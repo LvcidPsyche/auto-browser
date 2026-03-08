@@ -147,6 +147,7 @@ The controller owns:
 - interactable extraction and stable element IDs
 - auth-state save/restore
 - trace export on close
+- provider adapters and orchestration loops for OpenAI / Claude / Gemini
 
 ### Why the controller should be the only thing LLMs talk to
 
@@ -243,3 +244,14 @@ That is the minimal reliable operator loop.
 - never share one browser profile across multiple identities
 - store screenshots, traces, and action logs by session ID
 - make every action replayable
+
+
+## Adapter/orchestrator layer
+
+The current POC now has a dedicated orchestration layer:
+- `ProviderRegistry` advertises configured providers
+- each provider adapter converts screenshot + observation into one strict action decision
+- `BrowserOrchestrator` turns that decision into controller actions
+- step and run logs are stored in each session artifact directory
+
+This keeps provider-specific API logic out of the browser execution path.

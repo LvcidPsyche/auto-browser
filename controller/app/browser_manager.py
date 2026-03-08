@@ -453,6 +453,28 @@ class BrowserManager:
             before = await self._light_snapshot(session, label=f"before-{action_name}")
             try:
                 await operation()
+                self._assert_runtime_url_allowed(session.page.url)
+            except PermissionError as exc:
+                try:
+                    if session.page.url != before.get("url"):
+                        await session.page.go_back(wait_until="domcontentloaded")
+                        await self._settle(session.page)
+                except Exception:
+                    pass
+                failed = await self._light_snapshot(session, label=f"blocked-{action_name}")
+                await self._append_jsonl(
+                    session.artifact_dir / "actions.jsonl",
+                    {
+                        "timestamp": self._timestamp(),
+                        "action": action_name,
+                        "status": "blocked",
+                        "target": target,
+                        "before": before,
+                        "after": failed,
+                        "error": str(exc),
+                    },
+                )
+                raise
             except PlaywrightError as exc:
                 failed = await self._light_snapshot(session, label=f"failed-{action_name}")
                 await self._append_jsonl(
@@ -549,6 +571,12 @@ class BrowserManager:
         except Exception:
             pass
         await page.wait_for_timeout(250)
+
+    def _assert_runtime_url_allowed(self, url: str) -> None:
+        parsed = urlparse(url)
+        if parsed.scheme in {"about", "data", "blob", ""}:
+            return
+        self._assert_url_allowed(url)
 
     def _assert_url_allowed(self, url: str) -> None:
         host = urlparse(url).hostname

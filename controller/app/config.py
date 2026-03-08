@@ -28,10 +28,29 @@ class Settings(BaseSettings):
     typing_delay_ms: int = Field(20, alias="TYPING_DELAY_MS")
     action_timeout_ms: int = Field(15000, alias="ACTION_TIMEOUT_MS")
 
+    openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
+    openai_base_url: str = Field("https://api.openai.com/v1", alias="OPENAI_BASE_URL")
+    openai_model: str = Field("gpt-4.1-mini", alias="OPENAI_MODEL")
+
+    anthropic_api_key: str | None = Field(None, alias="ANTHROPIC_API_KEY")
+    anthropic_base_url: str = Field("https://api.anthropic.com/v1", alias="ANTHROPIC_BASE_URL")
+    anthropic_version: str = Field("2023-06-01", alias="ANTHROPIC_VERSION")
+    claude_model: str = Field("claude-sonnet-4-20250514", alias="CLAUDE_MODEL")
+
+    gemini_api_key: str | None = Field(None, alias="GEMINI_API_KEY")
+    gemini_base_url: str = Field(
+        "https://generativelanguage.googleapis.com/v1beta",
+        alias="GEMINI_BASE_URL",
+    )
+    gemini_model: str = Field("gemini-2.5-flash", alias="GEMINI_MODEL")
+
+    model_request_timeout_seconds: float = Field(60.0, alias="MODEL_REQUEST_TIMEOUT_SECONDS")
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
 
     @property

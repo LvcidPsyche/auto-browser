@@ -9,6 +9,8 @@ This scaffold gives you:
 - **human takeover** through noVNC
 - **artifact capture** for screenshots, traces, and storage state
 - **basic policy rails** with host allowlists and upload approval gates
+- provider adapters for **OpenAI, Claude, and Gemini** behind one internal action schema
+- one-step and multi-step **agent orchestration endpoints**
 - a browser-node generated **shared ws-endpoint file** so the controller can attach even when Chrome advertises `127.0.0.1` in CDP metadata
 
 It is intentionally **not** a stealth or anti-bot system. It is for operator-assisted browser workflows on sites and accounts you are authorized to use.
@@ -48,6 +50,12 @@ If `8000`, `6080`, or `5900` are already taken on the host, override them inline
 API_PORT=8010 NOVNC_PORT=6081 VNC_PORT=5901 \
 TAKEOVER_URL='http://127.0.0.1:6081/vnc.html?autoconnect=true&resize=scale' \
 docker compose up --build
+```
+
+### Check configured model providers
+
+```bash
+curl -s http://localhost:8000/agent/providers | jq
 ```
 
 ### Create a session
@@ -109,6 +117,32 @@ cp ~/Downloads/example.pdf data/uploads/
 
 Then call the upload action with `approved=true`.
 
+### Ask a provider for one next step
+
+```bash
+curl -s http://localhost:8000/sessions/<session-id>/agent/step \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{
+    "provider":"openai",
+    "goal":"Open the main link on the page and stop.",
+    "observation_limit":25
+  }' | jq
+```
+
+### Let a provider run a short loop
+
+```bash
+curl -s http://localhost:8000/sessions/<session-id>/agent/run \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{
+    "provider":"claude",
+    "goal":"Fill the search field with playwright mcp and stop before submitting.",
+    "max_steps":4
+  }' | jq
+```
+
 ## Project layout
 
 ```text
@@ -148,3 +182,13 @@ browser-operator-poc/
 - Chrome remote debugging changes: `https://developer.chrome.com/blog/remote-debugging-port`
 - Chrome for Testing: `https://developer.chrome.com/blog/chrome-for-testing`
 - noVNC embedding: `https://novnc.com/noVNC/docs/EMBEDDING.html`
+
+## Provider environment variables
+
+Set one or more of these before starting the stack:
+
+- `OPENAI_API_KEY` + optional `OPENAI_MODEL`
+- `ANTHROPIC_API_KEY` + optional `CLAUDE_MODEL`
+- `GEMINI_API_KEY` + optional `GEMINI_MODEL`
+
+The controller exposes provider readiness at `GET /agent/providers`.

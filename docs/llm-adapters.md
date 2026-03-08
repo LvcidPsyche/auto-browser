@@ -1,77 +1,102 @@
 # LLM Adapter Pattern
 
-The browser harness should be **model-agnostic**.
+The browser harness is now **model-agnostic** and has a real orchestrator.
 
-## Shared tool contract
+## Internal contract
 
-Every model should call the same small set of tools:
-- `create_session`
-- `observe`
+Every provider adapter returns the same internal decision schema:
+- `navigate`
 - `click`
 - `type`
 - `press`
 - `scroll`
 - `upload`
-- `save_storage_state`
 - `request_human_takeover`
-- `close_session`
+- `done`
 
-The model does not need shell access or direct browser access.
+The LLM does **not** talk to Playwright directly.
 
-## Recommended loop
+## Current implementation
 
-1. `observe`
-2. inspect screenshot + interactables
-3. choose one action
-4. execute one action only
-5. `observe` again
-6. repeat until the goal or a takeover gate
+The controller now includes:
+- `ProviderRegistry` for `openai`, `claude`, and `gemini`
+- provider adapters under `controller/app/providers/`
+- `BrowserOrchestrator` for one-step or multi-step loops
+- provider discovery endpoint: `GET /agent/providers`
+- step endpoint: `POST /sessions/{session_id}/agent/step`
+- run endpoint: `POST /sessions/{session_id}/agent/run`
 
-## Why this loop works
+## How a step works
 
-It gives the model:
-- a current screenshot for visual grounding
-- stable `element_id` handles for precise actions
-- console/page errors when the UI breaks
-- a recovery path through human takeover
+1. capture a fresh observation
+2. send screenshot + structured page state to the chosen model
+3. parse a strict structured action
+4. execute that action through the controller
+5. store artifacts and logs
 
-Treat `element_id` values as **observation-scoped** in the POC. If the page rerenders or navigates, refresh with `observe` before reusing a target.
-
-## Example orchestration pseudocode
-
-```python
-session = create_session(name="signup-run", start_url="https://example.com")
-
-while True:
-    observation = observe(session["id"])
-    decision = model.plan(
-        goal="fill the allowed form and stop before submission",
-        screenshot=observation["screenshot_url"],
-        interactables=observation["interactables"],
-        console=observation["console_messages"],
-        errors=observation["page_errors"],
-    )
-
-    if decision["type"] == "takeover":
-        request_human_takeover(session["id"], reason=decision["reason"])
-        break
-
-    execute(decision)
-```
-
-## Model-specific notes
+## Provider strategy
 
 ### OpenAI
-Use the same loop whether you wrap it with a custom browser tool or use the Responses API computer-use style pattern. The key shape is still screenshot → action → screenshot.
+Uses the Chat Completions API with:
+- image input
+- strict function calling
+- one required tool: `browser_action`
 
 ### Claude
-Claude works well when you keep the action space small and deterministic. It benefits from explicit “one action at a time” discipline.
+Uses the Anthropic Messages API with:
+- image input
+- one forced tool: `browser_action`
 
 ### Gemini
-Gemini can use the same controller API. Treat it as another planner over the same observation payload.
+Uses the Gemini `generateContent` API with:
+- image input
+- `responseMimeType: application/json`
+- `responseJsonSchema`
 
-## Strong opinion
+## Example step request
 
-Do not build a separate browser stack for each LLM.
+```json
+{
+  "provider": "openai",
+  "goal": "Open the main link on the page and stop.",
+  "observation_limit": 25,
+  "context_hints": "Prefer element_id over selector."
+}
+```
 
-Build one controller. Give every model the same tool contract. That is what keeps the system maintainable.
+## Example run request
+
+```json
+{
+  "provider": "claude",
+  "goal": "Fill the search field with `playwright mcp` and stop before submitting.",
+  "max_steps": 4,
+  "observation_limit": 25
+}
+```
+
+## Safety behavior
+
+The prompt tells all providers to choose `request_human_takeover` for:
+- login
+- MFA / 2FA
+- CAPTCHA
+- payments
+- posting / sending
+- uncertainty
+
+Upload approval still stays in the controller, not the model.
+
+## Important limits
+
+- This POC still uses **one visible desktop**, so only one active session is safe.
+- `element_id` values are **observation-scoped**.
+- Provider calls are synchronous HTTP requests in the API process.
+- Live provider execution depends on `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY` being present in the controller container.
+
+## Next production upgrades
+
+- switch OpenAI from Chat Completions to Responses API if you want one modern multimodal path everywhere
+- move provider calls into a queue/worker tier
+- add retry / loop detection policies
+- add MCP tool wrapping so external agents can call this controller as a shared browser tool
