@@ -152,6 +152,7 @@ The controller owns:
 - screenshot capture and artifact storage
 - interactable extraction and stable element IDs
 - auth-state save/restore with optional encryption + max-age enforcement
+- accessibility-outline capture for stronger screen understanding
 - trace export on close
 - provider adapters and orchestration loops for OpenAI / Claude / Gemini
 - durable background job execution for queued agent step/run requests
@@ -224,6 +225,7 @@ That is the minimal reliable operator loop.
 - durable agent job queue under `/data/jobs`
 - local artifact volume
 - text-excerpt and DOM-outline perception summaries
+- accessibility-outline summaries from the Playwright accessibility tree
 - action verification in action logs/responses
 - encrypted auth-state support
 - audit log at `/data/audit/events.jsonl`

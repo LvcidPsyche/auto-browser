@@ -151,6 +151,8 @@ PAGE_SUMMARY_SCRIPT = r"""
 }
 """
 
+ACCESSIBILITY_NODE_LIMIT = 30
+
 
 @dataclass
 class BrowserSession:
@@ -935,6 +937,7 @@ class BrowserManager:
             "active_element": summary["active_element"],
             "text_excerpt": summary["text_excerpt"],
             "dom_outline": summary["dom_outline"],
+            "accessibility_outline": summary["accessibility_outline"],
             "interactables": interactables,
             "screenshot_path": screenshot["path"],
             "screenshot_url": screenshot["url"],
@@ -954,6 +957,7 @@ class BrowserManager:
             "active_element": summary["active_element"],
             "text_excerpt": summary["text_excerpt"],
             "dom_outline": summary["dom_outline"],
+            "accessibility_outline": summary["accessibility_outline"],
             "screenshot_path": screenshot["path"],
             "screenshot_url": screenshot["url"],
         }
@@ -966,11 +970,93 @@ class BrowserManager:
 
     async def _page_summary(self, page: Page) -> dict[str, Any]:
         summary = await page.evaluate(PAGE_SUMMARY_SCRIPT, 2000)
+        accessibility_outline = await self._accessibility_outline(page)
         return {
             "title": await page.title(),
             "active_element": await page.evaluate(ACTIVE_ELEMENT_SCRIPT),
             "text_excerpt": summary.get("text_excerpt", ""),
             "dom_outline": summary.get("dom_outline", {}),
+            "accessibility_outline": accessibility_outline,
+        }
+
+    async def _accessibility_outline(self, page: Page) -> dict[str, Any]:
+        accessibility = getattr(page, "accessibility", None)
+        if accessibility is None or not hasattr(accessibility, "snapshot"):
+            return {
+                "available": False,
+                "root_role": None,
+                "root_name": None,
+                "focused": None,
+                "role_counts": {},
+                "nodes": [],
+            }
+
+        try:
+            snapshot = await accessibility.snapshot(interesting_only=True)
+        except Exception as exc:
+            logger.debug("failed to capture accessibility snapshot: %s", exc)
+            return {
+                "available": False,
+                "root_role": None,
+                "root_name": None,
+                "focused": None,
+                "role_counts": {},
+                "nodes": [],
+                "error": str(exc),
+            }
+
+        if not snapshot:
+            return {
+                "available": True,
+                "root_role": None,
+                "root_name": None,
+                "focused": None,
+                "role_counts": {},
+                "nodes": [],
+            }
+
+        nodes: list[dict[str, Any]] = []
+        role_counts: dict[str, int] = {}
+        focused: dict[str, Any] | None = None
+
+        def walk(node: dict[str, Any], depth: int) -> None:
+            nonlocal focused
+            if len(nodes) >= ACCESSIBILITY_NODE_LIMIT:
+                return
+            role = node.get("role")
+            if isinstance(role, str) and role:
+                role_counts[role] = role_counts.get(role, 0) + 1
+            compact = {
+                "role": role,
+                "name": node.get("name"),
+                "value": node.get("valueString") or node.get("value"),
+                "description": node.get("description"),
+                "focused": bool(node.get("focused")),
+                "disabled": bool(node.get("disabled")),
+                "selected": bool(node.get("selected")),
+                "checked": node.get("checked"),
+                "expanded": node.get("expanded"),
+                "pressed": node.get("pressed"),
+                "depth": depth,
+            }
+            nodes.append(compact)
+            if compact["focused"] and focused is None:
+                focused = compact
+            for child in node.get("children") or []:
+                if not isinstance(child, dict):
+                    continue
+                walk(child, depth + 1)
+                if len(nodes) >= ACCESSIBILITY_NODE_LIMIT:
+                    return
+
+        walk(snapshot, 0)
+        return {
+            "available": True,
+            "root_role": snapshot.get("role"),
+            "root_name": snapshot.get("name"),
+            "focused": focused,
+            "role_counts": role_counts,
+            "nodes": nodes,
         }
 
     def _session_auth_state_info(self, session: BrowserSession) -> dict[str, Any]:
@@ -1023,6 +1109,11 @@ class BrowserManager:
         if before_counts != after_counts:
             signals.append("dom_counts_changed")
 
+        before_accessibility = (before.get("accessibility_outline") or {}).get("focused")
+        after_accessibility = (after.get("accessibility_outline") or {}).get("focused")
+        if before_accessibility != after_accessibility:
+            signals.append("accessibility_focus_changed")
+
         interacted_element = target.get("element_id")
         selector = target.get("selector")
         interactables = after.get("interactables") or []
@@ -1041,9 +1132,18 @@ class BrowserManager:
         if action_name == "navigate":
             verified = "url_changed" in signals or "title_changed" in signals
         elif action_name in {"click", "press", "scroll"}:
-            verified = bool({"url_changed", "title_changed", "active_element_changed", "text_excerpt_changed"} & set(signals))
+            verified = bool(
+                {
+                    "url_changed",
+                    "title_changed",
+                    "active_element_changed",
+                    "text_excerpt_changed",
+                    "accessibility_focus_changed",
+                }
+                & set(signals)
+            )
         elif action_name == "type":
-            verified = bool({"active_element_changed", "text_excerpt_changed"} & set(signals))
+            verified = bool({"active_element_changed", "text_excerpt_changed", "accessibility_focus_changed"} & set(signals))
         elif action_name == "upload":
             verified = True
 

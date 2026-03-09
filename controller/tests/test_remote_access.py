@@ -14,6 +14,18 @@ from app.config import Settings
 class FakePage:
     def __init__(self, url: str = "https://example.com"):
         self.url = url
+        self.accessibility = self.FakeAccessibility()
+
+    class FakeAccessibility:
+        async def snapshot(self, interesting_only: bool = True):
+            return {
+                "role": "WebArea",
+                "name": "Example Domain",
+                "children": [
+                    {"role": "heading", "name": "Example Domain"},
+                    {"role": "link", "name": "More information", "focused": True},
+                ],
+            }
 
     async def title(self) -> str:
         return "Example Domain"
@@ -200,6 +212,8 @@ class RemoteAccessPropagationTests(unittest.IsolatedAsyncioTestCase):
             "http://bastion.example.com:16080/vnc.html?autoconnect=true",
         )
         self.assertEqual(observation["remote_access"]["status"], "active")
+        self.assertTrue(observation["accessibility_outline"]["available"])
+        self.assertEqual(observation["accessibility_outline"]["focused"]["role"], "link")
 
         takeover = await self.manager.request_human_takeover(self.session.id, "Need login review")
         self.assertEqual(

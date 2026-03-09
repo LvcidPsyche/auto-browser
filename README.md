@@ -167,6 +167,7 @@ The response includes:
 - current URL and title
 - a page-level `text_excerpt`
 - a compact `dom_outline` with headings, forms, and element counts
+- an `accessibility_outline` distilled from Playwright’s accessibility tree
 - a screenshot path and artifact URL
 - interactable elements with observation-scoped `element_id` values
 - recent console errors
