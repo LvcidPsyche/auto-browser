@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .agent_jobs import AgentJobQueue
@@ -12,7 +13,9 @@ from .audit import get_current_operator, reset_current_operator, set_current_ope
 from .approvals import ApprovalRequiredError
 from .browser_manager import BrowserManager
 from .config import get_settings
+from .maintenance import MaintenanceService
 from .mcp_transport import McpHttpTransport
+from .metrics import MetricsRecorder
 from .models import (
     ApprovalDecisionRequest,
     AgentRunRequest,
@@ -30,9 +33,12 @@ from .models import (
 )
 from .orchestrator import BrowserOrchestrator
 from .provider_registry import ProviderRegistry
+from .rate_limits import SlidingWindowRateLimiter, build_rate_limit_key, is_exempt_path
+from .runtime_policy import validate_runtime_policy
 from .tool_gateway import McpToolGateway
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 manager = BrowserManager(settings)
@@ -45,6 +51,16 @@ job_queue = AgentJobQueue(
     audit_store=manager.audit,
 )
 tool_gateway = McpToolGateway(manager=manager, orchestrator=orchestrator, job_queue=job_queue)
+rate_limiter = (
+    SlidingWindowRateLimiter(
+        limit=settings.request_rate_limit_requests,
+        window_seconds=settings.request_rate_limit_window_seconds,
+    )
+    if settings.request_rate_limit_enabled
+    else None
+)
+metrics = MetricsRecorder()
+maintenance = MaintenanceService(settings, session_provider=lambda: manager.sessions.values())
 mcp_transport = McpHttpTransport(
     tool_gateway=tool_gateway,
     server_name="auto-browser",
@@ -56,11 +72,18 @@ mcp_transport = McpHttpTransport(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    policy_report = validate_runtime_policy(settings)
+    if policy_report.errors:
+        raise RuntimeError("Invalid runtime policy:\n- " + "\n- ".join(policy_report.errors))
+    for warning in policy_report.warnings:
+        logger.warning("runtime policy warning: %s", warning)
     await manager.startup()
     await job_queue.startup()
+    await maintenance.startup()
     try:
         yield
     finally:
+        await maintenance.shutdown()
         await job_queue.shutdown()
         await manager.shutdown()
 
@@ -92,9 +115,44 @@ async def require_api_bearer_token(request: Request, call_next):
 
 
 @app.middleware("http")
+async def enforce_rate_limits(request: Request, call_next):
+    if rate_limiter is None or is_exempt_path(request.url.path, settings.request_rate_limit_exempt_path_list):
+        return await call_next(request)
+
+    decision = await rate_limiter.evaluate(
+        build_rate_limit_key(
+            operator_id_header=settings.operator_id_header,
+            headers=request.headers,
+            client_host=request.client.host if request.client else None,
+        )
+    )
+    headers = {
+        "X-RateLimit-Limit": str(decision.limit),
+        "X-RateLimit-Remaining": str(decision.remaining),
+        "X-RateLimit-Reset": str(decision.reset_after_seconds),
+    }
+    if decision.exceeded:
+        headers["Retry-After"] = str(decision.retry_after_seconds or decision.reset_after_seconds)
+        return JSONResponse(
+            status_code=429,
+            content={
+                "detail": "Rate limit exceeded",
+                "limit": decision.limit,
+                "window_seconds": decision.window_seconds,
+                "retry_after_seconds": decision.retry_after_seconds or decision.reset_after_seconds,
+            },
+            headers=headers,
+        )
+
+    response = await call_next(request)
+    response.headers.update(headers)
+    return response
+
+
+@app.middleware("http")
 async def bind_operator_identity(request: Request, call_next):
     path = request.url.path
-    exempt_prefixes = ("/healthz", "/readyz", "/docs", "/openapi.json", "/redoc", "/artifacts")
+    exempt_prefixes = ("/healthz", "/readyz", "/docs", "/openapi.json", "/redoc", "/artifacts", "/metrics")
     operator_id = request.headers.get(settings.operator_id_header)
     operator_name = request.headers.get(settings.operator_name_header)
 
@@ -113,6 +171,33 @@ async def bind_operator_identity(request: Request, call_next):
         reset_current_operator(token)
 
 
+@app.middleware("http")
+async def record_http_metrics(request: Request, call_next):
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration = time.perf_counter() - start
+        metrics.record_http_request(
+            method=request.method,
+            path=request.url.path,
+            status_code=500,
+            duration_seconds=duration,
+        )
+        raise
+
+    duration = time.perf_counter() - start
+    route = request.scope.get("route")
+    path = getattr(route, "path", request.url.path)
+    metrics.record_http_request(
+        method=request.method,
+        path=path,
+        status_code=response.status_code,
+        duration_seconds=duration,
+    )
+    return response
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
@@ -122,9 +207,33 @@ async def healthz() -> dict[str, str]:
 async def readyz() -> dict[str, str]:
     try:
         await manager.ensure_browser()
-        return {"status": "ready"}
+        return {"status": "ready", "environment": settings.environment_name}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/metrics", include_in_schema=False)
+async def get_metrics() -> Response:
+    metrics.set_active_sessions(len(manager.sessions))
+    payload, content_type = metrics.render()
+    return Response(content=payload, media_type=content_type)
+
+
+@app.get("/maintenance/status")
+async def get_maintenance_status() -> dict:
+    return {
+        "cleanup_on_startup": settings.cleanup_on_startup,
+        "cleanup_interval_seconds": settings.cleanup_interval_seconds,
+        "artifact_retention_hours": settings.artifact_retention_hours,
+        "upload_retention_hours": settings.upload_retention_hours,
+        "auth_retention_hours": settings.auth_retention_hours,
+        "last_report": maintenance.last_report,
+    }
+
+
+@app.post("/maintenance/cleanup")
+async def run_maintenance_cleanup() -> dict:
+    return await maintenance.run_cleanup()
 
 
 @app.get("/agent/providers")

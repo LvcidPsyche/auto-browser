@@ -36,7 +36,11 @@ flowchart LR
     Controller --> Policy[Allowlist + approval gates]
 ```
 
-See `docs/architecture.md` for the full design and `docs/llm-adapters.md` for the model-facing action loop.
+See:
+- `docs/architecture.md` for the full design
+- `docs/llm-adapters.md` for the model-facing action loop
+- `docs/production-hardening.md` for the production target/spec
+- `docs/deployment.md` for the deployment and credential handoff checklist
 
 ## Quickstart
 
@@ -66,6 +70,22 @@ X-Operator-Name: Alice Example
 ```
 
 Set `REQUIRE_OPERATOR_ID=true` if every non-health request must carry an operator ID.
+
+### Production-mode minimums
+
+For a real private beta, set at least:
+
+```bash
+APP_ENV=production
+API_BEARER_TOKEN=<strong-random-secret>
+REQUIRE_OPERATOR_ID=true
+AUTH_STATE_ENCRYPTION_KEY=<44-char-fernet-key>
+REQUIRE_AUTH_STATE_ENCRYPTION=true
+REQUEST_RATE_LIMIT_ENABLED=true
+METRICS_ENABLED=true
+```
+
+The controller now fails closed on startup in production mode if the required security settings are missing.
 
 If you want **true per-session browser isolation**, use the compose override:
 
@@ -144,6 +164,8 @@ This repo includes a self-contained smoke harness with a disposable SSH bastion 
 ./scripts/smoke_reverse_ssh.sh
 ```
 
+If `8000` is busy on the host, run the smoke with an override like `API_PORT=8010 ./scripts/smoke_reverse_ssh.sh`.
+
 It verifies:
 - controller `/remote-access`
 - forwarded API through the bastion
@@ -157,6 +179,8 @@ This repo also includes a smoke harness for per-session docker isolation:
 ```bash
 ./scripts/smoke_isolated_session.sh
 ```
+
+If the default controller port is busy, run `API_PORT=8010 ./scripts/smoke_isolated_session.sh`.
 
 It verifies:
 - controller readiness with the isolation override enabled
@@ -173,6 +197,8 @@ This repo also includes a smoke harness for controller-managed reverse tunnels o
 ```bash
 ./scripts/smoke_isolated_session_tunnel.sh
 ```
+
+If the default controller port is busy, run `API_PORT=8010 ./scripts/smoke_isolated_session_tunnel.sh`.
 
 It verifies:
 - controller-managed isolated session tunnel provisioning against the disposable bastion
@@ -378,6 +404,22 @@ curl -s 'http://localhost:8000/audit/events?session_id=<session-id>' | jq
 Audit events are written to `/data/audit/events.jsonl`.
 
 If `STATE_DB_PATH` is set, approvals and audit events are also stored in SQLite and served from there. `AUDIT_MAX_EVENTS` caps retained audit rows/events in both SQLite and the mirrored JSONL file.
+
+### Metrics and cleanup
+
+```bash
+curl -s http://localhost:8000/metrics | head
+curl -s http://localhost:8000/maintenance/status | jq
+
+curl -s http://localhost:8000/maintenance/cleanup \
+  -X POST \
+  -H "Authorization: Bearer <token>" \
+  -H "X-Operator-Id: ops" | jq
+```
+
+The controller can now:
+- expose Prometheus-style request/session metrics at `/metrics`
+- prune stale artifacts, uploads, and auth-state files on startup and on a configurable interval
 
 ### MCP browser gateway
 

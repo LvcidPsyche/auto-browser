@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  controller-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker compose config
+        run: |
+          docker compose -f docker-compose.yml config >/tmp/compose-main.out
+          docker compose -f docker-compose.yml -f docker-compose.isolation.yml config >/tmp/compose-isolation.out
+
+      - name: Build controller image
+        run: docker compose build controller
+
+      - name: Run controller unit tests
+        run: docker compose run --no-deps --rm controller python -m unittest discover -s tests -v

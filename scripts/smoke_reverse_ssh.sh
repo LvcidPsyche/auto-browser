@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.smoke.yml --profile reverse-ssh)
+API_PORT_VALUE="${API_PORT:-8000}"
+API_BASE_URL="http://127.0.0.1:${API_PORT_VALUE}"
 SSH_DIR="${ROOT_DIR}/data/ssh"
 TUNNEL_DIR="${ROOT_DIR}/data/tunnels"
 SMOKE_KEY="${SSH_DIR}/smoke_id_ed25519"
@@ -61,7 +63,7 @@ chmod 644 "${SMOKE_KNOWN_HOSTS}"
 "${COMPOSE[@]}" build browser-node controller reverse-ssh
 "${COMPOSE[@]}" up -d --no-recreate browser-node controller reverse-ssh
 
-wait_for "controller readiness" "curl -fsS http://127.0.0.1:8000/readyz" 120 2
+wait_for "controller readiness" "curl -fsS ${API_BASE_URL}/readyz" 120 2
 wait_for "remote access metadata" "[ -f '${REMOTE_INFO}' ]" 60 1
 wait_for \
   "forwarded API through bastion" \
@@ -74,7 +76,7 @@ wait_for \
   60 \
   2
 
-REMOTE_ACCESS_JSON="$(curl -fsS http://127.0.0.1:8000/remote-access)"
+REMOTE_ACCESS_JSON="$(curl -fsS "${API_BASE_URL}/remote-access")"
 python3 - <<'PY' "${REMOTE_ACCESS_JSON}"
 import json
 import sys

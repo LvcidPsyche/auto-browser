@@ -1,4 +1,5 @@
 .env
+.autonomous/
 data/artifacts/*
 !data/artifacts/.gitkeep
 data/uploads/*

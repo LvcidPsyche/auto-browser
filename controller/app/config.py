@@ -5,6 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    app_env: str = Field("development", validation_alias=AliasChoices("APP_ENV", "ENVIRONMENT"))
     api_bearer_token: str | None = Field(None, alias="API_BEARER_TOKEN")
     browser_ws_endpoint: str | None = Field(
         None,
@@ -52,6 +53,7 @@ class Settings(BaseSettings):
     operator_name_header: str = Field("X-Operator-Name", alias="OPERATOR_NAME_HEADER")
     require_operator_id: bool = Field(False, alias="REQUIRE_OPERATOR_ID")
     mcp_allowed_origins: str = Field("", alias="MCP_ALLOWED_ORIGINS")
+    metrics_enabled: bool = Field(True, alias="METRICS_ENABLED")
     session_isolation_mode: str = Field("shared_browser_node", alias="SESSION_ISOLATION_MODE")
     isolated_browser_image: str = Field(
         "auto-browser-browser-node:latest",
@@ -147,6 +149,18 @@ class Settings(BaseSettings):
     enable_tracing: bool = Field(True, alias="ENABLE_TRACING")
     typing_delay_ms: int = Field(20, alias="TYPING_DELAY_MS")
     action_timeout_ms: int = Field(15000, alias="ACTION_TIMEOUT_MS")
+    request_rate_limit_enabled: bool = Field(True, alias="REQUEST_RATE_LIMIT_ENABLED")
+    request_rate_limit_requests: int = Field(120, alias="REQUEST_RATE_LIMIT_REQUESTS")
+    request_rate_limit_window_seconds: int = Field(60, alias="REQUEST_RATE_LIMIT_WINDOW_SECONDS")
+    request_rate_limit_exempt_paths: str = Field(
+        "/healthz,/readyz,/docs,/openapi.json,/redoc,/artifacts,/metrics",
+        alias="REQUEST_RATE_LIMIT_EXEMPT_PATHS",
+    )
+    cleanup_on_startup: bool = Field(True, alias="CLEANUP_ON_STARTUP")
+    cleanup_interval_seconds: float = Field(3600.0, alias="CLEANUP_INTERVAL_SECONDS")
+    artifact_retention_hours: float = Field(168.0, alias="ARTIFACT_RETENTION_HOURS")
+    upload_retention_hours: float = Field(168.0, alias="UPLOAD_RETENTION_HOURS")
+    auth_retention_hours: float = Field(168.0, alias="AUTH_RETENTION_HOURS")
 
     openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
     openai_base_url: str = Field("https://api.openai.com/v1", alias="OPENAI_BASE_URL")
@@ -182,6 +196,18 @@ class Settings(BaseSettings):
     @property
     def mcp_allowed_origin_list(self) -> list[str]:
         return [item.strip() for item in self.mcp_allowed_origins.split(",") if item.strip()]
+
+    @property
+    def request_rate_limit_exempt_path_list(self) -> list[str]:
+        return [item.strip() for item in self.request_rate_limit_exempt_paths.split(",") if item.strip()]
+
+    @property
+    def environment_name(self) -> str:
+        return self.app_env.strip().lower()
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment_name == "production"
 
 
 @lru_cache(maxsize=1)
