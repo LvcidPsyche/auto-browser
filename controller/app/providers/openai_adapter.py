@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -156,26 +157,39 @@ class OpenAIAdapter(BaseProviderAdapter):
             schema_path = temp_root / "browser_action_schema.json"
             output_path = temp_root / "decision.json"
             schema_path.write_text(json.dumps(self.action_schema, ensure_ascii=False), encoding="utf-8")
-
-            command = [
-                self.settings.openai_cli_path,
-                "exec",
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-                "--cd",
-                tempdir,
-                "--ephemeral",
-                "--output-schema",
-                str(schema_path),
-                "--output-last-message",
-                str(output_path),
-                "--image",
-                observation["screenshot_path"],
-                "-",
+            self._ensure_codex_config_path_compatibility()
+            config_overrides = [
+                "project_doc_fallback_filenames=[]",
+                "agents={}",
+                "mcp_servers={}",
+                "features.multi_agent=false",
+                "features.apps=false",
+                'web_search="disabled"',
             ]
+
+            command = [self.settings.openai_cli_path]
             if model:
-                command[1:1] = ["--model", model]
+                command.extend(["--model", model])
+            for override in config_overrides:
+                command.extend(["-c", override])
+            command.extend(
+                [
+                    "exec",
+                    "--skip-git-repo-check",
+                    "--sandbox",
+                    "read-only",
+                    "--cd",
+                    tempdir,
+                    "--ephemeral",
+                    "--output-schema",
+                    str(schema_path),
+                    "--output-last-message",
+                    str(output_path),
+                    "--image",
+                    observation["screenshot_path"],
+                    "-",
+                ]
+            )
 
             result = await self.run_cli(command=command, input_text=prompt, cwd=tempdir)
             raw_text = output_path.read_text(encoding="utf-8") if output_path.exists() else result.stdout
@@ -187,3 +201,45 @@ class OpenAIAdapter(BaseProviderAdapter):
                 usage={"auth_mode": "cli", "transport": "codex-exec"},
                 raw_text=raw_text,
             )
+
+    def _ensure_codex_config_path_compatibility(self) -> None:
+        cli_home = (self.settings.cli_home or "").strip()
+        if not cli_home:
+            return
+
+        actual_codex_home = Path(cli_home) / ".codex"
+        config_path = actual_codex_home / "config.toml"
+        if not config_path.exists():
+            return
+
+        try:
+            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+
+        for expected_codex_home in self._extract_codex_roots(config):
+            if expected_codex_home == actual_codex_home or expected_codex_home.exists():
+                continue
+            try:
+                expected_codex_home.parent.mkdir(parents=True, exist_ok=True)
+                expected_codex_home.symlink_to(actual_codex_home, target_is_directory=True)
+            except FileExistsError:
+                continue
+            except OSError:
+                continue
+
+    @classmethod
+    def _extract_codex_roots(cls, payload: Any) -> set[Path]:
+        roots: set[Path] = set()
+        if isinstance(payload, dict):
+            for value in payload.values():
+                roots.update(cls._extract_codex_roots(value))
+            return roots
+        if isinstance(payload, list):
+            for value in payload:
+                roots.update(cls._extract_codex_roots(value))
+            return roots
+        if isinstance(payload, str) and payload.startswith("/") and "/.codex/" in payload:
+            prefix, _ = payload.split("/.codex/", 1)
+            roots.add(Path(f"{prefix}/.codex"))
+        return roots

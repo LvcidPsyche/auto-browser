@@ -44,6 +44,9 @@ class ProviderCLITests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_run_cli(*, command, input_text=None, env=None, cwd=None):
             self.assertIn("exec", command)
+            self.assertIn("-c", command)
+            self.assertIn("agents={}", command)
+            self.assertIn("mcp_servers={}", command)
             self.assertIn("--output-schema", command)
             self.assertIn("--output-last-message", command)
             self.assertIn("--image", command)
