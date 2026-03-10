@@ -107,7 +107,7 @@ If a provider still proposes a sensitive side effect, the controller does not tr
 - `element_id` values are **observation-scoped**.
 - Provider calls are synchronous HTTP requests in the API process.
 - Provider HTTP calls now retry `429` and `5xx` responses with exponential backoff using `MODEL_MAX_RETRIES` and `MODEL_RETRY_BACKOFF_SECONDS`.
-- Live provider execution depends on `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY` being present in the controller container.
+- Live provider execution depends on either provider API keys or mounted CLI auth state under `CLI_HOME`.
 
 ## Next production upgrades
 

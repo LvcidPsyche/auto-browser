@@ -16,6 +16,8 @@ import httpx
 from ..config import Settings
 from ..models import BROWSER_ACTION_SCHEMA, BrowserActionDecision, ProviderName
 
+VALID_PROVIDER_AUTH_MODES = {"api", "cli"}
+
 
 @dataclass
 class ProviderDecision:
@@ -68,6 +70,10 @@ class BaseProviderAdapter(ABC):
     @abstractmethod
     def missing_detail(self) -> str:
         raise NotImplementedError
+
+    @property
+    def readiness_detail(self) -> str:
+        return "configured" if self.configured else self.missing_detail
 
     async def decide(
         self,
@@ -256,6 +262,54 @@ class BaseProviderAdapter(ABC):
     @staticmethod
     def cli_binary_exists(path: str | None) -> bool:
         return bool(path and which(path))
+
+    @staticmethod
+    def normalize_auth_mode(raw: str | None) -> str:
+        return (raw or "").strip().lower()
+
+    @classmethod
+    def auth_mode_supported(cls, value: str) -> bool:
+        return value in VALID_PROVIDER_AUTH_MODES
+
+    def invalid_auth_mode_detail(self, value: str) -> str:
+        value_label = value or "<empty>"
+        return f"{self.provider} auth mode '{value_label}' is invalid; expected one of: api, cli"
+
+    @staticmethod
+    def describe_api_readiness(*, api_key: str | None, env_var: str) -> tuple[bool, str]:
+        if api_key:
+            return True, f"ready via {env_var}"
+        return False, f"{env_var} is not configured"
+
+    def describe_cli_readiness(
+        self,
+        *,
+        cli_path: str | None,
+        cli_label: str,
+        auth_markers: tuple[str, ...],
+    ) -> tuple[bool, str]:
+        resolved_cli = which(cli_path) if cli_path else None
+        if not resolved_cli:
+            expected_path = cli_path or cli_label
+            return False, f"{self.provider} CLI binary was not found: {expected_path}"
+
+        cli_home = (self.settings.cli_home or "").strip()
+        if not cli_home:
+            return True, f"ready via {cli_label} CLI ({resolved_cli}); CLI_HOME is unset so auth state is delegated to the CLI environment"
+
+        home_path = Path(cli_home)
+        if not home_path.exists():
+            return False, f"CLI_HOME path does not exist: {home_path}"
+
+        if not auth_markers:
+            return True, f"ready via {cli_label} CLI ({resolved_cli}) with CLI_HOME={home_path}"
+
+        matches = [str(home_path / marker) for marker in auth_markers if (home_path / marker).exists()]
+        if not matches:
+            expected = ", ".join(str(home_path / marker) for marker in auth_markers)
+            return False, f"No {self.provider} CLI auth state found under {home_path}; expected one of: {expected}"
+
+        return True, f"ready via {cli_label} CLI ({resolved_cli}); auth state found at {', '.join(matches)}"
 
     async def run_cli(
         self,

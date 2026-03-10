@@ -16,19 +16,32 @@ class GeminiAdapter(BaseProviderAdapter):
 
     @property
     def configured(self) -> bool:
-        if self.auth_mode == "cli":
-            return self.cli_binary_exists(self.settings.gemini_cli_path)
-        return bool(self.settings.gemini_api_key)
+        ready, _ = self._readiness()
+        return ready
 
     @property
     def missing_detail(self) -> str:
-        if self.auth_mode == "cli":
-            return "GEMINI_AUTH_MODE=cli requires a working gemini CLI in GEMINI_CLI_PATH"
-        return "GEMINI_API_KEY is not configured"
+        return self.readiness_detail
+
+    @property
+    def readiness_detail(self) -> str:
+        _, detail = self._readiness()
+        return detail
 
     @property
     def auth_mode(self) -> str:
-        return self.settings.gemini_auth_mode.strip().lower()
+        return self.normalize_auth_mode(self.settings.gemini_auth_mode)
+
+    def _readiness(self) -> tuple[bool, str]:
+        if not self.auth_mode_supported(self.auth_mode):
+            return False, self.invalid_auth_mode_detail(self.auth_mode)
+        if self.auth_mode == "cli":
+            return self.describe_cli_readiness(
+                cli_path=self.settings.gemini_cli_path,
+                cli_label="gemini",
+                auth_markers=(".gemini",),
+            )
+        return self.describe_api_readiness(api_key=self.settings.gemini_api_key, env_var="GEMINI_API_KEY")
 
     async def _decide(
         self,

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from app.config import Settings
 from app.runtime_policy import validate_runtime_policy
@@ -53,6 +56,66 @@ class RuntimePolicyTests(unittest.TestCase):
         self.assertTrue(any("docker_ephemeral" in warning for warning in report.warnings))
         self.assertTrue(any("TAKEOVER_URL" in warning for warning in report.warnings))
         self.assertTrue(any("METRICS_ENABLED" in warning for warning in report.warnings))
+
+    def test_production_rejects_invalid_provider_auth_modes(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            APP_ENV="production",
+            API_BEARER_TOKEN="secret",
+            REQUIRE_OPERATOR_ID="true",
+            AUTH_STATE_ENCRYPTION_KEY="b" * 44,
+            REQUIRE_AUTH_STATE_ENCRYPTION="true",
+            OPENAI_AUTH_MODE="bogus",
+        )
+
+        report = validate_runtime_policy(settings)
+
+        self.assertFalse(report.ok)
+        self.assertIn("OPENAI_AUTH_MODE=bogus is invalid; expected one of: api, cli", report.errors)
+
+    def test_production_rejects_cli_mode_without_expected_auth_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            settings = Settings(
+                _env_file=None,
+                APP_ENV="production",
+                API_BEARER_TOKEN="secret",
+                REQUIRE_OPERATOR_ID="true",
+                AUTH_STATE_ENCRYPTION_KEY="b" * 44,
+                REQUIRE_AUTH_STATE_ENCRYPTION="true",
+                OPENAI_AUTH_MODE="cli",
+                OPENAI_CLI_PATH="codex",
+                CLI_HOME=tempdir,
+            )
+
+            with patch("app.runtime_policy.which", return_value="/usr/bin/codex"):
+                report = validate_runtime_policy(settings)
+
+        self.assertFalse(report.ok)
+        self.assertIn(
+            f"openai uses CLI auth but no auth state was found; expected one of: {Path(tempdir) / '.codex'}",
+            report.errors,
+        )
+
+    def test_production_accepts_cli_mode_when_binary_and_auth_state_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            Path(tempdir, ".codex").mkdir()
+            settings = Settings(
+                _env_file=None,
+                APP_ENV="production",
+                API_BEARER_TOKEN="secret",
+                REQUIRE_OPERATOR_ID="true",
+                AUTH_STATE_ENCRYPTION_KEY="b" * 44,
+                REQUIRE_AUTH_STATE_ENCRYPTION="true",
+                OPENAI_AUTH_MODE="cli",
+                OPENAI_CLI_PATH="codex",
+                CLI_HOME=tempdir,
+            )
+
+            with patch("app.runtime_policy.which", return_value="/usr/bin/codex"):
+                report = validate_runtime_policy(settings)
+
+        self.assertTrue(report.ok)
+        self.assertFalse(any("OPENAI_AUTH_MODE" in error for error in report.errors))
 
 
 if __name__ == "__main__":

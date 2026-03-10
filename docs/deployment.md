@@ -78,6 +78,11 @@ rsync -a ~/.gemini data/cli-home/.gemini
 
 Treat `data/cli-home` like a password vault. Never commit it.
 
+In `APP_ENV=production`, startup now fails fast if:
+- any `*_AUTH_MODE` value is not `api` or `cli`
+- a provider is set to `cli` mode but its CLI binary is missing
+- `CLI_HOME` is set but the expected auth-state files are missing for that CLI
+
 ## Generate an auth-state encryption key
 
 ```bash

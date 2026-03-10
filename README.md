@@ -246,6 +246,12 @@ It verifies:
 curl -s http://localhost:8000/agent/providers | jq
 ```
 
+Each provider entry reports:
+- `configured`
+- `auth_mode` (`api` or `cli`)
+- `model`
+- `detail` with the concrete readiness reason or missing prerequisite
+
 ### Inspect active remote-access metadata
 
 ```bash
@@ -558,11 +564,10 @@ auto-browser/
 
 ## Provider environment variables
 
-Set one or more of these before starting the stack:
+Set one or more providers before starting the stack:
 
-- `OPENAI_API_KEY` + optional `OPENAI_MODEL`
-- `ANTHROPIC_API_KEY` + optional `CLAUDE_MODEL`
-- `GEMINI_API_KEY` + optional `GEMINI_MODEL`
+- API mode: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`
+- CLI mode: `OPENAI_AUTH_MODE=cli`, `CLAUDE_AUTH_MODE=cli`, `GEMINI_AUTH_MODE=cli`
 
 The controller exposes provider readiness at `GET /agent/providers`.
 

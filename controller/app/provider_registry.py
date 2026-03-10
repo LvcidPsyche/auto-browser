@@ -19,12 +19,14 @@ class ProviderRegistry:
     def list(self) -> list[ProviderInfo]:
         infos: list[ProviderInfo] = []
         for name, adapter in self.providers.items():
+            configured = adapter.configured
             infos.append(
                 ProviderInfo(
                     provider=name,  # type: ignore[arg-type]
-                    configured=adapter.configured,
+                    configured=configured,
                     model=adapter.default_model,
-                    detail=None if adapter.configured else adapter.missing_detail,
+                    auth_mode=adapter.auth_mode,
+                    detail=adapter.readiness_detail,
                 )
             )
         return infos

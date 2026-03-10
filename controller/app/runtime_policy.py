@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
+from shutil import which
 from urllib.parse import urlparse
 
 from .config import Settings
+from .providers.base import VALID_PROVIDER_AUTH_MODES
 
 
 @dataclass(slots=True)
@@ -17,6 +20,67 @@ class RuntimePolicyReport:
 
 
 LOCAL_HOSTS = {"", "127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
+CLI_PROVIDER_CHECKS = (
+    ("openai", "OPENAI_AUTH_MODE", "OPENAI_API_KEY", "OPENAI_CLI_PATH", "codex", (".codex",)),
+    ("claude", "CLAUDE_AUTH_MODE", "ANTHROPIC_API_KEY", "CLAUDE_CLI_PATH", "claude", (".claude.json", ".claude")),
+    ("gemini", "GEMINI_AUTH_MODE", "GEMINI_API_KEY", "GEMINI_CLI_PATH", "gemini", (".gemini",)),
+)
+
+
+def _validate_provider_runtime(settings: Settings, report: RuntimePolicyReport) -> None:
+    any_provider_ready = False
+    cli_home = (settings.cli_home or "").strip()
+    cli_home_path = Path(cli_home) if cli_home else None
+    missing_cli_home_reported = False
+
+    for provider_name, auth_mode_attr, api_key_attr, cli_path_attr, cli_label, auth_markers in CLI_PROVIDER_CHECKS:
+        auth_mode = (getattr(settings, auth_mode_attr.lower()) or "").strip().lower()
+        if auth_mode not in VALID_PROVIDER_AUTH_MODES:
+            report.errors.append(
+                f"{auth_mode_attr}={auth_mode or '<empty>'} is invalid; expected one of: api, cli"
+            )
+            continue
+
+        if auth_mode == "api":
+            if getattr(settings, api_key_attr.lower()):
+                any_provider_ready = True
+            continue
+
+        cli_path = getattr(settings, cli_path_attr.lower())
+        resolved_cli = which(cli_path) if cli_path else None
+        if not resolved_cli:
+            report.errors.append(
+                f"{auth_mode_attr}=cli requires a working {cli_label} CLI in {cli_path_attr}"
+            )
+            continue
+
+        if cli_home_path is None:
+            any_provider_ready = True
+            report.warnings.append(
+                f"{provider_name} uses CLI auth but CLI_HOME is unset; startup cannot verify signed-in state"
+            )
+            continue
+
+        if not cli_home_path.exists():
+            if not missing_cli_home_reported:
+                report.errors.append(f"CLI_HOME path does not exist: {cli_home_path}")
+                missing_cli_home_reported = True
+            continue
+
+        if not any((cli_home_path / marker).exists() for marker in auth_markers):
+            expected = ", ".join(str(cli_home_path / marker) for marker in auth_markers)
+            report.errors.append(
+                f"{provider_name} uses CLI auth but no auth state was found; expected one of: {expected}"
+            )
+            continue
+
+        any_provider_ready = True
+
+    if not any_provider_ready:
+        report.warnings.append(
+            "No model provider is ready; /agent/step and /agent/run will fail until a provider is configured"
+        )
 
 
 def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
@@ -65,5 +129,7 @@ def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
 
     if not settings.metrics_enabled:
         report.warnings.append("METRICS_ENABLED=false; observability will be limited in production")
+
+    _validate_provider_runtime(settings, report)
 
     return report

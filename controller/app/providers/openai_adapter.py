@@ -18,19 +18,32 @@ class OpenAIAdapter(BaseProviderAdapter):
 
     @property
     def configured(self) -> bool:
-        if self.auth_mode == "cli":
-            return self.cli_binary_exists(self.settings.openai_cli_path)
-        return bool(self.settings.openai_api_key)
+        ready, _ = self._readiness()
+        return ready
 
     @property
     def missing_detail(self) -> str:
-        if self.auth_mode == "cli":
-            return "OPENAI_AUTH_MODE=cli requires a working codex CLI in OPENAI_CLI_PATH"
-        return "OPENAI_API_KEY is not configured"
+        return self.readiness_detail
+
+    @property
+    def readiness_detail(self) -> str:
+        _, detail = self._readiness()
+        return detail
 
     @property
     def auth_mode(self) -> str:
-        return self.settings.openai_auth_mode.strip().lower()
+        return self.normalize_auth_mode(self.settings.openai_auth_mode)
+
+    def _readiness(self) -> tuple[bool, str]:
+        if not self.auth_mode_supported(self.auth_mode):
+            return False, self.invalid_auth_mode_detail(self.auth_mode)
+        if self.auth_mode == "cli":
+            return self.describe_cli_readiness(
+                cli_path=self.settings.openai_cli_path,
+                cli_label="codex",
+                auth_markers=(".codex",),
+            )
+        return self.describe_api_readiness(api_key=self.settings.openai_api_key, env_var="OPENAI_API_KEY")
 
     async def _decide(
         self,

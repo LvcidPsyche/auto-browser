@@ -16,19 +16,32 @@ class ClaudeAdapter(BaseProviderAdapter):
 
     @property
     def configured(self) -> bool:
-        if self.auth_mode == "cli":
-            return self.cli_binary_exists(self.settings.claude_cli_path)
-        return bool(self.settings.anthropic_api_key)
+        ready, _ = self._readiness()
+        return ready
 
     @property
     def missing_detail(self) -> str:
-        if self.auth_mode == "cli":
-            return "CLAUDE_AUTH_MODE=cli requires a working claude CLI in CLAUDE_CLI_PATH"
-        return "ANTHROPIC_API_KEY is not configured"
+        return self.readiness_detail
+
+    @property
+    def readiness_detail(self) -> str:
+        _, detail = self._readiness()
+        return detail
 
     @property
     def auth_mode(self) -> str:
-        return self.settings.claude_auth_mode.strip().lower()
+        return self.normalize_auth_mode(self.settings.claude_auth_mode)
+
+    def _readiness(self) -> tuple[bool, str]:
+        if not self.auth_mode_supported(self.auth_mode):
+            return False, self.invalid_auth_mode_detail(self.auth_mode)
+        if self.auth_mode == "cli":
+            return self.describe_cli_readiness(
+                cli_path=self.settings.claude_cli_path,
+                cli_label="claude",
+                auth_markers=(".claude.json", ".claude"),
+            )
+        return self.describe_api_readiness(api_key=self.settings.anthropic_api_key, env_var="ANTHROPIC_API_KEY")
 
     async def _decide(
         self,

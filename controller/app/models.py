@@ -166,6 +166,7 @@ class ProviderInfo(BaseModel):
     provider: ProviderName
     configured: bool
     model: str | None = None
+    auth_mode: str = "api"
     detail: str | None = None
 
 
