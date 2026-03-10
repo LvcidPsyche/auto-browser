@@ -26,6 +26,8 @@ class IsolatedBrowserRuntime:
     takeover_url: str
     novnc_port: int | None
     vnc_port: int | None
+    tunnel_local_host: str = "host.docker.internal"
+    tunnel_local_port: int = 6080
 
 
 class DockerBrowserNodeProvisioner:
@@ -97,9 +99,9 @@ class DockerBrowserNodeProvisioner:
                 "5900/tcp": (self.settings.isolated_browser_bind_host, None),
             },
             labels={
-                "browser-operator.managed": "true",
-                "browser-operator.session_id": session_id,
-                "browser-operator.mode": "docker_ephemeral",
+                "auto-browser.managed": "true",
+                "auto-browser.session_id": session_id,
+                "auto-browser.mode": "docker_ephemeral",
             },
         )
 
@@ -125,6 +127,8 @@ class DockerBrowserNodeProvisioner:
             takeover_url=takeover_url,
             novnc_port=novnc_port,
             vnc_port=vnc_port,
+            tunnel_local_host=container_name,
+            tunnel_local_port=6080,
         )
 
     def _release_sync(self, runtime: IsolatedBrowserRuntime) -> None:

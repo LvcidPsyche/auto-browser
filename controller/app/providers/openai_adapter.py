@@ -40,7 +40,7 @@ class OpenAIAdapter(BaseProviderAdapter):
                 {
                     "role": "system",
                     "content": (
-                        "You are a browser operator planner. Pick exactly one next action. "
+                        "You are the Auto Browser planner. Pick exactly one next action. "
                         "Use the provided function tool for your answer."
                     ),
                 },

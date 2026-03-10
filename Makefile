@@ -13,6 +13,9 @@ test:
 smoke-isolation:
 	./scripts/smoke_isolated_session.sh
 
+smoke-isolation-tunnel:
+	./scripts/smoke_isolated_session_tunnel.sh
+
 smoke-reverse-ssh:
 	./scripts/smoke_reverse_ssh.sh
 

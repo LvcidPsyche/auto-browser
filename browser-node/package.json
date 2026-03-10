@@ -1,5 +1,5 @@
 {
-  "name": "browser-operator-browser-node",
+  "name": "auto-browser-browser-node",
   "private": true,
   "type": "module",
   "dependencies": {

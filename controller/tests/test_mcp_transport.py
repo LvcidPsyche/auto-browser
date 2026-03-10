@@ -31,8 +31,8 @@ class McpTransportTests(unittest.TestCase):
         )
         self.transport = McpHttpTransport(
             tool_gateway=self.gateway,
-            server_name="browser-operator",
-            server_title="Browser Operator MCP",
+            server_name="auto-browser",
+            server_title="Auto Browser MCP",
             server_version="0.2.0",
             allowed_origins=["https://allowed.example"],
         )
@@ -70,7 +70,7 @@ class McpTransportTests(unittest.TestCase):
         session_id = response.headers[MCP_SESSION_HEADER]
         protocol_version = response.headers[MCP_PROTOCOL_HEADER]
         self.assertEqual(protocol_version, "2025-11-25")
-        self.assertEqual(response.json()["result"]["serverInfo"]["name"], "browser-operator")
+        self.assertEqual(response.json()["result"]["serverInfo"]["name"], "auto-browser")
         return session_id, protocol_version
 
     def test_initialize_requires_initialized_notification_before_tool_calls(self) -> None:

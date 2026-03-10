@@ -7,7 +7,7 @@ cd "${ROOT_DIR}"
 COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.isolation.yml)
 
 cleanup() {
-  docker ps -aq --filter label=browser-operator.managed=true | xargs -r docker rm -f >/dev/null 2>&1 || true
+  docker ps -aq --filter label=auto-browser.managed=true | xargs -r docker rm -f >/dev/null 2>&1 || true
   "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
 }
 

@@ -47,8 +47,8 @@ job_queue = AgentJobQueue(
 tool_gateway = McpToolGateway(manager=manager, orchestrator=orchestrator, job_queue=job_queue)
 mcp_transport = McpHttpTransport(
     tool_gateway=tool_gateway,
-    server_name="browser-operator",
-    server_title="Browser Operator MCP",
+    server_name="auto-browser",
+    server_title="Auto Browser MCP",
     server_version="0.2.0",
     allowed_origins=settings.mcp_allowed_origin_list,
 )
@@ -66,10 +66,10 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="Browser Operator Controller",
+    title="Auto Browser Controller",
     version="0.2.0",
     lifespan=lifespan,
-    summary="Visual browser operator control plane for LLM workflows.",
+    summary="Visual Auto Browser control plane for LLM workflows.",
 )
 
 app.mount("/artifacts", StaticFiles(directory=settings.artifact_root), name="artifacts")

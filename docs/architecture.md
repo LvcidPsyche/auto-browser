@@ -1,4 +1,4 @@
-# Browser Operator Architecture
+# Auto Browser Architecture
 
 ## Goal
 
@@ -131,6 +131,8 @@ This repo now also includes an optional `docker_ephemeral` session mode:
 - each isolated session gets its own published noVNC/VNC port pair
 - session summaries/observations now expose session-specific `remote_access` state so operators can see whether an isolated takeover URL is local-only or remotely reachable
 - the shared reverse-SSH metadata is not blindly reused for those takeover URLs
+- when isolated takeover ports are only local, the controller can now open a per-session reverse-SSH tunnel and advertise that remote URL instead
+- those per-session tunnels can target the isolated browser container directly over the Docker network instead of depending on host hairpin access
 
 That is the first real path toward true per-account browser isolation without rewriting the controller contract.
 
@@ -246,11 +248,13 @@ That is the minimal reliable operator loop.
 - audit log at `/data/audit/events.jsonl`
 - MCP JSON-RPC `/mcp` transport plus `/mcp/tools` + `/mcp/tools/call` convenience endpoints
 - optional `docker_ephemeral` isolated browser containers launched per session
+- optional controller-managed reverse-SSH session tunnels for isolated noVNC takeover ports
 - optional SQLite state DB for approvals + audit queries/retention
 
 ### Phase 2 — private remote access
 - put the stack behind Tailscale or Cloudflare Access
-- or use the optional reverse-SSH sidecar in this repo to pinhole only the API + noVNC ports through a bastion
+- or use the optional reverse-SSH sidecar in this repo to pinhole the shared API + noVNC ports through a bastion
+- or let the controller broker per-session reverse-SSH tunnels for isolated noVNC takeover ports
 - keep reverse binds on `127.0.0.1` unless you intentionally opt into `unsafe-public`
 - add TLS and auth at the gateway
 - remove public raw debugging ports

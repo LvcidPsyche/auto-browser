@@ -21,6 +21,7 @@ from .models import ApprovalKind, BrowserActionDecision, SessionRecord, SessionS
 from .ocr import OCRExtractor
 from .session_store import DurableSessionStore
 from .session_isolation import DockerBrowserNodeProvisioner, IsolatedBrowserRuntime
+from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,7 @@ class BrowserSession:
     isolation_mode: str = "shared_browser_node"
     browser: Browser | None = None
     runtime: IsolatedBrowserRuntime | None = None
+    tunnel: IsolatedSessionTunnel | None = None
     shared_takeover_surface: bool = True
     shared_browser_process: bool = True
     max_live_sessions_per_browser_node: int = 1
@@ -181,6 +183,7 @@ class BrowserSession:
     request_failures: list[dict[str, Any]] = field(default_factory=list)
     last_action: str | None = None
     last_auth_state_path: Path | None = None
+    tunnel_error: str | None = None
 
 
 class BrowserManager:
@@ -222,6 +225,7 @@ class BrowserManager:
             text_limit=self.settings.ocr_text_limit,
         )
         self.runtime_provisioner = DockerBrowserNodeProvisioner(self.settings)
+        self.tunnel_broker = IsolatedSessionTunnelBroker(self.settings)
 
     def get_remote_access_info(self, session_id: str | None = None) -> dict[str, Any]:
         if session_id:
@@ -301,20 +305,71 @@ class BrowserManager:
         if session.isolation_mode != "docker_ephemeral":
             return self._global_remote_access_info()
 
-        payload = dict(self._global_remote_access_info())
+        shared_remote_access = self._global_remote_access_info()
         takeover_url = session.takeover_url
         takeover_local_only = self._takeover_url_is_local_only(takeover_url)
-        api_url = payload.get("api_url")
+        api_url = shared_remote_access.get("api_url")
+        session_tunnel = self.tunnel_broker.describe(session.tunnel)
+        warning = None
+        status = "active"
+        active = True
+        effective_takeover_url = takeover_url
+        requires_direct_host_access = takeover_local_only
+        local_only = takeover_local_only
+
+        if session_tunnel and session_tunnel.get("active"):
+            effective_takeover_url = str(session_tunnel["public_takeover_url"])
+            requires_direct_host_access = False
+            local_only = False
+            status = "active"
+            active = True
+        elif not takeover_local_only:
+            status = "active"
+            active = True
+            requires_direct_host_access = False
+            local_only = False
+        else:
+            active = False
+            status = "api_only" if api_url else "local_only"
+            warning = (
+                "This isolated takeover URL is still bound to a local host/port. "
+                "Enable ISOLATED_TUNNEL_* settings or set ISOLATED_TAKEOVER_HOST to a remotely reachable hostname "
+                "or IP if humans need remote takeover."
+            )
+            if session_tunnel and session_tunnel.get("status") in {"error", "degraded"}:
+                status = "degraded"
+                warning = (
+                    "The isolated session tunnel is unavailable, so takeover fell back to the local-only URL. "
+                    f"{session_tunnel.get('error') or ''}"
+                ).strip()
+            elif session.tunnel_error:
+                status = "degraded"
+                warning = (
+                    "The isolated session tunnel could not be created, so takeover fell back to the local-only URL. "
+                    f"{session.tunnel_error}"
+                ).strip()
+
+        payload = dict(shared_remote_access)
         payload.update(
             {
                 "session_id": session.id,
-                "source": "isolated_runtime",
+                "source": (
+                    "isolated_session_tunnel"
+                    if session_tunnel and session_tunnel.get("active")
+                    else "isolated_runtime"
+                ),
                 "configured_takeover_url": takeover_url,
-                "takeover_url": takeover_url,
-                "local_only": takeover_local_only,
-                "requires_direct_host_access": True,
+                "takeover_url": effective_takeover_url,
+                "local_only": local_only,
+                "requires_direct_host_access": requires_direct_host_access,
                 "shared_api_url": api_url,
-                "shared_tunnel_active": bool(api_url),
+                "shared_tunnel_active": bool(shared_remote_access.get("active")),
+                "shared_tunnel": shared_remote_access.get("tunnel"),
+                "session_tunnel": session_tunnel,
+                "session_tunnel_error": session.tunnel_error,
+                "active": active,
+                "status": status,
+                "warning": warning,
             }
         )
         if session.runtime is not None:
@@ -324,21 +379,13 @@ class BrowserManager:
                 "novnc_port": session.runtime.novnc_port,
                 "vnc_port": session.runtime.vnc_port,
             }
-        if takeover_local_only:
-            payload["active"] = False
-            payload["status"] = "api_only" if api_url else "local_only"
-            payload["warning"] = (
-                "This isolated takeover URL is still bound to a local host/port. "
-                "Set ISOLATED_TAKEOVER_HOST to a remotely reachable hostname or IP if humans need remote takeover."
-            )
-        else:
-            payload["active"] = True
-            payload["status"] = "active"
-            payload["warning"] = None
         return payload
 
     def _current_takeover_url(self, session: BrowserSession | None = None) -> str:
         if session is not None and session.isolation_mode == "docker_ephemeral":
+            tunnel = self.tunnel_broker.describe(session.tunnel)
+            if tunnel and tunnel.get("active") and tunnel.get("public_takeover_url"):
+                return str(tunnel["public_takeover_url"])
             return session.takeover_url
         remote_access = self._global_remote_access_info()
         if remote_access.get("active") and remote_access.get("takeover_url"):
@@ -371,6 +418,7 @@ class BrowserManager:
         await self.session_store.startup()
         await self.session_store.mark_all_active_interrupted()
         self.playwright = await async_playwright().start()
+        await self.tunnel_broker.startup()
         await self.runtime_provisioner.startup()
         if self.settings.session_isolation_mode == "shared_browser_node":
             await self.ensure_browser()
@@ -387,6 +435,7 @@ class BrowserManager:
         self.browser = None
         if self.playwright is not None:
             await self.playwright.stop()
+        await self.tunnel_broker.shutdown()
         await self.session_store.shutdown()
 
     async def ensure_browser(self) -> Browser:
@@ -550,6 +599,7 @@ class BrowserManager:
                 await page.goto(start_url, wait_until="domcontentloaded")
                 await self._settle(page)
 
+            await self._maybe_provision_session_tunnel(session)
             await self._persist_session(session, status="active")
             summary = await self._session_summary(session)
             await self.audit.append(
@@ -567,15 +617,26 @@ class BrowserManager:
             return summary
         except Exception:
             self.sessions.pop(session_id, None)
+            if session is not None and session.tunnel is not None:
+                try:
+                    await self.tunnel_broker.release(session.tunnel)
+                except Exception as exc:
+                    logger.warning("failed to release session tunnel during create_session rollback: %s", exc)
             if context is not None:
-                await context.close()
+                try:
+                    await context.close()
+                except Exception as exc:
+                    logger.warning("failed to close browser context during create_session rollback: %s", exc)
             if browser is not None and browser is not self.browser:
                 try:
                     await browser.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("failed to close isolated browser during create_session rollback: %s", exc)
             if runtime is not None:
-                await self.runtime_provisioner.release(runtime)
+                try:
+                    await self.runtime_provisioner.release(runtime)
+                except Exception as exc:
+                    logger.warning("failed to release isolated runtime during create_session rollback: %s", exc)
             raise
         finally:
             if prepared_auth_state is not None:
@@ -940,6 +1001,8 @@ class BrowserManager:
     async def close_session(self, session_id: str) -> dict[str, Any]:
         session = await self.get_session(session_id)
         async with session.lock:
+            if session.tunnel is not None:
+                await self.tunnel_broker.release(session.tunnel)
             summary = await self._session_summary(session, status="closed", live=False)
             if self.settings.enable_tracing:
                 try:
@@ -970,6 +1033,25 @@ class BrowserManager:
                 },
             )
             return {"closed": True, "trace_path": str(session.trace_path), "session": summary}
+
+    async def _maybe_provision_session_tunnel(self, session: BrowserSession) -> None:
+        if session.isolation_mode != "docker_ephemeral" or session.runtime is None:
+            return
+        if not self.tunnel_broker.enabled:
+            return
+        if session.runtime.novnc_port is None or not self._takeover_url_is_local_only(session.takeover_url):
+            return
+        try:
+            session.tunnel = await self.tunnel_broker.provision(
+                session.id,
+                local_host=session.runtime.tunnel_local_host,
+                local_port=session.runtime.tunnel_local_port,
+            )
+            session.tunnel_error = None
+        except Exception as exc:
+            session.tunnel = None
+            session.tunnel_error = str(exc)
+            logger.warning("failed to provision isolated tunnel for session %s: %s", session.id, exc)
 
     async def _run_action(
         self,

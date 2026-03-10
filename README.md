@@ -1,6 +1,6 @@
-# Browser Operator POC
+# Auto Browser
 
-A visual browser-operator proof of concept for LLM-driven workflows.
+A visual Auto Browser control plane for LLM-driven workflows.
 
 This scaffold gives you:
 - a **browser node** with Chromium, Xvfb, x11vnc, and noVNC
@@ -41,7 +41,7 @@ See `docs/architecture.md` for the full design and `docs/llm-adapters.md` for th
 ## Quickstart
 
 ```bash
-cd browser-operator-poc
+cd auto-browser
 cp .env.example .env
 docker compose up --build
 ```
@@ -75,7 +75,10 @@ docker compose -f docker-compose.yml -f docker-compose.isolation.yml up --build
 
 That keeps the default shared browser-node available, but new sessions are provisioned as one-off browser containers with their own noVNC ports when `SESSION_ISOLATION_MODE=docker_ephemeral`.
 Raise `MAX_SESSIONS` above `1` if you want multiple isolated sessions live at once.
-The existing reverse-SSH sidecar still only tunnels the controller API plus the shared browser-node noVNC port. Isolated session noVNC ports are separate host ports, so set `ISOLATED_TAKEOVER_HOST` to a host humans can actually reach if you want remote takeover on isolated sessions.
+The existing reverse-SSH sidecar still only tunnels the controller API plus the shared browser-node noVNC port.
+If isolated session noVNC ports are only bound locally, enable the controller-managed `ISOLATED_TUNNEL_*` settings to open a reverse-SSH tunnel per session.
+If you already have direct host reachability, set `ISOLATED_TAKEOVER_HOST` to a host humans can actually reach and skip the extra tunnel broker.
+When the controller brokers an isolated-session tunnel, it targets the per-session browser container over the Docker network by default instead of hairpinning back through a host-published port.
 
 For remote access, you now have two sane paths:
 - put the stack behind **Tailscale / Cloudflare Access**
@@ -163,6 +166,20 @@ It verifies:
 - observe + close flow
 - isolated browser container cleanup after close
 
+### Run the local isolated-session tunnel smoke test
+
+This repo also includes a smoke harness for controller-managed reverse tunnels on isolated session takeover ports:
+
+```bash
+./scripts/smoke_isolated_session_tunnel.sh
+```
+
+It verifies:
+- controller-managed isolated session tunnel provisioning against the disposable bastion
+- session-specific remote-access payloads flipping to `active`
+- remote noVNC reachability from the bastion on the assigned per-session port
+- isolated tunnel teardown on session close
+
 ### Check configured model providers
 
 ```bash
@@ -177,7 +194,7 @@ curl -s 'http://localhost:8000/remote-access?session_id=<session-id>' | jq
 ```
 
 If the reverse-SSH sidecar is running, observations and session summaries will automatically return the forwarded `takeover_url` from `data/tunnels/reverse-ssh.json`.
-For isolated sessions, the `remote_access` payload becomes session-specific so you can see whether that session’s own noVNC URL is still local-only or actually reachable remotely.
+For isolated sessions, the `remote_access` payload becomes session-specific so you can see whether that session’s own noVNC URL is still local-only, directly reachable, or being served through a controller-managed session tunnel.
 
 ### Create a session
 
@@ -420,7 +437,7 @@ Notes:
 ## Project layout
 
 ```text
-browser-operator-poc/
+auto-browser/
 ├── browser-node/        # headed Chromium + noVNC image
 ├── controller/          # FastAPI + Playwright control plane
 ├── data/                # artifacts, uploads, auth state, durable session/job records, profile data
@@ -499,6 +516,25 @@ Optional auth/audit/operator knobs:
 - `ISOLATED_BROWSER_NETWORK`
 - `ISOLATED_HOST_DATA_ROOT`
 - `ISOLATED_DOCKER_HOST`
+- `ISOLATED_TUNNEL_ENABLED`
+- `ISOLATED_TUNNEL_HOST`
+- `ISOLATED_TUNNEL_PORT`
+- `ISOLATED_TUNNEL_USER`
+- `ISOLATED_TUNNEL_KEY_PATH`
+- `ISOLATED_TUNNEL_KNOWN_HOSTS_PATH`
+- `ISOLATED_TUNNEL_STRICT_HOST_KEY_CHECKING`
+- `ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS`
+- `ISOLATED_TUNNEL_REMOTE_PORT_START`
+- `ISOLATED_TUNNEL_REMOTE_PORT_END`
+- `ISOLATED_TUNNEL_SERVER_ALIVE_INTERVAL`
+- `ISOLATED_TUNNEL_SERVER_ALIVE_COUNT_MAX`
+- `ISOLATED_TUNNEL_INFO_INTERVAL_SECONDS`
+- `ISOLATED_TUNNEL_STARTUP_GRACE_SECONDS`
+- `ISOLATED_TUNNEL_ACCESS_MODE`
+- `ISOLATED_TUNNEL_PUBLIC_HOST`
+- `ISOLATED_TUNNEL_PUBLIC_SCHEME`
+- `ISOLATED_TUNNEL_LOCAL_HOST`
+- `ISOLATED_TUNNEL_INFO_ROOT`
 - `AUTH_STATE_ENCRYPTION_KEY`
 - `REQUIRE_AUTH_STATE_ENCRYPTION`
 - `AUTH_STATE_MAX_AGE_HOURS`

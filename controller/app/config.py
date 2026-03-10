@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     job_store_root: str = Field("/data/jobs", alias="JOB_STORE_ROOT")
     redis_url: str | None = Field(None, alias="REDIS_URL")
     session_store_redis_prefix: str = Field(
-        "browser_operator:sessions",
+        "auto_browser:sessions",
         alias="SESSION_STORE_REDIS_PREFIX",
     )
     agent_job_worker_count: int = Field(1, alias="AGENT_JOB_WORKER_COUNT")
@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     mcp_allowed_origins: str = Field("", alias="MCP_ALLOWED_ORIGINS")
     session_isolation_mode: str = Field("shared_browser_node", alias="SESSION_ISOLATION_MODE")
     isolated_browser_image: str = Field(
-        "browser-operator-poc-browser-node:latest",
+        "auto-browser-browser-node:latest",
         alias="ISOLATED_BROWSER_IMAGE",
     )
     isolated_browser_container_prefix: str = Field(
@@ -79,6 +79,64 @@ class Settings(BaseSettings):
     isolated_browser_network: str | None = Field(None, alias="ISOLATED_BROWSER_NETWORK")
     isolated_host_data_root: str | None = Field(None, alias="ISOLATED_HOST_DATA_ROOT")
     isolated_docker_host: str | None = Field(None, alias="ISOLATED_DOCKER_HOST")
+    isolated_tunnel_enabled: bool = Field(False, alias="ISOLATED_TUNNEL_ENABLED")
+    isolated_tunnel_host: str | None = Field(
+        None,
+        validation_alias=AliasChoices("ISOLATED_TUNNEL_HOST", "REVERSE_SSH_HOST"),
+    )
+    isolated_tunnel_port: int = Field(
+        22,
+        validation_alias=AliasChoices("ISOLATED_TUNNEL_PORT", "REVERSE_SSH_PORT"),
+    )
+    isolated_tunnel_user: str | None = Field(
+        None,
+        validation_alias=AliasChoices("ISOLATED_TUNNEL_USER", "REVERSE_SSH_USER"),
+    )
+    isolated_tunnel_key_path: str = Field("/data/ssh/id_ed25519", alias="ISOLATED_TUNNEL_KEY_PATH")
+    isolated_tunnel_known_hosts_path: str = Field(
+        "/data/ssh/known_hosts",
+        alias="ISOLATED_TUNNEL_KNOWN_HOSTS_PATH",
+    )
+    isolated_tunnel_strict_host_key_checking: str = Field(
+        "yes",
+        alias="ISOLATED_TUNNEL_STRICT_HOST_KEY_CHECKING",
+    )
+    isolated_tunnel_remote_bind_address: str = Field(
+        "127.0.0.1",
+        alias="ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS",
+    )
+    isolated_tunnel_remote_port_start: int = Field(16181, alias="ISOLATED_TUNNEL_REMOTE_PORT_START")
+    isolated_tunnel_remote_port_end: int = Field(16240, alias="ISOLATED_TUNNEL_REMOTE_PORT_END")
+    isolated_tunnel_server_alive_interval: int = Field(
+        30,
+        alias="ISOLATED_TUNNEL_SERVER_ALIVE_INTERVAL",
+    )
+    isolated_tunnel_server_alive_count_max: int = Field(
+        3,
+        alias="ISOLATED_TUNNEL_SERVER_ALIVE_COUNT_MAX",
+    )
+    isolated_tunnel_info_interval_seconds: float = Field(
+        10.0,
+        alias="ISOLATED_TUNNEL_INFO_INTERVAL_SECONDS",
+    )
+    isolated_tunnel_startup_grace_seconds: float = Field(
+        1.0,
+        alias="ISOLATED_TUNNEL_STARTUP_GRACE_SECONDS",
+    )
+    isolated_tunnel_access_mode: str = Field(
+        "private",
+        validation_alias=AliasChoices("ISOLATED_TUNNEL_ACCESS_MODE", "REVERSE_SSH_ACCESS_MODE"),
+    )
+    isolated_tunnel_public_host: str | None = Field(
+        None,
+        validation_alias=AliasChoices("ISOLATED_TUNNEL_PUBLIC_HOST", "REVERSE_SSH_PUBLIC_HOST"),
+    )
+    isolated_tunnel_public_scheme: str = Field(
+        "http",
+        validation_alias=AliasChoices("ISOLATED_TUNNEL_PUBLIC_SCHEME", "REVERSE_SSH_PUBLIC_SCHEME"),
+    )
+    isolated_tunnel_local_host: str = Field("host.docker.internal", alias="ISOLATED_TUNNEL_LOCAL_HOST")
+    isolated_tunnel_info_root: str = Field("/data/tunnels/sessions", alias="ISOLATED_TUNNEL_INFO_ROOT")
     allowed_hosts: str = Field("example.com,localhost", alias="ALLOWED_HOSTS")
     default_viewport_width: int = Field(1600, alias="DEFAULT_VIEWPORT_WIDTH")
     default_viewport_height: int = Field(900, alias="DEFAULT_VIEWPORT_HEIGHT")
