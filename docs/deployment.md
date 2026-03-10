@@ -110,6 +110,8 @@ curl -fsS http://127.0.0.1:8000/metrics | head
 curl -fsS http://127.0.0.1:8000/maintenance/status | jq
 ```
 
+If `METRICS_ENABLED=false`, skip the `/metrics` check; the endpoint returns `404`.
+
 ## Gateway recommendations
 
 Use **one** of:
@@ -157,7 +159,7 @@ Before live debugging, gather:
 
 1. Bring the stack up privately
 2. Verify `/readyz`
-3. Verify `/metrics`
+3. Verify `/metrics` (unless `METRICS_ENABLED=false`)
 4. Create one session against a non-sensitive site
 5. Verify observe/click/type flow
 6. Add real creds

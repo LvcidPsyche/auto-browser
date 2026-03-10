@@ -461,6 +461,8 @@ The controller can now:
 - expose Prometheus-style request/session metrics at `/metrics`
 - prune stale artifacts, uploads, and auth-state files on startup and on a configurable interval
 
+If `METRICS_ENABLED=false`, `/metrics` returns `404`.
+
 ### MCP browser gateway
 
 Convenience endpoints still exist:

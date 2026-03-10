@@ -59,7 +59,7 @@ rate_limiter = (
     if settings.request_rate_limit_enabled
     else None
 )
-metrics = MetricsRecorder()
+metrics = MetricsRecorder(enabled=settings.metrics_enabled)
 maintenance = MaintenanceService(settings, session_provider=lambda: manager.sessions.values())
 mcp_transport = McpHttpTransport(
     tool_gateway=tool_gateway,
@@ -173,6 +173,9 @@ async def bind_operator_identity(request: Request, call_next):
 
 @app.middleware("http")
 async def record_http_metrics(request: Request, call_next):
+    if not metrics.enabled:
+        return await call_next(request)
+
     start = time.perf_counter()
     try:
         response = await call_next(request)
@@ -214,6 +217,8 @@ async def readyz() -> dict[str, str]:
 
 @app.get("/metrics", include_in_schema=False)
 async def get_metrics() -> Response:
+    if not metrics.enabled:
+        raise HTTPException(status_code=404, detail="Metrics disabled")
     metrics.set_active_sessions(len(manager.sessions))
     payload, content_type = metrics.render()
     return Response(content=payload, media_type=content_type)

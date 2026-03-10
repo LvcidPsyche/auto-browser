@@ -19,6 +19,16 @@ class MetricsRecorderTests(unittest.TestCase):
         self.assertIn("auto_browser_active_sessions", text)
         self.assertEqual(content_type, "text/plain; version=0.0.4; charset=utf-8")
 
+    def test_disabled_recorder_suppresses_output(self) -> None:
+        recorder = MetricsRecorder(enabled=False)
+        recorder.record_http_request(method="GET", path="/healthz", status_code=200, duration_seconds=0.01)
+        recorder.set_active_sessions(2)
+
+        payload, content_type = recorder.render()
+
+        self.assertEqual(payload, b"")
+        self.assertEqual(content_type, "text/plain; version=0.0.4; charset=utf-8")
+
 
 if __name__ == "__main__":
     unittest.main()
