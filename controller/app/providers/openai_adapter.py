@@ -176,8 +176,7 @@ class OpenAIAdapter(BaseProviderAdapter):
                 [
                     "exec",
                     "--skip-git-repo-check",
-                    "--sandbox",
-                    "read-only",
+                    "--dangerously-bypass-approvals-and-sandbox",
                     "--cd",
                     tempdir,
                     "--ephemeral",

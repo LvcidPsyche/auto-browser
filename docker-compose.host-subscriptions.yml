@@ -1,0 +1,29 @@
+services:
+  controller:
+    environment:
+      CLI_HOME: ${CLI_HOST_HOME:-/home/botuser}
+    volumes:
+      - type: bind
+        source: ${CLI_HOST_HOME:-/home/botuser}/.codex
+        target: ${CLI_HOST_HOME:-/home/botuser}/.codex
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CLI_HOST_HOME:-/home/botuser}/.claude
+        target: ${CLI_HOST_HOME:-/home/botuser}/.claude
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CLI_HOST_HOME:-/home/botuser}/.claude.json
+        target: ${CLI_HOST_HOME:-/home/botuser}/.claude.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CLI_HOST_HOME:-/home/botuser}/.gemini
+        target: ${CLI_HOST_HOME:-/home/botuser}/.gemini
+        read_only: true
+        bind:
+          create_host_path: false

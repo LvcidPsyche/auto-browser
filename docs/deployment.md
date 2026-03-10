@@ -78,6 +78,18 @@ rsync -a ~/.gemini data/cli-home/.gemini
 
 Treat `data/cli-home` like a password vault. Never commit it.
 
+If the target machine already has those subscription logins locally, prefer the host-mount override instead of copying caches:
+
+```bash
+CLI_HOST_HOME=/home/botuser \
+OPENAI_AUTH_MODE=cli \
+CLAUDE_AUTH_MODE=cli \
+GEMINI_AUTH_MODE=cli \
+docker compose -f docker-compose.yml -f docker-compose.host-subscriptions.yml up -d --build
+```
+
+That override mounts `~/.codex`, `~/.claude`, `~/.claude.json`, and `~/.gemini` read-only at the same home-path inside the container and sets `CLI_HOME` to that host-style home. If your login home is different, change `CLI_HOST_HOME`.
+
 In `APP_ENV=production`, startup now fails fast if:
 - any `*_AUTH_MODE` value is not `api` or `cli`
 - a provider is set to `cli` mode but its CLI binary is missing

@@ -116,6 +116,23 @@ rsync -a ~/.claude data/cli-home/.claude
 rsync -a ~/.gemini data/cli-home/.gemini
 ```
 
+If this box already has those subscription logins locally, the smoother path is to mount the real host homes read-only at their native paths instead of copying caches around:
+
+```bash
+CLI_HOST_HOME=/home/botuser \
+OPENAI_AUTH_MODE=cli \
+CLAUDE_AUTH_MODE=cli \
+GEMINI_AUTH_MODE=cli \
+docker compose -f docker-compose.yml -f docker-compose.host-subscriptions.yml up --build
+```
+
+That override:
+- mounts `~/.codex`, `~/.claude`, `~/.claude.json`, and `~/.gemini` read-only
+- sets `CLI_HOME` to the host-style home path inside the container
+- behaves much more like running the CLIs directly on the host
+
+If your host home is not `/home/botuser`, set `CLI_HOST_HOME` first.
+
 Notes:
 - keep `data/cli-home` private; it contains live auth material
 - API keys are still the better default for CI/public automation
