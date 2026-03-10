@@ -6,7 +6,9 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from .base import BaseProviderAdapter, ProviderDecision
+import httpx
+
+from .base import BaseProviderAdapter, ProviderAPIError, ProviderDecision
 from ..models import BrowserActionDecision
 
 
@@ -14,8 +16,14 @@ class OpenAIAdapter(BaseProviderAdapter):
     provider = "openai"
 
     @property
+    def supported_auth_modes(self) -> tuple[str, ...]:
+        return ("api", "cli", "host_bridge")
+
+    @property
     def default_model(self) -> str:
-        return self.settings.openai_cli_model or self.settings.openai_model
+        if self.auth_mode in {"cli", "host_bridge"}:
+            return self.settings.openai_cli_model or "codex-default"
+        return self.settings.openai_model
 
     @property
     def configured(self) -> bool:
@@ -38,6 +46,11 @@ class OpenAIAdapter(BaseProviderAdapter):
     def _readiness(self) -> tuple[bool, str]:
         if not self.auth_mode_supported(self.auth_mode):
             return False, self.invalid_auth_mode_detail(self.auth_mode)
+        if self.auth_mode == "host_bridge":
+            return self.describe_socket_readiness(
+                socket_path=self.settings.openai_host_bridge_socket,
+                label="OpenAI host bridge",
+            )
         if self.auth_mode == "cli":
             return self.describe_cli_readiness(
                 cli_path=self.settings.openai_cli_path,
@@ -55,6 +68,14 @@ class OpenAIAdapter(BaseProviderAdapter):
         previous_steps: list[dict[str, Any]],
         model_override: str | None,
     ) -> ProviderDecision:
+        if self.auth_mode == "host_bridge":
+            return await self._decide_via_host_bridge(
+                goal=goal,
+                observation=observation,
+                context_hints=context_hints,
+                previous_steps=previous_steps,
+                model_override=model_override,
+            )
         if self.auth_mode == "cli":
             return await self._decide_via_cli(
                 goal=goal,
@@ -156,7 +177,7 @@ class OpenAIAdapter(BaseProviderAdapter):
             temp_root = Path(tempdir)
             schema_path = temp_root / "browser_action_schema.json"
             output_path = temp_root / "decision.json"
-            schema_path.write_text(json.dumps(self.action_schema, ensure_ascii=False), encoding="utf-8")
+            schema_path.write_text(json.dumps(self.strict_action_schema, ensure_ascii=False), encoding="utf-8")
             self._ensure_codex_config_path_compatibility()
             config_overrides = [
                 "project_doc_fallback_filenames=[]",
@@ -200,6 +221,92 @@ class OpenAIAdapter(BaseProviderAdapter):
                 usage={"auth_mode": "cli", "transport": "codex-exec"},
                 raw_text=raw_text,
             )
+
+    async def _decide_via_host_bridge(
+        self,
+        *,
+        goal: str,
+        observation: dict[str, Any],
+        context_hints: str | None,
+        previous_steps: list[dict[str, Any]],
+        model_override: str | None,
+    ) -> ProviderDecision:
+        model = model_override or self.settings.openai_cli_model
+        prompt = self.build_cli_prompt(
+            goal=goal,
+            observation=observation,
+            context_hints=context_hints,
+            previous_steps=previous_steps,
+            include_schema=False,
+        )
+        mime_type, image_b64 = self.encode_image(observation["screenshot_path"])
+        response = await self._post_host_bridge_request(
+            {
+                "model": model,
+                "prompt": prompt,
+                "schema": self.strict_action_schema,
+                "screenshot": {
+                    "media_type": mime_type,
+                    "base64": image_b64,
+                },
+            }
+        )
+        raw_text = str(response.get("raw_text") or "").strip()
+        if not raw_text:
+            raise RuntimeError("OpenAI host bridge returned an empty response")
+        decision = self.parse_decision_text(raw_text)
+        return ProviderDecision(
+            provider=self.provider,
+            model=str(response.get("model") or model or self.default_model),
+            decision=decision,
+            usage={"auth_mode": "host_bridge", "transport": "codex-host-bridge"},
+            raw_text=raw_text,
+        )
+
+    async def _post_host_bridge_request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        socket_path = self.settings.openai_host_bridge_socket
+        transport = httpx.AsyncHTTPTransport(uds=socket_path)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://host-bridge",
+            timeout=self.settings.model_request_timeout_seconds,
+        ) as client:
+            try:
+                response = await client.post("/openai/decide", json=payload)
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                raise ProviderAPIError(
+                    provider=self.provider,
+                    message=str(exc),
+                    status_code=None,
+                    retryable=True,
+                ) from exc
+
+        try:
+            body = response.json()
+        except Exception:
+            body = None
+
+        if response.status_code >= 400:
+            detail = None
+            if isinstance(body, dict):
+                error = body.get("error")
+                if isinstance(error, str) and error.strip():
+                    detail = error
+                elif isinstance(error, dict):
+                    detail = error.get("message") or error.get("detail")
+                if detail is None:
+                    detail = body.get("detail")
+            raise ProviderAPIError(
+                provider=self.provider,
+                message=str(detail or response.text[:1200] or "host bridge request failed"),
+                status_code=response.status_code,
+                retryable=response.status_code >= 500,
+                raw_error=body if isinstance(body, dict) else None,
+            )
+
+        if not isinstance(body, dict):
+            raise RuntimeError("OpenAI host bridge returned a non-object response")
+        return body
 
     def _ensure_codex_config_path_compatibility(self) -> None:
         cli_home = (self.settings.cli_home or "").strip()

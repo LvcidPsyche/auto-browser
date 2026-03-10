@@ -168,6 +168,10 @@ class Settings(BaseSettings):
     openai_auth_mode: str = Field("api", alias="OPENAI_AUTH_MODE")
     openai_cli_path: str = Field("codex", alias="OPENAI_CLI_PATH")
     openai_cli_model: str | None = Field(None, alias="OPENAI_CLI_MODEL")
+    openai_host_bridge_socket: str = Field(
+        "/data/host-bridge/codex.sock",
+        alias="OPENAI_HOST_BRIDGE_SOCKET",
+    )
 
     anthropic_api_key: str | None = Field(None, alias="ANTHROPIC_API_KEY")
     anthropic_base_url: str = Field("https://api.anthropic.com/v1", alias="ANTHROPIC_BASE_URL")

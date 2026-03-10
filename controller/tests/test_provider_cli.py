@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import socketserver
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -10,6 +13,38 @@ from app.providers.base import CLIResult
 from app.providers.claude_adapter import ClaudeAdapter
 from app.providers.gemini_adapter import GeminiAdapter
 from app.providers.openai_adapter import OpenAIAdapter
+
+
+class HealthzUnixSocketServer:
+    class _Handler(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            self.request.recv(4096)
+            self.request.sendall(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 15\r\n"
+                b"Connection: close\r\n\r\n"
+                b"{\"status\":\"ok\"}"
+            )
+
+    def __init__(self, socket_path: Path) -> None:
+        class _Server(socketserver.UnixStreamServer):
+            allow_reuse_address = True
+
+        self.socket_path = socket_path
+        self.server = _Server(str(socket_path), self._Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self) -> "HealthzUnixSocketServer":
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+        if self.socket_path.exists():
+            self.socket_path.unlink()
 
 
 class ProviderCLITests(unittest.IsolatedAsyncioTestCase):
@@ -50,6 +85,10 @@ class ProviderCLITests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("--output-schema", command)
             self.assertIn("--output-last-message", command)
             self.assertIn("--image", command)
+            schema_path = Path(command[command.index("--output-schema") + 1])
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            self.assertEqual(schema["required"], list(schema["properties"].keys()))
+            self.assertNotIn("default", json.dumps(schema))
             output_path = Path(command[command.index("--output-last-message") + 1])
             output_path.write_text(
                 '{"action":"done","reason":"complete","risk_category":"read"}',
@@ -124,6 +163,74 @@ class ProviderCLITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.model, "gemini-2.5-pro")
         self.assertEqual(result.decision.action, "done")
 
+    async def test_openai_host_bridge_mode_parses_response(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            OPENAI_AUTH_MODE="host_bridge",
+            OPENAI_HOST_BRIDGE_SOCKET=str(Path(self.tempdir.name) / "codex.sock"),
+            OPENAI_CLI_MODEL="gpt-5.4",
+        )
+        Path(settings.openai_host_bridge_socket).write_text("", encoding="utf-8")
+        adapter = OpenAIAdapter(settings)
+
+        with patch.object(
+            adapter,
+            "_post_host_bridge_request",
+            new=AsyncMock(
+                return_value={
+                    "model": "gpt-5.4",
+                    "raw_text": '{"action":"done","reason":"complete","risk_category":"read"}',
+                }
+            ),
+        ):
+            result = await adapter._decide(
+                goal="Finish the task",
+                observation=self.observation,
+                context_hints=None,
+                previous_steps=[],
+                model_override=None,
+            )
+
+        self.assertEqual(result.model, "gpt-5.4")
+        self.assertEqual(result.decision.action, "done")
+        self.assertEqual(result.usage, {"auth_mode": "host_bridge", "transport": "codex-host-bridge"})
+
+    async def test_openai_host_bridge_mode_sends_strict_schema(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            OPENAI_AUTH_MODE="host_bridge",
+            OPENAI_HOST_BRIDGE_SOCKET=str(Path(self.tempdir.name) / "codex.sock"),
+            OPENAI_CLI_MODEL="gpt-5.4",
+        )
+        Path(settings.openai_host_bridge_socket).write_text("", encoding="utf-8")
+        adapter = OpenAIAdapter(settings)
+
+        captured: dict[str, object] = {}
+
+        async def fake_post(payload: dict[str, object]) -> dict[str, object]:
+            captured.update(payload)
+            return {
+                "model": "gpt-5.4",
+                "raw_text": '{"action":"done","reason":"complete","risk_category":"read"}',
+            }
+
+        with patch.object(adapter, "_post_host_bridge_request", new=AsyncMock(side_effect=fake_post)):
+            result = await adapter._decide(
+                goal="Finish the task",
+                observation=self.observation,
+                context_hints=None,
+                previous_steps=[],
+                model_override=None,
+            )
+
+        schema = captured["schema"]
+        self.assertIsInstance(schema, dict)
+        self.assertEqual(schema["required"], list(schema["properties"].keys()))
+        self.assertNotIn("default", json.dumps(schema))
+        self.assertEqual(result.model, "gpt-5.4")
+        self.assertEqual(result.decision.action, "done")
+        self.assertEqual(result.usage, {"auth_mode": "host_bridge", "transport": "codex-host-bridge"})
+
     def test_cli_configured_checks_binary_path(self) -> None:
         self.touch(".codex/auth.json")
         self.touch(".claude.json")
@@ -170,7 +277,29 @@ class ProviderCLITests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(adapter.configured)
         self.assertIn("invalid", adapter.readiness_detail)
-        self.assertIn("api, cli", adapter.readiness_detail)
+        self.assertIn("api, cli, host_bridge", adapter.readiness_detail)
+
+    def test_host_bridge_mode_checks_socket_path(self) -> None:
+        socket_path = Path(self.tempdir.name) / "codex.sock"
+        adapter = OpenAIAdapter(
+            Settings(
+                _env_file=None,
+                OPENAI_AUTH_MODE="host_bridge",
+                OPENAI_HOST_BRIDGE_SOCKET=str(socket_path),
+            )
+        )
+
+        self.assertFalse(adapter.configured)
+        self.assertIn("does not exist", adapter.readiness_detail)
+
+        socket_path.write_text("", encoding="utf-8")
+        self.assertFalse(adapter.configured)
+        self.assertIn("is not a Unix socket", adapter.readiness_detail)
+
+        socket_path.unlink()
+        with HealthzUnixSocketServer(socket_path):
+            self.assertTrue(adapter.configured)
+            self.assertIn("ready via OpenAI host bridge socket", adapter.readiness_detail)
 
 
 if __name__ == "__main__":

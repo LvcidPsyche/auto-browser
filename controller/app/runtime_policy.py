@@ -6,7 +6,7 @@ from shutil import which
 from urllib.parse import urlparse
 
 from .config import Settings
-from .providers.base import VALID_PROVIDER_AUTH_MODES
+from .providers.base import BaseProviderAdapter
 
 
 @dataclass(slots=True)
@@ -22,9 +22,34 @@ class RuntimePolicyReport:
 LOCAL_HOSTS = {"", "127.0.0.1", "localhost", "::1", "0.0.0.0"}
 
 CLI_PROVIDER_CHECKS = (
-    ("openai", "OPENAI_AUTH_MODE", "OPENAI_API_KEY", "OPENAI_CLI_PATH", "codex", (".codex",)),
-    ("claude", "CLAUDE_AUTH_MODE", "ANTHROPIC_API_KEY", "CLAUDE_CLI_PATH", "claude", (".claude.json", ".claude")),
-    ("gemini", "GEMINI_AUTH_MODE", "GEMINI_API_KEY", "GEMINI_CLI_PATH", "gemini", (".gemini",)),
+    {
+        "provider": "openai",
+        "auth_mode_attr": "OPENAI_AUTH_MODE",
+        "allowed_modes": {"api", "cli", "host_bridge"},
+        "api_key_attr": "OPENAI_API_KEY",
+        "cli_path_attr": "OPENAI_CLI_PATH",
+        "cli_label": "codex",
+        "auth_markers": (".codex",),
+        "host_bridge_socket_attr": "OPENAI_HOST_BRIDGE_SOCKET",
+    },
+    {
+        "provider": "claude",
+        "auth_mode_attr": "CLAUDE_AUTH_MODE",
+        "allowed_modes": {"api", "cli"},
+        "api_key_attr": "ANTHROPIC_API_KEY",
+        "cli_path_attr": "CLAUDE_CLI_PATH",
+        "cli_label": "claude",
+        "auth_markers": (".claude.json", ".claude"),
+    },
+    {
+        "provider": "gemini",
+        "auth_mode_attr": "GEMINI_AUTH_MODE",
+        "allowed_modes": {"api", "cli"},
+        "api_key_attr": "GEMINI_API_KEY",
+        "cli_path_attr": "GEMINI_CLI_PATH",
+        "cli_label": "gemini",
+        "auth_markers": (".gemini",),
+    },
 )
 
 
@@ -34,17 +59,38 @@ def _validate_provider_runtime(settings: Settings, report: RuntimePolicyReport) 
     cli_home_path = Path(cli_home) if cli_home else None
     missing_cli_home_reported = False
 
-    for provider_name, auth_mode_attr, api_key_attr, cli_path_attr, cli_label, auth_markers in CLI_PROVIDER_CHECKS:
+    for check in CLI_PROVIDER_CHECKS:
+        provider_name = check["provider"]
+        auth_mode_attr = check["auth_mode_attr"]
+        api_key_attr = check["api_key_attr"]
+        cli_path_attr = check.get("cli_path_attr")
+        cli_label = check.get("cli_label")
+        auth_markers = check.get("auth_markers", ())
+        allowed_modes = check["allowed_modes"]
         auth_mode = (getattr(settings, auth_mode_attr.lower()) or "").strip().lower()
-        if auth_mode not in VALID_PROVIDER_AUTH_MODES:
+        if auth_mode not in allowed_modes:
+            supported = ", ".join(sorted(allowed_modes))
             report.errors.append(
-                f"{auth_mode_attr}={auth_mode or '<empty>'} is invalid; expected one of: api, cli"
+                f"{auth_mode_attr}={auth_mode or '<empty>'} is invalid; expected one of: {supported}"
             )
             continue
 
         if auth_mode == "api":
             if getattr(settings, api_key_attr.lower()):
                 any_provider_ready = True
+            continue
+
+        if auth_mode == "host_bridge":
+            socket_attr = check.get("host_bridge_socket_attr")
+            socket_path = getattr(settings, socket_attr.lower()) if socket_attr else None
+            ready, detail = BaseProviderAdapter.describe_socket_readiness(
+                socket_path=str(socket_path) if socket_path else None,
+                label=f"{provider_name} host bridge",
+            )
+            if not ready:
+                report.errors.append(f"{auth_mode_attr}=host_bridge is not ready: {detail}")
+                continue
+            any_provider_ready = True
             continue
 
         cli_path = getattr(settings, cli_path_attr.lower())

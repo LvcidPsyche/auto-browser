@@ -1,0 +1,13 @@
+[Unit]
+Description=Auto Browser Codex host bridge
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.openclaw/workspace/auto-browser
+ExecStart=/usr/bin/env python3 scripts/codex_host_bridge.py --socket-path data/host-bridge/codex.sock
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

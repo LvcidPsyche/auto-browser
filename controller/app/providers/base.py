@@ -5,6 +5,8 @@ import asyncio
 import json
 import mimetypes
 import os
+import socket
+import stat
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +18,7 @@ import httpx
 from ..config import Settings
 from ..models import BROWSER_ACTION_SCHEMA, BrowserActionDecision, ProviderName
 
-VALID_PROVIDER_AUTH_MODES = {"api", "cli"}
+DEFAULT_PROVIDER_AUTH_MODES = {"api", "cli"}
 
 
 @dataclass
@@ -225,6 +227,43 @@ class BaseProviderAdapter(ABC):
     def action_schema(self) -> dict[str, Any]:
         return BROWSER_ACTION_SCHEMA
 
+    @property
+    def strict_action_schema(self) -> dict[str, Any]:
+        return self.make_strict_json_schema(self.action_schema)
+
+    @classmethod
+    def make_strict_json_schema(cls, schema: dict[str, Any]) -> dict[str, Any]:
+        return cls._normalize_json_schema_node(schema)
+
+    @classmethod
+    def _normalize_json_schema_node(cls, node: Any) -> Any:
+        if isinstance(node, list):
+            return [cls._normalize_json_schema_node(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+
+        normalized: dict[str, Any] = {}
+        for key, value in node.items():
+            if key == "default":
+                continue
+            if key in {"properties", "$defs", "definitions"} and isinstance(value, dict):
+                normalized[key] = {
+                    child_key: cls._normalize_json_schema_node(child_value)
+                    for child_key, child_value in value.items()
+                }
+                continue
+            if key in {"items", "anyOf", "allOf", "oneOf", "not", "if", "then", "else"}:
+                normalized[key] = cls._normalize_json_schema_node(value)
+                continue
+            normalized[key] = value
+
+        properties = normalized.get("properties")
+        if isinstance(properties, dict):
+            normalized["required"] = list(properties.keys())
+            normalized.setdefault("additionalProperties", False)
+
+        return normalized
+
     def build_cli_prompt(
         self,
         *,
@@ -267,13 +306,17 @@ class BaseProviderAdapter(ABC):
     def normalize_auth_mode(raw: str | None) -> str:
         return (raw or "").strip().lower()
 
-    @classmethod
-    def auth_mode_supported(cls, value: str) -> bool:
-        return value in VALID_PROVIDER_AUTH_MODES
+    @property
+    def supported_auth_modes(self) -> tuple[str, ...]:
+        return tuple(sorted(DEFAULT_PROVIDER_AUTH_MODES))
+
+    def auth_mode_supported(self, value: str) -> bool:
+        return value in self.supported_auth_modes
 
     def invalid_auth_mode_detail(self, value: str) -> str:
         value_label = value or "<empty>"
-        return f"{self.provider} auth mode '{value_label}' is invalid; expected one of: api, cli"
+        supported = ", ".join(self.supported_auth_modes)
+        return f"{self.provider} auth mode '{value_label}' is invalid; expected one of: {supported}"
 
     @staticmethod
     def describe_api_readiness(*, api_key: str | None, env_var: str) -> tuple[bool, str]:
@@ -310,6 +353,32 @@ class BaseProviderAdapter(ABC):
             return False, f"No {self.provider} CLI auth state found under {home_path}; expected one of: {expected}"
 
         return True, f"ready via {cli_label} CLI ({resolved_cli}); auth state found at {', '.join(matches)}"
+
+    @staticmethod
+    def describe_socket_readiness(*, socket_path: str | None, label: str) -> tuple[bool, str]:
+        if not socket_path:
+            return False, f"{label} socket path is not configured"
+        path = Path(socket_path)
+        if not path.exists():
+            return False, f"{label} socket does not exist: {path}"
+        try:
+            mode = path.stat().st_mode
+        except OSError as exc:
+            return False, f"{label} socket could not be inspected: {exc}"
+        if not stat.S_ISSOCK(mode):
+            return False, f"{label} socket path is not a Unix socket: {path}"
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(1.0)
+                client.connect(str(path))
+                client.sendall(b"GET /healthz HTTP/1.1\r\nHost: host-bridge\r\nConnection: close\r\n\r\n")
+                response = client.recv(4096)
+        except OSError as exc:
+            return False, f"{label} socket is not accepting connections: {exc}"
+        status_line = response.splitlines()[0] if response else b""
+        if b"200" not in status_line:
+            return False, f"{label} socket health check failed: {status_line.decode('utf-8', errors='replace')}"
+        return True, f"ready via {label} socket ({path})"
 
     async def run_cli(
         self,

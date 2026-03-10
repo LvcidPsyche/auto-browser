@@ -133,7 +133,37 @@ That override:
 
 If your host home is not `/home/botuser`, set `CLI_HOST_HOME` first.
 
+If Codex subscription auth still does not survive inside Docker cleanly, use the host-side bridge instead. It runs `codex` on the host and exposes a Unix socket through the shared `./data` mount:
+
+```bash
+mkdir -p data/host-bridge
+python3 scripts/codex_host_bridge.py --socket-path data/host-bridge/codex.sock
+```
+
+If you want it to behave more like a persistent host skill, install the included user-service template once:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp ops/systemd/codex-host-bridge.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now codex-host-bridge.service
+```
+
+Then start the controller with:
+
+```bash
+OPENAI_AUTH_MODE=host_bridge \
+OPENAI_HOST_BRIDGE_SOCKET=/data/host-bridge/codex.sock \
+docker compose up --build
+```
+
+That gives OpenAI/Codex the closest behavior to a host-side skill, because the actual CLI stays on the host instead of inside the container.
+
 Notes:
+- the bridge socket is now health-checked, not just path-checked
+- host codex requests are killed after 55s by default so the bridge does not leak orphaned CLI jobs
+- the bridge is a **local trust boundary**: anyone who can talk to that Unix socket can make the host run `codex exec`
+- keep `data/host-bridge` private to trusted local users/processes only
 - keep `data/cli-home` private; it contains live auth material
 - API keys are still the better default for CI/public automation
 - CLI auth is aimed at trusted single-tenant boxes like your VPS + Tailscale setup

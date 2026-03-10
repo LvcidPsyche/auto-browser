@@ -26,6 +26,8 @@ data/downloads/*
 !data/downloads/.gitkeep
 data/tunnels/*
 !data/tunnels/.gitkeep
+data/host-bridge/*
+!data/host-bridge/.gitkeep
 data/cli-home/*
 !data/cli-home/.gitkeep
 __pycache__/

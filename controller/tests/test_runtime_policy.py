@@ -1,12 +1,46 @@
 from __future__ import annotations
 
+import socketserver
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from app.config import Settings
 from app.runtime_policy import validate_runtime_policy
+
+
+class HealthzUnixSocketServer:
+    class _Handler(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            self.request.recv(4096)
+            self.request.sendall(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 15\r\n"
+                b"Connection: close\r\n\r\n"
+                b"{\"status\":\"ok\"}"
+            )
+
+    def __init__(self, socket_path: Path) -> None:
+        class _Server(socketserver.UnixStreamServer):
+            allow_reuse_address = True
+
+        self.socket_path = socket_path
+        self.server = _Server(str(socket_path), self._Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self) -> "HealthzUnixSocketServer":
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+        if self.socket_path.exists():
+            self.socket_path.unlink()
 
 
 class RuntimePolicyTests(unittest.TestCase):
@@ -71,7 +105,7 @@ class RuntimePolicyTests(unittest.TestCase):
         report = validate_runtime_policy(settings)
 
         self.assertFalse(report.ok)
-        self.assertIn("OPENAI_AUTH_MODE=bogus is invalid; expected one of: api, cli", report.errors)
+        self.assertIn("OPENAI_AUTH_MODE=bogus is invalid; expected one of: api, cli, host_bridge", report.errors)
 
     def test_production_rejects_cli_mode_without_expected_auth_state(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -112,6 +146,32 @@ class RuntimePolicyTests(unittest.TestCase):
             )
 
             with patch("app.runtime_policy.which", return_value="/usr/bin/codex"):
+                report = validate_runtime_policy(settings)
+
+        self.assertTrue(report.ok)
+        self.assertFalse(any("OPENAI_AUTH_MODE" in error for error in report.errors))
+
+    def test_production_accepts_host_bridge_mode_when_socket_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            socket_path = Path(tempdir) / "codex.sock"
+            settings = Settings(
+                _env_file=None,
+                APP_ENV="production",
+                API_BEARER_TOKEN="secret",
+                REQUIRE_OPERATOR_ID="true",
+                AUTH_STATE_ENCRYPTION_KEY="b" * 44,
+                REQUIRE_AUTH_STATE_ENCRYPTION="true",
+                OPENAI_AUTH_MODE="host_bridge",
+                OPENAI_HOST_BRIDGE_SOCKET=str(socket_path),
+            )
+
+            socket_path.write_text("", encoding="utf-8")
+            bad_report = validate_runtime_policy(settings)
+            self.assertFalse(bad_report.ok)
+            self.assertTrue(any("not a Unix socket" in error for error in bad_report.errors))
+
+            socket_path.unlink()
+            with HealthzUnixSocketServer(socket_path):
                 report = validate_runtime_policy(settings)
 
         self.assertTrue(report.ok)

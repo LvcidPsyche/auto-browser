@@ -90,9 +90,37 @@ docker compose -f docker-compose.yml -f docker-compose.host-subscriptions.yml up
 
 That override mounts `~/.codex`, `~/.claude`, `~/.claude.json`, and `~/.gemini` read-only at the same home-path inside the container and sets `CLI_HOME` to that host-style home. If your login home is different, change `CLI_HOST_HOME`.
 
+If Codex subscription auth still fails inside Docker, switch only OpenAI to the host bridge:
+
+```bash
+mkdir -p data/host-bridge
+python3 scripts/codex_host_bridge.py --socket-path data/host-bridge/codex.sock
+```
+
+To keep that bridge running like a host-local skill, install the included user-service template:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp ops/systemd/codex-host-bridge.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now codex-host-bridge.service
+```
+
+Then:
+
+```env
+OPENAI_AUTH_MODE=host_bridge
+OPENAI_HOST_BRIDGE_SOCKET=/data/host-bridge/codex.sock
+```
+
+That keeps `codex` on the host, reuses the host login state directly, and lets the container call it over a shared Unix socket.
+The controller now health-checks that socket and the bridge kills stuck host `codex` jobs after 55 seconds by default.
+Treat the socket as a host-trust boundary: any local process that can connect to it can trigger host-side `codex exec`.
+
 In `APP_ENV=production`, startup now fails fast if:
-- any `*_AUTH_MODE` value is not `api` or `cli`
+- any `*_AUTH_MODE` value is not one of its supported modes (`api`, `cli`, and for OpenAI also `host_bridge`)
 - a provider is set to `cli` mode but its CLI binary is missing
+- OpenAI is set to `host_bridge` mode but the bridge socket is missing, stale, not a real Unix socket, or failing `/healthz`
 - `CLI_HOME` is set but the expected auth-state files are missing for that CLI
 
 ## Generate an auth-state encryption key
