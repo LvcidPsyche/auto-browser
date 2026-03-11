@@ -30,6 +30,18 @@ class IsolatedBrowserRuntime:
     tunnel_local_port: int = 6080
 
 
+@dataclass
+class PendingBrowserProvision:
+    session_id: str
+    container: Any
+    container_name: str
+    network_name: str
+    browser_node_name: str
+    local_profile_dir: Path
+    local_downloads_dir: Path
+    ws_endpoint_file: Path
+
+
 class DockerBrowserNodeProvisioner:
     def __init__(self, settings, *, client: Any | None = None):
         self.settings = settings
@@ -44,12 +56,38 @@ class DockerBrowserNodeProvisioner:
         await asyncio.to_thread(self._ensure_context)
 
     async def provision(self, session_id: str) -> IsolatedBrowserRuntime:
-        return await asyncio.to_thread(self._provision_sync, session_id)
+        pending = await asyncio.to_thread(self._provision_container_sync, session_id)
+        try:
+            ws_endpoint = await self._wait_for_ws_endpoint(pending.container, pending.ws_endpoint_file)
+            await asyncio.to_thread(pending.container.reload)
+            ports = pending.container.attrs.get("NetworkSettings", {}).get("Ports", {})
+            novnc_port = self._extract_host_port(ports, "6080/tcp")
+            vnc_port = self._extract_host_port(ports, "5900/tcp")
+            takeover_url = self._build_takeover_url(novnc_port)
+            return IsolatedBrowserRuntime(
+                session_id=pending.session_id,
+                container_id=str(pending.container.id),
+                container_name=pending.container_name,
+                network_name=pending.network_name,
+                browser_node_name=pending.browser_node_name,
+                profile_dir=pending.local_profile_dir,
+                downloads_dir=pending.local_downloads_dir,
+                ws_endpoint_file=pending.ws_endpoint_file,
+                ws_endpoint=ws_endpoint,
+                takeover_url=takeover_url,
+                novnc_port=novnc_port,
+                vnc_port=vnc_port,
+                tunnel_local_host=pending.container_name,
+                tunnel_local_port=6080,
+            )
+        except Exception:
+            await asyncio.to_thread(self._cleanup_pending_container, pending)
+            raise
 
     async def release(self, runtime: IsolatedBrowserRuntime) -> None:
         await asyncio.to_thread(self._release_sync, runtime)
 
-    def _provision_sync(self, session_id: str) -> IsolatedBrowserRuntime:
+    def _provision_container_sync(self, session_id: str) -> PendingBrowserProvision:
         client = self._ensure_context()
         host_data_root = self._host_data_root or self._discover_host_data_root(client)
         network_name = self._network_name or self._discover_network_name(client)
@@ -106,29 +144,15 @@ class DockerBrowserNodeProvisioner:
         )
 
         ws_endpoint_file = local_profile_dir / "browser-ws-endpoint.txt"
-        ws_endpoint = self._wait_for_ws_endpoint(container, ws_endpoint_file)
-
-        container.reload()
-        ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
-        novnc_port = self._extract_host_port(ports, "6080/tcp")
-        vnc_port = self._extract_host_port(ports, "5900/tcp")
-        takeover_url = self._build_takeover_url(novnc_port)
-
-        return IsolatedBrowserRuntime(
+        return PendingBrowserProvision(
             session_id=session_id,
-            container_id=str(container.id),
             container_name=container_name,
             network_name=network_name,
             browser_node_name=container_name,
-            profile_dir=local_profile_dir,
-            downloads_dir=local_downloads_dir,
+            local_profile_dir=local_profile_dir,
+            local_downloads_dir=local_downloads_dir,
             ws_endpoint_file=ws_endpoint_file,
-            ws_endpoint=ws_endpoint,
-            takeover_url=takeover_url,
-            novnc_port=novnc_port,
-            vnc_port=vnc_port,
-            tunnel_local_host=container_name,
-            tunnel_local_port=6080,
+            container=container,
         )
 
     def _release_sync(self, runtime: IsolatedBrowserRuntime) -> None:
@@ -195,9 +219,9 @@ class DockerBrowserNodeProvisioner:
             )
         return client.containers.get(self._controller_container_id)
 
-    def _wait_for_ws_endpoint(self, container, endpoint_file: Path) -> str:
+    async def _wait_for_ws_endpoint(self, container, endpoint_file: Path) -> str:
         for _ in range(max(1, self.settings.isolated_browser_wait_timeout_seconds * 4)):
-            container.reload()
+            await asyncio.to_thread(container.reload)
             status = str(getattr(container, "status", "") or container.attrs.get("State", {}).get("Status", ""))
             if status in {"exited", "dead"}:
                 logs = self._container_logs(container)
@@ -208,13 +232,30 @@ class DockerBrowserNodeProvisioner:
                 endpoint = endpoint_file.read_text(encoding="utf-8").strip()
                 if endpoint:
                     return endpoint
-            import time
-
-            time.sleep(0.25)
+            await asyncio.sleep(0.25)
         logs = self._container_logs(container)
         raise RuntimeError(
             f"Timed out waiting for isolated browser endpoint file {endpoint_file}. {logs}"
         )
+
+    def _cleanup_pending_container(self, pending: PendingBrowserProvision) -> None:
+        runtime = IsolatedBrowserRuntime(
+            session_id=pending.session_id,
+            container_id=str(pending.container.id),
+            container_name=pending.container_name,
+            network_name=pending.network_name,
+            browser_node_name=pending.browser_node_name,
+            profile_dir=pending.local_profile_dir,
+            downloads_dir=pending.local_downloads_dir,
+            ws_endpoint_file=pending.ws_endpoint_file,
+            ws_endpoint="",
+            takeover_url="",
+            novnc_port=None,
+            vnc_port=None,
+            tunnel_local_host=pending.container_name,
+            tunnel_local_port=6080,
+        )
+        self._release_sync(runtime)
 
     @staticmethod
     def _container_logs(container) -> str:

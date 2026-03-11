@@ -63,6 +63,7 @@ class BrowserOrchestratorLoopGuardTests(unittest.IsolatedAsyncioTestCase):
             ),
             request_human_takeover=AsyncMock(return_value={"takeover_url": "http://127.0.0.1:6080/vnc.html"}),
             get_session=AsyncMock(return_value=self.session),
+            get_session_summary=AsyncMock(return_value={"id": "session-1", "status": "active"}),
             _append_jsonl=AsyncMock(),
             _session_summary=AsyncMock(return_value={"id": "session-1", "status": "active"}),
         )
