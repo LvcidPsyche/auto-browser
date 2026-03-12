@@ -6,6 +6,7 @@ from typing import Any, Awaitable, Callable, Literal
 
 from pydantic import BaseModel, Field
 
+from .action_errors import BrowserActionError
 from .approvals import ApprovalRequiredError
 from .models import (
     AgentRunRequest,
@@ -31,6 +32,10 @@ class SessionIdInput(BaseModel):
 
 class ObserveInput(SessionIdInput):
     limit: int = Field(default=40, ge=1, le=100)
+
+
+class ScreenshotInput(SessionIdInput):
+    label: str = Field(default="manual", min_length=1, max_length=120)
 
 
 class ExecuteActionInput(SessionIdInput):
@@ -167,13 +172,15 @@ class ToolSpec:
     description: str
     input_model: type[BaseModel]
     handler: Callable[[BaseModel], Awaitable[dict[str, Any] | list[dict[str, Any]]]]
+    profiles: tuple[str, ...] = ("curated", "full")
 
 
 class McpToolGateway:
-    def __init__(self, *, manager, orchestrator, job_queue):
+    def __init__(self, *, manager, orchestrator, job_queue, tool_profile: str = "curated"):
         self.manager = manager
         self.orchestrator = orchestrator
         self.job_queue = job_queue
+        self.tool_profile = "full" if tool_profile == "full" else "curated"
         self._tools = {
             spec.name: spec
             for spec in [
@@ -200,6 +207,12 @@ class McpToolGateway:
                     description="Capture the current browser observation with screenshot, interactables, and perception summary.",
                     input_model=ObserveInput,
                     handler=self._observe,
+                ),
+                ToolSpec(
+                    name="browser.screenshot",
+                    description="Capture a lightweight screenshot for one session without the full observe payload.",
+                    input_model=ScreenshotInput,
+                    handler=self._screenshot,
                 ),
                 ToolSpec(
                     name="browser.list_auth_profiles",
@@ -248,6 +261,7 @@ class McpToolGateway:
                     description="Save session storage state to the per-session auth-state root.",
                     input_model=SaveAuthStateInput,
                     handler=self._save_auth_state,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="browser.save_auth_profile",
@@ -272,66 +286,77 @@ class McpToolGateway:
                     description="List pending or historical approval items.",
                     input_model=ListApprovalsInput,
                     handler=self._list_approvals,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="browser.approve_approval",
                     description="Approve a pending approval item.",
                     input_model=ApprovalDecisionInput,
                     handler=self._approve_approval,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="browser.reject_approval",
                     description="Reject a pending approval item.",
                     input_model=ApprovalDecisionInput,
                     handler=self._reject_approval,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="browser.execute_approval",
                     description="Execute an already approved action.",
                     input_model=ApprovalIdInput,
                     handler=self._execute_approval,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="browser.list_agent_jobs",
                     description="List queued or completed browser-agent jobs.",
                     input_model=ListAgentJobsInput,
                     handler=self._list_agent_jobs,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="browser.get_agent_job",
                     description="Read one browser-agent job record.",
                     input_model=AgentJobIdInput,
                     handler=self._get_agent_job,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="browser.queue_agent_step",
                     description="Queue one agent step for background execution.",
                     input_model=QueueAgentStepInput,
                     handler=self._queue_agent_step,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="browser.queue_agent_run",
                     description="Queue a short agent loop for background execution.",
                     input_model=QueueAgentRunInput,
                     handler=self._queue_agent_run,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="browser.list_providers",
                     description="List configured model providers for browser-agent orchestration.",
                     input_model=EmptyInput,
                     handler=self._list_providers,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="browser.get_remote_access",
                     description="Read current remote-access metadata for takeover/API forwarding.",
                     input_model=GetRemoteAccessInput,
                     handler=self._get_remote_access,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="social.scroll_feed",
                     description="Smoothly scroll the current page feed up or down by N screens using human-paced motion.",
                     input_model=SocialScrollInput,
                     handler=self._social_scroll,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="social.extract_posts",
@@ -344,6 +369,7 @@ class McpToolGateway:
                     description="Scrape visible comments/replies from the current post page.",
                     input_model=SocialScrapeInput,
                     handler=self._social_extract_comments,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="social.extract_profile",
@@ -360,6 +386,7 @@ class McpToolGateway:
                     ),
                     input_model=SocialPostInput,
                     handler=self._social_post,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="social.comment",
@@ -369,6 +396,7 @@ class McpToolGateway:
                     ),
                     input_model=SocialCommentInput,
                     handler=self._social_comment,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="social.like",
@@ -379,6 +407,7 @@ class McpToolGateway:
                     ),
                     input_model=SocialLikeInput,
                     handler=self._social_like,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="social.follow",
@@ -388,6 +417,7 @@ class McpToolGateway:
                     ),
                     input_model=SocialFollowInput,
                     handler=self._social_follow,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="social.unfollow",
@@ -397,6 +427,7 @@ class McpToolGateway:
                     ),
                     input_model=SocialUnfollowInput,
                     handler=self._social_unfollow,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="social.repost",
@@ -406,6 +437,7 @@ class McpToolGateway:
                     ),
                     input_model=SocialRepostInput,
                     handler=self._social_repost,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="social.dm",
@@ -415,6 +447,7 @@ class McpToolGateway:
                     ),
                     input_model=SocialDmInput,
                     handler=self._social_dm,
+                    profiles=("full",),
                 ),
                 ToolSpec(
                     name="social.login",
@@ -429,6 +462,7 @@ class McpToolGateway:
                     handler=self._social_search,
                 ),
             ]
+            if self.tool_profile in spec.profiles
         }
 
     def list_tools(self) -> list[dict[str, Any]]:
@@ -468,6 +502,13 @@ class McpToolGateway:
                 structuredContent=detail,
                 isError=True,
             )
+        except BrowserActionError as exc:
+            detail = exc.payload
+            return McpToolCallResponse(
+                content=[McpToolCallContent(text=json.dumps(detail, ensure_ascii=False))],
+                structuredContent=detail,
+                isError=True,
+            )
         except Exception as exc:
             return self._error_response(str(exc))
 
@@ -500,6 +541,9 @@ class McpToolGateway:
 
     async def _observe(self, payload: ObserveInput) -> dict[str, Any]:
         return await self.manager.observe(payload.session_id, limit=payload.limit)
+
+    async def _screenshot(self, payload: ScreenshotInput) -> dict[str, Any]:
+        return await self.manager.capture_screenshot(payload.session_id, label=payload.label)
 
     async def _list_auth_profiles(self, _: ListAuthProfilesInput) -> list[dict[str, Any]]:
         return await self.manager.list_auth_profiles()

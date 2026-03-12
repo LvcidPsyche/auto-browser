@@ -15,11 +15,14 @@ http://127.0.0.1:8000/mcp/tools/call
 
 ## Transport model
 
-Auto Browser is currently an **HTTP MCP server**.
+Auto Browser exposes:
+
+- an **HTTP MCP server**
+- a bundled **stdio bridge** at `scripts/mcp_stdio_bridge.py`
 
 That means:
 - MCP clients with HTTP transport support can talk to it directly
-- clients that only support stdio can use a small local bridge in front of it
+- stdio-first clients can use the shipped bridge directly
 
 ## Why this matters
 
@@ -44,15 +47,33 @@ Auto Browser is interesting because it already packages the browser layer as an 
    - actions
    - auth profile save/reuse
 
-## If your client only supports stdio
+## Claude Desktop example
 
-Use a thin local bridge/proxy that converts stdio-style MCP into HTTP calls to:
+Auto Browser ships a copy-paste Claude Desktop config example:
 
-```text
-http://127.0.0.1:8000/mcp
+- `examples/claude_desktop_config.json`
+- `examples/claude-desktop-setup.md`
+
+Minimal shape:
+
+```json
+{
+  "mcpServers": {
+    "auto-browser": {
+      "command": "python3",
+      "args": [
+        "/ABSOLUTE/PATH/TO/auto-browser/scripts/mcp_stdio_bridge.py"
+      ],
+      "env": {
+        "AUTO_BROWSER_BASE_URL": "http://127.0.0.1:8000/mcp",
+        "AUTO_BROWSER_BEARER_TOKEN": ""
+      }
+    }
+  }
+}
 ```
 
-Auto Browser stays the MCP server of record. The bridge is just compatibility glue.
+If your API is protected, set `AUTO_BROWSER_BEARER_TOKEN`.
 
 ## Recommended first demo
 
@@ -65,6 +86,28 @@ The best MCP demo is:
 5. continue work through MCP tools
 
 That shows why MCP + browser state reuse is more valuable than a plain “open page and click things” demo.
+
+## Curated vs full MCP tool profile
+
+The default MCP tool profile is `curated`.
+
+That hides:
+- approval admin tools
+- built-in agent queue tools
+- provider introspection tools
+- remote-access admin tools
+- most social write convenience tools
+
+Why:
+- smaller tool surface
+- better tool selection quality for LLMs
+- clearer product identity: MCP server first, optional agent runner second
+
+If you really want the whole surface:
+
+```bash
+MCP_TOOL_PROFILE=full
+```
 
 ## Raw tool-call example
 

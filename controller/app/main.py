@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .agent_jobs import AgentJobQueue
+from .action_errors import BrowserActionError
 from .audit import get_current_operator, reset_current_operator, set_current_operator
 from .approvals import ApprovalRequiredError
 from .browser_manager import BrowserManager
@@ -29,6 +30,7 @@ from .models import (
     PressRequest,
     SaveAuthProfileRequest,
     SaveStorageStateRequest,
+    ScreenshotRequest,
     ScrollRequest,
     SocialCommentRequest,
     SocialDmRequest,
@@ -64,7 +66,12 @@ job_queue = AgentJobQueue(
     worker_count=settings.agent_job_worker_count,
     audit_store=manager.audit,
 )
-tool_gateway = McpToolGateway(manager=manager, orchestrator=orchestrator, job_queue=job_queue)
+tool_gateway = McpToolGateway(
+    manager=manager,
+    orchestrator=orchestrator,
+    job_queue=job_queue,
+    tool_profile=settings.mcp_tool_profile,
+)
 rate_limiter = (
     SlidingWindowRateLimiter(
         limit=settings.request_rate_limit_requests,
@@ -116,6 +123,11 @@ app.mount("/artifacts", StaticFiles(directory=settings.artifact_root), name="art
 @app.exception_handler(SocialActionError)
 async def handle_social_action_error(_: Request, exc: SocialActionError) -> JSONResponse:
     return JSONResponse(status_code=400, content=exc.payload)
+
+
+@app.exception_handler(BrowserActionError)
+async def handle_browser_action_error(_: Request, exc: BrowserActionError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content=exc.payload)
 
 
 @app.middleware("http")
@@ -425,6 +437,14 @@ async def get_auth_profile(profile_name: str) -> dict:
 async def observe(session_id: str, limit: int = 40) -> dict:
     try:
         return await manager.observe(session_id, limit=limit)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+
+@app.post("/sessions/{session_id}/screenshot")
+async def capture_screenshot(session_id: str, payload: ScreenshotRequest) -> dict:
+    try:
+        return await manager.capture_screenshot(session_id, label=payload.label)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
 

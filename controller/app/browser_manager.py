@@ -21,6 +21,7 @@ try:  # pragma: no cover - optional until dependency is installed in runtime ima
 except Exception:  # pragma: no cover - graceful fallback for non-login test runs
     pyotp = None  # type: ignore[assignment]
 
+from .action_errors import BrowserActionError
 from .audit import AuditStore
 from .approvals import ApprovalRequiredError, ApprovalStore
 from .auth_state import AuthStateManager
@@ -467,10 +468,11 @@ class BrowserManager:
         proxy_username = request_proxy_username or self.settings.default_proxy_username
         proxy_password = request_proxy_password or self.settings.default_proxy_password
 
-        vw = self.settings.default_viewport_width + random.randint(-20, 20)
-        vh = self.settings.default_viewport_height + random.randint(-10, 10)
         context_kwargs: dict[str, Any] = {
-            "viewport": {"width": vw, "height": vh},
+            "viewport": {
+                "width": self.settings.default_viewport_width,
+                "height": self.settings.default_viewport_height,
+            },
             "accept_downloads": True,
         }
         # Use provided UA or pick one from the pool
@@ -535,7 +537,10 @@ class BrowserManager:
                 max_live_sessions_per_browser_node=1,
                 last_auth_state_path=source_path if storage_state_path else None,
                 auth_profile_name=self._normalize_auth_profile_name(auth_profile) if auth_profile else None,
-                mouse_position=(vw / 2, vh / 2),
+                mouse_position=(
+                    self.settings.default_viewport_width / 2,
+                    self.settings.default_viewport_height / 2,
+                ),
                 totp_secret=totp_secret,
             )
             if source_path is not None:
@@ -688,6 +693,18 @@ class BrowserManager:
         session = await self.get_session(session_id)
         async with session.lock:
             return await self._observation_payload(session, limit=limit)
+
+    async def capture_screenshot(self, session_id: str, *, label: str = "manual") -> dict[str, Any]:
+        session = await self.get_session(session_id)
+        async with session.lock:
+            screenshot = await self._capture_screenshot(session, label)
+            return {
+                "session": await self._session_summary(session),
+                "url": session.page.url,
+                "screenshot_path": screenshot["path"],
+                "screenshot_url": screenshot["url"],
+                "takeover_url": self._current_takeover_url(session),
+            }
 
     async def navigate(self, session_id: str, url: str) -> dict[str, Any]:
         self._assert_url_allowed(url)
@@ -2828,57 +2845,14 @@ class BrowserManager:
                     session_id=session.id,
                     details={"target": target, "error": str(exc)},
                 )
-                raise
-            except SocialActionError as exc:
-                failed = await self._light_snapshot(session, label=f"failed-{action_name}")
-                await self._append_jsonl(
-                    session.artifact_dir / "actions.jsonl",
-                    {
-                        "timestamp": self._timestamp(),
-                        "action": action_name,
-                        "status": "failed",
-                        "target": target,
-                        "before": before,
-                        "after": failed,
-                        "error": exc.payload,
-                    },
-                )
-                await self.audit.append(
-                    event_type="browser_action",
-                    status="failed",
+                raise BrowserActionError(
+                    str(exc),
+                    code="browser_action_blocked",
                     action=action_name,
-                    session_id=session.id,
-                    details={"target": target, "error": exc.payload},
-                )
-                raise
-            except PlaywrightError as exc:
-                try:
-                    fail_label = f"fail-{action_name}-{datetime.now(UTC).strftime('%H%M%S')}"
-                    await self._capture_screenshot(session, fail_label)
-                except Exception:
-                    pass
-                failed = await self._light_snapshot(session, label=f"failed-{action_name}")
-                await self._append_jsonl(
-                    session.artifact_dir / "actions.jsonl",
-                    {
-                        "timestamp": self._timestamp(),
-                        "action": action_name,
-                        "status": "failed",
-                        "target": target,
-                        "before": before,
-                        "after": failed,
-                        "error": str(exc),
-                    },
-                )
-                await self.audit.append(
-                    event_type="browser_action",
-                    status="failed",
-                    action=action_name,
-                    session_id=session.id,
-                    details={"target": target, "error": str(exc)},
-                )
-                raise ValueError(
-                    f"Action failed for {action_name}. Refresh observation and retry. Details: {exc}"
+                    status_code=403,
+                    retryable=False,
+                    url=session.page.url,
+                    details={"snapshot": failed},
                 ) from exc
             except SocialActionError as exc:
                 failed = await self._light_snapshot(session, label=f"failed-{action_name}")
@@ -2901,7 +2875,38 @@ class BrowserManager:
                     session_id=session.id,
                     details={"target": target, "error": exc.payload},
                 )
+                exc.details.setdefault("snapshot", failed)
                 raise
+            except PlaywrightError as exc:
+                failed = await self._light_snapshot(session, label=f"failed-{action_name}")
+                await self._append_jsonl(
+                    session.artifact_dir / "actions.jsonl",
+                    {
+                        "timestamp": self._timestamp(),
+                        "action": action_name,
+                        "status": "failed",
+                        "target": target,
+                        "before": before,
+                        "after": failed,
+                        "error": str(exc),
+                    },
+                )
+                await self.audit.append(
+                    event_type="browser_action",
+                    status="failed",
+                    action=action_name,
+                    session_id=session.id,
+                    details={"target": target, "error": str(exc)},
+                )
+                raise BrowserActionError(
+                    f"Action failed for {action_name}. Refresh observation and retry.",
+                    code="browser_action_failed",
+                    action=action_name,
+                    status_code=400,
+                    retryable=True,
+                    url=session.page.url,
+                    details={"snapshot": failed, "details": str(exc)},
+                ) from exc
             after = await self._observation_payload(session, limit=20, screenshot_label=f"after-{action_name}")
             session.last_action = action_name
             verification = self._action_verification(action_name, target, before, after)

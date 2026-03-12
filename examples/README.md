@@ -2,6 +2,14 @@
 
 These are small curl-first examples for common flows.
 
+More walkthroughs:
+
+- `claude-desktop-setup.md`
+- `login-and-save-profile.md`
+- `fill-a-form.md`
+- `extract-feed-posts.md`
+- `claude_desktop_config.json`
+
 ## 1. Create a session
 
 ```bash
@@ -17,7 +25,16 @@ curl -s http://127.0.0.1:8000/sessions \
 curl -s http://127.0.0.1:8000/sessions/<session-id>/observe | jq
 ```
 
-## 3. Save a reusable auth profile
+## 3. Capture a lightweight screenshot
+
+```bash
+curl -s http://127.0.0.1:8000/sessions/<session-id>/screenshot \
+  -X POST \
+  -H 'content-type: application/json' \
+  -d '{"label":"checkpoint"}' | jq
+```
+
+## 4. Save a reusable auth profile
 
 ```bash
 curl -s http://127.0.0.1:8000/sessions/<session-id>/auth-profiles \
@@ -26,13 +43,13 @@ curl -s http://127.0.0.1:8000/sessions/<session-id>/auth-profiles \
   -d '{"profile_name":"outlook-default"}' | jq
 ```
 
-## 4. List auth profiles
+## 5. List auth profiles
 
 ```bash
 curl -s http://127.0.0.1:8000/auth-profiles | jq
 ```
 
-## 5. Resume a new session from a saved profile
+## 6. Resume a new session from a saved profile
 
 ```bash
 curl -s http://127.0.0.1:8000/sessions \
@@ -41,7 +58,7 @@ curl -s http://127.0.0.1:8000/sessions \
   -d '{"name":"mail","start_url":"https://outlook.live.com/mail/0/","auth_profile":"outlook-default"}' | jq
 ```
 
-## 6. Type a secret safely
+## 7. Type a secret safely
 
 ```bash
 curl -s http://127.0.0.1:8000/sessions/<session-id>/actions/type \
@@ -50,7 +67,7 @@ curl -s http://127.0.0.1:8000/sessions/<session-id>/actions/type \
   -d '{"element_id":"op-password","text":"secret","sensitive":true}' | jq
 ```
 
-## 7. Ask for human takeover
+## 8. Ask for human takeover
 
 ```bash
 curl -s http://127.0.0.1:8000/sessions/<session-id>/takeover \
@@ -59,13 +76,13 @@ curl -s http://127.0.0.1:8000/sessions/<session-id>/takeover \
   -d '{"reason":"Manual checkpoint"}' | jq
 ```
 
-## 8. List MCP tools
+## 9. List MCP tools
 
 ```bash
 curl -s http://127.0.0.1:8000/mcp/tools | jq
 ```
 
-## 9. Call one MCP tool through the convenience endpoint
+## 10. Call one MCP tool through the convenience endpoint
 
 ```bash
 curl -s http://127.0.0.1:8000/mcp/tools/call \

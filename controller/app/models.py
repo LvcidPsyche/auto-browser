@@ -79,6 +79,10 @@ class HumanTakeoverRequest(BaseModel):
     reason: str = "Manual review requested"
 
 
+class ScreenshotRequest(BaseModel):
+    label: str = Field(default="manual", min_length=1, max_length=120)
+
+
 class ExecuteActionRequest(BaseModel):
     approval_id: str | None = None
     action: "BrowserActionDecision"

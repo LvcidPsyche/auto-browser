@@ -28,6 +28,7 @@ Auto Browser is an open-source MCP-native control plane for authorized browser w
 - local-first
 - MCP-native
 - visual browser control
+- bundled stdio bridge for Claude Desktop and other stdio-first MCP clients
 - human takeover when pages get brittle
 - reusable auth profiles
 - approval and audit rails

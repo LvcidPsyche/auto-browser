@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from app.approvals import ApprovalRequiredError
+from app.action_errors import BrowserActionError
 from app.models import ApprovalRecord, BrowserActionDecision, McpToolCallRequest, ProviderInfo
 from app.social_errors import SocialActionError
 from app.tool_gateway import McpToolGateway
@@ -17,6 +18,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             list_sessions=AsyncMock(return_value=[{"id": "session-1"}]),
             get_session_record=AsyncMock(return_value={"id": "session-1", "status": "active"}),
             observe=AsyncMock(return_value={"session": {"id": "session-1"}, "url": "https://example.com"}),
+            capture_screenshot=AsyncMock(return_value={"screenshot_url": "/artifacts/session-1/manual.png"}),
             list_auth_profiles=AsyncMock(return_value=[{"profile_name": "outlook-default"}]),
             get_auth_profile=AsyncMock(return_value={"profile_name": "outlook-default"}),
             list_tabs=AsyncMock(return_value=[{"index": 0, "active": True, "url": "https://example.com"}]),
@@ -62,30 +64,49 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             orchestrator=self.orchestrator,
             job_queue=self.job_queue,
         )
+        self.full_gateway = McpToolGateway(
+            manager=self.manager,
+            orchestrator=self.orchestrator,
+            job_queue=self.job_queue,
+            tool_profile="full",
+        )
 
     async def test_list_tools_includes_expected_browser_tools(self) -> None:
         tools = self.gateway.list_tools()
         names = {tool["name"] for tool in tools}
 
         self.assertIn("browser.create_session", names)
+        self.assertIn("browser.screenshot", names)
         self.assertIn("browser.list_auth_profiles", names)
         self.assertIn("browser.get_auth_profile", names)
         self.assertIn("browser.list_tabs", names)
         self.assertIn("browser.list_downloads", names)
         self.assertIn("browser.execute_action", names)
         self.assertIn("browser.save_auth_profile", names)
-        self.assertIn("browser.list_agent_jobs", names)
-        self.assertIn("browser.get_remote_access", names)
-        self.assertIn("social.post", names)
-        self.assertIn("social.comment", names)
-        self.assertIn("social.like", names)
-        self.assertIn("social.follow", names)
-        self.assertIn("social.unfollow", names)
-        self.assertIn("social.repost", names)
-        self.assertIn("social.dm", names)
+        self.assertNotIn("browser.list_agent_jobs", names)
+        self.assertNotIn("browser.list_providers", names)
+        self.assertNotIn("browser.get_remote_access", names)
+        self.assertNotIn("browser.list_approvals", names)
+        self.assertNotIn("social.post", names)
+        self.assertNotIn("social.comment", names)
+        self.assertNotIn("social.like", names)
+        self.assertNotIn("social.follow", names)
+        self.assertNotIn("social.unfollow", names)
+        self.assertNotIn("social.repost", names)
+        self.assertNotIn("social.dm", names)
         self.assertIn("social.login", names)
         self.assertIn("social.search", names)
+        self.assertEqual(len(names), 19)
         self.assertEqual(len(names), len(tools))
+
+    async def test_full_profile_keeps_internal_tools_available(self) -> None:
+        names = {tool["name"] for tool in self.full_gateway.list_tools()}
+
+        self.assertIn("browser.list_agent_jobs", names)
+        self.assertIn("browser.list_providers", names)
+        self.assertIn("browser.list_approvals", names)
+        self.assertIn("social.post", names)
+        self.assertIn("social.dm", names)
 
     async def test_execute_action_tool_returns_structured_payload(self) -> None:
         response = await self.gateway.call_tool(
@@ -130,6 +151,17 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.manager.list_auth_profiles.assert_awaited_once()
         self.manager.get_auth_profile.assert_awaited_once_with("outlook-default")
         self.manager.save_auth_profile.assert_awaited_once_with("session-1", "outlook-default")
+
+    async def test_screenshot_tool_forwards_arguments(self) -> None:
+        response = await self.gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.screenshot",
+                arguments={"session_id": "session-1", "label": "checkpoint"},
+            )
+        )
+
+        self.assertFalse(response.isError)
+        self.manager.capture_screenshot.assert_awaited_once_with("session-1", label="checkpoint")
 
     async def test_create_session_forwards_proxy_and_user_agent_options(self) -> None:
         response = await self.gateway.call_tool(
@@ -216,7 +248,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.manager.post_content = AsyncMock(side_effect=ApprovalRequiredError(approval))
 
-        response = await self.gateway.call_tool(
+        response = await self.full_gateway.call_tool(
             McpToolCallRequest(
                 name="social.post",
                 arguments={
@@ -230,8 +262,38 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.structuredContent["status"], "approval_required")
         self.assertEqual(response.structuredContent["approval"]["kind"], "post")
 
-    async def test_social_post_tool_forwards_approval_id(self) -> None:
+    async def test_browser_action_error_bubbles_back_as_structured_tool_error(self) -> None:
+        self.manager.execute_decision = AsyncMock(
+            side_effect=BrowserActionError(
+                "Action failed",
+                action="click",
+                details={"snapshot": {"screenshot_url": "/artifacts/session-1/fail-click.png"}},
+            )
+        )
+
         response = await self.gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.execute_action",
+                arguments={
+                    "session_id": "session-1",
+                    "action": {
+                        "action": "click",
+                        "reason": "Click the button",
+                        "element_id": "op-1",
+                    },
+                },
+            )
+        )
+
+        self.assertTrue(response.isError)
+        self.assertEqual(response.structuredContent["code"], "browser_action_failed")
+        self.assertEqual(
+            response.structuredContent["snapshot"]["screenshot_url"],
+            "/artifacts/session-1/fail-click.png",
+        )
+
+    async def test_social_post_tool_forwards_approval_id(self) -> None:
+        response = await self.full_gateway.call_tool(
             McpToolCallRequest(
                 name="social.post",
                 arguments={
@@ -250,7 +312,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_social_comment_tool_forwards_fields(self) -> None:
-        response = await self.gateway.call_tool(
+        response = await self.full_gateway.call_tool(
             McpToolCallRequest(
                 name="social.comment",
                 arguments={

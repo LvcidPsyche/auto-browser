@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     operator_name_header: str = Field("X-Operator-Name", alias="OPERATOR_NAME_HEADER")
     require_operator_id: bool = Field(False, alias="REQUIRE_OPERATOR_ID")
     mcp_allowed_origins: str = Field("", alias="MCP_ALLOWED_ORIGINS")
+    mcp_tool_profile: str = Field("curated", alias="MCP_TOOL_PROFILE")
     metrics_enabled: bool = Field(True, alias="METRICS_ENABLED")
     session_isolation_mode: str = Field("shared_browser_node", alias="SESSION_ISOLATION_MODE")
     isolated_browser_image: str = Field(
@@ -141,8 +142,8 @@ class Settings(BaseSettings):
     isolated_tunnel_local_host: str = Field("host.docker.internal", alias="ISOLATED_TUNNEL_LOCAL_HOST")
     isolated_tunnel_info_root: str = Field("/data/tunnels/sessions", alias="ISOLATED_TUNNEL_INFO_ROOT")
     allowed_hosts: str = Field("example.com,localhost", alias="ALLOWED_HOSTS")
-    default_viewport_width: int = Field(1600, alias="DEFAULT_VIEWPORT_WIDTH")
-    default_viewport_height: int = Field(900, alias="DEFAULT_VIEWPORT_HEIGHT")
+    default_viewport_width: int = Field(1280, alias="DEFAULT_VIEWPORT_WIDTH")
+    default_viewport_height: int = Field(800, alias="DEFAULT_VIEWPORT_HEIGHT")
     connect_retries: int = Field(60, alias="CONNECT_RETRIES")
     connect_retry_delay_seconds: float = Field(1.0, alias="CONNECT_RETRY_DELAY_SECONDS")
     max_sessions: int = Field(1, alias="MAX_SESSIONS")

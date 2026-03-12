@@ -33,8 +33,10 @@ for path in \
   docs/mcp-clients.md \
   docs/assets/hero.svg \
   examples/README.md \
+  examples/claude_desktop_config.json \
   scripts/compose_local.sh \
-  scripts/doctor.sh; do
+  scripts/doctor.sh \
+  scripts/mcp_stdio_bridge.py; do
   require_file "$path"
 done
 
@@ -46,7 +48,7 @@ echo "Running controller tests..."
 make test
 
 echo "Running readiness smoke..."
-make doctor
+DOCTOR_BUILD=1 make doctor
 
 echo "Scanning tracked files for obvious secret-shaped tokens..."
 if git grep -nE \

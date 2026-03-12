@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "auto-browser": {
+      "command": "python3",
+      "args": [
+        "<ABSOLUTE_PATH_TO_AUTO_BROWSER>/scripts/mcp_stdio_bridge.py"
+      ],
+      "env": {
+        "AUTO_BROWSER_BASE_URL": "http://127.0.0.1:8000/mcp",
+        "AUTO_BROWSER_BEARER_TOKEN": ""
+      }
+    }
+  }
+}

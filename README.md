@@ -41,8 +41,8 @@ This scaffold gives you:
 - **durable agent job records** under `/data/jobs` with background workers for queued step/run requests
 - **audit events** with per-request operator identity headers
 - optional **SQLite backing** for approvals + audit events
-- provider adapters for **OpenAI, Claude, and Gemini** behind one internal action schema
-- one-step and multi-step **agent orchestration endpoints**
+- optional built-in REST agent runner for **OpenAI, Claude, and Gemini**
+- one-step and multi-step **REST agent orchestration endpoints**
 - richer browser abilities through the shared action schema: **hover, select_option, wait, reload, back, forward**
 - **tab awareness and tab controls** for popup-heavy workflows
 - **download capture** with session-scoped files and URLs under `/artifacts`
@@ -97,8 +97,15 @@ See:
 
 ```bash
 cd auto-browser
-cp .env.example .env
 docker compose up --build
+```
+
+That works with **zero config for local dev**.
+
+Only copy `.env.example` if you want to change ports, providers, or allowed hosts:
+
+```bash
+cp .env.example .env
 ```
 
 Open:
@@ -165,16 +172,57 @@ That means you can use it as:
 The differentiator is not just “browser automation.”
 The differentiator is **a browser agent that is already packaged as an MCP server**.
 
-### MCP client note
+### MCP transport modes
 
-If your MCP client supports HTTP transports, point it at:
+- **HTTP MCP server** at `http://127.0.0.1:8000/mcp`
+- **stdio bridge** at `scripts/mcp_stdio_bridge.py`
 
-```text
-http://127.0.0.1:8000/mcp
+Most MCP clients still default to stdio. Auto Browser now ships the bridge out of the box, so you do not need a separate compatibility layer.
+
+### Claude Desktop quickstart
+
+Copy `examples/claude_desktop_config.json` and replace `<ABSOLUTE_PATH_TO_AUTO_BROWSER>` with your real clone path:
+
+```json
+{
+  "mcpServers": {
+    "auto-browser": {
+      "command": "python3",
+      "args": [
+        "<ABSOLUTE_PATH_TO_AUTO_BROWSER>/scripts/mcp_stdio_bridge.py"
+      ],
+      "env": {
+        "AUTO_BROWSER_BASE_URL": "http://127.0.0.1:8000/mcp",
+        "AUTO_BROWSER_BEARER_TOKEN": ""
+      }
+    }
+  }
+}
 ```
 
-If your client only supports stdio-style MCP, use a thin local bridge in front of the HTTP endpoint.
-The important part is that Auto Browser already exposes a real MCP tool surface on the server side.
+Then:
+
+1. start Auto Browser with `docker compose up --build`
+2. optional manual bridge command: `make stdio-bridge`
+3. paste that config into Claude Desktop
+4. restart Claude Desktop
+5. use the `auto-browser` MCP server through stdio
+
+### Tool surface
+
+The default MCP tool profile is intentionally **curated**.
+
+- small browser-first surface
+- auth profile reuse
+- screenshot + observe
+- human takeover
+- no internal queue/provider/admin tools by default
+
+If you want the entire legacy/internal tool surface, set:
+
+```bash
+MCP_TOOL_PROFILE=full
+```
 
 ## Why this is free
 

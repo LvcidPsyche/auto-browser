@@ -170,10 +170,10 @@ The controller owns:
 - accessibility-outline capture for stronger screen understanding
 - OCR screenshot extraction for text that DOM/accessibility misses
 - trace export on close
-- provider adapters and orchestration loops for OpenAI / Claude / Gemini
-- durable background job execution for queued agent step/run requests
+- an optional built-in agent runner over REST for OpenAI / Claude / Gemini
+- durable background job execution for queued REST agent step/run requests
 - audit events with operator identity tagging
-- an MCP JSON-RPC browser tool gateway with session-aware `/mcp` transport
+- an MCP JSON-RPC browser tool gateway with session-aware `/mcp` transport and a smaller curated default tool profile
 - optional docker-managed per-session browser containers for true runtime isolation
 - optional SQLite backing for approvals and audit retention
 
