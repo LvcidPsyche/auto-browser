@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run doctor smoke test
-        run: ./scripts/doctor.sh
+        run: DOCTOR_BUILD=1 ./scripts/doctor.sh
 
       - name: Run isolated session smoke test
-        run: API_PORT=8010 ./scripts/smoke_isolated_session.sh
+        run: DOCTOR_BUILD=1 API_PORT=8010 ./scripts/smoke_isolated_session.sh
