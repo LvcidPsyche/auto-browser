@@ -8,7 +8,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import httpx
+
 from app.config import Settings
+from app.providers.base import ProviderAPIError
 from app.providers.base import CLIResult
 from app.providers.claude_adapter import ClaudeAdapter
 from app.providers.gemini_adapter import GeminiAdapter
@@ -45,6 +48,23 @@ class HealthzUnixSocketServer:
         self.thread.join(timeout=2)
         if self.socket_path.exists():
             self.socket_path.unlink()
+
+
+class FakeAsyncClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    async def post(self, url, json=None):
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 class ProviderCLITests(unittest.IsolatedAsyncioTestCase):
@@ -230,6 +250,51 @@ class ProviderCLITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.model, "gpt-5.4")
         self.assertEqual(result.decision.action, "done")
         self.assertEqual(result.usage, {"auth_mode": "host_bridge", "transport": "codex-host-bridge"})
+
+    async def test_openai_host_bridge_request_retries_rate_limits(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            OPENAI_AUTH_MODE="host_bridge",
+            OPENAI_HOST_BRIDGE_SOCKET=str(Path(self.tempdir.name) / "codex.sock"),
+        )
+        settings.model_max_retries = 1
+        settings.model_retry_backoff_seconds = 0
+        adapter = OpenAIAdapter(settings)
+
+        request = httpx.Request("POST", "http://host-bridge/openai/decide")
+        responses = [
+            httpx.Response(429, request=request, json={"error": {"message": "rate limited"}}),
+            httpx.Response(200, request=request, json={"raw_text": "{}", "model": "codex-default"}),
+        ]
+
+        with patch("app.providers.openai_adapter.httpx.AsyncClient", return_value=FakeAsyncClient(responses)):
+            payload = await adapter._post_host_bridge_request({"demo": True})
+
+        self.assertEqual(payload["model"], "codex-default")
+
+    async def test_openai_host_bridge_request_marks_final_rate_limit_retryable(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            OPENAI_AUTH_MODE="host_bridge",
+            OPENAI_HOST_BRIDGE_SOCKET=str(Path(self.tempdir.name) / "codex.sock"),
+        )
+        settings.model_max_retries = 1
+        settings.model_retry_backoff_seconds = 0
+        adapter = OpenAIAdapter(settings)
+
+        request = httpx.Request("POST", "http://host-bridge/openai/decide")
+        responses = [
+            httpx.Response(429, request=request, json={"error": {"message": "rate limited"}}),
+            httpx.Response(429, request=request, json={"error": {"message": "still limited"}}),
+        ]
+
+        with patch("app.providers.openai_adapter.httpx.AsyncClient", return_value=FakeAsyncClient(responses)):
+            with self.assertRaises(ProviderAPIError) as ctx:
+                await adapter._post_host_bridge_request({"demo": True})
+
+        self.assertEqual(ctx.exception.status_code, 429)
+        self.assertTrue(ctx.exception.retryable)
+        self.assertIn("still limited", str(ctx.exception))
 
     def test_cli_configured_checks_binary_path(self) -> None:
         self.touch(".codex/auth.json")

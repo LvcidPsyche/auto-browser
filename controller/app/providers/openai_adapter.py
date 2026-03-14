@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import tempfile
 import tomllib
 from pathlib import Path
@@ -271,48 +272,67 @@ class OpenAIAdapter(BaseProviderAdapter):
 
     async def _post_host_bridge_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         socket_path = self.settings.openai_host_bridge_socket
+        max_attempts = max(1, self.settings.model_max_retries + 1)
         transport = httpx.AsyncHTTPTransport(uds=socket_path)
         async with httpx.AsyncClient(
             transport=transport,
             base_url="http://host-bridge",
             timeout=self.settings.model_request_timeout_seconds,
         ) as client:
-            try:
-                response = await client.post("/openai/decide", json=payload)
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                raise ProviderAPIError(
-                    provider=self.provider,
-                    message=str(exc),
-                    status_code=None,
-                    retryable=True,
-                ) from exc
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = await client.post("/openai/decide", json=payload)
+                except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                    if attempt < max_attempts:
+                        await asyncio.sleep(
+                            self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1))
+                        )
+                        continue
+                    raise ProviderAPIError(
+                        provider=self.provider,
+                        message=str(exc),
+                        status_code=None,
+                        retryable=True,
+                    ) from exc
 
-        try:
-            body = response.json()
-        except Exception:
-            body = None
+                try:
+                    body = response.json()
+                except Exception:
+                    body = None
 
-        if response.status_code >= 400:
-            detail = None
-            if isinstance(body, dict):
-                error = body.get("error")
-                if isinstance(error, str) and error.strip():
-                    detail = error
-                elif isinstance(error, dict):
-                    detail = error.get("message") or error.get("detail")
-                if detail is None:
-                    detail = body.get("detail")
-            raise ProviderAPIError(
-                provider=self.provider,
-                message=str(detail or response.text[:1200] or "host bridge request failed"),
-                status_code=response.status_code,
-                retryable=response.status_code >= 500,
-                raw_error=body if isinstance(body, dict) else None,
-            )
+                retryable_status = response.status_code == 429 or response.status_code >= 500
+                if response.status_code >= 400:
+                    if retryable_status and attempt < max_attempts:
+                        await asyncio.sleep(
+                            self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1))
+                        )
+                        continue
+                    detail = None
+                    if isinstance(body, dict):
+                        error = body.get("error")
+                        if isinstance(error, str) and error.strip():
+                            detail = error
+                        elif isinstance(error, dict):
+                            detail = error.get("message") or error.get("detail")
+                        if detail is None:
+                            detail = body.get("detail")
+                    raise ProviderAPIError(
+                        provider=self.provider,
+                        message=str(detail or response.text[:1200] or "host bridge request failed"),
+                        status_code=response.status_code,
+                        retryable=retryable_status,
+                        raw_error=body if isinstance(body, dict) else None,
+                    )
 
-        if not isinstance(body, dict):
-            raise RuntimeError("OpenAI host bridge returned a non-object response")
-        return body
+                if not isinstance(body, dict):
+                    raise RuntimeError("OpenAI host bridge returned a non-object response")
+                return body
+
+        raise ProviderAPIError(
+            provider=self.provider,
+            message="host bridge request failed without a response",
+            retryable=True,
+        )
 
     def _ensure_codex_config_path_compatibility(self) -> None:
         cli_home = (self.settings.cli_home or "").strip()
