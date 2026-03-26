@@ -103,6 +103,12 @@ class FakePage:
     def set_default_timeout(self, timeout_ms: int) -> None:
         return None
 
+    def on(self, event: str, handler) -> None:
+        return None
+
+    def remove_listener(self, event: str, handler) -> None:
+        return None
+
     async def title(self) -> str:
         return "Example Domain"
 
