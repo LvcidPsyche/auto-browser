@@ -4,9 +4,10 @@ import asyncio
 import json
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO
+
+from .utils import utc_now
 
 
 @dataclass
@@ -264,7 +265,7 @@ class IsolatedSessionTunnelBroker:
 
     def _write_metadata(self, tunnel: IsolatedSessionTunnel, *, status: str) -> None:
         tunnel.status = status
-        tunnel.last_updated = self._timestamp()
+        tunnel.last_updated = utc_now()
         payload = {
             "status": status,
             "updated_at": tunnel.last_updated,
@@ -295,7 +296,7 @@ class IsolatedSessionTunnelBroker:
             if str(payload.get("status") or "") not in {"starting", "active", "degraded"}:
                 continue
             payload["status"] = "inactive"
-            payload["updated_at"] = self._timestamp()
+            payload["updated_at"] = utc_now()
             payload["error"] = "controller restarted; session tunnel no longer active"
             path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -358,6 +359,3 @@ class IsolatedSessionTunnelBroker:
             return None
         return text[-max_chars:]
 
-    @staticmethod
-    def _timestamp() -> str:
-        return datetime.now(UTC).isoformat().replace("+00:00", "Z")

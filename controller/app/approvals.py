@@ -9,6 +9,7 @@ from typing import Protocol
 from uuid import uuid4
 
 from .models import ApprovalKind, ApprovalRecord, ApprovalStatus, BrowserActionDecision
+from .utils import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +240,7 @@ class ApprovalStore:
             if existing is not None:
                 return existing
 
-            now = self._timestamp()
+            now = utc_now()
             approval = ApprovalRecord(
                 id=uuid4().hex[:12],
                 session_id=session_id,
@@ -266,7 +267,7 @@ class ApprovalStore:
             if approval.status != "approved":
                 raise PermissionError(f"approval {approval_id} is not approved")
             self._ensure_not_expired(approval)
-            now = self._timestamp()
+            now = utc_now()
             approval.status = "executed"
             approval.updated_at = now
             approval.executed_at = now
@@ -304,7 +305,7 @@ class ApprovalStore:
             approval = await self.get(approval_id)
             if approval.status == "executed":
                 raise PermissionError(f"approval {approval_id} has already been executed")
-            now = self._timestamp()
+            now = utc_now()
             approval.status = status
             approval.updated_at = now
             approval.decided_at = now
@@ -353,6 +354,3 @@ class ApprovalStore:
     def _parse_timestamp(value: str) -> datetime:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
 
-    @staticmethod
-    def _timestamp() -> str:
-        return datetime.now(UTC).isoformat().replace("+00:00", "Z")

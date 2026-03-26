@@ -67,22 +67,13 @@ class BrowserOrchestrator:
                 error=None,
                 error_code=None,
             )
-        except ProviderAPIError as exc:
-            result = AgentStepResult(
-                provider=provider_name,
-                model=model_name,
-                goal=goal,
-                status="error",
-                observation=observation,
-                decision={},
-                execution=None,
-                usage=None,
-                raw_text=None,
-                error=str(exc),
-                error_code=exc.status_code or (503 if exc.retryable else 502),
-            )
         except Exception as exc:
-            error_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            if isinstance(exc, ProviderAPIError):
+                error_code: int | None = exc.status_code or (503 if exc.retryable else 502)
+            elif isinstance(exc, httpx.HTTPStatusError):
+                error_code = exc.response.status_code
+            else:
+                error_code = None
             result = AgentStepResult(
                 provider=provider_name,
                 model=model_name,

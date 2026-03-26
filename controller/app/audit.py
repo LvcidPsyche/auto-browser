@@ -9,6 +9,7 @@ from typing import Protocol
 from uuid import uuid4
 
 from .models import AuditEvent, OperatorIdentity
+from .utils import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +291,7 @@ class AuditStore:
         async with self._lock:
             event = AuditEvent(
                 id=uuid4().hex[:12],
-                timestamp=self._timestamp(),
+                timestamp=utc_now(),
                 event_type=event_type,
                 status=status,
                 action=action,
@@ -320,8 +321,3 @@ class AuditStore:
             operator_id=operator_id,
         )
 
-    @staticmethod
-    def _timestamp() -> str:
-        from datetime import UTC, datetime
-
-        return datetime.now(UTC).isoformat().replace("+00:00", "Z")

@@ -66,7 +66,7 @@ class McpHttpTransport:
 
         try:
             payload = await request.json()
-        except Exception:
+        except ValueError:
             return self._json_error_response(None, -32700, "Invalid JSON payload", status_code=400)
 
         if isinstance(payload, list):

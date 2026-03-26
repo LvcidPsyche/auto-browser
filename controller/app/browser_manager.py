@@ -24,6 +24,7 @@ except Exception:  # pragma: no cover - graceful fallback for non-login test run
     pyotp = None  # type: ignore[assignment]
 
 from .action_errors import BrowserActionError
+from .utils import utc_now
 from .audit import AuditStore
 from .approvals import ApprovalRequiredError, ApprovalStore
 from . import events as _events
@@ -484,62 +485,19 @@ class BrowserManager:
             raise ValueError("Provide auth_profile or storage_state_path, not both")
         if start_url:
             self._assert_url_allowed(start_url)
-        if len(self.sessions) >= self.settings.max_sessions:
-            active_ids = ", ".join(sorted(self.sessions.keys()))
-            message = (
-                f"Session limit reached: max_sessions={self.settings.max_sessions}. "
-                f"Active live session(s): {active_ids}."
-            )
-            if self.settings.session_isolation_mode == "shared_browser_node":
-                message += (
-                    " This scaffold uses one visible desktop and one shared browser node by default, "
-                    "so only one live workflow is allowed unless you switch to docker_ephemeral isolation."
-                )
-            raise RuntimeError(message)
+        self._check_session_limit()
 
         session_id = uuid4().hex[:12]
-        artifact_dir = Path(self.settings.artifact_root) / session_id
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-        (artifact_dir / "downloads").mkdir(parents=True, exist_ok=True)
-        auth_dir = self._session_auth_root(session_id)
-        upload_dir = self._session_upload_root(session_id)
-        auth_dir.mkdir(parents=True, exist_ok=True)
-        upload_dir.mkdir(parents=True, exist_ok=True)
+        artifact_dir, auth_dir, upload_dir = self._prepare_session_dirs(session_id)
         prepared_auth_state = None
         source_path: Path | None = None
 
-        # Choose proxy: per-session override > default settings
         proxy_server = request_proxy_server or self.settings.default_proxy_server
         proxy_username = request_proxy_username or self.settings.default_proxy_username
         proxy_password = request_proxy_password or self.settings.default_proxy_password
 
-        context_kwargs: dict[str, Any] = {
-            "viewport": {
-                "width": self.settings.default_viewport_width,
-                "height": self.settings.default_viewport_height,
-            },
-            "accept_downloads": True,
-        }
-        # Use provided UA or pick one from the pool
-        effective_ua = user_agent or (self.settings.random_user_agent if self.settings.stealth_enabled else None)
-        if effective_ua:
-            context_kwargs["user_agent"] = effective_ua
-        if self.settings.stealth_enabled:
-            context_kwargs.setdefault("timezone_id", "America/New_York")
-            context_kwargs.setdefault("locale", "en-US")
-            context_kwargs.setdefault(
-                "extra_http_headers",
-                {
-                    "Accept-Language": "en-US,en;q=0.9",
-                },
-            )
-        if proxy_server:
-            proxy_cfg: dict[str, Any] = {"server": proxy_server}
-            if proxy_username:
-                proxy_cfg["username"] = proxy_username
-            if proxy_password:
-                proxy_cfg["password"] = proxy_password
-            context_kwargs["proxy"] = proxy_cfg
+        context_kwargs = self._build_context_kwargs(user_agent, proxy_server, proxy_username, proxy_password)
+
         if auth_profile:
             source_path = self._resolve_auth_profile_state_path(auth_profile, must_exist=True)
         elif storage_state_path:
@@ -595,7 +553,6 @@ class BrowserManager:
             if hasattr(context, "on"):
                 context.on("page", lambda popup: self._attach_page_listeners(popup, session))
 
-            # Attach network inspector if enabled
             if self.settings.network_inspector_enabled:
                 inspector = NetworkInspector(
                     session_id=session_id,
@@ -632,31 +589,97 @@ class BrowserManager:
             )
             return summary
         except Exception:
-            self.sessions.pop(session_id, None)
-            if session is not None and session.tunnel is not None:
-                try:
-                    await self.tunnel_broker.release(session.tunnel)
-                except Exception as exc:
-                    logger.warning("failed to release session tunnel during create_session rollback: %s", exc)
-            if context is not None:
-                try:
-                    await context.close()
-                except Exception as exc:
-                    logger.warning("failed to close browser context during create_session rollback: %s", exc)
-            if browser is not None and browser is not self.browser:
-                try:
-                    await browser.close()
-                except Exception as exc:
-                    logger.warning("failed to close isolated browser during create_session rollback: %s", exc)
-            if runtime is not None:
-                try:
-                    await self.runtime_provisioner.release(runtime)
-                except Exception as exc:
-                    logger.warning("failed to release isolated runtime during create_session rollback: %s", exc)
+            await self._cleanup_failed_session(session_id, session=session, context=context,
+                                               browser=browser, runtime=runtime)
             raise
         finally:
             if prepared_auth_state is not None:
                 prepared_auth_state.cleanup()
+
+    def _check_session_limit(self) -> None:
+        if len(self.sessions) >= self.settings.max_sessions:
+            active_ids = ", ".join(sorted(self.sessions.keys()))
+            message = (
+                f"Session limit reached: max_sessions={self.settings.max_sessions}. "
+                f"Active live session(s): {active_ids}."
+            )
+            if self.settings.session_isolation_mode == "shared_browser_node":
+                message += (
+                    " This scaffold uses one visible desktop and one shared browser node by default, "
+                    "so only one live workflow is allowed unless you switch to docker_ephemeral isolation."
+                )
+            raise RuntimeError(message)
+
+    def _prepare_session_dirs(self, session_id: str) -> tuple[Path, Path, Path]:
+        artifact_dir = Path(self.settings.artifact_root) / session_id
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        (artifact_dir / "downloads").mkdir(parents=True, exist_ok=True)
+        auth_dir = self._session_auth_root(session_id)
+        upload_dir = self._session_upload_root(session_id)
+        auth_dir.mkdir(parents=True, exist_ok=True)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        return artifact_dir, auth_dir, upload_dir
+
+    def _build_context_kwargs(
+        self,
+        user_agent: str | None,
+        proxy_server: str | None,
+        proxy_username: str | None,
+        proxy_password: str | None,
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "viewport": {
+                "width": self.settings.default_viewport_width,
+                "height": self.settings.default_viewport_height,
+            },
+            "accept_downloads": True,
+        }
+        effective_ua = user_agent or (self.settings.random_user_agent if self.settings.stealth_enabled else None)
+        if effective_ua:
+            kwargs["user_agent"] = effective_ua
+        if self.settings.stealth_enabled:
+            kwargs.setdefault("timezone_id", "America/New_York")
+            kwargs.setdefault("locale", "en-US")
+            kwargs.setdefault("extra_http_headers", {"Accept-Language": "en-US,en;q=0.9"})
+        if proxy_server:
+            proxy_cfg: dict[str, Any] = {"server": proxy_server}
+            if proxy_username:
+                proxy_cfg["username"] = proxy_username
+            if proxy_password:
+                proxy_cfg["password"] = proxy_password
+            kwargs["proxy"] = proxy_cfg
+        return kwargs
+
+    async def _cleanup_failed_session(
+        self,
+        session_id: str,
+        *,
+        session: "BrowserSession | None",
+        context: "BrowserContext | None",
+        browser: "Browser | None",
+        runtime: "IsolatedBrowserRuntime | None",
+    ) -> None:
+        self.sessions.pop(session_id, None)
+        if session is not None and session.tunnel is not None:
+            try:
+                await self.tunnel_broker.release(session.tunnel)
+            except Exception as exc:
+                logger.warning("failed to release session tunnel during create_session rollback: %s", exc)
+        if context is not None:
+            try:
+                await context.close()
+            except Exception as exc:
+                logger.warning("failed to close browser context during create_session rollback: %s", exc)
+        if browser is not None and browser is not self.browser:
+            try:
+                await browser.close()
+            except Exception as exc:
+                logger.warning("failed to close isolated browser during create_session rollback: %s", exc)
+        if runtime is not None:
+            try:
+                await self.runtime_provisioner.release(runtime)
+            except Exception as exc:
+                logger.warning("failed to release isolated runtime during create_session rollback: %s", exc)
 
     async def get_session(self, session_id: str) -> BrowserSession:
         session = self.sessions.get(session_id)
@@ -2851,7 +2874,7 @@ class BrowserManager:
             }
             await self._append_jsonl(
                 session.artifact_dir / "actions.jsonl",
-                {"timestamp": self._timestamp(), "action": "save_storage_state", **payload},
+                {"timestamp": utc_now(), "action": "save_storage_state", **payload},
             )
             await self.audit.append(
                 event_type="auth_state_saved",
@@ -2903,7 +2926,7 @@ class BrowserManager:
             payload["session"] = await self._session_summary(session)
             await self._append_jsonl(
                 session.artifact_dir / "actions.jsonl",
-                {"timestamp": self._timestamp(), "action": "save_auth_profile", **payload},
+                {"timestamp": utc_now(), "action": "save_auth_profile", **payload},
             )
             await self.audit.append(
                 event_type="auth_profile_saved",
@@ -2961,7 +2984,7 @@ class BrowserManager:
         }
         await self._append_jsonl(
             session.artifact_dir / "actions.jsonl",
-            {"timestamp": self._timestamp(), "action": "request_human_takeover", **payload},
+            {"timestamp": utc_now(), "action": "request_human_takeover", **payload},
         )
         await self.audit.append(
             event_type="takeover_requested",
@@ -3117,7 +3140,7 @@ class BrowserManager:
                 await self._append_jsonl(
                     session.artifact_dir / "actions.jsonl",
                     {
-                        "timestamp": self._timestamp(),
+                        "timestamp": utc_now(),
                         "action": action_name,
                         "status": "blocked",
                         "target": target,
@@ -3147,7 +3170,7 @@ class BrowserManager:
                 await self._append_jsonl(
                     session.artifact_dir / "actions.jsonl",
                     {
-                        "timestamp": self._timestamp(),
+                        "timestamp": utc_now(),
                         "action": action_name,
                         "status": "failed",
                         "target": target,
@@ -3170,7 +3193,7 @@ class BrowserManager:
                 await self._append_jsonl(
                     session.artifact_dir / "actions.jsonl",
                     {
-                        "timestamp": self._timestamp(),
+                        "timestamp": utc_now(),
                         "action": action_name,
                         "status": "failed",
                         "target": target,
@@ -3199,7 +3222,7 @@ class BrowserManager:
             session.last_action = action_name
             verification = self._action_verification(action_name, target, before, after)
             payload = {
-                "timestamp": self._timestamp(),
+                "timestamp": utc_now(),
                 "action": action_name,
                 "action_class": self._action_class(action_name),
                 "target": target,
@@ -3378,7 +3401,8 @@ class BrowserManager:
         }
 
     async def _capture_screenshot(self, session: BrowserSession, label: str) -> dict[str, str]:
-        filename = f"{self._timestamp()}-{label}.png"
+        from datetime import UTC, datetime
+        filename = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%f')}Z-{label}.png"
         path = session.artifact_dir / filename
         await session.page.screenshot(path=str(path), full_page=False)
         return {"path": str(path), "url": f"/artifacts/{session.id}/{filename}"}
@@ -3950,7 +3974,7 @@ class BrowserManager:
 
         record = {
             "id": uuid4().hex[:12],
-            "timestamp": self._timestamp(),
+            "timestamp": utc_now(),
             "status": status,
             "filename": destination.name,
             "suggested_filename": suggested,
@@ -3983,10 +4007,6 @@ class BrowserManager:
     def _append_text(path: Path, text: str) -> None:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(text)
-
-    @staticmethod
-    def _timestamp() -> str:
-        return datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
 
     # ── Screenshot diff ──────────────────────────────────────────────────────
 

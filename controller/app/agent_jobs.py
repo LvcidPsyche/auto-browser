@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from .audit import get_current_operator
 from .models import AgentJobRecord, AgentJobStatus, AgentRunRequest, AgentStepRequest
+from .utils import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ class AgentJobStore:
 
     async def create(self, *, session_id: str, kind: str, request: dict, operator=None) -> AgentJobRecord:
         async with self._lock:
-            now = self._timestamp()
+            now = utc_now()
             record = AgentJobRecord(
                 id=uuid4().hex[:12],
                 session_id=session_id,
@@ -48,7 +49,7 @@ class AgentJobStore:
 
     async def update(self, record: AgentJobRecord) -> None:
         async with self._lock:
-            record.updated_at = self._timestamp()
+            record.updated_at = utc_now()
             await asyncio.to_thread(self._write_sync, record)
 
     async def mark_running_interrupted(self) -> None:
@@ -89,11 +90,6 @@ class AgentJobStore:
         tmp_path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
         tmp_path.replace(path)
 
-    @staticmethod
-    def _timestamp() -> str:
-        from datetime import UTC, datetime
-
-        return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 class AgentJobQueue:
@@ -142,27 +138,20 @@ class AgentJobQueue:
         return (await self.store.get(job_id)).model_dump()
 
     async def enqueue_step(self, session_id: str, payload: AgentStepRequest) -> dict:
-        record = await self.store.create(
-            session_id=session_id,
-            kind="agent_step",
-            request=payload.model_dump(),
-            operator=get_current_operator(),
-        )
-        try:
-            self.queue.put_nowait(record.id)
-        except asyncio.QueueFull:
-            await self.store.update_status(record.id) if hasattr(self.store, 'update_status') else None
-            record.status = "failed"
-            record.error = "Job queue is full (max 100 queued jobs)"
-            await self.store.update(record)
-            raise RuntimeError("Job queue is at capacity. Try again later.")
-        await self._audit("agent_job_enqueued", "queued", record)
-        return record.model_dump()
+        return await self._enqueue(session_id, "agent_step", payload)
 
     async def enqueue_run(self, session_id: str, payload: AgentRunRequest) -> dict:
+        return await self._enqueue(session_id, "agent_run", payload)
+
+    async def _enqueue(
+        self,
+        session_id: str,
+        kind: str,
+        payload: AgentStepRequest | AgentRunRequest,
+    ) -> dict:
         record = await self.store.create(
             session_id=session_id,
-            kind="agent_run",
+            kind=kind,
             request=payload.model_dump(),
             operator=get_current_operator(),
         )
