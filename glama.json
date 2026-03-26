@@ -1,0 +1,17 @@
+{
+  "$schema": "https://glama.ai/mcp/schemas/server.json",
+  "name": "auto-browser",
+  "description": "MCP-native browser automation agent with human-in-the-loop controls, approval workflows, PII scrubbing, session management, and full REST+MCP dual interface.",
+  "license": "MIT",
+  "homepage": "https://github.com/LvcidPsyche/auto-browser",
+  "repository": "https://github.com/LvcidPsyche/auto-browser",
+  "keywords": [
+    "browser-automation",
+    "mcp",
+    "playwright",
+    "web-scraping",
+    "agent-orchestration",
+    "pii-scrubbing",
+    "human-in-the-loop"
+  ]
+}
