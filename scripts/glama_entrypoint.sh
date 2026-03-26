@@ -2,9 +2,13 @@
 # Start the Auto Browser HTTP server in the background, then run the stdio bridge.
 # Used by the root Dockerfile for Glama MCP inspection.
 
+# Activate uv venv if present (Glama builds use uv venv /opt/venv)
+if [ -f /opt/venv/bin/activate ]; then
+    . /opt/venv/bin/activate
+fi
+
 # Launch uvicorn in the background
 uvicorn app.main:app --host 127.0.0.1 --port 8000 &
-SERVER_PID=$!
 
 # Wait up to 30s for the server to become healthy
 i=0
