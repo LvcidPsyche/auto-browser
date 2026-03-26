@@ -60,13 +60,13 @@ class HttpMcpClient:
                 raw = response.read()
                 return HttpMcpResponse(
                     status_code=response.status,
-                    headers=dict(response.headers.items()),
+                    headers={k.lower(): v for k, v in response.headers.items()},
                     body=self._decode_json(raw),
                 )
         except HTTPError as exc:
             return HttpMcpResponse(
                 status_code=exc.code,
-                headers=dict(exc.headers.items()),
+                headers={k.lower(): v for k, v in exc.headers.items()},
                 body=self._decode_json(exc.read()),
             )
 
@@ -124,11 +124,11 @@ class StdioMcpBridge:
             print(f"stdio bridge unexpected error: {exc}", file=self.stderr)
             return self._jsonrpc_error(request_id, -32000, f"Unexpected stdio bridge failure: {exc}")
 
-        next_session_id = response.headers.get(MCP_SESSION_HEADER)
+        next_session_id = response.headers.get(MCP_SESSION_HEADER.lower())
         if next_session_id:
             self.session_id = next_session_id
 
-        next_protocol_version = response.headers.get(MCP_PROTOCOL_HEADER)
+        next_protocol_version = response.headers.get(MCP_PROTOCOL_HEADER.lower())
         if next_protocol_version:
             self.protocol_version = next_protocol_version
         elif payload.get("method") == "initialize":

@@ -26,8 +26,8 @@ class FakeHttpMcpClient:
             return HttpMcpResponse(
                 status_code=200,
                 headers={
-                    MCP_SESSION_HEADER: "mcp-session-1",
-                    MCP_PROTOCOL_HEADER: "2025-11-25",
+                    MCP_SESSION_HEADER.lower(): "mcp-session-1",
+                    MCP_PROTOCOL_HEADER.lower(): "2025-11-25",
                 },
                 body={
                     "jsonrpc": "2.0",
