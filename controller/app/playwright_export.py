@@ -19,7 +19,6 @@ import textwrap
 from datetime import datetime, timezone
 from typing import Any
 
-
 _SCRIPT_HEADER = '''\
 #!/usr/bin/env python3
 """

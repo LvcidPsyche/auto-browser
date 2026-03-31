@@ -2,6 +2,35 @@
 
 All notable changes to auto-browser are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+#### `make doctor` sandbox preflight
+`scripts/doctor.sh` now fails fast with a clear message when the current shell cannot
+open local sockets (for example, a sandboxed agent session). This avoids repeated
+Python `PermissionError` tracebacks during port probing and points contributors to
+rerun the readiness smoke from a normal terminal or an elevated session.
+
+#### Local developer Python preflight
+Host-side controller entrypoints now require Python 3.11+ up front and print a direct
+compatibility message when only an older interpreter is available. This aligns local
+controller workflows with the runtime and avoids late failures from `datetime.UTC`.
+
+#### Host-side controller test path
+Added `make test-local` plus editable package metadata for `./controller`, making it
+possible to run the controller test suite on a host Python 3.11 environment without
+going through Docker every time.
+
+#### Provider HTTP coverage and broader linting
+CI now exercises host-side controller tests, includes HTTP coverage for `/agent/providers`
+and `/sessions/{id}/agent/step` without real provider credentials, and widens Ruff checks
+to cover controller tests and Python helper scripts with import sorting.
+
+#### `browser-node` Xvfb restart cleanup
+The browser-node entrypoint now clears stale `:99` X lock/socket files before starting Xvfb,
+preventing rerun failures where Playwright launched before an X server was actually available.
+
 ## [0.5.1] — 2026-03-26
 
 ### Fixed

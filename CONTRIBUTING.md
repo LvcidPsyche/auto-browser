@@ -30,10 +30,18 @@ cp .env.example .env
 Useful commands:
 
 ```bash
+make lint
 make help
 make doctor
 make release-audit
 make test
+make test-local
+```
+
+Host-side tests require Python 3.11+. Install the editable controller package with:
+
+```bash
+python3.11 -m pip install -e ./controller[dev]
 ```
 
 ## Before opening a PR

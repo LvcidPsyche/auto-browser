@@ -26,7 +26,7 @@ require_file() {
   fi
 }
 
-for bin in git docker curl jq python3; do
+for bin in git docker curl jq; do
   require_bin "$bin"
 done
 
@@ -52,6 +52,9 @@ done
 echo "Validating compose configs..."
 ./scripts/compose_local.sh config >"$compose_out"
 ./scripts/compose_local.sh -f docker-compose.yml -f docker-compose.isolation.yml config >"$compose_isolation_out"
+
+echo "Running lint..."
+make lint
 
 echo "Running controller tests..."
 make test

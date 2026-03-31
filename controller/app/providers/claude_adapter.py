@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .base import BaseProviderAdapter, ProviderDecision
 from ..models import BrowserActionDecision
+from .base import BaseProviderAdapter, ProviderDecision
 
 
 class ClaudeAdapter(BaseProviderAdapter):

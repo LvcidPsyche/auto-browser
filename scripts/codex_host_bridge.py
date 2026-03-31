@@ -7,10 +7,10 @@ import json
 import mimetypes
 import os
 import signal
-import threading
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
@@ -18,6 +18,8 @@ from pathlib import Path
 from socketserver import ThreadingMixIn, UnixStreamServer
 from typing import Any
 
+if sys.version_info < (3, 11):
+    raise SystemExit("auto-browser controller tooling requires Python 3.11+")
 
 CONFIG_OVERRIDES = (
     "project_doc_fallback_filenames=[]",

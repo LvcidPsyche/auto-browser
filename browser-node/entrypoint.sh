@@ -17,6 +17,8 @@ export BROWSER_WIDTH="$WIDTH" \
 
 mkdir -p /data/profile /data/downloads /tmp/runtime
 rm -f "$WS_ENDPOINT_FILE"
+DISPLAY_NUM="${DISPLAY#:}"
+rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
 
 Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" -ac +extension RANDR >/tmp/xvfb.log 2>&1 &
 fluxbox >/tmp/fluxbox.log 2>&1 &

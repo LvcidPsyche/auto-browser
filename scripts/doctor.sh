@@ -14,22 +14,84 @@ require_bin() {
   fi
 }
 
+explain_socket_access_requirement() {
+  cat >&2 <<'EOF'
+Local socket access is blocked in this environment.
+`make doctor` probes localhost ports and connects to Docker-published services,
+so it must run in a shell that can open local sockets.
+
+If you're running from a sandboxed agent session, rerun it with elevated
+permissions or from your normal terminal.
+EOF
+}
+
+ensure_local_socket_access() {
+  local status=0
+  if python3 - <<'PY'
+import errno
+import socket
+
+try:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM):
+        pass
+except PermissionError:
+    raise SystemExit(2)
+except OSError as exc:
+    if exc.errno in {errno.EPERM, errno.EACCES}:
+        raise SystemExit(2)
+    raise SystemExit(1)
+PY
+  then
+    return 0
+  else
+    status=$?
+  fi
+
+  if [[ "$status" == "2" ]]; then
+    explain_socket_access_requirement
+    exit 1
+  fi
+
+  echo "Failed to verify local socket access required by doctor." >&2
+  exit 1
+}
+
 port_is_free() {
-  python3 - "$1" <<'PY'
+  local status=0
+  if python3 - "$1" <<'PY'
+import errno
 import socket
 import sys
 
 port = int(sys.argv[1])
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-    sock.settimeout(0.2)
-    result = sock.connect_ex(("127.0.0.1", port))
+try:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.2)
+        result = sock.connect_ex(("127.0.0.1", port))
+except PermissionError:
+    raise SystemExit(2)
+except OSError as exc:
+    if exc.errno in {errno.EPERM, errno.EACCES}:
+        raise SystemExit(2)
+    raise
 raise SystemExit(0 if result != 0 else 1)
 PY
+  then
+    return 0
+  else
+    status=$?
+  fi
+
+  if [[ "$status" == "2" ]]; then
+    return 2
+  fi
+  return 1
 }
 
 pick_port() {
   local requested="$1"
   local reusable_current="${2:-}"
+  local status=0
   shift 2
   if [[ -n "$reusable_current" && "$requested" == "$reusable_current" ]]; then
     echo "$requested"
@@ -38,11 +100,23 @@ pick_port() {
   if port_is_free "$requested"; then
     echo "$requested"
     return 0
+  else
+    status=$?
+  fi
+  if [[ "$status" == "2" ]]; then
+    explain_socket_access_requirement
+    exit 1
   fi
   for candidate in "$@"; do
     if port_is_free "$candidate"; then
       echo "$candidate"
       return 0
+    else
+      status=$?
+    fi
+    if [[ "$status" == "2" ]]; then
+      explain_socket_access_requirement
+      exit 1
     fi
   done
   echo "No free port found for requested port $requested" >&2
@@ -91,6 +165,7 @@ require_bin docker
 require_bin curl
 require_bin jq
 require_bin python3
+ensure_local_socket_access
 
 REQUESTED_API_PORT="${API_PORT:-8000}"
 REQUESTED_NOVNC_PORT="${NOVNC_PORT:-6080}"

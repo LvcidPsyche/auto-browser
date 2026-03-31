@@ -4,8 +4,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from app.approvals import ApprovalRequiredError
 from app.action_errors import BrowserActionError
+from app.approvals import ApprovalRequiredError
 from app.models import ApprovalRecord, BrowserActionDecision, McpToolCallRequest, ProviderInfo
 from app.social_errors import SocialActionError
 from app.tool_gateway import McpToolGateway

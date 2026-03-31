@@ -11,23 +11,21 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
-from .agent_jobs import AgentJobQueue
+from . import events as _events
 from .action_errors import BrowserActionError
-from .audit import get_current_operator, reset_current_operator, set_current_operator
+from .agent_jobs import AgentJobQueue
 from .approvals import ApprovalRequiredError
+from .audit import get_current_operator, reset_current_operator, set_current_operator
 from .browser_manager import BrowserManager
 from .config import get_settings
 from .cron_service import CronService
 from .maintenance import MaintenanceService
 from .mcp_transport import McpHttpTransport
 from .metrics import MetricsRecorder
-from .proxy_personas import ProxyPersonaStore
-from .session_share import SessionShareManager
-from .vision_target import VisionTargeter
 from .models import (
-    ApprovalDecisionRequest,
     AgentRunRequest,
     AgentStepRequest,
+    ApprovalDecisionRequest,
     ClickRequest,
     CreateSessionRequest,
     ExecuteActionRequest,
@@ -37,6 +35,7 @@ from .models import (
     McpToolCallRequest,
     NavigateRequest,
     ObserveRequest,
+    OpenTabRequest,
     PressRequest,
     SaveAuthProfileRequest,
     SaveStorageStateRequest,
@@ -45,27 +44,28 @@ from .models import (
     SelectOptionRequest,
     SocialCommentRequest,
     SocialDmRequest,
-    SocialLoginRequest,
-    SocialScrollRequest,
-    SocialPostRequest,
-    SocialLikeRequest,
     SocialFollowRequest,
+    SocialLikeRequest,
+    SocialLoginRequest,
+    SocialPostRequest,
     SocialRepostRequest,
+    SocialScrollRequest,
     SocialSearchRequest,
     SocialUnfollowRequest,
-    OpenTabRequest,
     TabIndexRequest,
     TypeRequest,
     UploadRequest,
     WaitRequest,
 )
-from . import events as _events
 from .orchestrator import BrowserOrchestrator
 from .provider_registry import ProviderRegistry
+from .proxy_personas import ProxyPersonaStore
 from .rate_limits import SlidingWindowRateLimiter, build_rate_limit_key, is_exempt_path
 from .runtime_policy import validate_runtime_policy
+from .session_share import SessionShareManager
 from .social_errors import SocialActionError
 from .tool_gateway import McpToolGateway
+from .vision_target import VisionTargeter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

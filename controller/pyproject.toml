@@ -1,3 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto-browser-controller"
+version = "0.5.1"
+description = "Controller API for auto-browser"
+requires-python = ">=3.11"
+dynamic = ["dependencies", "optional-dependencies"]
+
+[project.urls]
+Homepage = "https://github.com/LvcidPsyche/auto-browser"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.dynamic.optional-dependencies]
+dev = {file = ["requirements-dev.txt"]}
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
@@ -10,8 +33,8 @@ line-length = 120
 target-version = "py311"
 
 [tool.ruff.lint]
-# Enforce syntax errors and unused imports — expand as code is cleaned up
-select = ["E9", "F"]
+# Enforce syntax errors, unused imports, and import sorting
+select = ["E9", "F", "I"]
 
 [tool.mypy]
 python_version = "3.11"

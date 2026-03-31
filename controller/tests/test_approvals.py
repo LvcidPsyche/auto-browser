@@ -6,8 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from app.approvals import ApprovalStore
-from app.approvals import ApprovalRequiredError
+from app.approvals import ApprovalRequiredError, ApprovalStore
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
 from app.models import BrowserActionDecision

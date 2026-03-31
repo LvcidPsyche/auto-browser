@@ -16,45 +16,46 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from playwright.async_api import Browser, BrowserContext, Error as PlaywrightError, Page, Playwright, async_playwright
+from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
+from playwright.async_api import Error as PlaywrightError
 
 try:  # pragma: no cover - optional until dependency is installed in runtime image
     import pyotp
 except Exception:  # pragma: no cover - graceful fallback for non-login test runs
     pyotp = None  # type: ignore[assignment]
 
-from .action_errors import BrowserActionError
-from .utils import utc_now
-from .audit import AuditStore
-from .approvals import ApprovalRequiredError, ApprovalStore
 from . import events as _events
-from .webhooks import dispatch_approval_event
+from .action_errors import BrowserActionError
+from .approvals import ApprovalRequiredError, ApprovalStore
+from .audit import AuditStore
 from .auth_state import AuthStateManager
+from .browser_scripts import (
+    ACTIVE_ELEMENT_SCRIPT,
+    EXTRACT_COMMENTS_SCRIPT,
+    EXTRACT_POSTS_SCRIPT,
+    EXTRACT_PROFILE_SCRIPT,
+    FIND_FOLLOW_BUTTON_SCRIPT,
+    FIND_LIKE_BUTTON_SCRIPT,
+    FIND_REPLY_BUTTON_SCRIPT,
+    FIND_REPOST_BUTTON_SCRIPT,
+    FIND_SEARCH_INPUT_SCRIPT,
+    FIND_UNFOLLOW_BUTTON_SCRIPT,
+    INTERACTABLES_SCRIPT,
+    PAGE_SUMMARY_SCRIPT,
+    SMOOTH_SCROLL_SCRIPT,
+    apply_stealth,
+)
 from .config import Settings
 from .models import ApprovalKind, BrowserActionDecision, SessionRecord, SessionStatus
 from .network_inspector import NetworkInspector
 from .ocr import OCRExtractor
 from .pii_scrub import PiiScrubber
-from .session_store import DurableSessionStore
 from .session_isolation import DockerBrowserNodeProvisioner, IsolatedBrowserRuntime
-from .social_errors import SocialActionError
+from .session_store import DurableSessionStore
 from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
-from .browser_scripts import (
-    INTERACTABLES_SCRIPT,
-    ACTIVE_ELEMENT_SCRIPT,
-    PAGE_SUMMARY_SCRIPT,
-    EXTRACT_POSTS_SCRIPT,
-    EXTRACT_PROFILE_SCRIPT,
-    EXTRACT_COMMENTS_SCRIPT,
-    SMOOTH_SCROLL_SCRIPT,
-    FIND_LIKE_BUTTON_SCRIPT,
-    FIND_FOLLOW_BUTTON_SCRIPT,
-    FIND_UNFOLLOW_BUTTON_SCRIPT,
-    FIND_REPLY_BUTTON_SCRIPT,
-    FIND_REPOST_BUTTON_SCRIPT,
-    FIND_SEARCH_INPUT_SCRIPT,
-    apply_stealth,
-)
+from .social_errors import SocialActionError
+from .utils import utc_now
+from .webhooks import dispatch_approval_event
 
 logger = logging.getLogger(__name__)
 

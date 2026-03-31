@@ -10,7 +10,8 @@ from .models import SessionRecord
 logger = logging.getLogger(__name__)
 
 try:  # pragma: no cover - import path depends on optional dependency
-    from redis.asyncio import Redis, from_url as redis_from_url
+    from redis.asyncio import Redis
+    from redis.asyncio import from_url as redis_from_url
 except Exception:  # pragma: no cover - graceful fallback when redis isn't installed
     Redis = None  # type: ignore[assignment]
     redis_from_url = None

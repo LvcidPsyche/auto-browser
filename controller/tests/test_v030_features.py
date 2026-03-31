@@ -10,7 +10,6 @@ Covers:
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import json
@@ -19,18 +18,16 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 from app import events as _events
 from app.config import Settings
 from app.models import (
     ImportAuthProfileRequest,
     ObserveRequest,
-    PerceptionPreset,
     ScreenshotDiffResponse,
 )
 from app.webhooks import _sign
-
 
 # ── Perception Preset Models ─────────────────────────────────────────────────
 

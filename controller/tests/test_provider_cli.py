@@ -11,8 +11,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from app.config import Settings
-from app.providers.base import ProviderAPIError
-from app.providers.base import CLIResult
+from app.providers.base import CLIResult, ProviderAPIError
 from app.providers.claude_adapter import ClaudeAdapter
 from app.providers.gemini_adapter import GeminiAdapter
 from app.providers.openai_adapter import OpenAIAdapter

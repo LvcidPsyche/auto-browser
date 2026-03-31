@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import asyncio
+import json
 import tempfile
 import tomllib
 from pathlib import Path
@@ -9,8 +9,8 @@ from typing import Any
 
 import httpx
 
-from .base import BaseProviderAdapter, ProviderAPIError, ProviderDecision
 from ..models import BrowserActionDecision
+from .base import BaseProviderAdapter, ProviderAPIError, ProviderDecision
 
 
 class OpenAIAdapter(BaseProviderAdapter):

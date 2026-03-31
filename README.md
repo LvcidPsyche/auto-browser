@@ -45,6 +45,8 @@ Optional sanity check:
 make doctor
 ```
 
+`make doctor` needs local Docker access and the ability to open localhost sockets.
+
 Open:
 - API docs: `http://localhost:8000/docs`
 - Operator Dashboard: `http://localhost:8000/ui/`
@@ -305,6 +307,17 @@ For a quick VPS sanity check before a live session:
 ```bash
 make doctor
 ```
+
+Run it from a normal terminal or any shell that has local Docker/localhost access.
+
+For host-side controller tests instead of Docker:
+
+```bash
+python3.11 -m pip install -e ./controller[dev]
+make test-local
+```
+
+Host-side controller workflows use Python 3.11+.
 
 For a fuller pre-release pass that validates docs, compose config, tests, and the live smoke:
 
