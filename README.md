@@ -66,20 +66,18 @@ To see the rest of the common commands:
 make help
 ```
 
-## What’s new in v0.5.1
+## What’s new in v0.5.2
 
 **Maintenance release — no API changes, all fixes are backwards compatible.**
 
-- **`network_inspector` pending leak fixed** — in-flight requests are now flushed as `failed` when a session is detached (tab close, crash), preventing unbounded memory growth
-- **Global `KeyError → 404` handler** — all store-layer `KeyError` raises are now handled uniformly; ~30 route handlers simplified
-- **`_WithApproval` mixin** — 9 social action models and `UploadRequest` no longer repeat `approval_id: str | None = None`
-- **`_MarkInterruptedMixin`** — `mark_all_active_interrupted` extracted from the three session store classes that each had identical copies
-- **`utils.utc_now()`** — shared ISO-8601 timestamp helper; `_timestamp()` removed from 5 modules
-- **`tool_inputs.py`** — Pydantic input models split from `tool_gateway.py` (dispatch logic vs. schema definitions)
-- **`create_session` decomposed** — 190-line method split into 4 focused private helpers
-- **`agent_jobs.py` cleanup** — dead `hasattr` guard deleted; `enqueue_step`/`enqueue_run` merged
+- **Python 3.10 host compatibility** — host-side controller workflows now run on the machine’s existing Python 3.10 environment
+- **`make test-local`** — editable controller packaging plus a first-class host-side test path for faster iteration without Docker
+- **Provider HTTP coverage** — `/agent/providers` and `/sessions/{id}/agent/step` now have direct HTTP-layer tests without real provider credentials
+- **Broader Ruff coverage** — CI now lints controller tests and Python helper scripts in addition to the main app package
+- **`make doctor` restricted-shell fix** — localhost socket probing now fails with a clear message instead of repeated Python tracebacks
+- **`browser-node` Xvfb cleanup** — stale `:99` lock/socket files are cleared before startup so release-smoke reruns stay stable
 
-All 149 tests pass.
+All 152 tests pass.
 
 ---
 

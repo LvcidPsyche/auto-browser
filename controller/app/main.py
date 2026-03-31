@@ -70,7 +70,7 @@ from .vision_target import VisionTargeter
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-_VERSION = "0.5.1"
+_VERSION = "0.5.2"
 
 settings = get_settings()
 manager = BrowserManager(settings)

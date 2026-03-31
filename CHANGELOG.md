@@ -4,6 +4,8 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-03-31
+
 ### Fixed
 
 #### `make doctor` sandbox preflight
