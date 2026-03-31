@@ -35,12 +35,14 @@ import hmac
 import json
 import logging
 import secrets
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
+
+from .utils import UTC
 
 try:
     from apscheduler.schedulers.asyncio import AsyncIOScheduler

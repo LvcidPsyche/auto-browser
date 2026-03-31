@@ -10,7 +10,7 @@ import re
 import shutil
 import tarfile
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -54,7 +54,7 @@ from .session_isolation import DockerBrowserNodeProvisioner, IsolatedBrowserRunt
 from .session_store import DurableSessionStore
 from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
 from .social_errors import SocialActionError
-from .utils import utc_now
+from .utils import UTC, utc_now
 from .webhooks import dispatch_approval_event
 
 logger = logging.getLogger(__name__)
@@ -3402,7 +3402,6 @@ class BrowserManager:
         }
 
     async def _capture_screenshot(self, session: BrowserSession, label: str) -> dict[str, str]:
-        from datetime import UTC, datetime
         filename = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%f')}Z-{label}.png"
         path = session.artifact_dir / filename
         await session.page.screenshot(path=str(path), full_page=False)

@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from playwright.async_api import Page, Request, Response
 
     from .pii_scrub import PiiScrubber
+from .utils import UTC
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +315,5 @@ def _elapsed_ms(entry: dict[str, Any]) -> float | None:
     started = entry.get("_started_at")
     if started is None:
         return None
-    from datetime import UTC
     elapsed = datetime.now(UTC).timestamp() - started
     return round(elapsed * 1000, 2)

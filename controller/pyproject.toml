@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "auto-browser-controller"
 version = "0.5.1"
 description = "Controller API for auto-browser"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dynamic = ["dependencies", "optional-dependencies"]
 
 [project.urls]
@@ -30,14 +30,14 @@ python_functions = ["test_*"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 # Enforce syntax errors, unused imports, and import sorting
 select = ["E9", "F", "I"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.10"
 ignore_missing_imports = true
 strict = false
 warn_unused_ignores = true

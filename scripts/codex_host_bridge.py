@@ -18,9 +18,6 @@ from pathlib import Path
 from socketserver import ThreadingMixIn, UnixStreamServer
 from typing import Any
 
-if sys.version_info < (3, 11):
-    raise SystemExit("auto-browser controller tooling requires Python 3.11+")
-
 CONFIG_OVERRIDES = (
     "project_doc_fallback_filenames=[]",
     "agents={}",

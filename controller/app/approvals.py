@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
 from .models import ApprovalKind, ApprovalRecord, ApprovalStatus, BrowserActionDecision
-from .utils import utc_now
+from .utils import UTC, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -353,4 +353,3 @@ class ApprovalStore:
     @staticmethod
     def _parse_timestamp(value: str) -> datetime:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
-

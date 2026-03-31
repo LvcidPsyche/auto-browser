@@ -13,13 +13,13 @@ Python `PermissionError` tracebacks during port probing and points contributors 
 rerun the readiness smoke from a normal terminal or an elevated session.
 
 #### Local developer Python preflight
-Host-side controller entrypoints now require Python 3.11+ up front and print a direct
+Host-side controller entrypoints now require Python 3.10+ up front and print a direct
 compatibility message when only an older interpreter is available. This aligns local
-controller workflows with the runtime and avoids late failures from `datetime.UTC`.
+controller workflows with the runtime and avoids late failures from Python-version drift.
 
 #### Host-side controller test path
 Added `make test-local` plus editable package metadata for `./controller`, making it
-possible to run the controller test suite on a host Python 3.11 environment without
+possible to run the controller test suite on a host Python 3.10+ environment without
 going through Docker every time.
 
 #### Provider HTTP coverage and broader linting

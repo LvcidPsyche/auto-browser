@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
 from app.models import BrowserActionDecision, CreateSessionRequest, HoverRequest, SelectOptionRequest, WaitRequest
+from app.utils import UTC
 
 
 class RequestModelTests(unittest.TestCase):

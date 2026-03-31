@@ -11,8 +11,10 @@ import asyncio
 import json
 import logging
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
+
+from .utils import UTC
 
 logger = logging.getLogger(__name__)
 

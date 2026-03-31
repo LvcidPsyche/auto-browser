@@ -1,11 +1,32 @@
 from __future__ import annotations
 
+import atexit
+import os
+import shutil
+import tempfile
 import unittest
 from contextlib import ExitStack
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
+
+_TEST_ROOT = Path(tempfile.mkdtemp(prefix="auto-browser-agent-http-"))
+atexit.register(lambda: shutil.rmtree(_TEST_ROOT, ignore_errors=True))
+for env_name, relative_path in {
+    "ARTIFACT_ROOT": "artifacts",
+    "UPLOAD_ROOT": "uploads",
+    "AUTH_ROOT": "auth",
+    "APPROVAL_ROOT": "approvals",
+    "AUDIT_ROOT": "audit",
+    "SESSION_STORE_ROOT": "sessions",
+    "JOB_STORE_ROOT": "jobs",
+    "MCP_SESSION_STORE_PATH": "mcp/sessions.json",
+    "CRON_STORE_PATH": "crons/crons.json",
+    "REMOTE_ACCESS_INFO_PATH": "tunnels/reverse-ssh.json",
+}.items():
+    os.environ.setdefault(env_name, str(_TEST_ROOT / relative_path))
 
 import app.main as main_module
 from app.models import AgentStepResult, ProviderInfo

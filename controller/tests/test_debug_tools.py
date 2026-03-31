@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
+from app.utils import UTC
 
 
 class FakeTracing:

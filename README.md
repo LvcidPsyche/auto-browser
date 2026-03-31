@@ -313,11 +313,11 @@ Run it from a normal terminal or any shell that has local Docker/localhost acces
 For host-side controller tests instead of Docker:
 
 ```bash
-python3.11 -m pip install -e ./controller[dev]
+python3 -m pip install -e ./controller[dev]
 make test-local
 ```
 
-Host-side controller workflows use Python 3.11+.
+Host-side controller workflows use Python 3.10+.
 
 For a fuller pre-release pass that validates docs, compose config, tests, and the live smoke:
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
-import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +10,11 @@ import httpx
 
 from ..models import BrowserActionDecision
 from .base import BaseProviderAdapter, ProviderAPIError, ProviderDecision
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib
 
 
 class OpenAIAdapter(BaseProviderAdapter):

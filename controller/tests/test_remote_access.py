@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
+from app.utils import UTC
 
 
 class FakePage:

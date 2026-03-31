@@ -4,11 +4,13 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from cryptography.fernet import Fernet
+
+from .utils import UTC
 
 
 @dataclass

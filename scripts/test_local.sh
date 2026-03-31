@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 source "${ROOT_DIR}/scripts/python_env.sh"
-PYTHON_BIN="$(require_python311_bin)"
+PYTHON_BIN="$(require_python310_bin)"
 export PYTHONPATH="${ROOT_DIR}/controller${PYTHONPATH:+:${PYTHONPATH}}"
 
 if ! "${PYTHON_BIN}" - <<'PY' >/dev/null 2>&1
