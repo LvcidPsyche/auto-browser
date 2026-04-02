@@ -65,6 +65,13 @@ For protection posture:
 - default: `WITNESS_PROTECTION_MODE_DEFAULT=normal`
 - confidential workloads: `WITNESS_PROTECTION_MODE_DEFAULT=confidential`
 
+For a hosted Witness control plane:
+
+- point `WITNESS_REMOTE_URL` at the Witness service
+- set `WITNESS_REMOTE_API_KEY` and `WITNESS_REMOTE_TENANT_ID` if your Witness deployment uses tenancy/auth
+- set `WITNESS_REMOTE_REQUIRED_FOR_CONFIDENTIAL=true` if confidential sessions must refuse write/auth work whenever hosted Witness is unavailable
+- session creation stays local-first; strict hosted Witness preflight applies before mutating actions and auth-material saves
+
 To see the rest of the common commands:
 
 ```bash
@@ -82,7 +89,9 @@ make help
 - **Approval lifecycle recording** — pending, approved, rejected, and executed approvals now land in Witness as part of the same system of record
 - **Packaged environment surface** — `.env.example` now documents `WITNESS_ROOT`, `WITNESS_ENABLED`, and `WITNESS_PROTECTION_MODE_DEFAULT`
 
-All 160 tests pass.
+The `v0.5.3` release shipped with 160 passing tests.
+
+Current `main` also adds hosted Witness forwarding and the controller suite is now at 165 passing tests.
 
 ---
 
@@ -119,6 +128,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full list.
 - **audit events** with per-request operator identity headers
 - **Witness receipts** with per-session hash-chained action evidence
 - **protection profiles** for `normal` and `confidential` workloads
+- optional **hosted Witness forwarding** with per-session delivery status and confidential-mode preflight enforcement before write/auth work
 - optional **SQLite backing** for approvals + audit events
 - optional built-in REST agent runner for **OpenAI, Claude, and Gemini**
 - one-step and multi-step **REST agent orchestration endpoints**

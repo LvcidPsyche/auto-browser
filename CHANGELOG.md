@@ -4,6 +4,28 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Added
+
+#### Hosted Witness forwarding from the controller
+`auto-browser` can now forward local Witness receipts into a hosted Witness deployment.
+
+The controller now supports:
+
+- `WITNESS_REMOTE_URL`, `WITNESS_REMOTE_API_KEY`, and `WITNESS_REMOTE_TENANT_ID`
+- per-session remote delivery status in session summaries and persisted session records
+- hosted Witness preflight for confidential sessions when `WITNESS_REMOTE_REQUIRED_FOR_CONFIDENTIAL=true`
+- fail-open remote delivery for normal sessions so browser work keeps moving even if the hosted Witness service is degraded
+
+### Changed
+
+#### Confidential Witness delivery behavior
+Confidential sessions can now require a reachable hosted Witness service before mutating
+actions or auth-material saves run. This keeps strict deployments from discovering
+after-the-fact that the external system of record was unavailable.
+
+Session creation remains local-first so operators can still establish and inspect
+confidential sessions while strict hosted delivery gates apply to write/auth work.
+
 ## [0.5.3] — 2026-04-01
 
 ### Added

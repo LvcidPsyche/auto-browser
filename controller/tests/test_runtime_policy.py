@@ -107,6 +107,39 @@ class RuntimePolicyTests(unittest.TestCase):
 
         self.assertTrue(any("WITNESS_PROTECTION_MODE_DEFAULT=confidential" in warning for warning in report.warnings))
 
+    def test_confidential_remote_requirement_errors_when_default_is_confidential(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            APP_ENV="production",
+            API_BEARER_TOKEN="secret",
+            REQUIRE_OPERATOR_ID="true",
+            AUTH_STATE_ENCRYPTION_KEY="b" * 44,
+            REQUIRE_AUTH_STATE_ENCRYPTION="true",
+            WITNESS_PROTECTION_MODE_DEFAULT="confidential",
+            WITNESS_REMOTE_REQUIRED_FOR_CONFIDENTIAL="true",
+        )
+
+        report = validate_runtime_policy(settings)
+
+        self.assertFalse(report.ok)
+        self.assertTrue(any("WITNESS_REMOTE_REQUIRED_FOR_CONFIDENTIAL=true" in error for error in report.errors))
+
+    def test_confidential_remote_requirement_warns_when_optional_by_default(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            APP_ENV="production",
+            API_BEARER_TOKEN="secret",
+            REQUIRE_OPERATOR_ID="true",
+            AUTH_STATE_ENCRYPTION_KEY="b" * 44,
+            REQUIRE_AUTH_STATE_ENCRYPTION="true",
+            WITNESS_REMOTE_REQUIRED_FOR_CONFIDENTIAL="true",
+        )
+
+        report = validate_runtime_policy(settings)
+
+        self.assertTrue(report.ok)
+        self.assertTrue(any("hosted Witness delivery" in warning for warning in report.warnings))
+
     def test_production_rejects_invalid_provider_auth_modes(self) -> None:
         settings = Settings(
             _env_file=None,

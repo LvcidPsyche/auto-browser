@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from .models import OperatorIdentity, ProtectionMode
@@ -327,3 +328,83 @@ class WitnessRecorder:
             separators=(",", ":"),
         )
         return sha256(f"{receipt.chain_prev_hash or ''}:{canonical}".encode("utf-8")).hexdigest()
+
+
+class WitnessRemoteClient:
+    def __init__(
+        self,
+        *,
+        base_url: str | None,
+        api_key: str | None = None,
+        tenant_id: str | None = None,
+        timeout_seconds: float = 0.75,
+        verify_tls: bool = True,
+    ):
+        self.base_url = base_url.rstrip("/") if base_url else None
+        self.api_key = api_key
+        self.tenant_id = tenant_id
+        self.timeout_seconds = timeout_seconds
+        self.verify_tls = verify_tls
+        self._client: httpx.AsyncClient | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.base_url)
+
+    async def startup(self) -> None:
+        if not self.enabled or self._client is not None:
+            return
+        self._client = httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=self.timeout_seconds,
+            verify=self.verify_tls,
+        )
+
+    async def shutdown(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    async def healthz(self) -> dict[str, Any]:
+        client = self._require_client()
+        response = await client.get("/healthz", headers=self._headers())
+        return self._parse_response(response, operation="health check")
+
+    async def record(self, scope: str, payload: dict[str, Any]) -> dict[str, Any]:
+        client = self._require_client()
+        response = await client.post(
+            f"/api/scopes/{scope}/receipts",
+            json=payload,
+            params=self._params(),
+            headers=self._headers(),
+        )
+        return self._parse_response(response, operation=f"record witness receipt for scope {scope}")
+
+    def _require_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            raise RuntimeError("Witness remote client is not started")
+        return self._client
+
+    def _headers(self) -> dict[str, str]:
+        if not self.api_key:
+            return {}
+        return {"X-Witness-Key": self.api_key}
+
+    def _params(self) -> dict[str, Any] | None:
+        if self.tenant_id is None:
+            return None
+        return {"tenant": self.tenant_id}
+
+    @staticmethod
+    def _parse_response(response: httpx.Response, *, operation: str) -> dict[str, Any]:
+        if response.is_success:
+            return response.json()
+        detail: str
+        try:
+            payload = response.json()
+        except Exception:
+            payload = response.text
+        detail = payload.get("detail") if isinstance(payload, dict) else str(payload)
+        raise RuntimeError(
+            f"Witness remote {operation} failed with HTTP {response.status_code}: {detail}"
+        )

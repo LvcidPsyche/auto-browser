@@ -156,6 +156,15 @@ class Settings(BaseSettings):
         "normal",
         alias="WITNESS_PROTECTION_MODE_DEFAULT",
     )
+    witness_remote_url: str | None = Field(None, alias="WITNESS_REMOTE_URL")
+    witness_remote_api_key: str | None = Field(None, alias="WITNESS_REMOTE_API_KEY")
+    witness_remote_tenant_id: str | None = Field(None, alias="WITNESS_REMOTE_TENANT_ID")
+    witness_remote_timeout_seconds: float = Field(0.75, alias="WITNESS_REMOTE_TIMEOUT_SECONDS")
+    witness_remote_verify_tls: bool = Field(True, alias="WITNESS_REMOTE_VERIFY_TLS")
+    witness_remote_required_for_confidential: bool = Field(
+        False,
+        alias="WITNESS_REMOTE_REQUIRED_FOR_CONFIDENTIAL",
+    )
     enable_tracing: bool = Field(True, alias="ENABLE_TRACING")
     typing_delay_ms: int = Field(20, alias="TYPING_DELAY_MS")
     action_timeout_ms: int = Field(15000, alias="ACTION_TIMEOUT_MS")

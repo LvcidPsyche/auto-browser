@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ProtectionMode = Literal["normal", "confidential"]
+WitnessRemoteStatus = Literal["disabled", "idle", "healthy", "delivered", "failed"]
 
 
 class _WithApproval(BaseModel):
@@ -356,6 +357,23 @@ class ApprovalDecisionRequest(BaseModel):
     comment: str | None = Field(default=None, max_length=2000)
 
 
+class OperatorIdentity(BaseModel):
+    id: str
+    name: str | None = None
+    source: str = "anonymous"
+
+
+class WitnessRemoteState(BaseModel):
+    configured: bool = False
+    required: bool = False
+    tenant_id: str | None = None
+    status: WitnessRemoteStatus = "disabled"
+    last_error: str | None = None
+    last_checked_at: str | None = None
+    last_attempted_at: str | None = None
+    last_delivered_at: str | None = None
+
+
 class SessionRecord(BaseModel):
     id: str
     name: str
@@ -374,12 +392,7 @@ class SessionRecord(BaseModel):
     last_action: str | None = None
     trace_path: str | None = None
     protection_mode: ProtectionMode = "normal"
-
-
-class OperatorIdentity(BaseModel):
-    id: str
-    name: str | None = None
-    source: str = "anonymous"
+    witness_remote: WitnessRemoteState = Field(default_factory=WitnessRemoteState)
 
 
 class AgentJobRecord(BaseModel):

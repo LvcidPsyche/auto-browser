@@ -46,7 +46,13 @@ from .browser_scripts import (
     apply_stealth,
 )
 from .config import Settings
-from .models import ApprovalKind, BrowserActionDecision, SessionRecord, SessionStatus
+from .models import (
+    ApprovalKind,
+    BrowserActionDecision,
+    SessionRecord,
+    SessionStatus,
+    WitnessRemoteState,
+)
 from .network_inspector import NetworkInspector
 from .ocr import OCRExtractor
 from .pii_scrub import PiiScrubber
@@ -63,6 +69,7 @@ from .witness import (
     WitnessPolicyEngine,
     WitnessPolicyOutcome,
     WitnessRecorder,
+    WitnessRemoteClient,
     WitnessSessionContext,
 )
 
@@ -109,6 +116,7 @@ class BrowserSession:
     headless: bool = True
     protection_mode: str = "normal"
     pending_witness_context: dict[str, Any] | None = None
+    witness_remote_state: WitnessRemoteState = field(default_factory=WitnessRemoteState)
 
 
 class BrowserManager:
@@ -161,6 +169,13 @@ class BrowserManager:
         )
         self.pii_scrubber = PiiScrubber.from_settings(self.settings)
         self.witness = WitnessRecorder(self.settings.witness_root)
+        self.witness_remote = WitnessRemoteClient(
+            base_url=self.settings.witness_remote_url,
+            api_key=self.settings.witness_remote_api_key,
+            tenant_id=self.settings.witness_remote_tenant_id,
+            timeout_seconds=self.settings.witness_remote_timeout_seconds,
+            verify_tls=self.settings.witness_remote_verify_tls,
+        )
         self.witness_policy = WitnessPolicyEngine()
         self.runtime_provisioner = DockerBrowserNodeProvisioner(self.settings)
         self.tunnel_broker = IsolatedSessionTunnelBroker(self.settings)
@@ -354,6 +369,8 @@ class BrowserManager:
         await self.approvals.startup()
         await self.audit.startup()
         await self.witness.startup()
+        if self.settings.witness_enabled:
+            await self.witness_remote.startup()
         await self.session_store.startup()
         await self.session_store.mark_all_active_interrupted()
         self.playwright = await async_playwright().start()
@@ -375,6 +392,7 @@ class BrowserManager:
         if self.playwright is not None:
             await self.playwright.stop()
         await self.tunnel_broker.shutdown()
+        await self.witness_remote.shutdown()
         await self.session_store.shutdown()
 
     async def ensure_browser(self) -> Browser:
@@ -508,6 +526,7 @@ class BrowserManager:
             raise ValueError("Provide auth_profile or storage_state_path, not both")
         if start_url:
             self._assert_url_allowed(start_url)
+        resolved_protection_mode = protection_mode or self.settings.witness_protection_mode_default
         self._check_session_limit()
 
         session_id = uuid4().hex[:12]
@@ -568,8 +587,9 @@ class BrowserManager:
                     self.settings.default_viewport_width / 2,
                     self.settings.default_viewport_height / 2,
                 ),
-                protection_mode=protection_mode or self.settings.witness_protection_mode_default,
+                protection_mode=resolved_protection_mode,
                 totp_secret=totp_secret,
+                witness_remote_state=self._initial_witness_remote_state(resolved_protection_mode),
             )
             if source_path is not None:
                 session.last_auth_state_path = source_path
@@ -596,7 +616,6 @@ class BrowserManager:
 
             await self._maybe_provision_session_tunnel(session)
             await self._persist_session(session, status="active")
-            summary = await self._session_summary(session)
             await self._record_session_witness_receipt(
                 session,
                 action="create_session",
@@ -608,6 +627,8 @@ class BrowserManager:
                     "totp_enabled": bool(totp_secret),
                 },
             )
+            await self._persist_session(session, status="active")
+            summary = await self._session_summary(session)
             await self.audit.append(
                 event_type="session_created",
                 status="ok",
@@ -2960,6 +2981,19 @@ class BrowserManager:
         session = await self.get_session(session_id)
         safe_path = self._safe_session_auth_path(session, path)
         async with session.lock:
+            try:
+                await self._ensure_witness_remote_ready(session, action="save_storage_state")
+            except PermissionError as exc:
+                await self._record_witness_receipt(
+                    session,
+                    event_type="auth_state",
+                    status="blocked",
+                    action="save_storage_state",
+                    action_class="auth",
+                    target={"path": path},
+                    metadata={"error": str(exc)},
+                )
+                raise
             witness_outcome = self.witness_policy.evaluate_action(
                 session=self._witness_session_context(session),
                 action=WitnessActionContext(
@@ -3008,6 +3042,7 @@ class BrowserManager:
                 target={"path": path},
                 metadata={"saved_to": auth_info["path"], "encrypted": auth_info["encrypted"]},
             )
+            payload["session"] = await self._session_summary(session)
             await self._persist_session(session, status="active")
             return payload
 
@@ -3047,6 +3082,19 @@ class BrowserManager:
     async def save_auth_profile(self, session_id: str, profile_name: str) -> dict[str, Any]:
         session = await self.get_session(session_id)
         async with session.lock:
+            try:
+                await self._ensure_witness_remote_ready(session, action="save_auth_profile")
+            except PermissionError as exc:
+                await self._record_witness_receipt(
+                    session,
+                    event_type="auth_profile",
+                    status="blocked",
+                    action="save_auth_profile",
+                    action_class="auth",
+                    target={"profile_name": profile_name},
+                    metadata={"error": str(exc)},
+                )
+                raise
             witness_outcome = self.witness_policy.evaluate_action(
                 session=self._witness_session_context(session),
                 action=WitnessActionContext(
@@ -3090,6 +3138,7 @@ class BrowserManager:
                 target={"profile_name": payload["profile_name"]},
                 metadata={"saved_to": payload["saved_to"]},
             )
+            payload["session"] = await self._session_summary(session)
             await self._persist_session(session, status="active")
             return payload
 
@@ -3156,6 +3205,7 @@ class BrowserManager:
             action_class="control",
             target={"reason": reason},
         )
+        payload["session"] = await self._session_summary(session)
         await self._persist_session(session, status="active")
         return payload
 
@@ -3241,7 +3291,6 @@ class BrowserManager:
                         logger.warning("failed to close isolated browser for session %s: %s", session_id, exc)
                 if session.runtime is not None:
                     await self.runtime_provisioner.release(session.runtime)
-            await self.session_store.upsert(SessionRecord.model_validate(summary))
             self.sessions.pop(session_id, None)
             await self.audit.append(
                 event_type="session_closed",
@@ -3266,6 +3315,8 @@ class BrowserManager:
                     "browser_node": session.browser_node_name,
                 },
             )
+            summary["witness_remote"] = session.witness_remote_state.model_dump()
+            await self.session_store.upsert(SessionRecord.model_validate(summary))
             return {"closed": True, "trace_path": str(session.trace_path), "session": summary}
 
     async def _maybe_provision_session_tunnel(self, session: BrowserSession) -> None:
@@ -3296,6 +3347,10 @@ class BrowserManager:
     ) -> dict[str, Any]:
         async with session.lock:
             witness_context = self._consume_witness_context(session)
+            action_class = self._witness_action_class(
+                action_name,
+                risk_category=witness_context.get("risk_category"),
+            )
             witness_outcome = self.witness_policy.evaluate_action(
                 session=self._witness_session_context(session),
                 action=self._build_witness_action_context(
@@ -3306,6 +3361,8 @@ class BrowserManager:
             )
             before = await self._light_snapshot(session, label=f"before-{action_name}")
             try:
+                if action_class != "read":
+                    await self._ensure_witness_remote_ready(session, action=action_name)
                 if witness_outcome.should_block:
                     raise PermissionError(witness_outcome.block_reason or "Witness policy blocked this action")
                 await operation()
@@ -3368,10 +3425,7 @@ class BrowserManager:
                     event_type="browser_action",
                     status="blocked",
                     action=action_name,
-                    action_class=self._witness_action_class(
-                        action_name,
-                        risk_category=witness_context.get("risk_category"),
-                    ),
+                    action_class=action_class,
                     risk_category=witness_context.get("risk_category"),
                     target=target,
                     outcome=witness_outcome,
@@ -3423,10 +3477,7 @@ class BrowserManager:
                     event_type="browser_action",
                     status="failed",
                     action=action_name,
-                    action_class=self._witness_action_class(
-                        action_name,
-                        risk_category=witness_context.get("risk_category"),
-                    ),
+                    action_class=action_class,
                     risk_category=witness_context.get("risk_category"),
                     target=target,
                     outcome=witness_outcome,
@@ -3471,10 +3522,7 @@ class BrowserManager:
                     event_type="browser_action",
                     status="failed",
                     action=action_name,
-                    action_class=self._witness_action_class(
-                        action_name,
-                        risk_category=witness_context.get("risk_category"),
-                    ),
+                    action_class=action_class,
                     risk_category=witness_context.get("risk_category"),
                     target=target,
                     outcome=witness_outcome,
@@ -3525,10 +3573,7 @@ class BrowserManager:
                 event_type="browser_action",
                 status="ok",
                 action=action_name,
-                action_class=self._witness_action_class(
-                    action_name,
-                    risk_category=witness_context.get("risk_category"),
-                ),
+                action_class=action_class,
                 risk_category=witness_context.get("risk_category"),
                 target=target,
                 outcome=witness_outcome,
@@ -3855,6 +3900,46 @@ class BrowserManager:
         receipts = await self.witness.list(session_id, limit=limit)
         return [item.model_dump() for item in receipts]
 
+    def _initial_witness_remote_state(self, protection_mode: str) -> WitnessRemoteState:
+        configured = bool(self.settings.witness_enabled and self.witness_remote.enabled)
+        return WitnessRemoteState(
+            configured=configured,
+            required=self._witness_remote_required_for_profile(protection_mode),
+            tenant_id=self.settings.witness_remote_tenant_id,
+            status="idle" if configured else "disabled",
+        )
+
+    def _witness_remote_required_for_profile(self, protection_mode: str) -> bool:
+        return bool(
+            self.settings.witness_enabled
+            and protection_mode == "confidential"
+            and self.settings.witness_remote_required_for_confidential
+        )
+
+    async def _ensure_witness_remote_ready(self, session: BrowserSession, *, action: str) -> None:
+        if not session.witness_remote_state.required:
+            return
+        checked_at = utc_now()
+        if not self.witness_remote.enabled:
+            session.witness_remote_state.status = "failed"
+            session.witness_remote_state.last_checked_at = checked_at
+            session.witness_remote_state.last_error = (
+                "Confidential session requires hosted Witness delivery, but WITNESS_REMOTE_URL is not configured."
+            )
+            raise PermissionError(session.witness_remote_state.last_error)
+        try:
+            await self.witness_remote.healthz()
+        except Exception as exc:
+            session.witness_remote_state.status = "failed"
+            session.witness_remote_state.last_checked_at = checked_at
+            session.witness_remote_state.last_error = (
+                f"Hosted Witness preflight failed before {action}: {exc}"
+            )
+            raise PermissionError(session.witness_remote_state.last_error) from exc
+        session.witness_remote_state.status = "healthy"
+        session.witness_remote_state.last_checked_at = checked_at
+        session.witness_remote_state.last_error = None
+
     def _auth_material_encryption_ready(self) -> bool:
         return bool(self.auth_state.require_encryption or self.auth_state.encryption_enabled)
 
@@ -3889,28 +3974,54 @@ class BrowserManager:
         if not self.settings.witness_enabled:
             return
         policy = outcome or WitnessPolicyOutcome(profile=session.protection_mode)  # type: ignore[arg-type]
-        await self.witness.record(
-            session.id,
-            profile=session.protection_mode,  # type: ignore[arg-type]
-            event_type=event_type,
-            status=status,
-            action=action,
-            action_class=action_class,  # type: ignore[arg-type]
-            session_id=session.id,
-            risk_category=risk_category,
-            operator=get_current_operator(),
-            approval=approval or WitnessApproval(),
-            target=self.witness_policy.redact_target(target or {}, evidence_mode=policy.evidence_mode),
-            concerns=policy.concerns,
-            evidence_mode=policy.evidence_mode,
-            evidence=WitnessEvidence(
+        payload = {
+            "profile": session.protection_mode,  # type: ignore[arg-type]
+            "event_type": event_type,
+            "status": status,
+            "action": action,
+            "action_class": action_class,  # type: ignore[arg-type]
+            "session_id": session.id,
+            "risk_category": risk_category,
+            "operator": get_current_operator(),
+            "approval": approval or WitnessApproval(),
+            "target": self.witness_policy.redact_target(target or {}, evidence_mode=policy.evidence_mode),
+            "concerns": policy.concerns,
+            "evidence_mode": policy.evidence_mode,
+            "evidence": WitnessEvidence(
                 before=before if policy.evidence_mode == "standard" else None,
                 after=after if policy.evidence_mode == "standard" else None,
                 verification=verification,
                 artifacts={},
             ),
-            metadata=metadata or {},
-        )
+            "metadata": metadata or {},
+        }
+        recorded = await self.witness.record(session.id, **payload)
+        if not self.witness_remote.enabled:
+            return
+        attempted_at = utc_now()
+        try:
+            await self.witness_remote.record(
+                session.id,
+                recorded.model_dump(
+                    mode="json",
+                    exclude={"receipt_id", "scope", "chain_prev_hash", "chain_hash"},
+                ),
+            )
+        except Exception as exc:
+            session.witness_remote_state.status = "failed"
+            session.witness_remote_state.last_attempted_at = attempted_at
+            session.witness_remote_state.last_error = str(exc)
+            logger.warning(
+                "witness remote delivery failed for session %s action %s: %s",
+                session.id,
+                action,
+                exc,
+            )
+            return
+        session.witness_remote_state.status = "delivered"
+        session.witness_remote_state.last_attempted_at = attempted_at
+        session.witness_remote_state.last_delivered_at = attempted_at
+        session.witness_remote_state.last_error = None
 
     async def _record_session_witness_receipt(
         self,
@@ -4106,6 +4217,7 @@ class BrowserManager:
             "last_action": session.last_action,
             "trace_path": str(session.trace_path),
             "protection_mode": session.protection_mode,
+            "witness_remote": session.witness_remote_state.model_dump(),
         }
 
     async def get_session_summary(self, session_id: str) -> dict[str, Any]:

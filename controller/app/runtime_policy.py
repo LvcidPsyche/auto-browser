@@ -177,6 +177,21 @@ def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
                 "WITNESS_PROTECTION_MODE_DEFAULT=confidential should be paired with REQUIRE_AUTH_STATE_ENCRYPTION=true"
             )
 
+    if settings.witness_remote_required_for_confidential:
+        if not settings.witness_remote_url:
+            message = (
+                "WITNESS_REMOTE_REQUIRED_FOR_CONFIDENTIAL=true requires WITNESS_REMOTE_URL; "
+                "confidential sessions cannot guarantee hosted Witness delivery without it"
+            )
+            if settings.witness_protection_mode_default == "confidential":
+                report.errors.append(message)
+            else:
+                report.warnings.append(message)
+        elif not settings.witness_remote_verify_tls and settings.app_env == "production":
+            report.warnings.append(
+                "WITNESS_REMOTE_VERIFY_TLS=false weakens hosted Witness transport integrity in production"
+            )
+
     takeover_host = (urlparse(settings.takeover_url).hostname or "").strip().lower()
     if takeover_host in LOCAL_HOSTS and not settings.isolated_tunnel_enabled:
         report.warnings.append(
