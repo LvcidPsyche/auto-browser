@@ -38,16 +38,12 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_REQUIRED_FIELDS = {"server"}
-_PASSWORD_MASK = "[MASKED]"
-
 
 class ProxyPersonaStore:
     """Read/write proxy personas from a JSON config file."""
 
     def __init__(self, file_path: str | Path | None):
         self._path = Path(file_path) if file_path else None
-        self._cache: dict[str, dict[str, Any]] | None = None
 
     def _load(self) -> dict[str, dict[str, Any]]:
         if self._path is None:
@@ -59,7 +55,15 @@ class ProxyPersonaStore:
             if not isinstance(data, dict):
                 logger.warning("proxy persona file is not a JSON object: %s", self._path)
                 return {}
-            return data
+            normalized: dict[str, dict[str, Any]] = {}
+            for raw_name, raw_persona in data.items():
+                try:
+                    name, persona = self._normalize_persona(raw_name, raw_persona)
+                except ValueError as exc:
+                    logger.warning("skipping invalid proxy persona entry %r in %s: %s", raw_name, self._path, exc)
+                    continue
+                normalized[name] = persona
+            return normalized
         except Exception as exc:
             logger.warning("failed to load proxy persona file %s: %s", self._path, exc)
             return {}
@@ -68,7 +72,37 @@ class ProxyPersonaStore:
         if self._path is None:
             raise RuntimeError("No PROXY_PERSONA_FILE configured — cannot save proxy personas")
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp_path = self._path.with_suffix(f"{self._path.suffix}.tmp")
+        tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        tmp_path.replace(self._path)
+
+    @staticmethod
+    def _normalize_persona(name: Any, persona: Any) -> tuple[str, dict[str, Any]]:
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("persona name must be a non-empty string")
+        if not isinstance(persona, dict):
+            raise ValueError("persona entry must be an object")
+
+        normalized_name = name.strip()
+        server = str(persona.get("server") or "").strip()
+        if not server:
+            raise ValueError("persona server is required")
+
+        username_raw = persona.get("username")
+        username = None if username_raw is None else str(username_raw).strip() or None
+        password_raw = persona.get("password")
+        password = None if password_raw is None else str(password_raw)
+        if password == "":
+            password = None
+        description_raw = persona.get("description", "")
+        description = str(description_raw).strip() if description_raw is not None else ""
+
+        return normalized_name, {
+            "server": server,
+            "username": username,
+            "password": password,
+            "description": description,
+        }
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -83,7 +117,7 @@ class ProxyPersonaStore:
                 "has_password": bool(persona.get("password")),
                 "description": persona.get("description", ""),
             }
-            for name, persona in data.items()
+            for name, persona in sorted(data.items())
         ]
 
     def get_persona(self, name: str) -> dict[str, Any]:
@@ -105,24 +139,24 @@ class ProxyPersonaStore:
         description: str = "",
     ) -> dict[str, Any]:
         """Create or update a proxy persona. Returns the new summary."""
-        if not name or not name.strip():
-            raise ValueError("Persona name cannot be empty")
-        if not server:
-            raise ValueError("Persona server is required")
+        normalized_name, normalized_persona = self._normalize_persona(
+            name,
+            {
+                "server": server,
+                "username": username,
+                "password": password,
+                "description": description,
+            },
+        )
         data = self._load()
-        data[name] = {
-            "server": server,
-            "username": username,
-            "password": password,
-            "description": description,
-        }
+        data[normalized_name] = normalized_persona
         self._save(data)
         return {
-            "name": name,
-            "server": server,
-            "username": username,
-            "has_password": bool(password),
-            "description": description,
+            "name": normalized_name,
+            "server": normalized_persona["server"],
+            "username": normalized_persona["username"],
+            "has_password": bool(normalized_persona["password"]),
+            "description": normalized_persona["description"],
         }
 
     def delete_persona(self, name: str) -> bool:

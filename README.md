@@ -91,7 +91,7 @@ make help
 
 The `v0.5.3` release shipped with 160 passing tests.
 
-Current `main` also adds hosted Witness forwarding and the controller suite is now at 165 passing tests.
+Current `main` also adds hosted Witness forwarding and the controller suite is now at 211 passing tests.
 
 ---
 

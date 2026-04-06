@@ -10,6 +10,7 @@ Job schema:
   {
     "id":          str (uuid hex),
     "name":        str,
+    "provider":    str,
     "schedule":    str (cron expr, e.g. "0 9 * * 1-5") or null for webhook-only,
     "enabled":     bool,
     "webhook_key": str | null (secret key for POST /crons/{id}/trigger),
@@ -98,6 +99,7 @@ class CronService:
         *,
         name: str,
         goal: str,
+        provider: str = "openai",
         schedule: str | None = None,
         start_url: str | None = None,
         auth_profile: str | None = None,
@@ -117,6 +119,7 @@ class CronService:
             job: dict[str, Any] = {
                 "id": job_id,
                 "name": name,
+                "provider": provider,
                 "schedule": schedule,
                 "enabled": enabled,
                 "webhook_key": webhook_key,
@@ -153,7 +156,7 @@ class CronService:
             if job_id not in jobs:
                 raise KeyError(f"Cron job not found: {job_id}")
             job = jobs[job_id]
-            allowed = {"name", "goal", "schedule", "enabled", "start_url",
+            allowed = {"name", "goal", "provider", "schedule", "enabled", "start_url",
                        "auth_profile", "proxy_persona", "max_steps"}
             for k, v in updates.items():
                 if k in allowed:
@@ -251,11 +254,13 @@ class CronService:
             name=f"cron-{job_id}",
             start_url=job.get("start_url"),
             auth_profile=job.get("auth_profile"),
+            proxy_persona=job.get("proxy_persona"),
         )
         session_id = session_result["id"]
 
         # Enqueue agent run
         run_request = AgentRunRequest(
+            provider=job.get("provider") or "openai",
             goal=job["goal"],
             max_steps=job.get("max_steps", 20),
         )

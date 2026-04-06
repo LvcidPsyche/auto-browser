@@ -1,120 +1,220 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ProtectionMode = Literal["normal", "confidential"]
 WitnessRemoteStatus = Literal["disabled", "idle", "healthy", "delivered", "failed"]
 
+HTTP_URL_SCHEMES = ("http", "https")
+PROXY_URL_SCHEMES = ("http", "https", "socks5", "socks5h")
+CDP_URL_SCHEMES = ("http", "https", "ws", "wss")
 
-class _WithApproval(BaseModel):
+
+class StrictInputModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+def validate_url(
+    value: str,
+    *,
+    field_name: str,
+    allowed_schemes: tuple[str, ...],
+) -> str:
+    parsed = urlparse(value)
+    scheme = parsed.scheme.strip().lower()
+    if scheme not in allowed_schemes or not parsed.netloc:
+        supported = ", ".join(allowed_schemes)
+        raise ValueError(f"{field_name} must use one of: {supported}")
+    return value
+
+
+def validate_coordinate_pair(
+    x: float | None,
+    y: float | None,
+    *,
+    field_name: str,
+) -> None:
+    if (x is None) ^ (y is None):
+        raise ValueError(f"{field_name} requires both x and y coordinates")
+
+
+class _WithApproval(StrictInputModel):
     """Mixin that adds an optional approval_id field to action request models."""
 
-    approval_id: str | None = None
+    approval_id: str | None = Field(default=None, min_length=1, max_length=120)
 
 
-class CreateSessionRequest(BaseModel):
-    name: str | None = None
-    start_url: str | None = None
-    storage_state_path: str | None = None
-    auth_profile: str | None = None
-    proxy_server: str | None = None
-    proxy_username: str | None = None
-    proxy_password: str | None = None
-    user_agent: str | None = None
+class CreateSessionRequest(StrictInputModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    start_url: str | None = Field(default=None, min_length=1, max_length=2000)
+    storage_state_path: str | None = Field(default=None, min_length=1, max_length=500)
+    auth_profile: str | None = Field(default=None, min_length=1, max_length=120)
+    proxy_persona: str | None = Field(default=None, min_length=1, max_length=200)
+    proxy_server: str | None = Field(default=None, min_length=1, max_length=500)
+    proxy_username: str | None = Field(default=None, max_length=200)
+    proxy_password: str | None = Field(default=None, max_length=500, repr=False)
+    user_agent: str | None = Field(default=None, min_length=1, max_length=2000)
     protection_mode: ProtectionMode | None = None
-    totp_secret: str | None = Field(default=None, repr=False)
+    totp_secret: str | None = Field(default=None, max_length=500, repr=False)
 
     @model_validator(mode="after")
     def validate_auth_source(self) -> "CreateSessionRequest":
         if self.storage_state_path and self.auth_profile:
             raise ValueError("Provide auth_profile or storage_state_path, not both")
+        if self.proxy_persona and any((self.proxy_server, self.proxy_username, self.proxy_password)):
+            raise ValueError("Provide proxy_persona or explicit proxy_server credentials, not both")
+        if (self.proxy_username or self.proxy_password) and not self.proxy_server:
+            raise ValueError("proxy_username and proxy_password require proxy_server")
+        if self.start_url:
+            self.start_url = validate_url(
+                self.start_url,
+                field_name="start_url",
+                allowed_schemes=HTTP_URL_SCHEMES,
+            )
+        if self.proxy_server:
+            self.proxy_server = validate_url(
+                self.proxy_server,
+                field_name="proxy_server",
+                allowed_schemes=PROXY_URL_SCHEMES,
+            )
         return self
 
 
-class ClickRequest(BaseModel):
-    selector: str | None = None
-    element_id: str | None = None
+class ClickRequest(StrictInputModel):
+    selector: str | None = Field(default=None, min_length=1, max_length=2000)
+    element_id: str | None = Field(default=None, min_length=1, max_length=500)
     x: float | None = None
     y: float | None = None
 
+    @model_validator(mode="after")
+    def validate_target(self) -> "ClickRequest":
+        validate_coordinate_pair(self.x, self.y, field_name="click coordinates")
+        if not (self.selector or self.element_id or (self.x is not None and self.y is not None)):
+            raise ValueError("click requires element_id, selector, or x+y coordinates")
+        return self
 
-class TypeRequest(BaseModel):
-    selector: str | None = None
-    element_id: str | None = None
-    text: str
+
+class TypeRequest(StrictInputModel):
+    selector: str | None = Field(default=None, min_length=1, max_length=2000)
+    element_id: str | None = Field(default=None, min_length=1, max_length=500)
+    text: str = Field(min_length=1, max_length=5000)
     clear_first: bool = True
     sensitive: bool = False
 
+    @model_validator(mode="after")
+    def validate_target(self) -> "TypeRequest":
+        if not (self.selector or self.element_id):
+            raise ValueError("type requires element_id or selector")
+        return self
 
-class PressRequest(BaseModel):
-    key: str
+
+class PressRequest(StrictInputModel):
+    key: str = Field(min_length=1, max_length=120)
 
 
-class ScrollRequest(BaseModel):
+class ScrollRequest(StrictInputModel):
     delta_x: float = 0
     delta_y: float = 600
 
 
-class SelectOptionRequest(BaseModel):
-    selector: str | None = None
-    element_id: str | None = None
-    value: str | None = None
-    label: str | None = None
+class SelectOptionRequest(StrictInputModel):
+    selector: str | None = Field(default=None, min_length=1, max_length=2000)
+    element_id: str | None = Field(default=None, min_length=1, max_length=500)
+    value: str | None = Field(default=None, max_length=1000)
+    label: str | None = Field(default=None, max_length=1000)
     index: int | None = Field(default=None, ge=0)
 
+    @model_validator(mode="after")
+    def validate_choice(self) -> "SelectOptionRequest":
+        if not (self.selector or self.element_id):
+            raise ValueError("select_option requires element_id or selector")
+        if self.value is None and self.label is None and self.index is None:
+            raise ValueError("select_option requires value, label, or index")
+        return self
 
-class HoverRequest(BaseModel):
-    selector: str | None = None
-    element_id: str | None = None
+
+class HoverRequest(StrictInputModel):
+    selector: str | None = Field(default=None, min_length=1, max_length=2000)
+    element_id: str | None = Field(default=None, min_length=1, max_length=500)
     x: float | None = None
     y: float | None = None
 
+    @model_validator(mode="after")
+    def validate_target(self) -> "HoverRequest":
+        validate_coordinate_pair(self.x, self.y, field_name="hover coordinates")
+        if not (self.selector or self.element_id or (self.x is not None and self.y is not None)):
+            raise ValueError("hover requires element_id, selector, or x+y coordinates")
+        return self
 
-class WaitRequest(BaseModel):
+
+class WaitRequest(StrictInputModel):
     wait_ms: int = Field(default=0, ge=0, le=30000, description="Milliseconds to wait (max 30s)")
 
 
-class NavigateRequest(BaseModel):
-    url: str
+class NavigateRequest(StrictInputModel):
+    url: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("url")
+    @classmethod
+    def validate_navigation_url(cls, value: str) -> str:
+        return validate_url(value, field_name="url", allowed_schemes=HTTP_URL_SCHEMES)
 
 
 class UploadRequest(_WithApproval):
-    selector: str | None = None
-    element_id: str | None = None
-    file_path: str
+    selector: str | None = Field(default=None, min_length=1, max_length=2000)
+    element_id: str | None = Field(default=None, min_length=1, max_length=500)
+    file_path: str = Field(min_length=1, max_length=500)
     approved: bool = False
 
+    @model_validator(mode="after")
+    def validate_target(self) -> "UploadRequest":
+        if not (self.selector or self.element_id):
+            raise ValueError("upload requires element_id or selector")
+        return self
 
-class SaveStorageStateRequest(BaseModel):
-    path: str = Field(description="Relative path inside /data/auth")
+
+class SaveStorageStateRequest(StrictInputModel):
+    path: str = Field(min_length=1, max_length=500, description="Relative path inside /data/auth")
 
 
-class SaveAuthProfileRequest(BaseModel):
+class SaveAuthProfileRequest(StrictInputModel):
     profile_name: str = Field(min_length=1, max_length=120)
 
 
-class HumanTakeoverRequest(BaseModel):
-    reason: str = "Manual review requested"
+class HumanTakeoverRequest(StrictInputModel):
+    reason: str = Field(default="Manual review requested", min_length=1, max_length=500)
 
 
-class ScreenshotRequest(BaseModel):
+class ScreenshotRequest(StrictInputModel):
     label: str = Field(default="manual", min_length=1, max_length=120)
 
 
-class ExecuteActionRequest(BaseModel):
-    approval_id: str | None = None
+class ShareSessionRequest(StrictInputModel):
+    ttl_minutes: int = Field(default=60, ge=1, le=1440)
+
+
+class ExecuteActionRequest(StrictInputModel):
+    approval_id: str | None = Field(default=None, min_length=1, max_length=120)
     action: "BrowserActionDecision"
 
 
-class TabIndexRequest(BaseModel):
+class TabIndexRequest(StrictInputModel):
     index: int = Field(ge=0)
 
 
-class OpenTabRequest(BaseModel):
-    url: str | None = None
+class OpenTabRequest(StrictInputModel):
+    url: str | None = Field(default=None, min_length=1, max_length=2000)
     activate: bool = True
+
+    @field_validator("url")
+    @classmethod
+    def validate_open_tab_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_url(value, field_name="url", allowed_schemes=HTTP_URL_SCHEMES)
 
 
 class SessionEnvelope(BaseModel):
@@ -132,13 +232,13 @@ class ActionEnvelope(BaseModel):
 PerceptionPreset = Literal["fast", "normal", "rich"]
 
 
-class ObserveRequest(BaseModel):
+class ObserveRequest(StrictInputModel):
     preset: PerceptionPreset = "normal"
     limit: int = Field(default=40, ge=1, le=200)
 
 
-class ImportAuthProfileRequest(BaseModel):
-    archive_path: str
+class ImportAuthProfileRequest(StrictInputModel):
+    archive_path: str = Field(min_length=1, max_length=500)
     overwrite: bool = False
 
 
@@ -194,35 +294,36 @@ AgentJobKind = Literal["agent_step", "agent_run"]
 AgentJobStatus = Literal["queued", "running", "completed", "failed", "interrupted"]
 
 
-class BrowserActionDecision(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class BrowserActionDecision(StrictInputModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     action: ActionName
     reason: str = Field(min_length=1, max_length=1000)
     confidence: float | None = Field(default=None, ge=0, le=1)
     risk_category: RiskCategory | None = None
-    element_id: str | None = None
-    selector: str | None = None
+    element_id: str | None = Field(default=None, min_length=1, max_length=500)
+    selector: str | None = Field(default=None, min_length=1, max_length=2000)
     x: float | None = None
     y: float | None = None
-    text: str | None = None
+    text: str | None = Field(default=None, min_length=1, max_length=5000)
     clear_first: bool = True
     sensitive: bool = False
-    key: str | None = None
-    value: str | None = None
-    label: str | None = None
+    key: str | None = Field(default=None, min_length=1, max_length=120)
+    value: str | None = Field(default=None, max_length=1000)
+    label: str | None = Field(default=None, max_length=1000)
     index: int | None = Field(default=None, ge=0)
     delta_x: float = 0
     delta_y: float = 600
     wait_ms: int = Field(default=1000, ge=0, le=30000)
-    url: str | None = None
-    file_path: str | None = None
-    recipient: str | None = None
-    platform: str | None = None
-    username: str | None = None
+    url: str | None = Field(default=None, min_length=1, max_length=2000)
+    file_path: str | None = Field(default=None, min_length=1, max_length=500)
+    recipient: str | None = Field(default=None, min_length=1, max_length=200)
+    platform: str | None = Field(default=None, min_length=1, max_length=120)
+    username: str | None = Field(default=None, min_length=1, max_length=500)
 
     @model_validator(mode="after")
     def validate_action_requirements(self) -> "BrowserActionDecision":
+        validate_coordinate_pair(self.x, self.y, field_name=f"{self.action} coordinates")
         if self.risk_category is None:
             if self.action in {"navigate", "hover", "scroll", "wait", "reload", "go_back", "go_forward", "done"}:
                 self.risk_category = "read"
@@ -273,8 +374,10 @@ class BrowserActionDecision(BaseModel):
                 raise ValueError("social_login requires username")
         if self.action == "press" and not self.key:
             raise ValueError("press requires key")
-        if self.action == "navigate" and not self.url:
-            raise ValueError("navigate requires url")
+        if self.action == "navigate":
+            if not self.url:
+                raise ValueError("navigate requires url")
+            self.url = validate_url(self.url, field_name="url", allowed_schemes=HTTP_URL_SCHEMES)
         if self.action == "upload":
             if not has_locator_target:
                 raise ValueError("upload requires element_id or selector")
@@ -283,14 +386,14 @@ class BrowserActionDecision(BaseModel):
         return self
 
 
-class AgentStepRequest(BaseModel):
+class AgentStepRequest(StrictInputModel):
     provider: ProviderName
     goal: str = Field(min_length=1, max_length=4000)
     provider_model: str | None = None
     observation_limit: int = Field(default=40, ge=1, le=100)
     context_hints: str | None = Field(default=None, max_length=4000)
     upload_approved: bool = False
-    approval_id: str | None = None
+    approval_id: str | None = Field(default=None, min_length=1, max_length=120)
 
 
 class AgentRunRequest(AgentStepRequest):
@@ -353,7 +456,7 @@ class ApprovalRecord(BaseModel):
     executed_at: str | None = None
 
 
-class ApprovalDecisionRequest(BaseModel):
+class ApprovalDecisionRequest(StrictInputModel):
     comment: str | None = Field(default=None, max_length=2000)
 
 
@@ -391,6 +494,7 @@ class SessionRecord(BaseModel):
     downloads: list[dict[str, Any]] = Field(default_factory=list)
     last_action: str | None = None
     trace_path: str | None = None
+    proxy_persona: str | None = None
     protection_mode: ProtectionMode = "normal"
     witness_remote: WitnessRemoteState = Field(default_factory=WitnessRemoteState)
 
@@ -443,12 +547,12 @@ class McpToolCallResponse(BaseModel):
     isError: bool = False
 
 
-class SocialScrollRequest(BaseModel):
+class SocialScrollRequest(StrictInputModel):
     direction: Literal["down", "up"] = "down"
     screens: int = Field(default=3, ge=1, le=20)
 
 
-class SocialScrapeRequest(BaseModel):
+class SocialScrapeRequest(StrictInputModel):
     limit: int = Field(default=20, ge=1, le=100)
 
 
@@ -490,11 +594,11 @@ class SocialLoginRequest(_WithApproval):
     totp_secret: str | None = Field(default=None, max_length=500, repr=False)
 
 
-class SocialSearchRequest(BaseModel):
+class SocialSearchRequest(StrictInputModel):
     query: str = Field(min_length=1, max_length=500)
 
 
-class SocialScrapeCommentsRequest(BaseModel):
+class SocialScrapeCommentsRequest(StrictInputModel):
     limit: int = Field(default=20, ge=1, le=100)
 
 

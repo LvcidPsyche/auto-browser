@@ -733,6 +733,7 @@ class McpToolGateway:
             start_url=payload.start_url,
             storage_state_path=payload.storage_state_path,
             auth_profile=payload.auth_profile,
+            proxy_persona=payload.proxy_persona,
             request_proxy_server=payload.proxy_server,
             request_proxy_username=payload.proxy_username,
             request_proxy_password=payload.proxy_password,
@@ -748,7 +749,7 @@ class McpToolGateway:
         return await self.manager.get_session_record(payload.session_id)
 
     async def _observe(self, payload: ObserveInput) -> dict[str, Any]:
-        return await self.manager.observe(payload.session_id, limit=payload.limit)
+        return await self.manager.observe(payload.session_id, limit=payload.limit, preset=payload.preset)
 
     async def _screenshot(self, payload: ScreenshotInput) -> dict[str, Any]:
         return await self.manager.capture_screenshot(payload.session_id, label=payload.label)
@@ -1122,6 +1123,7 @@ class McpToolGateway:
         return await self.cron_service.create_job(
             name=payload.name,
             goal=payload.goal,
+            provider=payload.provider,
             schedule=payload.schedule,
             start_url=payload.start_url,
             auth_profile=payload.auth_profile,

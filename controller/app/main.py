@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -8,6 +9,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from pydantic import ValidationError
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
@@ -39,6 +41,7 @@ from .models import (
     PressRequest,
     SaveAuthProfileRequest,
     SaveStorageStateRequest,
+    ShareSessionRequest,
     ScreenshotRequest,
     ScrollRequest,
     SelectOptionRequest,
@@ -64,6 +67,7 @@ from .rate_limits import SlidingWindowRateLimiter, build_rate_limit_key, is_exem
 from .runtime_policy import validate_runtime_policy
 from .session_share import SessionShareManager
 from .social_errors import SocialActionError
+from .tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, TriggerCronJobInput
 from .tool_gateway import McpToolGateway
 from .vision_target import VisionTargeter
 
@@ -73,7 +77,8 @@ logger = logging.getLogger(__name__)
 _VERSION = "0.5.3"
 
 settings = get_settings()
-manager = BrowserManager(settings)
+proxy_store = ProxyPersonaStore(settings.proxy_persona_file)
+manager = BrowserManager(settings, proxy_store=proxy_store)
 providers = ProviderRegistry(settings)
 orchestrator = BrowserOrchestrator(manager, providers)
 job_queue = AgentJobQueue(
@@ -92,7 +97,6 @@ share_manager = SessionShareManager(
     secret=settings.share_token_secret,
     ttl_minutes=settings.share_token_ttl_minutes,
 )
-proxy_store = ProxyPersonaStore(settings.proxy_persona_file)
 vision_targeter = VisionTargeter.from_settings(settings)
 tool_gateway = McpToolGateway(
     manager=manager,
@@ -416,6 +420,7 @@ async def create_session(payload: CreateSessionRequest) -> dict:
             start_url=payload.start_url,
             storage_state_path=payload.storage_state_path,
             auth_profile=payload.auth_profile,
+            proxy_persona=payload.proxy_persona,
             request_proxy_server=payload.proxy_server,
             request_proxy_username=payload.proxy_username,
             request_proxy_password=payload.proxy_password,
@@ -1144,15 +1149,17 @@ async def fork_session(session_id: str, name: str | None = None, start_url: str 
 
 
 @app.post("/sessions/{session_id}/share")
-async def share_session(session_id: str, request: Request) -> dict:
-    body: dict = {}
+async def share_session(session_id: str, payload: ShareSessionRequest | None = None) -> dict:
     try:
-        body = await request.json()
-    except Exception:
-        pass
-    ttl_minutes: int = int(body.get("ttl_minutes", 60))
-    await manager.get_session(session_id)  # raises KeyError → 404 if missing
-    return share_manager.create_token(session_id, ttl_seconds=ttl_minutes * 60)
+        await manager.get_session(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+    ttl_minutes = payload.ttl_minutes if payload is not None else 60
+    try:
+        return share_manager.create_token(session_id, ttl_seconds=ttl_minutes * 60)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/share/{token}/observe")
@@ -1161,7 +1168,178 @@ async def shared_observe(token: str) -> dict:
     info = share_manager.token_info(token)
     if not info.get("valid"):
         raise HTTPException(status_code=403, detail=info.get("error", "Invalid token"))
-    return await manager.observe(info["session_id"])
+    try:
+        return await manager.observe(info["session_id"])
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {info['session_id']}") from exc
+
+
+@app.get("/share/{token}", response_class=HTMLResponse)
+async def shared_session_view(token: str) -> HTMLResponse:
+    """Lightweight observer page for a shared session token."""
+    info = share_manager.token_info(token)
+    if not info.get("valid"):
+        raise HTTPException(status_code=403, detail=info.get("error", "Invalid token"))
+    try:
+        await manager.get_session(info["session_id"])
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {info['session_id']}") from exc
+
+    token_json = json.dumps(token)
+    session_id_json = json.dumps(info["session_id"])
+    html = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Shared Session {info["session_id"]}</title>
+    <style>
+      :root {{
+        color-scheme: dark;
+        --bg: #111418;
+        --panel: #1a2027;
+        --panel-border: #2b3440;
+        --text: #f5f7fa;
+        --muted: #9aa6b2;
+        --accent: #7dd3fc;
+      }}
+      * {{ box-sizing: border-box; }}
+      body {{
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+        background:
+          radial-gradient(circle at top, rgba(125, 211, 252, 0.16), transparent 28%),
+          linear-gradient(180deg, #0b0f14, var(--bg));
+        color: var(--text);
+      }}
+      main {{
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 24px;
+      }}
+      header {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 18px;
+      }}
+      h1 {{
+        margin: 0;
+        font-size: 1.2rem;
+      }}
+      .meta {{
+        color: var(--muted);
+        font-size: 0.95rem;
+      }}
+      .panel {{
+        background: rgba(26, 32, 39, 0.92);
+        border: 1px solid var(--panel-border);
+        border-radius: 18px;
+        overflow: hidden;
+        box-shadow: 0 18px 40px rgba(0, 0, 0, 0.24);
+      }}
+      .toolbar {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 18px;
+        border-bottom: 1px solid var(--panel-border);
+      }}
+      .status {{
+        color: var(--muted);
+        font-size: 0.95rem;
+      }}
+      .status strong {{
+        color: var(--accent);
+      }}
+      .frame {{
+        aspect-ratio: 16 / 10;
+        width: 100%;
+        background: #0b0f14;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }}
+      img {{
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        display: block;
+      }}
+      .error {{
+        padding: 24px;
+        color: #fecaca;
+      }}
+      a {{
+        color: var(--accent);
+      }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>Shared Session Observer</h1>
+          <div class="meta">Session <code id="session-id"></code></div>
+        </div>
+        <div class="meta" id="url">Waiting for first snapshot…</div>
+      </header>
+      <section class="panel">
+        <div class="toolbar">
+          <div class="status"><strong id="state">Connecting</strong> <span id="detail">Fetching shared observe payload…</span></div>
+          <div class="meta" id="updated">Never updated</div>
+        </div>
+        <div class="frame" id="frame">
+          <div class="meta">Loading screenshot…</div>
+        </div>
+      </section>
+    </main>
+    <script>
+      const token = {token_json};
+      const sessionId = {session_id_json};
+      const observeUrl = `/share/${{token}}/observe`;
+      const imageEl = document.createElement("img");
+      const frameEl = document.getElementById("frame");
+      const stateEl = document.getElementById("state");
+      const detailEl = document.getElementById("detail");
+      const updatedEl = document.getElementById("updated");
+      const urlEl = document.getElementById("url");
+      document.getElementById("session-id").textContent = sessionId;
+
+      async function refresh() {{
+        try {{
+          const response = await fetch(observeUrl, {{ cache: "no-store" }});
+          if (!response.ok) {{
+            throw new Error(`HTTP ${{response.status}}`);
+          }}
+          const payload = await response.json();
+          imageEl.src = `${{payload.screenshot_url}}?ts=${{Date.now()}}`;
+          imageEl.alt = payload.title || payload.url || sessionId;
+          if (!imageEl.isConnected) {{
+            frameEl.replaceChildren(imageEl);
+          }}
+          stateEl.textContent = "Live";
+          detailEl.textContent = payload.title || "Shared observe payload loaded";
+          urlEl.innerHTML = payload.url ? `<a href="${{payload.url}}" target="_blank" rel="noreferrer">${{payload.url}}</a>` : "No URL available";
+          updatedEl.textContent = `Updated ${{new Date().toLocaleTimeString()}}`;
+        }} catch (error) {{
+          frameEl.innerHTML = `<div class="error">Unable to refresh shared session: ${{error.message}}</div>`;
+          stateEl.textContent = "Error";
+          detailEl.textContent = "Retrying every 5 seconds";
+          updatedEl.textContent = `Last attempt ${{new Date().toLocaleTimeString()}}`;
+        }}
+      }}
+
+      refresh();
+      setInterval(refresh, 5000);
+    </script>
+  </body>
+</html>"""
+    return HTMLResponse(content=html)
 
 
 @app.post("/sessions/{session_id}/shadow-browse")
@@ -1247,15 +1425,14 @@ async def list_proxy_personas() -> list:
 
 
 @app.post("/proxy-personas")
-async def set_proxy_persona(payload: dict) -> dict:
+async def set_proxy_persona(payload: CreateProxyPersonaInput) -> dict:
     try:
-        name = payload.get("name", "")
         return proxy_store.set_persona(
-            name,
-            server=payload.get("server", ""),
-            username=payload.get("username"),
-            password=payload.get("password"),
-            description=payload.get("description", ""),
+            payload.name,
+            server=payload.server,
+            username=payload.username,
+            password=payload.password,
+            description=payload.description,
         )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1284,16 +1461,21 @@ async def list_cron_jobs() -> list:
     return await cron_service.list_jobs()
 
 
-_CRON_JOB_FIELDS = frozenset(
-    {"name", "goal", "schedule", "start_url", "auth_profile", "proxy_persona", "max_steps", "enabled", "webhook_enabled"}
-)
-
-
 @app.post("/crons")
-async def create_cron_job(payload: dict) -> dict:
+async def create_cron_job(payload: CreateCronJobInput) -> dict:
     try:
-        filtered = {k: v for k, v in payload.items() if k in _CRON_JOB_FIELDS}
-        return await cron_service.create_job(**filtered)
+        return await cron_service.create_job(
+            name=payload.name,
+            goal=payload.goal,
+            provider=payload.provider,
+            schedule=payload.schedule,
+            start_url=payload.start_url,
+            auth_profile=payload.auth_profile,
+            proxy_persona=payload.proxy_persona,
+            max_steps=payload.max_steps,
+            enabled=payload.enabled,
+            webhook_enabled=payload.webhook_enabled,
+        )
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1314,11 +1496,13 @@ async def delete_cron_job(job_id: str) -> dict:
 @app.post("/crons/{job_id}/trigger")
 async def trigger_cron_job_via_webhook(job_id: str, request: Request) -> dict:
     """Webhook endpoint — requires webhook_key in request body."""
-    body = await request.json()
-    webhook_key = body.get("webhook_key", "")
     try:
-        return await cron_service.trigger_via_webhook(job_id, webhook_key)
+        body = await request.json()
+        payload = TriggerCronJobInput.model_validate({"job_id": job_id, **body})
+        return await cron_service.trigger_via_webhook(payload.job_id, payload.webhook_key or "")
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except (ValidationError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

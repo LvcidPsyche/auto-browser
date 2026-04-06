@@ -35,6 +35,8 @@ class SessionShareManager:
     """Issues and validates time-limited session share tokens."""
 
     def __init__(self, *, secret: str | None = None, ttl_minutes: int = 60):
+        if ttl_minutes <= 0:
+            raise ValueError("ttl_minutes must be positive")
         if not secret:
             # Auto-generate an ephemeral secret if none configured.
             # Tokens created with this secret won't survive server restarts.
@@ -67,15 +69,23 @@ class SessionShareManager:
               "expires_in_seconds": int,
             }
         """
-        exp = int(time.time()) + (ttl_seconds or self.ttl_seconds)
-        payload = {"session_id": session_id, "exp": exp, "scope": scope}
+        normalized_session_id = str(session_id).strip()
+        if not normalized_session_id:
+            raise ValueError("session_id must not be empty")
+        if scope != SCOPE_OBSERVE:
+            raise ValueError(f"unsupported share scope: {scope}")
+        effective_ttl = self.ttl_seconds if ttl_seconds is None else int(ttl_seconds)
+        if effective_ttl <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        exp = int(time.time()) + effective_ttl
+        payload = {"session_id": normalized_session_id, "exp": exp, "scope": scope}
         payload_json = json.dumps(payload, separators=(",", ":"))
         payload_b64 = base64.urlsafe_b64encode(payload_json.encode()).decode().rstrip("=")
         sig = self._sign(payload_b64)
         token = f"{payload_b64}.{sig}"
         return {
             "token": token,
-            "session_id": session_id,
+            "session_id": normalized_session_id,
             "scope": scope,
             "expires_at": exp,
             "expires_in_seconds": exp - int(time.time()),
@@ -104,19 +114,32 @@ class SessionShareManager:
                 raise ValueError("invalid token signature")
 
             # Decode payload
-            padding = "=" * (4 - len(payload_b64) % 4)
+            padding = "=" * (-len(payload_b64) % 4)
             payload_json = base64.urlsafe_b64decode(payload_b64 + padding).decode()
             payload = json.loads(payload_json)
 
         except (ValueError, KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"invalid share token: {exc}") from exc
 
+        session_id = str(payload.get("session_id") or "").strip()
+        if not session_id:
+            raise ValueError("invalid share token: token missing session_id")
+        scope = str(payload.get("scope") or "").strip()
+        if scope != SCOPE_OBSERVE:
+            raise ValueError("invalid share token: unsupported scope")
+        exp_raw = payload.get("exp")
+        if isinstance(exp_raw, bool):
+            raise ValueError("invalid share token: token exp must be an integer")
+        try:
+            exp = int(exp_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid share token: token exp must be an integer") from exc
+
         # Check expiry
-        exp = payload.get("exp", 0)
         if int(time.time()) > exp:
             raise ValueError("share token has expired")
 
-        return payload
+        return {"session_id": session_id, "exp": exp, "scope": scope}
 
     def token_info(self, token: str) -> dict[str, Any]:
         """Return token info without raising — sets 'valid' field."""

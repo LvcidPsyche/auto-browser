@@ -27,10 +27,9 @@ class RequestModelTests(unittest.TestCase):
         self.assertEqual(req.x, 100.0)
         self.assertEqual(req.y, 200.0)
 
-    def test_hover_request_all_optional(self) -> None:
-        # HoverRequest itself has no required fields — BrowserManager validates the combination
-        req = HoverRequest()
-        self.assertIsNone(req.selector)
+    def test_hover_request_requires_target(self) -> None:
+        with self.assertRaises(ValidationError):
+            HoverRequest()
 
     def test_wait_request_clamps_min(self) -> None:
         req = WaitRequest(wait_ms=0)

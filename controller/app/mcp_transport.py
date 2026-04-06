@@ -82,8 +82,6 @@ class McpHttpTransport:
             )
 
         method = payload.get("method")
-        if method is None:
-            return Response(status_code=202)
         if not isinstance(method, str) or not method:
             return self._json_error_response(payload.get("id"), -32600, "JSON-RPC method is required", status_code=400)
 

@@ -15,6 +15,10 @@ from app.models import McpToolCallContent, McpToolCallResponse
 class McpTransportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
+        self.manager = SimpleNamespace(
+            sessions={"session-1": object()},
+            list_sessions=AsyncMock(return_value=[{"id": "session-1", "status": "active"}]),
+        )
         self.gateway = SimpleNamespace(
             list_tools=lambda: [
                 {
@@ -38,6 +42,7 @@ class McpTransportTests(unittest.TestCase):
             server_version="0.2.0",
             allowed_origins=["https://allowed.example"],
             session_store_path=f"{self.tempdir.name}/mcp-sessions.json",
+            manager=self.manager,
         )
         app = FastAPI()
 
@@ -178,6 +183,7 @@ class McpTransportTests(unittest.TestCase):
             server_version="0.2.0",
             allowed_origins=["https://allowed.example"],
             session_store_path=f"{self.tempdir.name}/mcp-sessions.json",
+            manager=self.manager,
         )
         app = FastAPI()
 
@@ -194,6 +200,78 @@ class McpTransportTests(unittest.TestCase):
 
         self.assertEqual(list_response.status_code, 200)
         self.assertEqual(list_response.json()["result"]["tools"][0]["name"], "browser.observe")
+
+    def test_missing_method_returns_invalid_request_error(self) -> None:
+        response = self.client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 9, "params": {}},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(body["error"]["code"], -32600)
+        self.assertEqual(body["error"]["message"], "JSON-RPC method is required")
+
+    def test_resources_list_and_read_sessions_work_after_initialization(self) -> None:
+        session_id, protocol_version = self._initialize()
+        init_response = self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version},
+            json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+        )
+        self.assertEqual(init_response.status_code, 202)
+
+        list_response = self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version},
+            json={"jsonrpc": "2.0", "id": 10, "method": "resources/list", "params": {}},
+        )
+        self.assertEqual(list_response.status_code, 200)
+        resource_uris = {item["uri"] for item in list_response.json()["result"]["resources"]}
+        self.assertIn("browser://sessions", resource_uris)
+        self.assertIn("browser://session-1/console", resource_uris)
+
+        read_response = self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version},
+            json={
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "resources/read",
+                "params": {"uri": "browser://sessions"},
+            },
+        )
+        self.assertEqual(read_response.status_code, 200)
+        contents = read_response.json()["result"]["contents"]
+        self.assertEqual(len(contents), 1)
+        self.assertEqual(contents[0]["uri"], "browser://sessions")
+        self.assertEqual(contents[0]["mimeType"], "application/json")
+        self.assertEqual(contents[0]["text"], '[{"id": "session-1", "status": "active"}]')
+        self.manager.list_sessions.assert_awaited_once_with()
+
+    def test_resources_read_returns_not_found_error_for_unknown_uri(self) -> None:
+        session_id, protocol_version = self._initialize()
+        self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version},
+            json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+        )
+
+        read_response = self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version},
+            json={
+                "jsonrpc": "2.0",
+                "id": 12,
+                "method": "resources/read",
+                "params": {"uri": "browser://session-1/does-not-exist"},
+            },
+        )
+
+        self.assertEqual(read_response.status_code, 200)
+        body = read_response.json()
+        self.assertEqual(body["error"]["code"], -32002)
+        self.assertIn("Resource not found", body["error"]["message"])
 
 
 if __name__ == "__main__":

@@ -239,6 +239,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             start_url="https://example.com",
             storage_state_path=None,
             auth_profile="outlook-default",
+            proxy_persona=None,
             request_proxy_server="http://proxy.internal:8080",
             request_proxy_username="alice",
             request_proxy_password="secret",
@@ -246,6 +247,44 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             protection_mode="confidential",
             totp_secret="JBSWY3DPEHPK3PXP",
         )
+
+    async def test_create_session_forwards_proxy_persona(self) -> None:
+        response = await self.gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.create_session",
+                arguments={
+                    "name": "session-1",
+                    "start_url": "https://example.com",
+                    "proxy_persona": "us-east",
+                },
+            )
+        )
+
+        self.assertFalse(response.isError)
+        self.manager.create_session.assert_awaited_once_with(
+            name="session-1",
+            start_url="https://example.com",
+            storage_state_path=None,
+            auth_profile=None,
+            proxy_persona="us-east",
+            request_proxy_server=None,
+            request_proxy_username=None,
+            request_proxy_password=None,
+            user_agent=None,
+            protection_mode=None,
+            totp_secret=None,
+        )
+
+    async def test_observe_tool_forwards_preset(self) -> None:
+        response = await self.gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.observe",
+                arguments={"session_id": "session-1", "preset": "rich", "limit": 50},
+            )
+        )
+
+        self.assertFalse(response.isError)
+        self.manager.observe.assert_awaited_once_with("session-1", limit=50, preset="rich")
 
     async def test_approval_required_bubbles_back_as_tool_error(self) -> None:
         approval = ApprovalRecord(

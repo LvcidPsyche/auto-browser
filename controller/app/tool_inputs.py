@@ -8,9 +8,24 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import Field, field_validator, model_validator
 
-from .models import AgentRunRequest, AgentStepRequest, BrowserActionDecision, CreateSessionRequest
+from .models import (
+    AgentJobStatus,
+    AgentRunRequest,
+    AgentStepRequest,
+    ApprovalStatus,
+    BrowserActionDecision,
+    CDP_URL_SCHEMES,
+    CreateSessionRequest,
+    HTTP_URL_SCHEMES,
+    PROXY_URL_SCHEMES,
+    PerceptionPreset,
+    ProviderName,
+    StrictInputModel,
+    validate_coordinate_pair,
+    validate_url,
+)
 
 __all__ = [
     "AgentJobIdInput",
@@ -72,19 +87,21 @@ __all__ = [
     "TriggerCronJobInput",
     "ValidateShareTokenInput",
     "VisionFindInput",
+    "WaitForSelectorInput",
 ]
 
 
-class EmptyInput(BaseModel):
+class EmptyInput(StrictInputModel):
     pass
 
 
-class SessionIdInput(BaseModel):
-    session_id: str
+class SessionIdInput(StrictInputModel):
+    session_id: str = Field(min_length=1, max_length=120)
 
 
 class ObserveInput(SessionIdInput):
-    limit: int = Field(default=40, ge=1, le=100)
+    preset: PerceptionPreset = "normal"
+    limit: int = Field(default=40, ge=1, le=200)
 
 
 class SessionTailInput(SessionIdInput):
@@ -101,7 +118,7 @@ class ExecuteActionInput(SessionIdInput):
 
 
 class SaveAuthStateInput(SessionIdInput):
-    path: str
+    path: str = Field(min_length=1, max_length=500)
 
 
 class SaveAuthProfileInput(SessionIdInput):
@@ -116,11 +133,11 @@ class ListDownloadsInput(SessionIdInput):
     pass
 
 
-class AuthProfileNameInput(BaseModel):
+class AuthProfileNameInput(StrictInputModel):
     profile_name: str = Field(min_length=1, max_length=120)
 
 
-class ListAuthProfilesInput(BaseModel):
+class ListAuthProfilesInput(StrictInputModel):
     pass
 
 
@@ -132,30 +149,30 @@ class TabActionInput(SessionIdInput):
     index: int = Field(ge=0)
 
 
-class ApprovalIdInput(BaseModel):
-    approval_id: str
+class ApprovalIdInput(StrictInputModel):
+    approval_id: str = Field(min_length=1, max_length=120)
 
 
 class ApprovalDecisionInput(ApprovalIdInput):
     comment: str | None = Field(default=None, max_length=2000)
 
 
-class ListApprovalsInput(BaseModel):
-    status: str | None = None
-    session_id: str | None = None
+class ListApprovalsInput(StrictInputModel):
+    status: ApprovalStatus | None = None
+    session_id: str | None = Field(default=None, min_length=1, max_length=120)
 
 
-class ListAgentJobsInput(BaseModel):
-    status: str | None = None
-    session_id: str | None = None
+class ListAgentJobsInput(StrictInputModel):
+    status: AgentJobStatus | None = None
+    session_id: str | None = Field(default=None, min_length=1, max_length=120)
 
 
-class GetRemoteAccessInput(BaseModel):
-    session_id: str | None = None
+class GetRemoteAccessInput(StrictInputModel):
+    session_id: str | None = Field(default=None, min_length=1, max_length=120)
 
 
-class AgentJobIdInput(BaseModel):
-    job_id: str
+class AgentJobIdInput(StrictInputModel):
+    job_id: str = Field(min_length=1, max_length=120)
 
 
 class QueueAgentStepInput(SessionIdInput):
@@ -228,10 +245,27 @@ class GetNetworkLogInput(SessionIdInput):
     method: str | None = Field(default=None, max_length=10)
     url_contains: str | None = Field(default=None, max_length=500)
 
+    @field_validator("method")
+    @classmethod
+    def normalize_method(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        method = value.upper()
+        if not method.isalpha():
+            raise ValueError("method must contain only letters")
+        return method
+
 
 class ForkSessionInput(SessionIdInput):
     name: str | None = Field(default=None, max_length=200)
     start_url: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("start_url")
+    @classmethod
+    def validate_start_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_url(value, field_name="start_url", allowed_schemes=HTTP_URL_SCHEMES)
 
 
 class EvalJsInput(SessionIdInput):
@@ -247,9 +281,44 @@ class WaitForSelectorInput(SessionIdInput):
 class GetCookiesInput(SessionIdInput):
     urls: list[str] | None = Field(default=None)
 
+    @field_validator("urls")
+    @classmethod
+    def validate_urls(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("urls must not be empty when provided")
+        return [
+            validate_url(item, field_name=f"urls[{index}]", allowed_schemes=HTTP_URL_SCHEMES)
+            for index, item in enumerate(value)
+        ]
+
 
 class SetCookiesInput(SessionIdInput):
-    cookies: list[dict[str, Any]]
+    cookies: list[dict[str, Any]] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_cookies(self) -> "SetCookiesInput":
+        for index, cookie in enumerate(self.cookies):
+            if not isinstance(cookie, dict):
+                raise ValueError(f"cookies[{index}] must be an object")
+            name = str(cookie.get("name") or "").strip()
+            value = cookie.get("value")
+            domain = str(cookie.get("domain") or "").strip()
+            url = str(cookie.get("url") or "").strip()
+            if not name:
+                raise ValueError(f"cookies[{index}] requires name")
+            if value is None:
+                raise ValueError(f"cookies[{index}] requires value")
+            if not domain and not url:
+                raise ValueError(f"cookies[{index}] requires domain or url")
+            if url:
+                validate_url(
+                    url,
+                    field_name=f"cookies[{index}].url",
+                    allowed_schemes=HTTP_URL_SCHEMES,
+                )
+        return self
 
 
 class GetStorageInput(SessionIdInput):
@@ -281,19 +350,46 @@ class DragDropInput(SessionIdInput):
     target_x: float | None = None
     target_y: float | None = None
 
+    @model_validator(mode="after")
+    def validate_targets(self) -> "DragDropInput":
+        validate_coordinate_pair(self.source_x, self.source_y, field_name="drag source coordinates")
+        validate_coordinate_pair(self.target_x, self.target_y, field_name="drag target coordinates")
+        if not (self.source_selector or (self.source_x is not None and self.source_y is not None)):
+            raise ValueError("drag_drop requires source_selector or source_x+source_y")
+        if not (self.target_selector or (self.target_x is not None and self.target_y is not None)):
+            raise ValueError("drag_drop requires target_selector or target_x+target_y")
+        return self
+
 
 class ExportScriptInput(SessionIdInput):
     pass
 
 
-class CdpAttachInput(BaseModel):
+class CdpAttachInput(StrictInputModel):
     cdp_url: str = Field(min_length=1, max_length=500)
 
+    @field_validator("cdp_url")
+    @classmethod
+    def validate_cdp_url(cls, value: str) -> str:
+        return validate_url(value, field_name="cdp_url", allowed_schemes=CDP_URL_SCHEMES)
 
-class ForkCdpInput(BaseModel):
+
+class ForkCdpInput(StrictInputModel):
     cdp_url: str = Field(min_length=1, max_length=500)
     name: str | None = Field(default=None, max_length=200)
     start_url: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("cdp_url")
+    @classmethod
+    def validate_cdp_url(cls, value: str) -> str:
+        return validate_url(value, field_name="cdp_url", allowed_schemes=CDP_URL_SCHEMES)
+
+    @field_validator("start_url")
+    @classmethod
+    def validate_start_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_url(value, field_name="start_url", allowed_schemes=HTTP_URL_SCHEMES)
 
 
 class VisionFindInput(SessionIdInput):
@@ -305,7 +401,7 @@ class ShareSessionInput(SessionIdInput):
     ttl_minutes: int = Field(default=60, ge=1, le=1440)
 
 
-class ValidateShareTokenInput(BaseModel):
+class ValidateShareTokenInput(StrictInputModel):
     token: str = Field(min_length=1, max_length=500)
 
 
@@ -313,25 +409,31 @@ class ShadowBrowseInput(SessionIdInput):
     pass
 
 
-class ProxyPersonaNameInput(BaseModel):
+class ProxyPersonaNameInput(StrictInputModel):
     name: str = Field(min_length=1, max_length=200)
 
 
-class CreateProxyPersonaInput(BaseModel):
+class CreateProxyPersonaInput(StrictInputModel):
     name: str = Field(min_length=1, max_length=200)
     server: str = Field(min_length=1, max_length=500)
     username: str | None = Field(default=None, max_length=200)
     password: str | None = Field(default=None, max_length=500, repr=False)
     description: str = Field(default="", max_length=500)
 
+    @field_validator("server")
+    @classmethod
+    def validate_server(cls, value: str) -> str:
+        return validate_url(value, field_name="server", allowed_schemes=PROXY_URL_SCHEMES)
 
-class CronJobIdInput(BaseModel):
+
+class CronJobIdInput(StrictInputModel):
     job_id: str = Field(min_length=1, max_length=50)
 
 
-class CreateCronJobInput(BaseModel):
+class CreateCronJobInput(StrictInputModel):
     name: str = Field(min_length=1, max_length=200)
     goal: str = Field(min_length=1, max_length=5000)
+    provider: ProviderName = "openai"
     schedule: str | None = Field(default=None, max_length=100)
     start_url: str | None = Field(default=None, max_length=2000)
     auth_profile: str | None = Field(default=None, max_length=200)
@@ -339,6 +441,19 @@ class CreateCronJobInput(BaseModel):
     max_steps: int = Field(default=20, ge=1, le=100)
     enabled: bool = True
     webhook_enabled: bool = False
+
+    @field_validator("start_url")
+    @classmethod
+    def validate_start_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_url(value, field_name="start_url", allowed_schemes=HTTP_URL_SCHEMES)
+
+    @model_validator(mode="after")
+    def validate_trigger_mode(self) -> "CreateCronJobInput":
+        if not self.schedule and not self.webhook_enabled:
+            raise ValueError("create_cron_job requires schedule or webhook_enabled=true")
+        return self
 
 
 class TriggerCronJobInput(CronJobIdInput):

@@ -106,6 +106,7 @@ class BrowserSession:
     downloads: list[dict[str, Any]] = field(default_factory=list)
     attached_pages: set[int] = field(default_factory=set)
     last_action: str | None = None
+    proxy_persona: str | None = None
     last_auth_state_path: Path | None = None
     auth_profile_name: str | None = None
     tunnel_error: str | None = None
@@ -120,8 +121,9 @@ class BrowserSession:
 
 
 class BrowserManager:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, proxy_store: Any | None = None):
         self.settings = settings
+        self.proxy_store = proxy_store
         self.playwright: Playwright | None = None
         self.browser: Browser | None = None
         self.sessions: dict[str, BrowserSession] = {}
@@ -515,6 +517,7 @@ class BrowserManager:
         start_url: str | None = None,
         storage_state_path: str | None = None,
         auth_profile: str | None = None,
+        proxy_persona: str | None = None,
         request_proxy_server: str | None = None,
         request_proxy_username: str | None = None,
         request_proxy_password: str | None = None,
@@ -524,6 +527,8 @@ class BrowserManager:
     ) -> dict[str, Any]:
         if storage_state_path and auth_profile:
             raise ValueError("Provide auth_profile or storage_state_path, not both")
+        if proxy_persona and any((request_proxy_server, request_proxy_username, request_proxy_password)):
+            raise ValueError("Provide proxy_persona or explicit proxy_server credentials, not both")
         if start_url:
             self._assert_url_allowed(start_url)
         resolved_protection_mode = protection_mode or self.settings.witness_protection_mode_default
@@ -534,9 +539,17 @@ class BrowserManager:
         prepared_auth_state = None
         source_path: Path | None = None
 
-        proxy_server = request_proxy_server or self.settings.default_proxy_server
-        proxy_username = request_proxy_username or self.settings.default_proxy_username
-        proxy_password = request_proxy_password or self.settings.default_proxy_password
+        if proxy_persona:
+            if self.proxy_store is None:
+                raise RuntimeError("No PROXY_PERSONA_FILE configured")
+            resolved_proxy = self.proxy_store.resolve_proxy(proxy_persona)
+            proxy_server = resolved_proxy.get("server")
+            proxy_username = resolved_proxy.get("username")
+            proxy_password = resolved_proxy.get("password")
+        else:
+            proxy_server = request_proxy_server or self.settings.default_proxy_server
+            proxy_username = request_proxy_username or self.settings.default_proxy_username
+            proxy_password = request_proxy_password or self.settings.default_proxy_password
 
         context_kwargs = self._build_context_kwargs(user_agent, proxy_server, proxy_username, proxy_password)
 
@@ -581,6 +594,7 @@ class BrowserManager:
                 shared_takeover_surface=runtime is None,
                 shared_browser_process=runtime is None,
                 max_live_sessions_per_browser_node=1,
+                proxy_persona=proxy_persona,
                 last_auth_state_path=source_path if storage_state_path else None,
                 auth_profile_name=self._normalize_auth_profile_name(auth_profile) if auth_profile else None,
                 mouse_position=(
@@ -624,6 +638,7 @@ class BrowserManager:
                     "start_url": start_url,
                     "storage_state_path": storage_state_path,
                     "auth_profile": auth_profile,
+                    "proxy_persona": proxy_persona,
                     "totp_enabled": bool(totp_secret),
                 },
             )
@@ -638,6 +653,7 @@ class BrowserManager:
                     "start_url": start_url,
                     "storage_state_path": storage_state_path,
                     "auth_profile": auth_profile,
+                    "proxy_persona": proxy_persona,
                     "isolation_mode": session.isolation_mode,
                     "browser_node": session.browser_node_name,
                     "totp_enabled": bool(totp_secret),
@@ -4216,6 +4232,7 @@ class BrowserManager:
             "downloads": session.downloads[-20:],
             "last_action": session.last_action,
             "trace_path": str(session.trace_path),
+            "proxy_persona": session.proxy_persona,
             "protection_mode": session.protection_mode,
             "witness_remote": session.witness_remote_state.model_dump(),
         }
