@@ -11,15 +11,15 @@ from typing import Any, Literal
 from pydantic import Field, field_validator, model_validator
 
 from .models import (
+    CDP_URL_SCHEMES,
+    HTTP_URL_SCHEMES,
+    PROXY_URL_SCHEMES,
     AgentJobStatus,
     AgentRunRequest,
     AgentStepRequest,
     ApprovalStatus,
     BrowserActionDecision,
-    CDP_URL_SCHEMES,
     CreateSessionRequest,
-    HTTP_URL_SCHEMES,
-    PROXY_URL_SCHEMES,
     PerceptionPreset,
     ProviderName,
     StrictInputModel,

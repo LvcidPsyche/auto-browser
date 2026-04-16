@@ -4,6 +4,8 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-04-16
+
 ### Fixed
 
 #### Dependency security updates

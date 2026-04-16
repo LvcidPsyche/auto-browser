@@ -9,8 +9,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
-from pydantic import ValidationError
 from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
 from starlette.responses import StreamingResponse
 
 from . import events as _events
@@ -41,10 +41,10 @@ from .models import (
     PressRequest,
     SaveAuthProfileRequest,
     SaveStorageStateRequest,
-    ShareSessionRequest,
     ScreenshotRequest,
     ScrollRequest,
     SelectOptionRequest,
+    ShareSessionRequest,
     SocialCommentRequest,
     SocialDmRequest,
     SocialFollowRequest,
@@ -67,14 +67,14 @@ from .rate_limits import SlidingWindowRateLimiter, build_rate_limit_key, is_exem
 from .runtime_policy import validate_runtime_policy
 from .session_share import SessionShareManager
 from .social_errors import SocialActionError
-from .tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, TriggerCronJobInput
 from .tool_gateway import McpToolGateway
+from .tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, TriggerCronJobInput
 from .vision_target import VisionTargeter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-_VERSION = "0.5.3"
+_VERSION = "0.5.4"
 
 settings = get_settings()
 proxy_store = ProxyPersonaStore(settings.proxy_persona_file)
