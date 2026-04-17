@@ -327,8 +327,7 @@ class ProviderCLITests(unittest.IsolatedAsyncioTestCase):
 
         with patch("app.providers.base.which", return_value="/usr/bin/codex"):
             self.assertFalse(adapter.configured)
-
-        self.assertIn("No openai CLI auth state found", adapter.readiness_detail)
+            self.assertIn("No openai CLI auth state found", adapter.readiness_detail)
 
     def test_invalid_auth_mode_is_reported(self) -> None:
         adapter = OpenAIAdapter(
