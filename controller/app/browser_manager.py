@@ -1807,15 +1807,24 @@ class BrowserManager:
             return "outlook"
         return normalized
 
+    @staticmethod
+    def _host_matches(host: str, *domains: str) -> bool:
+        host = host.lower().rstrip(".")
+        for domain in domains:
+            domain = domain.lower().rstrip(".")
+            if host == domain or host.endswith("." + domain):
+                return True
+        return False
+
     def _current_platform(self, session: BrowserSession) -> str | None:
         host = (urlparse(session.page.url).hostname or "").lower()
-        if "x.com" in host or "twitter.com" in host:
+        if self._host_matches(host, "x.com", "twitter.com"):
             return "x"
-        if "instagram.com" in host:
+        if self._host_matches(host, "instagram.com"):
             return "instagram"
-        if "linkedin.com" in host:
+        if self._host_matches(host, "linkedin.com"):
             return "linkedin"
-        if "outlook.live.com" in host or "outlook.office.com" in host or "outlook.office365.com" in host:
+        if self._host_matches(host, "outlook.live.com", "outlook.office.com", "outlook.office365.com"):
             return "outlook"
         return None
 
@@ -4360,7 +4369,7 @@ class BrowserManager:
         normalized = self._normalize_auth_profile_name(profile_name)
         root = self._auth_profile_root()
         directory = (root / normalized).resolve()
-        if root not in directory.parents and directory != root:
+        if not directory.is_relative_to(root):
             raise PermissionError("auth profile path must stay inside auth root")
         if create:
             directory.mkdir(parents=True, exist_ok=True)
@@ -4511,7 +4520,7 @@ class BrowserManager:
             else:
                 candidate = (preferred_roots[0] / file_path).resolve()
 
-        if not any(candidate == allowed_root or allowed_root in candidate.parents for allowed_root in allowed_roots):
+        if not any(candidate.is_relative_to(allowed_root) for allowed_root in allowed_roots):
             raise PermissionError("file_path must stay inside upload root")
         if not candidate.exists():
             raise FileNotFoundError(candidate)
@@ -4526,7 +4535,7 @@ class BrowserManager:
     ) -> Path:
         root = session.auth_dir.resolve()
         candidate = (root / relative_path).resolve()
-        if root not in candidate.parents and candidate != root:
+        if not candidate.is_relative_to(root):
             raise PermissionError("auth path must stay inside the session auth root")
         candidate.parent.mkdir(parents=True, exist_ok=True)
         if must_exist and not candidate.exists():
@@ -4536,7 +4545,7 @@ class BrowserManager:
     def _safe_auth_path(self, relative_path: str, must_exist: bool = False) -> Path:
         root = Path(self.settings.auth_root).resolve()
         candidate = (root / relative_path).resolve()
-        if root not in candidate.parents and candidate != root:
+        if not candidate.is_relative_to(root):
             raise PermissionError("auth path must stay inside auth root")
         candidate.parent.mkdir(parents=True, exist_ok=True)
         if must_exist and not candidate.exists():
@@ -4736,18 +4745,23 @@ class BrowserManager:
 
     async def export_auth_profile(self, profile_name: str) -> dict[str, Any]:
         """Package an auth profile dir as a .tar.gz and return the artifact path."""
-        auth_root = Path(self.settings.auth_root)
-        profile_dir = auth_root / profile_name
+        normalized = self._normalize_auth_profile_name(profile_name)
+        auth_root = Path(self.settings.auth_root).resolve()
+        profile_dir = (auth_root / normalized).resolve()
+        if not profile_dir.is_relative_to(auth_root):
+            raise PermissionError("auth profile path must stay inside auth root")
         if not profile_dir.exists() or not profile_dir.is_dir():
-            raise FileNotFoundError(f"auth profile '{profile_name}' not found")
+            raise FileNotFoundError(f"auth profile '{normalized}' not found")
 
         ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        archive_name = f"{profile_name}-{ts}.tar.gz"
-        archive_path = auth_root / archive_name
+        archive_name = f"{normalized}-{ts}.tar.gz"
+        archive_path = (auth_root / archive_name).resolve()
+        if not archive_path.is_relative_to(auth_root):
+            raise PermissionError("archive path must stay inside auth root")
 
         await asyncio.to_thread(self._write_tar, profile_dir, archive_path)
         return {
-            "profile_name": profile_name,
+            "profile_name": normalized,
             "archive_path": str(archive_path),
             "archive_name": archive_name,
             "download_url": f"/auth-export/{archive_name}",

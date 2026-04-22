@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import html as _html
 import json
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -80,6 +82,45 @@ logging.basicConfig(level=_log_level)
 logger = logging.getLogger(__name__)
 
 _VERSION = "1.0.0"
+
+_SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _require_safe_segment(value: str, *, field: str) -> str:
+    """Validate that *value* is a single safe path segment (no traversal).
+
+    Accepts only characters that can't form path traversal sequences so the
+    result is safe to join with a trusted base directory.
+    """
+    if not isinstance(value, str) or not _SAFE_PATH_SEGMENT.fullmatch(value):
+        raise HTTPException(status_code=400, detail=f"Invalid {field}")
+    return value
+
+
+def _http_detail(exc: Exception, fallback: str) -> str:
+    """Return a safe HTTP detail string for *exc*.
+
+    Logs the exception server-side with full context but returns only the
+    provided *fallback*, so no stack-trace, chained exception, or internal
+    state flows back to the client.
+    """
+    logger.warning("HTTP error (%s): %s", type(exc).__name__, exc)
+    return fallback
+
+
+def _approval_payload(exc: ApprovalRequiredError) -> dict[str, object]:
+    """Return a safe approval-required response payload.
+
+    Rebuilds the payload from the typed ``ApprovalRecord`` attribute so no
+    tainted exception attribute reaches the client.
+    """
+    record = exc.approval
+    return {
+        "status": "approval_required",
+        "message": f"{record.kind} actions require human approval",
+        "approval": record.model_dump(),
+    }
+
 
 settings = get_settings()
 _compliance_template = settings.compliance_template.upper().strip() if settings.compliance_template else None
@@ -350,7 +391,7 @@ async def readyz() -> dict[str, str]:
         await manager.ensure_browser()
         return {"status": "ready", "environment": settings.environment_name}
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=_http_detail(exc, "Service unavailable")) from exc
 
 
 @app.get("/metrics", include_in_schema=False)
@@ -451,7 +492,7 @@ async def approve_approval(approval_id: str, payload: ApprovalDecisionRequest) -
     try:
         return await manager.approve(approval_id, comment=payload.comment)
     except PermissionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=_http_detail(exc, "Conflict")) from exc
 
 
 @app.post("/approvals/{approval_id}/reject")
@@ -459,7 +500,7 @@ async def reject_approval(approval_id: str, payload: ApprovalDecisionRequest) ->
     try:
         return await manager.reject(approval_id, comment=payload.comment)
     except PermissionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=_http_detail(exc, "Conflict")) from exc
 
 
 @app.post("/approvals/{approval_id}/execute")
@@ -467,11 +508,11 @@ async def execute_approval(approval_id: str) -> dict:
     try:
         return await manager.execute_approval(approval_id)
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
     except PermissionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=_http_detail(exc, "Conflict")) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.get("/sessions")
@@ -497,17 +538,17 @@ async def create_session(payload: CreateSessionRequest) -> dict:
             totp_secret=payload.totp_secret,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=_http_detail(exc, "Not found")) from exc
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=_http_detail(exc, "Conflict")) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail=_http_detail(exc, "Internal error")) from exc
 
 
 @app.get("/sessions/{session_id}")
@@ -530,7 +571,7 @@ async def get_auth_profile(profile_name: str) -> dict:
     try:
         return await manager.get_auth_profile(profile_name)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.get("/sessions/{session_id}/observe")
@@ -564,7 +605,7 @@ async def activate_tab(session_id: str, payload: TabIndexRequest) -> dict:
     try:
         return await manager.activate_tab(session_id, payload.index)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.post("/sessions/{session_id}/tabs/close")
@@ -572,7 +613,7 @@ async def close_tab(session_id: str, payload: TabIndexRequest) -> dict:
     try:
         return await manager.close_tab(session_id, payload.index)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.post("/sessions/{session_id}/tabs/open")
@@ -580,7 +621,7 @@ async def open_tab(session_id: str, payload: OpenTabRequest) -> dict:
     try:
         return await manager.open_tab(session_id, payload.url, payload.activate)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.post("/sessions/{session_id}/actions/navigate")
@@ -588,9 +629,9 @@ async def navigate(session_id: str, payload: NavigateRequest) -> dict:
     try:
         return await manager.navigate(session_id, payload.url)
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
 
 
 @app.post("/sessions/{session_id}/actions/click")
@@ -604,11 +645,11 @@ async def click(session_id: str, payload: ClickRequest) -> dict:
             y=payload.y,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
 
 
 @app.post("/sessions/{session_id}/actions/type")
@@ -623,11 +664,11 @@ async def type_text(session_id: str, payload: TypeRequest) -> dict:
             sensitive=payload.sensitive,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
 
 
 @app.post("/sessions/{session_id}/actions/press")
@@ -635,9 +676,9 @@ async def press_key(session_id: str, payload: PressRequest) -> dict:
     try:
         return await manager.press(session_id, payload.key)
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
 
 
 @app.post("/sessions/{session_id}/actions/scroll")
@@ -645,7 +686,7 @@ async def scroll(session_id: str, payload: ScrollRequest) -> dict:
     try:
         return await manager.scroll(session_id, payload.delta_x, payload.delta_y)
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
 
 
 @app.post("/sessions/{session_id}/actions/execute")
@@ -657,11 +698,11 @@ async def execute_action(session_id: str, payload: ExecuteActionRequest) -> dict
             approval_id=payload.approval_id,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
 
 
 @app.post("/sessions/{session_id}/actions/upload")
@@ -676,13 +717,13 @@ async def upload(session_id: str, payload: UploadRequest) -> dict:
             approval_id=payload.approval_id,
         )
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=_http_detail(exc, "Not found")) from exc
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.post("/sessions/{session_id}/actions/hover")
@@ -696,11 +737,11 @@ async def hover(session_id: str, payload: HoverRequest) -> dict:
             y=payload.y,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
 
 
 @app.post("/sessions/{session_id}/actions/select-option")
@@ -715,11 +756,11 @@ async def select_option(session_id: str, payload: SelectOptionRequest) -> dict:
             index=payload.index,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
 
 
 @app.post("/sessions/{session_id}/actions/wait")
@@ -732,9 +773,9 @@ async def reload(session_id: str) -> dict:
     try:
         return await manager.reload(session_id)
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
 
 
 @app.post("/sessions/{session_id}/actions/go-back")
@@ -742,9 +783,9 @@ async def go_back(session_id: str) -> dict:
     try:
         return await manager.go_back(session_id)
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
 
 
 @app.post("/sessions/{session_id}/actions/go-forward")
@@ -752,9 +793,9 @@ async def go_forward(session_id: str) -> dict:
     try:
         return await manager.go_forward(session_id)
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
 
 
 @app.post("/sessions/{session_id}/social/scroll")
@@ -782,11 +823,11 @@ async def social_post(session_id: str, payload: SocialPostRequest) -> dict:
     try:
         return await manager.post_content(session_id, text=payload.text, approval_id=payload.approval_id)
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.post("/sessions/{session_id}/social/comment")
@@ -799,11 +840,11 @@ async def social_comment(session_id: str, payload: SocialCommentRequest) -> dict
             approval_id=payload.approval_id,
         )
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.post("/sessions/{session_id}/social/like")
@@ -811,11 +852,11 @@ async def social_like(session_id: str, payload: SocialLikeRequest) -> dict:
     try:
         return await manager.like_post(session_id, post_index=payload.post_index, approval_id=payload.approval_id)
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.post("/sessions/{session_id}/social/follow")
@@ -823,11 +864,11 @@ async def social_follow(session_id: str, payload: SocialFollowRequest) -> dict:
     try:
         return await manager.follow_user(session_id, approval_id=payload.approval_id)
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.post("/sessions/{session_id}/social/unfollow")
@@ -835,11 +876,11 @@ async def social_unfollow(session_id: str, payload: SocialUnfollowRequest) -> di
     try:
         return await manager.unfollow_user(session_id, approval_id=payload.approval_id)
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.post("/sessions/{session_id}/social/repost")
@@ -851,11 +892,11 @@ async def social_repost(session_id: str, payload: SocialRepostRequest) -> dict:
             approval_id=payload.approval_id,
         )
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.post("/sessions/{session_id}/social/dm")
@@ -868,11 +909,11 @@ async def social_dm(session_id: str, payload: SocialDmRequest) -> dict:
             approval_id=payload.approval_id,
         )
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.post("/sessions/{session_id}/social/login")
@@ -888,11 +929,11 @@ async def social_login(session_id: str, payload: SocialLoginRequest) -> dict:
             totp_secret=payload.totp_secret,
         )
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except ApprovalRequiredError as exc:
-        raise HTTPException(status_code=409, detail=exc.payload) from exc
+        raise HTTPException(status_code=409, detail=_approval_payload(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.post("/sessions/{session_id}/social/search")
@@ -900,7 +941,7 @@ async def social_search(session_id: str, payload: SocialSearchRequest) -> dict:
     try:
         return await manager.search_page(session_id, query=payload.query)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.post("/sessions/{session_id}/storage-state")
@@ -908,7 +949,7 @@ async def save_storage_state(session_id: str, payload: SaveStorageStateRequest) 
     try:
         return await manager.save_storage_state(session_id, payload.path)
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
 
 
 @app.post("/sessions/{session_id}/auth-profiles")
@@ -916,9 +957,9 @@ async def save_auth_profile(session_id: str, payload: SaveAuthProfileRequest) ->
     try:
         return await manager.save_auth_profile(session_id, payload.profile_name)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
 
 
 @app.post("/sessions/{session_id}/takeover")
@@ -946,7 +987,7 @@ async def run_agent_step(session_id: str, payload: AgentStepRequest) -> dict:
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=_http_detail(exc, "Service unavailable")) from exc
 
 
 @app.post("/sessions/{session_id}/agent/jobs/step", status_code=202)
@@ -973,7 +1014,7 @@ async def run_agent_loop(session_id: str, payload: AgentRunRequest) -> dict:
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=_http_detail(exc, "Service unavailable")) from exc
 
 
 @app.post("/sessions/{session_id}/agent/jobs/run", status_code=202)
@@ -1054,16 +1095,19 @@ async def screenshot_compare(session_id: str) -> dict:
     try:
         return await manager.screenshot_diff(session_id)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail=_http_detail(exc, "Internal error")) from exc
 
 
 @app.get("/sessions/{session_id}/replay", response_class=HTMLResponse)
 async def session_replay(session_id: str) -> HTMLResponse:
     """Session replay — HTML viewer showing screenshots, audit events, and approvals."""
-    import html as _html
+    _require_safe_segment(session_id, field="session_id")
 
-    # Gather screenshots
-    artifact_dir = Path(settings.artifact_root) / session_id
+    # Gather screenshots, constrained to the artifact root.
+    artifact_root = Path(settings.artifact_root).resolve()
+    artifact_dir = (artifact_root / session_id).resolve()
+    if not artifact_dir.is_relative_to(artifact_root):
+        raise HTTPException(status_code=400, detail="Invalid session_id")
     screenshots: list[tuple[str, str]] = []  # (url, label)
     if artifact_dir.is_dir():
         for f in sorted(artifact_dir.glob("*.png")):
@@ -1158,14 +1202,18 @@ async def session_replay(session_id: str) -> HTMLResponse:
 @app.get("/auth-profiles/{profile_name}/export")
 async def export_auth_profile(profile_name: str):
     """Download an auth profile as a .tar.gz archive."""
+    _require_safe_segment(profile_name, field="profile_name")
     try:
         result = await manager.export_auth_profile(profile_name)
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=_http_detail(exc, "Not found")) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail=_http_detail(exc, "Internal error")) from exc
 
-    archive_path = Path(result["archive_path"])
+    auth_root = Path(settings.auth_root).resolve()
+    archive_path = Path(result["archive_path"]).resolve()
+    if not archive_path.is_relative_to(auth_root):
+        raise HTTPException(status_code=500, detail="archive path outside auth root")
     if not archive_path.exists():
         raise HTTPException(status_code=500, detail="archive file not found after export")
 
@@ -1182,11 +1230,11 @@ async def import_auth_profile(payload: ImportAuthProfileRequest) -> dict:
     try:
         return await manager.import_auth_profile(payload.archive_path, overwrite=payload.overwrite)
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=_http_detail(exc, "Not found")) from exc
     except FileExistsError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=_http_detail(exc, "Conflict")) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail=_http_detail(exc, "Internal error")) from exc
 
 
 @app.delete("/sessions/{session_id}")
@@ -1213,7 +1261,7 @@ async def fork_session(session_id: str, name: str | None = None, start_url: str 
     try:
         return await manager.fork_session(session_id, name=name, start_url=start_url)
     except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=_http_detail(exc, "Conflict")) from exc
 
 
 @app.post("/sessions/{session_id}/share")
@@ -1227,7 +1275,7 @@ async def share_session(session_id: str, payload: ShareSessionRequest | None = N
     try:
         return share_manager.create_token(session_id, ttl_seconds=ttl_minutes * 60)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.get("/share/{token}/observe")
@@ -1255,12 +1303,13 @@ async def shared_session_view(token: str) -> HTMLResponse:
 
     token_json = json.dumps(token)
     session_id_json = json.dumps(info["session_id"])
+    session_id_html = _html.escape(str(info["session_id"]), quote=True)
     html = f"""<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Shared Session {info["session_id"]}</title>
+    <title>Shared Session {session_id_html}</title>
     <style>
       :root {{
         color-scheme: dark;
@@ -1416,7 +1465,7 @@ async def enable_shadow_browse(session_id: str) -> dict:
     try:
         return await manager.enable_shadow_browse(session_id)
     except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.get("/sessions/{session_id}/audit")
@@ -1503,7 +1552,7 @@ async def set_proxy_persona(payload: CreateProxyPersonaInput) -> dict:
             description=payload.description,
         )
     except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.get("/proxy-personas/{name}")
@@ -1511,7 +1560,7 @@ async def get_proxy_persona(name: str) -> dict:
     try:
         return proxy_store.get_persona(name)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=_http_detail(exc, "Not found")) from exc
 
 
 @app.delete("/proxy-personas/{name}")
@@ -1545,7 +1594,7 @@ async def create_cron_job(payload: CreateCronJobInput) -> dict:
             webhook_enabled=payload.webhook_enabled,
         )
     except (ValueError, TypeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
 
 
 @app.get("/crons/{job_id}")
@@ -1569,8 +1618,8 @@ async def trigger_cron_job_via_webhook(job_id: str, request: Request) -> dict:
         payload = TriggerCronJobInput.model_validate({"job_id": job_id, **body})
         return await cron_service.trigger_via_webhook(payload.job_id, payload.webhook_key or "")
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=_http_detail(exc, "Not found")) from exc
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail=_http_detail(exc, "Not permitted")) from exc
     except (ValidationError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_http_detail(exc, "Invalid request")) from exc
