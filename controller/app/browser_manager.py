@@ -5,6 +5,7 @@ import fnmatch
 import inspect
 import json
 import logging
+import os
 import random
 import re
 import shutil
@@ -3130,7 +3131,6 @@ class BrowserManager:
             profile_payload.update(metadata)
 
         metadata_path = self._auth_profile_metadata_path(normalized, create=True)
-        # codeql[py/path-injection]
         metadata_path.write_text(json.dumps(profile_payload, indent=2, sort_keys=True), encoding="utf-8")
         return {
             "profile_name": normalized,
@@ -3207,7 +3207,6 @@ class BrowserManager:
         profile_dir = self._auth_profile_dir(normalized, create=False)
         metadata = self._read_auth_profile_metadata(normalized)
         state_path = self._resolve_auth_profile_state_path(normalized, must_exist=False)
-        # codeql[py/path-injection]
         state_exists = state_path.exists()
         if not state_exists and not metadata:
             raise KeyError(normalized)
@@ -4359,6 +4358,24 @@ class BrowserManager:
         return root
 
     @staticmethod
+    def _resolve_contained_path(root: Path, candidate_path: str | Path, *, allow_absolute: bool = False) -> Path:
+        root_str = os.path.realpath(os.fspath(root))
+        raw_path = os.fspath(candidate_path)
+        if os.path.isabs(raw_path):
+            if not allow_absolute:
+                raise PermissionError("path must be relative")
+            candidate_str = os.path.realpath(raw_path)
+        else:
+            candidate_str = os.path.realpath(os.path.join(root_str, raw_path))
+
+        root_norm = os.path.normcase(root_str)
+        candidate_norm = os.path.normcase(candidate_str)
+        root_prefix = root_norm if root_norm.endswith(os.sep) else root_norm + os.sep
+        if candidate_norm != root_norm and not candidate_norm.startswith(root_prefix):
+            raise PermissionError("path must stay inside the configured root")
+        return Path(candidate_str)
+
+    @staticmethod
     def _normalize_auth_profile_name(profile_name: str) -> str:
         normalized = profile_name.strip()
         if not normalized:
@@ -4370,12 +4387,8 @@ class BrowserManager:
     def _auth_profile_dir(self, profile_name: str, *, create: bool) -> Path:
         normalized = self._normalize_auth_profile_name(profile_name)
         root = self._auth_profile_root()
-        # codeql[py/path-injection]
-        directory = (root / normalized).resolve()
-        if not directory.is_relative_to(root):
-            raise PermissionError("auth profile path must stay inside auth root")
+        directory = self._resolve_contained_path(root, normalized)
         if create:
-            # codeql[py/path-injection]
             directory.mkdir(parents=True, exist_ok=True)
         return directory
 
@@ -4388,10 +4401,8 @@ class BrowserManager:
     def _resolve_auth_profile_state_path(self, profile_name: str, *, must_exist: bool) -> Path:
         base_path = self._auth_profile_state_base_path(profile_name, create=not must_exist)
         candidates = [base_path.with_name(f"{base_path.name}.enc"), base_path]
-        # codeql[py/path-injection]
         existing = [candidate for candidate in candidates if candidate.exists()]
         if existing:
-            # codeql[py/path-injection]
             existing.sort(key=lambda candidate: candidate.stat().st_mtime, reverse=True)
             return existing[0]
         if must_exist:
@@ -4400,11 +4411,9 @@ class BrowserManager:
 
     def _read_auth_profile_metadata(self, profile_name: str) -> dict[str, Any]:
         metadata_path = self._auth_profile_metadata_path(profile_name, create=False)
-        # codeql[py/path-injection]
         if not metadata_path.exists():
             return {}
         try:
-            # codeql[py/path-injection]
             payload = json.loads(metadata_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             return {}
@@ -4507,10 +4516,8 @@ class BrowserManager:
 
     def _safe_upload_path(self, file_path: str, *, session: BrowserSession | None = None) -> Path:
         root = Path(self.settings.upload_root).resolve()
-        raw_path = Path(file_path)
-        if raw_path.is_absolute():
-            # codeql[py/path-injection]
-            candidate = raw_path.resolve()
+        if os.path.isabs(file_path):
+            candidate = Path(os.path.realpath(file_path))
             allowed_roots = [root]
             if session is not None:
                 allowed_roots.append(session.upload_dir.resolve())
@@ -4523,20 +4530,24 @@ class BrowserManager:
             preferred_roots.append(root)
 
             for candidate_root in preferred_roots:
-                # codeql[py/path-injection]
-                candidate = (candidate_root / file_path).resolve()
+                candidate = self._resolve_contained_path(candidate_root, file_path)
                 if candidate.exists():
                     break
             else:
-                # codeql[py/path-injection]
-                candidate = (preferred_roots[0] / file_path).resolve()
+                candidate = self._resolve_contained_path(preferred_roots[0], file_path)
 
-        if not any(candidate.is_relative_to(allowed_root) for allowed_root in allowed_roots):
+        if not any(self._path_is_contained_by(candidate, allowed_root) for allowed_root in allowed_roots):
             raise PermissionError("file_path must stay inside upload root")
-        # codeql[py/path-injection]
         if not candidate.exists():
             raise FileNotFoundError(candidate)
         return candidate
+
+    @staticmethod
+    def _path_is_contained_by(candidate: Path, root: Path) -> bool:
+        root_str = os.path.normcase(os.path.realpath(os.fspath(root)))
+        candidate_str = os.path.normcase(os.path.realpath(os.fspath(candidate)))
+        root_prefix = root_str if root_str.endswith(os.sep) else root_str + os.sep
+        return candidate_str == root_str or candidate_str.startswith(root_prefix)
 
     def _safe_session_auth_path(
         self,
@@ -4546,26 +4557,16 @@ class BrowserManager:
         must_exist: bool = False,
     ) -> Path:
         root = session.auth_dir.resolve()
-        # codeql[py/path-injection]
-        candidate = (root / relative_path).resolve()
-        if not candidate.is_relative_to(root):
-            raise PermissionError("auth path must stay inside the session auth root")
-        # codeql[py/path-injection]
+        candidate = self._resolve_contained_path(root, relative_path)
         candidate.parent.mkdir(parents=True, exist_ok=True)
-        # codeql[py/path-injection]
         if must_exist and not candidate.exists():
             raise FileNotFoundError(candidate)
         return candidate
 
     def _safe_auth_path(self, relative_path: str, must_exist: bool = False) -> Path:
         root = Path(self.settings.auth_root).resolve()
-        # codeql[py/path-injection]
-        candidate = (root / relative_path).resolve()
-        if not candidate.is_relative_to(root):
-            raise PermissionError("auth path must stay inside auth root")
-        # codeql[py/path-injection]
+        candidate = self._resolve_contained_path(root, relative_path)
         candidate.parent.mkdir(parents=True, exist_ok=True)
-        # codeql[py/path-injection]
         if must_exist and not candidate.exists():
             raise FileNotFoundError(candidate)
         return candidate
@@ -4767,17 +4768,14 @@ class BrowserManager:
         auth_root = Path(self.settings.auth_root).resolve()
         profile_root = self._auth_profile_root()
         profile_dir = self._auth_profile_dir(normalized, create=False)
-        if not profile_dir.is_relative_to(profile_root):
+        if not self._path_is_contained_by(profile_dir, profile_root):
             raise PermissionError("auth profile path must stay inside auth profile root")
         if not profile_dir.exists() or not profile_dir.is_dir():
             raise FileNotFoundError(f"auth profile '{normalized}' not found")
 
         ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         archive_name = f"{normalized}-{ts}.tar.gz"
-        # codeql[py/path-injection]
-        archive_path = (auth_root / archive_name).resolve()
-        if not archive_path.is_relative_to(auth_root):
-            raise PermissionError("archive path must stay inside auth root")
+        archive_path = self._resolve_contained_path(auth_root, archive_name)
 
         await asyncio.to_thread(self._write_tar, profile_dir, archive_path)
         return {
@@ -4805,10 +4803,7 @@ class BrowserManager:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,180}\.tar\.gz", archive_name):
             raise ValueError("auth profile archive name is invalid")
         auth_root = Path(self.settings.auth_root).resolve()
-        # codeql[py/path-injection]
-        src = (auth_root / archive_name).resolve()
-        if not src.is_relative_to(auth_root):
-            raise PermissionError("auth profile archive path must stay inside auth root")
+        src = self._resolve_contained_path(auth_root, archive_name)
         if not src.exists():
             raise FileNotFoundError(f"archive not found: {archive_name}")
 
@@ -4841,32 +4836,22 @@ class BrowserManager:
                     raise ValueError("archive contains no importable files")
 
                 profile_name = self._normalize_auth_profile_name(top_level)
-                # codeql[py/path-injection]
-                dest_dir = (profile_root / profile_name).resolve()
-                if not dest_dir.is_relative_to(profile_root):
-                    raise PermissionError("auth profile path must stay inside auth profile root")
+                dest_dir = self._resolve_contained_path(profile_root, profile_name)
                 if dest_dir.exists() and not overwrite:
                     raise FileExistsError(f"profile '{profile_name}' already exists; pass overwrite=true")
                 if dest_dir.exists():
-                    # codeql[py/path-injection]
                     shutil.rmtree(dest_dir)
 
                 for member, safe_path in safe_members:
                     relative = Path(*safe_path.parts)
-                    # codeql[py/path-injection]
-                    target = (profile_root / relative).resolve()
-                    if not target.is_relative_to(profile_root):
-                        raise PermissionError("archive member escapes auth profile root")
+                    target = self._resolve_contained_path(profile_root, relative)
                     if member.isdir():
-                        # codeql[py/path-injection]
                         target.mkdir(parents=True, exist_ok=True)
                         continue
-                    # codeql[py/path-injection]
                     target.parent.mkdir(parents=True, exist_ok=True)
                     source = tar.extractfile(member)
                     if source is None:
                         raise ValueError("archive member could not be read")
-                    # codeql[py/path-injection]
                     with source, target.open("wb") as output:
                         shutil.copyfileobj(source, output)
 

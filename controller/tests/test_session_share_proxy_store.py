@@ -198,7 +198,7 @@ class ShareHttpTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/html", response.headers["content-type"])
         self.assertIn("Shared Session Observer", response.text)
-        self.assertIn('const token = "fake-token";', response.text)
+        self.assertIn('const token = window.location.pathname.split("/").filter(Boolean).pop() || "";', response.text)
         self.assertIn("const observeUrl = `/share/${token}/observe`;", response.text)
 
     def test_shared_session_page_returns_404_for_missing_session(self) -> None:
