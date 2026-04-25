@@ -6,12 +6,17 @@ All notable changes to auto-browser are documented here.
 
 ## [1.0.1] — 2026-04-25
 
+### Added
+- Added regression coverage for Playwright session export script generation
+
 ### Fixed
 - Reapplied the closed CodeQL hardening fixes to the release line for workflow permissions, path validation, URL allowlist checks, reflected XSS, and stack-trace exposure
+- Bound remaining route exceptions to fixed error responses so unexpected manager failures do not expose internals
 - Corrected reusable auth profile export/import so archives round-trip through `AUTH_ROOT/profiles`
 - Restored Python client package builds and updated the SDK to the current action and audit REST routes
 - Rebuilt the operator dashboard tables with DOM text nodes and validated links instead of interpolating untrusted values into `innerHTML`
 - Fixed the active-session dashboard stat update
+- Updated the bundled operator UI version label to `v1.0.1`
 - Redirected legacy `/ui/` requests to `/dashboard` so secured deployments consistently land on the bootstrap-aware operator dashboard
 
 ## [1.0.0] — 2026-04-21

@@ -1,5 +1,6 @@
 .env
 .autonomous/
+CODEX_*.md
 data/artifacts/*
 !data/artifacts/.gitkeep
 data/uploads/*
