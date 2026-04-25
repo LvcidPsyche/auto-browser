@@ -210,10 +210,10 @@ class AutoBrowserClient:
     # ── Navigation & actions ─────────────────────────────────────────────────
 
     def navigate(self, session_id: str, url: str) -> dict:
-        return self._post(f"/sessions/{session_id}/navigate", {"url": url})
+        return self._post(f"/sessions/{session_id}/actions/navigate", {"url": url})
 
     async def async_navigate(self, session_id: str, url: str) -> dict:
-        return await self._apost(f"/sessions/{session_id}/navigate", {"url": url})
+        return await self._apost(f"/sessions/{session_id}/actions/navigate", {"url": url})
 
     def click(self, session_id: str, *, selector: str | None = None, element_id: str | None = None, x: float | None = None, y: float | None = None) -> dict:
         body: dict[str, Any] = {}
@@ -225,7 +225,7 @@ class AutoBrowserClient:
             body["x"] = x
         if y is not None:
             body["y"] = y
-        return self._post(f"/sessions/{session_id}/click", body)
+        return self._post(f"/sessions/{session_id}/actions/click", body)
 
     async def async_click(self, session_id: str, *, selector: str | None = None, element_id: str | None = None, x: float | None = None, y: float | None = None) -> dict:
         body: dict[str, Any] = {}
@@ -237,7 +237,7 @@ class AutoBrowserClient:
             body["x"] = x
         if y is not None:
             body["y"] = y
-        return await self._apost(f"/sessions/{session_id}/click", body)
+        return await self._apost(f"/sessions/{session_id}/actions/click", body)
 
     def type_text(self, session_id: str, text: str, *, selector: str | None = None, element_id: str | None = None, clear_first: bool = True) -> dict:
         body: dict[str, Any] = {"text": text, "clear_first": clear_first}
@@ -245,7 +245,7 @@ class AutoBrowserClient:
             body["selector"] = selector
         if element_id:
             body["element_id"] = element_id
-        return self._post(f"/sessions/{session_id}/type", body)
+        return self._post(f"/sessions/{session_id}/actions/type", body)
 
     async def async_type_text(self, session_id: str, text: str, *, selector: str | None = None, element_id: str | None = None, clear_first: bool = True) -> dict:
         body: dict[str, Any] = {"text": text, "clear_first": clear_first}
@@ -253,13 +253,13 @@ class AutoBrowserClient:
             body["selector"] = selector
         if element_id:
             body["element_id"] = element_id
-        return await self._apost(f"/sessions/{session_id}/type", body)
+        return await self._apost(f"/sessions/{session_id}/actions/type", body)
 
     def scroll(self, session_id: str, *, delta_x: float = 0, delta_y: float = 600) -> dict:
-        return self._post(f"/sessions/{session_id}/scroll", {"delta_x": delta_x, "delta_y": delta_y})
+        return self._post(f"/sessions/{session_id}/actions/scroll", {"delta_x": delta_x, "delta_y": delta_y})
 
     async def async_scroll(self, session_id: str, *, delta_x: float = 0, delta_y: float = 600) -> dict:
-        return await self._apost(f"/sessions/{session_id}/scroll", {"delta_x": delta_x, "delta_y": delta_y})
+        return await self._apost(f"/sessions/{session_id}/actions/scroll", {"delta_x": delta_x, "delta_y": delta_y})
 
     def screenshot(self, session_id: str, label: str = "manual") -> dict:
         return self._post(f"/sessions/{session_id}/screenshot", {"label": label})
@@ -365,10 +365,10 @@ class AutoBrowserClient:
         params: dict[str, Any] = {"limit": limit}
         if session_id:
             params["session_id"] = session_id
-        return self._get("/audit", **params)
+        return self._get("/audit/events", **params)
 
     async def async_list_audit_events(self, *, limit: int = 50, session_id: str | None = None) -> list[dict]:
         params: dict[str, Any] = {"limit": limit}
         if session_id:
             params["session_id"] = session_id
-        return await self._aget("/audit", **params)
+        return await self._aget("/audit/events", **params)

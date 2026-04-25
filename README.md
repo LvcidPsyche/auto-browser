@@ -28,13 +28,13 @@ Works with:
 - **Local-first by default.** Run the full stack on your own box with Docker Compose, or use Codespaces for a quick hosted demo.
 - **Safety rails built in.** Approvals, operator identity, PII scrubbing, Witness receipts, and compliance templates are all part of the product surface.
 
-## Release Highlights (v1.0.0)
+## Release Highlights (v1.0.1)
 
-- **Signed mesh delegation** for trusted peer-to-peer workflow routing
-- **Operator dashboard and workflow surfaces** under `/dashboard`, `/workflows`, `/social/empire`, and the extended session network/CDP routes
-- **Readiness advisor, compliance templates, and memory profiles** for safer repeatable automation
-- **Codespaces support and integration packages** for one-click demos and downstream orchestration
-- **Hardening fixes** across auth bootstrap, recipient-bound mesh envelopes, Windows job persistence, audit retention, and archive import safety
+- **Security hardening** for CodeQL-reported workflow permissions, path validation, URL matching, reflected output, and error exposure
+- **Auth profile archive fixes** so saved reusable profiles export and import under `AUTH_ROOT/profiles`
+- **Python client SDK repair** with packageable wheels and current action/audit REST paths
+- **Dashboard XSS hardening** with DOM text rendering, validated links, and a working active-session counter
+- **1.0 platform surface** including signed mesh delegation, workflow routes, `/dashboard`, noVNC takeover, MCP transport, audit trails, and readiness checks
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full release history.
 

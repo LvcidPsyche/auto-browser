@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from datetime import datetime
@@ -202,3 +203,42 @@ class SessionStoreTests(unittest.IsolatedAsyncioTestCase):
 
         profiles = await self.manager.list_auth_profiles()
         self.assertEqual([item["profile_name"] for item in profiles], ["outlook-default"])
+
+    async def test_auth_profile_export_import_round_trips_profiles_root(self) -> None:
+        artifact_dir = Path(self.settings.artifact_root) / "session-export"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        session = BrowserSession(
+            id="session-export",
+            name="session-export",
+            created_at=datetime.now(UTC),
+            context=FakeContext(),  # type: ignore[arg-type]
+            page=FakePage("https://example.com/export"),  # type: ignore[arg-type]
+            artifact_dir=artifact_dir,
+            auth_dir=Path(self.settings.auth_root) / "session-export",
+            upload_dir=Path(self.settings.upload_root) / "session-export",
+            takeover_url="http://127.0.0.1:6080/vnc.html",
+            trace_path=artifact_dir / "trace.zip",
+        )
+        session.auth_dir.mkdir(parents=True, exist_ok=True)
+        session.upload_dir.mkdir(parents=True, exist_ok=True)
+        self.manager.sessions[session.id] = session
+        self.manager._append_jsonl = AsyncMock()  # type: ignore[method-assign]
+
+        await self.manager.save_auth_profile(session.id, "src-profile")
+        profile_dir = Path(self.settings.auth_root) / "profiles" / "src-profile"
+
+        exported = await self.manager.export_auth_profile("src-profile")
+
+        archive_path = Path(exported["archive_path"])
+        self.assertTrue(archive_path.exists())
+        shutil.rmtree(profile_dir)
+        imported = await self.manager.import_auth_profile(str(archive_path))
+
+        self.assertEqual(imported["profile_name"], "src-profile")
+        self.assertEqual(Path(imported["profile_path"]), profile_dir)
+        self.assertTrue((profile_dir / "state.json").exists())
+        self.assertTrue((profile_dir / "profile.json").exists())
+        self.assertFalse((Path(self.settings.auth_root) / "src-profile").exists())
+
+        profiles = await self.manager.list_auth_profiles()
+        self.assertEqual([item["profile_name"] for item in profiles], ["src-profile"])

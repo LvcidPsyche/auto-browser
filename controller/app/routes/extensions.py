@@ -561,13 +561,20 @@ const api = (path) =>
       return r.json();
     })
     .catch(e => ({}));
+const asText = (value, fallback = '—') => {
+  if (value === null || value === undefined || value === '') return fallback;
+  return String(value);
+};
 const statusBadge = (s) => {
   const map = {active:'green', running:'green', completed:'green', ok:'green',
                 failed:'red', error:'red', rejected:'red',
                 pending:'yellow', approval_required:'yellow',
                 interrupted:'gray', closed:'gray'};
-  const cls = map[s] || 'gray';
-  return `<span class="badge badge-${cls}">${s}</span>`;
+  const label = asText(s, 'unknown');
+  const span = document.createElement('span');
+  span.className = `badge badge-${map[label] || 'gray'}`;
+  span.textContent = label;
+  return span;
 };
 const timeAgo = (ts) => {
   if (!ts) return '—';
@@ -575,6 +582,48 @@ const timeAgo = (ts) => {
   if (s < 60) return `${s}s ago`;
   if (s < 3600) return `${Math.floor(s/60)}m ago`;
   return `${Math.floor(s/3600)}h ago`;
+};
+const formatEventTime = (ts) => {
+  if (!ts) return '—';
+  const numeric = Number(ts);
+  const date = Number.isFinite(numeric) ? new Date(numeric * 1000) : new Date(String(ts));
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleTimeString();
+};
+const appendCell = (row, value, options = {}) => {
+  const td = document.createElement('td');
+  if (options.className) td.className = options.className;
+  if (options.maxWidth) {
+    td.style.maxWidth = options.maxWidth;
+    td.style.overflow = 'hidden';
+    td.style.textOverflow = 'ellipsis';
+  }
+  td.textContent = asText(value);
+  row.appendChild(td);
+  return td;
+};
+const appendNodeCell = (row, node) => {
+  const td = document.createElement('td');
+  td.appendChild(node);
+  row.appendChild(td);
+  return td;
+};
+const appendEmptyRow = (tbody, colspan, message) => {
+  tbody.replaceChildren();
+  const row = document.createElement('tr');
+  const cell = document.createElement('td');
+  cell.colSpan = colspan;
+  cell.className = 'empty';
+  cell.textContent = message;
+  row.appendChild(cell);
+  tbody.appendChild(row);
+};
+const safeHttpUrl = (value) => {
+  if (!value) return null;
+  try {
+    const parsed = new URL(String(value), window.location.origin);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.href;
+  } catch (_) {}
+  return null;
 };
 
 async function loadAll() {
@@ -589,17 +638,35 @@ async function loadIdentity() {
 async function loadSessions() {
   const d = await api('/sessions');
   const sessions = d.sessions || d || [];
-  document.getElementById('stat-sessions', sessions.filter?.(s=>s.status==='active').length||0);
+  document.getElementById('stat-sessions').textContent = sessions.filter?.(s=>s.status==='active').length||0;
   const tbody = document.getElementById('sessions-tbody');
-  if (!sessions.length) { tbody.innerHTML='<tr><td colspan="6" class="empty">No sessions</td></tr>'; return; }
-  tbody.innerHTML = sessions.map(s => `<tr>
-    <td class="mono">${(s.session_id||s.id||'').slice(0,12)}...</td>
-    <td>${s.name||'—'}</td>
-    <td>${statusBadge(s.status||'unknown')}</td>
-    <td>${s.operator_id||'—'}</td>
-    <td class="mono" style="max-width:200px;overflow:hidden;text-overflow:ellipsis">${s.current_url||s.start_url||'—'}</td>
-    <td><a href="${s.takeover_url||'#'}" target="_blank" style="color:var(--accent);text-decoration:none">↗ noVNC</a></td>
-  </tr>`).join('');
+  if (!sessions.length) { appendEmptyRow(tbody, 6, 'No sessions'); return; }
+  tbody.replaceChildren();
+  sessions.forEach(s => {
+    const row = document.createElement('tr');
+    const sessionId = asText(s.session_id || s.id, '').slice(0, 12);
+    appendCell(row, sessionId ? `${sessionId}...` : '—', {className: 'mono'});
+    appendCell(row, s.name);
+    appendNodeCell(row, statusBadge(s.status || 'unknown'));
+    appendCell(row, s.operator_id);
+    appendCell(row, s.current_url || s.start_url, {className: 'mono', maxWidth: '200px'});
+    const actionCell = document.createElement('td');
+    const href = safeHttpUrl(s.takeover_url);
+    if (href) {
+      const link = document.createElement('a');
+      link.href = href;
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      link.style.color = 'var(--accent)';
+      link.style.textDecoration = 'none';
+      link.textContent = 'Open noVNC';
+      actionCell.appendChild(link);
+    } else {
+      actionCell.textContent = '—';
+    }
+    row.appendChild(actionCell);
+    tbody.appendChild(row);
+  });
 }
 
 async function loadWorkflows() {
@@ -607,17 +674,19 @@ async function loadWorkflows() {
   const runs = d.runs || [];
   document.getElementById('stat-workflows').textContent = runs.length;
   const tbody = document.getElementById('workflows-tbody');
-  if (!runs.length) { tbody.innerHTML='<tr><td colspan="5" class="empty">No runs yet</td></tr>'; return; }
-  tbody.innerHTML = runs.slice(0,50).map(r => {
+  if (!runs.length) { appendEmptyRow(tbody, 5, 'No runs yet'); return; }
+  tbody.replaceChildren();
+  runs.slice(0,50).forEach(r => {
     const dur = r.finished_at && r.started_at ? `${((r.finished_at-r.started_at)).toFixed(1)}s` : '—';
-    return `<tr>
-      <td class="mono">${(r.run_id||'').slice(0,12)}...</td>
-      <td>${r.workflow_id||'—'}</td>
-      <td>${statusBadge(r.status||'unknown')}</td>
-      <td>${timeAgo(r.started_at)}</td>
-      <td>${dur}</td>
-    </tr>`;
-  }).join('');
+    const row = document.createElement('tr');
+    const runId = asText(r.run_id, '').slice(0, 12);
+    appendCell(row, runId ? `${runId}...` : '—', {className: 'mono'});
+    appendCell(row, r.workflow_id);
+    appendNodeCell(row, statusBadge(r.status || 'unknown'));
+    appendCell(row, timeAgo(r.started_at));
+    appendCell(row, dur);
+    tbody.appendChild(row);
+  });
 }
 
 async function loadPeers() {
@@ -625,20 +694,31 @@ async function loadPeers() {
   const peers = d.peers || [];
   document.getElementById('stat-peers').textContent = peers.length;
   const tbody = document.getElementById('peers-tbody');
-  if (!peers.length) { tbody.innerHTML='<tr><td colspan="6" class="empty">No peers registered</td></tr>'; return; }
-  tbody.innerHTML = peers.map(p => `<tr>
-    <td class="mono">${(p.node_id||'').slice(0,16)}...</td>
-    <td>${p.display_name||'—'}</td>
-    <td class="mono">${p.endpoint||'—'}</td>
-    <td>${timeAgo(p.last_seen)}</td>
-    <td>${(p.grants||[]).length} grants</td>
-    <td><button class="btn btn-danger btn-sm" onclick="removePeer('${p.node_id}')">Remove</button></td>
-  </tr>`).join('');
+  if (!peers.length) { appendEmptyRow(tbody, 6, 'No peers registered'); return; }
+  tbody.replaceChildren();
+  peers.forEach(p => {
+    const row = document.createElement('tr');
+    const nodeId = asText(p.node_id, '').slice(0, 16);
+    appendCell(row, nodeId ? `${nodeId}...` : '—', {className: 'mono'});
+    appendCell(row, p.display_name);
+    appendCell(row, p.endpoint, {className: 'mono'});
+    appendCell(row, timeAgo(p.last_seen));
+    appendCell(row, `${(p.grants||[]).length} grants`);
+    const actionCell = document.createElement('td');
+    const button = document.createElement('button');
+    button.className = 'btn btn-danger btn-sm';
+    button.type = 'button';
+    button.textContent = 'Remove';
+    button.addEventListener('click', () => removePeer(asText(p.node_id, '')));
+    actionCell.appendChild(button);
+    row.appendChild(actionCell);
+    tbody.appendChild(row);
+  });
 }
 
 async function removePeer(nodeId) {
   if (!confirm('Remove peer ' + nodeId + '?')) return;
-  await fetch('/mesh/peers/' + nodeId, {method:'DELETE', headers: _authHeaders()});
+  await fetch('/mesh/peers/' + encodeURIComponent(nodeId), {method:'DELETE', headers: _authHeaders()});
   loadPeers();
 }
 
@@ -647,14 +727,17 @@ async function loadAudit() {
   const events = d.events || d || [];
   if (Array.isArray(events)) document.getElementById('stat-audit').textContent = events.length;
   const tbody = document.getElementById('audit-tbody');
-  if (!events.length) { tbody.innerHTML='<tr><td colspan="5" class="empty">No audit events</td></tr>'; return; }
-  tbody.innerHTML = events.slice(0,50).map(e => `<tr>
-    <td class="mono">${e.timestamp ? new Date(e.timestamp*1000).toLocaleTimeString() : '—'}</td>
-    <td>${e.operator_id||'—'}</td>
-    <td>${e.action||e.event_type||'—'}</td>
-    <td class="mono">${(e.session_id||'').slice(0,8)||'—'}</td>
-    <td>${statusBadge(e.status||'ok')}</td>
-  </tr>`).join('');
+  if (!events.length) { appendEmptyRow(tbody, 5, 'No audit events'); return; }
+  tbody.replaceChildren();
+  events.slice(0,50).forEach(e => {
+    const row = document.createElement('tr');
+    appendCell(row, formatEventTime(e.timestamp), {className: 'mono'});
+    appendCell(row, e.operator_id);
+    appendCell(row, e.action || e.event_type);
+    appendCell(row, asText(e.session_id, '').slice(0, 8) || '—', {className: 'mono'});
+    appendNodeCell(row, statusBadge(e.status || 'ok'));
+    tbody.appendChild(row);
+  });
 }
 
 // Auto-refresh every 15s

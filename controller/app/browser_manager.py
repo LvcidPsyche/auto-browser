@@ -11,7 +11,7 @@ import shutil
 import tarfile
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -4747,9 +4747,10 @@ class BrowserManager:
         """Package an auth profile dir as a .tar.gz and return the artifact path."""
         normalized = self._normalize_auth_profile_name(profile_name)
         auth_root = Path(self.settings.auth_root).resolve()
-        profile_dir = (auth_root / normalized).resolve()
-        if not profile_dir.is_relative_to(auth_root):
-            raise PermissionError("auth profile path must stay inside auth root")
+        profile_root = self._auth_profile_root()
+        profile_dir = self._auth_profile_dir(normalized, create=False)
+        if not profile_dir.is_relative_to(profile_root):
+            raise PermissionError("auth profile path must stay inside auth profile root")
         if not profile_dir.exists() or not profile_dir.is_dir():
             raise FileNotFoundError(f"auth profile '{normalized}' not found")
 
@@ -4772,30 +4773,76 @@ class BrowserManager:
         with tarfile.open(str(dest), "w:gz") as tar:
             tar.add(str(source_dir), arcname=source_dir.name)
 
+    @staticmethod
+    def _safe_auth_archive_member_name(member_name: str) -> PurePosixPath:
+        candidate = PurePosixPath(member_name.replace("\\", "/"))
+        if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
+            raise ValueError("archive contains an unsafe path")
+        return candidate
+
     async def import_auth_profile(self, archive_path: str, *, overwrite: bool = False) -> dict[str, Any]:
-        """Extract a .tar.gz archive into the auth root."""
-        src = Path(archive_path)
+        """Extract a .tar.gz archive into the reusable auth profile root."""
+        src = Path(archive_path).resolve()
         if not src.exists():
             raise FileNotFoundError(f"archive not found: {archive_path}")
 
-        auth_root = Path(self.settings.auth_root)
+        profile_root = self._auth_profile_root()
 
         def _extract() -> str:
             with tarfile.open(str(src), "r:gz") as tar:
-                # Determine profile name from top-level dir in archive
                 members = tar.getmembers()
                 if not members:
                     raise ValueError("archive is empty")
-                top = members[0].name.split("/")[0]
-                dest_dir = auth_root / top
+
+                safe_members: list[tuple[tarfile.TarInfo, PurePosixPath]] = []
+                top_level: str | None = None
+                for member in members:
+                    if member.issym() or member.islnk() or member.isdev():
+                        raise ValueError("archive contains an unsupported member type")
+                    if not member.isdir() and not member.isfile():
+                        continue
+                    safe_path = self._safe_auth_archive_member_name(member.name)
+                    if len(safe_path.parts) == 1 and not member.isdir():
+                        raise ValueError("archive must contain a top-level profile directory")
+                    top = safe_path.parts[0]
+                    if top_level is None:
+                        top_level = top
+                    elif top != top_level:
+                        raise ValueError("archive must contain a single top-level profile directory")
+                    safe_members.append((member, safe_path))
+
+                if top_level is None:
+                    raise ValueError("archive contains no importable files")
+
+                profile_name = self._normalize_auth_profile_name(top_level)
+                dest_dir = (profile_root / profile_name).resolve()
+                if not dest_dir.is_relative_to(profile_root):
+                    raise PermissionError("auth profile path must stay inside auth profile root")
                 if dest_dir.exists() and not overwrite:
-                    raise FileExistsError(f"profile '{top}' already exists — pass overwrite=true")
-                tar.extractall(path=str(auth_root), filter="data")
-                return top
+                    raise FileExistsError(f"profile '{profile_name}' already exists; pass overwrite=true")
+                if dest_dir.exists():
+                    shutil.rmtree(dest_dir)
+
+                for member, safe_path in safe_members:
+                    relative = Path(*safe_path.parts)
+                    target = (profile_root / relative).resolve()
+                    if not target.is_relative_to(profile_root):
+                        raise PermissionError("archive member escapes auth profile root")
+                    if member.isdir():
+                        target.mkdir(parents=True, exist_ok=True)
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    source = tar.extractfile(member)
+                    if source is None:
+                        raise ValueError("archive member could not be read")
+                    with source, target.open("wb") as output:
+                        shutil.copyfileobj(source, output)
+
+                return profile_name
 
         profile_name = await asyncio.to_thread(_extract)
         return {
             "profile_name": profile_name,
-            "profile_path": str(auth_root / profile_name),
+            "profile_path": str(profile_root / profile_name),
             "imported": True,
         }
