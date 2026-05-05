@@ -82,7 +82,7 @@ _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), loggi
 logging.basicConfig(level=_log_level)
 logger = logging.getLogger(__name__)
 
-_VERSION = "1.0.2"
+_VERSION = "1.0.3"
 
 _SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -1083,6 +1083,16 @@ async def resume_agent_job(job_id: str, payload: AgentResumeRequest | None = Non
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except RuntimeError:
         raise HTTPException(status_code=503, detail="Service unavailable") from None
+
+
+@app.post("/agent/jobs/{job_id}/discard")
+async def discard_agent_job(job_id: str) -> dict:
+    try:
+        return await job_queue.discard_job(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown job") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
 @app.get("/mcp")

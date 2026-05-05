@@ -317,6 +317,13 @@ class McpToolGateway:
                     profiles=("full",),
                 ),
                 ToolSpec(
+                    name="browser.discard_agent_job",
+                    description="Discard a queued or finished background agent job so operators can clear stale work.",
+                    input_model=AgentJobIdInput,
+                    handler=self._discard_agent_job,
+                    profiles=("full",),
+                ),
+                ToolSpec(
                     name="browser.queue_agent_step",
                     description="Queue one agent step for background execution.",
                     input_model=QueueAgentStepInput,
@@ -911,6 +918,9 @@ class McpToolGateway:
 
     async def _resume_agent_job(self, payload: ResumeAgentJobInput) -> dict[str, Any]:
         return await self.job_queue.resume_job(payload.job_id, max_steps=payload.max_steps)
+
+    async def _discard_agent_job(self, payload: AgentJobIdInput) -> dict[str, Any]:
+        return await self.job_queue.discard_job(payload.job_id)
 
     async def _queue_agent_step(self, payload: QueueAgentStepInput) -> dict[str, Any]:
         await self.manager.get_session(payload.session_id)

@@ -4,9 +4,16 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.0.3] — 2026-05-05
+
 ### Added
 - Added request-level agent workflow profiles: `fast` for direct execution and `governed` for conservative review guidance.
 - Added durable per-step checkpoints for background agent jobs plus REST/MCP resume support for interrupted, failed, or step-limited runs.
+- Added dashboard controls for viewing, resuming, and discarding background agent jobs with checkpoint timelines.
+- Added a repeatable agent eval harness for provider/profile comparison in offline scoring or live-controller execution mode.
+
+### Changed
+- Split session artifact preparation, screenshots, trace payloads, and JSONL persistence into a dedicated artifact service.
 
 ## [1.0.2] — 2026-04-26
 

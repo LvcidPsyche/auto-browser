@@ -71,6 +71,14 @@ class AgentJobStore:
             record.updated_at = utc_now()
             await asyncio.to_thread(self._write_sync, record)
 
+    async def start_queued(self, job_id: str) -> AgentJobRecord | None:
+        async with self._lock:
+            return await asyncio.to_thread(self._start_queued_sync, job_id)
+
+    async def discard(self, job_id: str) -> tuple[AgentJobRecord, bool]:
+        async with self._lock:
+            return await asyncio.to_thread(self._discard_sync, job_id)
+
     async def mark_running_interrupted(self) -> None:
         for record in await self.list():
             if record.status == "running":
@@ -103,6 +111,27 @@ class AgentJobStore:
         if not path.exists():
             raise KeyError(job_id)
         return AgentJobRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def _start_queued_sync(self, job_id: str) -> AgentJobRecord | None:
+        record = self._get_sync(job_id)
+        if record.status != "queued":
+            return None
+        record.status = "running"
+        record.updated_at = utc_now()
+        self._write_sync(record)
+        return record
+
+    def _discard_sync(self, job_id: str) -> tuple[AgentJobRecord, bool]:
+        record = self._get_sync(job_id)
+        if record.status == "running":
+            raise ValueError("Running jobs cannot be discarded")
+        if record.status != "discarded":
+            record.status = "discarded"
+            record.error = "agent_job_discarded"
+            record.updated_at = utc_now()
+            self._write_sync(record)
+            return record, True
+        return record, False
 
     def _write_sync(self, record: AgentJobRecord) -> None:
         path = self.root / f"{record.id}.json"
@@ -194,6 +223,12 @@ class AgentJobQueue:
         await self._audit("agent_job_resumed", "queued", await self.store.get(resumed["id"]))
         return resumed
 
+    async def discard_job(self, job_id: str) -> dict:
+        record, changed = await self.store.discard(job_id)
+        if changed:
+            await self._audit("agent_job_discarded", "discarded", record)
+        return self._public_record(record)
+
     async def _enqueue(
         self,
         session_id: str,
@@ -232,12 +267,10 @@ class AgentJobQueue:
                 self.queue.task_done()
 
     async def _process_job(self, job_id: str) -> None:
-        record = await self.store.get(job_id)
-        if record.status != "queued":
+        record = await self.store.start_queued(job_id)
+        if record is None:
             return
 
-        record.status = "running"
-        await self.store.update(record)
         await self._audit("agent_job_started", "running", record)
 
         try:

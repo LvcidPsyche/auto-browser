@@ -433,6 +433,10 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .btn-primary { background: var(--accent); color: white; }
   .btn-danger { background: var(--red); color: white; }
   .btn-sm { padding: 3px 10px; font-size: 12px; }
+  .btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .timeline { display: flex; flex-direction: column; gap: 4px; max-width: 280px; }
+  .timeline-item { color: var(--muted); font-size: 12px; }
+  .timeline-item strong { color: var(--text); font-weight: 600; }
   .empty { padding: 32px; text-align: center; color: var(--muted); }
   .refresh-btn { background: none; border: 1px solid var(--border); color: var(--muted);
                  padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
@@ -447,6 +451,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <nav>
   <a href="#sessions" class="active">Sessions</a>
   <a href="#workflows">Workflows</a>
+  <a href="#agent-jobs">Agent Jobs</a>
   <a href="#peers">Peers</a>
   <a href="#audit">Audit Log</a>
 </nav>
@@ -455,6 +460,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="grid" id="stats">
     <div class="card"><h3>Active Sessions</h3><div class="value" id="stat-sessions">—</div></div>
     <div class="card"><h3>Workflow Runs</h3><div class="value" id="stat-workflows">—</div></div>
+    <div class="card"><h3>Agent Jobs</h3><div class="value" id="stat-agent-jobs">—</div></div>
     <div class="card"><h3>Mesh Peers</h3><div class="value" id="stat-peers">—</div></div>
     <div class="card"><h3>Audit Events</h3><div class="value" id="stat-audit">—</div></div>
   </div>
@@ -463,7 +469,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="section" id="sessions">
     <div class="section-header">
       <h2>Sessions</h2>
-      <button class="refresh-btn" onclick="loadSessions()">↻ Refresh</button>
+      <button class="refresh-btn" id="refresh-sessions">↻ Refresh</button>
     </div>
     <table><thead><tr>
       <th>Session ID</th><th>Name</th><th>Status</th><th>Operator</th><th>URL</th><th>Actions</th>
@@ -474,18 +480,29 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="section" id="workflows">
     <div class="section-header">
       <h2>Workflow Runs</h2>
-      <button class="refresh-btn" onclick="loadWorkflows()">↻ Refresh</button>
+      <button class="refresh-btn" id="refresh-workflows">↻ Refresh</button>
     </div>
     <table><thead><tr>
       <th>Run ID</th><th>Workflow</th><th>Status</th><th>Started</th><th>Duration</th>
     </tr></thead><tbody id="workflows-tbody"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody></table>
   </div>
 
+  <!-- Agent Jobs -->
+  <div class="section" id="agent-jobs">
+    <div class="section-header">
+      <h2>Agent Jobs</h2>
+      <button class="refresh-btn" id="refresh-agent-jobs">↻ Refresh</button>
+    </div>
+    <table><thead><tr>
+      <th>Job ID</th><th>Kind</th><th>Status</th><th>Profile</th><th>Checkpoints</th><th>Timeline</th><th>Actions</th>
+    </tr></thead><tbody id="agent-jobs-tbody"><tr><td colspan="7" class="empty">Loading...</td></tr></tbody></table>
+  </div>
+
   <!-- Peers -->
   <div class="section" id="peers">
     <div class="section-header">
       <h2>Mesh Peers</h2>
-      <button class="refresh-btn" onclick="loadPeers()">↻ Refresh</button>
+      <button class="refresh-btn" id="refresh-peers">↻ Refresh</button>
     </div>
     <table><thead><tr>
       <th>Node ID</th><th>Display Name</th><th>Endpoint</th><th>Last Seen</th><th>Grants</th><th>Actions</th>
@@ -496,7 +513,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="section" id="audit">
     <div class="section-header">
       <h2>Audit Log</h2>
-      <button class="refresh-btn" onclick="loadAudit()">↻ Refresh</button>
+      <button class="refresh-btn" id="refresh-audit">↻ Refresh</button>
     </div>
     <table><thead><tr>
       <th>Time</th><th>Operator</th><th>Action</th><th>Session</th><th>Status</th>
@@ -541,8 +558,9 @@ const _authHeaders = () => {
   if (operatorName) headers['__OPERATOR_NAME_HEADER__'] = operatorName;
   return headers;
 };
-const api = (path) =>
-  fetch(path, {headers: _authHeaders()})
+const api = (path, options = {}) => {
+  const headers = {..._authHeaders(), ...(options.headers || {})};
+  return fetch(path, {...options, headers})
     .then(async r => {
       if (r.status === 401) {
         sessionStorage.removeItem('ab_token');
@@ -561,6 +579,15 @@ const api = (path) =>
       return r.json();
     })
     .catch(e => ({}));
+};
+const apiPost = (path, payload = null) => {
+  const options = {method: 'POST'};
+  if (payload !== null) {
+    options.headers = {'Content-Type': 'application/json'};
+    options.body = JSON.stringify(payload);
+  }
+  return api(path, options);
+};
 const asText = (value, fallback = '—') => {
   if (value === null || value === undefined || value === '') return fallback;
   return String(value);
@@ -568,8 +595,8 @@ const asText = (value, fallback = '—') => {
 const statusBadge = (s) => {
   const map = {active:'green', running:'green', completed:'green', ok:'green',
                 failed:'red', error:'red', rejected:'red',
-                pending:'yellow', approval_required:'yellow',
-                interrupted:'gray', closed:'gray'};
+                pending:'yellow', queued:'yellow', approval_required:'yellow',
+                interrupted:'gray', discarded:'gray', closed:'gray'};
   const label = asText(s, 'unknown');
   const span = document.createElement('span');
   span.className = `badge badge-${map[label] || 'gray'}`;
@@ -627,7 +654,7 @@ const safeHttpUrl = (value) => {
 };
 
 async function loadAll() {
-  await Promise.all([loadIdentity(), loadSessions(), loadWorkflows(), loadPeers(), loadAudit()]);
+  await Promise.all([loadIdentity(), loadSessions(), loadWorkflows(), loadAgentJobs(), loadPeers(), loadAudit()]);
 }
 
 async function loadIdentity() {
@@ -689,6 +716,92 @@ async function loadWorkflows() {
   });
 }
 
+const checkpointTimeline = (job) => {
+  const container = document.createElement('div');
+  container.className = 'timeline';
+  const checkpoints = Array.isArray(job.checkpoints) ? job.checkpoints.slice(-4) : [];
+  if (!checkpoints.length) {
+    const empty = document.createElement('span');
+    empty.className = 'timeline-item';
+    empty.textContent = 'No checkpoints';
+    container.appendChild(empty);
+    return container;
+  }
+  checkpoints.forEach(checkpoint => {
+    const item = document.createElement('span');
+    item.className = 'timeline-item';
+    const step = document.createElement('strong');
+    step.textContent = `#${checkpoint.step_index || '?'}`;
+    item.appendChild(step);
+    item.appendChild(document.createTextNode(` ${asText(checkpoint.status, 'unknown')}`));
+    if (checkpoint.action) item.appendChild(document.createTextNode(` · ${checkpoint.action}`));
+    if (checkpoint.title || checkpoint.url) {
+      item.appendChild(document.createTextNode(` · ${checkpoint.title || checkpoint.url}`));
+    }
+    container.appendChild(item);
+  });
+  return container;
+};
+
+const jobActionButton = (label, className, handler) => {
+  const button = document.createElement('button');
+  button.className = className;
+  button.type = 'button';
+  button.textContent = label;
+  button.addEventListener('click', handler);
+  return button;
+};
+
+async function resumeAgentJob(jobId) {
+  const result = await apiPost('/agent/jobs/' + encodeURIComponent(jobId) + '/resume', {});
+  if (result && result.id) loadAgentJobs();
+}
+
+async function discardAgentJob(jobId) {
+  if (!confirm('Discard agent job ' + jobId + '?')) return;
+  const result = await apiPost('/agent/jobs/' + encodeURIComponent(jobId) + '/discard');
+  if (result && result.id) loadAgentJobs();
+}
+
+async function loadAgentJobs() {
+  const jobs = await api('/agent/jobs');
+  const items = Array.isArray(jobs) ? jobs : [];
+  document.getElementById('stat-agent-jobs').textContent = items.length;
+  const tbody = document.getElementById('agent-jobs-tbody');
+  if (!items.length) { appendEmptyRow(tbody, 7, 'No agent jobs'); return; }
+  tbody.replaceChildren();
+  items.slice(0,50).forEach(job => {
+    const row = document.createElement('tr');
+    const jobId = asText(job.id, '');
+    appendCell(row, jobId ? `${jobId.slice(0, 12)}...` : '—', {className: 'mono'});
+    appendCell(row, job.kind);
+    appendNodeCell(row, statusBadge(job.status || 'unknown'));
+    appendCell(row, job.request && job.request.workflow_profile);
+    appendCell(row, job.checkpoint_count ?? (job.checkpoints || []).length);
+    appendNodeCell(row, checkpointTimeline(job));
+
+    const actions = document.createElement('div');
+    actions.className = 'btn-row';
+    if (job.resumable) {
+      actions.appendChild(jobActionButton(
+        'Resume',
+        'btn btn-primary btn-sm',
+        () => resumeAgentJob(jobId)
+      ));
+    }
+    if (job.status !== 'running' && job.status !== 'discarded') {
+      actions.appendChild(jobActionButton(
+        'Discard',
+        'btn btn-danger btn-sm',
+        () => discardAgentJob(jobId)
+      ));
+    }
+    if (!actions.childNodes.length) actions.textContent = '—';
+    appendNodeCell(row, actions);
+    tbody.appendChild(row);
+  });
+}
+
 async function loadPeers() {
   const d = await api('/mesh/peers');
   const peers = d.peers || [];
@@ -739,6 +852,12 @@ async function loadAudit() {
     tbody.appendChild(row);
   });
 }
+
+document.getElementById('refresh-sessions').addEventListener('click', loadSessions);
+document.getElementById('refresh-workflows').addEventListener('click', loadWorkflows);
+document.getElementById('refresh-agent-jobs').addEventListener('click', loadAgentJobs);
+document.getElementById('refresh-peers').addEventListener('click', loadPeers);
+document.getElementById('refresh-audit').addEventListener('click', loadAudit);
 
 // Auto-refresh every 15s
 loadAll();

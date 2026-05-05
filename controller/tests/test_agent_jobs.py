@@ -125,6 +125,36 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Resuming background agent job", resumed_record["request"]["context_hints"])
         self.assertIn("https://example.com/3", resumed_record["request"]["context_hints"])
 
+    async def test_discard_queued_job_marks_it_discarded(self) -> None:
+        record = await self.queue.store.create(
+            session_id="session-3",
+            kind="agent_run",
+            request=AgentRunRequest(provider="openai", goal="stale work").model_dump(),
+        )
+
+        discarded = await self.queue.discard_job(record.id)
+        listed = await self.queue.list_jobs(status="discarded")
+
+        self.assertEqual(discarded["status"], "discarded")
+        self.assertEqual(discarded["error"], "agent_job_discarded")
+        self.assertFalse(discarded["resumable"])
+        self.assertEqual([item["id"] for item in listed], [record.id])
+
+    async def test_discard_running_job_is_rejected(self) -> None:
+        record = await self.queue.store.create(
+            session_id="session-4",
+            kind="agent_run",
+            request=AgentRunRequest(provider="openai", goal="active work").model_dump(),
+        )
+        record.status = "running"
+        await self.queue.store.update(record)
+
+        with self.assertRaisesRegex(ValueError, "Running jobs cannot be discarded"):
+            await self.queue.discard_job(record.id)
+
+        stored = await self.queue.get_job(record.id)
+        self.assertEqual(stored["status"], "running")
+
     async def test_running_jobs_become_interrupted_on_restart(self) -> None:
         await self.queue.store.create(
             session_id="session-2",

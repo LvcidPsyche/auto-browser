@@ -28,13 +28,13 @@ Works with:
 - **Local-first by default.** Run the full stack on your own box with Docker Compose, or use Codespaces for a quick hosted demo.
 - **Safety rails built in.** Approvals, operator identity, PII scrubbing, Witness receipts, and compliance templates are all part of the product surface.
 
-## Release Highlights (v1.0.2)
+## Release Highlights (v1.0.3)
 
-- **Framework security updates** with FastAPI and Starlette pinned to the current patched line
-- **Safer error boundaries** across browser actions, CDP, OCR, mesh, workflow, tunnel, social, and share-token surfaces
-- **Rate-limit hardening** with bounded buckets and hashed operator identifiers
-- **Host and path policy tightening** for production `ALLOWED_HOSTS`, auth profile paths, and upload roots
-- **1.0 platform surface** including signed mesh delegation, workflow routes, `/dashboard`, noVNC takeover, MCP transport, audit trails, and readiness checks
+- **Resumable agent workflows** with `fast` and `governed` profiles plus durable per-step checkpoints
+- **Operator job controls** in `/dashboard` for viewing checkpoint timelines, resuming runs, and discarding stale jobs
+- **Agent eval harness** for repeatable provider/profile comparison in offline scoring or live-controller execution mode
+- **MCP/REST job management** including resume and discard operations for background browser-agent work
+- **Artifact service extraction** for cleaner screenshot, trace, and JSONL persistence boundaries
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full release history.
 

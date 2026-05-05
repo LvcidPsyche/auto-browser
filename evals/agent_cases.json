@@ -1,0 +1,31 @@
+{
+  "cases": [
+    {
+      "id": "example-domain-read",
+      "name": "Read a simple public page",
+      "start_url": "https://example.com",
+      "goal": "Confirm the page is Example Domain and finish without changing anything.",
+      "providers": ["openai", "claude"],
+      "workflow_profiles": ["fast", "governed"],
+      "max_steps": 4,
+      "expected_statuses": ["done"],
+      "expect_url_contains": ["example.com"],
+      "expect_actions": ["done"],
+      "min_step_count": 1,
+      "max_step_count": 4
+    },
+    {
+      "id": "wikipedia-search-read",
+      "name": "Navigate and extract a public fact",
+      "start_url": "https://www.wikipedia.org",
+      "goal": "Search for Playwright browser automation and stop on a relevant article or search result page.",
+      "providers": ["openai", "claude"],
+      "workflow_profiles": ["fast", "governed"],
+      "max_steps": 8,
+      "expected_statuses": ["done", "max_steps_reached"],
+      "expect_url_contains": ["wikipedia.org"],
+      "min_step_count": 1,
+      "max_step_count": 8
+    }
+  ]
+}

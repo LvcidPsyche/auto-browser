@@ -357,6 +357,7 @@ class McpHttpTransport:
                     "autoBrowser": {
                         "workflowProfiles": ["fast", "governed"],
                         "resumableAgentJobs": True,
+                        "discardableAgentJobs": True,
                     }
                 },
             },
