@@ -358,6 +358,7 @@ class McpHttpTransport:
                         "workflowProfiles": ["fast", "governed"],
                         "resumableAgentJobs": True,
                         "discardableAgentJobs": True,
+                        "cancellableAgentJobs": True,
                     }
                 },
             },

@@ -298,7 +298,16 @@ ApprovalKind = Literal["upload", "post", "payment", "account_change", "destructi
 ApprovalStatus = Literal["pending", "approved", "rejected", "executed"]
 SessionStatus = Literal["active", "closed", "interrupted", "failed"]
 AgentJobKind = Literal["agent_step", "agent_run"]
-AgentJobStatus = Literal["queued", "running", "completed", "failed", "interrupted", "discarded"]
+AgentJobStatus = Literal[
+    "queued",
+    "running",
+    "cancelling",
+    "completed",
+    "failed",
+    "interrupted",
+    "cancelled",
+    "discarded",
+]
 AgentStepStatus = Literal["acted", "done", "takeover", "approval_required", "error"]
 
 

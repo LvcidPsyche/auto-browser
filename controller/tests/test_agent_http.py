@@ -162,6 +162,16 @@ class AgentHttpTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "discarded")
         discard_job.assert_awaited_once_with("job-1")
 
+    def test_cancel_agent_job_endpoint_marks_job_cancelled(self) -> None:
+        cancel_job = AsyncMock(return_value={"id": "job-1", "status": "cancelled", "resumable": False})
+
+        with patch.object(main_module.job_queue, "cancel_job", cancel_job):
+            response = self.client.post("/agent/jobs/job-1/cancel")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["status"], "cancelled")
+        cancel_job.assert_awaited_once_with("job-1")
+
     def test_agent_step_surfaces_provider_failure_status_code(self) -> None:
         step = AsyncMock(
             return_value=AgentStepResult(

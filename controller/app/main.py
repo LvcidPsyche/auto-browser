@@ -1095,6 +1095,16 @@ async def discard_agent_job(job_id: str) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
+@app.post("/agent/jobs/{job_id}/cancel", status_code=202)
+async def cancel_agent_job(job_id: str) -> dict:
+    try:
+        return await job_queue.cancel_job(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown job") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
 @app.get("/mcp")
 async def get_mcp_transport(request: Request):
     return await mcp_transport.handle_get_request(request)

@@ -104,6 +104,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             get_job=AsyncMock(return_value={"id": "job-1", "status": "completed"}),
             resume_job=AsyncMock(return_value={"id": "job-2", "parent_job_id": "job-1", "status": "queued"}),
             discard_job=AsyncMock(return_value={"id": "job-1", "status": "discarded"}),
+            cancel_job=AsyncMock(return_value={"id": "job-1", "status": "cancelled"}),
             enqueue_step=AsyncMock(return_value={"id": "job-1", "kind": "agent_step"}),
             enqueue_run=AsyncMock(return_value={"id": "job-2", "kind": "agent_run"}),
         )
@@ -162,6 +163,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("browser.find_by_vision", names)
         self.assertEqual(len(names), len(tools))
         self.assertNotIn("browser.discard_agent_job", names)
+        self.assertNotIn("browser.cancel_agent_job", names)
 
     async def test_full_profile_keeps_internal_tools_available(self) -> None:
         names = {tool["name"] for tool in self.full_gateway.list_tools()}
@@ -169,6 +171,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("browser.list_agent_jobs", names)
         self.assertIn("browser.resume_agent_job", names)
         self.assertIn("browser.discard_agent_job", names)
+        self.assertIn("browser.cancel_agent_job", names)
         self.assertIn("browser.list_providers", names)
         self.assertIn("browser.delete_memory_profile", names)
         self.assertIn("browser.readiness_check", names)
@@ -194,6 +197,15 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(response.isError)
         self.assertEqual(response.structuredContent["status"], "discarded")
         self.job_queue.discard_job.assert_awaited_once_with("job-1")
+
+    async def test_cancel_agent_job_tool_forwards_arguments(self) -> None:
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(name="browser.cancel_agent_job", arguments={"job_id": "job-1"})
+        )
+
+        self.assertFalse(response.isError)
+        self.assertEqual(response.structuredContent["status"], "cancelled")
+        self.job_queue.cancel_job.assert_awaited_once_with("job-1")
 
     async def test_vision_tool_is_listed_when_targeter_is_available(self) -> None:
         names = {tool["name"] for tool in self.vision_gateway.list_tools()}

@@ -195,6 +195,77 @@ def summarize_scores(scores: list[AgentEvalScore]) -> dict[str, Any]:
     }
 
 
+def plan_payload(specs: list[AgentEvalSpec]) -> dict[str, Any]:
+    return {
+        "cases": len({spec.case.id for spec in specs}),
+        "runs": [
+            {
+                "case_id": spec.case.id,
+                "name": spec.case.name,
+                "provider": spec.provider,
+                "workflow_profile": spec.workflow_profile,
+                "max_steps": spec.case.max_steps,
+                "result_file": spec.result_name,
+            }
+            for spec in specs
+        ],
+    }
+
+
+def render_markdown_report(
+    specs: list[AgentEvalSpec],
+    *,
+    scores: list[AgentEvalScore] | None = None,
+) -> str:
+    lines = ["# Auto Browser Agent Eval Report", ""]
+    if scores is None:
+        lines.extend(
+            [
+                "## Planned Matrix",
+                "",
+                "| Case | Provider | Profile | Max Steps | Result File |",
+                "| --- | --- | --- | ---: | --- |",
+            ]
+        )
+        for spec in specs:
+            lines.append(
+                f"| {spec.case.id} | {spec.provider} | {spec.workflow_profile} | "
+                f"{spec.case.max_steps} | {spec.result_name} |"
+            )
+        lines.append("")
+        lines.append(f"Planned runs: {len(specs)}")
+        return "\n".join(lines) + "\n"
+
+    summary = summarize_scores(scores)
+    lines.extend(
+        [
+            "## Summary",
+            "",
+            "| Provider/Profile | Runs | Successes | Average Score |",
+            "| --- | ---: | ---: | ---: |",
+        ]
+    )
+    for key, item in summary.items():
+        lines.append(f"| {key} | {item['runs']} | {item['successes']} | {item['average_score']:.4f} |")
+    lines.extend(
+        [
+            "",
+            "## Runs",
+            "",
+            "| Case | Provider | Profile | Status | Score | Failed Criteria |",
+            "| --- | --- | --- | --- | ---: | --- |",
+        ]
+    )
+    for score in scores:
+        failed = [criterion.name for criterion in score.criteria if not criterion.passed]
+        status = "PASS" if score.success else "FAIL"
+        lines.append(
+            f"| {score.case_id} | {score.provider} | {score.workflow_profile} | "
+            f"{status} | {score.score:.4f} | {', '.join(failed) if failed else '-'} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 class ControllerEvalClient:
     def __init__(
         self,

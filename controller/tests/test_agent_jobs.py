@@ -149,11 +149,90 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         record.status = "running"
         await self.queue.store.update(record)
 
-        with self.assertRaisesRegex(ValueError, "Running jobs cannot be discarded"):
+        with self.assertRaisesRegex(ValueError, "Running jobs must be cancelled"):
             await self.queue.discard_job(record.id)
 
         stored = await self.queue.get_job(record.id)
         self.assertEqual(stored["status"], "running")
+
+    async def test_cancel_queued_job_marks_it_cancelled(self) -> None:
+        record = await self.queue.store.create(
+            session_id="session-5",
+            kind="agent_run",
+            request=AgentRunRequest(provider="openai", goal="cancel queued").model_dump(),
+        )
+
+        cancelled = await self.queue.cancel_job(record.id)
+        listed = await self.queue.list_jobs(status="cancelled")
+
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["error"], "agent_job_cancelled")
+        self.assertFalse(cancelled["resumable"])
+        self.assertEqual([item["id"] for item in listed], [record.id])
+
+    async def test_cancel_running_job_stops_worker_task(self) -> None:
+        class SlowOrchestrator:
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.cancelled = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.started.set()
+                try:
+                    await asyncio.sleep(60)
+                finally:
+                    self.cancelled.set()
+
+        await self.queue.shutdown()
+        slow_orchestrator = SlowOrchestrator()
+        self.queue = AgentJobQueue(
+            orchestrator=slow_orchestrator,
+            store_root=Path(self.tempdir.name),
+            worker_count=1,
+        )
+        await self.queue.startup()
+
+        job = await self.queue.enqueue_run(
+            "session-6",
+            AgentRunRequest(provider="openai", goal="cancel active work"),
+        )
+        await asyncio.wait_for(slow_orchestrator.started.wait(), timeout=2)
+
+        cancelled = await self.queue.cancel_job(job["id"])
+
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["error"], "agent_job_cancelled")
+        self.assertTrue(slow_orchestrator.cancelled.is_set())
+
+    async def test_shutdown_interrupts_running_job(self) -> None:
+        class SlowOrchestrator:
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.started.set()
+                await asyncio.sleep(60)
+
+        await self.queue.shutdown()
+        slow_orchestrator = SlowOrchestrator()
+        self.queue = AgentJobQueue(
+            orchestrator=slow_orchestrator,
+            store_root=Path(self.tempdir.name),
+            worker_count=1,
+        )
+        await self.queue.startup()
+
+        job = await self.queue.enqueue_run(
+            "session-7",
+            AgentRunRequest(provider="openai", goal="interrupt active work"),
+        )
+        await asyncio.wait_for(slow_orchestrator.started.wait(), timeout=2)
+        await self.queue.shutdown()
+
+        interrupted = await self.queue.get_job(job["id"])
+        self.assertEqual(interrupted["status"], "interrupted")
+        self.assertEqual(interrupted["error"], "agent_job_interrupted")
+        self.assertTrue(interrupted["resumable"])
 
     async def test_running_jobs_become_interrupted_on_restart(self) -> None:
         await self.queue.store.create(

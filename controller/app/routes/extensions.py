@@ -595,8 +595,8 @@ const asText = (value, fallback = '—') => {
 const statusBadge = (s) => {
   const map = {active:'green', running:'green', completed:'green', ok:'green',
                 failed:'red', error:'red', rejected:'red',
-                pending:'yellow', queued:'yellow', approval_required:'yellow',
-                interrupted:'gray', discarded:'gray', closed:'gray'};
+                pending:'yellow', queued:'yellow', cancelling:'yellow', approval_required:'yellow',
+                interrupted:'gray', cancelled:'gray', discarded:'gray', closed:'gray'};
   const label = asText(s, 'unknown');
   const span = document.createElement('span');
   span.className = `badge badge-${map[label] || 'gray'}`;
@@ -763,6 +763,12 @@ async function discardAgentJob(jobId) {
   if (result && result.id) loadAgentJobs();
 }
 
+async function cancelAgentJob(jobId) {
+  if (!confirm('Cancel running agent job ' + jobId + '?')) return;
+  const result = await apiPost('/agent/jobs/' + encodeURIComponent(jobId) + '/cancel');
+  if (result && result.id) loadAgentJobs();
+}
+
 async function loadAgentJobs() {
   const jobs = await api('/agent/jobs');
   const items = Array.isArray(jobs) ? jobs : [];
@@ -782,6 +788,13 @@ async function loadAgentJobs() {
 
     const actions = document.createElement('div');
     actions.className = 'btn-row';
+    if (job.status === 'running') {
+      actions.appendChild(jobActionButton(
+        'Cancel',
+        'btn btn-danger btn-sm',
+        () => cancelAgentJob(jobId)
+      ));
+    }
     if (job.resumable) {
       actions.appendChild(jobActionButton(
         'Resume',
@@ -789,7 +802,7 @@ async function loadAgentJobs() {
         () => resumeAgentJob(jobId)
       ));
     }
-    if (job.status !== 'running' && job.status !== 'discarded') {
+    if (!['running', 'cancelling', 'cancelled', 'discarded'].includes(job.status)) {
       actions.appendChild(jobActionButton(
         'Discard',
         'btn btn-danger btn-sm',

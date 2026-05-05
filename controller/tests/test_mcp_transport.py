@@ -91,6 +91,7 @@ class McpTransportTests(unittest.TestCase):
         )
         self.assertTrue(result["capabilities"]["experimental"]["autoBrowser"]["resumableAgentJobs"])
         self.assertTrue(result["capabilities"]["experimental"]["autoBrowser"]["discardableAgentJobs"])
+        self.assertTrue(result["capabilities"]["experimental"]["autoBrowser"]["cancellableAgentJobs"])
         return session_id, protocol_version
 
     def test_initialize_requires_initialized_notification_before_tool_calls(self) -> None:

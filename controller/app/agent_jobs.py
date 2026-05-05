@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from pathlib import Path
@@ -75,6 +76,29 @@ class AgentJobStore:
         async with self._lock:
             return await asyncio.to_thread(self._start_queued_sync, job_id)
 
+    async def append_checkpoint(self, job_id: str, checkpoint: AgentJobCheckpoint) -> AgentJobRecord:
+        async with self._lock:
+            return await asyncio.to_thread(self._append_checkpoint_sync, job_id, checkpoint)
+
+    async def finish(
+        self,
+        job_id: str,
+        *,
+        status: AgentJobStatus,
+        result: dict | None,
+        error: str | None,
+    ) -> AgentJobRecord:
+        async with self._lock:
+            return await asyncio.to_thread(self._finish_sync, job_id, status, result, error)
+
+    async def finish_cancelled(self, job_id: str, *, user_cancelled: bool) -> AgentJobRecord:
+        async with self._lock:
+            return await asyncio.to_thread(self._finish_cancelled_sync, job_id, user_cancelled)
+
+    async def request_cancel(self, job_id: str) -> tuple[AgentJobRecord, bool]:
+        async with self._lock:
+            return await asyncio.to_thread(self._request_cancel_sync, job_id)
+
     async def discard(self, job_id: str) -> tuple[AgentJobRecord, bool]:
         async with self._lock:
             return await asyncio.to_thread(self._discard_sync, job_id)
@@ -121,10 +145,68 @@ class AgentJobStore:
         self._write_sync(record)
         return record
 
+    def _append_checkpoint_sync(self, job_id: str, checkpoint: AgentJobCheckpoint) -> AgentJobRecord:
+        record = self._get_sync(job_id)
+        record.checkpoints.append(checkpoint)
+        record.updated_at = utc_now()
+        self._write_sync(record)
+        return record
+
+    def _finish_sync(
+        self,
+        job_id: str,
+        status: AgentJobStatus,
+        result: dict | None,
+        error: str | None,
+    ) -> AgentJobRecord:
+        record = self._get_sync(job_id)
+        if record.status == "cancelling":
+            record.status = "cancelled"
+            record.error = "agent_job_cancelled"
+            record.result = None
+        elif record.status not in {"cancelled", "discarded"}:
+            record.status = status
+            record.error = error
+            record.result = result
+        record.updated_at = utc_now()
+        self._write_sync(record)
+        return record
+
+    def _finish_cancelled_sync(self, job_id: str, user_cancelled: bool) -> AgentJobRecord:
+        record = self._get_sync(job_id)
+        if user_cancelled:
+            record.status = "cancelled"
+            record.error = "agent_job_cancelled"
+        else:
+            record.status = "interrupted"
+            record.error = "agent_job_interrupted"
+        record.result = None
+        record.updated_at = utc_now()
+        self._write_sync(record)
+        return record
+
+    def _request_cancel_sync(self, job_id: str) -> tuple[AgentJobRecord, bool]:
+        record = self._get_sync(job_id)
+        if record.status == "queued":
+            record.status = "cancelled"
+            record.error = "agent_job_cancelled"
+            record.updated_at = utc_now()
+            self._write_sync(record)
+            return record, True
+        if record.status == "running":
+            record.status = "cancelling"
+            record.error = "agent_job_cancellation_requested"
+            record.updated_at = utc_now()
+            self._write_sync(record)
+            return record, True
+        if record.status in {"cancelling", "cancelled"}:
+            return record, False
+        raise ValueError("Only queued or running jobs can be cancelled")
+
     def _discard_sync(self, job_id: str) -> tuple[AgentJobRecord, bool]:
         record = self._get_sync(job_id)
-        if record.status == "running":
-            raise ValueError("Running jobs cannot be discarded")
+        if record.status in {"running", "cancelling"}:
+            raise ValueError("Running jobs must be cancelled before they can be discarded")
         if record.status != "discarded":
             record.status = "discarded"
             record.error = "agent_job_discarded"
@@ -157,6 +239,8 @@ class AgentJobQueue:
         self._workers: list[asyncio.Task] = []
         self._started = False
         self.audit = audit_store
+        self._running_tasks: dict[str, asyncio.Task[None]] = {}
+        self._cancellation_reasons: dict[str, str] = {}
 
     async def startup(self) -> None:
         await self.store.startup()
@@ -229,6 +313,31 @@ class AgentJobQueue:
             await self._audit("agent_job_discarded", "discarded", record)
         return self._public_record(record)
 
+    async def cancel_job(self, job_id: str) -> dict:
+        record, changed = await self.store.request_cancel(job_id)
+        if changed:
+            await self._audit("agent_job_cancel_requested", record.status, record)
+        if record.status == "cancelled":
+            if changed:
+                await self._audit("agent_job_cancelled", "cancelled", record)
+            return self._public_record(record)
+
+        task = self._running_tasks.get(job_id)
+        if task is None:
+            record = await self.store.finish_cancelled(job_id, user_cancelled=False)
+            await self._audit("agent_job_interrupted", "interrupted", record)
+            return self._public_record(record)
+
+        self._cancellation_reasons[job_id] = "user"
+        task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        except asyncio.CancelledError:
+            pass
+        except asyncio.TimeoutError:
+            return self._public_record(await self.store.get(job_id))
+        return self._public_record(await self.store.get(job_id))
+
     async def _enqueue(
         self,
         session_id: str,
@@ -257,13 +366,24 @@ class AgentJobQueue:
     async def _worker_loop(self, worker_index: int) -> None:
         while True:
             job_id = await self.queue.get()
+            task: asyncio.Task[None] | None = None
             try:
-                await self._process_job(job_id)
+                task = asyncio.create_task(self._process_job(job_id), name=f"agent-job-{job_id}")
+                self._running_tasks[job_id] = task
+                await task
             except asyncio.CancelledError:
-                raise
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    if task is not None:
+                        task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await task
+                    raise
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.exception("agent job worker %s crashed on %s: %s", worker_index, job_id, exc)
             finally:
+                self._running_tasks.pop(job_id, None)
+                self._cancellation_reasons.pop(job_id, None)
                 self.queue.task_done()
 
     async def _process_job(self, job_id: str) -> None:
@@ -287,14 +407,12 @@ class AgentJobQueue:
                     provider_model=request.provider_model,
                     workflow_profile=request.workflow_profile,
                 )
-                record.checkpoints.append(self._checkpoint_from_step(1, result))
-                await self.store.update(record)
+                record = await self.store.append_checkpoint(record.id, self._checkpoint_from_step(1, result))
             else:
                 request = AgentRunRequest.model_validate(record.request)
 
                 async def checkpoint_step(step_index: int, step_result: AgentStepResult) -> None:
-                    record.checkpoints.append(self._checkpoint_from_step(step_index, step_result))
-                    await self.store.update(record)
+                    await self.store.append_checkpoint(record.id, self._checkpoint_from_step(step_index, step_result))
 
                 result = await self.orchestrator.run(
                     session_id=record.session_id,
@@ -309,14 +427,15 @@ class AgentJobQueue:
                     workflow_profile=request.workflow_profile,
                     on_step=checkpoint_step,
                 )
-            record.status = "completed"
-            record.result = result.model_dump()
-            record.error = None
+            record = await self.store.finish(record.id, status="completed", result=result.model_dump(), error=None)
+        except asyncio.CancelledError:
+            user_cancelled = self._cancellation_reasons.get(job_id) == "user"
+            record = await self.store.finish_cancelled(job_id, user_cancelled=user_cancelled)
+            event_type = "agent_job_cancelled" if user_cancelled else "agent_job_interrupted"
+            await self._audit(event_type, record.status, record)
+            raise
         except Exception:
-            record.status = "failed"
-            record.error = "agent_job_failed"
-            record.result = None
-        await self.store.update(record)
+            record = await self.store.finish(record.id, status="failed", result=None, error="agent_job_failed")
         await self._audit("agent_job_finished", record.status, record)
 
     async def _audit(self, event_type: str, status: str, record: AgentJobRecord) -> None:

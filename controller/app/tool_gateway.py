@@ -324,6 +324,13 @@ class McpToolGateway:
                     profiles=("full",),
                 ),
                 ToolSpec(
+                    name="browser.cancel_agent_job",
+                    description="Cancel a queued or running background agent job.",
+                    input_model=AgentJobIdInput,
+                    handler=self._cancel_agent_job,
+                    profiles=("full",),
+                ),
+                ToolSpec(
                     name="browser.queue_agent_step",
                     description="Queue one agent step for background execution.",
                     input_model=QueueAgentStepInput,
@@ -921,6 +928,9 @@ class McpToolGateway:
 
     async def _discard_agent_job(self, payload: AgentJobIdInput) -> dict[str, Any]:
         return await self.job_queue.discard_job(payload.job_id)
+
+    async def _cancel_agent_job(self, payload: AgentJobIdInput) -> dict[str, Any]:
+        return await self.job_queue.cancel_job(payload.job_id)
 
     async def _queue_agent_step(self, payload: QueueAgentStepInput) -> dict[str, Any]:
         await self.manager.get_session(payload.session_id)

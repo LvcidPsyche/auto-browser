@@ -12,6 +12,7 @@ class DashboardSecurityTests(unittest.TestCase):
         self.assertIn("agent-jobs-tbody", _DASHBOARD_HTML)
         self.assertIn("resumeAgentJob", _DASHBOARD_HTML)
         self.assertIn("discardAgentJob", _DASHBOARD_HTML)
+        self.assertIn("cancelAgentJob", _DASHBOARD_HTML)
         self.assertNotIn("innerHTML", _DASHBOARD_HTML)
         self.assertNotIn("onclick=\"removePeer", _DASHBOARD_HTML)
 

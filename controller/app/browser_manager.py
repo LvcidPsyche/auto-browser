@@ -48,6 +48,7 @@ from .browser_scripts import (
     apply_stealth,
 )
 from .config import Settings
+from .downloads import DownloadCaptureService
 from .memory_manager import MemoryManager
 from .models import (
     ApprovalKind,
@@ -162,6 +163,7 @@ class BrowserManager:
             max_events=self.settings.audit_max_events,
         )
         self.artifacts = SessionArtifactService(self.settings.artifact_root)
+        self.download_capture = DownloadCaptureService(self.artifacts)
         self.session_store = DurableSessionStore(
             file_root=self.settings.session_store_root,
             redis_url=self.settings.redis_url,
@@ -4648,43 +4650,13 @@ class BrowserManager:
             del items[: len(items) - limit]
 
     async def _handle_download(self, session: BrowserSession, download: Any) -> None:
-        suggested = Path(str(getattr(download, "suggested_filename", "") or f"download-{uuid4().hex}")).name
-        destination = session.artifact_dir / "downloads" / suggested
-        if destination.exists():
-            destination = destination.with_name(f"{destination.stem}-{uuid4().hex[:8]}{destination.suffix}")
-
-        failure: str | None = None
-        status = "completed"
-        try:
-            await download.save_as(str(destination))
-            if hasattr(download, "failure"):
-                failure = await download.failure()
-        except Exception:
-            failure = "download_save_failed"
-            status = "failed"
-
-        if failure:
-            status = "failed"
-
-        record = {
-            "id": uuid4().hex[:12],
-            "timestamp": utc_now(),
-            "status": status,
-            "filename": destination.name,
-            "suggested_filename": suggested,
-            "path": str(destination),
-            "url": f"/artifacts/{session.id}/downloads/{destination.name}",
-            "source_url": getattr(download, "url", None),
-            "failure": failure,
-        }
-        self._bounded_append(session.downloads, record, limit=100)
-        await self._append_jsonl(session.artifact_dir / "downloads.jsonl", record)
+        record = await self.download_capture.capture(session, download)
         await self.audit.append(
             event_type="download_captured",
-            status=status,
+            status=record["status"],
             action="download",
             session_id=session.id,
-            details={"filename": record["filename"], "url": record["url"], "failure": failure},
+            details={"filename": record["filename"], "url": record["url"], "failure": record["failure"]},
         )
         if session.id in self.sessions:
             try:

@@ -22,7 +22,7 @@ This is the near-term direction for Auto Browser.
 - Cron + webhook triggers — autonomous scheduled jobs
 - MCP Resources Protocol — live browser state as subscribable resources
 - Operator dashboard at `/dashboard` with SSE event stream
-- Durable background-agent checkpoints with dashboard resume/discard controls
+- Durable background-agent checkpoints with dashboard resume/discard/cancel controls
 - Repeatable agent eval harness for provider and workflow-profile comparisons
 
 ## Next
@@ -36,7 +36,7 @@ This is the near-term direction for Auto Browser.
 ## Recently Shipped
 
 - v1.0.1 security hardening, auth-profile archive fixes, client SDK repair, and dashboard XSS cleanup
-- v1.0.3 resumable agent workflows, operator job controls, eval harness, and artifact service cleanup
+- v1.0.3 resumable/cancellable agent workflows, operator job controls, eval reporting, and artifact/download service cleanup
 - Durable background-agent checkpoints with REST/MCP resume support
 - Request-level `fast` and `governed` workflow profiles for agent runs
 - Agent memory profiles for cross-session context persistence

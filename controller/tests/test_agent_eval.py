@@ -5,7 +5,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.agent_eval import build_matrix, load_cases, score_from_result_dir, score_result, summarize_scores
+from app.agent_eval import (
+    build_matrix,
+    load_cases,
+    plan_payload,
+    render_markdown_report,
+    score_from_result_dir,
+    score_result,
+    summarize_scores,
+)
 
 
 class AgentEvalTests(unittest.TestCase):
@@ -52,6 +60,9 @@ class AgentEvalTests(unittest.TestCase):
             self.assertTrue(score.success)
             self.assertEqual(score.score, 1.0)
             self.assertEqual(summary["openai/fast"]["successes"], 1)
+            self.assertEqual(plan_payload(matrix)["runs"][0]["result_file"], "case-1__openai__fast.json")
+            self.assertIn("| case-1 | openai | fast | PASS | 1.0000 | - |", render_markdown_report(matrix, scores=[score]))
+            self.assertIn("Planned runs: 2", render_markdown_report(matrix))
 
     def test_score_from_result_dir_marks_missing_results_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

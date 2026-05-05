@@ -11,9 +11,12 @@ All notable changes to auto-browser are documented here.
 - Added durable per-step checkpoints for background agent jobs plus REST/MCP resume support for interrupted, failed, or step-limited runs.
 - Added dashboard controls for viewing, resuming, and discarding background agent jobs with checkpoint timelines.
 - Added a repeatable agent eval harness for provider/profile comparison in offline scoring or live-controller execution mode.
+- Added explicit REST/MCP/dashboard cancellation for queued and running background agent jobs.
 
 ### Changed
 - Split session artifact preparation, screenshots, trace payloads, and JSONL persistence into a dedicated artifact service.
+- Split download capture persistence into a dedicated service and added CI validation for eval case files.
+- Added a committed browser-node package lock so npm audit produces a real release gate.
 
 ## [1.0.2] — 2026-04-26
 

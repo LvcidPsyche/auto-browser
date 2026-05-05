@@ -15,6 +15,8 @@ from app.agent_eval import (  # noqa: E402
     ControllerEvalClient,
     build_matrix,
     load_cases,
+    plan_payload,
+    render_markdown_report,
     score_from_result_dir,
     score_result,
     summarize_scores,
@@ -37,6 +39,7 @@ def main() -> int:
     parser.add_argument("--operator-id", default="")
     parser.add_argument("--operator-name", default="")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    parser.add_argument("--report-file", default="", help="Write a Markdown report to this path.")
     args = parser.parse_args()
 
     cases = load_cases(args.cases)
@@ -57,24 +60,16 @@ def main() -> int:
         for spec in matrix:
             result = client.run_spec(spec)
             scores.append(score_result(spec, result))
+        _write_report(args.report_file, render_markdown_report(matrix, scores=scores))
         return _emit_scores(scores, json_output=args.json)
 
     if args.results_dir:
         scores = score_from_result_dir(matrix, args.results_dir)
+        _write_report(args.report_file, render_markdown_report(matrix, scores=scores))
         return _emit_scores(scores, json_output=args.json)
 
-    plan = {
-        "cases": len(cases),
-        "runs": [
-            {
-                "case_id": spec.case.id,
-                "provider": spec.provider,
-                "workflow_profile": spec.workflow_profile,
-                "result_file": spec.result_name,
-            }
-            for spec in matrix
-        ],
-    }
+    plan = plan_payload(matrix)
+    _write_report(args.report_file, render_markdown_report(matrix))
     if args.json:
         print(json.dumps(plan, indent=2))
     else:
@@ -106,6 +101,14 @@ def _emit_scores(scores, *, json_output: bool) -> int:
 def _csv(value: str):
     items = tuple(item.strip() for item in value.split(",") if item.strip())
     return items or None
+
+
+def _write_report(path: str, content: str) -> None:
+    if not path:
+        return
+    report_path = Path(path)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(content, encoding="utf-8")
 
 
 if __name__ == "__main__":
