@@ -121,6 +121,43 @@ class BrowserOrchestratorLoopGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[Memory: checkout]", adapter.last_goal)
         self.assertIn("Current goal: Click the buy button", adapter.last_goal)
 
+    async def test_governed_workflow_profile_adds_conservative_context(self) -> None:
+        class ContextAwareAdapter:
+            default_model = "test-model"
+
+            def __init__(self) -> None:
+                self.last_context_hints = ""
+
+            async def decide(self, **kwargs):
+                self.last_context_hints = kwargs["context_hints"]
+                return ProviderDecision(
+                    provider="openai",
+                    model="test-model",
+                    decision=BrowserActionDecision(
+                        action="done",
+                        reason="Enough context",
+                        risk_category="read",
+                    ),
+                    usage={"provider": "fake"},
+                    raw_text='{"action":"done"}',
+                )
+
+        adapter = ContextAwareAdapter()
+        orchestrator = BrowserOrchestrator(self.manager, StaticRegistry(adapter))
+
+        result = await orchestrator.step(
+            session_id="session-1",
+            provider_name="openai",
+            goal="Inspect the account page",
+            context_hints="Stay on the current account.",
+            workflow_profile="governed",
+        )
+
+        self.assertEqual(result.workflow_profile, "governed")
+        self.assertIn("Stay on the current account.", adapter.last_context_hints)
+        self.assertIn("Workflow profile: governed", adapter.last_context_hints)
+        self.assertIn("request human takeover", adapter.last_context_hints)
+
 
 if __name__ == "__main__":
     unittest.main()

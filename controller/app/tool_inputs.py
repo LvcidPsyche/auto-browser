@@ -62,6 +62,7 @@ __all__ = [
     "QueueAgentRunInput",
     "QueueAgentStepInput",
     "ReadinessCheckInput",
+    "ResumeAgentJobInput",
     "SaveMemoryProfileInput",
     "SaveAuthProfileInput",
     "SaveAuthStateInput",
@@ -197,6 +198,10 @@ class ReadinessCheckInput(StrictInputModel):
 
 class AgentJobIdInput(StrictInputModel):
     job_id: str = Field(min_length=1, max_length=120)
+
+
+class ResumeAgentJobInput(AgentJobIdInput):
+    max_steps: int | None = Field(default=None, ge=1, le=20)
 
 
 class QueueAgentStepInput(SessionIdInput):

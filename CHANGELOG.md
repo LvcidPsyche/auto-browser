@@ -4,6 +4,10 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Added
+- Added request-level agent workflow profiles: `fast` for direct execution and `governed` for conservative review guidance.
+- Added durable per-step checkpoints for background agent jobs plus REST/MCP resume support for interrupted, failed, or step-limited runs.
+
 ## [1.0.2] — 2026-04-26
 
 ### Fixed

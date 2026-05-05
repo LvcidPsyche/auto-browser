@@ -353,6 +353,12 @@ class McpHttpTransport:
             "capabilities": {
                 "tools": {},
                 "resources": {"subscribe": False},
+                "experimental": {
+                    "autoBrowser": {
+                        "workflowProfiles": ["fast", "governed"],
+                        "resumableAgentJobs": True,
+                    }
+                },
             },
             "serverInfo": {
                 "name": self.server_name,

@@ -12,6 +12,7 @@ from app.browser_manager import BrowserManager
 from app.config import Settings
 from app.cron_service import CronService
 from app.models import (
+    AgentRunRequest,
     BrowserActionDecision,
     ClickRequest,
     CreateSessionRequest,
@@ -96,6 +97,15 @@ class RequestValidationTests(unittest.TestCase):
 
         self.assertEqual(payload.preset, "rich")
         self.assertEqual(payload.limit, 120)
+
+    def test_agent_run_request_accepts_governed_workflow_profile(self) -> None:
+        payload = AgentRunRequest(provider="openai", goal="check the inbox", workflow_profile="governed")
+
+        self.assertEqual(payload.workflow_profile, "governed")
+
+    def test_agent_run_request_rejects_unknown_workflow_profile(self) -> None:
+        with self.assertRaises(ValidationError):
+            AgentRunRequest(provider="openai", goal="check the inbox", workflow_profile="unsafe")
 
     def test_get_network_log_uppercases_method(self) -> None:
         payload = GetNetworkLogInput(session_id="session-1", method="post")

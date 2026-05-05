@@ -40,6 +40,7 @@ The controller now includes:
 - provider discovery endpoint: `GET /agent/providers`
 - step endpoint: `POST /sessions/{session_id}/agent/step`
 - run endpoint: `POST /sessions/{session_id}/agent/run`
+- background job resume endpoint: `POST /agent/jobs/{job_id}/resume`
 
 ## How a step works
 
@@ -85,10 +86,34 @@ Uses the Gemini `generateContent` API with:
 {
   "provider": "claude",
   "goal": "Fill the search field with `playwright mcp` and stop before submitting.",
+  "workflow_profile": "governed",
   "max_steps": 4,
   "observation_limit": 25
 }
 ```
+
+`workflow_profile` defaults to `fast`. Use `governed` when an operator wants the
+agent to inspect first, avoid ambiguous writes, and request human takeover around
+sensitive account/payment/posting/destructive work.
+
+## Background jobs and resume
+
+Queued agent runs persist a compact checkpoint after every completed step. A
+checkpoint stores status, action, reason, URL/title, and error summary without
+raw provider text. If the controller restarts while a job is running, startup
+marks that job `interrupted` and leaves its checkpoints in the job record.
+
+Resume through REST:
+
+```bash
+curl -X POST http://localhost:8000/agent/jobs/<job_id>/resume \
+  -H "Content-Type: application/json" \
+  -d '{"max_steps": 4}'
+```
+
+The MCP full profile exposes the same behavior as `browser.resume_agent_job`.
+Resume creates a new child job with `parent_job_id` set to the original job and
+injects the checkpoint summary into `context_hints`.
 
 ## Safety behavior
 
@@ -119,6 +144,4 @@ If a provider still proposes a sensitive side effect, the controller does not tr
 ## Next production upgrades
 
 - switch OpenAI from Chat Completions to Responses API if you want one modern multimodal path everywhere
-- move provider calls into a queue/worker tier
-- add retry / loop detection policies
 - add streaming/SSE on top of the current REST + MCP surfaces when clients need server-pushed events

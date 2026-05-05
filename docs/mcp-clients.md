@@ -109,6 +109,10 @@ If you really want the whole surface:
 MCP_TOOL_PROFILE=full
 ```
 
+In the full profile, `browser.queue_agent_run` accepts `workflow_profile`
+(`fast` or `governed`) and `browser.resume_agent_job` resumes interrupted,
+failed, or step-limited background runs from persisted checkpoints.
+
 ## Raw tool-call example
 
 If you want to see the shape of the tool surface without wiring up a full MCP client yet:

@@ -10,12 +10,16 @@ from app.models import AgentRunRequest, AgentRunResult, AgentStepRequest, AgentS
 
 
 class FakeOrchestrator:
+    def __init__(self) -> None:
+        self.run_calls: list[dict] = []
+
     async def step(self, **kwargs):
         await asyncio.sleep(0.01)
         return AgentStepResult(
             provider=kwargs["provider_name"],
             model="test-model",
             goal=kwargs["goal"],
+            workflow_profile=kwargs.get("workflow_profile", "fast"),
             status="done",
             observation={"url": "https://example.com"},
             decision={"action": "done", "reason": "done"},
@@ -27,13 +31,34 @@ class FakeOrchestrator:
         )
 
     async def run(self, **kwargs):
+        self.run_calls.append(kwargs)
         await asyncio.sleep(0.01)
+        steps = []
+        for step_index in range(1, kwargs["max_steps"] + 1):
+            step = AgentStepResult(
+                provider=kwargs["provider_name"],
+                model="test-model",
+                goal=kwargs["goal"],
+                workflow_profile=kwargs.get("workflow_profile", "fast"),
+                status="acted",
+                observation={"url": f"https://example.com/{step_index}", "title": f"Step {step_index}"},
+                decision={"action": "click", "reason": f"step {step_index}"},
+                execution={"after": {"url": f"https://example.com/{step_index}", "title": f"Step {step_index}"}},
+                usage=None,
+                raw_text=None,
+                error=None,
+                error_code=None,
+            )
+            steps.append(step)
+            if kwargs.get("on_step"):
+                await kwargs["on_step"](step_index, step)
         return AgentRunResult(
             provider=kwargs["provider_name"],
             model="test-model",
             goal=kwargs["goal"],
-            status="done",
-            steps=[],
+            workflow_profile=kwargs.get("workflow_profile", "fast"),
+            status="max_steps_reached",
+            steps=steps,
             final_session={"id": kwargs["session_id"], "status": "active"},
         )
 
@@ -41,8 +66,9 @@ class FakeOrchestrator:
 class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
+        self.orchestrator = FakeOrchestrator()
         self.queue = AgentJobQueue(
-            orchestrator=FakeOrchestrator(),
+            orchestrator=self.orchestrator,
             store_root=Path(self.tempdir.name),
             worker_count=1,
         )
@@ -68,6 +94,36 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(stored["result"]["status"], "done")
         self.assertEqual(stored["kind"], "agent_step")
+        self.assertEqual(stored["checkpoint_count"], 1)
+        self.assertFalse(stored["resumable"])
+
+    async def test_agent_run_records_checkpoints_and_resume_queues_remaining_steps(self) -> None:
+        job = await self.queue.enqueue_run(
+            "session-2",
+            AgentRunRequest(provider="openai", goal="run it", max_steps=3, workflow_profile="governed"),
+        )
+
+        for _ in range(50):
+            stored = await self.queue.get_job(job["id"])
+            if stored["status"] == "completed":
+                break
+            await asyncio.sleep(0.02)
+        else:
+            self.fail("run job did not complete")
+
+        self.assertEqual(stored["checkpoint_count"], 3)
+        self.assertTrue(stored["resumable"])
+        self.assertEqual(stored["checkpoints"][-1]["url"], "https://example.com/3")
+        self.assertEqual(stored["result"]["workflow_profile"], "governed")
+
+        resumed = await self.queue.resume_job(job["id"])
+        resumed_record = await self.queue.get_job(resumed["id"])
+
+        self.assertEqual(resumed_record["parent_job_id"], job["id"])
+        self.assertEqual(resumed_record["request"]["workflow_profile"], "governed")
+        self.assertEqual(resumed_record["request"]["max_steps"], 1)
+        self.assertIn("Resuming background agent job", resumed_record["request"]["context_hints"])
+        self.assertIn("https://example.com/3", resumed_record["request"]["context_hints"])
 
     async def test_running_jobs_become_interrupted_on_restart(self) -> None:
         await self.queue.store.create(
@@ -90,3 +146,4 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
 
         updated = await self.queue.get_job(record.id)
         self.assertEqual(updated["status"], "interrupted")
+        self.assertTrue(updated["resumable"])

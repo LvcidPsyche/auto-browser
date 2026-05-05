@@ -284,6 +284,7 @@ ActionName = Literal[
     "done",
 ]
 ProviderName = Literal["openai", "claude", "gemini"]
+WorkflowProfile = Literal["fast", "governed"]
 RiskCategory = Literal[
     "read",
     "write",
@@ -298,6 +299,7 @@ ApprovalStatus = Literal["pending", "approved", "rejected", "executed"]
 SessionStatus = Literal["active", "closed", "interrupted", "failed"]
 AgentJobKind = Literal["agent_step", "agent_run"]
 AgentJobStatus = Literal["queued", "running", "completed", "failed", "interrupted"]
+AgentStepStatus = Literal["acted", "done", "takeover", "approval_required", "error"]
 
 
 class BrowserActionDecision(StrictInputModel):
@@ -396,6 +398,10 @@ class AgentStepRequest(StrictInputModel):
     provider: ProviderName
     goal: str = Field(min_length=1, max_length=4000)
     provider_model: str | None = None
+    workflow_profile: WorkflowProfile = Field(
+        default="fast",
+        description="fast preserves direct execution; governed adds conservative review guidance and richer audit context.",
+    )
     observation_limit: int = Field(default=40, ge=1, le=100)
     context_hints: str | None = Field(default=None, max_length=4000)
     upload_approved: bool = False
@@ -404,6 +410,15 @@ class AgentStepRequest(StrictInputModel):
 
 class AgentRunRequest(AgentStepRequest):
     max_steps: int = Field(default=6, ge=1, le=20)
+
+
+class AgentResumeRequest(StrictInputModel):
+    max_steps: int | None = Field(
+        default=None,
+        ge=1,
+        le=20,
+        description="Override the number of steps to run when resuming a job.",
+    )
 
 
 class ProviderInfo(BaseModel):
@@ -427,7 +442,8 @@ class AgentStepResult(BaseModel):
     provider: ProviderName
     model: str
     goal: str
-    status: Literal["acted", "done", "takeover", "approval_required", "error"]
+    workflow_profile: WorkflowProfile = "fast"
+    status: AgentStepStatus
     observation: dict[str, Any]
     decision: dict[str, Any]
     execution: dict[str, Any] | None = None
@@ -441,6 +457,7 @@ class AgentRunResult(BaseModel):
     provider: ProviderName
     model: str
     goal: str
+    workflow_profile: WorkflowProfile = "fast"
     status: Literal["acted", "done", "takeover", "approval_required", "error", "max_steps_reached"]
     steps: list[AgentStepResult]
     final_session: dict[str, Any]
@@ -483,6 +500,17 @@ class WitnessRemoteState(BaseModel):
     last_delivered_at: str | None = None
 
 
+class AgentJobCheckpoint(BaseModel):
+    step_index: int = Field(ge=1)
+    created_at: str
+    status: AgentStepStatus
+    action: str | None = None
+    reason: str | None = None
+    url: str | None = None
+    title: str | None = None
+    error: str | None = None
+
+
 class SessionRecord(BaseModel):
     id: str
     name: str
@@ -513,6 +541,8 @@ class AgentJobRecord(BaseModel):
     created_at: str
     updated_at: str
     request: dict[str, Any]
+    parent_job_id: str | None = None
+    checkpoints: list[AgentJobCheckpoint] = Field(default_factory=list)
     operator: OperatorIdentity | None = None
     result: dict[str, Any] | None = None
     error: str | None = None

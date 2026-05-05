@@ -109,6 +109,7 @@ class AgentHttpTests(unittest.TestCase):
                 provider="openai",
                 model="gpt-4.1-mini",
                 goal="Inspect the page",
+                workflow_profile="governed",
                 status="done",
                 observation={"url": "https://example.com", "title": "Example Domain"},
                 decision={"action": "done", "reason": "Already on the target page", "risk_category": "read"},
@@ -125,6 +126,7 @@ class AgentHttpTests(unittest.TestCase):
                     "goal": "Inspect the page",
                     "observation_limit": 12,
                     "provider_model": "gpt-4.1-mini",
+                    "workflow_profile": "governed",
                 },
             )
 
@@ -132,11 +134,23 @@ class AgentHttpTests(unittest.TestCase):
         body = response.json()
         self.assertEqual(body["status"], "done")
         self.assertEqual(body["usage"], {"transport": "fake-provider"})
+        self.assertEqual(body["workflow_profile"], "governed")
         self.assertEqual(body["decision"]["action"], "done")
         self.assertEqual(step.await_args.kwargs["session_id"], "session-1")
         self.assertEqual(step.await_args.kwargs["provider_name"], "openai")
         self.assertEqual(step.await_args.kwargs["provider_model"], "gpt-4.1-mini")
         self.assertEqual(step.await_args.kwargs["observation_limit"], 12)
+        self.assertEqual(step.await_args.kwargs["workflow_profile"], "governed")
+
+    def test_resume_agent_job_endpoint_returns_queued_job(self) -> None:
+        resume_job = AsyncMock(return_value={"id": "job-2", "parent_job_id": "job-1", "status": "queued"})
+
+        with patch.object(main_module.job_queue, "resume_job", resume_job):
+            response = self.client.post("/agent/jobs/job-1/resume", json={"max_steps": 4})
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["parent_job_id"], "job-1")
+        resume_job.assert_awaited_once_with("job-1", max_steps=4)
 
     def test_agent_step_surfaces_provider_failure_status_code(self) -> None:
         step = AsyncMock(

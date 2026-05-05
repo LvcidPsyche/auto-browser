@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
 
 from .approvals import ApprovalRequiredError
 from .browser_manager import BrowserManager
-from .models import AgentRunResult, AgentStepResult, ProviderName
+from .models import AgentRunResult, AgentStepResult, ProviderName, WorkflowProfile
 from .provider_registry import ProviderRegistry
 from .providers.base import ProviderAPIError, ProviderDecision
 
@@ -30,6 +31,7 @@ class BrowserOrchestrator:
         upload_approved: bool = False,
         approval_id: str | None = None,
         provider_model: str | None = None,
+        workflow_profile: WorkflowProfile = "fast",
         previous_steps: list[AgentStepResult] | None = None,
     ) -> AgentStepResult:
         adapter = self.registry.get(provider_name)
@@ -37,6 +39,7 @@ class BrowserOrchestrator:
         session = await self.manager.get_session(session_id)
         memory_context = getattr(session, "metadata", {}).get("memory_context")
         effective_goal = f"{memory_context}\n\n---\nCurrent goal: {goal}" if memory_context else goal
+        effective_context_hints = self._context_hints_for_profile(context_hints, workflow_profile)
         observation = await self.manager.observe(session_id, limit=observation_limit)
         prompt_history = self._summarize_previous_steps(previous_steps or [])
 
@@ -44,7 +47,7 @@ class BrowserOrchestrator:
             provider_decision = await adapter.decide(
                 goal=effective_goal,
                 observation=observation,
-                context_hints=context_hints,
+                context_hints=effective_context_hints,
                 previous_steps=prompt_history,
                 model_override=provider_model,
             )
@@ -55,12 +58,14 @@ class BrowserOrchestrator:
                 provider_decision=provider_decision,
                 upload_approved=upload_approved,
                 approval_id=approval_id,
+                workflow_profile=workflow_profile,
             )
         except ApprovalRequiredError as exc:
             result = AgentStepResult(
                 provider=provider_name,
                 model=model_name,
                 goal=goal,
+                workflow_profile=workflow_profile,
                 status="approval_required",
                 observation=observation,
                 decision=provider_decision.decision.model_dump(),
@@ -82,6 +87,7 @@ class BrowserOrchestrator:
                 provider=provider_name,
                 model=model_name,
                 goal=goal,
+                workflow_profile=workflow_profile,
                 status="error",
                 observation=observation,
                 decision={},
@@ -107,6 +113,8 @@ class BrowserOrchestrator:
         upload_approved: bool = False,
         approval_id: str | None = None,
         provider_model: str | None = None,
+        workflow_profile: WorkflowProfile = "fast",
+        on_step: Callable[[int, AgentStepResult], Awaitable[None]] | None = None,
     ) -> AgentRunResult:
         steps: list[AgentStepResult] = []
         final_status = "max_steps_reached"
@@ -123,9 +131,12 @@ class BrowserOrchestrator:
                 upload_approved=upload_approved,
                 approval_id=approval_id,
                 provider_model=provider_model,
+                workflow_profile=workflow_profile,
                 previous_steps=steps,
             )
             steps.append(step_result)
+            if on_step is not None:
+                await on_step(index + 1, step_result)
             model_name = step_result.model
             if self._should_trigger_loop_takeover(steps):
                 takeover_reason = "Agent loop guard triggered after repeated low-progress actions"
@@ -135,6 +146,7 @@ class BrowserOrchestrator:
                         provider=provider_name,
                         model=model_name,
                         goal=goal,
+                        workflow_profile=workflow_profile,
                         status="takeover",
                         observation=step_result.observation,
                         decision={
@@ -161,6 +173,7 @@ class BrowserOrchestrator:
             provider=provider_name,
             model=model_name,
             goal=goal,
+            workflow_profile=workflow_profile,
             status=final_status,
             steps=steps,
             final_session=final_session,
@@ -177,6 +190,7 @@ class BrowserOrchestrator:
         provider_decision: ProviderDecision,
         upload_approved: bool,
         approval_id: str | None,
+        workflow_profile: WorkflowProfile,
     ) -> AgentStepResult:
         decision = provider_decision.decision
         execution: dict[str, Any] | None = None
@@ -214,6 +228,7 @@ class BrowserOrchestrator:
             provider=provider_decision.provider,
             model=provider_decision.model,
             goal=goal,
+            workflow_profile=workflow_profile,
             status=status,  # type: ignore[arg-type]
             observation=observation,
             decision=decision.model_dump(),
@@ -223,6 +238,20 @@ class BrowserOrchestrator:
             error=None,
             error_code=None,
         )
+
+    @staticmethod
+    def _context_hints_for_profile(context_hints: str | None, workflow_profile: WorkflowProfile) -> str | None:
+        if workflow_profile == "fast":
+            return context_hints
+        governed_hint = (
+            "Workflow profile: governed. Prefer inspect/read actions before mutating state. "
+            "Use normal write actions only when the target is unambiguous and confidence is high. "
+            "For login, MFA, posting, payment, account changes, destructive actions, sensitive data, "
+            "or uncertainty, request human takeover instead of proceeding."
+        )
+        if context_hints:
+            return f"{context_hints}\n\n{governed_hint}"
+        return governed_hint
 
     @staticmethod
     def _summarize_previous_steps(steps: list[AgentStepResult]) -> list[dict[str, Any]]:

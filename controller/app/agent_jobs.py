@@ -7,7 +7,14 @@ from pathlib import Path
 from uuid import uuid4
 
 from .audit import get_current_operator
-from .models import AgentJobRecord, AgentJobStatus, AgentRunRequest, AgentStepRequest
+from .models import (
+    AgentJobCheckpoint,
+    AgentJobRecord,
+    AgentJobStatus,
+    AgentRunRequest,
+    AgentStepRequest,
+    AgentStepResult,
+)
 from .utils import utc_now
 
 logger = logging.getLogger(__name__)
@@ -34,7 +41,15 @@ class AgentJobStore:
         async with self._lock:
             return await asyncio.to_thread(self._get_sync, job_id)
 
-    async def create(self, *, session_id: str, kind: str, request: dict, operator=None) -> AgentJobRecord:
+    async def create(
+        self,
+        *,
+        session_id: str,
+        kind: str,
+        request: dict,
+        operator=None,
+        parent_job_id: str | None = None,
+    ) -> AgentJobRecord:
         async with self._lock:
             now = utc_now()
             record = AgentJobRecord(
@@ -45,6 +60,7 @@ class AgentJobStore:
                 created_at=now,
                 updated_at=now,
                 request=request,
+                parent_job_id=parent_job_id,
                 operator=operator,
             )
             await asyncio.to_thread(self._write_sync, record)
@@ -59,6 +75,7 @@ class AgentJobStore:
         for record in await self.list():
             if record.status == "running":
                 record.status = "interrupted"
+                record.error = "agent_job_interrupted_on_restart"
                 await self.update(record)
 
     def _list_sync(
@@ -142,10 +159,10 @@ class AgentJobQueue:
         session_id: str | None = None,
     ) -> list[dict]:
         records = await self.store.list(status=status, session_id=session_id)
-        return [record.model_dump() for record in records]
+        return [self._public_record(record) for record in records]
 
     async def get_job(self, job_id: str) -> dict:
-        return (await self.store.get(job_id)).model_dump()
+        return self._public_record(await self.store.get(job_id))
 
     async def enqueue_step(self, session_id: str, payload: AgentStepRequest) -> dict:
         return await self._enqueue(session_id, "agent_step", payload)
@@ -153,17 +170,44 @@ class AgentJobQueue:
     async def enqueue_run(self, session_id: str, payload: AgentRunRequest) -> dict:
         return await self._enqueue(session_id, "agent_run", payload)
 
+    async def resume_job(self, job_id: str, *, max_steps: int | None = None) -> dict:
+        source = await self.store.get(job_id)
+        if not self._is_resumable(source):
+            raise ValueError("Job is not resumable")
+        if source.kind != "agent_run":
+            raise ValueError("Only agent_run jobs can be resumed")
+
+        payload = AgentRunRequest.model_validate(source.request)
+        completed_steps = len(source.checkpoints)
+        remaining_steps = max(1, payload.max_steps - completed_steps)
+        payload.max_steps = max_steps or remaining_steps
+        payload.context_hints = self._merge_context_hints(
+            payload.context_hints,
+            self._resume_context(source),
+        )
+        resumed = await self._enqueue(
+            source.session_id,
+            "agent_run",
+            payload,
+            parent_job_id=source.id,
+        )
+        await self._audit("agent_job_resumed", "queued", await self.store.get(resumed["id"]))
+        return resumed
+
     async def _enqueue(
         self,
         session_id: str,
         kind: str,
         payload: AgentStepRequest | AgentRunRequest,
+        *,
+        parent_job_id: str | None = None,
     ) -> dict:
         record = await self.store.create(
             session_id=session_id,
             kind=kind,
             request=payload.model_dump(),
             operator=get_current_operator(),
+            parent_job_id=parent_job_id,
         )
         try:
             self.queue.put_nowait(record.id)
@@ -173,7 +217,7 @@ class AgentJobQueue:
             await self.store.update(record)
             raise RuntimeError("Job queue is at capacity. Try again later.")
         await self._audit("agent_job_enqueued", "queued", record)
-        return record.model_dump()
+        return self._public_record(record)
 
     async def _worker_loop(self, worker_index: int) -> None:
         while True:
@@ -208,9 +252,17 @@ class AgentJobQueue:
                     upload_approved=request.upload_approved,
                     approval_id=request.approval_id,
                     provider_model=request.provider_model,
+                    workflow_profile=request.workflow_profile,
                 )
+                record.checkpoints.append(self._checkpoint_from_step(1, result))
+                await self.store.update(record)
             else:
                 request = AgentRunRequest.model_validate(record.request)
+
+                async def checkpoint_step(step_index: int, step_result: AgentStepResult) -> None:
+                    record.checkpoints.append(self._checkpoint_from_step(step_index, step_result))
+                    await self.store.update(record)
+
                 result = await self.orchestrator.run(
                     session_id=record.session_id,
                     provider_name=request.provider,
@@ -221,6 +273,8 @@ class AgentJobQueue:
                     upload_approved=request.upload_approved,
                     approval_id=request.approval_id,
                     provider_model=request.provider_model,
+                    workflow_profile=request.workflow_profile,
+                    on_step=checkpoint_step,
                 )
             record.status = "completed"
             record.result = result.model_dump()
@@ -244,3 +298,73 @@ class AgentJobQueue:
             operator=record.operator,
             details={"kind": record.kind, "error": record.error},
         )
+
+    @classmethod
+    def _public_record(cls, record: AgentJobRecord) -> dict:
+        payload = record.model_dump()
+        payload["checkpoint_count"] = len(record.checkpoints)
+        payload["resumable"] = cls._is_resumable(record)
+        return payload
+
+    @staticmethod
+    def _is_resumable(record: AgentJobRecord) -> bool:
+        if record.kind != "agent_run":
+            return False
+        if record.status in {"interrupted", "failed"}:
+            return True
+        if record.status != "completed" or not isinstance(record.result, dict):
+            return False
+        return record.result.get("status") in {"max_steps_reached", "approval_required", "error"}
+
+    @classmethod
+    def _checkpoint_from_step(cls, step_index: int, result: AgentStepResult) -> AgentJobCheckpoint:
+        execution = result.execution if isinstance(result.execution, dict) else {}
+        after = execution.get("after") if isinstance(execution.get("after"), dict) else {}
+        observation = result.observation if isinstance(result.observation, dict) else {}
+        decision = result.decision if isinstance(result.decision, dict) else {}
+        return AgentJobCheckpoint(
+            step_index=step_index,
+            created_at=utc_now(),
+            status=result.status,
+            action=cls._truncate(decision.get("action"), 120),
+            reason=cls._truncate(decision.get("reason"), 300),
+            url=cls._truncate(after.get("url") or observation.get("url"), 2000),
+            title=cls._truncate(after.get("title") or observation.get("title"), 500),
+            error=cls._truncate(result.error, 500),
+        )
+
+    @classmethod
+    def _resume_context(cls, record: AgentJobRecord) -> str:
+        if not record.checkpoints:
+            return (
+                f"Resuming background agent job {record.id}. No completed step checkpoints were recorded; "
+                "continue from the current browser state and avoid repeating completed work when visible."
+            )
+        latest = record.checkpoints[-1]
+        step_lines = []
+        for checkpoint in record.checkpoints[-6:]:
+            action = checkpoint.action or "unknown"
+            location = checkpoint.url or checkpoint.title or "current page"
+            step_lines.append(f"{checkpoint.step_index}. {checkpoint.status} {action} at {location}")
+        return (
+            f"Resuming background agent job {record.id} after {len(record.checkpoints)} completed step(s). "
+            f"Latest checkpoint: status={latest.status}, action={latest.action or 'unknown'}, "
+            f"url={latest.url or 'unknown'}. Continue from the current browser state; do not repeat completed "
+            "actions unless the page state requires it.\nCompleted checkpoints:\n"
+            + "\n".join(step_lines)
+        )
+
+    @staticmethod
+    def _merge_context_hints(existing: str | None, resume_context: str) -> str:
+        if existing:
+            return f"{existing}\n\n{resume_context}"
+        return resume_context
+
+    @staticmethod
+    def _truncate(value: object, limit: int) -> str | None:
+        if value is None:
+            return None
+        text = str(value)
+        if len(text) <= limit:
+            return text
+        return f"{text[: limit - 3]}..."
