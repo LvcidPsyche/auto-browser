@@ -38,7 +38,7 @@ Auto Browser is an open-source MCP-native control plane for authorized browser w
 
 ## Current release tag
 
-Use `v1.0.4` for current public release references.
+Use `v1.0.5` for current public release references.
 
 ## Suggested launch timing
 
@@ -62,7 +62,7 @@ See `docs/good-first-issues.md`.
 - [ ] embed GIF in README (above the fold, before quickstart)
 - [ ] verify no secrets in git history for this branch
 - [ ] prepare first 3 “good first issue” tickets (see `docs/good-first-issues.md`)
-- [ ] create GitHub release `v1.0.4` with changelog
+- [ ] create GitHub release `v1.0.5` with changelog
 - [ ] add GitHub topics: `mcp`, `browser-automation`, `playwright`, `llm`, `claude`, `ai-agent`, `self-hosted`, `local-first`, `fastapi`, `docker`
 
 ### Day 1 launch (same day, in order)

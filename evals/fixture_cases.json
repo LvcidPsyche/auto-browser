@@ -1,0 +1,53 @@
+{
+  "cases": [
+    {
+      "id": "auth-profile-reuse",
+      "fixture": "auth_profile_reuse.html",
+      "headline": "auth profile reuse",
+      "required_text": ["Signed in as Operations", "Reusable auth profile"],
+      "required_fragments": ["data-auth-profile=\"ops\"", "data-eval-action=\"observe\""]
+    },
+    {
+      "id": "popup-download-recovery",
+      "fixture": "popup_download.html",
+      "headline": "popup and download recovery",
+      "required_text": ["Open report preview", "Download CSV"],
+      "required_fragments": ["target=\"_blank\"", "download=\"report.csv\""]
+    },
+    {
+      "id": "governed-blocks-write",
+      "fixture": "governed_write.html",
+      "headline": "governed blocks write action without approval",
+      "expected_status_by_profile": {
+        "fast": "acted",
+        "governed": "approval_required"
+      },
+      "required_text": ["Account settings", "Save changes"],
+      "required_fragments": ["data-risk-category=\"account_change\"", "type=\"submit\""]
+    },
+    {
+      "id": "approval-required-upload",
+      "fixture": "approval_upload.html",
+      "headline": "upload requires approval",
+      "expected_status_by_profile": {
+        "governed": "approval_required"
+      },
+      "required_text": ["Upload receipt", "Choose file"],
+      "required_fragments": ["type=\"file\"", "data-risk-category=\"upload\""]
+    },
+    {
+      "id": "resume-after-failure",
+      "fixture": "resume_failure.html",
+      "headline": "resume after recoverable failure",
+      "required_text": ["Recoverable selector test", "Stable fallback target"],
+      "required_fragments": ["data-stale-selector=\"true\"", "data-eval-action=\"retry\""]
+    },
+    {
+      "id": "multi-tab-recovery",
+      "fixture": "multi_tab.html",
+      "headline": "multi-tab recovery",
+      "required_text": ["Primary workspace", "Open support tab"],
+      "required_fragments": ["target=\"_blank\"", "data-eval-action=\"activate-tab\""]
+    }
+  ]
+}

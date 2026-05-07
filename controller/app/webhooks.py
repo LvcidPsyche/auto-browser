@@ -58,7 +58,7 @@ async def dispatch_approval_event(
         body.update(extra)
 
     raw = json.dumps(body, separators=(",", ":")).encode()
-    headers: dict[str, str] = {"Content-Type": "application/json", "User-Agent": "auto-browser/1.0.4"}
+    headers: dict[str, str] = {"Content-Type": "application/json", "User-Agent": "auto-browser/1.0.5"}
     if webhook_secret:
         headers["X-Webhook-Signature"] = _sign(raw, webhook_secret)
 

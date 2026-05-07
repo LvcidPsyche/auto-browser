@@ -201,10 +201,9 @@ class TestNewConfigSettings(unittest.TestCase):
         s = Settings()
         self.assertAlmostEqual(s.sse_keepalive_seconds, 15.0)
 
-    def test_stealth_and_experimental_social_default_disabled(self) -> None:
+    def test_stealth_default_disabled(self) -> None:
         s = Settings()
         self.assertFalse(s.stealth_enabled)
-        self.assertFalse(s.experimental_social)
 
     def test_approval_webhook_url_from_env(self) -> None:
         with patch.dict(os.environ, {"APPROVAL_WEBHOOK_URL": "https://hooks.example.com/1"}):

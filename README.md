@@ -28,13 +28,13 @@ Works with:
 - **Local-first by default.** Run the full stack on your own box with Docker Compose, or use Codespaces for a quick hosted demo.
 - **Safety rails built in.** Approvals, operator identity, PII scrubbing, Witness receipts, and compliance templates are all part of the product surface.
 
-## Release Highlights (v1.0.4)
+## Release Highlights (v1.0.5)
 
 - **Governed workflow enforcement** now blocks write-sensitive agent actions until an approval token is supplied.
-- **Social/Veo3 surfaces are isolated** behind `EXPERIMENTAL_SOCIAL=true` and are absent from the default HTTP and MCP surface.
+- **Social/Veo3 code is no longer shipped in the controller wheel** and no HTTP or MCP social routes are registered.
 - **Stealth defaults off** with `STEALTH_ENABLED=false`, matching the authorized-workflow product stance.
-- **Expanded eval matrix** covers auth reuse, popup/download recovery, upload approval, resume recovery, multi-tab recovery, and `fast` versus `governed` divergence.
-- **Release audit hardening** adds dependency audits, wheel builds, npm audit, and a controller coverage ratchet gate.
+- **Expanded evals** cover auth reuse, popup/download recovery, upload approval, resume recovery, multi-tab recovery, local fixtures, and `fast` versus `governed` divergence.
+- **Release audit hardening** adds fixture validation, dependency audits, wheel inspection, npm audit, and an 80% controller coverage gate.
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full release history.
 
@@ -136,13 +136,6 @@ The default MCP tool profile is `curated`, which keeps the browser surface compa
 MCP_TOOL_PROFILE=full
 ```
 
-Experimental social/Veo3 tools are not part of the default product surface. They stay hidden unless both conditions are true:
-
-```bash
-EXPERIMENTAL_SOCIAL=true
-MCP_TOOL_PROFILE=full
-```
-
 Raw tool-call example:
 
 ```bash
@@ -178,7 +171,6 @@ REQUIRE_AUTH_STATE_ENCRYPTION=true
 REQUEST_RATE_LIMIT_ENABLED=true
 METRICS_ENABLED=true
 STEALTH_ENABLED=false
-EXPERIMENTAL_SOCIAL=false
 ```
 
 `COMPLIANCE_TEMPLATE` can apply a preconfigured posture at startup:

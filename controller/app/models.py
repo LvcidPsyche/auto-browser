@@ -272,14 +272,6 @@ ActionName = Literal[
     "go_back",
     "go_forward",
     "upload",
-    "social_login",
-    "social_post",
-    "social_comment",
-    "social_like",
-    "social_follow",
-    "social_unfollow",
-    "social_repost",
-    "social_dm",
     "request_human_takeover",
     "done",
 ]
@@ -344,18 +336,6 @@ class BrowserActionDecision(StrictInputModel):
         if self.risk_category is None:
             if self.action in {"navigate", "hover", "scroll", "wait", "reload", "go_back", "go_forward", "done"}:
                 self.risk_category = "read"
-            elif self.action == "social_login":
-                self.risk_category = "account_change"
-            elif self.action in {
-                "social_post",
-                "social_comment",
-                "social_like",
-                "social_follow",
-                "social_unfollow",
-                "social_repost",
-                "social_dm",
-            }:
-                self.risk_category = "post"
             elif self.action == "upload":
                 self.risk_category = "upload"
             elif self.action == "request_human_takeover":
@@ -373,22 +353,11 @@ class BrowserActionDecision(StrictInputModel):
                 raise ValueError("select_option requires element_id or selector")
             if self.value is None and self.label is None and self.index is None:
                 raise ValueError("select_option requires value, label, or index")
-        if self.action in {"type", "social_post", "social_comment"}:
+        if self.action == "type":
             if not has_locator_target:
-                if self.action == "type":
-                    raise ValueError("type requires element_id or selector")
+                raise ValueError("type requires element_id or selector")
             if not self.text:
                 raise ValueError(f"{self.action} requires text")
-        if self.action == "social_dm":
-            if not self.text:
-                raise ValueError("social_dm requires text")
-            if not self.recipient:
-                raise ValueError("social_dm requires recipient")
-        if self.action == "social_login":
-            if not self.platform:
-                raise ValueError("social_login requires platform")
-            if not self.username:
-                raise ValueError("social_login requires username")
         if self.action == "press" and not self.key:
             raise ValueError("press requires key")
         if self.action == "navigate":
@@ -593,61 +562,6 @@ class McpToolCallResponse(BaseModel):
     content: list[McpToolCallContent]
     structuredContent: Any | None = None
     isError: bool = False
-
-
-class SocialScrollRequest(StrictInputModel):
-    direction: Literal["down", "up"] = "down"
-    screens: int = Field(default=3, ge=1, le=20)
-
-
-class SocialScrapeRequest(StrictInputModel):
-    limit: int = Field(default=20, ge=1, le=100)
-
-
-class SocialPostRequest(_WithApproval):
-    text: str = Field(min_length=1, max_length=5000)
-
-
-class SocialCommentRequest(_WithApproval):
-    text: str = Field(min_length=1, max_length=5000)
-    post_index: int = Field(default=0, ge=0, le=50)
-
-
-class SocialLikeRequest(_WithApproval):
-    post_index: int = Field(default=0, ge=0, le=50)
-
-
-class SocialFollowRequest(_WithApproval):
-    pass
-
-
-class SocialUnfollowRequest(_WithApproval):
-    pass
-
-
-class SocialRepostRequest(_WithApproval):
-    post_index: int = Field(default=0, ge=0, le=50)
-
-
-class SocialDmRequest(_WithApproval):
-    recipient: str = Field(min_length=1, max_length=200)
-    text: str = Field(min_length=1, max_length=5000)
-
-
-class SocialLoginRequest(_WithApproval):
-    platform: Literal["x", "twitter", "instagram", "linkedin", "outlook", "microsoft", "live"]
-    username: str = Field(min_length=1, max_length=500)
-    password: str = Field(min_length=1, max_length=5000, repr=False)
-    auth_profile: str | None = Field(default=None, max_length=120)
-    totp_secret: str | None = Field(default=None, max_length=500, repr=False)
-
-
-class SocialSearchRequest(StrictInputModel):
-    query: str = Field(min_length=1, max_length=500)
-
-
-class SocialScrapeCommentsRequest(StrictInputModel):
-    limit: int = Field(default=20, ge=1, le=100)
 
 
 BROWSER_ACTION_SCHEMA = BrowserActionDecision.model_json_schema()

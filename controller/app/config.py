@@ -66,7 +66,6 @@ class Settings(BaseSettings):
     mcp_allowed_origins: str = Field("", alias="MCP_ALLOWED_ORIGINS")
     controller_allowed_hosts: str = Field("", alias="CONTROLLER_ALLOWED_HOSTS")
     mcp_tool_profile: str = Field("curated", alias="MCP_TOOL_PROFILE")
-    experimental_social: bool = Field(False, alias="EXPERIMENTAL_SOCIAL")
     metrics_enabled: bool = Field(True, alias="METRICS_ENABLED")
     session_isolation_mode: str = Field("shared_browser_node", alias="SESSION_ISOLATION_MODE")
     isolated_browser_image: str = Field(

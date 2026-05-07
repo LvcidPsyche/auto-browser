@@ -220,9 +220,6 @@ def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
     if not settings.metrics_enabled:
         report.warnings.append("METRICS_ENABLED=false; observability will be limited in production")
 
-    if settings.experimental_social:
-        report.errors.append("EXPERIMENTAL_SOCIAL=true is not permitted when APP_ENV=production")
-
     if settings.stealth_enabled:
         report.warnings.append("STEALTH_ENABLED=true is outside the default authorized-workflow posture")
 

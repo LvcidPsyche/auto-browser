@@ -96,7 +96,6 @@ That hides:
 - built-in agent queue tools
 - provider introspection tools
 - remote-access admin tools
-- all experimental social/Veo3 convenience tools
 
 Why:
 - smaller tool surface
@@ -107,12 +106,6 @@ If you really want the whole surface:
 
 ```bash
 MCP_TOOL_PROFILE=full
-```
-
-Experimental social/Veo3 tools also require:
-
-```bash
-EXPERIMENTAL_SOCIAL=true
 ```
 
 In the full profile, `browser.queue_agent_run` accepts `workflow_profile`

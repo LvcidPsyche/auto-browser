@@ -17,11 +17,12 @@ RUN apt-get update \
         @google/gemini-cli@${GEMINI_CLI_VERSION} \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt pytest
+COPY requirements.txt requirements-dev.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-dev.txt
 
 COPY app ./app
 COPY tests ./tests
+COPY pyproject.toml ./pyproject.toml
 
 RUN mkdir -p /data/artifacts /data/uploads /data/auth /data/approvals /data/audit /data/db /data/jobs /data/sessions /data/browser-sessions /data/tunnels /data/cli-home
 

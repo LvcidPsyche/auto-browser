@@ -9,13 +9,13 @@ from pydantic import BaseModel
 from .action_errors import BrowserActionError
 from .approvals import ApprovalRequiredError
 from .models import (
+    BrowserActionDecision,
     McpToolCallContent,
     McpToolCallRequest,
     McpToolCallResponse,
     McpToolDescriptor,
 )
 from .readiness import run_readiness_checks
-from .social_errors import SocialActionError
 from .tool_inputs import (  # noqa: F401 — re-exported for backwards compat
     AgentJobIdInput,
     AgentRunRequest,
@@ -65,17 +65,6 @@ from .tool_inputs import (  # noqa: F401 — re-exported for backwards compat
     SetViewportInput,
     ShadowBrowseInput,
     ShareSessionInput,
-    SocialCommentInput,
-    SocialDmInput,
-    SocialFollowInput,
-    SocialLikeInput,
-    SocialLoginInput,
-    SocialPostInput,
-    SocialRepostInput,
-    SocialScrapeInput,
-    SocialScrollInput,
-    SocialSearchInput,
-    SocialUnfollowInput,
     TabActionInput,
     TakeoverInput,
     TriggerCronJobInput,
@@ -93,6 +82,7 @@ class ToolSpec:
     handler: Callable[[BaseModel], Awaitable[dict[str, Any] | list[dict[str, Any]]]]
     profiles: tuple[str, ...] = ("curated", "full")
     experimental: str | None = None
+    governed_kind: str | None = None
 
 
 class McpToolGateway:
@@ -133,6 +123,7 @@ class McpToolGateway:
                     ),
                     input_model=SaveMemoryProfileInput,
                     handler=self._save_memory_profile,
+                    governed_kind="write",
                 ),
                 ToolSpec(
                     name="browser.get_memory_profile",
@@ -152,6 +143,7 @@ class McpToolGateway:
                     input_model=DeleteMemoryProfileInput,
                     handler=self._delete_memory_profile,
                     profiles=("full",),
+                    governed_kind="destructive",
                 ),
                 ToolSpec(
                     name="browser.list_sessions",
@@ -236,12 +228,14 @@ class McpToolGateway:
                     description="Close one tab index if more than one tab is open.",
                     input_model=TabActionInput,
                     handler=self._close_tab,
+                    governed_kind="write",
                 ),
                 ToolSpec(
                     name="browser.execute_action",
                     description="Execute one browser action using the shared internal action schema.",
                     input_model=ExecuteActionInput,
                     handler=self._execute_action,
+                    governed_kind="dynamic",
                 ),
                 ToolSpec(
                     name="browser.save_auth_state",
@@ -249,24 +243,28 @@ class McpToolGateway:
                     input_model=SaveAuthStateInput,
                     handler=self._save_auth_state,
                     profiles=("full",),
+                    governed_kind="account_change",
                 ),
                 ToolSpec(
                     name="browser.save_auth_profile",
                     description="Save the current session storage state into a reusable named auth profile.",
                     input_model=SaveAuthProfileInput,
                     handler=self._save_auth_profile,
+                    governed_kind="account_change",
                 ),
                 ToolSpec(
                     name="browser.request_human_takeover",
                     description="Ask for a human to take over the shared browser desktop.",
                     input_model=TakeoverInput,
                     handler=self._takeover,
+                    governed_kind="write",
                 ),
                 ToolSpec(
                     name="browser.close_session",
                     description="Close a session and finalize its trace/artifacts.",
                     input_model=SessionIdInput,
                     handler=self._close_session,
+                    governed_kind="write",
                 ),
                 ToolSpec(
                     name="browser.list_approvals",
@@ -370,133 +368,6 @@ class McpToolGateway:
                     input_model=ReadinessCheckInput,
                     handler=self._readiness_check,
                 ),
-                ToolSpec(
-                    name="social.scroll_feed",
-                    description="Smoothly scroll the current page feed up or down by N screens using human-paced motion.",
-                    input_model=SocialScrollInput,
-                    handler=self._social_scroll,
-                    profiles=("full",),
-                    experimental="social",
-                ),
-                ToolSpec(
-                    name="social.extract_posts",
-                    description="Scrape visible feed posts from the current page. Returns structured list of {text, links, images, y_position}.",
-                    input_model=SocialScrapeInput,
-                    handler=self._social_extract_posts,
-                    profiles=("full",),
-                    experimental="social",
-                ),
-                ToolSpec(
-                    name="social.extract_comments",
-                    description="Scrape visible comments/replies from the current post page.",
-                    input_model=SocialScrapeInput,
-                    handler=self._social_extract_comments,
-                    profiles=("full",),
-                    experimental="social",
-                ),
-                ToolSpec(
-                    name="social.extract_profile",
-                    description="Extract profile info (username, bio, followers, following, avatar) from the current page.",
-                    input_model=SessionIdInput,
-                    handler=self._social_extract_profile,
-                    profiles=("full",),
-                    experimental="social",
-                ),
-                ToolSpec(
-                    name="social.post",
-                    description=(
-                        "Find the text composer on the current page (tweet box, post field, comment box) "
-                        "and type + submit the provided text. Navigate to the platform first. "
-                        "If approval_id is omitted, this returns an approval_required error."
-                    ),
-                    input_model=SocialPostInput,
-                    handler=self._social_post,
-                    profiles=("full",),
-                    experimental="social",
-                ),
-                ToolSpec(
-                    name="social.comment",
-                    description=(
-                        "Reply/comment on a visible post. Use post_index to target a specific post. "
-                        "If approval_id is omitted, this returns an approval_required error."
-                    ),
-                    input_model=SocialCommentInput,
-                    handler=self._social_comment,
-                    profiles=("full",),
-                    experimental="social",
-                ),
-                ToolSpec(
-                    name="social.like",
-                    description=(
-                        "Find and click the like/heart button for a visible post. "
-                        "Use post_index to target a specific post (0 = first). "
-                        "If approval_id is omitted, this returns an approval_required error."
-                    ),
-                    input_model=SocialLikeInput,
-                    handler=self._social_like,
-                    profiles=("full",),
-                    experimental="social",
-                ),
-                ToolSpec(
-                    name="social.follow",
-                    description=(
-                        "Find and click the Follow button on the current profile page. "
-                        "If approval_id is omitted, this returns an approval_required error."
-                    ),
-                    input_model=SocialFollowInput,
-                    handler=self._social_follow,
-                    profiles=("full",),
-                    experimental="social",
-                ),
-                ToolSpec(
-                    name="social.unfollow",
-                    description=(
-                        "Find and click the unfollow/following button on the current profile page. "
-                        "If approval_id is omitted, this returns an approval_required error."
-                    ),
-                    input_model=SocialUnfollowInput,
-                    handler=self._social_unfollow,
-                    profiles=("full",),
-                    experimental="social",
-                ),
-                ToolSpec(
-                    name="social.repost",
-                    description=(
-                        "Find and click the repost/retweet button for a visible post. "
-                        "If approval_id is omitted, this returns an approval_required error."
-                    ),
-                    input_model=SocialRepostInput,
-                    handler=self._social_repost,
-                    profiles=("full",),
-                    experimental="social",
-                ),
-                ToolSpec(
-                    name="social.dm",
-                    description=(
-                        "Send a direct message on the current supported social platform. "
-                        "If approval_id is omitted, this returns an approval_required error."
-                    ),
-                    input_model=SocialDmInput,
-                    handler=self._social_dm,
-                    profiles=("full",),
-                    experimental="social",
-                ),
-                ToolSpec(
-                    name="social.login",
-                    description="Navigate to the platform login flow, enter credentials, handle TOTP if configured, and save auth state.",
-                    input_model=SocialLoginInput,
-                    handler=self._social_login,
-                    profiles=("full",),
-                    experimental="social",
-                ),
-                ToolSpec(
-                    name="social.search",
-                    description="Find the search input on the current page and type a query, then press Enter.",
-                    input_model=SocialSearchInput,
-                    handler=self._social_search,
-                    profiles=("full",),
-                    experimental="social",
-                ),
                 # ── Network Inspector ──────────────────────────────────────
                 ToolSpec(
                     name="browser.get_network_log",
@@ -529,6 +400,7 @@ class McpToolGateway:
                     ),
                     input_model=EvalJsInput,
                     handler=self._eval_js,
+                    governed_kind="write",
                 ),
                 ToolSpec(
                     name="browser.wait_for_selector",
@@ -569,6 +441,7 @@ class McpToolGateway:
                     ),
                     input_model=DragDropInput,
                     handler=self._drag_drop,
+                    governed_kind="write",
                 ),
                 ToolSpec(
                     name="browser.set_viewport",
@@ -598,6 +471,7 @@ class McpToolGateway:
                     input_model=SetCookiesInput,
                     handler=self._set_cookies,
                     profiles=("full",),
+                    governed_kind="account_change",
                 ),
                 ToolSpec(
                     name="browser.get_local_storage",
@@ -618,6 +492,7 @@ class McpToolGateway:
                     input_model=SetStorageInput,
                     handler=self._set_local_storage,
                     profiles=("full",),
+                    governed_kind="account_change",
                 ),
                 # ── Playwright Script Export ───────────────────────────────
                 ToolSpec(
@@ -643,6 +518,7 @@ class McpToolGateway:
                     input_model=CdpAttachInput,
                     handler=self._cdp_attach,
                     profiles=("full",),
+                    governed_kind="account_change",
                 ),
                 # ── Vision-Grounded Targeting ─────────────────────────────
                 ToolSpec(
@@ -666,6 +542,7 @@ class McpToolGateway:
                     input_model=ShareSessionInput,
                     handler=self._share_session,
                     profiles=("full",),
+                    governed_kind="write",
                 ),
                 # ── Shadow Browsing ────────────────────────────────────────
                 ToolSpec(
@@ -678,6 +555,7 @@ class McpToolGateway:
                     input_model=ShadowBrowseInput,
                     handler=self._enable_shadow_browse,
                     profiles=("full",),
+                    governed_kind="write",
                 ),
                 # ── Proxy Personas ─────────────────────────────────────────
                 ToolSpec(
@@ -759,11 +637,7 @@ class McpToolGateway:
             del self._tools["browser.find_by_vision"]
 
     def _experimental_enabled(self, name: str | None) -> bool:
-        if name is None:
-            return True
-        if name == "social":
-            return bool(getattr(getattr(self.manager, "settings", None), "experimental_social", False))
-        return False
+        return name is None
 
     def list_tools(self) -> list[dict[str, Any]]:
         return [
@@ -781,21 +655,25 @@ class McpToolGateway:
             return self._error_response(f"Unknown tool: {payload.name}")
 
         try:
-            arguments = spec.input_model.model_validate(payload.arguments)
+            raw_arguments = dict(payload.arguments or {})
+            policy_profile = self._pop_policy_profile(spec, raw_arguments)
+            policy_approval_id = self._pop_policy_approval_id(spec, raw_arguments)
+            arguments = spec.input_model.model_validate(raw_arguments)
+            approval = await self._require_governed_tool_approval(
+                spec,
+                arguments,
+                workflow_profile=policy_profile,
+                approval_id=policy_approval_id,
+            )
             result = await spec.handler(arguments)
+            if approval is not None:
+                await self.manager.approvals.mark_executed(approval.id)
             return McpToolCallResponse(
                 content=[McpToolCallContent(text=json.dumps(result, ensure_ascii=False))],
                 structuredContent=result,
                 isError=False,
             )
         except ApprovalRequiredError as exc:
-            detail = exc.payload
-            return McpToolCallResponse(
-                content=[McpToolCallContent(text=json.dumps(detail, ensure_ascii=False))],
-                structuredContent=detail,
-                isError=True,
-            )
-        except SocialActionError as exc:
             detail = exc.payload
             return McpToolCallResponse(
                 content=[McpToolCallContent(text=json.dumps(detail, ensure_ascii=False))],
@@ -818,6 +696,47 @@ class McpToolGateway:
             content=[McpToolCallContent(text=message)],
             structuredContent={"error": message},
             isError=True,
+        )
+
+    @staticmethod
+    def _pop_policy_profile(spec: ToolSpec, raw_arguments: dict[str, Any]) -> str:
+        profile = str(raw_arguments.pop("policy_profile", "") or raw_arguments.get("workflow_profile") or "fast")
+        if "workflow_profile" not in spec.input_model.model_fields:
+            raw_arguments.pop("workflow_profile", None)
+        return profile
+
+    @staticmethod
+    def _pop_policy_approval_id(spec: ToolSpec, raw_arguments: dict[str, Any]) -> str | None:
+        approval_id = raw_arguments.get("approval_id")
+        if "approval_id" not in spec.input_model.model_fields:
+            approval_id = raw_arguments.pop("approval_id", approval_id)
+        governed_approval_id = raw_arguments.pop("governed_approval_id", None)
+        return str(governed_approval_id or approval_id) if governed_approval_id or approval_id else None
+
+    async def _require_governed_tool_approval(
+        self,
+        spec: ToolSpec,
+        arguments: BaseModel,
+        *,
+        workflow_profile: str,
+        approval_id: str | None,
+    ):
+        if workflow_profile != "governed" or spec.governed_kind is None:
+            return None
+        session_id = getattr(arguments, "session_id", None)
+        if not session_id:
+            return None
+        decision = getattr(arguments, "action", None)
+        if not isinstance(decision, BrowserActionDecision):
+            decision = BrowserActionDecision(
+                action="request_human_takeover",
+                reason=f"Approve governed MCP tool call {spec.name}",
+                risk_category=spec.governed_kind if spec.governed_kind != "dynamic" else "write",
+            )
+        return await self.manager.require_governed_approval(
+            session_id,
+            decision,
+            approval_id=approval_id,
         )
 
     async def _create_session(self, payload: CreateSessionRequest) -> dict[str, Any]:
@@ -977,79 +896,6 @@ class McpToolGateway:
     async def _readiness_check(self, payload: ReadinessCheckInput) -> dict[str, Any]:
         report = run_readiness_checks(self.manager.settings, mode=payload.mode)
         return report.to_dict()
-
-    async def _social_scroll(self, payload: SocialScrollInput) -> dict[str, Any]:
-        return await self.manager.scroll_feed(
-            payload.session_id,
-            direction=payload.direction,
-            screens=payload.screens,
-        )
-
-    async def _social_extract_posts(self, payload: SocialScrapeInput) -> list[dict[str, Any]]:
-        return await self.manager.extract_posts(payload.session_id, limit=payload.limit)
-
-    async def _social_extract_comments(self, payload: SocialScrapeInput) -> list[dict[str, Any]]:
-        return await self.manager.extract_comments(payload.session_id, limit=payload.limit)
-
-    async def _social_extract_profile(self, payload: SessionIdInput) -> dict[str, Any]:
-        return await self.manager.extract_profile(payload.session_id)
-
-    async def _social_post(self, payload: SocialPostInput) -> dict[str, Any]:
-        return await self.manager.post_content(
-            payload.session_id,
-            text=payload.text,
-            approval_id=payload.approval_id,
-        )
-
-    async def _social_comment(self, payload: SocialCommentInput) -> dict[str, Any]:
-        return await self.manager.comment_on_post(
-            payload.session_id,
-            text=payload.text,
-            post_index=payload.post_index,
-            approval_id=payload.approval_id,
-        )
-
-    async def _social_like(self, payload: SocialLikeInput) -> dict[str, Any]:
-        return await self.manager.like_post(
-            payload.session_id,
-            post_index=payload.post_index,
-            approval_id=payload.approval_id,
-        )
-
-    async def _social_follow(self, payload: SocialFollowInput) -> dict[str, Any]:
-        return await self.manager.follow_user(payload.session_id, approval_id=payload.approval_id)
-
-    async def _social_unfollow(self, payload: SocialUnfollowInput) -> dict[str, Any]:
-        return await self.manager.unfollow_user(payload.session_id, approval_id=payload.approval_id)
-
-    async def _social_repost(self, payload: SocialRepostInput) -> dict[str, Any]:
-        return await self.manager.repost_post(
-            payload.session_id,
-            post_index=payload.post_index,
-            approval_id=payload.approval_id,
-        )
-
-    async def _social_dm(self, payload: SocialDmInput) -> dict[str, Any]:
-        return await self.manager.send_direct_message(
-            payload.session_id,
-            recipient=payload.recipient,
-            text=payload.text,
-            approval_id=payload.approval_id,
-        )
-
-    async def _social_login(self, payload: SocialLoginInput) -> dict[str, Any]:
-        return await self.manager.social_login(
-            payload.session_id,
-            platform=payload.platform,
-            username=payload.username,
-            password=payload.password,
-            auth_profile=payload.auth_profile,
-            approval_id=payload.approval_id,
-            totp_secret=payload.totp_secret,
-        )
-
-    async def _social_search(self, payload: SocialSearchInput) -> dict[str, Any]:
-        return await self.manager.search_page(payload.session_id, query=payload.query)
 
     # ── Extended tool handlers ──────────────────────────────────────────────
 

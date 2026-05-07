@@ -4,6 +4,19 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.0.5] — 2026-05-07
+
+### Added
+- Added local HTML eval fixtures for auth-profile reuse, popup/download recovery, governed write blocking, upload approval, resume-after-failure, and multi-tab recovery.
+- Added `scripts/fixture_eval.py` and `make fixture-eval` to validate release-critical browser workflow fixtures without a live provider.
+- Added portable `scripts/release_audit.py` with fixture validation, dependency audits, wheel builds, controller wheel inspection, compile checks, and an 80% controller coverage gate.
+
+### Changed
+- Removed the social/Veo3 HTTP and MCP surface from the shipped controller package instead of keeping it behind an environment flag.
+- Removed the legacy `EXPERIMENTAL_SOCIAL` configuration knob from the production posture.
+- Raised controller coverage to the 80% release gate with focused BrowserManager, route, event, webhook, and session-store coverage.
+- Updated public docs to describe Auto Browser as the authorized browser MCP surface only.
+
 ## [1.0.4] — 2026-05-06
 
 ### Added

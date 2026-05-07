@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,7 +9,6 @@ from app.action_errors import BrowserActionError
 from app.approvals import ApprovalRequiredError
 from app.memory_manager import MemoryProfile
 from app.models import ApprovalRecord, BrowserActionDecision, McpToolCallRequest, ProviderInfo
-from app.social_errors import SocialActionError
 from app.tool_gateway import McpToolGateway
 
 
@@ -40,23 +40,11 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             close_tab=AsyncMock(return_value={"closed_index": 1, "tabs": [{"index": 0, "active": True}]}),
             list_downloads=AsyncMock(return_value=[{"filename": "report.csv"}]),
             execute_decision=AsyncMock(return_value={"action": "click", "verification": {"verified": True}}),
+            require_governed_approval=AsyncMock(return_value=None),
             save_storage_state=AsyncMock(return_value={"saved_to": "/data/auth/session-1/state.json.enc"}),
             save_auth_profile=AsyncMock(return_value={"profile_name": "outlook-default"}),
             request_human_takeover=AsyncMock(return_value={"takeover_url": "http://127.0.0.1:6080/vnc.html"}),
             close_session=AsyncMock(return_value={"closed": True}),
-            scroll_feed=AsyncMock(return_value={"action": "scroll_feed"}),
-            extract_posts=AsyncMock(return_value=[{"text": "hello"}]),
-            extract_comments=AsyncMock(return_value=[{"text": "reply"}]),
-            extract_profile=AsyncMock(return_value={"username": "@example"}),
-            post_content=AsyncMock(return_value={"action": "social_post"}),
-            comment_on_post=AsyncMock(return_value={"action": "social_comment"}),
-            like_post=AsyncMock(return_value={"action": "social_like"}),
-            follow_user=AsyncMock(return_value={"action": "social_follow"}),
-            unfollow_user=AsyncMock(return_value={"action": "social_unfollow"}),
-            repost_post=AsyncMock(return_value={"action": "social_repost"}),
-            send_direct_message=AsyncMock(return_value={"action": "social_dm"}),
-            social_login=AsyncMock(return_value={"action": "social_login"}),
-            search_page=AsyncMock(return_value={"action": "social_search"}),
             list_approvals=AsyncMock(return_value=[]),
             approve=AsyncMock(return_value={"id": "approval-1", "status": "approved"}),
             reject=AsyncMock(return_value={"id": "approval-1", "status": "rejected"}),
@@ -74,7 +62,6 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 allowed_hosts="*",
                 pii_scrub_enabled=True,
                 require_approval_for_uploads=True,
-                experimental_social=False,
             ),
             memory=SimpleNamespace(
                 save=AsyncMock(
@@ -96,6 +83,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 list=AsyncMock(return_value=[{"name": "checkout", "step_count": 0}]),
                 delete=AsyncMock(return_value=True),
             ),
+            approvals=SimpleNamespace(mark_executed=AsyncMock()),
         )
         self.orchestrator = SimpleNamespace(
             list_providers=lambda: [ProviderInfo(provider="openai", configured=True, model="gpt-4.1-mini")]
@@ -126,14 +114,6 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             job_queue=self.job_queue,
             vision_targeter=object(),
         )
-        self.manager.settings.experimental_social = True
-        self.social_full_gateway = McpToolGateway(
-            manager=self.manager,
-            orchestrator=self.orchestrator,
-            job_queue=self.job_queue,
-            tool_profile="full",
-        )
-        self.manager.settings.experimental_social = False
 
     async def test_list_tools_includes_expected_browser_tools(self) -> None:
         tools = self.gateway.list_tools()
@@ -189,16 +169,17 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("social.dm", names)
         self.assertNotIn("browser.find_by_vision", names)
 
-    async def test_experimental_social_full_profile_exposes_social_tools(self) -> None:
-        names = {tool["name"] for tool in self.social_full_gateway.list_tools()}
+    async def test_social_tools_are_not_shipped_even_with_full_profile(self) -> None:
+        gateway = McpToolGateway(
+            manager=self.manager,
+            orchestrator=self.orchestrator,
+            job_queue=self.job_queue,
+            tool_profile="full",
+        )
+        names = {tool["name"] for tool in gateway.list_tools()}
+        self.assertNotIn("social.post", names)
+        self.assertNotIn("social.login", names)
 
-        self.assertIn("social.post", names)
-        self.assertIn("social.dm", names)
-        self.assertIn("social.login", names)
-        self.assertIn("social.search", names)
-        self.assertNotIn("browser.find_by_vision", names)
-
-    async def test_social_tools_are_unknown_when_experiment_disabled(self) -> None:
         response = await self.full_gateway.call_tool(
             McpToolCallRequest(
                 name="social.post",
@@ -285,7 +266,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.manager.memory.delete.assert_awaited_once_with("checkout")
 
     async def test_execute_action_tool_returns_structured_payload(self) -> None:
-        response = await self.social_full_gateway.call_tool(
+        response = await self.gateway.call_tool(
             McpToolCallRequest(
                 name="browser.execute_action",
                 arguments={
@@ -306,6 +287,82 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(called_args[0], "session-1")
         self.assertIsInstance(called_args[1], BrowserActionDecision)
         self.assertEqual(called_args[1].element_id, "op-123")
+
+    async def test_governed_execute_action_requires_gateway_approval(self) -> None:
+        approval = ApprovalRecord(
+            id="approval-governed-tool-1",
+            session_id="session-1",
+            kind="write",
+            status="pending",
+            created_at="2026-05-07T00:00:00Z",
+            updated_at="2026-05-07T00:00:00Z",
+            reason="Governed MCP call requires approval",
+            action=BrowserActionDecision(
+                action="click",
+                reason="Click save",
+                element_id="op-save",
+                risk_category="write",
+            ),
+        )
+        self.manager.require_governed_approval = AsyncMock(side_effect=ApprovalRequiredError(approval))
+
+        response = await self.gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.execute_action",
+                arguments={
+                    "session_id": "session-1",
+                    "workflow_profile": "governed",
+                    "action": {
+                        "action": "click",
+                        "reason": "Click save",
+                        "element_id": "op-save",
+                    },
+                },
+            )
+        )
+
+        self.assertTrue(response.isError)
+        self.assertEqual(response.structuredContent["status"], "approval_required")
+        self.manager.require_governed_approval.assert_awaited_once()
+        self.manager.execute_decision.assert_not_awaited()
+
+    async def test_governed_storage_tool_uses_approval_token_and_marks_executed(self) -> None:
+        approval = ApprovalRecord(
+            id="approval-governed-storage-1",
+            session_id="session-1",
+            kind="account_change",
+            status="approved",
+            created_at="2026-05-07T00:00:00Z",
+            updated_at="2026-05-07T00:00:00Z",
+            reason="Governed storage mutation approved",
+            action=BrowserActionDecision(
+                action="request_human_takeover",
+                reason="Approve governed MCP tool call browser.set_local_storage",
+                risk_category="account_change",
+            ),
+        )
+        self.manager.require_governed_approval = AsyncMock(return_value=approval)
+        page = SimpleNamespace(evaluate=AsyncMock())
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page))
+
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.set_local_storage",
+                arguments={
+                    "session_id": "session-1",
+                    "workflow_profile": "governed",
+                    "approval_id": "approval-governed-storage-1",
+                    "storage_type": "local",
+                    "key": "theme",
+                    "value": "dark",
+                },
+            )
+        )
+
+        self.assertFalse(response.isError)
+        self.manager.require_governed_approval.assert_awaited_once()
+        page.evaluate.assert_awaited_once()
+        self.manager.approvals.mark_executed.assert_awaited_once_with("approval-governed-storage-1")
 
     async def test_auth_profile_tools_forward_arguments(self) -> None:
         list_response = await self.gateway.call_tool(
@@ -447,6 +504,119 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(response.isError)
         self.assertEqual(self.manager.create_session.await_args.kwargs["memory_profile"], "checkout")
 
+    async def test_full_profile_extended_runtime_tools_forward_to_helpers(self) -> None:
+        class FakeLocator:
+            @property
+            def first(self):
+                return self
+
+            async def bounding_box(self):
+                return {"x": 10, "y": 20, "width": 30, "height": 40}
+
+        class FakeMouse:
+            def __init__(self) -> None:
+                self.move = AsyncMock()
+                self.down = AsyncMock()
+                self.up = AsyncMock()
+
+        class FakePage:
+            def __init__(self) -> None:
+                self.url = "https://example.com"
+                self.mouse = FakeMouse()
+                self.evaluate = AsyncMock(side_effect=["eval-result", "plain text", [{"tag": "button"}], "stored", {"all": "items"}, None])
+                self.wait_for_selector = AsyncMock()
+                self.content = AsyncMock(return_value="<html></html>")
+                self.set_viewport_size = AsyncMock()
+
+            def locator(self, selector: str):
+                return FakeLocator()
+
+        fake_context = SimpleNamespace(
+            cookies=AsyncMock(return_value=[{"name": "sid"}]),
+            add_cookies=AsyncMock(),
+        )
+        fake_session = SimpleNamespace(
+            page=FakePage(),
+            context=fake_context,
+            artifact_dir=Path("."),
+        )
+        self.manager.get_session = AsyncMock(return_value=fake_session)
+        self.manager.get_network_log = AsyncMock(return_value={"entries": []})
+        self.manager.fork_session = AsyncMock(return_value={"id": "fork-1"})
+        self.manager.cdp_attach = AsyncMock(return_value={"attached": True})
+        self.manager.enable_shadow_browse = AsyncMock(return_value={"enabled": True})
+        self.manager.capture_screenshot = AsyncMock(return_value={"screenshot_path": "vision.png"})
+        self.manager.get_pii_scrubber_status = lambda: {"enabled": True}
+        self.manager.audit = object()
+        self.manager.settings.default_viewport_width = 1280
+        self.manager.settings.default_viewport_height = 720
+
+        cron_service = SimpleNamespace(
+            list_jobs=AsyncMock(return_value=[]),
+            create_job=AsyncMock(return_value={"id": "cron-1"}),
+            delete_job=AsyncMock(return_value=True),
+            trigger_job=AsyncMock(return_value={"triggered": True}),
+        )
+        proxy_store = SimpleNamespace(
+            list_personas=lambda: [{"name": "us-east"}],
+            set_persona=lambda *args, **kwargs: {"name": args[0]},
+            delete_persona=lambda name: True,
+        )
+        share_manager = SimpleNamespace(create_token=lambda session_id, ttl_seconds: {"token": "share-token"})
+        vision_targeter = SimpleNamespace(find_element=AsyncMock(return_value={"selector": "button"}))
+        gateway = McpToolGateway(
+            manager=self.manager,
+            orchestrator=self.orchestrator,
+            job_queue=self.job_queue,
+            tool_profile="full",
+            cron_service=cron_service,
+            share_manager=share_manager,
+            proxy_store=proxy_store,
+            vision_targeter=vision_targeter,
+        )
+
+        calls = [
+            ("browser.get_network_log", {"session_id": "session-1"}),
+            ("browser.fork_session", {"session_id": "session-1", "name": "fork"}),
+            ("browser.eval_js", {"session_id": "session-1", "expression": "() => 1"}),
+            ("browser.wait_for_selector", {"session_id": "session-1", "selector": "button"}),
+            ("browser.get_html", {"session_id": "session-1", "text_only": True}),
+            ("browser.get_html", {"session_id": "session-1", "text_only": False}),
+            ("browser.find_elements", {"session_id": "session-1", "selector": "button"}),
+            (
+                "browser.drag_drop",
+                {"session_id": "session-1", "source_selector": "#a", "target_selector": "#b"},
+            ),
+            ("browser.set_viewport", {"session_id": "session-1", "width": 800, "height": 600}),
+            ("browser.get_cookies", {"session_id": "session-1", "urls": ["https://example.com"]}),
+            ("browser.set_cookies", {"session_id": "session-1", "cookies": [{"name": "sid", "value": "1", "url": "https://example.com"}]}),
+            ("browser.get_local_storage", {"session_id": "session-1", "key": "k"}),
+            ("browser.get_local_storage", {"session_id": "session-1"}),
+            ("browser.set_local_storage", {"session_id": "session-1", "key": "k", "value": "v"}),
+            ("browser.cdp_attach", {"cdp_url": "http://127.0.0.1:9222"}),
+            ("browser.find_by_vision", {"session_id": "session-1", "description": "submit", "take_screenshot": True}),
+            ("browser.share_session", {"session_id": "session-1", "ttl_minutes": 5}),
+            ("browser.enable_shadow_browse", {"session_id": "session-1"}),
+            ("browser.list_proxy_personas", {}),
+            ("browser.create_proxy_persona", {"name": "us-east", "server": "http://proxy.example.com:8080"}),
+            ("browser.delete_proxy_persona", {"name": "us-east"}),
+            ("browser.list_cron_jobs", {}),
+            ("browser.create_cron_job", {"name": "daily", "goal": "check", "schedule": "0 9 * * *"}),
+            ("browser.delete_cron_job", {"job_id": "cron-1"}),
+            ("browser.trigger_cron_job", {"job_id": "cron-1"}),
+            ("browser.pii_scrubber_status", {}),
+        ]
+
+        for name, arguments in calls:
+            response = await gateway.call_tool(McpToolCallRequest(name=name, arguments=arguments))
+            self.assertFalse(response.isError, name)
+
+        self.manager.get_network_log.assert_awaited_once()
+        self.manager.fork_session.assert_awaited_once()
+        fake_session.page.wait_for_selector.assert_awaited_once()
+        fake_context.add_cookies.assert_awaited_once()
+        vision_targeter.find_element.assert_awaited_once()
+
     async def test_observe_tool_forwards_preset(self) -> None:
         response = await self.gateway.call_tool(
             McpToolCallRequest(
@@ -495,38 +665,6 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.structuredContent["status"], "approval_required")
         self.assertEqual(response.structuredContent["approval"]["id"], "approval-1")
 
-    async def test_social_post_tool_bubbles_approval_back_as_tool_error(self) -> None:
-        approval = ApprovalRecord(
-            id="approval-social-1",
-            session_id="session-1",
-            kind="post",
-            status="pending",
-            created_at="2026-03-09T00:00:00Z",
-            updated_at="2026-03-09T00:00:00Z",
-            reason="Posting requires approval",
-            action=BrowserActionDecision(
-                action="social_post",
-                reason="Publish a social post",
-                text="hello world",
-                risk_category="post",
-            ),
-        )
-        self.manager.post_content = AsyncMock(side_effect=ApprovalRequiredError(approval))
-
-        response = await self.social_full_gateway.call_tool(
-            McpToolCallRequest(
-                name="social.post",
-                arguments={
-                    "session_id": "session-1",
-                    "text": "hello world",
-                },
-            )
-        )
-
-        self.assertTrue(response.isError)
-        self.assertEqual(response.structuredContent["status"], "approval_required")
-        self.assertEqual(response.structuredContent["approval"]["kind"], "post")
-
     async def test_browser_action_error_bubbles_back_as_structured_tool_error(self) -> None:
         self.manager.execute_decision = AsyncMock(
             side_effect=BrowserActionError(
@@ -556,98 +694,3 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             response.structuredContent["snapshot"]["screenshot_url"],
             "/artifacts/session-1/fail-click.png",
         )
-
-    async def test_social_post_tool_forwards_approval_id(self) -> None:
-        response = await self.social_full_gateway.call_tool(
-            McpToolCallRequest(
-                name="social.post",
-                arguments={
-                    "session_id": "session-1",
-                    "text": "hello world",
-                    "approval_id": "approval-social-1",
-                },
-            )
-        )
-
-        self.assertFalse(response.isError)
-        self.manager.post_content.assert_awaited_once_with(
-            "session-1",
-            text="hello world",
-            approval_id="approval-social-1",
-        )
-
-    async def test_social_comment_tool_forwards_fields(self) -> None:
-        response = await self.social_full_gateway.call_tool(
-            McpToolCallRequest(
-                name="social.comment",
-                arguments={
-                    "session_id": "session-1",
-                    "text": "great update",
-                    "post_index": 2,
-                    "approval_id": "approval-social-2",
-                },
-            )
-        )
-
-        self.assertFalse(response.isError)
-        self.manager.comment_on_post.assert_awaited_once_with(
-            "session-1",
-            text="great update",
-            post_index=2,
-            approval_id="approval-social-2",
-        )
-
-    async def test_social_login_tool_forwards_credentials_and_approval(self) -> None:
-        response = await self.social_full_gateway.call_tool(
-            McpToolCallRequest(
-                name="social.login",
-                arguments={
-                    "session_id": "session-1",
-                    "platform": "x",
-                    "username": "alice",
-                    "password": "secret-password",
-                    "auth_profile": "outlook-default",
-                    "approval_id": "approval-login-1",
-                    "totp_secret": "JBSWY3DPEHPK3PXP",
-                },
-            )
-        )
-
-        self.assertFalse(response.isError)
-        self.manager.social_login.assert_awaited_once_with(
-            "session-1",
-            platform="x",
-            username="alice",
-            password="secret-password",
-            auth_profile="outlook-default",
-            approval_id="approval-login-1",
-            totp_secret="JBSWY3DPEHPK3PXP",
-        )
-
-    async def test_social_errors_return_structured_tool_error(self) -> None:
-        self.manager.social_login = AsyncMock(
-            side_effect=SocialActionError(
-                "captcha detected",
-                action="social_login",
-                code="captcha_detected",
-                retryable=False,
-                url="https://x.com/i/flow/login",
-                details={"signal": "captcha"},
-            )
-        )
-
-        response = await self.social_full_gateway.call_tool(
-            McpToolCallRequest(
-                name="social.login",
-                arguments={
-                    "session_id": "session-1",
-                    "platform": "x",
-                    "username": "alice",
-                    "password": "secret-password",
-                },
-            )
-        )
-
-        self.assertTrue(response.isError)
-        self.assertEqual(response.structuredContent["code"], "captcha_detected")
-        self.assertEqual(response.structuredContent["action"], "social_login")

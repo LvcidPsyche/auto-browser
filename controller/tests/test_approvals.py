@@ -21,20 +21,6 @@ class FakePage:
         return "Example Domain"
 
 
-class FakeSocialPage(FakePage):
-    async def evaluate(self, script: str, arg=None):
-        if "tweetTextarea_0" in script:
-            return "textarea"
-        if "likeSelectors" in script:
-            return {
-                "selector": '[data-testid="like"]',
-                "x": 100,
-                "y": 200,
-                "label": "Like",
-            }
-        return None
-
-
 class ApprovalQueueTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -156,62 +142,6 @@ class ApprovalQueueTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(approved.id, approval.id)
-
-    async def test_social_post_requires_pending_approval(self) -> None:
-        self.session.page = FakeSocialPage()  # type: ignore[assignment]
-        self.manager._run_action = AsyncMock(return_value={"action": "social_post"})  # type: ignore[method-assign]
-
-        with self.assertRaises(ApprovalRequiredError) as ctx:
-            await self.manager.post_content(self.session.id, "hello world")
-
-        approval = ctx.exception.approval
-        self.assertEqual(approval.kind, "post")
-        self.assertEqual(approval.action.action, "social_post")
-        self.assertEqual(approval.action.text, "hello world")
-
-    async def test_social_like_requires_pending_approval(self) -> None:
-        self.session.page = FakeSocialPage()  # type: ignore[assignment]
-        self.manager._run_action = AsyncMock(return_value={"action": "like_post"})  # type: ignore[method-assign]
-
-        with self.assertRaises(ApprovalRequiredError) as ctx:
-            await self.manager.like_post(self.session.id, post_index=0)
-
-        approval = ctx.exception.approval
-        self.assertEqual(approval.kind, "post")
-        self.assertEqual(approval.action.action, "social_like")
-        self.assertEqual(approval.action.index, 0)
-
-    async def test_execute_approval_dispatches_social_post_action(self) -> None:
-        async def fake_post_content(session_id: str, text: str, *, approval_id: str | None = None) -> dict[str, str]:
-            if approval_id:
-                await self.manager.approvals.mark_executed(approval_id)
-            return {"action": "social_post", "session_id": session_id, "text": text}
-
-        self.manager.post_content = AsyncMock(side_effect=fake_post_content)  # type: ignore[method-assign]
-
-        approval = await self.manager.approvals.create_or_reuse_pending(
-            session_id=self.session.id,
-            kind="post",
-            reason="Posting requires approval",
-            action=BrowserActionDecision(
-                action="social_post",
-                reason="Publish a social post",
-                text="Ship the update",
-                risk_category="post",
-            ),
-            observation={"url": "https://example.com"},
-        )
-        await self.manager.approve(approval.id, comment="approved")
-
-        result = await self.manager.execute_approval(approval.id)
-
-        self.assertEqual(result["approval"]["status"], "executed")
-        self.manager.post_content.assert_awaited_once_with(
-            self.session.id,
-            "Ship the update",
-            approval_id=approval.id,
-        )
-
 
 class ApprovalStoreSQLiteTests(unittest.IsolatedAsyncioTestCase):
     async def test_sqlite_store_persists_and_filters_records(self) -> None:

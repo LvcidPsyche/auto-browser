@@ -22,7 +22,6 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
 - Containerized CI for controller tests + compose validation
 - A deployment/runbook document with exact credential handoff steps
 - `STEALTH_ENABLED=false`
-- `EXPERIMENTAL_SOCIAL=false`
 
 ## Non-goals for this phase
 
@@ -37,7 +36,7 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
 - CAPTCHAs, MFA, and brittle login flows still require human takeover
 - noVNC must sit behind a real access layer before remote use
 - File + SQLite durability is acceptable for beta, not enough for larger-scale production
-- Social/Veo3 workflow code remains in the tree for experiments, but it is not registered in production unless `EXPERIMENTAL_SOCIAL=true`
+- Social/Veo3 integrations are extracted from the shipped controller package and are not part of the production surface.
 
 ## Acceptance criteria
 

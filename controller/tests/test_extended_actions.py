@@ -83,46 +83,6 @@ class BrowserActionDecisionExtendedTests(unittest.TestCase):
                 decision = BrowserActionDecision(action=action, reason=f"Run {action}")
                 self.assertEqual(decision.risk_category, "read")
 
-    def test_social_write_actions_default_to_post_risk(self) -> None:
-        post = BrowserActionDecision(action="social_post", reason="Share an update", text="hello world")
-        comment = BrowserActionDecision(action="social_comment", reason="Reply to the post", text="nice post")
-        like = BrowserActionDecision(action="social_like", reason="Like the first post")
-        follow = BrowserActionDecision(action="social_follow", reason="Follow this profile")
-        unfollow = BrowserActionDecision(action="social_unfollow", reason="Unfollow this profile")
-        repost = BrowserActionDecision(action="social_repost", reason="Repost this update")
-        dm = BrowserActionDecision(action="social_dm", reason="DM the creator", recipient="alice", text="hello")
-
-        self.assertEqual(post.risk_category, "post")
-        self.assertEqual(comment.risk_category, "post")
-        self.assertEqual(like.risk_category, "post")
-        self.assertEqual(follow.risk_category, "post")
-        self.assertEqual(unfollow.risk_category, "post")
-        self.assertEqual(repost.risk_category, "post")
-        self.assertEqual(dm.risk_category, "post")
-
-    def test_social_post_requires_text(self) -> None:
-        with self.assertRaises(ValidationError):
-            BrowserActionDecision(action="social_post", reason="Share an update")
-
-    def test_social_dm_requires_recipient_and_text(self) -> None:
-        with self.assertRaises(ValidationError):
-            BrowserActionDecision(action="social_dm", reason="Send a DM", text="hello")
-
-        with self.assertRaises(ValidationError):
-            BrowserActionDecision(action="social_dm", reason="Send a DM", recipient="alice")
-
-    def test_social_login_defaults_to_account_change_and_requires_identity(self) -> None:
-        decision = BrowserActionDecision(
-            action="social_login",
-            reason="Log into X",
-            platform="x",
-            username="alice",
-        )
-        self.assertEqual(decision.risk_category, "account_change")
-
-        with self.assertRaises(ValidationError):
-            BrowserActionDecision(action="social_login", reason="Log into X", platform="x")
-
     def test_create_session_rejects_auth_profile_and_storage_state_together(self) -> None:
         with self.assertRaises(ValidationError):
             CreateSessionRequest(storage_state_path="state.json", auth_profile="outlook-default")

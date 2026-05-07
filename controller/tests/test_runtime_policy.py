@@ -114,7 +114,7 @@ class RuntimePolicyTests(unittest.TestCase):
         self.assertTrue(report.ok)
         self.assertTrue(any("CONTROLLER_ALLOWED_HOSTS is unset" in warning for warning in report.warnings))
 
-    def test_production_rejects_experimental_social_and_warns_on_stealth(self) -> None:
+    def test_production_warns_on_stealth(self) -> None:
         settings = Settings(
             _env_file=None,
             APP_ENV="production",
@@ -123,14 +123,12 @@ class RuntimePolicyTests(unittest.TestCase):
             AUTH_STATE_ENCRYPTION_KEY="b" * 44,
             REQUIRE_AUTH_STATE_ENCRYPTION="true",
             ALLOWED_HOSTS="example.com",
-            EXPERIMENTAL_SOCIAL="true",
             STEALTH_ENABLED="true",
         )
 
         report = validate_runtime_policy(settings)
 
-        self.assertFalse(report.ok)
-        self.assertIn("EXPERIMENTAL_SOCIAL=true is not permitted when APP_ENV=production", report.errors)
+        self.assertTrue(report.ok)
         self.assertTrue(any("STEALTH_ENABLED=true" in warning for warning in report.warnings))
 
     def test_confidential_default_emits_hardening_warnings(self) -> None:

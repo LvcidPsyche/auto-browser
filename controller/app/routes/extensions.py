@@ -1,12 +1,11 @@
 """
 routes.extensions — FastAPI route definitions for all 1.0 pillars.
 
-Registers: /mesh, /network, /cdp, /social, /workflow, /dashboard
+Registers: /mesh, /network, /cdp, /workflow, /dashboard
 """
 from __future__ import annotations
 
 import logging
-import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -264,126 +263,7 @@ async def workflow_get_run(run_id: str, request: Request):
 
 
 # ===========================================================================
-# Pillar 5 — Social empire routes
-# ===========================================================================
-
-social_router = APIRouter(prefix="/social/empire", tags=["social-empire"])
-
-
-class ViralResearchRequest(BaseModel):
-    niche: str
-    subreddits: list[str] = []
-    yt_results: int = 20
-
-
-class VideoGenerateRequest(BaseModel):
-    prompt: str
-    output_filename: str = ""
-    duration_seconds: int = 8
-    aspect_ratio: str = "16:9"
-
-
-class YouTubeUploadRequest(BaseModel):
-    file_path: str
-    title: str
-    description: str = ""
-    tags: list[str] = []
-    privacy: str = "public"
-    make_short: bool = False
-
-
-class CrossPostRequest(BaseModel):
-    video_url: str
-    title: str
-    description: str = ""
-    platforms: list[str] = ["reddit", "x"]
-    subreddits: list[str] = ["videos"]
-
-
-@social_router.post("/research")
-async def social_research(body: ViralResearchRequest, request: Request):
-    engine = getattr(request.app.state, "viral_engine", None)
-    if engine is None:
-        raise HTTPException(503, "Viral research engine not initialized")
-    result = await engine.research(
-        niche=body.niche,
-        subreddits=body.subreddits,
-        yt_results=body.yt_results,
-    )
-    return result
-
-
-@social_router.post("/generate")
-async def social_generate_video(body: VideoGenerateRequest, request: Request):
-    veo3 = getattr(request.app.state, "veo3_client", None)
-    if veo3 is None:
-        raise HTTPException(503, "Veo3 client not initialized")
-    output = body.output_filename or f"/data/social/generated/{uuid.uuid4().hex}.mp4"
-    path = await veo3.generate(
-        prompt=body.prompt,
-        output_path=output,
-        duration_seconds=body.duration_seconds,
-        aspect_ratio=body.aspect_ratio,
-    )
-    return {"status": "generated", "path": path, "prompt": body.prompt}
-
-
-@social_router.post("/youtube/upload")
-async def social_youtube_upload(body: YouTubeUploadRequest, request: Request):
-    yt = getattr(request.app.state, "youtube_client", None)
-    if yt is None:
-        raise HTTPException(503, "YouTube client not initialized")
-    if body.make_short:
-        result = await yt.create_short(
-            file_path=body.file_path,
-            title=body.title,
-            description=body.description,
-            tags=body.tags,
-        )
-    else:
-        result = await yt.upload_video(
-            file_path=body.file_path,
-            title=body.title,
-            description=body.description,
-            tags=body.tags,
-            privacy=body.privacy,
-        )
-    return {"status": "uploaded", "video_id": result.get("id"), "result": result}
-
-
-@social_router.post("/crosspost")
-async def social_crosspost(body: CrossPostRequest, request: Request):
-    results = {}
-    if "reddit" in body.platforms:
-        reddit = getattr(request.app.state, "reddit_client", None)
-        if reddit:
-            for sr in (body.subreddits or ["videos"]):
-                try:
-                    r = await reddit.submit_link(sr, body.title, body.video_url)
-                    results[f"reddit/{sr}"] = r
-                except Exception:
-                    results[f"reddit/{sr}"] = {"error": "crosspost_failed"}
-    if "x" in body.platforms:
-        x = getattr(request.app.state, "x_client", None)
-        if x:
-            try:
-                r = await x.post_tweet(f"{body.title}\n\n{body.video_url}")
-                results["x"] = r
-            except Exception:
-                results["x"] = {"error": "crosspost_failed"}
-    if "instagram" in body.platforms:
-        ig = getattr(request.app.state, "instagram_client", None)
-        if ig:
-            try:
-                r = await ig.post_reel(body.video_url, body.description)
-                results["instagram"] = r
-            except Exception:
-                results["instagram"] = {"error": "crosspost_failed"}
-    return {"status": "crossposted", "results": results}
-
-
-# ===========================================================================
-# Pillar 6 — Operator Dashboard
+# Operator Dashboard
 # ===========================================================================
 
 dashboard_router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -899,11 +779,5 @@ def register_all_routers(app) -> None:
     app.include_router(network_router)
     app.include_router(cdp_router)
     app.include_router(workflow_router)
-    settings = getattr(app.state, "settings", None)
-    if getattr(settings, "experimental_social", False):
-        app.include_router(social_router)
     app.include_router(dashboard_router)
-    logger.info(
-        "routes.extensions: 1.0 routers registered experimental_social=%s",
-        bool(getattr(settings, "experimental_social", False)),
-    )
+    logger.info("routes.extensions: 1.0 routers registered")

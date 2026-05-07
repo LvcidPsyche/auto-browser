@@ -2,7 +2,7 @@
 
 This is the near-term direction for Auto Browser.
 
-## Now (current in v1.0.4)
+## Now (current in v1.0.5)
 
 - stable local-first browser control
 - reusable auth profiles + import/export
@@ -24,19 +24,20 @@ This is the near-term direction for Auto Browser.
 - Operator dashboard at `/dashboard` with SSE event stream
 - Durable background-agent checkpoints with dashboard resume/discard/cancel controls
 - Repeatable agent eval harness for provider and workflow-profile comparisons
+- Local HTML fixture evals for release-critical browser workflows
 
 ## Next
 
 - cleaner multi-tab / popup management
 - MCP `resources/subscribe` push notifications (live browser state streaming)
 - stronger trace viewer integration in operator dashboard
-- platform-versioned social scraping connector library
 - auth profile setup wizard
 
 ## Recently Shipped
 
 - v1.0.1 security hardening, auth-profile archive fixes, client SDK repair, and dashboard XSS cleanup
 - v1.0.4 governed approval enforcement, default-off social/Veo3 surfaces, default-off stealth, broader eval coverage, and release audit hardening
+- v1.0.5 extracted social/Veo3 from the shipped controller wheel, added fixture evals, and raised controller coverage to 80%
 - Durable background-agent checkpoints with REST/MCP resume support
 - Request-level `fast` and `governed` workflow profiles for agent runs
 - Agent memory profiles for cross-session context persistence

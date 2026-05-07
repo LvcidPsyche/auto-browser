@@ -25,19 +25,12 @@ def register_extensions(app) -> None:
         network_inspectors  — dict[session_id, NetworkInspector]
         cdp_sessions        — dict[session_id, CDPPassthrough]
         workflow_engine     — WorkflowEngine (with all action handlers)
-        youtube_client      — YouTubeClient (if env set)
-        instagram_client    — InstagramClient (if env set)
-        reddit_client       — RedditClient (if env set)
-        x_client            — XClient (if env set)
-        veo3_client         — Veo3Client (if env set)
-        viral_engine        — ViralResearchEngine (if YT+Reddit available)
     """
     _init_mesh(app)
     _init_network_stores(app)
     _init_workflow_engine(app)
-    _init_social_clients(app)
+    _disable_extracted_social_state(app)
     _init_curator(app)
-    _register_workflow_actions(app)
     _register_session_hooks(app)
     logger.info("startup.extensions: all 1.0 subsystems registered")
 
@@ -155,186 +148,18 @@ def _init_workflow_engine(app) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Social clients
+# Extracted social/Veo3 state
 # ---------------------------------------------------------------------------
 
-def _init_social_clients(app) -> None:
+def _disable_extracted_social_state(app) -> None:
+    """Keep removed social/Veo3 app.state names inert for old extensions/tests."""
     app.state.youtube_client = None
     app.state.instagram_client = None
     app.state.reddit_client = None
     app.state.x_client = None
     app.state.veo3_client = None
     app.state.viral_engine = None
-
-    settings = getattr(app.state, "settings", None)
-    if not getattr(settings, "experimental_social", False):
-        logger.info("startup.social: experimental social clients disabled")
-        return
-
-    # YouTube
-    if os.environ.get("YOUTUBE_CLIENT_ID"):
-        try:
-            from app.social.youtube import YouTubeClient
-            app.state.youtube_client = YouTubeClient.from_env()
-            logger.info("startup.social: YouTube client initialized")
-        except Exception as exc:
-            logger.warning("startup.social: YouTube init failed — %s", exc)
-
-    # Instagram
-    if os.environ.get("INSTAGRAM_ACCESS_TOKEN"):
-        try:
-            from app.social.clients import InstagramClient
-            app.state.instagram_client = InstagramClient.from_env()
-            logger.info("startup.social: Instagram client initialized")
-        except Exception as exc:
-            logger.warning("startup.social: Instagram init failed — %s", exc)
-
-    # Reddit
-    if os.environ.get("REDDIT_CLIENT_ID"):
-        try:
-            from app.social.clients import RedditClient
-            app.state.reddit_client = RedditClient.from_env()
-            logger.info("startup.social: Reddit client initialized")
-        except Exception as exc:
-            logger.warning("startup.social: Reddit init failed — %s", exc)
-
-    # X / Twitter
-    if os.environ.get("X_API_KEY"):
-        try:
-            from app.social.clients import XClient
-            app.state.x_client = XClient.from_env()
-            logger.info("startup.social: X client initialized")
-        except Exception as exc:
-            logger.warning("startup.social: X init failed — %s", exc)
-
-    # Veo3
-    if os.environ.get("GOOGLE_CLOUD_PROJECT"):
-        try:
-            from app.integrations.veo3_and_research import Veo3Client
-            app.state.veo3_client = Veo3Client.from_env()
-            logger.info("startup.social: Veo3 client initialized")
-        except Exception as exc:
-            logger.warning("startup.social: Veo3 init failed — %s", exc)
-
-    # Viral research engine (needs YT + Reddit)
-    if app.state.youtube_client and app.state.reddit_client:
-        try:
-            from app.integrations.veo3_and_research import ViralResearchEngine
-            app.state.viral_engine = ViralResearchEngine(
-                youtube_client=app.state.youtube_client,
-                reddit_client=app.state.reddit_client,
-            )
-            logger.info("startup.social: Viral research engine initialized")
-        except Exception as exc:
-            logger.warning("startup.social: ViralResearchEngine init failed — %s", exc)
-
-
-# ---------------------------------------------------------------------------
-# Workflow action handlers
-# ---------------------------------------------------------------------------
-
-def _register_workflow_actions(app) -> None:
-    engine = app.state.workflow_engine
-    if engine is None:
-        return
-    settings = getattr(app.state, "settings", None)
-    if not getattr(settings, "experimental_social", False):
-        logger.info("startup.extensions: social workflow actions disabled")
-        return
-
-    # social.research.viral
-    async def _research(action, params, ctx):
-        engine_ref = app.state.viral_engine
-        if engine_ref is None:
-            return {"error": "viral_engine not initialized"}
-        return await engine_ref.research(
-            niche=params.get("niche", ""),
-            subreddits=params.get("subreddits", []),
-            yt_results=params.get("yt_results", 20),
-        )
-    engine.register_action("social.research.viral", _research)
-
-    # social.veo3.generate
-    async def _veo3_gen(action, params, ctx):
-        import uuid
-        veo3 = app.state.veo3_client
-        if veo3 is None:
-            return {"error": "veo3_client not initialized"}
-        output = params.get("output_filename") or f"/data/social/generated/{uuid.uuid4().hex}.mp4"
-        path = await veo3.generate(
-            prompt=params["prompt"],
-            output_path=output,
-            duration_seconds=params.get("duration_seconds", 8),
-            aspect_ratio=params.get("aspect_ratio", "16:9"),
-        )
-        return {"path": path, "prompt": params["prompt"]}
-    engine.register_action("social.veo3.generate", _veo3_gen)
-
-    # social.youtube.upload
-    async def _yt_upload(action, params, ctx):
-        yt = app.state.youtube_client
-        if yt is None:
-            return {"error": "youtube_client not initialized"}
-        if params.get("make_short"):
-            result = await yt.create_short(
-                file_path=params["file_path"],
-                title=params.get("title", ""),
-                description=params.get("description", ""),
-                tags=params.get("tags", []),
-            )
-        else:
-            result = await yt.upload_video(
-                file_path=params["file_path"],
-                title=params.get("title", ""),
-                description=params.get("description", ""),
-                tags=params.get("tags", []),
-                privacy=params.get("privacy", "public"),
-            )
-        return {"video_id": result.get("id"), "result": result}
-    engine.register_action("social.youtube.upload", _yt_upload)
-
-    # social.crosspost
-    async def _crosspost(action, params, ctx):
-        results = {}
-        video_url = params.get("video_url", "")
-        title = params.get("title", "")
-        description = params.get("description", "")
-        platforms = params.get("platforms", [])
-
-        if "reddit" in platforms and app.state.reddit_client:
-            for sr in params.get("subreddits", ["videos"]):
-                try:
-                    r = await app.state.reddit_client.submit_link(sr, title, video_url)
-                    results[f"reddit/{sr}"] = r
-                except Exception:
-                    results[f"reddit/{sr}"] = {"error": "crosspost_failed"}
-
-        if "x" in platforms and app.state.x_client:
-            try:
-                r = await app.state.x_client.post_tweet(f"{title}\n\n{video_url}")
-                results["x"] = r
-            except Exception:
-                results["x"] = {"error": "crosspost_failed"}
-
-        if "instagram" in platforms and app.state.instagram_client:
-            try:
-                r = await app.state.instagram_client.post_reel(video_url, description)
-                results["instagram"] = r
-            except Exception:
-                results["instagram"] = {"error": "crosspost_failed"}
-
-        return {"results": results}
-    engine.register_action("social.crosspost", _crosspost)
-
-    # social.auth.verify (warm-up checker stub — real impl uses browser session)
-    async def _auth_verify(action, params, ctx):
-        platform = params.get("platform", "")
-        profile = params.get("auth_profile", f"{platform}-default")
-        # Real impl would open a session with the auth profile and check login state
-        return {"platform": platform, "profile": profile, "status": "check_requires_browser_session"}
-    engine.register_action("social.auth.verify", _auth_verify)
-
-    logger.info("startup.extensions: %d workflow actions registered", 5)
+    logger.info("startup.social: social/Veo3 integrations are extracted from the controller")
 
 
 def _register_session_hooks(app) -> None:

@@ -51,16 +51,6 @@ from .models import (
     ScrollRequest,
     SelectOptionRequest,
     ShareSessionRequest,
-    SocialCommentRequest,
-    SocialDmRequest,
-    SocialFollowRequest,
-    SocialLikeRequest,
-    SocialLoginRequest,
-    SocialPostRequest,
-    SocialRepostRequest,
-    SocialScrollRequest,
-    SocialSearchRequest,
-    SocialUnfollowRequest,
     TabIndexRequest,
     TypeRequest,
     UploadRequest,
@@ -73,7 +63,6 @@ from .rate_limits import SlidingWindowRateLimiter, build_rate_limit_key, is_exem
 from .readiness import run_readiness_checks
 from .runtime_policy import validate_runtime_policy
 from .session_share import SessionShareManager
-from .social_errors import SocialActionError
 from .tool_gateway import McpToolGateway
 from .tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, TriggerCronJobInput
 from .vision_target import VisionTargeter
@@ -82,7 +71,7 @@ _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), loggi
 logging.basicConfig(level=_log_level)
 logger = logging.getLogger(__name__)
 
-_VERSION = "1.0.4"
+_VERSION = "1.0.5"
 
 _SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -231,11 +220,6 @@ async def legacy_ui_redirect(_: Request, rest_of_path: str = "") -> RedirectResp
 async def handle_key_not_found(_: Request, exc: KeyError) -> JSONResponse:
     key = exc.args[0] if exc.args else "unknown"
     return JSONResponse(status_code=404, content={"detail": f"Not found: {key}"})
-
-
-@app.exception_handler(SocialActionError)
-async def handle_social_action_error(_: Request, exc: SocialActionError) -> JSONResponse:
-    return JSONResponse(status_code=400, content=exc.payload)
 
 
 @app.exception_handler(BrowserActionError)
@@ -818,175 +802,6 @@ async def go_forward(session_id: str) -> dict:
         raise HTTPException(status_code=403, detail="Not permitted") from None
     except ApprovalRequiredError:
         raise
-    except Exception:
-        raise HTTPException(status_code=500, detail="Internal error") from None
-
-
-@app.post("/sessions/{session_id}/social/scroll")
-async def social_scroll_feed(session_id: str, payload: SocialScrollRequest) -> dict:
-    try:
-        return await manager.scroll_feed(session_id, direction=payload.direction, screens=payload.screens)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Unknown session") from None
-    except Exception:
-        raise HTTPException(status_code=500, detail="Internal error") from None
-
-
-@app.get("/sessions/{session_id}/social/posts")
-async def social_extract_posts(session_id: str, limit: int = 20) -> list:
-    return await manager.extract_posts(session_id, limit=limit)
-
-
-@app.get("/sessions/{session_id}/social/comments")
-async def social_extract_comments(session_id: str, limit: int = 20) -> list:
-    return await manager.extract_comments(session_id, limit=limit)
-
-
-@app.get("/sessions/{session_id}/social/profile")
-async def social_extract_profile(session_id: str) -> dict:
-    return await manager.extract_profile(session_id)
-
-
-@app.post("/sessions/{session_id}/social/post")
-async def social_post(session_id: str, payload: SocialPostRequest) -> dict:
-    try:
-        return await manager.post_content(session_id, text=payload.text, approval_id=payload.approval_id)
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="Not permitted") from None
-    except ApprovalRequiredError:
-        raise
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid request") from None
-    except Exception:
-        raise HTTPException(status_code=500, detail="Internal error") from None
-
-
-@app.post("/sessions/{session_id}/social/comment")
-async def social_comment(session_id: str, payload: SocialCommentRequest) -> dict:
-    try:
-        return await manager.comment_on_post(
-            session_id,
-            text=payload.text,
-            post_index=payload.post_index,
-            approval_id=payload.approval_id,
-        )
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="Not permitted") from None
-    except ApprovalRequiredError:
-        raise
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid request") from None
-    except Exception:
-        raise HTTPException(status_code=500, detail="Internal error") from None
-
-
-@app.post("/sessions/{session_id}/social/like")
-async def social_like(session_id: str, payload: SocialLikeRequest) -> dict:
-    try:
-        return await manager.like_post(session_id, post_index=payload.post_index, approval_id=payload.approval_id)
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="Not permitted") from None
-    except ApprovalRequiredError:
-        raise
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid request") from None
-    except Exception:
-        raise HTTPException(status_code=500, detail="Internal error") from None
-
-
-@app.post("/sessions/{session_id}/social/follow")
-async def social_follow(session_id: str, payload: SocialFollowRequest) -> dict:
-    try:
-        return await manager.follow_user(session_id, approval_id=payload.approval_id)
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="Not permitted") from None
-    except ApprovalRequiredError:
-        raise
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid request") from None
-    except Exception:
-        raise HTTPException(status_code=500, detail="Internal error") from None
-
-
-@app.post("/sessions/{session_id}/social/unfollow")
-async def social_unfollow(session_id: str, payload: SocialUnfollowRequest) -> dict:
-    try:
-        return await manager.unfollow_user(session_id, approval_id=payload.approval_id)
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="Not permitted") from None
-    except ApprovalRequiredError:
-        raise
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid request") from None
-    except Exception:
-        raise HTTPException(status_code=500, detail="Internal error") from None
-
-
-@app.post("/sessions/{session_id}/social/repost")
-async def social_repost(session_id: str, payload: SocialRepostRequest) -> dict:
-    try:
-        return await manager.repost_post(
-            session_id,
-            post_index=payload.post_index,
-            approval_id=payload.approval_id,
-        )
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="Not permitted") from None
-    except ApprovalRequiredError:
-        raise
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid request") from None
-    except Exception:
-        raise HTTPException(status_code=500, detail="Internal error") from None
-
-
-@app.post("/sessions/{session_id}/social/dm")
-async def social_dm(session_id: str, payload: SocialDmRequest) -> dict:
-    try:
-        return await manager.send_direct_message(
-            session_id,
-            recipient=payload.recipient,
-            text=payload.text,
-            approval_id=payload.approval_id,
-        )
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="Not permitted") from None
-    except ApprovalRequiredError:
-        raise
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid request") from None
-    except Exception:
-        raise HTTPException(status_code=500, detail="Internal error") from None
-
-
-@app.post("/sessions/{session_id}/social/login")
-async def social_login(session_id: str, payload: SocialLoginRequest) -> dict:
-    try:
-        return await manager.social_login(
-            session_id,
-            platform=payload.platform,
-            username=payload.username,
-            password=payload.password,
-            auth_profile=payload.auth_profile,
-            approval_id=payload.approval_id,
-            totp_secret=payload.totp_secret,
-        )
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="Not permitted") from None
-    except ApprovalRequiredError:
-        raise
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid request") from None
-    except Exception:
-        raise HTTPException(status_code=500, detail="Internal error") from None
-
-
-@app.post("/sessions/{session_id}/social/search")
-async def social_search(session_id: str, payload: SocialSearchRequest) -> dict:
-    try:
-        return await manager.search_page(session_id, query=payload.query)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid request") from None
     except Exception:
         raise HTTPException(status_code=500, detail="Internal error") from None
 

@@ -74,17 +74,6 @@ __all__ = [
     "SetViewportInput",
     "ShadowBrowseInput",
     "ShareSessionInput",
-    "SocialCommentInput",
-    "SocialDmInput",
-    "SocialFollowInput",
-    "SocialLikeInput",
-    "SocialLoginInput",
-    "SocialPostInput",
-    "SocialRepostInput",
-    "SocialScrapeInput",
-    "SocialScrollInput",
-    "SocialSearchInput",
-    "SocialUnfollowInput",
     "TabActionInput",
     "TakeoverInput",
     "TriggerCronJobInput",
@@ -210,63 +199,6 @@ class QueueAgentStepInput(SessionIdInput):
 
 class QueueAgentRunInput(SessionIdInput):
     request: AgentRunRequest
-
-
-class SocialScrollInput(SessionIdInput):
-    direction: Literal["down", "up"] = "down"
-    screens: int = Field(default=3, ge=1, le=20)
-
-
-class SocialScrapeInput(SessionIdInput):
-    limit: int = Field(default=20, ge=1, le=100)
-
-
-class SocialPostInput(SessionIdInput):
-    text: str = Field(min_length=1, max_length=5000)
-    approval_id: str | None = None
-
-
-class SocialCommentInput(SessionIdInput):
-    text: str = Field(min_length=1, max_length=5000)
-    post_index: int = Field(default=0, ge=0, le=50)
-    approval_id: str | None = None
-
-
-class SocialLikeInput(SessionIdInput):
-    post_index: int = Field(default=0, ge=0, le=50)
-    approval_id: str | None = None
-
-
-class SocialFollowInput(SessionIdInput):
-    approval_id: str | None = None
-
-
-class SocialUnfollowInput(SessionIdInput):
-    approval_id: str | None = None
-
-
-class SocialRepostInput(SessionIdInput):
-    post_index: int = Field(default=0, ge=0, le=50)
-    approval_id: str | None = None
-
-
-class SocialDmInput(SessionIdInput):
-    recipient: str = Field(min_length=1, max_length=200)
-    text: str = Field(min_length=1, max_length=5000)
-    approval_id: str | None = None
-
-
-class SocialLoginInput(SessionIdInput):
-    platform: Literal["x", "twitter", "instagram", "linkedin", "outlook", "microsoft", "live"]
-    username: str = Field(min_length=1, max_length=500)
-    password: str = Field(min_length=1, max_length=5000, repr=False)
-    auth_profile: str | None = Field(default=None, max_length=120)
-    approval_id: str | None = None
-    totp_secret: str | None = Field(default=None, repr=False)
-
-
-class SocialSearchInput(SessionIdInput):
-    query: str = Field(min_length=1, max_length=500)
 
 
 class GetNetworkLogInput(SessionIdInput):
