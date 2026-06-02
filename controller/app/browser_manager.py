@@ -108,6 +108,35 @@ class BrowserSession:
     witness_remote_state: WitnessRemoteState = field(default_factory=WitnessRemoteState)
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __getattribute__(self, name: str) -> Any:
+        val = super().__getattribute__(name)
+        if name == "page":
+            try:
+                is_closed = False
+                if val is not None:
+                    if hasattr(val, "is_closed") and callable(val.is_closed):
+                        is_closed = val.is_closed()
+                    else:
+                        is_closed = getattr(val, "closed", False)
+                
+                if is_closed:
+                    context = super().__getattribute__("context")
+                    pages = context.pages
+                    if pages:
+                        for p in reversed(pages):
+                            p_closed = False
+                            if hasattr(p, "is_closed") and callable(p.is_closed):
+                                p_closed = p.is_closed()
+                            else:
+                                p_closed = getattr(p, "closed", False)
+                            
+                            if not p_closed:
+                                self.__dict__["page"] = p
+                                return p
+            except Exception:
+                pass
+        return val
+
 
 SessionCreatedHook = Callable[[str, Page], Awaitable[None]]
 SessionClosedHook = Callable[[str], Awaitable[None]]
