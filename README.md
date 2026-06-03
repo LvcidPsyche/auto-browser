@@ -29,13 +29,12 @@ Works with:
 - **Safety rails built in.** Approvals, operator identity, PII scrubbing, Witness receipts, and policy presets are all part of the product surface.
 - **Governed skill induction.** Verified browser traces can become staged skill candidates with signed provenance, verifier adapters, and review-only graduation — agents that prove they can repeat themselves correctly, not just act once.
 
-## Release Highlights (v1.1.2)
+## Release Highlights (v1.1.3)
 
-- **Controller auth hardening** uses ASGI request scope paths for security decisions and requires controller Host validation in production.
-- **Dependency security refresh** moves to FastAPI 0.136.3 and Starlette 1.0.1 to clear the current Starlette path-confusion advisory.
-- **Release gates in CI** now enforce dependency audits, fixture evals, client tests, Python wheel builds, and the 80% controller coverage gate.
-- **Reproducible browser-node builds** use the committed npm lockfile with `npm ci`.
-- **Benchmark and contributor lanes** are tracked explicitly so community work maps to release-critical proof instead of loose placeholders.
+- **Background-task reliability** keeps a strong reference to fire-and-forget work — network capture, the on-detach flush, approval webhooks, and post-session curator review — so it can no longer be garbage-collected mid-flight.
+- **Audit attribution fix** stops operator identity from sharing a single mutable default across request contexts.
+- **Leaner controller** removes the previously extracted social/Veo3 modules that were already unwired and excluded from the build.
+- **Release gates in CI** continue to enforce dependency audits, fixture evals, client tests, Python wheel builds, and the 80% controller coverage gate.
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full release history.
 

@@ -4,6 +4,18 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.1.3] — 2026-06-02
+
+### Fixed
+- Fixed fire-and-forget background work (network-capture listeners, the on-detach pending flush, approval webhook dispatch, and post-session curator review) being scheduled without a retained task reference, which allowed CPython to garbage-collect the tasks before they completed. They now route through a shared `spawn_background_task` helper that holds a strong reference until the task finishes.
+- Fixed operator-identity audit attribution sharing a single mutable `OperatorIdentity` instance as a `ContextVar` default across all request contexts. The default is now `None` and `get_current_operator()` mints a fresh anonymous identity when no operator is set.
+
+### Removed
+- Removed the extracted social (YouTube/Instagram/Reddit/X) clients and the Veo3/viral-research integration, along with their unit tests and the now-empty packaging exclude. They were already unwired from routes, tools, the orchestrator, and startup, and excluded from the wheel build; the guard tests that assert those routes/tools stay unshipped are retained.
+
+### Changed
+- Bumped controller, client, LangChain integration, and browser-node package metadata to `1.1.3`, and refreshed release-facing version strings in the dashboard badge, webhook user-agent, README highlights, launch notes, and good-first-issue docs.
+
 ## [1.1.2] — 2026-06-02
 
 ### Added

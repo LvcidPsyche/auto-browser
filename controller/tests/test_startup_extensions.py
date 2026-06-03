@@ -116,12 +116,12 @@ class StartupExtensionsTests(unittest.IsolatedAsyncioTestCase):
         def _close_task(coro):
             coro.close()
 
-        with patch("asyncio.create_task", side_effect=_close_task) as create_task:
+        with patch("app.utils.spawn_background_task", side_effect=_close_task) as spawn:
             await extensions.on_session_closed(app, "session-1")
 
         self.assertEqual(app.state.network_inspectors, {})
         self.assertEqual(app.state.cdp_sessions, {})
-        create_task.assert_called_once()
+        spawn.assert_called_once()
 
 
 if __name__ == "__main__":
