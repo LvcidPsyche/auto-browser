@@ -11,6 +11,7 @@ from ...action_errors import BrowserActionError
 from ...actions import ActionRunContext
 from ...approvals import ApprovalRequiredError
 from ...models import ApprovalKind, BrowserActionDecision
+from ...utils import spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
 
@@ -374,7 +375,7 @@ class BrowserActionService:
         )
         _events.emit_approval(session_id, approval.id, approval.kind, approval.status, approval.reason)
         if self.manager.settings.approval_webhook_url:
-            asyncio.ensure_future(
+            spawn_background_task(
                 dispatch_approval_event(
                     approval,
                     webhook_url=self.manager.settings.approval_webhook_url,
