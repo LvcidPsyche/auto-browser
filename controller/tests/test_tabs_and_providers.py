@@ -123,6 +123,21 @@ class BrowserTabManagementTests(unittest.IsolatedAsyncioTestCase):
         # Active page unchanged
         self.assertIs(self.session.page, original_page)
 
+    async def test_active_page_auto_recovers_when_closed(self) -> None:
+        first_page = self.session.page
+        pages = self.session.context.pages
+        second_page = pages[1]
+        
+        await first_page.close()
+        
+        current_active = self.session.page
+        self.assertIs(current_active, second_page)
+        
+        summaries = await self.manager.list_tabs(self.session.id)
+        self.assertEqual(len(summaries), 1)
+        self.assertTrue(summaries[0]["active"])
+        self.assertEqual(summaries[0]["title"], "Export")
+
 
 class ProviderRegistryLoginCommandTests(unittest.TestCase):
     def test_cli_modes_expose_login_commands(self) -> None:
