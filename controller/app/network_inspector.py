@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from playwright.async_api import Page, Request, Response
 
     from .pii_scrub import PiiScrubber
-from .utils import UTC
+from .utils import UTC, spawn_background_task
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ class NetworkInspector:
             pass
         self._page = None
         # Drain pending entries — requestfailed/requestfinished will never fire after detach
-        asyncio.ensure_future(self._flush_pending())
+        spawn_background_task(self._flush_pending())
 
     def entries(self, limit: int = 100, method: str | None = None, url_contains: str | None = None) -> list[dict[str, Any]]:
         """Return captured network entries, most recent first."""
@@ -155,16 +155,16 @@ class NetworkInspector:
     # ── Listeners (synchronous wrappers → schedule async work) ─────────────
 
     def _on_request(self, request: "Request") -> None:
-        asyncio.ensure_future(self._handle_request(request))
+        spawn_background_task(self._handle_request(request))
 
     def _on_response(self, response: "Response") -> None:
-        asyncio.ensure_future(self._handle_response(response))
+        spawn_background_task(self._handle_response(response))
 
     def _on_request_failed(self, request: "Request") -> None:
-        asyncio.ensure_future(self._handle_request_failed(request))
+        spawn_background_task(self._handle_request_failed(request))
 
     def _on_request_finished(self, request: "Request") -> None:
-        asyncio.ensure_future(self._handle_request_finished(request))
+        spawn_background_task(self._handle_request_finished(request))
 
     # ── Async handlers ─────────────────────────────────────────────────────
 

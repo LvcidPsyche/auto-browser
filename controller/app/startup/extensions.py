@@ -279,8 +279,8 @@ async def on_session_closed(app, session_id: str) -> None:
     try:
         curator = getattr(app.state, "curator_adapter", None)
         if curator is not None and getattr(curator, "ready", False):
-            import asyncio as _asyncio
-            _asyncio.create_task(_curator_review_session(app, session_id, curator))
+            from ..utils import spawn_background_task
+            spawn_background_task(_curator_review_session(app, session_id, curator))
     except Exception as exc:
         logger.debug("on_session_closed: curator review skipped — %s", exc)
 

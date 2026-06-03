@@ -15,9 +15,12 @@ from .utils import utc_now
 
 logger = logging.getLogger(__name__)
 
-_CURRENT_OPERATOR: ContextVar[OperatorIdentity] = ContextVar(
+# Default is None (not a shared OperatorIdentity instance): a mutable ContextVar
+# default is shared across every context, so get_current_operator() mints a fresh
+# anonymous identity instead.
+_CURRENT_OPERATOR: ContextVar[OperatorIdentity | None] = ContextVar(
     "current_operator",
-    default=OperatorIdentity(id="anonymous", source="anonymous"),
+    default=None,
 )
 
 
@@ -35,7 +38,10 @@ def reset_current_operator(token: Token) -> None:
 
 
 def get_current_operator() -> OperatorIdentity:
-    return _CURRENT_OPERATOR.get()
+    operator = _CURRENT_OPERATOR.get()
+    if operator is None:
+        return OperatorIdentity(id="anonymous", source="anonymous")
+    return operator
 
 
 class AuditStoreBackend(Protocol):
