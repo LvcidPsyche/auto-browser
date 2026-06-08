@@ -1,6 +1,6 @@
 pytest
 pytest-asyncio>=0.23
-pytest-cov>=5.0
+pytest-cov>=7.1.0
 respx
 ruff
 build
