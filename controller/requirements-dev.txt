@@ -1,5 +1,5 @@
 pytest
-pytest-asyncio>=0.23
+pytest-asyncio>=1.4.0
 pytest-cov>=5.0
 respx
 ruff
