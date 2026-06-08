@@ -29,8 +29,11 @@ Works with:
 - **Safety rails built in.** Approvals, operator identity, PII scrubbing, Witness receipts, and policy presets are all part of the product surface.
 - **Governed skill induction.** Verified browser traces can become staged skill candidates with signed provenance, verifier adapters, and review-only graduation — agents that prove they can repeat themselves correctly, not just act once.
 
-## Release Highlights (v1.1.3)
+## Release Highlights (v1.1.4)
 
+- **v1.1.4 — documentation patch.** Documents the single-writer chain-integrity invariant in the Witness recorder; no functional changes since v1.1.3.
+
+### Since v1.1.3
 - **Background-task reliability** keeps a strong reference to fire-and-forget work — network capture, the on-detach flush, approval webhooks, and post-session curator review — so it can no longer be garbage-collected mid-flight.
 - **Audit attribution fix** stops operator identity from sharing a single mutable default across request contexts.
 - **Leaner controller** removes the previously extracted social/Veo3 modules that were already unwired and excluded from the build.

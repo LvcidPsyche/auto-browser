@@ -4,6 +4,12 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.1.4] — 2026-06-08
+
+### Changed
+- Documented the single-writer chain-integrity invariant on `WitnessRecorder`: the `asyncio.Lock` and in-memory head-hash cache are correct only within one process (the supported single-worker uvicorn deployment), so running multiple workers against the same `witness_root` would fork the receipt hash chain. No functional changes.
+- Bumped controller, client, LangChain integration, and browser-node package metadata to `1.1.4`, and refreshed release-facing version strings in the dashboard badge, webhook user-agent, README highlights, launch notes, and good-first-issue docs.
+
 ## [1.1.3] — 2026-06-02
 
 ### Fixed

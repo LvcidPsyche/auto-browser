@@ -1,6 +1,6 @@
 # Good first issues
 
-Use these as public contributor tickets that match the current v1.1.3 product surface.
+Use these as public contributor tickets that match the current v1.1.4 product surface.
 
 ## 1. Improve multi-tab and popup recovery tests
 
@@ -36,4 +36,4 @@ Use these as public contributor tickets that match the current v1.1.3 product su
 
 - **Label:** `good first issue`
 - **Scope:** add focused tests for `BrowserManager`, startup extension wiring, network inspector paths, and route handlers without needing live browsers
-- **Why it matters:** v1.1.3 preserves the 80% release gate after the architecture split; the next useful ratchet is coverage on the lower-signal edge paths that remain
+- **Why it matters:** v1.1.4 preserves the 80% release gate after the architecture split; the next useful ratchet is coverage on the lower-signal edge paths that remain
