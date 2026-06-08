@@ -11,5 +11,5 @@ pytesseract==0.3.13
 docker==7.1.0
 prometheus-client==0.22.1
 pyotp==2.9.0
-apscheduler==3.11.0
+apscheduler==3.11.2
 tomli==2.3.0; python_version < "3.11"
