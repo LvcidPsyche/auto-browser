@@ -258,6 +258,17 @@ class WitnessPolicyEngine:
 
 
 class WitnessRecorder:
+    """Append-only, hash-chained receipt log (one JSONL file per scope).
+
+    Chain integrity assumes a single writer process: the asyncio.Lock serializes
+    concurrent appends within one event loop and self._heads caches each scope's
+    head hash in memory. This holds for the supported deployment (uvicorn with a
+    single worker — see controller/Dockerfile). Running multiple worker processes
+    against the same witness_root would fork the chain (duplicate chain_prev_hash)
+    and needs OS-level file locking or a shared store — out of scope until
+    multi-worker is actually adopted.
+    """
+
     def __init__(self, root: str | Path):
         self.root = Path(root)
         self._lock = asyncio.Lock()
