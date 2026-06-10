@@ -3,9 +3,15 @@ from __future__ import annotations
 import io
 import json
 import unittest
+from pathlib import Path
 
+import app.mcp_stdio as mcp_stdio
+import app.mcp_transport as mcp_transport
 from app.mcp_stdio import HttpMcpResponse, StdioMcpBridge
 from app.mcp_transport import MCP_PROTOCOL_HEADER, MCP_SESSION_HEADER
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_CLIENT_BRIDGE = _REPO_ROOT / "client" / "auto_browser_client" / "mcp_bridge.py"
 
 
 class FakeHttpMcpClient:
@@ -117,6 +123,27 @@ class McpStdioBridgeTests(unittest.TestCase):
 
         payload = json.loads(stdout.getvalue().strip())
         self.assertEqual(payload["error"]["code"], -32700)
+
+
+class BridgeCopySyncTests(unittest.TestCase):
+    """The bridge ships twice: app.mcp_stdio (controller image) and
+    auto_browser_client.mcp_bridge (PyPI console script). These guards keep
+    the copies from drifting."""
+
+    def test_header_constants_match_mcp_transport(self) -> None:
+        self.assertEqual(mcp_stdio.MCP_SESSION_HEADER, mcp_transport.MCP_SESSION_HEADER)
+        self.assertEqual(mcp_stdio.MCP_PROTOCOL_HEADER, mcp_transport.MCP_PROTOCOL_HEADER)
+
+    @unittest.skipUnless(_CLIENT_BRIDGE.exists(), "client package not present (packaged/Docker run)")
+    def test_client_bridge_copy_is_identical(self) -> None:
+        controller_copy = Path(mcp_stdio.__file__).read_text(encoding="utf-8").replace("\r\n", "\n")
+        client_copy = _CLIENT_BRIDGE.read_text(encoding="utf-8").replace("\r\n", "\n")
+        self.assertEqual(
+            controller_copy,
+            client_copy,
+            "controller/app/mcp_stdio.py and client/auto_browser_client/mcp_bridge.py "
+            "must stay byte-identical — mirror your edit to the other copy.",
+        )
 
 
 if __name__ == "__main__":

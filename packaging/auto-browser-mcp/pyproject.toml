@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# Metapackage: exists so `uvx auto-browser-mcp` works without --from.
+# All code lives in auto-browser-client; this package only re-declares the
+# console script against that dependency.
+[project]
+name = "auto-browser-mcp"
+version = "1.2.1"
+description = "MCP stdio bridge for Auto Browser (metapackage for `uvx auto-browser-mcp`)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["auto-browser-client>=1.2.1"]
+keywords = ["auto-browser", "mcp", "mcp-server", "browser-automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Homepage = "https://github.com/LvcidPsyche/auto-browser"
+Repository = "https://github.com/LvcidPsyche/auto-browser"
+
+[project.scripts]
+auto-browser-mcp = "auto_browser_client.mcp_bridge:main"
+
+[tool.setuptools]
+py-modules = []

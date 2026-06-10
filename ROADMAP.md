@@ -2,8 +2,9 @@
 
 This is the near-term direction for Auto Browser.
 
-## Now (current in v1.2.0)
+## Now (current in v1.2.1)
 
+- PyPI packages: `auto-browser-client` SDK, `auto-browser-langchain` adapters, `uvx auto-browser-mcp` stdio bridge
 - stable local-first browser control
 - reusable auth profiles + import/export
 - human takeover via noVNC
@@ -37,6 +38,7 @@ This is the near-term direction for Auto Browser.
 
 ## Recently Shipped
 
+- v1.2.1 PyPI publishing: client SDK, LangChain adapters, and the `auto-browser-mcp` bridge via tag-triggered trusted publishing
 - v1.2.0 witness chain verification, isolated-container resource limits + orphan reaping, dependency refresh, and unified UA pool
 - v1.1.x policy presets (`strict`/`balanced`), per-session isolation audit + CI smoke, dependency-audit gates, and the 80% coverage gate
 - v1.0.1 security hardening, auth-profile archive fixes, client SDK repair, and dashboard XSS cleanup

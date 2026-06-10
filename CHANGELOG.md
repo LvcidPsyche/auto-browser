@@ -4,6 +4,19 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-06-10
+
+### Added
+- Published to PyPI: `auto-browser-client` (SDK + bridge), `auto-browser-langchain` (LangChain/LangGraph/CrewAI adapters), and `auto-browser-mcp` (metapackage so `uvx auto-browser-mcp` runs the stdio bridge directly).
+- Added the `auto-browser-mcp` console script: the stdio bridge now lives in the client package as `auto_browser_client.mcp_bridge` and ships on PyPI. The controller's `app.mcp_stdio` copy remains for the Docker/Glama entrypoint; a guard test keeps the two copies byte-identical and their header constants in sync with `app.mcp_transport`.
+- Added a tag-triggered `release.yml` workflow: verifies tag/version agreement, builds the three distributions, publishes via PyPI trusted publishing (OIDC — no stored tokens), and creates the GitHub release with CHANGELOG notes and artifacts attached.
+- Added `scripts/extract_changelog.py` to pull one version's section out of CHANGELOG.md for release notes, failing loudly when the section is missing.
+
+### Changed
+- Claude Desktop / Cursor / MCP client examples now use `uvx auto-browser-mcp` as the primary setup path, with the repo-checkout script as fallback.
+- Filled out PyPI packaging metadata (license, readme, classifiers, keywords, project URLs) for the client and LangChain packages.
+- Bumped controller, client, LangChain integration, and browser-node package metadata to `1.2.1`, and refreshed release-facing version strings.
+
 ## [1.2.0] — 2026-06-10
 
 ### Added

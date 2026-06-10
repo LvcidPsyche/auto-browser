@@ -1,0 +1,85 @@
+name: Release
+
+# Tag-triggered publish: build wheels/sdists for the PyPI packages, publish
+# via PyPI trusted publishing (OIDC — no tokens stored anywhere), then create
+# the GitHub release with CHANGELOG notes and the artifacts attached.
+#
+# PyPI setup (one-time, per package): pypi.org → Publishing → add publisher
+# for auto-browser-client / auto-browser-langchain / auto-browser-mcp with
+# owner LvcidPsyche, repo auto-browser, workflow release.yml, environment pypi.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Verify tag matches package versions
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          for f in client/pyproject.toml integrations/langchain/pyproject.toml packaging/auto-browser-mcp/pyproject.toml; do
+            V=$(python -c "import tomllib; print(tomllib.load(open('$f','rb'))['project']['version'])")
+            if [ "$V" != "$TAG" ]; then
+              echo "::error::$f declares version $V but the tag is $TAG"
+              exit 1
+            fi
+          done
+      - name: Build distributions
+        run: |
+          python -m pip install build
+          python -m build --outdir dist client
+          python -m build --outdir dist integrations/langchain
+          python -m build --outdir dist packaging/auto-browser-mcp
+          ls -l dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish-pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI (trusted publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Create GitHub release with CHANGELOG notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/extract_changelog.py "${GITHUB_REF_NAME#v}" > /tmp/notes.md
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; uploading artifacts only."
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file /tmp/notes.md
+          fi

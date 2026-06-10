@@ -29,8 +29,11 @@ Works with:
 - **Safety rails built in.** Approvals, operator identity, PII scrubbing, Witness receipts, and policy presets are all part of the product surface.
 - **Governed skill induction.** Verified browser traces can become staged skill candidates with signed provenance, verifier adapters, and review-only graduation — agents that prove they can repeat themselves correctly, not just act once.
 
-## Release Highlights (v1.2.0)
+## Release Highlights (v1.2.1)
 
+- **On PyPI.** `pip install auto-browser-client` for the SDK, `pip install auto-browser-langchain` for the LangChain/LangGraph/CrewAI adapters, and `uvx auto-browser-mcp` to run the MCP stdio bridge with zero setup. Releases publish via PyPI trusted publishing (OIDC) on tag push.
+
+### Since v1.2.0
 - **Verifiable Witness receipts.** Receipts were always hash-chained at write time; now you can check the chain on demand. `GET /sessions/{id}/witness/verify` and the read-only `browser.verify_witness` MCP tool walk the full chain and report the first divergent receipt if the log was altered, reordered, or truncated.
 - **Sturdier session isolation.** Per-session browser containers now get memory/PID/CPU caps, and the controller reaps containers orphaned by a crash at startup.
 - **Fresh dependency floor.** Playwright 1.60 (controller and browser-node aligned), uvicorn 0.49, and a unified, current user-agent pool replacing the stale Chrome 122-era defaults.
@@ -128,7 +131,7 @@ Auto Browser exposes:
 
 - an HTTP MCP endpoint at `http://127.0.0.1:8000/mcp`
 - convenience endpoints at `http://127.0.0.1:8000/mcp/tools` and `http://127.0.0.1:8000/mcp/tools/call`
-- a bundled stdio bridge at [`scripts/mcp_stdio_bridge.py`](./scripts/mcp_stdio_bridge.py)
+- a stdio bridge: `uvx auto-browser-mcp` from PyPI, or [`scripts/mcp_stdio_bridge.py`](./scripts/mcp_stdio_bridge.py) in a repo checkout
 
 The default MCP tool profile is `curated`, which keeps the browser surface compact for better tool selection. If you want the full internal tool surface, set:
 

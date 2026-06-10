@@ -12,16 +12,14 @@ In Cursor: **Settings → MCP** (or open `~/.cursor/mcp.json` directly).
 
 ## 3. Add this config block
 
-Replace `<ABSOLUTE_PATH_TO_AUTO_BROWSER>` with the real path to your clone:
+With [uv](https://docs.astral.sh/uv/) installed (recommended — no clone needed):
 
 ```json
 {
   "mcpServers": {
     "auto-browser": {
-      "command": "python3",
-      "args": [
-        "<ABSOLUTE_PATH_TO_AUTO_BROWSER>/scripts/mcp_stdio_bridge.py"
-      ],
+      "command": "uvx",
+      "args": ["auto-browser-mcp"],
       "env": {
         "AUTO_BROWSER_BASE_URL": "http://127.0.0.1:8000/mcp",
         "AUTO_BROWSER_BEARER_TOKEN": ""
@@ -31,7 +29,7 @@ Replace `<ABSOLUTE_PATH_TO_AUTO_BROWSER>` with the real path to your clone:
 }
 ```
 
-Example with a real path:
+Or from a repo checkout, replace `<ABSOLUTE_PATH_TO_AUTO_BROWSER>` with the real path to your clone:
 
 ```json
 {
@@ -39,7 +37,7 @@ Example with a real path:
     "auto-browser": {
       "command": "python3",
       "args": [
-        "/home/youruser/auto-browser/scripts/mcp_stdio_bridge.py"
+        "<ABSOLUTE_PATH_TO_AUTO_BROWSER>/scripts/mcp_stdio_bridge.py"
       ],
       "env": {
         "AUTO_BROWSER_BASE_URL": "http://127.0.0.1:8000/mcp",

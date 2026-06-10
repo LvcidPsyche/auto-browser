@@ -105,6 +105,7 @@ jobs:
           python -m build --wheel --outdir /tmp/wheelhouse controller
           python -m build --wheel --outdir /tmp/wheelhouse client
           python -m build --wheel --outdir /tmp/wheelhouse integrations/langchain
+          python -m build --wheel --outdir /tmp/wheelhouse packaging/auto-browser-mcp
 
   controller-tests:
     needs: lint

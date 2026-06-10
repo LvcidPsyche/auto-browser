@@ -4,12 +4,24 @@ build-backend = "hatchling.build"
 
 [project]
 name = "auto-browser-langchain"
-version = "1.2.0"
+version = "1.2.1"
 description = "LangChain / LangGraph / CrewAI integration for auto-browser"
+readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
+]
+keywords = ["auto-browser", "langchain", "langgraph", "crewai", "browser-automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 
 [project.optional-dependencies]
@@ -18,3 +30,6 @@ crewai = ["crewai>=0.28"]
 
 [project.urls]
 Homepage = "https://github.com/LvcidPsyche/auto-browser"
+Repository = "https://github.com/LvcidPsyche/auto-browser"
+Changelog = "https://github.com/LvcidPsyche/auto-browser/blob/main/CHANGELOG.md"
+Issues = "https://github.com/LvcidPsyche/auto-browser/issues"

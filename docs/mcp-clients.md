@@ -18,11 +18,11 @@ http://127.0.0.1:8000/mcp/tools/call
 Auto Browser exposes:
 
 - an **HTTP MCP server**
-- a bundled **stdio bridge** at `scripts/mcp_stdio_bridge.py`
+- a **stdio bridge**, installable from PyPI (`uvx auto-browser-mcp`) or bundled at `scripts/mcp_stdio_bridge.py` for repo checkouts
 
 That means:
 - MCP clients with HTTP transport support can talk to it directly
-- stdio-first clients can use the shipped bridge directly
+- stdio-first clients can use the bridge with zero setup beyond `uvx`
 
 ## Why this matters
 
@@ -54,16 +54,14 @@ Auto Browser ships a copy-paste Claude Desktop config example:
 - `examples/claude_desktop_config.json`
 - `examples/claude-desktop-setup.md`
 
-Minimal shape:
+Minimal shape (requires [uv](https://docs.astral.sh/uv/)):
 
 ```json
 {
   "mcpServers": {
     "auto-browser": {
-      "command": "python3",
-      "args": [
-        "/ABSOLUTE/PATH/TO/auto-browser/scripts/mcp_stdio_bridge.py"
-      ],
+      "command": "uvx",
+      "args": ["auto-browser-mcp"],
       "env": {
         "AUTO_BROWSER_BASE_URL": "http://127.0.0.1:8000/mcp",
         "AUTO_BROWSER_BEARER_TOKEN": ""
@@ -72,6 +70,9 @@ Minimal shape:
   }
 }
 ```
+
+Working from a repo checkout without uv? Point `command` at `python3` with
+`args: ["/ABSOLUTE/PATH/TO/auto-browser/scripts/mcp_stdio_bridge.py"]` instead.
 
 If your API is protected, set `AUTO_BROWSER_BEARER_TOKEN`.
 
