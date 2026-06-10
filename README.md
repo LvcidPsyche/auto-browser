@@ -1,6 +1,7 @@
 # Auto Browser
 
 [![CI](https://github.com/LvcidPsyche/auto-browser/actions/workflows/ci.yml/badge.svg)](https://github.com/LvcidPsyche/auto-browser/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/auto-browser-client?label=PyPI)](https://pypi.org/project/auto-browser-client/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![MCP Server](https://img.shields.io/badge/MCP-server-blue)](./README.md)
 [![Local First](https://img.shields.io/badge/local--first-0ea5e9)](./README.md)
