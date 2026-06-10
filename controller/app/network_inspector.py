@@ -95,8 +95,8 @@ class NetworkInspector:
             self._page.remove_listener("response", self._on_response)
             self._page.remove_listener("requestfailed", self._on_request_failed)
             self._page.remove_listener("requestfinished", self._on_request_finished)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("network inspector listener removal failed (page likely closed): %s", exc)
         self._page = None
         # Drain pending entries — requestfailed/requestfinished will never fire after detach
         spawn_background_task(self._flush_pending())
@@ -185,8 +185,8 @@ class NetworkInspector:
                     raw = request.post_data
                     if raw and len(raw) <= self.body_max_bytes:
                         req_body = raw
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("could not read request body for %s: %s", url, exc)
 
             # Scrub request body
             pii_hit = False
@@ -224,8 +224,8 @@ class NetworkInspector:
             # Store request ID on the Playwright Request object for cross-referencing
             try:
                 request._pii_entry_id = req_id  # type: ignore[attr-defined]
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("could not tag request object for %s: %s", url, exc)
 
             async with self._lock:
                 self._pending[req_id] = entry
@@ -267,8 +267,9 @@ class NetworkInspector:
                                 if hits:
                                     resp_body = scrubbed if isinstance(scrubbed, str) else resp_body
                                     pii_hit = True
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Bodies are unavailable for redirects and torn-down contexts.
+                    logger.debug("could not read response body for %s: %s", entry.get("url", "?"), exc)
 
             async with self._lock:
                 entry["status"] = status

@@ -14,11 +14,20 @@ from app.utils import UTC
 
 
 class FakeDockerContainer:
-    def __init__(self, *, container_id: str, name: str, attrs: dict, status: str = "running") -> None:
+    def __init__(
+        self,
+        *,
+        container_id: str,
+        name: str,
+        attrs: dict,
+        status: str = "running",
+        labels: dict | None = None,
+    ) -> None:
         self.id = container_id
         self.name = name
         self.attrs = attrs
         self.status = status
+        self.labels = labels or {}
         self.removed = False
         self.stopped = False
 
@@ -68,9 +77,19 @@ class FakeDockerContainers:
                     }
                 },
             },
+            labels=kwargs.get("labels") or {},
         )
+        container.run_kwargs = kwargs
         self.browser_containers[name] = container
         return container
+
+    def list(self, all: bool = False, filters: dict | None = None) -> list[FakeDockerContainer]:
+        containers = list(self.browser_containers.values())
+        label_filter = (filters or {}).get("label")
+        if not label_filter:
+            return containers
+        key, _, value = label_filter.partition("=")
+        return [c for c in containers if c.labels.get(key) == value]
 
 
 class FakeDockerClient:
@@ -178,6 +197,127 @@ class DockerBrowserNodeProvisionerTests(unittest.IsolatedAsyncioTestCase):
             container = client.containers.browser_containers[runtime.container_name]
             self.assertTrue(container.stopped)
             self.assertTrue(container.removed)
+
+    async def test_provision_applies_default_resource_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            data_root = Path(tempdir) / "data"
+            data_root.mkdir(parents=True, exist_ok=True)
+            settings = Settings(
+                _env_file=None,
+                ARTIFACT_ROOT=str(data_root / "artifacts"),
+            )
+            controller_container = FakeDockerContainer(
+                container_id="controller-id",
+                name="controller",
+                attrs={
+                    "Mounts": [{"Destination": "/data", "Source": str(data_root)}],
+                    "NetworkSettings": {"Networks": {"auto-browser_default": {}}},
+                },
+            )
+            client = FakeDockerClient(controller_container)
+            provisioner = DockerBrowserNodeProvisioner(settings, client=client)
+            provisioner._controller_container_id = controller_container.id
+
+            runtime = await provisioner.provision("session-limits")
+
+            kwargs = client.containers.browser_containers[runtime.container_name].run_kwargs
+            self.assertEqual(kwargs["mem_limit"], "4g")
+            self.assertEqual(kwargs["pids_limit"], 2048)
+            self.assertNotIn("nano_cpus", kwargs)
+
+    async def test_provision_applies_cpu_limit_when_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            data_root = Path(tempdir) / "data"
+            data_root.mkdir(parents=True, exist_ok=True)
+            settings = Settings(
+                _env_file=None,
+                ARTIFACT_ROOT=str(data_root / "artifacts"),
+                ISOLATED_BROWSER_CPUS="1.5",
+                ISOLATED_BROWSER_MEM_LIMIT="2g",
+                ISOLATED_BROWSER_PIDS_LIMIT="512",
+            )
+            controller_container = FakeDockerContainer(
+                container_id="controller-id",
+                name="controller",
+                attrs={
+                    "Mounts": [{"Destination": "/data", "Source": str(data_root)}],
+                    "NetworkSettings": {"Networks": {"auto-browser_default": {}}},
+                },
+            )
+            client = FakeDockerClient(controller_container)
+            provisioner = DockerBrowserNodeProvisioner(settings, client=client)
+            provisioner._controller_container_id = controller_container.id
+
+            runtime = await provisioner.provision("session-cpus")
+
+            kwargs = client.containers.browser_containers[runtime.container_name].run_kwargs
+            self.assertEqual(kwargs["mem_limit"], "2g")
+            self.assertEqual(kwargs["pids_limit"], 512)
+            self.assertEqual(kwargs["nano_cpus"], 1_500_000_000)
+
+    async def test_startup_reaps_orphaned_containers(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            data_root = Path(tempdir) / "data"
+            data_root.mkdir(parents=True, exist_ok=True)
+            settings = Settings(
+                _env_file=None,
+                ARTIFACT_ROOT=str(data_root / "artifacts"),
+                SESSION_ISOLATION_MODE="docker_ephemeral",
+            )
+            controller_container = FakeDockerContainer(
+                container_id="controller-id",
+                name="controller",
+                attrs={"Mounts": [], "NetworkSettings": {"Networks": {}}},
+            )
+            client = FakeDockerClient(controller_container)
+            orphan = FakeDockerContainer(
+                container_id="orphan-id",
+                name="browser-session-stale",
+                attrs={},
+                labels={"auto-browser.managed": "true"},
+            )
+            unmanaged = FakeDockerContainer(
+                container_id="other-id",
+                name="someone-elses-container",
+                attrs={},
+            )
+            client.containers.browser_containers[orphan.name] = orphan
+            client.containers.browser_containers[unmanaged.name] = unmanaged
+            provisioner = DockerBrowserNodeProvisioner(settings, client=client)
+
+            await provisioner.startup()
+
+            self.assertTrue(orphan.removed)
+            self.assertFalse(unmanaged.removed)
+
+    async def test_startup_keeps_orphans_when_keep_containers_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            data_root = Path(tempdir) / "data"
+            data_root.mkdir(parents=True, exist_ok=True)
+            settings = Settings(
+                _env_file=None,
+                ARTIFACT_ROOT=str(data_root / "artifacts"),
+                SESSION_ISOLATION_MODE="docker_ephemeral",
+                ISOLATED_BROWSER_KEEP_CONTAINERS="true",
+            )
+            controller_container = FakeDockerContainer(
+                container_id="controller-id",
+                name="controller",
+                attrs={"Mounts": [], "NetworkSettings": {"Networks": {}}},
+            )
+            client = FakeDockerClient(controller_container)
+            orphan = FakeDockerContainer(
+                container_id="orphan-id",
+                name="browser-session-stale",
+                attrs={},
+                labels={"auto-browser.managed": "true"},
+            )
+            client.containers.browser_containers[orphan.name] = orphan
+            provisioner = DockerBrowserNodeProvisioner(settings, client=client)
+
+            await provisioner.startup()
+
+            self.assertFalse(orphan.removed)
 
 
 class BrowserIsolationSummaryTests(unittest.IsolatedAsyncioTestCase):

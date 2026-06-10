@@ -269,6 +269,6 @@ class WorkflowEngine:
                 if workflow_id and data.get("workflow_id") != workflow_id:
                     continue
                 runs.append(data)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("skipping unreadable workflow run file %s: %s", p.name, exc)
         return runs

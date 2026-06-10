@@ -129,6 +129,10 @@ class SessionIdInput(StrictInputModel):
     session_id: str = Field(min_length=1, max_length=120)
 
 
+class VerifyWitnessInput(SessionIdInput):
+    """Verify the Witness receipt hash chain for one session scope."""
+
+
 class ObserveInput(SessionIdInput):
     preset: PerceptionPreset = "normal"
     limit: int = Field(default=40, ge=1, le=200)

@@ -777,6 +777,28 @@ class AgentHttpTests(unittest.TestCase):
         )
         list_witness.assert_awaited_once_with("session-1", limit=25)
 
+    def test_session_witness_verify_reports_chain_state(self) -> None:
+        verify = AsyncMock(
+            return_value={
+                "scope": "session-1",
+                "valid": True,
+                "receipt_count": 4,
+                "head_hash": "abc123",
+                "first_invalid_index": None,
+                "first_invalid_receipt_id": None,
+                "reason": None,
+            }
+        )
+
+        with patch.object(main_module.manager, "verify_witness_chain", verify):
+            response = self.client.get("/sessions/session-1/witness/verify")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["receipt_count"], 4)
+        verify.assert_awaited_once_with("session-1")
+
     def test_social_session_routes_are_not_shipped(self) -> None:
         endpoints = [
             ("get", "/sessions/session-1/social/posts", None),

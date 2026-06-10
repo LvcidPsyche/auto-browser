@@ -70,6 +70,7 @@ from ..tool_inputs import (
     ShareSessionInput,
     TabActionInput,
     TakeoverInput,
+    VerifyWitnessInput,
     VisionFindInput,
     WaitForSelectorInput,
 )
@@ -475,6 +476,9 @@ class McpToolGateway:
             method=payload.method,
             url_contains=payload.url_contains,
         )
+
+    async def _verify_witness(self, payload: VerifyWitnessInput) -> dict[str, Any]:
+        return await self.manager.verify_witness_chain(payload.session_id)
 
     async def _fork_session(self, payload: ForkSessionInput) -> dict[str, Any]:
         return await self.manager.fork_session(

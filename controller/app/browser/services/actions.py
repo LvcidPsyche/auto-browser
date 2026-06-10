@@ -49,8 +49,12 @@ class BrowserActionService:
                         session.id,
                         reason=f"Bot challenge detected: {challenge['signal']}",
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "failed to request human takeover after bot challenge on session %s: %s",
+                        session.id,
+                        exc,
+                    )
 
         return await self.manager._run_action(session, "navigate", {"url": url}, operation)
 

@@ -80,6 +80,98 @@ class WitnessRecorderTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(second.chain_prev_hash, first.chain_hash)
 
 
+class WitnessVerifyTests(unittest.IsolatedAsyncioTestCase):
+    async def _record_chain(self, recorder: WitnessRecorder, scope: str, count: int) -> list:
+        receipts = []
+        for index in range(count):
+            receipts.append(
+                await recorder.record(
+                    scope,
+                    profile="normal",
+                    event_type="browser_action",
+                    status="ok",
+                    action=f"action-{index}",
+                    action_class="write",
+                    operator={"id": "alice", "source": "header"},
+                )
+            )
+        return receipts
+
+    async def test_verify_passes_for_intact_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            recorder = WitnessRecorder(Path(tempdir))
+            await recorder.startup()
+            receipts = await self._record_chain(recorder, "session-1", 3)
+
+            result = await recorder.verify("session-1")
+
+            self.assertTrue(result["valid"])
+            self.assertEqual(result["receipt_count"], 3)
+            self.assertEqual(result["head_hash"], receipts[-1].chain_hash)
+            self.assertIsNone(result["reason"])
+
+    async def test_verify_detects_altered_receipt_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            recorder = WitnessRecorder(Path(tempdir))
+            await recorder.startup()
+            await self._record_chain(recorder, "session-1", 3)
+
+            path = Path(tempdir) / "session-1.jsonl"
+            lines = path.read_text(encoding="utf-8").splitlines()
+            lines[1] = lines[1].replace('"action-1"', '"tampered"')
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            result = await recorder.verify("session-1")
+
+            self.assertFalse(result["valid"])
+            self.assertEqual(result["first_invalid_index"], 1)
+            self.assertIn("chain_hash", result["reason"])
+
+    async def test_verify_detects_deleted_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            recorder = WitnessRecorder(Path(tempdir))
+            await recorder.startup()
+            await self._record_chain(recorder, "session-1", 3)
+
+            path = Path(tempdir) / "session-1.jsonl"
+            lines = path.read_text(encoding="utf-8").splitlines()
+            del lines[1]
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            result = await recorder.verify("session-1")
+
+            self.assertFalse(result["valid"])
+            self.assertEqual(result["first_invalid_index"], 1)
+            self.assertIn("chain_prev_hash", result["reason"])
+
+    async def test_verify_detects_unparseable_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            recorder = WitnessRecorder(Path(tempdir))
+            await recorder.startup()
+            await self._record_chain(recorder, "session-1", 2)
+
+            path = Path(tempdir) / "session-1.jsonl"
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write("{not json}\n")
+
+            result = await recorder.verify("session-1")
+
+            self.assertFalse(result["valid"])
+            self.assertEqual(result["first_invalid_index"], 2)
+            self.assertIn("not parseable", result["reason"])
+
+    async def test_verify_empty_scope_is_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            recorder = WitnessRecorder(Path(tempdir))
+            await recorder.startup()
+
+            result = await recorder.verify("never-written")
+
+            self.assertTrue(result["valid"])
+            self.assertEqual(result["receipt_count"], 0)
+            self.assertIsNone(result["head_hash"])
+
+
 class WitnessBrowserManagerIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_confidential_auth_profile_save_is_blocked_without_encryption(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

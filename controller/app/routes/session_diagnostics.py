@@ -205,6 +205,10 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
             "receipts": receipts,
         }
 
+    @router.get("/sessions/{session_id}/witness/verify")
+    async def verify_session_witness(session_id: str) -> dict[str, Any]:
+        return await manager.verify_witness_chain(session_id)
+
     @router.get("/sessions/{session_id}/export-script")
     async def export_script(session_id: str) -> dict[str, Any]:
         session = await manager.get_session(session_id)

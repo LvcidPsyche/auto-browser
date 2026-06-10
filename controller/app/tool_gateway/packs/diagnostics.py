@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from ...tool_inputs import EmptyInput, ExportScriptInput, GetNetworkLogInput, GetRemoteAccessInput, ReadinessCheckInput
+from ...tool_inputs import (
+    EmptyInput,
+    ExportScriptInput,
+    GetNetworkLogInput,
+    GetRemoteAccessInput,
+    ReadinessCheckInput,
+    VerifyWitnessInput,
+)
 from ..registry import ToolSpec
 
 
@@ -33,6 +40,17 @@ def register(registry, gateway):
             ),
             input_model=GetNetworkLogInput,
             handler=gateway._get_network_log,
+        ),
+        ToolSpec(
+            name="browser.verify_witness",
+            description=(
+                "Verify the integrity of a session's Witness receipt hash chain. "
+                "Walks every receipt, recomputes the chain, and reports the first "
+                "divergent receipt if the log was altered, reordered, or truncated."
+            ),
+            input_model=VerifyWitnessInput,
+            handler=gateway._verify_witness,
+            read_only_hint=True,
         ),
         ToolSpec(
             name="browser.export_script",

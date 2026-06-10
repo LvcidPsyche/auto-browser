@@ -5,6 +5,8 @@ from typing import Literal
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .stealth.fingerprint import CHROME_UA_POOL
+
 
 class Settings(BaseSettings):
     app_env: str = Field("development", validation_alias=AliasChoices("APP_ENV", "ENVIRONMENT"))
@@ -91,6 +93,9 @@ class Settings(BaseSettings):
         alias="ISOLATED_BROWSER_KEEP_CONTAINERS",
     )
     isolated_browser_bind_host: str = Field("127.0.0.1", alias="ISOLATED_BROWSER_BIND_HOST")
+    isolated_browser_mem_limit: str = Field("4g", alias="ISOLATED_BROWSER_MEM_LIMIT")
+    isolated_browser_pids_limit: int = Field(2048, alias="ISOLATED_BROWSER_PIDS_LIMIT")
+    isolated_browser_cpus: float = Field(0.0, alias="ISOLATED_BROWSER_CPUS")
     isolated_takeover_host: str = Field("127.0.0.1", alias="ISOLATED_TAKEOVER_HOST")
     isolated_takeover_scheme: str = Field("http", alias="ISOLATED_TAKEOVER_SCHEME")
     isolated_takeover_path: str = Field(
@@ -200,7 +205,7 @@ class Settings(BaseSettings):
 
     openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
     openai_base_url: str = Field("https://api.openai.com/v1", alias="OPENAI_BASE_URL")
-    openai_model: str = Field("gpt-4.1-mini", alias="OPENAI_MODEL")
+    openai_model: str = Field("gpt-5-mini", alias="OPENAI_MODEL")
     openai_auth_mode: str = Field("api", alias="OPENAI_AUTH_MODE")
     openai_cli_path: str = Field("codex", alias="OPENAI_CLI_PATH")
     openai_cli_model: str | None = Field(None, alias="OPENAI_CLI_MODEL")
@@ -212,7 +217,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = Field(None, alias="ANTHROPIC_API_KEY")
     anthropic_base_url: str = Field("https://api.anthropic.com/v1", alias="ANTHROPIC_BASE_URL")
     anthropic_version: str = Field("2023-06-01", alias="ANTHROPIC_VERSION")
-    claude_model: str = Field("claude-sonnet-4-20250514", alias="CLAUDE_MODEL")
+    claude_model: str = Field("claude-sonnet-4-6", alias="CLAUDE_MODEL")
     vision_model: str = Field("claude-haiku-4-5-20251001", alias="VISION_MODEL")
     claude_auth_mode: str = Field("api", alias="CLAUDE_AUTH_MODE")
     claude_cli_path: str = Field("claude", alias="CLAUDE_CLI_PATH")
@@ -223,7 +228,7 @@ class Settings(BaseSettings):
         "https://generativelanguage.googleapis.com/v1beta",
         alias="GEMINI_BASE_URL",
     )
-    gemini_model: str = Field("gemini-2.5-flash", alias="GEMINI_MODEL")
+    gemini_model: str = Field("gemini-3.5-flash", alias="GEMINI_MODEL")
     gemini_auth_mode: str = Field("api", alias="GEMINI_AUTH_MODE")
     gemini_cli_path: str = Field("gemini", alias="GEMINI_CLI_PATH")
     gemini_cli_model: str | None = Field(None, alias="GEMINI_CLI_MODEL")
@@ -239,11 +244,10 @@ class Settings(BaseSettings):
 
     # Stealth / anti-bot
     stealth_enabled: bool = Field(False, alias="STEALTH_ENABLED")
+    # Defaults to the single authoritative pool in stealth.fingerprint so the
+    # context-level UA and the fingerprint layer cannot drift apart.
     user_agent_pool: str = Field(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36,"
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36,"
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36,"
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        ",".join(CHROME_UA_POOL),
         alias="USER_AGENT_POOL",
     )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,10 @@ try:  # pragma: no cover - optional dependency for local host-only unit runs
     import docker
 except Exception:  # pragma: no cover - optional dependency for local host-only unit runs
     docker = None
+
+logger = logging.getLogger(__name__)
+
+_MANAGED_LABEL = "auto-browser.managed"
 
 
 @dataclass
@@ -54,6 +59,33 @@ class DockerBrowserNodeProvisioner:
         if self.settings.session_isolation_mode != "docker_ephemeral":
             return
         await asyncio.to_thread(self._ensure_context)
+        await asyncio.to_thread(self._reap_orphaned_containers)
+
+    def _reap_orphaned_containers(self) -> None:
+        """Remove session containers left behind by a previous controller run.
+
+        Runs at startup before any session exists, so every container carrying
+        the managed label is an orphan (a crashed or killed controller never got
+        to release it). Assumes one controller per Docker host, matching the
+        supported single-controller deployment.
+        """
+        if self.settings.isolated_browser_keep_containers:
+            logger.debug("Skipping orphan container sweep: ISOLATED_BROWSER_KEEP_CONTAINERS is enabled")
+            return
+        client = self._ensure_context()
+        try:
+            orphans = client.containers.list(all=True, filters={"label": f"{_MANAGED_LABEL}=true"})
+        except Exception as exc:
+            logger.warning("Could not list orphaned browser containers: %s", exc)
+            return
+        for container in orphans:
+            name = getattr(container, "name", "<unknown>")
+            try:
+                container.remove(force=True)
+            except Exception as exc:
+                logger.warning("Failed to remove orphaned browser container %s: %s", name, exc)
+                continue
+            logger.info("Reaped orphaned browser container %s", name)
 
     async def provision(self, session_id: str) -> IsolatedBrowserRuntime:
         pending = await asyncio.to_thread(self._provision_container_sync, session_id)
@@ -111,8 +143,16 @@ class DockerBrowserNodeProvisioner:
         if existing is not None:
             try:
                 existing.remove(force=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Could not remove stale container %s before provisioning: %s", container_name, exc)
+
+        resource_kwargs: dict[str, Any] = {}
+        if self.settings.isolated_browser_mem_limit:
+            resource_kwargs["mem_limit"] = self.settings.isolated_browser_mem_limit
+        if self.settings.isolated_browser_pids_limit > 0:
+            resource_kwargs["pids_limit"] = self.settings.isolated_browser_pids_limit
+        if self.settings.isolated_browser_cpus > 0:
+            resource_kwargs["nano_cpus"] = int(self.settings.isolated_browser_cpus * 1_000_000_000)
 
         container = client.containers.run(
             self.settings.isolated_browser_image,
@@ -137,10 +177,11 @@ class DockerBrowserNodeProvisioner:
                 "5900/tcp": (self.settings.isolated_browser_bind_host, None),
             },
             labels={
-                "auto-browser.managed": "true",
+                _MANAGED_LABEL: "true",
                 "auto-browser.session_id": session_id,
                 "auto-browser.mode": "docker_ephemeral",
             },
+            **resource_kwargs,
         )
 
         ws_endpoint_file = local_profile_dir / "browser-ws-endpoint.txt"
@@ -164,13 +205,13 @@ class DockerBrowserNodeProvisioner:
             return
         try:
             container.stop(timeout=5)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Could not stop browser container %s: %s", runtime.container_name, exc)
         if not self.settings.isolated_browser_keep_containers:
             try:
                 container.remove(force=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Could not remove browser container %s: %s", runtime.container_name, exc)
 
     def _ensure_context(self):
         if self._client is None:

@@ -301,6 +301,71 @@ class WitnessRecorder:
     async def list(self, scope: str, *, limit: int = 100) -> list[WitnessReceipt]:
         return await asyncio.to_thread(self._list_sync, self._path(scope), limit)
 
+    async def verify(self, scope: str) -> dict[str, Any]:
+        """Walk a scope's full receipt chain and verify it end to end.
+
+        Recomputes every chain hash and checks each receipt's chain_prev_hash
+        against its predecessor, so deletion, reordering, insertion, and
+        content edits all surface as the first divergent index.
+        """
+        return await asyncio.to_thread(self._verify_sync, scope, self._path(scope))
+
+    @classmethod
+    def _verify_sync(cls, scope: str, path: Path) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "scope": scope,
+            "valid": True,
+            "receipt_count": 0,
+            "head_hash": None,
+            "first_invalid_index": None,
+            "first_invalid_receipt_id": None,
+            "reason": None,
+        }
+        if not path.exists():
+            return result
+
+        previous: str | None = None
+        index = -1
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            index += 1
+            try:
+                receipt = WitnessReceipt.model_validate_json(line)
+            except Exception:
+                return cls._verify_failure(result, index, None, "receipt is not parseable")
+            if receipt.chain_prev_hash != previous:
+                return cls._verify_failure(
+                    result,
+                    index,
+                    receipt.receipt_id,
+                    "chain_prev_hash does not match the preceding receipt (chain reordered, truncated, or forked)",
+                )
+            if cls._compute_hash(receipt) != receipt.chain_hash:
+                return cls._verify_failure(
+                    result,
+                    index,
+                    receipt.receipt_id,
+                    "chain_hash does not match receipt content (receipt altered after write)",
+                )
+            previous = receipt.chain_hash
+            result["receipt_count"] = index + 1
+            result["head_hash"] = receipt.chain_hash
+        return result
+
+    @staticmethod
+    def _verify_failure(
+        result: dict[str, Any],
+        index: int,
+        receipt_id: str | None,
+        reason: str,
+    ) -> dict[str, Any]:
+        result["valid"] = False
+        result["first_invalid_index"] = index
+        result["first_invalid_receipt_id"] = receipt_id
+        result["reason"] = reason
+        return result
+
     def _path(self, scope: str) -> Path:
         return self.root / f"{scope}.jsonl"
 

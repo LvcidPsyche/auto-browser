@@ -53,6 +53,17 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             execute_approval=AsyncMock(return_value={"approval": {"id": "approval-1", "status": "executed"}}),
             get_remote_access_info=lambda: {"active": False, "status": "inactive"},
             get_session=AsyncMock(return_value={"id": "session-1"}),
+            verify_witness_chain=AsyncMock(
+                return_value={
+                    "scope": "session-1",
+                    "valid": True,
+                    "receipt_count": 2,
+                    "head_hash": "abc123",
+                    "first_invalid_index": None,
+                    "first_invalid_receipt_id": None,
+                    "reason": None,
+                }
+            ),
             settings=SimpleNamespace(
                 auth_state_encryption_key=None,
                 require_auth_state_encryption=False,
@@ -148,6 +159,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("browser.get_memory_profile", names)
         self.assertIn("browser.list_memory_profiles", names)
         self.assertIn("browser.readiness_check", names)
+        self.assertIn("browser.verify_witness", names)
         self.assertIn("browser.list_auth_profiles", names)
         self.assertIn("browser.get_auth_profile", names)
         self.assertIn("browser.list_tabs", names)
@@ -172,6 +184,16 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(names), len(tools))
         self.assertNotIn("browser.discard_agent_job", names)
         self.assertNotIn("browser.cancel_agent_job", names)
+
+    async def test_verify_witness_tool_dispatches_to_manager(self) -> None:
+        response = await self.gateway.call_tool(
+            McpToolCallRequest(name="browser.verify_witness", arguments={"session_id": "session-1"})
+        )
+
+        self.assertFalse(response.isError)
+        self.assertTrue(response.structuredContent["valid"])
+        self.assertEqual(response.structuredContent["receipt_count"], 2)
+        self.manager.verify_witness_chain.assert_awaited_once_with("session-1")
 
     async def test_list_tools_include_mcp_hints(self) -> None:
         tools = {tool["name"]: tool for tool in self.gateway.list_tools()}

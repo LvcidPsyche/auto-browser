@@ -1,7 +1,7 @@
 fastapi==0.136.3
 starlette==1.0.1
-uvicorn[standard]==0.35.0
-playwright==1.56.0
+uvicorn[standard]==0.49.0
+playwright==1.60.0
 pydantic-settings==2.10.1
 httpx==0.28.1
 redis==7.1.1
@@ -11,5 +11,5 @@ pytesseract==0.3.13
 docker==7.1.0
 prometheus-client==0.22.1
 pyotp==2.9.0
-apscheduler==3.11.0
+apscheduler==3.11.2
 tomli==2.3.0; python_version < "3.11"

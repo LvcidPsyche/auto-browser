@@ -872,6 +872,9 @@ class BrowserManager:
         receipts = await self.witness.list(session_id, limit=limit)
         return [item.model_dump() for item in receipts]
 
+    async def verify_witness_chain(self, session_id: str) -> dict[str, Any]:
+        return await self.witness.verify(session_id)
+
     def _initial_witness_remote_state(self, protection_mode: str) -> WitnessRemoteState:
         return self.witness_bridge.initial_remote_state(protection_mode)
 
@@ -1057,8 +1060,9 @@ class BrowserManager:
     async def _settle(self, page: Page) -> None:
         try:
             await page.wait_for_load_state("networkidle", timeout=min(self.settings.action_timeout_ms, 5000))
-        except Exception:
-            pass
+        except Exception as exc:
+            # Busy pages legitimately never reach networkidle; proceed anyway.
+            logger.debug("settle: networkidle not reached: %s", exc)
         await page.wait_for_timeout(250)
 
     def _assert_runtime_url_allowed(self, url: str) -> None:

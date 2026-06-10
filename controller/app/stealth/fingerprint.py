@@ -14,22 +14,25 @@ import random
 # User-agent pool
 # ---------------------------------------------------------------------------
 
-_UA_POOL = [
-    # Chrome 135 on Windows (April 2026 stable)
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
-    # Chrome 135 on macOS
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
-    # Chrome 135 on Linux
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
-    # Firefox 137 on Windows
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0",
-    # Firefox 137 on macOS
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.4; rv:137.0) Gecko/20100101 Firefox/137.0",
-    # Edge 135
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0",
-    # Safari 17.6 on macOS (Safari release cadence is slower)
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
+# Single authoritative UA pool. config.Settings derives its default USER_AGENT_POOL
+# from this list so the context-level UA (sessions service) and the fingerprint
+# layer can never drift apart again.
+#
+# Chromium-engine UAs only: the browser node runs Chromium, and a Firefox/Safari
+# UA on a Chromium engine is an engine/UA mismatch — itself a detection signal.
+CHROME_UA_POOL = [
+    # Chrome 149 on Windows (June 2026 stable)
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+    # Chrome 149 on macOS (UA reduction freezes the reported mac version)
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+    # Chrome 149 on Linux
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+    # Chrome 148 on Windows (previous stable still common in the wild)
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+    # Edge 149 on Windows (Chromium engine)
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36 Edg/149.0.0.0",
 ]
+_UA_POOL = CHROME_UA_POOL
 # NOTE: UA strings go stale fast. Refresh this pool every 2-3 months.
 # Stale UAs are themselves a bot signal — Chrome 122 in a 2026 session sticks out.
 

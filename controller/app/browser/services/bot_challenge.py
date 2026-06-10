@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 BOT_CHALLENGE_SIGNALS = (
     "challenge.cloudflare.com",
@@ -37,8 +40,9 @@ class BrowserBotChallengeService:
                     )
                 )
             ]
-        except Exception:
-            pass
+        except Exception as exc:
+            # Page may be mid-navigation or already closed; check with what we have.
+            logger.debug("bot challenge probe could not read page content: %s", exc)
 
         combined = f"{url} {title} {body_text} {' '.join(iframe_sources)}"
         for signal in BOT_CHALLENGE_SIGNALS:
