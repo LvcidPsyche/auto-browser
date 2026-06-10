@@ -4,9 +4,17 @@ name: Release
 # via PyPI trusted publishing (OIDC — no tokens stored anywhere), then create
 # the GitHub release with CHANGELOG notes and the artifacts attached.
 #
+# Each package publishes from its own GitHub environment because PyPI's
+# pending-publisher uniqueness constraint is on (owner, repo, workflow,
+# environment) WITHOUT the project name — a second pending publisher on the
+# same tuple 500s (pypi/warehouse#20006, #20112). Distinct environments give
+# each package its own slot.
+#
 # PyPI setup (one-time, per package): pypi.org → Publishing → add publisher
-# for auto-browser-client / auto-browser-langchain / auto-browser-mcp with
-# owner LvcidPsyche, repo auto-browser, workflow release.yml, environment pypi.
+# with owner LvcidPsyche, repo auto-browser, workflow release.yml, and:
+#   auto-browser-client    → environment pypi
+#   auto-browser-langchain → environment pypi-langchain
+#   auto-browser-mcp       → environment pypi-mcp
 
 on:
   push:
@@ -48,15 +56,33 @@ jobs:
   publish-pypi:
     needs: build
     runs-on: ubuntu-latest
-    environment: pypi
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: auto-browser-client
+            environment: pypi
+            dist_glob: auto_browser_client-*
+          - package: auto-browser-langchain
+            environment: pypi-langchain
+            dist_glob: auto_browser_langchain-*
+          - package: auto-browser-mcp
+            environment: pypi-mcp
+            dist_glob: auto_browser_mcp-*
+    environment: ${{ matrix.environment }}
     permissions:
       id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: dist
-          path: dist/
-      - name: Publish to PyPI (trusted publishing)
+          path: all-dist/
+      - name: Select ${{ matrix.package }} distributions
+        run: |
+          mkdir -p dist
+          cp all-dist/${{ matrix.dist_glob }} dist/
+          ls -l dist/
+      - name: Publish ${{ matrix.package }} to PyPI (trusted publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
 
   github-release:
