@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from playwright.async_api import Error as PlaywrightError
+
 from ...browser_scripts import apply_stealth
 from ...models import SessionRecord, SessionStatus
 from ...network_inspector import NetworkInspector
@@ -371,6 +373,18 @@ class BrowserSessionService:
             await self.manager.session_store.upsert(SessionRecord.model_validate(summary))
             return {"closed": True, "trace_path": str(session.trace_path), "session": summary}
 
+    @staticmethod
+    async def _page_snapshot(session: "BrowserSession") -> tuple[str, str, bool]:
+        page = session.page
+        is_closed = getattr(page, "is_closed", None)
+        if callable(is_closed) and is_closed():
+            return "", "", False
+        try:
+            return page.url, await page.title(), True
+        except PlaywrightError as exc:
+            logger.debug("page snapshot failed for session %s: %s", session.id, exc)
+            return "", "", False
+
     async def summary(
         self,
         session: "BrowserSession",
@@ -378,6 +392,10 @@ class BrowserSessionService:
         status: SessionStatus = "active",
         live: bool = True,
     ) -> dict[str, Any]:
+        current_url, title, page_live = await self._page_snapshot(session)
+        if not page_live and status == "active":
+            status = "interrupted"
+            live = False
         return {
             "id": session.id,
             "name": session.name,
@@ -385,8 +403,8 @@ class BrowserSessionService:
             "updated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "status": status,
             "live": live,
-            "current_url": session.page.url,
-            "title": await session.page.title(),
+            "current_url": current_url,
+            "title": title,
             "artifact_dir": str(session.artifact_dir),
             "takeover_url": self.manager._current_takeover_url(session),
             "remote_access": self.manager._session_remote_access_info(session),
