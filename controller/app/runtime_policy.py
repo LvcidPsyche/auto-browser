@@ -133,6 +133,11 @@ def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
     report = RuntimePolicyReport()
 
     if not settings.is_production:
+        if not settings.api_bearer_token:
+            report.warnings.append(
+                "API_BEARER_TOKEN is unset; the controller serves every route unauthenticated. "
+                "Set it before exposing this instance on a non-loopback address."
+            )
         return report
 
     if not settings.api_bearer_token:

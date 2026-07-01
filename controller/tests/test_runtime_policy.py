@@ -52,6 +52,26 @@ class RuntimePolicyTests(unittest.TestCase):
         self.assertTrue(report.ok)
         self.assertEqual(report.errors, [])
 
+    def test_development_warns_when_bearer_token_unset(self) -> None:
+        settings = Settings(_env_file=None, APP_ENV="development")
+
+        report = validate_runtime_policy(settings)
+
+        self.assertTrue(report.ok)
+        self.assertTrue(
+            any("API_BEARER_TOKEN is unset" in w for w in report.warnings),
+            report.warnings,
+        )
+
+    def test_development_no_bearer_warning_when_token_set(self) -> None:
+        settings = Settings(
+            _env_file=None, APP_ENV="development", API_BEARER_TOKEN="dev-token"
+        )
+
+        report = validate_runtime_policy(settings)
+
+        self.assertFalse(any("API_BEARER_TOKEN is unset" in w for w in report.warnings))
+
     def test_production_requires_security_basics(self) -> None:
         settings = Settings(
             _env_file=None,
