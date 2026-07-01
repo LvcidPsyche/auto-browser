@@ -16,6 +16,19 @@ class DashboardSecurityTests(unittest.TestCase):
         self.assertNotIn("innerHTML", _DASHBOARD_HTML)
         self.assertNotIn("onclick=\"removePeer", _DASHBOARD_HTML)
 
+    def test_replay_view_present_and_renders_safely(self) -> None:
+        # Panel + wiring exist.
+        self.assertIn('id="replay"', _DASHBOARD_HTML)
+        self.assertIn("async function loadReplay()", _DASHBOARD_HTML)
+        self.assertIn("getElementById('load-replay').addEventListener('click', loadReplay)", _DASHBOARD_HTML)
+        # Reads from existing run/approval artifacts.
+        self.assertIn("/agent/jobs/", _DASHBOARD_HTML)
+        self.assertIn("/approvals", _DASHBOARD_HTML)
+        # Renders untrusted run data via text nodes / safe helpers, never innerHTML.
+        self.assertIn("appendCell(row, decision.action)", _DASHBOARD_HTML)
+        self.assertIn("statusBadge(result.status)", _DASHBOARD_HTML)
+        self.assertIn("safeHttpUrl(v)", _DASHBOARD_HTML)
+
 
 if __name__ == "__main__":
     unittest.main()

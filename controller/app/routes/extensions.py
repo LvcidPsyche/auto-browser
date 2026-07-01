@@ -399,6 +399,18 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <th>Time</th><th>Operator</th><th>Action</th><th>Session</th><th>Status</th>
     </tr></thead><tbody id="audit-tbody"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody></table>
   </div>
+
+  <div class="section" id="replay">
+    <div class="section-header">
+      <h2>Run Replay</h2>
+    </div>
+    <div class="replay-controls">
+      <input id="replay-job-id" type="text" placeholder="agent job id" />
+      <button class="refresh-btn" id="load-replay">&#9654; Load replay</button>
+    </div>
+    <div id="replay-status" class="empty">Enter a completed agent job id to replay its actions, approvals, screenshots, and final status.</div>
+    <div id="replay-output"></div>
+  </div>
 </main>
 
 <script>
@@ -745,6 +757,111 @@ async function loadAudit() {
     tbody.appendChild(row);
   });
 }
+
+// --- Run replay ------------------------------------------------------------
+// Renders a completed agent run from existing artifacts. All values come from
+// untrusted run data, so everything is written with text nodes and the shared
+// safe cell helpers -- never via raw HTML assignment.
+function replaySection(title) {
+  const header = document.createElement('h3');
+  header.textContent = title;
+  document.getElementById('replay-output').appendChild(header);
+  const table = document.createElement('table');
+  const tbody = document.createElement('tbody');
+  table.appendChild(tbody);
+  document.getElementById('replay-output').appendChild(table);
+  return tbody;
+}
+function renderReplayScreenshots(steps) {
+  const urls = [];
+  steps.forEach((step) => {
+    const exec = step.execution || {};
+    const obs = step.observation || {};
+    [exec.screenshot, exec.screenshot_url, obs.screenshot, obs.screenshot_url].forEach((v) => {
+      const safe = safeHttpUrl(v);
+      if (safe) urls.push(safe);
+    });
+  });
+  const header = document.createElement('h3');
+  header.textContent = `Screenshots (${urls.length})`;
+  document.getElementById('replay-output').appendChild(header);
+  if (!urls.length) {
+    const note = document.createElement('div');
+    note.className = 'empty';
+    note.textContent = 'No screenshot artifacts available for this run.';
+    document.getElementById('replay-output').appendChild(note);
+    return;
+  }
+  urls.forEach((url) => {
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = 'run screenshot';
+    img.style.maxWidth = '320px';
+    img.style.margin = '4px';
+    document.getElementById('replay-output').appendChild(img);
+  });
+}
+async function loadReplay() {
+  const jobId = (document.getElementById('replay-job-id').value || '').trim();
+  const statusEl = document.getElementById('replay-status');
+  const out = document.getElementById('replay-output');
+  out.replaceChildren();
+  if (!jobId) { statusEl.textContent = 'Enter an agent job id.'; return; }
+  statusEl.textContent = 'Loading replay...';
+  let job;
+  try {
+    job = await api(`/agent/jobs/${encodeURIComponent(jobId)}`);
+  } catch (err) {
+    statusEl.textContent = `Could not load job ${jobId}.`;
+    return;
+  }
+  const result = job.result || job;
+  const sessionId = (result.final_session && result.final_session.id) || job.session_id || '';
+
+  const statusLine = document.createElement('div');
+  statusLine.appendChild(document.createTextNode('Final status: '));
+  statusLine.appendChild(statusBadge(result.status));
+  out.appendChild(statusLine);
+
+  const steps = Array.isArray(result.steps) ? result.steps : [];
+  const actionsBody = replaySection(`Actions (${steps.length})`);
+  if (!steps.length) {
+    appendEmptyRow(actionsBody, 3, 'No steps recorded.');
+  } else {
+    steps.forEach((step, index) => {
+      const decision = step.decision || {};
+      const row = document.createElement('tr');
+      appendCell(row, index + 1);
+      appendCell(row, decision.action);
+      appendNodeCell(row, statusBadge(step.status));
+      actionsBody.appendChild(row);
+    });
+  }
+
+  try {
+    const approvals = await api('/approvals');
+    const list = Array.isArray(approvals) ? approvals : (approvals.approvals || []);
+    const forRun = list.filter((a) => !sessionId || a.session_id === sessionId);
+    const apprBody = replaySection(`Approvals (${forRun.length})`);
+    if (!forRun.length) {
+      appendEmptyRow(apprBody, 3, 'No approvals for this run.');
+    } else {
+      forRun.forEach((a) => {
+        const row = document.createElement('tr');
+        appendCell(row, a.kind);
+        appendCell(row, a.reason);
+        appendNodeCell(row, statusBadge(a.status));
+        apprBody.appendChild(row);
+      });
+    }
+  } catch (err) {
+    /* approvals are best-effort in replay */
+  }
+
+  renderReplayScreenshots(steps);
+  statusEl.textContent = `Replay for job ${jobId}.`;
+}
+document.getElementById('load-replay').addEventListener('click', loadReplay);
 
 document.getElementById('refresh-sessions').addEventListener('click', loadSessions);
 document.getElementById('refresh-workflows').addEventListener('click', loadWorkflows);
