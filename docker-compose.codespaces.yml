@@ -1,10 +1,16 @@
 # Use in Codespaces: docker compose -f docker-compose.yml -f docker-compose.codespaces.yml up
+#
+# `!override` replaces the base service's `ports` list instead of merging with it.
+# Without it, Compose appends these entries to the base 127.0.0.1 bindings, so both
+# 127.0.0.1:PORT and 0.0.0.0:PORT are published for the same container port and the
+# second bind fails with "address already in use" (breaks the devcontainer
+# postStartCommand). Requires Docker Compose v2.24.4+ (Codespaces ships newer).
 services:
   browser-node:
-    ports:
+    ports: !override
       - "0.0.0.0:${NOVNC_PORT:-6080}:6080"
       - "0.0.0.0:${VNC_PORT:-5900}:5900"
 
   controller:
-    ports:
+    ports: !override
       - "0.0.0.0:${API_PORT:-8000}:8000"
