@@ -4,6 +4,30 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-07-01
+
+### Added
+- **Operator dashboard: run replay view.** Open a completed agent run by job id to see its action order, approvals, final status, and screenshot artifacts, reusing the existing `/agent/jobs` and `/approvals` endpoints. All untrusted run data renders via text nodes and safe cell helpers (never `innerHTML`).
+- **Operator dashboard: auth profile setup wizard.** A four-step flow — name a profile and start a login session, complete login by hand in the takeover window, save the captured auth state as a named profile, and reopen a session from any saved profile.
+- **Local fixture server + optional live execution** (`scripts/fixture_server.py`, `scripts/fixture_live.py`): serve `evals/fixtures/` over loopback and drive the real controller (create session → navigate → observe) against a fixture. Opt-in; requires Playwright browsers and never runs in default CI.
+- **WebArena Stage 0 executable contracts** (`benchmarks/webarena/`): typed `TaskContract`s parsed from the manifest, an environment-revision pin (null until a reviewed SHA is set), and a runner with `validate`/`execute` modes that materializes the trace/actions/screenshots/model_decisions evidence layout. Lane stays tracked-only until pinned.
+- **Verifier lane adapter** (`benchmarks/adapters/verifier_adapter.py`): maps an `AgentRunResult` into the CUAVerifier and Online-Mind2Web evidence lanes. Never scores — `verifier_result` is always `None` and records are `scored: false`.
+- **Closed-tab recovery fixture + regression** (`closed-tab-recovery`): the fixture-eval mandatory set and a controller test now cover closing the active tab and recovering to a usable, foregrounded tab.
+- **MCP resources & subscription examples** (`examples/mcp-resources.md`) with a doc-sync test that keeps the documented URIs, methods, and error codes aligned with `mcp_transport.py`.
+- **Live-free coverage** for the provider base layer (readiness checks, decision-parse ladder, error extraction), the stealth timing/fingerprint layer, and the mesh nonce replay cache. Controller coverage ratcheted upward while keeping the 80% gate green and avoiding live browser/network dependencies.
+- **Scheduled dependency audit** is provided by the existing `dependency-audit` CI job (pip-audit) plus GitHub Dependabot alerts.
+
+### Changed
+- **Startup warns when `API_BEARER_TOKEN` is unset in non-production.** Production already hard-fails; non-production now surfaces a runtime-policy warning so a reachable dev/staging instance is not silently served unauthenticated.
+- **Provider decision-parse ladder** narrows its fall-through handlers from bare `except Exception` to `(ValidationError, ValueError)`, so a genuine bug propagates instead of being masked as a parse miss.
+
+### Fixed
+- **Codespaces stack no longer double-binds ports.** `docker-compose.codespaces.yml` now tags its `ports` lists with `!override` so they replace the base `127.0.0.1` bindings instead of appending `0.0.0.0` on top (which failed with "address already in use" and broke the devcontainer `postStartCommand`).
+- **`GET /sessions` no longer 500s after the browser is closed from VNC** (external fix, thanks @gmother): session summary detects a disconnected page and marks the session `interrupted`/`live:false` instead of raising.
+
+### Security
+- Resolved all open Dependabot alerts by bumping pinned dependencies: `starlette` 1.0.1 → 1.3.1, `cryptography` 46.0.7 → 49.0.0, plus `redis` 8.0.1, `pyotp` 2.10.0, `prometheus-client` 0.25.0, and Playwright/GitHub Actions updates.
+
 ## [1.2.1] — 2026-06-10
 
 ### Added

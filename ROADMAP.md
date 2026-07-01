@@ -2,7 +2,7 @@
 
 This is the near-term direction for Auto Browser.
 
-## Now (current in v1.2.1)
+## Now (current in v1.3.0)
 
 - PyPI packages: `auto-browser-client` SDK, `auto-browser-langchain` adapters, `uvx auto-browser-mcp` stdio bridge
 - stable local-first browser control
