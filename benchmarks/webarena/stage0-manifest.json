@@ -6,6 +6,29 @@
     "These contracts define the first five WebArena-style task classes Auto Browser must wire before publishing competitive numbers.",
     "Each contract requires a pinned local WebArena environment and must produce trace, action, screenshot, and model-decision evidence before it can count."
   ],
+  "environment": {
+    "source_repo": "https://github.com/web-arena-x/webarena",
+    "revision": null,
+    "revision_note": "Pin the reviewed WebArena commit SHA here before the lane may execute or score. `null` = not yet pinned (tracked-only).",
+    "base_url_env": "WEBARENA_BASE_URL",
+    "auth_profile_env": "WEBARENA_AUTH_PROFILE",
+    "site_images_note": "Record the digest of each seeded site container (shopping, forum, gitlab, cms, maps) alongside the revision when provisioning."
+  },
+  "evidence_layout": {
+    "root_env": "WEBARENA_EVIDENCE_ROOT",
+    "per_task": {
+      "trace": "trace.zip",
+      "actions": "actions.json",
+      "screenshots": "screenshots/",
+      "model_decisions": "model_decisions.json"
+    }
+  },
+  "required_before_scoring": [
+    "pin webarena environment.revision (currently null)",
+    "provision the five seeded site containers and record their image digests",
+    "execute all five contracts producing trace/actions/screenshots/model_decisions evidence",
+    "flip competitive_score_allowed only after the pinned subset is deterministic locally and in Linux CI"
+  ],
   "tasks": [
     {
       "id": "shopping-order-status-read",
