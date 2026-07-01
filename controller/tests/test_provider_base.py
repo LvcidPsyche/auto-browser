@@ -161,6 +161,16 @@ class ProviderDecisionParsingTests(unittest.TestCase):
         self.assertIsNone(BaseProviderAdapter._find_decision_candidate({"nothing": "useful"}))
         self.assertIsNone(BaseProviderAdapter._find_decision_candidate(["a", "b"]))
 
+    def test_parse_ladder_does_not_swallow_unexpected_errors(self) -> None:
+        # A non-parse bug (not ValidationError/ValueError) must propagate rather
+        # than being masked as a parse miss by the narrowed except clauses. Here
+        # json.loads raises RuntimeError on the second strategy; it must surface.
+        from unittest.mock import patch
+
+        with patch("app.providers.base.json.loads", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                self.adapter.parse_decision_text("not a decision object at all")
+
 
 class ProviderErrorExtractionTests(unittest.TestCase):
     def test_safe_json(self) -> None:
