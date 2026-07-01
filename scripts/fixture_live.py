@@ -38,9 +38,8 @@ FAILED = 2
 def _run_live(base_url: str, fixture: str, expect: str) -> int:
     # Imported lazily so the module only loads when live mode is actually invoked.
     try:
-        from fastapi.testclient import TestClient
-
         from app.main import app
+        from fastapi.testclient import TestClient
     except Exception as exc:  # noqa: BLE001 - controller not installed is a skip, not a failure
         print(f"[fixture-live] SKIP: controller app not importable ({exc}). "
               "Install it with `pip install -e ./controller[dev]`.")
