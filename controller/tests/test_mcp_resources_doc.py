@@ -17,6 +17,8 @@ _TRANSPORT = _REPO / "controller" / "app" / "mcp_transport.py"
 
 class McpResourcesDocTests(unittest.TestCase):
     def setUp(self) -> None:
+        if not _DOC.exists() or not _TRANSPORT.exists():  # repo layout absent in the controller image
+            self.skipTest(f"doc-sync sources unavailable: {_DOC}")
         self.doc = _DOC.read_text(encoding="utf-8")
         self.transport = _TRANSPORT.read_text(encoding="utf-8")
 
