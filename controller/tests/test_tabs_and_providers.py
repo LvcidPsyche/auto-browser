@@ -123,6 +123,22 @@ class BrowserTabManagementTests(unittest.IsolatedAsyncioTestCase):
         # Active page unchanged
         self.assertIs(self.session.page, original_page)
 
+    async def test_close_active_tab_recovers_to_a_usable_tab(self) -> None:
+        # Regression for closed-tab recovery: closing the ACTIVE tab must leave the
+        # session pointing at a live, usable tab — never at the page we just closed.
+        closed_page = self.session.page  # "Home", index 0, currently active
+
+        result = await self.manager.close_tab(self.session.id, 0)
+
+        self.assertTrue(closed_page.closed)
+        self.assertEqual(len(result["tabs"]), 1)
+        # The active page must have moved to the surviving tab, and be usable.
+        self.assertIsNot(self.session.page, closed_page)
+        self.assertFalse(self.session.page.closed)
+        self.assertEqual(self.session.page.url, "https://example.com/export")
+        # The recovered tab is brought to the foreground.
+        self.assertEqual(self.session.page.front_calls, 1)
+
 
 class ProviderRegistryLoginCommandTests(unittest.TestCase):
     def test_cli_modes_expose_login_commands(self) -> None:
