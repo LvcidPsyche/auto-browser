@@ -411,6 +411,41 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <div id="replay-status" class="empty">Enter a completed agent job id to replay its actions, approvals, screenshots, and final status.</div>
     <div id="replay-output"></div>
   </div>
+
+  <div class="section" id="auth-wizard">
+    <div class="section-header">
+      <h2>Auth Profile Wizard</h2>
+      <button class="refresh-btn" id="refresh-auth-profiles">&#8635; Refresh profiles</button>
+    </div>
+    <ol class="wizard-steps">
+      <li>
+        <strong>1. Name the profile &amp; start login.</strong>
+        <div class="wizard-controls">
+          <input id="wizard-profile-name" type="text" placeholder="profile name (e.g. shop-account)" maxlength="120" />
+          <input id="wizard-start-url" type="text" placeholder="login URL (optional)" />
+          <button class="refresh-btn" id="wizard-start">Start login session</button>
+        </div>
+      </li>
+      <li>
+        <strong>2. Complete the login by hand</strong> in the takeover window, then come back.
+        <div id="wizard-takeover"></div>
+      </li>
+      <li>
+        <strong>3. Save the captured auth state</strong> under the profile name.
+        <div class="wizard-controls">
+          <button class="refresh-btn" id="wizard-save" disabled>Save auth profile</button>
+        </div>
+      </li>
+      <li>
+        <strong>4. Reopen a session</strong> from a saved profile.
+        <div class="wizard-controls">
+          <select id="wizard-profile-select"><option value="">— saved profiles —</option></select>
+          <button class="refresh-btn" id="wizard-reopen">Reopen session</button>
+        </div>
+      </li>
+    </ol>
+    <div id="wizard-status" class="empty">Name a profile and start a login session to begin.</div>
+  </div>
 </main>
 
 <script>
@@ -546,7 +581,7 @@ const safeHttpUrl = (value) => {
 };
 
 async function loadAll() {
-  await Promise.all([loadIdentity(), loadSessions(), loadWorkflows(), loadAgentJobs(), loadPeers(), loadAudit()]);
+  await Promise.all([loadIdentity(), loadSessions(), loadWorkflows(), loadAgentJobs(), loadPeers(), loadAudit(), loadAuthProfiles()]);
 }
 
 async function loadIdentity() {
@@ -862,6 +897,108 @@ async function loadReplay() {
   statusEl.textContent = `Replay for job ${jobId}.`;
 }
 document.getElementById('load-replay').addEventListener('click', loadReplay);
+
+// --- Auth profile wizard ---------------------------------------------------
+// Guides an operator through: name a profile -> log in by hand in the takeover
+// window -> save the captured auth state -> reopen a session from that profile.
+// Profile names and session/takeover URLs are untrusted, so they are rendered
+// with text nodes and safeHttpUrl, never raw HTML.
+let wizardSessionId = null;
+async function wizardStart() {
+  const name = (document.getElementById('wizard-profile-name').value || '').trim();
+  const startUrl = (document.getElementById('wizard-start-url').value || '').trim();
+  const statusEl = document.getElementById('wizard-status');
+  if (!name) { statusEl.textContent = 'Enter a profile name first.'; return; }
+  statusEl.textContent = 'Starting a login session...';
+  const body = { name: `login-${name}` };
+  const safeStart = safeHttpUrl(startUrl);
+  if (safeStart) body.start_url = safeStart;
+  let session;
+  try {
+    session = await apiPost('/sessions', body);
+  } catch (err) {
+    statusEl.textContent = 'Could not start a login session.';
+    return;
+  }
+  wizardSessionId = session.id || session.session_id || null;
+  document.getElementById('wizard-save').disabled = !wizardSessionId;
+
+  const takeover = document.getElementById('wizard-takeover');
+  takeover.replaceChildren();
+  const url = safeHttpUrl(session.takeover_url);
+  if (url) {
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = 'Open takeover window to log in';
+    takeover.appendChild(link);
+  } else {
+    const note = document.createElement('span');
+    note.className = 'empty';
+    note.textContent = 'No takeover URL available for this session.';
+    takeover.appendChild(note);
+  }
+  statusEl.textContent = `Session ${wizardSessionId} ready. Log in by hand, then save.`;
+}
+async function wizardSave() {
+  const name = (document.getElementById('wizard-profile-name').value || '').trim();
+  const statusEl = document.getElementById('wizard-status');
+  if (!wizardSessionId || !name) { statusEl.textContent = 'Start a login session first.'; return; }
+  statusEl.textContent = 'Saving auth profile...';
+  try {
+    await apiPost(`/sessions/${encodeURIComponent(wizardSessionId)}/auth-profiles`,
+      { profile_name: name });
+  } catch (err) {
+    statusEl.textContent = 'Could not save the auth profile (is the login complete?).';
+    return;
+  }
+  statusEl.textContent = `Saved auth profile "${name}".`;
+  await loadAuthProfiles();
+}
+async function loadAuthProfiles() {
+  const select = document.getElementById('wizard-profile-select');
+  let profiles;
+  try {
+    profiles = await api('/auth-profiles');
+  } catch (err) {
+    return;
+  }
+  const list = Array.isArray(profiles) ? profiles : (profiles.profiles || []);
+  select.replaceChildren();
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = '— saved profiles —';
+  select.appendChild(placeholder);
+  list.forEach((p) => {
+    const name = asText(typeof p === 'string' ? p : (p.name || p.profile_name), '');
+    if (!name) return;
+    const opt = document.createElement('option');
+    opt.value = name;       // value set as a property, never interpolated into HTML
+    opt.textContent = name;
+    select.appendChild(opt);
+  });
+}
+async function wizardReopen() {
+  const name = document.getElementById('wizard-profile-select').value;
+  const statusEl = document.getElementById('wizard-status');
+  if (!name) { statusEl.textContent = 'Pick a saved profile to reopen.'; return; }
+  statusEl.textContent = `Reopening a session from "${name}"...`;
+  let session;
+  try {
+    session = await apiPost('/sessions', { name: `reopen-${name}`, auth_profile: name });
+  } catch (err) {
+    statusEl.textContent = 'Could not reopen a session from that profile.';
+    return;
+  }
+  const sid = session.id || session.session_id || '';
+  statusEl.textContent = `Reopened session ${sid} from profile "${name}".`;
+  loadSessions();
+}
+document.getElementById('wizard-start').addEventListener('click', wizardStart);
+document.getElementById('wizard-save').addEventListener('click', wizardSave);
+document.getElementById('wizard-reopen').addEventListener('click', wizardReopen);
+document.getElementById('refresh-auth-profiles').addEventListener('click', loadAuthProfiles);
 
 document.getElementById('refresh-sessions').addEventListener('click', loadSessions);
 document.getElementById('refresh-workflows').addEventListener('click', loadWorkflows);

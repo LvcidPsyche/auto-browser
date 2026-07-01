@@ -29,6 +29,21 @@ class DashboardSecurityTests(unittest.TestCase):
         self.assertIn("statusBadge(result.status)", _DASHBOARD_HTML)
         self.assertIn("safeHttpUrl(v)", _DASHBOARD_HTML)
 
+    def test_auth_wizard_present_and_renders_safely(self) -> None:
+        # Panel + four-step wiring exist.
+        self.assertIn('id="auth-wizard"', _DASHBOARD_HTML)
+        self.assertIn("async function wizardStart()", _DASHBOARD_HTML)
+        self.assertIn("async function wizardSave()", _DASHBOARD_HTML)
+        self.assertIn("async function wizardReopen()", _DASHBOARD_HTML)
+        self.assertIn("getElementById('wizard-start').addEventListener('click', wizardStart)", _DASHBOARD_HTML)
+        # Reuses existing auth-profile + session endpoints (save named profile, reopen).
+        self.assertIn("/auth-profiles", _DASHBOARD_HTML)
+        self.assertIn("auth_profile: name", _DASHBOARD_HTML)
+        # Untrusted profile names / takeover URLs handled safely (text nodes, safeHttpUrl,
+        # option value set as a property — never interpolated into HTML).
+        self.assertIn("safeHttpUrl(session.takeover_url)", _DASHBOARD_HTML)
+        self.assertIn("opt.textContent = name", _DASHBOARD_HTML)
+
 
 if __name__ == "__main__":
     unittest.main()
