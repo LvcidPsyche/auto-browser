@@ -48,6 +48,17 @@
       "headline": "multi-tab recovery",
       "required_text": ["Primary workspace", "Open support tab"],
       "required_fragments": ["target=\"_blank\"", "data-eval-action=\"activate-tab\""]
+    },
+    {
+      "id": "closed-tab-recovery",
+      "fixture": "closed_tab_recovery.html",
+      "headline": "closed tab recovery returns to the active tab",
+      "required_text": ["Primary workspace", "Close support tab", "Return to primary workspace"],
+      "required_fragments": [
+        "data-eval-action=\"close-tab\"",
+        "data-eval-action=\"activate-tab\"",
+        "data-eval-active-tab=\"primary\""
+      ]
     }
   ]
 }

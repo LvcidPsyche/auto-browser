@@ -16,6 +16,7 @@ MANDATORY_CASES = {
     "approval-required-upload",
     "resume-after-failure",
     "multi-tab-recovery",
+    "closed-tab-recovery",
 }
 
 

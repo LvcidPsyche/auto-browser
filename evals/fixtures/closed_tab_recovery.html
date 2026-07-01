@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Closed tab recovery fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Primary workspace</h1>
+      <p>
+        Open the support tab, then close it and return here. The agent must not be
+        left stranded on the closed tab.
+      </p>
+
+      <!-- Opens a child/support tab. -->
+      <a
+        id="open-support-tab"
+        href="support_tab.html"
+        target="_blank"
+        rel="noopener"
+        data-eval-action="open-tab"
+        >Open support tab</a
+      >
+
+      <!-- Closes the support tab (the popup/child). -->
+      <button id="close-support-tab" type="button" data-eval-action="close-tab">
+        Close support tab
+      </button>
+
+      <!-- Returns focus to this primary workspace tab. -->
+      <button id="return-to-primary" type="button" data-eval-action="activate-tab">
+        Return to primary workspace
+      </button>
+
+      <p id="primary-marker" data-eval-active-tab="primary">
+        You are back on the primary workspace tab.
+      </p>
+    </main>
+  </body>
+</html>
