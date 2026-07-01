@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import logging
+import weakref
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -87,7 +88,9 @@ class BrowserSession:
     page_errors: list[str] = field(default_factory=list)
     request_failures: list[dict[str, Any]] = field(default_factory=list)
     downloads: list[dict[str, Any]] = field(default_factory=list)
-    attached_pages: set[int] = field(default_factory=set)
+    # Weak refs: a collected Page must not block re-attaching listeners to a
+    # new Page that happens to reuse its id().
+    attached_pages: weakref.WeakSet[Any] = field(default_factory=weakref.WeakSet)
     last_action: str | None = None
     proxy_persona: str | None = None
     last_auth_state_path: Path | None = None

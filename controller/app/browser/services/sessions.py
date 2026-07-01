@@ -383,16 +383,17 @@ class BrowserSessionService:
         """Fork a session: clone cookies + localStorage state into a new session."""
         session = await self.manager.get_session(session_id)
         async with session.lock:
-            # Export cookies and storage state to a temp file
+            # Export through AuthStateManager so the state file is encrypted
+            # at rest whenever an encryption key is configured.
             fork_auth_path = session.auth_dir / f"fork_{uuid4().hex[:8]}.json"
-            await session.context.storage_state(path=str(fork_auth_path))
+            auth_info = await self.manager.auth_state.write_storage_state(session.context, fork_auth_path)
             current_url = session.page.url
 
         # Create the new session using the forked state
         forked = await self.manager.create_session(
             name=name or f"fork-of-{session.name}",
             start_url=start_url or current_url,
-            storage_state_path=str(fork_auth_path),
+            storage_state_path=auth_info["path"],
         )
         forked["forked_from"] = session_id
         await self.manager.audit.append(
@@ -424,8 +425,8 @@ class BrowserSessionService:
         session = await manager.get_session(session_id)
         async with session.lock:
             current_url = session.page.url
-            shadow_auth_path = session.auth_dir / f"shadow_{uuid4().hex[:8]}.json"
-            await session.context.storage_state(path=str(shadow_auth_path))
+            # In-memory export: shadow state never touches disk.
+            storage_state = await session.context.storage_state()
 
         from ...browser_manager import BrowserSession
 
@@ -437,7 +438,7 @@ class BrowserSessionService:
                 "height": manager.settings.default_viewport_height,
             },
             "accept_downloads": True,
-            "storage_state": str(shadow_auth_path),
+            "storage_state": storage_state,
         }
 
         # Launch a local headed browser process
@@ -479,9 +480,6 @@ class BrowserSessionService:
             except Exception as exc:  # pragma: no cover - best effort rollback
                 logger.warning("failed to close shadow browser during rollback: %s", exc)
             raise
-        finally:
-            # State was consumed by new_context; nothing references the temp file.
-            shadow_auth_path.unlink(missing_ok=True)
 
         await manager.audit.append(
             event_type="shadow_browse_started",

@@ -90,10 +90,9 @@ class BrowserDiagnosticsService:
     def attach_page_listeners(self, page: "Page", session: "BrowserSession") -> None:
         if not hasattr(page, "on"):
             return
-        page_id = id(page)
-        if page_id in session.attached_pages:
+        if page in session.attached_pages:
             return
-        session.attached_pages.add(page_id)
+        session.attached_pages.add(page)
 
         page.on("console", lambda message: self._bounded_append(
             session.console_messages,
