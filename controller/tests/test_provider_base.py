@@ -7,6 +7,7 @@ OpenAIAdapter is used only as a concrete instantiation of the abstract base.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -15,7 +16,6 @@ from pathlib import Path
 import httpx
 
 from app.config import Settings
-from app.models import BrowserActionDecision
 from app.providers.base import BaseProviderAdapter
 from app.providers.openai_adapter import OpenAIAdapter
 
@@ -156,8 +156,6 @@ class ProviderDecisionParsingTests(unittest.TestCase):
         self.assertEqual(decision.element_id, "from-file")
 
     def test_find_decision_candidate_variants(self) -> None:
-        import json
-
         payload = json.loads(_decision_json("in-list"))
         self.assertIsNotNone(BaseProviderAdapter._find_decision_candidate([{"noise": 1}, payload]))
         self.assertIsNone(BaseProviderAdapter._find_decision_candidate({"nothing": "useful"}))
