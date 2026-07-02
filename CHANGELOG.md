@@ -5,7 +5,7 @@ All notable changes to auto-browser are documented here.
 ## [Unreleased]
 
 ### Fixed
-- **Controller could not connect to the browser node in compose deployments.** Dependabot #60 bumped browser-node's npm `playwright` to 1.61.1 while the controller's pip pin stayed at 1.60.0; Playwright's websocket protocol requires an exact client/server version match, so every `docker compose up --build` crash-looped readiness (diagnosis credit: #76 by @itsreese83). Browser-node is re-aligned to the known-good 1.60.0 on both sides; the coordinated 1.61.x upgrade will follow as its own bump.
+- **Controller could not connect to the browser node in compose deployments.** Dependabot #60 bumped browser-node's npm `playwright` to 1.61.1 while the controller's pip pin stayed at 1.60.0; Playwright's websocket protocol requires an exact client/server version match, so every `docker compose up --build` crash-looped readiness. Fixed in two steps: first re-aligned both sides to the known-good 1.60.0, then landed the coordinated upgrade pinning `playwright==1.61.0` on both pip and npm (#76 by @itsreese83, who also diagnosed the mismatch).
 - `scripts/doctor.sh` now dumps controller and browser-node container logs when the readiness probe times out, so compose-smoke failures are diagnosable from CI output.
 
 ## [1.3.1] — 2026-07-01
