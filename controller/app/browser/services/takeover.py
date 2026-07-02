@@ -16,7 +16,7 @@ class BrowserTakeoverService:
             "session": await manager._session_summary(session),
             "reason": reason,
             "takeover_url": manager._current_takeover_url(session),
-            "remote_access": manager._session_remote_access_info(session),
+            "remote_access": manager.remote_access.session_info(session),
             "message": (
                 "Human takeover requested. Open the noVNC URL to continue visually."
                 if session.isolation_mode == "docker_ephemeral"

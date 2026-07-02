@@ -30,7 +30,7 @@ _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), loggi
 logging.basicConfig(level=_log_level)
 logger = logging.getLogger(__name__)
 
-_VERSION = "1.3.0"
+_VERSION = "1.3.1"
 
 def _install_controller_host_middleware(application: FastAPI, allowed_hosts: list[str]) -> None:
     install_controller_host_middleware(application, allowed_hosts)

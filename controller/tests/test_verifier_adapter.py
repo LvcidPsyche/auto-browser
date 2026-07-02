@@ -10,13 +10,16 @@ _ADAPTERS = Path(__file__).resolve().parents[2] / "benchmarks" / "adapters"
 if str(_ADAPTERS) not in sys.path:
     sys.path.insert(0, str(_ADAPTERS))
 
-from verifier_adapter import (  # noqa: E402
-    REQUIRED_FIELDS,
-    adapt,
-    missing_source_fields,
-    to_cuaverifier_input,
-    to_mind2web_result,
-)
+try:
+    from verifier_adapter import (  # noqa: E402
+        REQUIRED_FIELDS,
+        adapt,
+        missing_source_fields,
+        to_cuaverifier_input,
+        to_mind2web_result,
+    )
+except ModuleNotFoundError as exc:  # benchmarks/ is not shipped in the controller image
+    raise unittest.SkipTest(f"verifier_adapter unavailable: {exc}") from exc
 
 _SAMPLE_RUN = {
     "provider": "openai",

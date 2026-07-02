@@ -11,13 +11,16 @@ _WEBARENA = Path(__file__).resolve().parents[2] / "benchmarks" / "webarena"
 if str(_WEBARENA) not in sys.path:
     sys.path.insert(0, str(_WEBARENA))
 
-from stage0_contracts import (  # noqa: E402
-    EXPECTED_TASK_COUNT,
-    REQUIRED_EVIDENCE,
-    is_scorable,
-    load_contracts,
-    validate_manifest,
-)
+try:
+    from stage0_contracts import (  # noqa: E402
+        EXPECTED_TASK_COUNT,
+        REQUIRED_EVIDENCE,
+        is_scorable,
+        load_contracts,
+        validate_manifest,
+    )
+except ModuleNotFoundError as exc:  # benchmarks/ is not shipped in the controller image
+    raise unittest.SkipTest(f"stage0_contracts unavailable: {exc}") from exc
 
 
 class WebArenaStage0ContractTests(unittest.TestCase):

@@ -9,6 +9,7 @@ import tarfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from ...utils import UTC, utc_now
 from ...witness import WitnessActionContext
@@ -20,6 +21,40 @@ if TYPE_CHECKING:
 class BrowserAuthProfileService:
     def __init__(self, manager: Any) -> None:
         self.manager = manager
+
+    @staticmethod
+    def _host_matches(host: str, *domains: str) -> bool:
+        host = host.lower().rstrip(".")
+        for domain in domains:
+            domain = domain.lower().rstrip(".")
+            if host == domain or host.endswith("." + domain):
+                return True
+        return False
+
+    def current_platform(self, session: "BrowserSession") -> str | None:
+        host = (urlparse(session.page.url).hostname or "").lower()
+        if self._host_matches(host, "x.com", "twitter.com"):
+            return "x"
+        if self._host_matches(host, "instagram.com"):
+            return "instagram"
+        if self._host_matches(host, "linkedin.com"):
+            return "linkedin"
+        if self._host_matches(host, "outlook.live.com", "outlook.office.com", "outlook.office365.com"):
+            return "outlook"
+        return None
+
+    def session_auth_state_info(self, session: "BrowserSession") -> dict[str, Any]:
+        info = self.manager.auth_state.inspect(session.last_auth_state_path)
+        info["session_auth_root"] = str(session.auth_dir)
+        info["profile_name"] = session.auth_profile_name
+        return info
+
+    async def auth_state_info(self, session_id: str) -> dict[str, Any]:
+        session = self.manager.sessions.get(session_id)
+        if session is not None:
+            return self.session_auth_state_info(session)
+        record = await self.manager.session_store.get(session_id)
+        return record.auth_state
 
     async def save_storage_state(self, session_id: str, path: str) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
@@ -109,7 +144,7 @@ class BrowserAuthProfileService:
             "saved_from_session_id": session.id,
             "saved_from_url": session.page.url,
             "saved_from_title": await session.page.title(),
-            "platform": self.manager._current_platform(session),
+            "platform": self.current_platform(session),
         }
         if metadata:
             profile_payload.update(metadata)

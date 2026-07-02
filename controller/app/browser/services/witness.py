@@ -157,7 +157,7 @@ class BrowserWitnessService:
     ) -> None:
         if not self.manager.settings.witness_enabled:
             return
-        outcome = self.manager.witness_policy.evaluate_session(self.manager._witness_session_context(session))
+        outcome = self.manager.witness_policy.evaluate_session(self.session_context(session))
         await self.manager._record_witness_receipt(
             session,
             event_type="session",
@@ -196,7 +196,7 @@ class BrowserWitnessService:
         witness_context: dict[str, Any],
     ) -> WitnessActionContext:
         risk_category = witness_context.get("risk_category")
-        action_class = self.manager._witness_action_class(action_name, risk_category=risk_category)
+        action_class = self.action_class(action_name, risk_category=risk_category)
         sensitive_input = bool(
             witness_context.get("sensitive_input")
             or target.get("text_redacted")

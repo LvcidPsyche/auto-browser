@@ -233,7 +233,11 @@ fi
 API_PORT="$API_PORT" NOVNC_PORT="$NOVNC_PORT" VNC_PORT="$VNC_PORT" TAKEOVER_URL="$TAKEOVER_URL" \
   docker compose up "${compose_flags[@]}" browser-node controller >/dev/null
 
-wait_for_http "http://127.0.0.1:${API_PORT}/readyz"
+if ! wait_for_http "http://127.0.0.1:${API_PORT}/readyz"; then
+  echo "Controller never became ready; dumping container logs for diagnosis:" >&2
+  docker compose logs --tail=80 controller browser-node >&2 || true
+  exit 1
+fi
 
 echo "Provider readiness:"
 providers_json="$(curl -fsS "http://127.0.0.1:${API_PORT}/agent/providers")"

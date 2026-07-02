@@ -11,7 +11,10 @@ _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
-from fixture_server import serve_fixtures  # noqa: E402
+try:
+    from fixture_server import serve_fixtures  # noqa: E402
+except ModuleNotFoundError as exc:  # scripts/ is not shipped in the controller image
+    raise unittest.SkipTest(f"fixture_server unavailable: {exc}") from exc
 
 
 class FixtureServerTests(unittest.TestCase):

@@ -4,6 +4,23 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Controller could not connect to the browser node in compose deployments.** Dependabot #60 bumped browser-node's npm `playwright` to 1.61.1 while the controller's pip pin stayed at 1.60.0; Playwright's websocket protocol requires an exact client/server version match, so every `docker compose up --build` crash-looped readiness. Fixed in two steps: first re-aligned both sides to the known-good 1.60.0, then landed the coordinated upgrade pinning `playwright==1.61.0` on both pip and npm (#76 by @itsreese83, who also diagnosed the mismatch).
+- `scripts/doctor.sh` now dumps controller and browser-node container logs when the readiness probe times out, so compose-smoke failures are diagnosable from CI output.
+
+## [1.3.1] — 2026-07-01
+
+### Changed
+- **`browser_manager.py` is now a pure facade + composition root** (1,284 → 769 lines). The domain logic that remained after the v1.2 service extraction moved into `app/browser/services/` (fork / shadow-browse / network log → sessions & diagnostics; settle / action verification → actions; platform detection + auth-state info → auth profiles), and ~50 delegation shims with zero callers were deleted. The public API and the private seams that tests patch are unchanged.
+- **Fork state exports are encrypted at rest.** `fork_session` now routes its storage-state export through `AuthStateManager`, so exported cookies/localStorage are Fernet-encrypted whenever `AUTH_STATE_ENCRYPTION_KEY` is set (previously always plaintext JSON, regardless of settings).
+- **Shadow-browse state never touches disk.** `enable_shadow_browse` hands the exported storage state to the headed context as an in-memory dict instead of writing a plaintext temp file.
+
+### Fixed
+- **Download capture tasks can no longer be garbage-collected mid-flight.** Page `download` handlers now go through `spawn_background_task`; the event loop keeps only weak task references, so the old bare `asyncio.create_task` could silently drop a download and its audit record.
+- **Shadow-browse failures roll back cleanly.** If navigation in the headed clone fails, the headed Chromium process is closed and the half-registered session is removed (previously both leaked until manual cleanup).
+- **Page listeners survive object-id reuse.** Sessions track listener-attached pages in a `WeakSet` instead of raw `id()` values, so a recycled id can no longer cause a new page to skip listener attachment.
+- `shutdown()` is idempotent (the Playwright handle is cleared after stop), and `_assert_url_allowed` matches host patterns case-insensitively on all platforms.
+
 ## [1.3.0] — 2026-07-01
 
 ### Added
