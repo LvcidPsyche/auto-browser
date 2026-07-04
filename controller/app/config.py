@@ -234,6 +234,11 @@ class Settings(BaseSettings):
     gemini_cli_model: str | None = Field(None, alias="GEMINI_CLI_MODEL")
     cli_home: str | None = Field("/data/cli-home", alias="CLI_HOME")
 
+    minimax_api_key: str | None = Field(None, alias="MINIMAX_API_KEY")
+    minimax_base_url: str = Field("https://api.minimax.io/v1", alias="MINIMAX_BASE_URL")
+    minimax_model: str = Field("MiniMax-M3", alias="MINIMAX_MODEL")
+    minimax_auth_mode: str = Field("api", alias="MINIMAX_AUTH_MODE")
+
     model_request_timeout_seconds: float = Field(60.0, alias="MODEL_REQUEST_TIMEOUT_SECONDS")
     model_max_retries: int = Field(2, alias="MODEL_MAX_RETRIES")
     model_retry_backoff_seconds: float = Field(1.0, alias="MODEL_RETRY_BACKOFF_SECONDS")

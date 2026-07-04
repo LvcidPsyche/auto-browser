@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from .config import Settings
 from .models import ProviderInfo, ProviderName
-from .providers import ClaudeAdapter, GeminiAdapter, OpenAIAdapter
+from .providers import ClaudeAdapter, GeminiAdapter, MinimaxAdapter, OpenAIAdapter
 
 
 class ProviderRegistry:
@@ -11,6 +11,7 @@ class ProviderRegistry:
             "openai": OpenAIAdapter(settings),
             "claude": ClaudeAdapter(settings),
             "gemini": GeminiAdapter(settings),
+            "minimax": MinimaxAdapter(settings),
         }
 
     def get(self, name: ProviderName):

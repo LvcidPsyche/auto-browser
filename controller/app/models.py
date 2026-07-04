@@ -275,7 +275,7 @@ ActionName = Literal[
     "request_human_takeover",
     "done",
 ]
-ProviderName = Literal["openai", "claude", "gemini"]
+ProviderName = Literal["openai", "claude", "gemini", "minimax"]
 WorkflowProfile = Literal["fast", "governed"]
 RiskCategory = Literal[
     "read",
