@@ -6,7 +6,7 @@ pydantic-settings==2.10.1
 httpx==0.28.1
 redis==8.0.1
 cryptography==49.0.0
-Pillow==12.2.0
+Pillow==12.3.0
 pytesseract==0.3.13
 docker==7.1.0
 prometheus-client==0.25.0
