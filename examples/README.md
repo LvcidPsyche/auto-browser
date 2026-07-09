@@ -8,6 +8,7 @@ More walkthroughs:
 - `login-and-save-profile.md`
 - `fill-a-form.md`
 - `extract-feed-posts.md`
+- `mcp-resources.md` — MCP resources & subscription notifications
 - `claude_desktop_config.json`
 
 ## 1. Create a session

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 from pydantic import ValidationError
 
+from app.browser.services import BrowserActionService
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
 from app.models import BrowserActionDecision, CreateSessionRequest, HoverRequest, SelectOptionRequest, WaitRequest
@@ -92,7 +93,7 @@ class BrowserActionDecisionExtendedTests(unittest.TestCase):
         self.assertEqual(req.protection_mode, "confidential")
 
     def test_text_target_payload_redacts_sensitive_values(self) -> None:
-        redacted = BrowserManager._text_target_payload(
+        redacted = BrowserActionService.text_target_payload(
             {"selector": "#password"},
             "secret-password",
             clear_first=True,
@@ -102,7 +103,7 @@ class BrowserActionDecisionExtendedTests(unittest.TestCase):
         self.assertTrue(redacted["text_redacted"])
         self.assertNotIn("text_preview", redacted)
 
-        visible = BrowserManager._text_target_payload(
+        visible = BrowserActionService.text_target_payload(
             {"selector": "#search"},
             "playwright",
             clear_first=True,

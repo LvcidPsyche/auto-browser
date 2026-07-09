@@ -9,11 +9,13 @@ from typing import TYPE_CHECKING, Any
 
 from ...downloads import DownloadCaptureService
 from ...pii_scrub import PiiScrubber
-from ...utils import UTC
+from ...utils import UTC, spawn_background_task
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from playwright.async_api import Page
+
     from ...browser_manager import BrowserSession
 
 
@@ -59,6 +61,63 @@ class BrowserDiagnosticsService:
                 "session": await self.manager._session_summary(session),
                 "items": session.request_failures[-limit:],
             }
+
+    async def get_network_log(
+        self,
+        session_id: str,
+        *,
+        limit: int = 100,
+        method: str | None = None,
+        url_contains: str | None = None,
+    ) -> dict[str, Any]:
+        session = await self.manager.get_session(session_id)
+        async with session.lock:
+            inspector = session.network_inspector
+            if inspector is None:
+                return {
+                    "session": await self.manager._session_summary(session),
+                    "enabled": False,
+                    "entries": [],
+                    "summary": {},
+                }
+            return {
+                "session": await self.manager._session_summary(session),
+                "enabled": True,
+                "entries": inspector.entries(limit=limit, method=method, url_contains=url_contains),
+                "summary": inspector.summary(),
+            }
+
+    def attach_page_listeners(self, page: "Page", session: "BrowserSession") -> None:
+        if not hasattr(page, "on"):
+            return
+        if page in session.attached_pages:
+            return
+        session.attached_pages.add(page)
+
+        page.on("console", lambda message: self._bounded_append(
+            session.console_messages,
+            {
+                "type": message.type,
+                "text": message.text,
+                "location": message.location,
+            },
+        ))
+        page.on("pageerror", lambda error: self._bounded_append(session.page_errors, str(error)))
+        page.on("requestfailed", lambda request: self._bounded_append(
+            session.request_failures,
+            {
+                "url": request.url,
+                "method": request.method,
+                "failure": str(request.failure) if request.failure else None,
+            },
+        ))
+        page.on("download", lambda download: spawn_background_task(self.manager._handle_download(session, download)))
+
+    @staticmethod
+    def _bounded_append(items: list[Any], value: Any, limit: int = 50) -> None:
+        items.append(value)
+        if len(items) > limit:
+            del items[: len(items) - limit]
 
     async def list_downloads(self, session_id: str) -> list[dict[str, Any]]:
         session = self.manager.sessions.get(session_id)

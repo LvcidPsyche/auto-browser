@@ -14,9 +14,16 @@ from shutil import which
 from typing import Any
 
 import httpx
+from pydantic import ValidationError
 
 from ..config import Settings
 from ..models import BROWSER_ACTION_SCHEMA, BrowserActionDecision, ProviderName
+
+# Parse strategies fall through on malformed input only. model_validate* raise
+# ValidationError; json.loads / raw_decode raise JSONDecodeError (a ValueError).
+# Narrowing to these lets a real bug (AttributeError, TypeError, ...) surface
+# instead of being silently swallowed as a parse miss.
+_PARSE_ERRORS = (ValidationError, ValueError)
 
 DEFAULT_PROVIDER_AUTH_MODES = {"api", "cli"}
 
@@ -440,12 +447,12 @@ class BaseProviderAdapter(ABC):
 
         try:
             return BrowserActionDecision.model_validate_json(text)
-        except Exception:
+        except _PARSE_ERRORS:
             pass
 
         try:
             payload = json.loads(text)
-        except Exception:
+        except _PARSE_ERRORS:
             payload = None
 
         if payload is not None:
@@ -459,7 +466,7 @@ class BaseProviderAdapter(ABC):
                 continue
             try:
                 candidate, _ = decoder.raw_decode(text[index:])
-            except Exception:
+            except _PARSE_ERRORS:
                 continue
             decision = self._find_decision_candidate(candidate)
             if decision is not None:
@@ -475,7 +482,7 @@ class BaseProviderAdapter(ABC):
         if isinstance(payload, dict):
             try:
                 return BrowserActionDecision.model_validate(payload)
-            except Exception:
+            except _PARSE_ERRORS:
                 pass
             for value in payload.values():
                 decision = BaseProviderAdapter._find_decision_candidate(value)

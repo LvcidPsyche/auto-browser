@@ -68,20 +68,20 @@ class BrowserActionService:
         y: float | None = None,
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
-        target = self.manager._resolve_target(selector=selector, element_id=element_id, x=x, y=y)
+        target = self.resolve_target(selector=selector, element_id=element_id, x=x, y=y)
 
         async def operation() -> None:
             if target["mode"] == "coordinates":
-                await self.manager._click_human_like(session, float(x), float(y))
+                await self.click_human_like(session, float(x), float(y))
             else:
                 locator = session.page.locator(target["selector"]).first
                 await locator.scroll_into_view_if_needed()
-                coords = await self.manager._locator_center(locator)
+                coords = await self.locator_center(locator)
                 if coords is None:
                     await locator.click()
                 else:
                     target["x"], target["y"] = coords
-                    await self.manager._click_human_like(session, coords[0], coords[1])
+                    await self.click_human_like(session, coords[0], coords[1])
             await self.manager._settle(session.page)
 
         return await self.manager._run_action(session, "click", target, operation)
@@ -96,20 +96,20 @@ class BrowserActionService:
         y: float | None = None,
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
-        target = self.manager._resolve_target(selector=selector, element_id=element_id, x=x, y=y)
+        target = self.resolve_target(selector=selector, element_id=element_id, x=x, y=y)
 
         async def operation() -> None:
             if target["mode"] == "coordinates":
-                await self.manager._move_mouse_human_like(session, float(x), float(y))
+                await self.move_mouse_human_like(session, float(x), float(y))
             else:
                 locator = session.page.locator(target["selector"]).first
                 await locator.scroll_into_view_if_needed()
-                coords = await self.manager._locator_center(locator)
+                coords = await self.locator_center(locator)
                 if coords is None:
                     await locator.hover()
                 else:
                     target["x"], target["y"] = coords
-                    await self.manager._move_mouse_human_like(session, coords[0], coords[1])
+                    await self.move_mouse_human_like(session, coords[0], coords[1])
             await self.manager._settle(session.page)
 
         return await self.manager._run_action(session, "hover", target, operation)
@@ -125,7 +125,7 @@ class BrowserActionService:
         index: int | None = None,
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
-        target = self.manager._resolve_target(selector=selector, element_id=element_id)
+        target = self.resolve_target(selector=selector, element_id=element_id)
 
         async def operation() -> None:
             locator = session.page.locator(target["selector"]).first
@@ -156,8 +156,8 @@ class BrowserActionService:
         sensitive: bool = False,
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
-        target = self.manager._resolve_target(selector=selector, element_id=element_id)
-        payload = self.manager._text_target_payload(
+        target = self.resolve_target(selector=selector, element_id=element_id)
+        payload = self.text_target_payload(
             target,
             text,
             clear_first=clear_first,
@@ -167,17 +167,17 @@ class BrowserActionService:
 
         async def operation() -> None:
             locator = session.page.locator(target["selector"]).first
-            if await self.manager._locator_is_sensitive_input(locator):
+            if await self.locator_is_sensitive_input(locator):
                 payload.pop("text_preview", None)
                 payload["text_redacted"] = True
             await locator.scroll_into_view_if_needed()
-            await self.manager._focus_locator(session, locator)
+            await self.focus_locator(session, locator)
             if clear_first:
                 await session.page.keyboard.press("Control+a")
                 await asyncio.sleep(0.03)
                 await session.page.keyboard.press("Delete")
                 await asyncio.sleep(0.05)
-            await self.manager._type_text_human_like(session.page, text)
+            await self.type_text_human_like(session.page, text)
             await self.manager._settle(session.page)
 
         return await self.manager._run_action(session, "type", payload, operation)
@@ -248,7 +248,7 @@ class BrowserActionService:
         approval_id: str | None = None,
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
-        approval = await self.manager._require_decision_approval(
+        approval = await self.require_decision_approval(
             session_id,
             decision,
             approval_id=approval_id,
@@ -337,7 +337,7 @@ class BrowserActionService:
         fallback_reason: str | None = None,
         approval_kind: ApprovalKind | None = None,
     ):
-        kind = approval_kind or self.manager._approval_kind_for_decision(decision)
+        kind = approval_kind or self.approval_kind_for_decision(decision)
         if kind is None:
             return None
         if approval_id:
@@ -354,7 +354,7 @@ class BrowserActionService:
             kind=kind,
             reason=fallback_reason or decision.reason,
             action=decision,
-            observation=await self.manager._approval_observation(session),
+            observation=await self._approval_observation(session),
         )
         await self.manager._record_witness_receipt(
             session,
@@ -395,20 +395,39 @@ class BrowserActionService:
         *,
         approval_id: str | None,
     ):
-        kind = self.manager._governed_approval_kind_for_decision(decision)
+        kind = self.governed_approval_kind_for_decision(decision)
         if kind is None:
             return None
         reason = (
             "Governed workflow requires operator approval before executing "
             f"{decision.risk_category or 'write'} action {decision.action!r}."
         )
-        return await self.manager._require_decision_approval(
+        return await self.require_decision_approval(
             session_id,
             decision,
             approval_id=approval_id,
             fallback_reason=reason,
             approval_kind=kind,
         )
+
+    async def _approval_observation(self, session: "BrowserSession") -> dict[str, Any]:
+        return {
+            "url": session.page.url,
+            "title": await session.page.title(),
+            "takeover_url": self.manager._current_takeover_url(session),
+            "remote_access": self.manager.remote_access.session_info(session),
+            "isolation": self.manager.session_lifecycle.isolation_payload(session),
+            "auth_state": self.manager.auth_profiles.session_auth_state_info(session),
+            "last_action": session.last_action,
+        }
+
+    async def settle(self, page: "Page") -> None:
+        try:
+            await page.wait_for_load_state("networkidle", timeout=min(self.manager.settings.action_timeout_ms, 5000))
+        except Exception as exc:
+            # Busy pages legitimately never reach networkidle; proceed anyway.
+            logger.debug("settle: networkidle not reached: %s", exc)
+        await page.wait_for_timeout(250)
 
     async def run_action(
         self,
@@ -518,7 +537,7 @@ class BrowserActionService:
     async def click_human_like(self, session: "BrowserSession", x: float, y: float) -> None:
         jitter_x = x + random.uniform(-2.5, 2.5)
         jitter_y = y + random.uniform(-2.5, 2.5)
-        await self.manager._move_mouse_human_like(session, jitter_x, jitter_y)
+        await self.move_mouse_human_like(session, jitter_x, jitter_y)
         await asyncio.sleep(random.uniform(0.03, 0.12))
         await session.page.mouse.down()
         await asyncio.sleep(random.uniform(0.02, 0.08))
@@ -526,11 +545,11 @@ class BrowserActionService:
         session.mouse_position = (jitter_x, jitter_y)
 
     async def focus_locator(self, session: "BrowserSession", locator: Any) -> None:
-        coords = await self.manager._locator_center(locator)
+        coords = await self.locator_center(locator)
         if coords is None:
             await locator.click()
         else:
-            await self.manager._click_human_like(session, coords[0], coords[1])
+            await self.click_human_like(session, coords[0], coords[1])
         await asyncio.sleep(0.05 + random.random() * 0.1)
 
     async def type_text_human_like(self, page: "Page", text: str) -> None:
@@ -575,20 +594,20 @@ class BrowserActionService:
             'input[aria-label*="code" i]',
             'input[placeholder*="code" i]',
         ]
-        located = await self.manager._first_visible_locator(session.page, selectors)
+        located = await self.first_visible_locator(session.page, selectors)
         if located is None:
             return None
 
         locator, selector = located
         code = pyotp.TOTP(session.totp_secret).now()
-        await self.manager._focus_locator(session, locator)
+        await self.focus_locator(session, locator)
         try:
             await locator.fill("")
         except Exception:
             await session.page.keyboard.press("Control+a")
             await session.page.keyboard.press("Delete")
-        await self.manager._type_text_human_like(session.page, code)
-        submit = await self.manager._first_visible_locator(
+        await self.type_text_human_like(session.page, code)
+        submit = await self.first_visible_locator(
             session.page,
             [
                 'button[type="submit"]',
@@ -600,11 +619,11 @@ class BrowserActionService:
             ],
         )
         if submit is not None:
-            coords = await self.manager._locator_center(submit[0])
+            coords = await self.locator_center(submit[0])
             if coords is None:
                 await submit[0].click()
             else:
-                await self.manager._click_human_like(session, coords[0], coords[1])
+                await self.click_human_like(session, coords[0], coords[1])
         await self.manager._settle(session.page)
         return {"selector": selector, "code_length": len(code)}
 
@@ -638,6 +657,86 @@ class BrowserActionService:
         }:
             return "read"
         return "write"
+
+    @staticmethod
+    def action_verification(
+        action_name: str,
+        target: dict[str, Any],
+        before: dict[str, Any],
+        after: dict[str, Any],
+    ) -> dict[str, Any]:
+        signals: list[str] = []
+        if before.get("url") != after.get("url"):
+            signals.append("url_changed")
+        if before.get("title") != after.get("title"):
+            signals.append("title_changed")
+        if before.get("active_element") != after.get("active_element"):
+            signals.append("active_element_changed")
+        if before.get("text_excerpt") != after.get("text_excerpt"):
+            signals.append("text_excerpt_changed")
+
+        before_counts = (before.get("dom_outline") or {}).get("counts") or {}
+        after_counts = (after.get("dom_outline") or {}).get("counts") or {}
+        if before_counts != after_counts:
+            signals.append("dom_counts_changed")
+
+        before_accessibility = (before.get("accessibility_outline") or {}).get("focused")
+        after_accessibility = (after.get("accessibility_outline") or {}).get("focused")
+        if before_accessibility != after_accessibility:
+            signals.append("accessibility_focus_changed")
+
+        interacted_element = target.get("element_id")
+        selector = target.get("selector")
+        interactables = after.get("interactables") or []
+        target_seen_after = None
+        if interacted_element:
+            target_seen_after = any(item.get("element_id") == interacted_element for item in interactables)
+        elif selector:
+            target_seen_after = any(item.get("selector_hint") == selector for item in interactables)
+
+        if target_seen_after is True:
+            signals.append("target_still_visible")
+        elif target_seen_after is False:
+            signals.append("target_no_longer_visible")
+
+        verified = bool(signals)
+        if action_name == "navigate":
+            verified = "url_changed" in signals or "title_changed" in signals
+        elif action_name in {"go_back", "go_forward"}:
+            verified = "url_changed" in signals or "title_changed" in signals
+        elif action_name in {
+            "click",
+            "press",
+            "scroll",
+        }:
+            verified = bool(
+                {
+                    "url_changed",
+                    "title_changed",
+                    "active_element_changed",
+                    "text_excerpt_changed",
+                    "accessibility_focus_changed",
+                }
+                & set(signals)
+            )
+        elif action_name == "hover":
+            verified = bool(
+                {"active_element_changed", "text_excerpt_changed", "accessibility_focus_changed"} & set(signals)
+            ) or target_seen_after is not None
+        elif action_name in {"type", "select_option"}:
+            verified = bool(
+                {"active_element_changed", "text_excerpt_changed", "accessibility_focus_changed"} & set(signals)
+            )
+        elif action_name in {"wait", "reload"}:
+            verified = True
+        elif action_name == "upload":
+            verified = True
+
+        return {
+            "verified": verified,
+            "signals": signals,
+            "target_seen_after": target_seen_after,
+        }
 
     @staticmethod
     def resolve_target(

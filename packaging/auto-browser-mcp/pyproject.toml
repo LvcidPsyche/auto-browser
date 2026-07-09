@@ -7,12 +7,12 @@ build-backend = "setuptools.build_meta"
 # console script against that dependency.
 [project]
 name = "auto-browser-mcp"
-version = "1.2.1"
+version = "1.3.1"
 description = "MCP stdio bridge for Auto Browser (metapackage for `uvx auto-browser-mcp`)"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
-dependencies = ["auto-browser-client>=1.2.1"]
+dependencies = ["auto-browser-client>=1.3.1"]
 keywords = ["auto-browser", "mcp", "mcp-server", "browser-automation"]
 classifiers = [
     "Development Status :: 4 - Beta",

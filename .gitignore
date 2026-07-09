@@ -49,3 +49,6 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+
+# WebArena Stage 0 evidence runs (generated)
+benchmarks/webarena/runs/

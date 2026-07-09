@@ -18,9 +18,10 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from app import events as _events
+from app.browser.services import BrowserAuthProfileService, BrowserDiagnosticsService
 from app.config import Settings
 from app.models import (
     ImportAuthProfileRequest,
@@ -218,16 +219,6 @@ class TestNewConfigSettings(unittest.TestCase):
 
 # ── Auth Export / Import ─────────────────────────────────────────────────────
 
-def _get_browser_manager_cls():
-    """Import BrowserManager, patching missing optional deps."""
-    import sys
-    # Patch pytesseract if not installed
-    if "pytesseract" not in sys.modules:
-        sys.modules["pytesseract"] = MagicMock()
-    from app.browser_manager import BrowserManager
-    return BrowserManager
-
-
 class TestAuthExportImport(unittest.TestCase):
     def test_export_creates_tar_gz(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -236,8 +227,7 @@ class TestAuthExportImport(unittest.TestCase):
             profile_dir.mkdir()
             (profile_dir / "cookies.json").write_text('{"test": true}')
 
-            BrowserManager = _get_browser_manager_cls()
-            BrowserManager._write_tar(profile_dir, auth_root / "my-profile.tar.gz")
+            BrowserAuthProfileService.write_tar(profile_dir, auth_root / "my-profile.tar.gz")
 
             archive = auth_root / "my-profile.tar.gz"
             self.assertTrue(archive.exists())
@@ -251,9 +241,8 @@ class TestAuthExportImport(unittest.TestCase):
             profile_dir.mkdir()
             (profile_dir / "state.json").write_text('{"session": "abc"}')
 
-            BrowserManager = _get_browser_manager_cls()
             archive_path = Path(src_tmp) / "test-profile.tar.gz"
-            BrowserManager._write_tar(profile_dir, archive_path)
+            BrowserAuthProfileService.write_tar(profile_dir, archive_path)
 
             with tarfile.open(str(archive_path), "r:gz") as t:
                 t.extractall(path=dst_tmp, filter="data")
@@ -279,8 +268,7 @@ class TestScreenshotDiff(unittest.TestCase):
             d = Path(tmp)
             self._make_png(d / "a.png", color=(0, 128, 255))
             self._make_png(d / "b.png", color=(0, 128, 255))
-            BrowserManager = _get_browser_manager_cls()
-            result = BrowserManager._compute_diff(
+            result = BrowserDiagnosticsService.compute_diff(
                 str(d / "a.png"), str(d / "b.png"), "/a.png", "/b.png", d
             )
             self.assertEqual(result["changed_pixels"], 0)
@@ -291,8 +279,7 @@ class TestScreenshotDiff(unittest.TestCase):
             d = Path(tmp)
             self._make_png(d / "a.png", color=(0, 0, 0))
             self._make_png(d / "b.png", color=(255, 255, 255))
-            BrowserManager = _get_browser_manager_cls()
-            result = BrowserManager._compute_diff(
+            result = BrowserDiagnosticsService.compute_diff(
                 str(d / "a.png"), str(d / "b.png"), "/a.png", "/b.png", d
             )
             self.assertGreater(result["changed_pixels"], 0)
@@ -302,8 +289,7 @@ class TestScreenshotDiff(unittest.TestCase):
     def test_missing_image_returns_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
-            BrowserManager = _get_browser_manager_cls()
-            result = BrowserManager._compute_diff(
+            result = BrowserDiagnosticsService.compute_diff(
                 "/nonexistent/a.png", "/nonexistent/b.png", "/a.png", "/b.png", d
             )
             self.assertIn("error", result)

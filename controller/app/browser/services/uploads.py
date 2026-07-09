@@ -26,7 +26,7 @@ class BrowserUploadService:
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         safe_path = self.safe_path(file_path, session=session)
-        approval = await self.manager._require_decision_approval(
+        approval = await self.manager.actions.require_decision_approval(
             session_id,
             BrowserActionDecision(
                 action="upload",
@@ -40,7 +40,7 @@ class BrowserUploadService:
             fallback_reason="Upload actions require approval",
         )
 
-        target = self.manager._resolve_target(selector=selector, element_id=element_id)
+        target = self.manager.actions.resolve_target(selector=selector, element_id=element_id)
 
         async def operation() -> None:
             locator = session.page.locator(target["selector"]).first

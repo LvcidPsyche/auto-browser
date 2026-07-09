@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 
+from prometheus_client import CONTENT_TYPE_LATEST
+
 from app.metrics import MetricsRecorder
 
 
@@ -21,7 +23,7 @@ class MetricsRecorderTests(unittest.TestCase):
         self.assertIn("auto_browser_mcp_tool_duration_seconds", text)
         self.assertIn('tool="browser.observe"', text)
         self.assertIn("auto_browser_active_sessions", text)
-        self.assertEqual(content_type, "text/plain; version=0.0.4; charset=utf-8")
+        self.assertEqual(content_type, CONTENT_TYPE_LATEST)
 
     def test_disabled_recorder_suppresses_output(self) -> None:
         recorder = MetricsRecorder(enabled=False)
@@ -32,7 +34,7 @@ class MetricsRecorderTests(unittest.TestCase):
         payload, content_type = recorder.render()
 
         self.assertEqual(payload, b"")
-        self.assertEqual(content_type, "text/plain; version=0.0.4; charset=utf-8")
+        self.assertEqual(content_type, CONTENT_TYPE_LATEST)
 
 
 if __name__ == "__main__":

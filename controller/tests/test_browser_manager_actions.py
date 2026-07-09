@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from app.action_errors import BrowserActionError
+from app.browser.services import BrowserRemoteAccessService
 from app.browser_manager import BrowserManager, BrowserSession, PlaywrightError
 from app.config import Settings
 from app.utils import UTC
@@ -328,10 +329,10 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(active["active"])
         self.assertEqual(active["takeover_url"], "https://takeover.example.com")
         self.assertEqual(self.manager._current_takeover_url(), "https://takeover.example.com")
-        self.assertIsNotNone(BrowserManager._parse_remote_access_timestamp("2026-01-01T00:00:00Z"))
-        self.assertIsNone(BrowserManager._parse_remote_access_timestamp("not-a-date"))
-        self.assertTrue(BrowserManager._takeover_url_is_local_only("http://127.0.0.1:6080"))
-        self.assertFalse(BrowserManager._takeover_url_is_local_only("https://takeover.example.com"))
+        self.assertIsNotNone(BrowserRemoteAccessService.parse_timestamp("2026-01-01T00:00:00Z"))
+        self.assertIsNone(BrowserRemoteAccessService.parse_timestamp("not-a-date"))
+        self.assertTrue(BrowserRemoteAccessService.takeover_url_is_local_only("http://127.0.0.1:6080"))
+        self.assertFalse(BrowserRemoteAccessService.takeover_url_is_local_only("https://takeover.example.com"))
 
         self.session.isolation_mode = "docker_ephemeral"
         self.session.takeover_url = "http://127.0.0.1:6080/vnc.html"

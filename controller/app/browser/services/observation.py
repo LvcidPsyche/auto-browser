@@ -68,7 +68,7 @@ class BrowserObservationService:
 
         if preset == "fast":
             title = await session.page.title()
-            tabs = await self.manager._tab_summaries(session)
+            tabs = await self.manager.tabs.summaries(session)
             return {
                 "session": await self.manager._session_summary(session),
                 "url": session.page.url,
@@ -87,17 +87,17 @@ class BrowserObservationService:
                 "tabs": tabs,
                 "recent_downloads": session.downloads[-10:],
                 "takeover_url": self.manager._current_takeover_url(session),
-                "remote_access": self.manager._session_remote_access_info(session),
+                "remote_access": self.manager.remote_access.session_info(session),
                 "preset": "fast",
             }
 
         effective_limit = min(limit * 2, 200) if preset == "rich" else limit
         interactables = await session.page.evaluate(INTERACTABLES_SCRIPT, effective_limit)
         text_limit = 4000 if preset == "rich" else 2000
-        summary = await self.manager._page_summary(session.page, text_limit=text_limit)
+        summary = await self.page_summary(session.page, text_limit=text_limit)
         ocr = await self.manager.ocr.extract_from_image(screenshot["path"])
         await self._scrub_screenshot_if_needed(session, screenshot, ocr)
-        tabs = await self.manager._tab_summaries(session)
+        tabs = await self.manager.tabs.summaries(session)
         return {
             "session": await self.manager._session_summary(session),
             "url": session.page.url,
@@ -116,13 +116,13 @@ class BrowserObservationService:
             "tabs": tabs,
             "recent_downloads": session.downloads[-10:],
             "takeover_url": self.manager._current_takeover_url(session),
-            "remote_access": self.manager._session_remote_access_info(session),
+            "remote_access": self.manager.remote_access.session_info(session),
             "preset": preset,
         }
 
     async def light_snapshot(self, session: "BrowserSession", *, label: str) -> dict[str, Any]:
         screenshot = await self.manager._capture_screenshot(session, label)
-        summary = await self.manager._page_summary(session.page)
+        summary = await self.page_summary(session.page)
         return {
             "url": session.page.url,
             "title": summary["title"],
@@ -152,7 +152,7 @@ class BrowserObservationService:
 
     async def page_summary(self, page: "Page", text_limit: int = 2000) -> dict[str, Any]:
         summary = await page.evaluate(PAGE_SUMMARY_SCRIPT, text_limit)
-        accessibility_outline = await self.manager._accessibility_outline(page)
+        accessibility_outline = await self.accessibility_outline(page)
         return {
             "title": await page.title(),
             "active_element": await page.evaluate(ACTIVE_ELEMENT_SCRIPT),
