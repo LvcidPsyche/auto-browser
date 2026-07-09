@@ -4,9 +4,19 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-07-09
+
+### Added
+- **Any OpenAI-compatible model can now drive the browser.** A single generic adapter serves every model reachable over an OpenAI `/chat/completions` endpoint, so Auto Browser is no longer limited to OpenAI / Claude / Gemini. New providers: `openrouter` (one key → ~every frontier model — Claude, GPT, Gemini, Grok, DeepSeek, Llama, Mistral, Qwen, …), `xai` (Grok), `deepseek`, `minimax`, and `openai_compatible` (a custom base URL for self-hosted Ollama / vLLM / LM Studio, Azure, Together, Groq, Fireworks, …). Vision + function-calling with a content-parse fallback for endpoints that ignore `tool_choice`; DeepSeek runs text-only from the DOM/accessibility outline. Configure via the `*_API_KEY` / `*_BASE_URL` / `*_MODEL` settings in `.env.example` (#85). Supersedes the bespoke MiniMax adapter from #77 — MiniMax is now a generic profile.
+- **`browser://audit/events` MCP resource** — list and read recent audit events across sessions over MCP, guarded on `manager.list_audit_events` so it no-ops where unavailable (#86, adopted from #48 by @luohui1).
+- **CI guard for Playwright pin parity** between the controller (`requirements.txt`) and browser-node (`package.json`) so a single-side bump can no longer merge; and `fastapi` capped `<0.137`, whose router-internals change silently drops every mounted route (#84).
+
 ### Fixed
 - **Controller could not connect to the browser node in compose deployments.** Dependabot #60 bumped browser-node's npm `playwright` to 1.61.1 while the controller's pip pin stayed at 1.60.0; Playwright's websocket protocol requires an exact client/server version match, so every `docker compose up --build` crash-looped readiness. Fixed in two steps: first re-aligned both sides to the known-good 1.60.0, then landed the coordinated upgrade pinning `playwright==1.61.0` on both pip and npm (#76 by @itsreese83, who also diagnosed the mismatch).
 - `scripts/doctor.sh` now dumps controller and browser-node container logs when the readiness probe times out, so compose-smoke failures are diagnosable from CI output.
+
+### Changed
+- Dependency bumps: `uvicorn` 0.49.0 → 0.50.1 (#79), `pydantic-settings` 2.10.1 → 2.14.2 (#80), `pillow` 12.2.0 → 12.3.0 (#81), and dev `ruff` 0.15.12 → 0.15.20 (#78).
 
 ## [1.3.1] — 2026-07-01
 
