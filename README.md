@@ -222,13 +222,30 @@ For deployment details, hosted Witness notes, CLI auth modes, and reverse-SSH gu
 ```mermaid
 flowchart LR
     User[Human operator] -->|watch / takeover| noVNC[noVNC]
-    LLM[OpenAI / Claude / Gemini] -->|shared tools| Controller[Controller API]
+    LLM[Any model: OpenAI / Claude / Gemini / OpenRouter / Grok / DeepSeek / MiniMax / local] -->|shared tools| Controller[Controller API]
     Controller -->|Playwright protocol| Browser[Browser node]
     noVNC --> Browser
     Browser --> Artifacts[(screenshots / traces / auth state)]
     Controller --> Artifacts
     Controller --> Policy[Allowlist + approval gates]
 ```
+
+### Model providers
+
+First-class adapters for **OpenAI**, **Claude**, and **Gemini** (API or CLI). Beyond those,
+a single generic **OpenAI-compatible** adapter drives any model reachable over an OpenAI
+`/chat/completions` endpoint — set an API key to enable it:
+
+| Provider | Reaches |
+|----------|---------|
+| `openrouter` | one key → ~every frontier model (Claude, GPT, Gemini, Grok, DeepSeek, Llama, Mistral, Qwen, …) |
+| `xai` | Grok |
+| `deepseek` | DeepSeek (text-only; driven from the DOM/accessibility outline) |
+| `minimax` | MiniMax |
+| `openai_compatible` | any custom base URL — self-hosted Ollama / vLLM / LM Studio, Azure OpenAI, Together, Groq, Fireworks, … |
+
+Vision (screenshots) is used for every provider except text-only ones. See `.env.example` for
+the `*_API_KEY` / `*_BASE_URL` / `*_MODEL` settings.
 
 Core components:
 
