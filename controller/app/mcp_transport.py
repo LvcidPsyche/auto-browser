@@ -262,6 +262,15 @@ class McpHttpTransport:
         ]
         if self.manager is None:
             return resources
+        if callable(getattr(self.manager, "list_audit_events", None)):
+            resources.append(
+                {
+                    "uri": "browser://audit/events",
+                    "name": "Recent Audit Events",
+                    "description": "Recent browser audit events across sessions",
+                    "mimeType": "application/json",
+                }
+            )
 
         for session_id in list(self.manager.sessions.keys()):
             resources += [
@@ -302,6 +311,15 @@ class McpHttpTransport:
                 "uri": uri,
                 "mimeType": "application/json",
                 "text": json.dumps(sessions, ensure_ascii=False),
+            }
+        if uri == "browser://audit/events":
+            if self.manager is None or not callable(getattr(self.manager, "list_audit_events", None)):
+                return None
+            events = await self.manager.list_audit_events(limit=100)
+            return {
+                "uri": uri,
+                "mimeType": "application/json",
+                "text": json.dumps(events, ensure_ascii=False),
             }
 
         # Parse browser://{session_id}/{resource}

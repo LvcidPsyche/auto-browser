@@ -88,6 +88,85 @@ The best MCP demo is:
 
 That shows why MCP + browser state reuse is more valuable than a plain “open page and click things” demo.
 
+## Resources and subscriptions
+
+MCP clients can inspect browser state through resources as well as one-shot
+tools. Start with a normal MCP initialization, keep the returned
+`MCP-Session-Id` and `MCP-Protocol-Version` headers, then send
+`notifications/initialized`.
+
+Minimal resource listing over the HTTP transport:
+
+```bash
+curl -s http://127.0.0.1:8000/mcp \
+  -X POST \
+  -H 'accept: application/json, text/event-stream' \
+  -H 'content-type: application/json' \
+  -H "MCP-Session-Id: $MCP_SESSION_ID" \
+  -H "MCP-Protocol-Version: $MCP_PROTOCOL_VERSION" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 20,
+    "method": "resources/list",
+    "params": {}
+  }' | jq
+```
+
+The default resource set includes:
+
+- `browser://sessions` for active browser sessions
+- `browser://audit/events` for recent audit events
+- `browser://<session-id>/dom`, `browser://<session-id>/screenshot`,
+  `browser://<session-id>/console`, and `browser://<session-id>/network` once a
+  session exists
+
+Read a resource by URI:
+
+```bash
+curl -s http://127.0.0.1:8000/mcp \
+  -X POST \
+  -H 'accept: application/json, text/event-stream' \
+  -H 'content-type: application/json' \
+  -H "MCP-Session-Id: $MCP_SESSION_ID" \
+  -H "MCP-Protocol-Version: $MCP_PROTOCOL_VERSION" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 21,
+    "method": "resources/read",
+    "params": {
+      "uri": "browser://audit/events"
+    }
+  }' | jq
+```
+
+Clients that support resource updates can subscribe, then keep the MCP event
+stream open with `GET /mcp`:
+
+```bash
+curl -s http://127.0.0.1:8000/mcp \
+  -X POST \
+  -H 'accept: application/json, text/event-stream' \
+  -H 'content-type: application/json' \
+  -H "MCP-Session-Id: $MCP_SESSION_ID" \
+  -H "MCP-Protocol-Version: $MCP_PROTOCOL_VERSION" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 22,
+    "method": "resources/subscribe",
+    "params": {
+      "uri": "browser://sessions"
+    }
+  }' | jq
+
+curl -N http://127.0.0.1:8000/mcp \
+  -H 'accept: text/event-stream' \
+  -H "MCP-Session-Id: $MCP_SESSION_ID" \
+  -H "MCP-Protocol-Version: $MCP_PROTOCOL_VERSION"
+```
+
+When a subscribed resource changes, the stream emits a JSON-RPC notification
+named `notifications/resources/updated` with the updated `uri`.
+
 ## Curated vs full MCP tool profile
 
 The default MCP tool profile is `curated`.

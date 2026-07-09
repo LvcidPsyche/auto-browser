@@ -168,6 +168,9 @@ Client setup guides:
 - [`examples/cursor-mcp-setup.md`](./examples/cursor-mcp-setup.md)
 - [`examples/claude_desktop_config.json`](./examples/claude_desktop_config.json)
 
+For resource listing, resource reads, and subscription-style update examples,
+see [`docs/mcp-clients.md#resources-and-subscriptions`](./docs/mcp-clients.md#resources-and-subscriptions).
+
 ## Convergence Harness
 
 Auto Browser ships a Stage 0 convergence harness for Agent Skill Induction. It runs a structured task contract, records tamper-checked traces, verifies completion, and writes a staged skill candidate with signed provenance. Generated skills are staged only — promotion stays explicit and reviewed.
