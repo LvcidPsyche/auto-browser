@@ -3,6 +3,7 @@ from __future__ import annotations
 from .config import Settings
 from .models import ProviderInfo, ProviderName
 from .providers import ClaudeAdapter, GeminiAdapter, OpenAIAdapter
+from .providers.openai_compatible import build_openai_compatible_adapters
 
 
 class ProviderRegistry:
@@ -11,6 +12,10 @@ class ProviderRegistry:
             "openai": OpenAIAdapter(settings),
             "claude": ClaudeAdapter(settings),
             "gemini": GeminiAdapter(settings),
+            # OpenAI-compatible providers (openrouter, xai, deepseek, minimax,
+            # openai_compatible) — one generic adapter, so any model reachable over an
+            # OpenAI-style /chat/completions endpoint can drive the browser.
+            **build_openai_compatible_adapters(settings),
         }
 
     def get(self, name: ProviderName):

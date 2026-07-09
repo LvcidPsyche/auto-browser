@@ -234,6 +234,29 @@ class Settings(BaseSettings):
     gemini_cli_model: str | None = Field(None, alias="GEMINI_CLI_MODEL")
     cli_home: str | None = Field("/data/cli-home", alias="CLI_HOME")
 
+    # OpenAI-compatible providers, all served by one generic adapter. Set the API key
+    # (and, for openrouter/openai_compatible, a model) to enable each. base_url defaults
+    # are stable; model defaults are current-but-overridable.
+    openrouter_api_key: str | None = Field(None, alias="OPENROUTER_API_KEY")
+    openrouter_base_url: str = Field("https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL")
+    openrouter_model: str = Field("", alias="OPENROUTER_MODEL")
+
+    xai_api_key: str | None = Field(None, alias="XAI_API_KEY")
+    xai_base_url: str = Field("https://api.x.ai/v1", alias="XAI_BASE_URL")
+    xai_model: str = Field("grok-4", alias="XAI_MODEL")
+
+    deepseek_api_key: str | None = Field(None, alias="DEEPSEEK_API_KEY")
+    deepseek_base_url: str = Field("https://api.deepseek.com/v1", alias="DEEPSEEK_BASE_URL")
+    deepseek_model: str = Field("deepseek-chat", alias="DEEPSEEK_MODEL")
+
+    minimax_api_key: str | None = Field(None, alias="MINIMAX_API_KEY")
+    minimax_base_url: str = Field("https://api.minimax.io/v1", alias="MINIMAX_BASE_URL")
+    minimax_model: str = Field("MiniMax-M3", alias="MINIMAX_MODEL")
+
+    openai_compatible_api_key: str | None = Field(None, alias="OPENAI_COMPATIBLE_API_KEY")
+    openai_compatible_base_url: str = Field("", alias="OPENAI_COMPATIBLE_BASE_URL")
+    openai_compatible_model: str = Field("", alias="OPENAI_COMPATIBLE_MODEL")
+
     model_request_timeout_seconds: float = Field(60.0, alias="MODEL_REQUEST_TIMEOUT_SECONDS")
     model_max_retries: int = Field(2, alias="MODEL_MAX_RETRIES")
     model_retry_backoff_seconds: float = Field(1.0, alias="MODEL_RETRY_BACKOFF_SECONDS")

@@ -275,7 +275,19 @@ ActionName = Literal[
     "request_human_takeover",
     "done",
 ]
-ProviderName = Literal["openai", "claude", "gemini"]
+ProviderName = Literal[
+    "openai",
+    "claude",
+    "gemini",
+    # OpenAI-compatible providers (one generic adapter): OpenRouter proxies ~every
+    # frontier model; the rest are popular direct endpoints; openai_compatible is a
+    # custom base URL for anything else (Ollama / vLLM / Azure / Together / Groq / ...).
+    "openrouter",
+    "xai",
+    "deepseek",
+    "minimax",
+    "openai_compatible",
+]
 WorkflowProfile = Literal["fast", "governed"]
 RiskCategory = Literal[
     "read",
