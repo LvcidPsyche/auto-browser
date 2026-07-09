@@ -4,6 +4,9 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Compose deploy now wires `APP_ENV` and the v1.4.0 OpenAI-compatible providers into the controller.** `APP_ENV` was absent from `docker-compose.yml`, so `APP_ENV=production` in `.env` never reached the container — it always ran in `development`, silently skipping production hardening. And the new providers (`openrouter`, `xai`, `deepseek`, `minimax`, `openai_compatible`) weren't passed through, so they couldn't be configured through a standard compose deploy despite being supported in code. Both are now in the controller `environment:` block. Caught by smoke-testing the deploy end to end.
+
 ## [1.4.0] — 2026-07-09
 
 ### Added
