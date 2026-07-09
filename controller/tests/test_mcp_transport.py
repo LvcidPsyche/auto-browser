@@ -20,6 +20,15 @@ class McpTransportTests(unittest.TestCase):
         self.manager = SimpleNamespace(
             sessions={"session-1": object()},
             list_sessions=AsyncMock(return_value=[{"id": "session-1", "status": "active"}]),
+            list_audit_events=AsyncMock(
+                return_value=[
+                    {
+                        "event_type": "browser_action",
+                        "session_id": "session-1",
+                        "action": "click",
+                    }
+                ]
+            ),
         )
         self.gateway = SimpleNamespace(
             list_tools=lambda: [
@@ -320,6 +329,41 @@ class McpTransportTests(unittest.TestCase):
         body = read_response.json()
         self.assertEqual(body["error"]["code"], -32002)
         self.assertIn("Resource not found", body["error"]["message"])
+
+    def test_resources_list_and_read_audit_events_work_after_initialization(self) -> None:
+        session_id, protocol_version = self._initialize()
+        self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version},
+            json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+        )
+
+        list_response = self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version},
+            json={"jsonrpc": "2.0", "id": 13, "method": "resources/list", "params": {}},
+        )
+        self.assertEqual(list_response.status_code, 200)
+        resource_uris = {item["uri"] for item in list_response.json()["result"]["resources"]}
+        self.assertIn("browser://audit/events", resource_uris)
+
+        read_response = self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version},
+            json={
+                "jsonrpc": "2.0",
+                "id": 14,
+                "method": "resources/read",
+                "params": {"uri": "browser://audit/events"},
+            },
+        )
+
+        self.assertEqual(read_response.status_code, 200)
+        contents = read_response.json()["result"]["contents"]
+        self.assertEqual(contents[0]["uri"], "browser://audit/events")
+        self.assertEqual(contents[0]["mimeType"], "application/json")
+        self.assertEqual(json.loads(contents[0]["text"])[0]["event_type"], "browser_action")
+        self.manager.list_audit_events.assert_awaited_once_with(limit=100)
 
     def test_resources_subscribe_and_unsubscribe_track_session_state(self) -> None:
         session_id, protocol_version = self._initialize()
