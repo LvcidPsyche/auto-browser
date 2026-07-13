@@ -7,6 +7,14 @@ updates:
       day: monday
       time: "09:00"
     open-pull-requests-limit: 5
+    # One PR per week for minor/patch bumps: same-file pins conflict as soon as
+    # one PR merges, forcing rebase+CI cycles for every remaining PR. Majors
+    # stay individual so they get reviewed on their own.
+    groups:
+      pip-minor-patch:
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: npm
     directory: /browser-node
@@ -15,6 +23,11 @@ updates:
       day: monday
       time: "09:15"
     open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: github-actions
     directory: /
@@ -23,3 +36,8 @@ updates:
       day: monday
       time: "09:30"
     open-pull-requests-limit: 5
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch
