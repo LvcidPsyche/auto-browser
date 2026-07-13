@@ -1,6 +1,8 @@
 # Good first issues
 
-Use these as public contributor tickets that match the current v1.2.1 product surface.
+Use these as public contributor tickets that match the current v1.4.x product surface.
+(Earlier seeds from this file shipped: the auth profile setup wizard, the run replay
+view, and live fixture execution all landed in v1.3.0.)
 
 ## 1. Improve multi-tab and popup recovery tests
 
@@ -8,32 +10,20 @@ Use these as public contributor tickets that match the current v1.2.1 product su
 - **Scope:** add fixtures and regression coverage for popups, tab switching, closed tabs, and returning to the useful active tab
 - **Why it matters:** real browser workflows often branch into new tabs before the agent can finish cleanly
 
-## 2. Add MCP resources and subscribe examples
+## 2. Add MCP `resources/subscribe` examples
 
 - **Label:** `good first issue`
-- **Scope:** document and test MCP resource listing, session/audit resources, and subscription-style update examples for clients that support them
+- **Scope:** document and test subscription-style update examples for MCP clients that support them, building on the existing session and `browser://audit/events` resources
 - **Why it matters:** MCP users need more than one-shot tools once sessions run for several steps
 
-## 3. Build an auth profile setup wizard
-
-- **Label:** `enhancement`
-- **Scope:** add a small dashboard flow for naming a profile, guiding manual login, saving auth state, and reopening a session from that profile
-- **Why it matters:** auth reuse is the strongest demo, but the current path is still too curl-heavy for first-time operators
-
-## 4. Add live execution for local eval fixtures
+## 3. Add example configs for more OpenAI-compatible endpoints
 
 - **Label:** `good first issue`
-- **Scope:** serve `evals/fixtures/` in a tiny local test server and add an optional live fixture execution mode that drives the controller against those pages
-- **Why it matters:** governed mode is already covered by static fixture validation; the next step is browser-level reproduction without external sites
+- **Scope:** contribute tested `.env` examples and short docs for driving the browser through additional OpenAI-compatible endpoints (Together, Groq, Fireworks, LM Studio, …) via the generic provider added in v1.4.0
+- **Why it matters:** the adapter is generic, but first-time operators still benefit from copy-paste configs proven against real endpoints
 
-## 5. Add a lightweight replay view for agent runs
-
-- **Label:** `enhancement`
-- **Scope:** render checkpoints, actions, screenshots, approvals, and final session state from existing job/session artifacts
-- **Why it matters:** operators need to debug what happened without reading JSONL files by hand
-
-## 6. Raise controller coverage toward 85%
+## 4. Raise controller coverage toward 85%
 
 - **Label:** `good first issue`
 - **Scope:** add focused tests for `BrowserManager`, startup extension wiring, network inspector paths, and route handlers without needing live browsers
-- **Why it matters:** v1.2.1 preserves the 80% release gate after the architecture split; the next useful ratchet is coverage on the lower-signal edge paths that remain
+- **Why it matters:** the 80% release gate held through the architecture split; the next useful ratchet is coverage on the lower-signal edge paths that remain
