@@ -30,22 +30,18 @@ Works with:
 - **Safety rails built in.** Approvals, operator identity, PII scrubbing, Witness receipts, and policy presets are all part of the product surface.
 - **Governed skill induction.** Verified browser traces can become staged skill candidates with signed provenance, verifier adapters, and review-only graduation — agents that prove they can repeat themselves correctly, not just act once.
 
-## Release Highlights (v1.3.0)
+## Release Highlights (v1.4.0)
 
+- **Any OpenAI-compatible model can drive the browser.** A single generic adapter serves every model reachable over an OpenAI `/chat/completions` endpoint. New providers: `openrouter` (one key → ~every frontier model), `xai` (Grok), `deepseek`, `minimax`, and `openai_compatible` (custom base URL for self-hosted Ollama / vLLM / LM Studio, Azure, Together, Groq, Fireworks, …). Vision + function-calling with a content-parse fallback for endpoints that ignore `tool_choice`.
+- **`browser://audit/events` MCP resource.** List and read recent audit events across sessions directly over MCP.
+- **Playwright pin parity enforced in CI.** The controller (pip) and browser-node (npm) Playwright versions must match exactly — a single-side bump can no longer merge and crash-loop compose deployments.
 - **On PyPI.** `pip install auto-browser-client` for the SDK, `pip install auto-browser-langchain` for the LangChain/LangGraph/CrewAI adapters, and `uvx auto-browser-mcp` to run the MCP stdio bridge with zero setup. Releases publish via PyPI trusted publishing (OIDC) on tag push.
 
-### Since v1.2.1
-- **Operator dashboard, expanded.** A run-replay view (action order, approvals, final status, screenshots from existing artifacts) and a four-step auth-profile setup wizard (name → guided login → save → reopen), both rendered with XSS-safe text nodes.
-- **Fixture proof layers.** A loopback fixture server and opt-in live runner drive the real controller against local fixtures; a new closed-tab-recovery fixture guards active-tab recovery.
-- **Benchmark scaffolding.** Executable WebArena Stage 0 contracts (pinned-environment gated, tracked-only) and an adapter mapping runs into the CUAVerifier / Online-Mind2Web evidence lanes — never scored until pinned.
-- **Security & hardening.** All Dependabot alerts resolved (starlette 1.3.1, cryptography 49, redis 8, …); a startup warning when `API_BEARER_TOKEN` is unset in non-production; the closed-browser `GET /sessions` 500 fixed; the Codespaces port double-bind fixed.
-
-### Since v1.2.0
-- **Verifiable Witness receipts.** Receipts were always hash-chained at write time; now you can check the chain on demand. `GET /sessions/{id}/witness/verify` and the read-only `browser.verify_witness` MCP tool walk the full chain and report the first divergent receipt if the log was altered, reordered, or truncated.
-- **Sturdier session isolation.** Per-session browser containers now get memory/PID/CPU caps, and the controller reaps containers orphaned by a crash at startup.
-- **Fresh dependency floor.** Playwright 1.60 (controller and browser-node aligned), uvicorn 0.49, and a unified, current user-agent pool replacing the stale Chrome 122-era defaults.
-- **Quieter failure modes.** Cleanup and capture paths that previously swallowed errors now log them with context.
-- **Release gates in CI** continue to enforce dependency audits, fixture evals, client tests, Python wheel builds, and the 80% controller coverage gate — now on Python 3.11 and 3.14.
+### Since v1.3.0
+- **`browser_manager.py` is now a pure facade + composition root** (1,284 → 769 lines), with domain logic extracted into `app/browser/services/`.
+- **Fork state exports are encrypted at rest** and shadow-browse state never touches disk.
+- **Download capture tasks can no longer be garbage-collected mid-flight**, shadow-browse failures roll back cleanly, and page listeners survive object-id reuse.
+- **Release gates in CI** enforce dependency audits, fixture evals, client tests, Python wheel builds, and the 80% controller coverage gate on Python 3.11 and 3.14.
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full release history.
 

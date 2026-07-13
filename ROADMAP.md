@@ -2,8 +2,9 @@
 
 This is the near-term direction for Auto Browser.
 
-## Now (current in v1.3.0)
+## Now (current in v1.4.0)
 
+- any OpenAI-compatible model can drive the browser (OpenRouter, xAI, DeepSeek, MiniMax, custom base URL for Ollama / vLLM / Azure / Groq, …)
 - PyPI packages: `auto-browser-client` SDK, `auto-browser-langchain` adapters, `uvx auto-browser-mcp` stdio bridge
 - stable local-first browser control
 - reusable auth profiles + import/export
@@ -34,10 +35,11 @@ This is the near-term direction for Auto Browser.
 - cleaner multi-tab / popup management
 - MCP `resources/subscribe` push notifications (live browser state streaming)
 - stronger trace viewer integration in operator dashboard
-- auth profile setup wizard
 
 ## Recently Shipped
 
+- v1.4.0 generic OpenAI-compatible provider adapter (OpenRouter / xAI / DeepSeek / MiniMax / custom base URL), `browser://audit/events` MCP resource, and a CI guard for Playwright pin parity
+- v1.3.x operator dashboard run replay, auth-profile setup wizard, `browser_manager` facade refactor, encrypted fork-state exports, and fixture proof layers
 - v1.2.1 PyPI publishing: client SDK, LangChain adapters, and the `auto-browser-mcp` bridge via tag-triggered trusted publishing
 - v1.2.0 witness chain verification, isolated-container resource limits + orphan reaping, dependency refresh, and unified UA pool
 - v1.1.x policy presets (`strict`/`balanced`), per-session isolation audit + CI smoke, dependency-audit gates, and the 80% coverage gate
