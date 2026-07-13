@@ -151,8 +151,10 @@ class OpenAIAdapter(BaseProviderAdapter):
             },
             payload=payload,
         )
-        choice = response["choices"][0]
-        message = choice.get("message", {})
+        choices = response.get("choices") or []
+        if not choices:
+            raise RuntimeError("OpenAI response contained no choices")
+        message = choices[0].get("message", {})
         tool_calls = message.get("tool_calls") or []
         if not tool_calls:
             raise RuntimeError("OpenAI did not return a tool call for browser_action")

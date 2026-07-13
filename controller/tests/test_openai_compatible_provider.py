@@ -130,6 +130,22 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
             decision = await adapter.decide(goal="g", observation=self._observation())
         self.assertEqual(decision.decision.action, "done")
 
+    async def test_empty_choices_raises_labeled_error(self):
+        adapter = self._adapter("xai", xai_api_key="k")
+        fake = FakeAsyncClient(FakeResponse({"model": "test-model", "choices": []}))
+        with patch("app.providers.base.httpx.AsyncClient", return_value=fake):
+            with self.assertRaises(RuntimeError) as ctx:
+                await adapter.decide(goal="g", observation=self._observation())
+        self.assertIn("xAI Grok", str(ctx.exception))
+
+    async def test_missing_choices_key_raises_labeled_error(self):
+        adapter = self._adapter("openrouter", openrouter_api_key="k", openrouter_model="m")
+        fake = FakeAsyncClient(FakeResponse({"error": {"message": "overloaded"}}))
+        with patch("app.providers.base.httpx.AsyncClient", return_value=fake):
+            with self.assertRaises(RuntimeError) as ctx:
+                await adapter.decide(goal="g", observation=self._observation())
+        self.assertIn("OpenRouter", str(ctx.exception))
+
     async def test_text_only_provider_omits_image(self):
         adapter = self._adapter("deepseek", deepseek_api_key="k")
         fake = FakeAsyncClient(_tool_call_response({"action": "done", "reason": "x"}))

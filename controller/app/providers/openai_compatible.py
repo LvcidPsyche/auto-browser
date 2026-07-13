@@ -213,7 +213,10 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
             payload=payload,
         )
 
-        message = response["choices"][0].get("message", {})
+        choices = response.get("choices") or []
+        if not choices:
+            raise RuntimeError(f"{self.profile.label} response contained no choices")
+        message = choices[0].get("message", {})
         tool_calls = message.get("tool_calls") or []
         if tool_calls:
             raw_text = tool_calls[0]["function"]["arguments"]
