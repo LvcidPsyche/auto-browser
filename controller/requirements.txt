@@ -15,4 +15,4 @@ docker==7.2.0
 prometheus-client==0.25.0
 pyotp==2.10.0
 apscheduler==3.11.3
-tomli==2.3.0; python_version < "3.11"
+tomli==2.4.1; python_version < "3.11"
