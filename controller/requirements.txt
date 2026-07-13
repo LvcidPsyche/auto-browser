@@ -11,7 +11,7 @@ redis==8.0.1
 cryptography==49.0.0
 Pillow==12.3.0
 pytesseract==0.3.13
-docker==7.1.0
+docker==7.2.0
 prometheus-client==0.25.0
 pyotp==2.10.0
 apscheduler==3.11.2
