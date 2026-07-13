@@ -41,7 +41,13 @@ def register(registry, gateway):
         ),
         ToolSpec(
             name="harness.list_runs",
-            description="List recent convergence harness runs.",
+            description=(
+                "List recent Agent Skill Induction convergence runs, newest first, with "
+                "each run's ID, contract, provider, attempt count, and current status. "
+                "Optionally filter by status (created, running, converged, unconverged, "
+                "failed, over_budget). Feed run IDs into harness.get_status or "
+                "harness.get_trace."
+            ),
             input_model=HarnessListRunsInput,
             handler=gateway._harness_list_runs,
             profiles=("curated", "full"),

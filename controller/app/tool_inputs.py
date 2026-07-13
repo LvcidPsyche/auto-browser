@@ -105,7 +105,14 @@ class HarnessStartConvergenceInput(StrictInputModel):
 
 
 class HarnessGetStatusInput(StrictInputModel):
-    run_id: str = Field(min_length=1, max_length=120)
+    run_id: str = Field(
+        min_length=1,
+        max_length=120,
+        description=(
+            "ID of the convergence run, as returned by harness.start_convergence "
+            "or listed by harness.list_runs."
+        ),
+    )
 
 
 class HarnessGetTraceInput(HarnessGetStatusInput):
@@ -113,8 +120,16 @@ class HarnessGetTraceInput(HarnessGetStatusInput):
 
 
 class HarnessListRunsInput(StrictInputModel):
-    status: Literal["created", "running", "converged", "unconverged", "failed", "over_budget"] | None = None
-    limit: int = Field(default=50, ge=1, le=200)
+    status: Literal["created", "running", "converged", "unconverged", "failed", "over_budget"] | None = Field(
+        default=None,
+        description="Only return runs in this state. Omit to list runs in every state.",
+    )
+    limit: int = Field(
+        default=50,
+        ge=1,
+        le=200,
+        description="Maximum number of runs to return, newest first (1-200, default 50).",
+    )
 
 
 class HarnessSkillIdInput(StrictInputModel):
@@ -126,7 +141,14 @@ class HarnessGraduateInput(HarnessGetStatusInput):
 
 
 class SessionIdInput(StrictInputModel):
-    session_id: str = Field(min_length=1, max_length=120)
+    session_id: str = Field(
+        min_length=1,
+        max_length=120,
+        description=(
+            "ID of the target browser session, as returned by browser.create_session "
+            "or listed by browser.list_sessions."
+        ),
+    )
 
 
 class VerifyWitnessInput(SessionIdInput):
@@ -147,8 +169,20 @@ class ScreenshotInput(SessionIdInput):
 
 
 class ExecuteActionInput(SessionIdInput):
-    approval_id: str | None = None
-    action: BrowserActionDecision
+    approval_id: str | None = Field(
+        default=None,
+        description=(
+            "ID of a granted approval that authorizes this action when the active "
+            "policy requires one. Omit when the action does not need approval."
+        ),
+    )
+    action: BrowserActionDecision = Field(
+        description=(
+            "The browser action to execute, in the shared action schema: an action type "
+            "(navigate, click, type, scroll, wait, done, …) plus its arguments, e.g. a "
+            "URL for navigate or an element selector/index for click and type."
+        ),
+    )
 
 
 class SaveAuthStateInput(SessionIdInput):
@@ -176,7 +210,14 @@ class ListDownloadsInput(SessionIdInput):
 
 
 class AuthProfileNameInput(StrictInputModel):
-    profile_name: str = Field(min_length=1, max_length=120)
+    profile_name: str = Field(
+        min_length=1,
+        max_length=120,
+        description=(
+            "Name of the saved auth profile to inspect, as listed by "
+            "browser.list_auth_profiles."
+        ),
+    )
 
 
 class GetMemoryProfileInput(StrictInputModel):
@@ -196,7 +237,12 @@ class ListTabsInput(SessionIdInput):
 
 
 class TabActionInput(SessionIdInput):
-    index: int = Field(ge=0)
+    index: int = Field(
+        ge=0,
+        description=(
+            "Zero-based index of the target tab, as reported by browser.list_tabs."
+        ),
+    )
 
 
 class ApprovalIdInput(StrictInputModel):

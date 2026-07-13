@@ -77,7 +77,12 @@ def register(registry, gateway):
         ),
         ToolSpec(
             name="browser.get_session",
-            description="Get one browser session summary.",
+            description=(
+                "Get the full record for one browser session by ID: the live session "
+                "summary (status, current page, tabs) when the session is active, or the "
+                "persisted session record when it has been closed. Use "
+                "browser.list_sessions to discover session IDs."
+            ),
             input_model=SessionIdInput,
             handler=gateway._get_session,
         ),
@@ -125,7 +130,13 @@ def register(registry, gateway):
         ),
         ToolSpec(
             name="browser.get_auth_profile",
-            description="Inspect one saved auth profile and its storage-state metadata.",
+            description=(
+                "Inspect one saved auth profile by name: its normalized name, on-disk "
+                "profile directory, storage-state metadata, and any saved profile "
+                "metadata. Profiles are created with browser.save_auth_profile and loaded "
+                "into new sessions via browser.create_session; discover names with "
+                "browser.list_auth_profiles."
+            ),
             input_model=AuthProfileNameInput,
             handler=gateway._get_auth_profile,
         ),
@@ -143,7 +154,11 @@ def register(registry, gateway):
         ),
         ToolSpec(
             name="browser.activate_tab",
-            description="Switch the active session page to one tab index.",
+            description=(
+                "Bring one tab to the foreground so subsequent observations and actions "
+                "target it. Tab indexes come from browser.list_tabs. Returns the activated "
+                "index, the updated session summary, and the current tab list."
+            ),
             input_model=TabActionInput,
             handler=gateway._activate_tab,
         ),
@@ -156,7 +171,14 @@ def register(registry, gateway):
         ),
         ToolSpec(
             name="browser.execute_action",
-            description="Execute one browser action using the shared internal action schema.",
+            description=(
+                "Execute one browser action (navigate, click, hover, type, press, "
+                "select_option, scroll, …) in a session, using the same action schema the "
+                "agent planner emits. Actions are policy-checked and audited, and governed "
+                "actions may require a granted approval_id. Call browser.observe first to "
+                "get targetable element IDs and selectors; returns the executed action's "
+                "result payload."
+            ),
             input_model=ExecuteActionInput,
             handler=gateway._execute_action,
             governed_kind="dynamic",
