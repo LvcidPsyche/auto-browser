@@ -129,13 +129,13 @@ class HarnessService:
             model_tiers=self.model_tiers,
         )
         self.store.save(record)
+        attempt_budget = min(max_attempts or contract.budget.max_attempts, contract.budget.max_attempts)
         detector = ConvergenceDetector(
             required_successes=min(3, max(1, contract.budget.max_attempts)),
-            max_attempts=max_attempts or contract.budget.max_attempts,
+            max_attempts=attempt_budget,
         )
         results: list[VerificationResult] = []
         latest_trace: TraceEnvelope | None = None
-        attempt_budget = min(max_attempts or contract.budget.max_attempts, contract.budget.max_attempts)
         deadline = time.monotonic() + contract.budget.max_wall_seconds
         for attempt_index in range(1, attempt_budget + 1):
             trace_path = run_dir / f"attempt-{attempt_index}" / "trace.json"

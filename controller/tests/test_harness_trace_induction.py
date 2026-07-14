@@ -312,6 +312,24 @@ class HarnessServiceTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 service.graduate(record.id)
 
+    async def test_caller_attempt_override_cannot_leave_exhausted_run_active(self) -> None:
+        # Given: the caller asks for more attempts than the contract permits.
+        contract = _contract(max_attempts=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            service = HarnessService(tmp)
+
+            # When: the only permitted attempt fails verification.
+            record = await service.start_convergence(
+                contract,
+                mock_final_observation={"url": "https://example.com/not-done", "text": "still running"},
+                max_attempts=3,
+            )
+
+            # Then: the persisted run is terminal because its effective budget is exhausted.
+            self.assertEqual(record.status, "unconverged")
+            self.assertFalse(record.decision.should_continue)
+            self.assertEqual(record.decision.total_attempts, 1)
+
     async def test_attempt_exception_is_persisted_as_failed_run(self) -> None:
         contract = _contract(max_attempts=2)
         orchestrator = _FailingOrchestrator()
