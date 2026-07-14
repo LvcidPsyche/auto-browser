@@ -4,6 +4,10 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Security
+
+- Upgraded FastAPI, Starlette, cryptography, and Pillow to versions that clear the release dependency audit.
+
 ## [1.0.6] — 2026-05-09
 
 ### Added
