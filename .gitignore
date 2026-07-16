@@ -52,3 +52,6 @@ dist/
 
 # WebArena Stage 0 evidence runs (generated)
 benchmarks/webarena/runs/
+
+# local pytest basetemp (Windows global-temp ACL workaround)
+.pytmp/
