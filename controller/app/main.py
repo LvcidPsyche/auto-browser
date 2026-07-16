@@ -25,12 +25,12 @@ from .routes.session_diagnostics import create_session_diagnostics_router
 from .routes.sessions import create_sessions_router
 from .routes.share import create_share_router
 from .runtime_policy import validate_runtime_policy
+from .version import __version__ as _VERSION
 
 _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(level=_log_level)
 logger = logging.getLogger(__name__)
 
-_VERSION = "1.3.1"
 
 def _install_controller_host_middleware(application: FastAPI, allowed_hosts: list[str]) -> None:
     install_controller_host_middleware(application, allowed_hosts)

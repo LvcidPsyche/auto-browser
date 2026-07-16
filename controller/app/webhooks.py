@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .models import ApprovalRecord
+from .version import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,7 @@ async def dispatch_approval_event(
         body.update(extra)
 
     raw = json.dumps(body, separators=(",", ":")).encode()
-    headers: dict[str, str] = {"Content-Type": "application/json", "User-Agent": "auto-browser/1.3.1"}
+    headers: dict[str, str] = {"Content-Type": "application/json", "User-Agent": f"auto-browser/{__version__}"}
     if webhook_secret:
         headers["X-Webhook-Signature"] = _sign(raw, webhook_secret)
 

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from app import events, webhooks
 from app.models import ApprovalRecord, BrowserActionDecision
+from app.version import __version__
 
 
 class EventsTests(unittest.TestCase):
@@ -64,7 +65,7 @@ class WebhookTests(unittest.IsolatedAsyncioTestCase):
         first_call = client.post.await_args_list[0]
         self.assertEqual(first_call.args[0], "https://hooks.example.com/approval")
         self.assertIn("X-Webhook-Signature", first_call.kwargs["headers"])
-        self.assertEqual(first_call.kwargs["headers"]["User-Agent"], "auto-browser/1.3.1")
+        self.assertEqual(first_call.kwargs["headers"]["User-Agent"], f"auto-browser/{__version__}")
         self.assertIn(b'"source":"test"', first_call.kwargs["content"])
         self.assertEqual(client.post.await_count, 2)
 
