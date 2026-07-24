@@ -4,6 +4,14 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **`python -m app.harness.run` no longer crashes when a task fails to converge.** The run record's `candidate` field is present but null unless the run succeeded, and `payload.get("candidate", {})` returns `None` rather than the `{}` default when a key exists with a null value — so the summary line raised `AttributeError` instead of printing, exactly when an operator was reading the output to find out why the run failed. The `--json` path was unaffected (#108).
+
+### Changed
+- **The auth-profile containment guards are now pinned by tests.** `BrowserAuthProfileService` handles stored browser auth state (cookies, session tokens) and was the least-covered module in the controller at 22%; its guards were correct but untested, so a refactor that weakened one would have shipped green. Rejection behaviour is now covered for Zip Slip member names, symlink/hardlink/device archive members, containment on a separator boundary rather than a raw string prefix, the profile-name whitelist, and archive-path traversal — plus the end-to-end property that a malicious archive writes nothing outside the root. Each guard's test was verified by breaking the guard and confirming the failure (#105).
+- **The MCP stdio bridge's failure paths are covered.** `app/mcp_stdio.py` — what `uvx auto-browser-mcp` runs — went from 58% to 99%, covering HTTP errors being returned rather than raised (so the server's JSON-RPC error reaches the client instead of a transport crash), teardown swallowing a dead connection, batch/non-object rejection, unreachable-endpoint handling, and protocol-version fallback when the response header is absent (#106).
+- Roadmap corrected: MCP `resources/subscribe` push notifications were listed under "Next" but shipped in v1.1.0 (#107).
+
 ## [1.4.1] — 2026-07-24
 
 ### Added
