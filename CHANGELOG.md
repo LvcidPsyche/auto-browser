@@ -4,7 +4,12 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Route-presence gate (`controller/tests/test_route_presence.py`).** Router mounting is now verified directly instead of being guarded by a dependency pin. Three independent layers: every `include_router` call site is represented in the OpenAPI surface (13 canaries, each naming its owning module), the surface has not collapsed, and the canaries actually dispatch at runtime. Layer 3 is not redundant — since FastAPI 0.137 `app.routes` holds `_IncludedRouter` wrappers rather than flattened `Route` objects, so introspection and dispatch can diverge (#101).
+
 ### Changed
+- **`fastapi` cap `<0.137` lifted to `>=0.139.2,<0.140`, and its stated rationale corrected.** The cap claimed 0.137 changed `include_router` internals so every mounted route vanishes silently, and set the condition for lifting it — "revisit behind a route-presence smoke test" — but that test was never written, so the cap could not be evaluated and simply ossified. Measured directly: the app exposes an identical 91-path surface on 0.136.3, 0.137.0 and 0.139.2, with the full suite green on 0.139.2; PR #82, the bump that triggered the cap, was itself fully green. What 0.137 *did* change is `app.routes` holding `_IncludedRouter` wrappers, so nothing may enumerate `app.routes` expecting `.path` (#99, #101, #102).
+- **CI lint no longer drifts from the ruff pin it is supposed to enforce.** The lint job hardcoded `ruff==0.15.12` while `controller/requirements-dev.txt` pinned `0.15.21`; Dependabot only bumps the requirements file, so the gate sat 9 patch versions behind and drifted further with every bump — lint could pass in CI and fail locally. The job now reads the pin from the requirements file. Same one-dependency-two-sources failure class as the Playwright drift guarded by `scripts/check_playwright_pins.py` (#101).
 - **Richer MCP tool schemas for the lowest-rated tools.** `browser.get_session`, `browser.get_auth_profile`, `browser.activate_tab`, `browser.execute_action`, and `harness.list_runs` (the five tools Glama graded C) now document what they return, where their IDs come from, and every input parameter; shared input fields (`session_id`, tab `index`, `run_id`) gained schema descriptions that flow through to every tool built on them.
 
 ### Fixed
