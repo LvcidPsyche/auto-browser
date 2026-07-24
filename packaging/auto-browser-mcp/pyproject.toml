@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 # console script against that dependency.
 [project]
 name = "auto-browser-mcp"
-version = "1.4.0"
+version = "1.4.1"
 description = "MCP stdio bridge for Auto Browser (metapackage for `uvx auto-browser-mcp`)"
 readme = "README.md"
 license = { text = "MIT" }
