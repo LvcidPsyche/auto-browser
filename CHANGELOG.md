@@ -4,6 +4,8 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.4.1] — 2026-07-24
+
 ### Added
 - **Route-presence gate (`controller/tests/test_route_presence.py`).** Router mounting is now verified directly instead of being guarded by a dependency pin. Three independent layers: every `include_router` call site is represented in the OpenAPI surface (13 canaries, each naming its owning module), the surface has not collapsed, and the canaries actually dispatch at runtime. Layer 3 is not redundant — since FastAPI 0.137 `app.routes` holds `_IncludedRouter` wrappers rather than flattened `Route` objects, so introspection and dispatch can diverge (#101).
 
