@@ -35,7 +35,10 @@ def main() -> int:
     if args.json:
         print(json.dumps(payload, indent=2))
     else:
-        candidate_path = payload.get("candidate", {}).get("files", {}).get("candidate.json", "")
+        # `candidate` is present but null on any non-converged run, so the {} default
+        # never applies — guard on the value, not on the key.
+        candidate = payload.get("candidate") or {}
+        candidate_path = candidate.get("files", {}).get("candidate.json", "")
         print(f"harness run {record.id}: {record.status} after {len(record.attempts)} attempt(s)")
         if candidate_path:
             print(f"staged candidate: {candidate_path}")
