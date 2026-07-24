@@ -36,6 +36,7 @@ data/host-bridge/*
 !data/host-bridge/.gitkeep
 data/cli-home/*
 !data/cli-home/.gitkeep
+node_modules/
 __pycache__/
 *.pyc
 .venv*/
