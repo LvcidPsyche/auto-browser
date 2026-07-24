@@ -24,7 +24,7 @@ This is the near-term direction for Auto Browser.
 - Shared session links — HMAC-signed TTL observer tokens
 - Vision-grounded targeting — Claude Vision element identification
 - Cron + webhook triggers — autonomous scheduled jobs
-- MCP Resources Protocol — live browser state as subscribable resources
+- MCP Resources Protocol — live browser state as subscribable resources, with `resources/subscribe` and `notifications/resources/updated` pushed over the event stream
 - Operator dashboard at `/dashboard` with SSE event stream
 - Durable background-agent checkpoints with dashboard resume/discard/cancel controls
 - Repeatable agent eval harness for provider and workflow-profile comparisons
@@ -33,8 +33,7 @@ This is the near-term direction for Auto Browser.
 ## Next
 
 - cleaner multi-tab / popup management
-- MCP `resources/subscribe` push notifications (live browser state streaming)
-- stronger trace viewer integration in operator dashboard
+- stronger trace viewer integration in operator dashboard (the API already returns a `viewer_url`; the dashboard does not surface it yet)
 
 ## Recently Shipped
 
