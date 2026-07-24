@@ -20,7 +20,10 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install lint tools
-        run: python -m pip install 'ruff==0.15.12'
+        # Single-source the ruff pin from controller/requirements-dev.txt. Hardcoding it
+        # here let the CI gate drift 9 patch versions behind the pin Dependabot maintains,
+        # so lint could pass in CI and fail locally (or vice versa).
+        run: python -m pip install "$(grep -E '^ruff==' controller/requirements-dev.txt)"
       - name: Ruff check
         run: make lint
       - name: Check Playwright pins matched (controller <-> browser-node)
