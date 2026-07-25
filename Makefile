@@ -3,8 +3,12 @@
 help: ## Show available commands
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | sed 's/:.*## /\t/' | sort
 
-lint: ## Run Ruff checks on app, tests, and Python scripts
-	ruff check controller/app controller/tests scripts/*.py --select E9,F,I
+lint: ## Run Ruff checks across the whole repo
+	# Repo-wide, not a path list: the previous scope (controller/app, controller/tests,
+	# scripts/*.py) silently excluded client/, integrations/ and benchmarks/ — including
+	# two packages published to PyPI — and four real errors had accumulated there unseen.
+	# Ruff's defaults plus .gitignore already exclude .venv*/, node_modules/, build/, dist/.
+	ruff check . --select E9,F,I
 
 up: ## Start the shared browser stack
 	./scripts/compose_local.sh up --build

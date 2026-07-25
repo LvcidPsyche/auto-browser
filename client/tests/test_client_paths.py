@@ -5,7 +5,6 @@ import unittest
 from typing import Any
 
 import httpx
-
 from auto_browser_client import AutoBrowserClient
 
 
