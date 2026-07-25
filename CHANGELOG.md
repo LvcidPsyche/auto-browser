@@ -4,6 +4,8 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.4.2] — 2026-07-25
+
 ### Fixed
 - **`AutoBrowserTool` works again on Python 3.14.** The synchronous path — what LangChain and CrewAI call for `.invoke()` — used `asyncio.get_event_loop().run_until_complete()`, and since 3.14 `get_event_loop()` raises `RuntimeError: There is no current event loop` rather than creating one. `auto-browser-langchain` advertises 3.14 in `requires-python` and its classifiers, and nothing tested the package at all, so this shipped unnoticed. Now uses `asyncio.run()`, which is correct on every supported version; callers already inside an event loop should await `_arun` via `ainvoke` (#110).
 - **`python -m app.harness.run` no longer crashes when a task fails to converge.** The run record's `candidate` field is present but null unless the run succeeded, and `payload.get("candidate", {})` returns `None` rather than the `{}` default when a key exists with a null value — so the summary line raised `AttributeError` instead of printing, exactly when an operator was reading the output to find out why the run failed. The `--json` path was unaffected (#108).
