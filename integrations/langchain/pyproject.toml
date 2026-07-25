@@ -27,10 +27,11 @@ classifiers = [
 [project.optional-dependencies]
 langchain = ["langchain-core>=0.2"]
 crewai = ["crewai>=0.28"]
-# langchain-core is pinned rather than floated: the tests need it installed to
-# exercise AutoBrowserTool at all, and 1.5.0 was the newest release older than
-# the 72-hour supply-chain window when this suite was added. Bump deliberately.
-dev = ["pytest", "pytest-cov", "respx", "langchain-core==1.5.0"]
+# dev pulls the langchain extra rather than naming langchain-core again, so the
+# version constraint has exactly one home. Floated deliberately: this package's
+# whole job is to sit on top of langchain-core, so testing against whatever is
+# current is how upstream breakage gets caught rather than discovered by users.
+dev = ["auto-browser-langchain[langchain]", "pytest", "pytest-cov", "respx"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
