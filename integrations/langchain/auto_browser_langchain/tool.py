@@ -44,7 +44,11 @@ class AutoBrowserTool(BaseTool):
     def _run(self, action: str, arguments: dict[str, Any] | None = None) -> str:
         import asyncio
 
-        return asyncio.get_event_loop().run_until_complete(self._arun(action, arguments or {}))
+        # asyncio.run, not get_event_loop().run_until_complete(): since Python 3.14
+        # get_event_loop() raises RuntimeError when no loop is running, which broke
+        # this sync path outright on a version the package claims to support.
+        # Callers already inside a running loop should await _arun via ainvoke.
+        return asyncio.run(self._arun(action, arguments or {}))
 
     async def _arun(self, action: str, arguments: dict[str, Any] | None = None) -> str:
         headers: dict[str, str] = {"Content-Type": "application/json"}
