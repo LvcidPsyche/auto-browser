@@ -1,0 +1,16 @@
+# Ruff settings for everything outside controller/, which keeps its own
+# [tool.ruff] in controller/pyproject.toml and is unaffected by this file
+# (Ruff resolves the nearest config per file).
+#
+# Before this existed, scripts/, client/, integrations/, benchmarks/ and
+# examples/ were linted with Ruff's bare defaults — a different line length
+# than the controller, and a target version old enough that `tomllib` was
+# classified as third-party rather than stdlib. Matching the controller's
+# settings keeps one repo linting one way.
+line-length = 120
+target-version = "py311"
+
+[lint]
+# The gate is deliberately narrow: syntax errors, undefined/unused names, and
+# import order. Widening it is a separate decision from widening the scope.
+select = ["E9", "F", "I"]

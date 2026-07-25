@@ -37,7 +37,7 @@ auto-browser-mcp = "auto_browser_client.mcp_bridge:main"
 include = ["auto_browser_client*"]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "respx"]
+dev = ["pytest", "pytest-asyncio", "pytest-cov", "respx"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

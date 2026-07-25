@@ -92,9 +92,8 @@ def _cmd_execute() -> int:
 def _execute_live(contracts: list[TaskContract], run_dir: Path, base_url: str) -> int:
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "controller"))
-        from fastapi.testclient import TestClient
-
         from app.main import app
+        from fastapi.testclient import TestClient
     except Exception as exc:  # noqa: BLE001 - missing controller is a skip
         print(f"[webarena] SKIP live execution: controller not importable ({exc}).")
         return 0

@@ -195,7 +195,7 @@ def WARMUP_CHECK(
     for platform in platforms:
         steps.append({
             "id": f"check_{platform}",
-            "action": f"social.auth.verify",
+            "action": "social.auth.verify",
             "params": {
                 "platform": platform,
                 "auth_profile": f"{platform}-default",

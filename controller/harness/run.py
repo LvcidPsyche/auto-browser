@@ -9,6 +9,5 @@ if str(CONTROLLER_ROOT) not in sys.path:
 
 from app.harness.run import main
 
-
 if __name__ == "__main__":
     raise SystemExit(main())
