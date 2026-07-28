@@ -1,5 +1,7 @@
 # Auto Browser
 
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2FLvcidPsyche%2Fauto-browser.svg)](https://mcptoplist.com/server/glama%2FLvcidPsyche%2Fauto-browser)
+
 [![CI](https://github.com/LvcidPsyche/auto-browser/actions/workflows/ci.yml/badge.svg)](https://github.com/LvcidPsyche/auto-browser/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/auto-browser-client?label=PyPI)](https://pypi.org/project/auto-browser-client/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
