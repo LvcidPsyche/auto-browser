@@ -64,9 +64,8 @@ class BrowserObservationService:
         screenshot_label: str = "observe",
         preset: str = "normal",
     ) -> dict[str, Any]:
-        screenshot = await self.manager._capture_screenshot(session, screenshot_label)
-
         if preset == "fast":
+            screenshot = await self.manager._capture_screenshot(session, screenshot_label)
             title = await session.page.title()
             tabs = await self.manager.tabs.summaries(session)
             return {
@@ -91,11 +90,38 @@ class BrowserObservationService:
                 "preset": "fast",
             }
 
+        if preset == "text":
+            interactables = await session.page.evaluate(INTERACTABLES_SCRIPT, limit)
+            summary = await self.page_summary(session.page, text_limit=2000)
+            tabs = await self.manager.tabs.summaries(session)
+            return {
+                "session": await self.manager._session_summary(session),
+                "url": session.page.url,
+                "title": summary["title"],
+                "active_element": summary["active_element"],
+                "text_excerpt": summary["text_excerpt"],
+                "dom_outline": summary["dom_outline"],
+                "accessibility_outline": summary["accessibility_outline"],
+                "ocr": None,
+                "interactables": interactables,
+                "screenshot_path": None,
+                "screenshot_url": None,
+                "console_messages": session.console_messages[-10:],
+                "page_errors": session.page_errors[-10:],
+                "request_failures": session.request_failures[-10:],
+                "tabs": tabs,
+                "recent_downloads": session.downloads[-10:],
+                "takeover_url": self.manager._current_takeover_url(session),
+                "remote_access": self.manager.remote_access.session_info(session),
+                "preset": "text",
+            }
+
+        screenshot = await self.manager._capture_screenshot(session, screenshot_label)
         effective_limit = min(limit * 2, 200) if preset == "rich" else limit
         interactables = await session.page.evaluate(INTERACTABLES_SCRIPT, effective_limit)
         text_limit = 4000 if preset == "rich" else 2000
         summary = await self.page_summary(session.page, text_limit=text_limit)
-        ocr = await self.manager.ocr.extract_from_image(screenshot["path"])
+        ocr = await self._extract_ocr_if_needed(session, screenshot, summary)
         await self._scrub_screenshot_if_needed(session, screenshot, ocr)
         tabs = await self.manager.tabs.summaries(session)
         return {
@@ -119,6 +145,27 @@ class BrowserObservationService:
             "remote_access": self.manager.remote_access.session_info(session),
             "preset": preset,
         }
+
+    async def _extract_ocr_if_needed(
+        self,
+        session: "BrowserSession",
+        screenshot: dict[str, str],
+        summary: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Skip OCR when text extraction already produced usable content.
+
+        Never skips while screenshot PII scrubbing is active — scrubbing
+        consumes OCR's bounding boxes, so trading tokens for that would
+        weaken PII redaction.
+        """
+        skip_enabled = self.manager.settings.ocr_skip_when_text_available
+        scrubbing_active = self.manager.pii_scrubber.screenshot_enabled
+        text_available = bool(summary.get("text_excerpt")) and bool(
+            summary.get("accessibility_outline", {}).get("available")
+        )
+        if skip_enabled and not scrubbing_active and text_available:
+            return None
+        return await self.manager.ocr.extract_from_image(screenshot["path"])
 
     async def light_snapshot(self, session: "BrowserSession", *, label: str) -> dict[str, Any]:
         screenshot = await self.manager._capture_screenshot(session, label)

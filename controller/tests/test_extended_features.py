@@ -41,6 +41,10 @@ class TestObserveRequest(unittest.TestCase):
         req = ObserveRequest(preset="fast")
         self.assertEqual(req.preset, "fast")
 
+    def test_text_preset(self) -> None:
+        req = ObserveRequest(preset="text")
+        self.assertEqual(req.preset, "text")
+
     def test_rich_preset(self) -> None:
         req = ObserveRequest(preset="rich")
         self.assertEqual(req.preset, "rich")
@@ -215,6 +219,15 @@ class TestNewConfigSettings(unittest.TestCase):
         with patch.dict(os.environ, {"PERCEPTION_PRESET_DEFAULT": "fast"}):
             s = Settings()
             self.assertEqual(s.perception_preset_default, "fast")
+
+    def test_ocr_skip_when_text_available_default_true(self) -> None:
+        s = Settings()
+        self.assertTrue(s.ocr_skip_when_text_available)
+
+    def test_ocr_skip_when_text_available_from_env(self) -> None:
+        with patch.dict(os.environ, {"OCR_SKIP_WHEN_TEXT_AVAILABLE": "false"}):
+            s = Settings()
+            self.assertFalse(s.ocr_skip_when_text_available)
 
 
 # ── Auth Export / Import ─────────────────────────────────────────────────────

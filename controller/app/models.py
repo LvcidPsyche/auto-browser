@@ -235,7 +235,7 @@ class ActionEnvelope(BaseModel):
     target: dict[str, Any]
 
 
-PerceptionPreset = Literal["fast", "normal", "rich"]
+PerceptionPreset = Literal["text", "fast", "normal", "rich"]
 
 
 class ObserveRequest(StrictInputModel):
