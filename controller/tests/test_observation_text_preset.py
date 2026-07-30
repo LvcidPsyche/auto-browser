@@ -52,9 +52,17 @@ def _make_session(*, text_excerpt: str = "Hello world") -> SimpleNamespace:
     )
 
 
-def _make_manager(*, ocr_skip: bool = True, scrubbing_active: bool = False) -> SimpleNamespace:
+def _make_manager(
+    *,
+    ocr_skip: bool = True,
+    scrubbing_active: bool = False,
+    preset_default: str = "normal",
+) -> SimpleNamespace:
     return SimpleNamespace(
-        settings=SimpleNamespace(ocr_skip_when_text_available=ocr_skip),
+        settings=SimpleNamespace(
+            ocr_skip_when_text_available=ocr_skip,
+            perception_preset_default=preset_default,
+        ),
         pii_scrubber=SimpleNamespace(screenshot_enabled=scrubbing_active, audit_report=False),
         _capture_screenshot=AsyncMock(return_value={"path": "/tmp/shot.png", "url": "/artifacts/shot.png"}),
         _session_summary=AsyncMock(return_value={"id": "session-1"}),
@@ -88,6 +96,24 @@ class TextPresetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["interactables"], [{"element_id": "op-1", "label": "Submit"}])
         self.assertIsNone(result["ocr"])
         manager.ocr.extract_from_image.assert_not_called()
+
+    async def test_omitted_preset_resolves_from_settings_default(self) -> None:
+        # PERCEPTION_PRESET_DEFAULT steers the whole deployment when the caller
+        # does not pass a preset — here the default is "text", so no screenshot.
+        manager = _make_manager(preset_default="text")
+        service = BrowserObservationService(manager=manager)
+        result = await service.observation_payload(_make_session(), preset=None)
+
+        manager._capture_screenshot.assert_not_called()
+        self.assertEqual(result["preset"], "text")
+
+    async def test_unknown_preset_falls_back_to_normal(self) -> None:
+        manager = _make_manager(preset_default="bogus")
+        service = BrowserObservationService(manager=manager)
+        result = await service.observation_payload(_make_session(), preset=None)
+
+        manager._capture_screenshot.assert_awaited_once()
+        self.assertEqual(result["preset"], "normal")
 
     async def test_fast_preset_still_captures_screenshot(self) -> None:
         manager = _make_manager()

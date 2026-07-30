@@ -23,7 +23,7 @@ class BrowserObservationService:
     def __init__(self, manager: Any) -> None:
         self.manager = manager
 
-    async def observe(self, session_id: str, limit: int = 40, preset: str = "normal") -> dict[str, Any]:
+    async def observe(self, session_id: str, limit: int = 40, preset: str | None = None) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         async with session.lock:
             result = await self.observation_payload(session, limit=limit, preset=preset)
@@ -62,8 +62,14 @@ class BrowserObservationService:
         *,
         limit: int = 40,
         screenshot_label: str = "observe",
-        preset: str = "normal",
+        preset: str | None = None,
     ) -> dict[str, Any]:
+        if preset is None:
+            preset = self.manager.settings.perception_preset_default
+        if preset not in ("text", "fast", "normal", "rich"):
+            logger.warning("unknown perception preset %r; falling back to 'normal'", preset)
+            preset = "normal"
+
         if preset == "fast":
             screenshot = await self.manager._capture_screenshot(session, screenshot_label)
             title = await session.page.title()

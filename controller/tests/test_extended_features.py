@@ -33,9 +33,11 @@ from app.webhooks import _sign
 # ── Perception Preset Models ─────────────────────────────────────────────────
 
 class TestObserveRequest(unittest.TestCase):
-    def test_default_preset_is_normal(self) -> None:
+    def test_default_preset_is_unset(self) -> None:
+        # None defers to the deployment default (PERCEPTION_PRESET_DEFAULT,
+        # "normal" unless overridden) — resolved in observation_payload.
         req = ObserveRequest()
-        self.assertEqual(req.preset, "normal")
+        self.assertIsNone(req.preset)
 
     def test_fast_preset(self) -> None:
         req = ObserveRequest(preset="fast")

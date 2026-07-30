@@ -239,7 +239,8 @@ PerceptionPreset = Literal["text", "fast", "normal", "rich"]
 
 
 class ObserveRequest(StrictInputModel):
-    preset: PerceptionPreset = "normal"
+    # None → the deployment default (PERCEPTION_PRESET_DEFAULT, normally "normal")
+    preset: PerceptionPreset | None = None
     limit: int = Field(default=40, ge=1, le=200)
 
 
