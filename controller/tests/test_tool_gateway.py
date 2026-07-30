@@ -938,6 +938,55 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(response.isError)
 
+    async def test_find_elements_invalid_regex_surfaces_structured_error(self) -> None:
+        page = SimpleNamespace(
+            evaluate=AsyncMock(return_value={"__invalid_regex": "Unterminated group"})
+        )
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page))
+
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.find_elements",
+                arguments={"session_id": "session-1", "query": "(unclosed", "regex": True},
+            )
+        )
+
+        self.assertTrue(response.isError)
+        self.assertEqual(response.structuredContent.get("code"), "invalid_regex")
+        self.assertIn("Invalid regular expression", response.content[0].text)
+        self.assertIn("Unterminated group", response.content[0].text)
+
+    async def test_invalid_arguments_message_reaches_the_caller(self) -> None:
+        # drag_drop with neither selectors nor coordinates fails validation with an
+        # operator-facing message; it must surface instead of "Tool execution failed".
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=SimpleNamespace()))
+
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.drag_drop",
+                arguments={"session_id": "session-1"},
+            )
+        )
+
+        self.assertTrue(response.isError)
+        self.assertIn("source_selector", response.content[0].text)
+        self.assertNotIn("Tool execution failed", response.content[0].text)
+
+    async def test_handler_key_error_message_reaches_the_caller(self) -> None:
+        # get_memory_profile raises KeyError with an operator-facing message for an
+        # unknown profile; it must surface, not the opaque catch-all.
+        self.manager.memory = SimpleNamespace(get=AsyncMock(return_value=None))
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.get_memory_profile",
+                arguments={"profile_name": "no-such-profile"},
+            )
+        )
+
+        self.assertTrue(response.isError)
+        self.assertIn("no-such-profile", response.content[0].text)
+        self.assertNotIn("Tool execution failed", response.content[0].text)
+
     async def test_approval_required_bubbles_back_as_tool_error(self) -> None:
         approval = ApprovalRecord(
             id="approval-1",

@@ -5,7 +5,7 @@ import logging
 import time
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ..action_errors import BrowserActionError
 from ..approvals import ApprovalRequiredError
@@ -200,6 +200,23 @@ class McpToolGateway:
                 structuredContent=detail,
                 isError=True,
             )
+        except ValidationError as exc:
+            # Invalid tool arguments — report the field errors so the calling
+            # agent can fix its call, instead of "Tool execution failed".
+            details = "; ".join(
+                f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
+                if err.get("loc")
+                else err["msg"]
+                for err in exc.errors()
+            )
+            return self._error_response(f"Invalid arguments for {payload.name}: {details}")
+        except (ValueError, KeyError, RuntimeError) as exc:
+            # Handlers raise these with operator-facing messages ("Provide
+            # source_selector or source_x/source_y", "Memory profile not found").
+            # Surface them so the calling agent can self-correct, instead of
+            # collapsing them into the opaque catch-all below.
+            message = str(exc.args[0]) if exc.args else exc.__class__.__name__
+            return self._error_response(message)
         except Exception:
             logger.exception("tool %s failed", payload.name)
             return self._error_response("Tool execution failed")
@@ -516,7 +533,14 @@ class McpToolGateway:
         if payload.query is not None:
             elements = await session.page.evaluate(
                 """([query, isRegex, context, limit]) => {
-                    const matcher = isRegex ? new RegExp(query, 'gi') : null;
+                    let matcher = null;
+                    if (isRegex) {
+                        try {
+                            matcher = new RegExp(query, 'gi');
+                        } catch (e) {
+                            return {__invalid_regex: String((e && e.message) || e)};
+                        }
+                    }
                     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
                     const results = [];
                     let node;
@@ -557,6 +581,12 @@ class McpToolGateway:
                 }""",
                 [payload.query, payload.regex, payload.context, payload.limit],
             )
+            if isinstance(elements, dict) and "__invalid_regex" in elements:
+                raise BrowserActionError(
+                    f"Invalid regular expression: {elements['__invalid_regex']}",
+                    code="invalid_regex",
+                    action="find_elements",
+                )
             return {"session_id": payload.session_id, "query": payload.query, "elements": elements}
 
         elements = await session.page.evaluate(

@@ -392,12 +392,16 @@ class FindElementsInput(SessionIdInput):
         max_length=500,
         description=(
             "Text or regex to search for across the page's text content, as an "
-            "alternative to selector. Returns matched elements plus surrounding text."
+            "alternative to selector. Matching is case-insensitive in both modes. "
+            "Returns matched elements plus surrounding text."
         ),
     )
     regex: bool = Field(
         default=False,
-        description="Treat query as a regular expression instead of a plain-text substring match.",
+        description=(
+            "Treat query as a regular expression (JavaScript syntax, 'gi' flags) "
+            "instead of a plain-text substring match."
+        ),
     )
     context: int = Field(
         default=0,
