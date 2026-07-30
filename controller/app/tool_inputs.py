@@ -385,8 +385,35 @@ class SetViewportInput(SessionIdInput):
 
 
 class FindElementsInput(SessionIdInput):
-    selector: str = Field(min_length=1, max_length=2000)
+    selector: str | None = Field(default=None, min_length=1, max_length=2000)
+    query: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=500,
+        description=(
+            "Text or regex to search for across the page's text content, as an "
+            "alternative to selector. Returns matched elements plus surrounding text."
+        ),
+    )
+    regex: bool = Field(
+        default=False,
+        description="Treat query as a regular expression instead of a plain-text substring match.",
+    )
+    context: int = Field(
+        default=0,
+        ge=0,
+        le=500,
+        description="Characters of surrounding text to include around each match when query is used.",
+    )
     limit: int = Field(default=20, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def validate_selector_or_query(self) -> "FindElementsInput":
+        if not self.selector and not self.query:
+            raise ValueError("find_elements requires either selector or query")
+        if self.selector and self.query:
+            raise ValueError("find_elements accepts either selector or query, not both")
+        return self
 
 
 class DragDropInput(SessionIdInput):

@@ -513,6 +513,52 @@ class McpToolGateway:
 
     async def _find_elements(self, payload: FindElementsInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
+        if payload.query is not None:
+            elements = await session.page.evaluate(
+                """([query, isRegex, context, limit]) => {
+                    const matcher = isRegex ? new RegExp(query, 'gi') : null;
+                    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+                    const results = [];
+                    let node;
+                    while ((node = walker.nextNode()) && results.length < limit) {
+                        const text = node.textContent || '';
+                        if (!text.trim()) continue;
+                        let matchIndex = -1;
+                        let matchText = '';
+                        if (isRegex) {
+                            matcher.lastIndex = 0;
+                            const m = matcher.exec(text);
+                            if (m) { matchIndex = m.index; matchText = m[0]; }
+                        } else {
+                            const idx = text.toLowerCase().indexOf(query.toLowerCase());
+                            if (idx !== -1) { matchIndex = idx; matchText = text.substr(idx, query.length); }
+                        }
+                        if (matchIndex === -1) continue;
+                        const el = node.parentElement;
+                        if (!el) continue;
+                        const r = el.getBoundingClientRect();
+                        const start = Math.max(0, matchIndex - context);
+                        const end = Math.min(text.length, matchIndex + matchText.length + context);
+                        results.push({
+                            tag: el.tagName.toLowerCase(),
+                            text: text.trim().substring(0, 200),
+                            match: matchText,
+                            context_text: text.substring(start, end).trim(),
+                            value: el.value || null,
+                            href: el.href || null,
+                            id: el.id || null,
+                            class: el.className || null,
+                            visible: r.width > 0 && r.height > 0,
+                            x: Math.round(r.x), y: Math.round(r.y),
+                            width: Math.round(r.width), height: Math.round(r.height),
+                        });
+                    }
+                    return results;
+                }""",
+                [payload.query, payload.regex, payload.context, payload.limit],
+            )
+            return {"session_id": payload.session_id, "query": payload.query, "elements": elements}
+
         elements = await session.page.evaluate(
             """([selector, limit]) => {
                 const els = [...document.querySelectorAll(selector)].slice(0, limit);

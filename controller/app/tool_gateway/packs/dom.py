@@ -48,9 +48,12 @@ def register(registry, gateway):
         ToolSpec(
             name="browser.find_elements",
             description=(
-                "Find all elements matching a CSS selector and return their "
-                "text, href, value, bounding box, and visibility. "
-                "Useful before clicking or scraping multiple items."
+                "Find elements either by CSS selector or by a text/regex query across the "
+                "page's text content. selector mode returns matching elements' text, href, "
+                "value, bounding box, and visibility -- useful before clicking or scraping "
+                "multiple items. query mode (set query, optionally regex and context) returns "
+                "the matched text plus surrounding context for each hit -- a cheap way to "
+                "locate a specific string on the page without a full observe."
             ),
             input_model=FindElementsInput,
             handler=gateway._find_elements,

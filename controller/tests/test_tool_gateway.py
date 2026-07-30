@@ -889,6 +889,55 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(response.isError)
         self.manager.observe.assert_awaited_once_with("session-1", limit=50, preset="rich")
 
+    async def test_find_elements_query_mode_returns_matches_and_echoes_query(self) -> None:
+        page = SimpleNamespace(
+            evaluate=AsyncMock(
+                return_value=[
+                    {
+                        "tag": "span",
+                        "text": "Total: $42.00",
+                        "match": "$42.00",
+                        "context_text": "Order Total: $42.00 due",
+                        "value": None,
+                        "href": None,
+                        "id": None,
+                        "class": None,
+                        "visible": True,
+                        "x": 0,
+                        "y": 0,
+                        "width": 10,
+                        "height": 10,
+                    }
+                ]
+            )
+        )
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page))
+
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.find_elements",
+                arguments={"session_id": "session-1", "query": "$42.00", "context": 20},
+            )
+        )
+
+        self.assertFalse(response.isError)
+        result = response.content[0].text
+        self.assertIn("$42.00", result)
+        self.assertIn("Order Total", result)
+        page.evaluate.assert_awaited_once()
+        call_args = page.evaluate.await_args.args[1]
+        self.assertEqual(call_args, ["$42.00", False, 20, 20])
+
+    async def test_find_elements_rejects_neither_selector_nor_query(self) -> None:
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.find_elements",
+                arguments={"session_id": "session-1"},
+            )
+        )
+
+        self.assertTrue(response.isError)
+
     async def test_approval_required_bubbles_back_as_tool_error(self) -> None:
         approval = ApprovalRecord(
             id="approval-1",

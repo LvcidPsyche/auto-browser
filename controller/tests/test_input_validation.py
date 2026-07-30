@@ -26,6 +26,7 @@ from app.tool_inputs import (
     CreateCronJobInput,
     CreateProxyPersonaInput,
     DragDropInput,
+    FindElementsInput,
     GetNetworkLogInput,
     ObserveInput,
     SetCookiesInput,
@@ -122,6 +123,25 @@ class RequestValidationTests(unittest.TestCase):
     def test_drag_drop_requires_complete_coordinate_pairs(self) -> None:
         with self.assertRaises(ValidationError):
             DragDropInput(session_id="session-1", source_x=10, target_x=20, target_y=30)
+
+    def test_find_elements_requires_selector_or_query(self) -> None:
+        with self.assertRaises(ValidationError):
+            FindElementsInput(session_id="session-1")
+
+    def test_find_elements_rejects_both_selector_and_query(self) -> None:
+        with self.assertRaises(ValidationError):
+            FindElementsInput(session_id="session-1", selector="button", query="Submit")
+
+    def test_find_elements_accepts_selector_only(self) -> None:
+        payload = FindElementsInput(session_id="session-1", selector="button")
+        self.assertEqual(payload.selector, "button")
+        self.assertIsNone(payload.query)
+
+    def test_find_elements_accepts_query_only(self) -> None:
+        payload = FindElementsInput(session_id="session-1", query="Total: $", context=40)
+        self.assertEqual(payload.query, "Total: $")
+        self.assertEqual(payload.context, 40)
+        self.assertIsNone(payload.selector)
 
     def test_set_cookies_requires_name_and_domain_or_url(self) -> None:
         with self.assertRaises(ValidationError):
