@@ -118,11 +118,15 @@ class TextPresetTests(unittest.IsolatedAsyncioTestCase):
     async def test_fast_preset_still_captures_screenshot(self) -> None:
         manager = _make_manager()
         service = BrowserObservationService(manager=manager)
-        result = await service.observation_payload(_make_session(), preset="fast")
+        session = _make_session()
+        session.request_failures = [{"url": "https://example.com/x", "status": 500}]
+        result = await service.observation_payload(session, preset="fast")
 
         manager._capture_screenshot.assert_awaited_once()
         self.assertEqual(result["screenshot_path"], "/tmp/shot.png")
         self.assertEqual(result["screenshot_url"], "/artifacts/shot.png")
+        # fast reports the same diagnostic tails as the other presets
+        self.assertEqual(len(result["request_failures"]), 1)
 
     async def test_normal_preset_still_captures_screenshot(self) -> None:
         manager = _make_manager()

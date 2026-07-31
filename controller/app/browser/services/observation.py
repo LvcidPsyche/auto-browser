@@ -88,7 +88,7 @@ class BrowserObservationService:
                 "screenshot_url": screenshot["url"],
                 "console_messages": session.console_messages[-10:],
                 "page_errors": session.page_errors[-10:],
-                "request_failures": [],
+                "request_failures": session.request_failures[-10:],
                 "tabs": tabs,
                 "recent_downloads": session.downloads[-10:],
                 "takeover_url": self.manager._current_takeover_url(session),

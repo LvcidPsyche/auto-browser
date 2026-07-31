@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -78,6 +79,11 @@ from .packs import register_all
 from .registry import ToolRegistry, ToolSpec
 
 logger = logging.getLogger(__name__)
+
+# Bound on the in-page text walk for find_elements' query mode — a
+# catastrophically backtracking regex would otherwise hang page.evaluate
+# (and the session) indefinitely.
+FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS = 10.0
 
 
 class McpToolGateway:
@@ -531,7 +537,7 @@ class McpToolGateway:
     async def _find_elements(self, payload: FindElementsInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
         if payload.query is not None:
-            elements = await session.page.evaluate(
+            evaluate = session.page.evaluate(
                 """([query, isRegex, context, limit]) => {
                     let matcher = null;
                     if (isRegex) {
@@ -571,7 +577,7 @@ class McpToolGateway:
                             value: el.value || null,
                             href: el.href || null,
                             id: el.id || null,
-                            class: el.className || null,
+                            class: (typeof el.className === 'string' ? el.className : el.getAttribute('class')) || null,
                             visible: r.width > 0 && r.height > 0,
                             x: Math.round(r.x), y: Math.round(r.y),
                             width: Math.round(r.width), height: Math.round(r.height),
@@ -581,6 +587,18 @@ class McpToolGateway:
                 }""",
                 [payload.query, payload.regex, payload.context, payload.limit],
             )
+            try:
+                elements = await asyncio.wait_for(
+                    evaluate, timeout=FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS
+                )
+            except asyncio.TimeoutError:
+                raise BrowserActionError(
+                    f"find_elements query timed out after "
+                    f"{FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS:g}s — the pattern may "
+                    "backtrack catastrophically on this page's text",
+                    code="query_timeout",
+                    action="find_elements",
+                ) from None
             if isinstance(elements, dict) and "__invalid_regex" in elements:
                 raise BrowserActionError(
                     f"Invalid regular expression: {elements['__invalid_regex']}",
@@ -600,7 +618,7 @@ class McpToolGateway:
                         value: el.value || null,
                         href: el.href || null,
                         id: el.id || null,
-                        class: el.className || null,
+                        class: (typeof el.className === 'string' ? el.className : el.getAttribute('class')) || null,
                         visible: r.width > 0 && r.height > 0,
                         x: Math.round(r.x), y: Math.round(r.y),
                         width: Math.round(r.width), height: Math.round(r.height),

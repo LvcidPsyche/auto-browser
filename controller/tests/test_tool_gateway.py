@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -937,6 +938,34 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(response.isError)
+
+    async def test_find_elements_query_timeout_surfaces_structured_error(self) -> None:
+        # A catastrophically backtracking regex hangs page.evaluate; the query
+        # path is bounded and must come back as a structured error, not a hang.
+        from app.tool_gateway import gateway as gateway_module
+
+        async def never_finishes(*_args: object) -> object:
+            await asyncio.sleep(30)
+            return []
+
+        page = SimpleNamespace(evaluate=never_finishes)
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page))
+
+        original = gateway_module.FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS
+        gateway_module.FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS = 0.05
+        try:
+            response = await self.full_gateway.call_tool(
+                McpToolCallRequest(
+                    name="browser.find_elements",
+                    arguments={"session_id": "session-1", "query": "(a+)+$", "regex": True},
+                )
+            )
+        finally:
+            gateway_module.FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS = original
+
+        self.assertTrue(response.isError)
+        self.assertEqual(response.structuredContent.get("code"), "query_timeout")
+        self.assertIn("timed out", response.content[0].text)
 
     async def test_find_elements_invalid_regex_surfaces_structured_error(self) -> None:
         page = SimpleNamespace(
