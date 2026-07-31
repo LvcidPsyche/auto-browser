@@ -71,7 +71,7 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
         return await manager.get_session_record(session_id)
 
     @router.get("/sessions/{session_id}/observe")
-    async def observe(session_id: str, limit: int = 40, preset: str = "normal") -> dict[str, Any]:
+    async def observe(session_id: str, limit: int = 40, preset: str | None = None) -> dict[str, Any]:
         try:
             return await manager.observe(session_id, limit=limit, preset=preset)
         except KeyError:

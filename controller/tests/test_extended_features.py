@@ -33,13 +33,19 @@ from app.webhooks import _sign
 # ── Perception Preset Models ─────────────────────────────────────────────────
 
 class TestObserveRequest(unittest.TestCase):
-    def test_default_preset_is_normal(self) -> None:
+    def test_default_preset_is_unset(self) -> None:
+        # None defers to the deployment default (PERCEPTION_PRESET_DEFAULT,
+        # "normal" unless overridden) — resolved in observation_payload.
         req = ObserveRequest()
-        self.assertEqual(req.preset, "normal")
+        self.assertIsNone(req.preset)
 
     def test_fast_preset(self) -> None:
         req = ObserveRequest(preset="fast")
         self.assertEqual(req.preset, "fast")
+
+    def test_text_preset(self) -> None:
+        req = ObserveRequest(preset="text")
+        self.assertEqual(req.preset, "text")
 
     def test_rich_preset(self) -> None:
         req = ObserveRequest(preset="rich")
@@ -215,6 +221,15 @@ class TestNewConfigSettings(unittest.TestCase):
         with patch.dict(os.environ, {"PERCEPTION_PRESET_DEFAULT": "fast"}):
             s = Settings()
             self.assertEqual(s.perception_preset_default, "fast")
+
+    def test_ocr_skip_when_text_available_default_true(self) -> None:
+        s = Settings()
+        self.assertTrue(s.ocr_skip_when_text_available)
+
+    def test_ocr_skip_when_text_available_from_env(self) -> None:
+        with patch.dict(os.environ, {"OCR_SKIP_WHEN_TEXT_AVAILABLE": "false"}):
+            s = Settings()
+            self.assertFalse(s.ocr_skip_when_text_available)
 
 
 # ── Auth Export / Import ─────────────────────────────────────────────────────

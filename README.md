@@ -30,8 +30,11 @@ Works with:
 - **Safety rails built in.** Approvals, operator identity, PII scrubbing, Witness receipts, and policy presets are all part of the product surface.
 - **Governed skill induction.** Verified browser traces can become staged skill candidates with signed provenance, verifier adapters, and review-only graduation — agents that prove they can repeat themselves correctly, not just act once.
 
-## Release Highlights (v1.4.0)
+## Release Highlights (v1.5.0)
 
+- **Read a page without paying for pixels.** The new `text` observation preset returns the accessibility outline, extracted text, and interactables with no screenshot and no OCR — the cheapest way for an agent to read a page. Set `PERCEPTION_PRESET_DEFAULT=text` to make it a deployment-wide default.
+- **Find a string on the page in one call.** `browser.find_elements` now takes a `query` (plain text or regex, case-insensitive) instead of a CSS selector and returns each match with surrounding context — no full observe needed to check one value.
+- **Errors agents can act on.** Invalid tool arguments report field-level details, handler messages pass through instead of a generic failure, and the MCP bridge's cold-start error now says exactly how to start the controller.
 - **Any OpenAI-compatible model can drive the browser.** A single generic adapter serves every model reachable over an OpenAI `/chat/completions` endpoint. New providers: `openrouter` (one key → ~every frontier model), `xai` (Grok), `deepseek`, `minimax`, and `openai_compatible` (custom base URL for self-hosted Ollama / vLLM / LM Studio, Azure, Together, Groq, Fireworks, …). Vision + function-calling with a content-parse fallback for endpoints that ignore `tool_choice`.
 - **`browser://audit/events` MCP resource.** List and read recent audit events across sessions directly over MCP.
 - **Playwright pin parity enforced in CI.** The controller (pip) and browser-node (npm) Playwright versions must match exactly — a single-side bump can no longer merge and crash-loop compose deployments.

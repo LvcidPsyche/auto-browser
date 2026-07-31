@@ -4,6 +4,22 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-07-30
+
+### Added
+- **`text` observation preset — read a page without paying for pixels.** `browser.observe` (and `GET/POST /sessions/{id}/observe`) now takes `preset="text"`: populated accessibility outline, text excerpt, DOM outline, and interactables with **no screenshot and no OCR**. This is the cheapest way for an agent to read a page's content, and closes the cost gap with accessibility-snapshot-first browser MCP servers. `screenshot_path`/`screenshot_url` stay in the payload as `null`, so consumers keep a stable shape.
+- **`browser.find_elements` query mode.** Pass `query` (with optional `regex` and `context`) instead of `selector` to search the page's text content and get back each match plus surrounding text — locate one string on a page in a single cheap call instead of a full observe. Matching is case-insensitive in both modes; exactly one of `selector`/`query` is required.
+- **OCR skipping on `normal`/`rich` observes** when text extraction already produced usable content (`OCR_SKIP_WHEN_TEXT_AVAILABLE`, default on). Never skipped while screenshot PII scrubbing is active — scrubbing consumes OCR's bounding boxes, so redaction always wins over token savings. Under default config (scrubbing on) OCR therefore still runs; use `preset="text"` for the real savings.
+
+### Fixed
+- **The MCP stdio bridge's cold-start error is actionable.** A first-time `uvx auto-browser-mcp` user with no controller running used to get `Unable to reach Auto Browser MCP HTTP endpoint: [WinError 10061]` — the exact moment an agent silently falls back to a competing server. The error now names the endpoint it tried and the fix (`docker compose up -d`, or `--base-url`/`AUTO_BROWSER_BASE_URL` for remote deployments).
+- **Tool errors an agent can act on.** Invalid tool arguments now report pydantic's field-level errors, handler-raised `ValueError`/`KeyError`/`RuntimeError` messages ("Provide source_selector or source_x/source_y", "Memory profile not found") pass through to the caller, and an invalid regex in `find_elements` returns a structured `invalid_regex` error — all of these previously collapsed into an opaque `Tool execution failed`.
+- **`PERCEPTION_PRESET_DEFAULT` actually works.** The setting existed but every observe path hardcoded `normal`, so it was dead config. An omitted preset now resolves against it (unknown values clamp to `normal` with a warning), and the client SDK stopped forcing `preset="normal"` on every call — omitted means the deployment default. One env var now flips a whole deployment to screenshot-free observes.
+- **`./scripts/test_local.sh` no longer reports phantom failures on developer boxes.** It ran discovery from the repo root, where pydantic-settings picks up a developer's local dotenv — auth and rate limits turned on and ~138 route tests failed with 400s that CI and Docker (which have no dotenv) never see. Discovery now runs from `controller/`. The interpreter search also probes for the controller's dependencies rather than accepting on version alone, and falls back to the Windows `py` launcher — a stock Windows Git Bash box now finds its working interpreter without `AUTO_BROWSER_PYTHON_BIN`.
+
+### CI
+- **The stdio bridge's two copies are parity-enforced.** `client/auto_browser_client/mcp_bridge.py` and `controller/app/mcp_stdio.py` are intentionally byte-identical, and nothing caught an edit applied to only one. `scripts/check_bridge_parity.py` now fails CI on drift — same one-thing-two-sources class as the version and Playwright pin guards.
+
 ## [1.4.2] — 2026-07-25
 
 ### Fixed

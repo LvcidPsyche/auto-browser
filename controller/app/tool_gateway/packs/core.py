@@ -88,7 +88,14 @@ def register(registry, gateway):
         ),
         ToolSpec(
             name="browser.observe",
-            description="Capture the current browser observation with screenshot, interactables, and perception summary.",
+            description=(
+                "Capture the current browser observation: interactables, tabs, console, and a "
+                "perception summary. Presets: 'text' — no screenshot, no OCR, just the "
+                "accessibility tree and extracted text; the cheapest choice for reading a page's "
+                "content. 'fast' — screenshot only, no text/accessibility extraction; for visual "
+                "models. 'normal' (default) — screenshot + OCR + accessibility tree. 'rich' — "
+                "normal with extended text and DOM outline."
+            ),
             input_model=ObserveInput,
             handler=gateway._observe,
         ),

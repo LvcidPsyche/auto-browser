@@ -400,7 +400,7 @@ class BrowserManager:
 
     # ── Observation ──────────────────────────────────────────────────────────
 
-    async def observe(self, session_id: str, limit: int = 40, preset: str = "normal") -> dict[str, Any]:
+    async def observe(self, session_id: str, limit: int = 40, preset: str | None = None) -> dict[str, Any]:
         return await self.observation.observe(session_id, limit=limit, preset=preset)
 
     async def capture_screenshot(self, session_id: str, *, label: str = "manual") -> dict[str, Any]:
