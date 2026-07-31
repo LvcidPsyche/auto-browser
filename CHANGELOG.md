@@ -4,6 +4,9 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Added
+- **`session_id` may be omitted on MCP tools.** With exactly one live session, tools target it; with none live, observe/act tools (`observe`, `execute_action`, `find_elements`, `screenshot`, `get_html`, `wait_for_selector`) create one on demand — an agent's first `browser.observe` now works with zero setup calls. Anything ambiguous (multiple live sessions, or a non-create tool with none) stays an explicit structured error (`ambiguous_session` / `no_session`) rather than a guess. Explicit `session_id` behavior is unchanged.
+
 ## [1.5.0] — 2026-07-30
 
 ### Added

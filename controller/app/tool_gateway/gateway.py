@@ -85,6 +85,21 @@ logger = logging.getLogger(__name__)
 # (and the session) indefinitely.
 FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS = 10.0
 
+# Tools allowed to create a session on demand when session_id is omitted and no
+# session is live — the first call an agent makes is almost always one of these.
+# Everything else resolves an omitted session_id only when exactly one session
+# is live; creating a session as a side effect of, say, close_tab helps nobody.
+IMPLICIT_SESSION_CREATE_TOOLS = frozenset(
+    {
+        "browser.execute_action",
+        "browser.observe",
+        "browser.find_elements",
+        "browser.screenshot",
+        "browser.get_html",
+        "browser.wait_for_selector",
+    }
+)
+
 
 class McpToolGateway:
     def __init__(
@@ -178,6 +193,7 @@ class McpToolGateway:
                     "harness service unavailable - check controller startup logs and HARNESS_* config"
                 )
             arguments = spec.input_model.model_validate(raw_arguments)
+            arguments = await self._resolve_implicit_session(spec, arguments)
             approval = await self._require_governed_tool_approval(
                 spec,
                 arguments,
@@ -233,6 +249,36 @@ class McpToolGateway:
             content=[McpToolCallContent(text=message)],
             structuredContent={"error": message},
             isError=True,
+        )
+
+    async def _resolve_implicit_session(self, spec: Any, arguments: BaseModel) -> BaseModel:
+        """Resolve an omitted session_id against the live session set.
+
+        Exactly one live session → target it. None live → create one on demand,
+        but only for observe/act tools (IMPLICIT_SESSION_CREATE_TOOLS). Anything
+        ambiguous stays an explicit, actionable error rather than a guess.
+        """
+        if not isinstance(arguments, SessionIdInput) or arguments.session_id:
+            return arguments
+        sessions = await self.manager.list_sessions()
+        if len(sessions) == 1:
+            return arguments.model_copy(update={"session_id": sessions[0]["id"]})
+        if not sessions:
+            if spec.name in IMPLICIT_SESSION_CREATE_TOOLS:
+                created = await self.manager.create_session()
+                return arguments.model_copy(update={"session_id": created["id"]})
+            raise BrowserActionError(
+                f"{spec.name} needs a session and none are live — create one with "
+                "browser.create_session (or call an observe/act tool, which creates "
+                "one on demand).",
+                code="no_session",
+                action=spec.name,
+            )
+        ids = ", ".join(str(item.get("id")) for item in sessions)
+        raise BrowserActionError(
+            f"session_id is required when multiple sessions are live ({ids}).",
+            code="ambiguous_session",
+            action=spec.name,
         )
 
     @staticmethod

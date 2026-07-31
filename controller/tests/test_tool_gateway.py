@@ -939,6 +939,65 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(response.isError)
 
+    async def test_omitted_session_id_resolves_to_single_live_session(self) -> None:
+        self.manager.list_sessions = AsyncMock(return_value=[{"id": "session-42"}])
+
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(name="browser.observe", arguments={})
+        )
+
+        self.assertFalse(response.isError)
+        self.manager.observe.assert_awaited_once()
+        self.assertEqual(self.manager.observe.await_args.args[0], "session-42")
+
+    async def test_omitted_session_id_creates_session_for_observe_when_none_live(self) -> None:
+        self.manager.list_sessions = AsyncMock(return_value=[])
+        self.manager.create_session = AsyncMock(return_value={"id": "session-new"})
+
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(name="browser.observe", arguments={})
+        )
+
+        self.assertFalse(response.isError)
+        self.manager.create_session.assert_awaited_once()
+        self.assertEqual(self.manager.observe.await_args.args[0], "session-new")
+
+    async def test_omitted_session_id_errors_for_non_create_tool_when_none_live(self) -> None:
+        self.manager.list_sessions = AsyncMock(return_value=[])
+        self.manager.create_session = AsyncMock(return_value={"id": "session-new"})
+
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(name="browser.get_console", arguments={})
+        )
+
+        self.assertTrue(response.isError)
+        self.assertEqual(response.structuredContent.get("code"), "no_session")
+        self.manager.create_session.assert_not_awaited()
+
+    async def test_omitted_session_id_errors_when_multiple_sessions_live(self) -> None:
+        self.manager.list_sessions = AsyncMock(
+            return_value=[{"id": "session-a"}, {"id": "session-b"}]
+        )
+
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(name="browser.observe", arguments={})
+        )
+
+        self.assertTrue(response.isError)
+        self.assertEqual(response.structuredContent.get("code"), "ambiguous_session")
+        self.assertIn("session-a", response.content[0].text)
+        self.assertIn("session-b", response.content[0].text)
+
+    async def test_explicit_session_id_skips_implicit_resolution(self) -> None:
+        self.manager.list_sessions = AsyncMock(return_value=[])
+
+        response = await self.full_gateway.call_tool(
+            McpToolCallRequest(name="browser.observe", arguments={"session_id": "session-1"})
+        )
+
+        self.assertFalse(response.isError)
+        self.manager.list_sessions.assert_not_awaited()
+
     async def test_find_elements_query_timeout_surfaces_structured_error(self) -> None:
         # A catastrophically backtracking regex hangs page.evaluate; the query
         # path is bounded and must come back as a structured error, not a hang.
