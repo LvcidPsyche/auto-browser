@@ -8,6 +8,15 @@ import pytesseract
 from PIL import Image
 from pytesseract import Output, TesseractNotFoundError
 
+# Tesseract confidence below this is treated as unreliable for the model-facing
+# excerpt. It deliberately does NOT gate `redaction_blocks` — see _extract_sync.
+_MIN_CONFIDENCE = 30
+
+# Safety ceiling on the redaction block list so a text-dense page cannot grow it
+# without bound. Two orders of magnitude above the model-facing cap, which is
+# what matters: redaction must not be starved by a token budget.
+_REDACTION_BLOCK_CAP = 5000
+
 
 class OCRExtractor:
     def __init__(self, *, enabled: bool, language: str, max_blocks: int, text_limit: int):
@@ -25,6 +34,7 @@ class OCRExtractor:
                 "language": self.language,
                 "text_excerpt": "",
                 "blocks": [],
+                "redaction_blocks": [],
             }
         return await asyncio.to_thread(self._extract_sync, Path(image_path))
 
@@ -43,6 +53,7 @@ class OCRExtractor:
             return self._error_payload(image_path, "ocr_extraction_failed")
 
         blocks: list[dict[str, Any]] = []
+        redaction_blocks: list[dict[str, Any]] = []
         parts: list[str] = []
         char_count = 0
         for idx, raw_text in enumerate(data.get("text", [])):
@@ -53,8 +64,6 @@ class OCRExtractor:
                 confidence = float(data.get("conf", [])[idx])
             except Exception:
                 confidence = -1.0
-            if confidence < 30:
-                continue
             block = {
                 "text": text,
                 "confidence": round(confidence, 2),
@@ -65,15 +74,27 @@ class OCRExtractor:
                     "height": int(data.get("height", [0])[idx]),
                 },
             }
-            blocks.append(block)
-            if char_count < self.text_limit:
-                remaining = self.text_limit - char_count
-                chunk = text[:remaining]
-                if chunk:
-                    parts.append(chunk)
-                    char_count += len(chunk) + 1
-            if len(blocks) >= self.max_blocks:
-                break
+
+            # Redaction sees every block, and deliberately ignores both the
+            # confidence floor and max_blocks. image_to_data returns one block
+            # per *word*, so capping this at ocr_max_blocks (default 20) meant
+            # only the first ~20 words of a page could ever be redacted — a nav
+            # bar exhausted the budget before reaching the page body. Dropping
+            # low-confidence blocks here would be fail-open for privacy too.
+            if len(redaction_blocks) < _REDACTION_BLOCK_CAP:
+                redaction_blocks.append(block)
+
+            # The model-facing payload keeps both limits: callers pay tokens for it.
+            if confidence < _MIN_CONFIDENCE:
+                continue
+            if len(blocks) < self.max_blocks:
+                blocks.append(block)
+                if char_count < self.text_limit:
+                    remaining = self.text_limit - char_count
+                    chunk = text[:remaining]
+                    if chunk:
+                        parts.append(chunk)
+                        char_count += len(chunk) + 1
 
         return {
             "available": True,
@@ -84,6 +105,7 @@ class OCRExtractor:
             "dimensions": {"width": width, "height": height},
             "text_excerpt": " ".join(parts).strip(),
             "blocks": blocks,
+            "redaction_blocks": redaction_blocks,
         }
 
     def _error_payload(self, image_path: Path, error: str) -> dict[str, Any]:
@@ -95,5 +117,6 @@ class OCRExtractor:
             "image_path": str(image_path),
             "text_excerpt": "",
             "blocks": [],
+            "redaction_blocks": [],
             "error": error,
         }
