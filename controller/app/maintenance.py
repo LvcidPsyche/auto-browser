@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Callable, Iterable
 
 from .config import Settings
 from .utils import UTC
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -90,7 +93,15 @@ class MaintenanceService:
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self.settings.cleanup_interval_seconds)
             except asyncio.TimeoutError:
-                await self.run_cleanup()
+                try:
+                    await self.run_cleanup()
+                except Exception:
+                    # A single failed sweep must not kill the loop. Previously any
+                    # exception here ended the task silently and nothing observed
+                    # it, so artifacts/uploads/auth grew forever with only a stale
+                    # last_report as the clue. The stat race below was a live
+                    # trigger for exactly this.
+                    logger.exception("cleanup sweep failed; the maintenance loop continues")
 
     def _cleanup_roots(self) -> list[tuple[str, float]]:
         return [
@@ -132,7 +143,14 @@ class MaintenanceService:
                 stats.skipped_recent += 1
                 continue
             if path.is_file():
-                size = path.stat().st_size
+                # Same FileNotFoundError race the mtime stat above already
+                # guards: a concurrent writer or another sweep can remove the
+                # file between the two stats. Unguarded, this propagated out of
+                # run_cleanup and killed the loop permanently.
+                try:
+                    size = path.stat().st_size
+                except FileNotFoundError:
+                    continue
                 path.unlink(missing_ok=True)
                 stats.deleted_files += 1
                 stats.bytes_reclaimed += size
