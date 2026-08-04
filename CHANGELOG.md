@@ -4,6 +4,54 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.6.1] — 2026-08-04
+
+Security fixes from a **privately reported** vulnerability disclosure (received
+2026-06-17). Reported findings, verified before fixing.
+
+**If you use the Codespaces overlay, upgrade and set `API_BEARER_TOKEN`.**
+
+### Security
+
+- **`Runtime.evaluate` and `Network.getCookies` were in the "safe" raw-CDP
+  allowlist.** `/sessions/{id}/cdp/raw` is gated solely by
+  `_ALLOWED_CDP_COMMANDS`, and that list — described as safe — permitted
+  arbitrary JavaScript execution in the page context. Because sessions reuse
+  stored auth profiles, that meant cookie theft and acting as the logged-in user
+  on every site a profile is authenticated to, plus `fetch()`-based SSRF to
+  internal and cloud-metadata addresses which bypasses the navigation allowlist
+  entirely. `Network.getCookies` returned credential material directly.
+
+  Both removed. This does not affect internal element intelligence (which issues
+  CDP commands directly rather than through `raw_cdp_command`) or
+  `browser.eval_js` (which uses Playwright's `page.evaluate` and is governed and
+  auditable). The allowlist is now pinned by tests that reject any entry which
+  is not read-only introspection.
+
+- **The Codespaces overlay published an unauthenticated control plane.**
+  `docker-compose.codespaces.yml` binds the API to `0.0.0.0` so the port
+  forwarder can reach it, while `API_BEARER_TOKEN` defaults to unset and the
+  bearer middleware fails open when it is. Combined with the CDP issue above,
+  anyone who could reach the forwarded port could open a session from a saved
+  auth profile and export its cookies.
+
+  The overlay now requires `API_BEARER_TOKEN` via Compose's `${VAR:?message}`
+  form, so it refuses to start rather than silently publishing an
+  unauthenticated browser control plane.
+
+- **Raw VNC is no longer published on `0.0.0.0` in that overlay.** `x11vnc` runs
+  `-nopw`, so port 5900 is unauthenticated by design and is only safe behind a
+  loopback bind. noVNC (6080) remains published, so human takeover still works.
+
+### Known and not yet addressed
+
+The same report raised items that need design decisions rather than patches, and
+they are deliberately **not** claimed as fixed here: the API remaining
+unauthenticated by default outside the Codespaces overlay (loopback-bound in the
+base compose), auth profiles not being owner-scoped, operator identity being a
+self-asserted header, and the Codex host-bridge running with sandbox approvals
+bypassed. These are tracked for the next release.
+
 ## [1.6.0] — 2026-08-04
 
 Witness receipts are now signed, and an exported bundle can be verified by

@@ -1,5 +1,21 @@
 # Use in Codespaces: docker compose -f docker-compose.yml -f docker-compose.codespaces.yml up
 #
+# This overlay publishes on 0.0.0.0 so the Codespaces port-forwarder can reach
+# the services. That makes it the one shipped configuration where the API is not
+# loopback-only, so it must not run unauthenticated.
+#
+# API_BEARER_TOKEN uses `:?`, so Compose refuses to start when it is unset rather
+# than silently publishing an unauthenticated control plane that can drive a
+# browser holding stored logins. Reported privately 2026-06-17: with the API on
+# 0.0.0.0 and no token, anyone who could reach the port could open a session from
+# a saved auth profile and export its cookies.
+#
+#   export API_BEARER_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+#
+# Raw VNC (5900) is deliberately no longer published here: x11vnc runs `-nopw`,
+# so that port is unauthenticated by design and is only safe behind a loopback
+# bind. noVNC (6080) stays published so human takeover still works.
+#
 # `!override` replaces the base service's `ports` list instead of merging with it.
 # Without it, Compose appends these entries to the base 127.0.0.1 bindings, so both
 # 127.0.0.1:PORT and 0.0.0.0:PORT are published for the same container port and the
@@ -9,8 +25,9 @@ services:
   browser-node:
     ports: !override
       - "0.0.0.0:${NOVNC_PORT:-6080}:6080"
-      - "0.0.0.0:${VNC_PORT:-5900}:5900"
 
   controller:
+    environment:
+      API_BEARER_TOKEN: ${API_BEARER_TOKEN:?set API_BEARER_TOKEN before using the Codespaces overlay - it publishes the API on 0.0.0.0 and must not run unauthenticated}
     ports: !override
       - "0.0.0.0:${API_PORT:-8000}:8000"
