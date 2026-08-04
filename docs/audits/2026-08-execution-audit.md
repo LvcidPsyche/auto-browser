@@ -2,7 +2,12 @@
 
 **Status:** complete. All findings fixed and released across v1.5.1–v1.6.0.
 **Method:** adversarial audit of this repository, by its maintainers. No user
-reported any of it.
+reported any of it, and there is no evidence of exploitation.
+**Advisory:** [GHSA-32ph-8hp6-7qgj](https://github.com/LvcidPsyche/auto-browser/security/advisories/GHSA-32ph-8hp6-7qgj)
+(Moderate) covers the two findings with user-facing security impact — the
+screenshot redaction no-op and the auth-state encryption fail-open. No CVE was
+requested: there is no attacker-controlled trigger, and the affected code ships
+as source with no package-manager coordinate to alert on.
 
 This follows the precedent of [`session-isolation-audit.md`](../session-isolation-audit.md):
 findings first, reproductions included, limits stated plainly, and the parts
