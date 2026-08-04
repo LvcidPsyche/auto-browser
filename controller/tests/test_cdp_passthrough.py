@@ -111,7 +111,12 @@ class CDPPassthroughTests(unittest.IsolatedAsyncioTestCase):
         fake = _FakeCDPSession(
             {
                 "DOM.getDocument": {"root": {"nodeId": 1}},
-                "Runtime.evaluate": RuntimeError("eval failed"),
+                # Previously this used Runtime.evaluate as the "allowed command
+                # that fails at runtime" example. It is no longer allowed through
+                # the raw passthrough at all — arbitrary JS in an authenticated
+                # page is cookie theft plus SSRF — so a genuinely read-only
+                # command stands in for that case.
+                "Accessibility.getFullAXTree": RuntimeError("ax tree failed"),
             }
         )
         passthrough = CDPPassthrough(fake)
@@ -119,11 +124,16 @@ class CDPPassthroughTests(unittest.IsolatedAsyncioTestCase):
         success = await passthrough.raw_cdp_command("DOM.getDocument", {"depth": 1})
         self.assertEqual(success["root"]["nodeId"], 1)
 
-        error = await passthrough.raw_cdp_command("Runtime.evaluate", {"expression": "1+1"})
-        self.assertEqual(error, {"error": "cdp_command_failed", "method": "Runtime.evaluate"})
+        error = await passthrough.raw_cdp_command("Accessibility.getFullAXTree")
+        self.assertEqual(error, {"error": "cdp_command_failed", "method": "Accessibility.getFullAXTree"})
 
         with self.assertRaisesRegex(ValueError, "not in the allowed list"):
             await passthrough.raw_cdp_command("Page.navigate")
+
+        # The security property this endpoint depends on.
+        for blocked in ("Runtime.evaluate", "Network.getCookies"):
+            with self.assertRaisesRegex(ValueError, "not in the allowed list"):
+                await passthrough.raw_cdp_command(blocked, {"expression": "document.cookie"})
 
     async def test_from_page_builds_passthrough_from_new_cdp_session(self) -> None:
         fake_session = _FakeCDPSession({"DOM.getDocument": {"root": {"nodeId": 1}}})

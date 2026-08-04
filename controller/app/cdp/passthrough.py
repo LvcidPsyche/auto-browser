@@ -15,10 +15,29 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Commands allowed through the raw CDP passthrough
+# Commands allowed through the raw CDP passthrough.
+#
+# This list is the security boundary of /sessions/{id}/cdp/raw, so it may only
+# contain *read-only introspection*. Two entries did not belong and were removed
+# (reported privately, 2026-06-17):
+#
+#   Runtime.evaluate   — runs arbitrary JavaScript in the page context. Since
+#                        sessions reuse stored auth profiles, that is cookie
+#                        theft and acting as the logged-in user on every site a
+#                        profile is authenticated to, plus fetch()-based SSRF to
+#                        internal and cloud-metadata addresses, bypassing the
+#                        navigation allowlist entirely. An allowlist advertised
+#                        as safe cannot contain arbitrary code execution.
+#   Network.getCookies — returns cookies for all origins, including HttpOnly
+#                        ones, which is the credential material directly.
+#
+# Removing them does not affect internal element intelligence, which issues
+# Runtime.evaluate against the CDP session directly rather than through
+# raw_cdp_command, nor browser.eval_js, which uses Playwright's page.evaluate.
+# Callers that genuinely need scripted evaluation should use browser.eval_js,
+# which is governed and auditable.
 _ALLOWED_CDP_COMMANDS = frozenset(
     [
-        "Runtime.evaluate",
         "DOM.getDocument",
         "DOM.querySelector",
         "DOM.getAttributes",
@@ -26,7 +45,6 @@ _ALLOWED_CDP_COMMANDS = frozenset(
         "CSS.getComputedStyleForNode",
         "CSS.getMatchedStylesForNode",
         "Animation.getPlaybackRate",
-        "Network.getCookies",
         "Performance.getMetrics",
         "Page.getLayoutMetrics",
         "Accessibility.getFullAXTree",
