@@ -62,6 +62,27 @@ logger = logging.getLogger(__name__)
 __all__ = ["BrowserManager", "BrowserSession", "PlaywrightError"]
 
 
+def _build_witness_signer(settings):
+    """Ed25519 signer for witness receipts, or None if it cannot be created.
+
+    Keys live beside the receipts they sign (`<witness_root>/keys`) and are
+    generated on first use, so signing is on by default with no configuration.
+
+    A failure here must not take the controller down: an unsigned chain is still
+    a useful audit log, and refusing to boot over key material would make the
+    security improvement a liability. It is logged at exception level, and
+    verify() reports unsigned receipts, so the degraded state stays visible
+    rather than being quietly assumed away.
+    """
+    try:
+        from .witness_signing import WitnessSigner
+
+        return WitnessSigner(Path(settings.witness_root) / "keys")
+    except Exception:
+        logger.exception("witness: could not initialise the signing key; receipts will be recorded unsigned")
+        return None
+
+
 @dataclass
 class BrowserSession:
     id: str
@@ -191,7 +212,7 @@ class BrowserManager:
             self.pii_scrubber,
             self.download_capture,
         )
-        self.witness = WitnessRecorder(self.settings.witness_root)
+        self.witness = WitnessRecorder(self.settings.witness_root, signer=_build_witness_signer(self.settings))
         self.witness_remote = WitnessRemoteClient(
             base_url=self.settings.witness_remote_url,
             api_key=self.settings.witness_remote_api_key,
@@ -703,7 +724,16 @@ class BrowserManager:
         return [item.model_dump() for item in receipts]
 
     async def verify_witness_chain(self, session_id: str) -> dict[str, Any]:
-        return await self.witness.verify(session_id)
+        chain = await self.witness.verify(session_id)
+        # A hash chain only proves internal consistency — anyone holding the file
+        # can rewrite it and recompute every hash. Report the signature result
+        # alongside so "valid: true" is never mistaken for "attested".
+        chain["signatures"] = await self.witness.verify_signatures(session_id)
+        return chain
+
+    async def export_witness_bundle(self, session_id: str) -> dict[str, Any]:
+        """Third-party-verifiable evidence bundle for a session."""
+        return await self.witness.export_bundle(session_id)
 
     def _initial_witness_remote_state(self, protection_mode: str) -> WitnessRemoteState:
         return self.witness_bridge.initial_remote_state(protection_mode)

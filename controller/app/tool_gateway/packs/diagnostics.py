@@ -44,12 +44,29 @@ def register(registry, gateway):
         ToolSpec(
             name="browser.verify_witness",
             description=(
-                "Verify the integrity of a session's Witness receipt hash chain. "
-                "Walks every receipt, recomputes the chain, and reports the first "
-                "divergent receipt if the log was altered, reordered, or truncated."
+                "Verify a session's Witness receipt chain. Walks every receipt, "
+                "recomputes the hash chain, and reports the first divergent receipt "
+                "if the log was altered, reordered, or truncated. Also returns a "
+                "'signatures' block: the hash chain alone only proves internal "
+                "consistency, while the Ed25519 signatures prove the receipts were "
+                "attested by this deployment's key."
             ),
             input_model=VerifyWitnessInput,
             handler=gateway._verify_witness,
+            read_only_hint=True,
+        ),
+        ToolSpec(
+            name="browser.export_witness_bundle",
+            description=(
+                "Export a session's Witness receipts as a self-contained evidence "
+                "bundle: every receipt, the head hash, the signing key id, and the "
+                "Ed25519 public key. Anyone can verify it with "
+                "scripts/verify_witness_bundle.py, which imports nothing from this "
+                "project. Use when you need to hand proof of what happened in a "
+                "session to someone who does not run (or trust) this controller."
+            ),
+            input_model=VerifyWitnessInput,
+            handler=gateway._export_witness_bundle,
             read_only_hint=True,
         ),
         ToolSpec(
