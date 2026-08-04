@@ -11,7 +11,9 @@ someone who does not run — and does not trust — this controller.
 
 This also closes the August execution audit. Its full findings, reproductions,
 and the gates that close the defect class are published in
-[`docs/audits/2026-08-execution-audit.md`](./docs/audits/2026-08-execution-audit.md).
+[`docs/audits/2026-08-execution-audit.md`](./docs/audits/2026-08-execution-audit.md),
+and the two findings with user-facing security impact are disclosed as
+[GHSA-32ph-8hp6-7qgj](https://github.com/LvcidPsyche/auto-browser/security/advisories/GHSA-32ph-8hp6-7qgj).
 
 ### Added
 

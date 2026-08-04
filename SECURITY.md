@@ -35,6 +35,17 @@ Include:
 - repro steps
 - logs, screenshots, or PoC if available
 
+## Published advisories
+
+Issues found by the maintainers are disclosed the same way a reported one would
+be, and the audits that found them are published in full:
+
+- [GHSA-32ph-8hp6-7qgj](https://github.com/LvcidPsyche/auto-browser/security/advisories/GHSA-32ph-8hp6-7qgj)
+  — safety controls that reported success while not functioning (fixed in 1.5.1
+  and 1.5.3). Write-up: [`docs/audits/2026-08-execution-audit.md`](./docs/audits/2026-08-execution-audit.md)
+- [`docs/session-isolation-audit.md`](./docs/session-isolation-audit.md) — response
+  to an external session-poisoning claim
+
 ## Handling goals
 
 The project aims to:
