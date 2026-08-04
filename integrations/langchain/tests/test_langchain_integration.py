@@ -77,6 +77,49 @@ class AutoBrowserToolAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(result), payload)
 
     @respx.mock
+    async def test_arun_handles_empty_content_list_without_indexerror(self) -> None:
+        # Regression: content.get("content", [{}]) is defeated when the key is
+        # present with an empty list -- the default never kicks in, and
+        # content[0] raises IndexError instead of degrading gracefully.
+        payload = {"content": []}
+        respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json=payload))
+
+        result = await AutoBrowserTool(base_url=BASE_URL)._arun("browser.observe", {})
+
+        self.assertEqual(json.loads(result), payload)
+
+    @respx.mock
+    async def test_arun_handles_null_content_without_typeerror(self) -> None:
+        # Regression: same class of bug as the empty-list case, but with the key
+        # present and explicitly null -- content[0] raised TypeError.
+        payload = {"content": None}
+        respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json=payload))
+
+        result = await AutoBrowserTool(base_url=BASE_URL)._arun("browser.observe", {})
+
+        self.assertEqual(json.loads(result), payload)
+
+    @respx.mock
+    async def test_arun_handles_iserror_with_empty_content_list(self) -> None:
+        respx.post(f"{BASE_URL}/mcp/tools/call").mock(
+            return_value=httpx.Response(200, json={"isError": True, "content": []})
+        )
+
+        result = await AutoBrowserTool(base_url=BASE_URL)._arun("browser.observe", {})
+
+        self.assertEqual(result, "ERROR: Unknown error")
+
+    @respx.mock
+    async def test_arun_handles_iserror_with_null_content(self) -> None:
+        respx.post(f"{BASE_URL}/mcp/tools/call").mock(
+            return_value=httpx.Response(200, json={"isError": True, "content": None})
+        )
+
+        result = await AutoBrowserTool(base_url=BASE_URL)._arun("browser.observe", {})
+
+        self.assertEqual(result, "ERROR: Unknown error")
+
+    @respx.mock
     async def test_arun_sends_the_action_and_arguments(self) -> None:
         route = respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json=_content("ok")))
 
@@ -198,6 +241,23 @@ class AutoBrowserNodeAsyncTests(unittest.IsolatedAsyncioTestCase):
             await self.node.create_session()
 
     @respx.mock
+    async def test_create_session_handles_empty_content_list(self) -> None:
+        # Regression: result.get("content", [{}]) is defeated when "content" is
+        # present as an empty list -- content[0] raised IndexError instead of
+        # degrading to the existing "no id returned" KeyError.
+        respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json={"content": []}))
+
+        with self.assertRaises(KeyError):
+            await self.node.create_session()
+
+    @respx.mock
+    async def test_create_session_handles_null_content(self) -> None:
+        respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json={"content": None}))
+
+        with self.assertRaises(KeyError):
+            await self.node.create_session()
+
+    @respx.mock
     async def test_observe_parses_the_embedded_json(self) -> None:
         observation = {"url": "https://example.com/a", "screenshot_url": "/artifacts/a.png"}
         respx.post(f"{BASE_URL}/mcp/tools/call").mock(
@@ -205,6 +265,18 @@ class AutoBrowserNodeAsyncTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(await self.node.observe("sess-1"), observation)
+
+    @respx.mock
+    async def test_observe_handles_empty_content_list(self) -> None:
+        respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json={"content": []}))
+
+        self.assertEqual(await self.node.observe("sess-1"), {})
+
+    @respx.mock
+    async def test_observe_handles_null_content(self) -> None:
+        respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json={"content": None}))
+
+        self.assertEqual(await self.node.observe("sess-1"), {})
 
     @respx.mock
     async def test_run_creates_a_session_when_state_has_none(self) -> None:
