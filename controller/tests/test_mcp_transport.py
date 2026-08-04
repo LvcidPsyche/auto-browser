@@ -75,6 +75,45 @@ class McpTransportTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
+    def _initialize_with_version(self, version: str):
+        return self.client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": version,
+                    "clientInfo": {"name": "pytest", "version": "1.0.0"},
+                    "capabilities": {},
+                },
+            },
+        )
+
+    def test_unknown_protocol_version_gets_a_counter_offer_not_an_error(self) -> None:
+        """The spec requires a supported version in the result, not an error.
+
+        Returning -32602 killed the connection for any client opening with a
+        version we do not speak — including a newer client probing for backwards
+        compatibility, which is exactly what graceful downgrade exists for. The
+        client compares the offer against what it supports and disconnects itself
+        if it cannot proceed.
+        """
+        response = self._initialize_with_version("2099-01-01")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertNotIn("error", body, "unknown version must not be a hard error")
+        self.assertEqual(body["result"]["protocolVersion"], "2025-11-25")
+        self.assertEqual(response.headers[MCP_PROTOCOL_HEADER], "2025-11-25")
+
+    def test_older_supported_protocol_version_is_honoured(self) -> None:
+        """A counter-offer must not clobber a version we genuinely support."""
+        response = self._initialize_with_version("2025-06-18")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["result"]["protocolVersion"], "2025-06-18")
+
     def _initialize(self) -> tuple[str, str]:
         response = self.client.post(
             "/mcp",
@@ -116,7 +155,11 @@ class McpTransportTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["error"]["code"], -32002)
+        # -32005, not -32002: the latter is the spec's "resource not found" code
+        # and is asserted as such elsewhere in this file. Sharing one code left
+        # clients unable to distinguish "send initialized first" from "no such
+        # resource".
+        self.assertEqual(body["error"]["code"], -32005)
         self.assertIn("notifications/initialized", body["error"]["message"])
 
     def test_tools_list_and_call_work_after_initialization(self) -> None:

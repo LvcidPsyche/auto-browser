@@ -27,7 +27,10 @@ SUPPORTED_PROTOCOL_VERSIONS = (
     "2025-03-26",
 )
 CURRENT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
-INITIALIZATION_REQUIRED_ERROR = -32002
+# -32002 is the spec's "resource not found" code and is used as such below, so
+# reusing it here left clients unable to tell "send initialized first" apart
+# from "no such resource". -32005 sits in the implementation-defined range.
+INITIALIZATION_REQUIRED_ERROR = -32005
 logger = logging.getLogger(__name__)
 
 
@@ -479,20 +482,26 @@ class McpHttpTransport:
 
     def _handle_initialize(self, request_id: Any, params: dict[str, Any]) -> Response:
         requested_version = params.get("protocolVersion")
-        if requested_version not in SUPPORTED_PROTOCOL_VERSIONS:
-            return self._json_error_response(
-                request_id,
-                -32602,
-                "Unsupported MCP protocol version",
-                data={
-                    "requested": requested_version,
-                    "supported": list(SUPPORTED_PROTOCOL_VERSIONS),
-                },
+        if requested_version in SUPPORTED_PROTOCOL_VERSIONS:
+            negotiated_version = requested_version
+        else:
+            # The spec requires a counter-offer here, not an error: "the server
+            # MUST respond with another protocol version it supports". Returning
+            # -32602 killed the connection outright for any client that opened
+            # with a version we do not speak — including a newer client probing
+            # for backwards compatibility, which is exactly the case graceful
+            # downgrade exists to serve. The client compares this against what it
+            # supports and disconnects itself if it cannot proceed.
+            negotiated_version = CURRENT_PROTOCOL_VERSION
+            logger.info(
+                "MCP client requested unsupported protocol version %r; offering %s",
+                requested_version,
+                negotiated_version,
             )
 
         session = McpSession(
             id=uuid4().hex,
-            protocol_version=requested_version,
+            protocol_version=negotiated_version,
             client_info=self._coerce_dict(params.get("clientInfo")),
             client_capabilities=self._coerce_dict(params.get("capabilities")),
         )

@@ -538,5 +538,13 @@ class TriggerCronJobInput(CronJobIdInput):
 
 
 class GetPageHtmlInput(SessionIdInput):
-    full_page: bool = False
+    # Deprecated and ignored. page.content() always returns the full serialized
+    # DOM, so this never had anything to switch on — the handler has never read
+    # it. Still accepted so existing callers do not start getting 422s in a
+    # patch release; remove in 1.6.0.
+    full_page: bool = Field(
+        default=False,
+        description="Deprecated and ignored — get_html always returns the full page.",
+        deprecated=True,
+    )
     text_only: bool = False

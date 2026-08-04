@@ -738,7 +738,7 @@ class McpToolGateway:
         return {"session_id": payload.session_id, "key": payload.key, "set": True}
 
     async def _export_script(self, payload: ExportScriptInput) -> dict[str, Any]:
-        from .playwright_export import export_session_script
+        from ..playwright_export import export_session_script
 
         session = await self.manager.get_session(payload.session_id)
         start_url = session.page.url

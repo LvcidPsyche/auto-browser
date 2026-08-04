@@ -14,7 +14,7 @@ STEALTH_INIT_SCRIPT = r"""
   } catch (_) {}
 
   // Chrome runtime object (many sites check for this)
-  if (\!window.chrome) {
+  if (!window.chrome) {
     window.chrome = {
       runtime: {
         onMessage: { addListener: () => {}, removeListener: () => {} },
@@ -88,7 +88,7 @@ STEALTH_INIT_SCRIPT = r"""
       };
     };
     patchGL(WebGLRenderingContext.prototype);
-    if (typeof WebGL2RenderingContext \!== 'undefined') patchGL(WebGL2RenderingContext.prototype);
+    if (typeof WebGL2RenderingContext !== 'undefined') patchGL(WebGL2RenderingContext.prototype);
   } catch (_) {}
 
   // Realistic hardware values

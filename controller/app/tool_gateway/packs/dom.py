@@ -38,9 +38,10 @@ def register(registry, gateway):
         ToolSpec(
             name="browser.get_html",
             description=(
-                "Get the HTML source of the current page. "
-                "Set text_only=true to strip tags and return plain text. "
-                "Set full_page=false (default) for visible viewport only."
+                "Get the HTML source of the current page. Returns the full "
+                "serialized DOM, not just the visible viewport. "
+                "Set text_only=true to strip tags and return plain text instead. "
+                "(full_page is deprecated and ignored.)"
             ),
             input_model=GetPageHtmlInput,
             handler=gateway._get_html,
