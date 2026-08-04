@@ -4,6 +4,110 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.5.2] — 2026-08-04
+
+The rest of the audit that produced 1.5.1. Same theme — guarantees that were
+never verified end to end — but these fail by *leaking*, *wedging*, or *going
+quiet* rather than by silently permitting.
+
+**If you use cron triggers, upgrade.** The first cron fire permanently consumed
+your only session slot.
+
+### Fixed
+
+- **Cron-triggered sessions were never closed, and the first fire wedged the
+  service.** `_run_job_now` created a session per fire and nothing ever released
+  it. With `MAX_SESSIONS` defaulting to **1**, the first cron fire consumed the
+  only slot permanently — every later fire *and every manual `create_session`*
+  then failed "Session limit reached". Under `docker_ephemeral` each fire also
+  leaked a browser container. The job queue now carries a finish-callback
+  registry invoked from a `finally`, so the session is released on completion,
+  failure and cancellation alike; a fire is skipped while that job's previous
+  run is still in flight; and a rejected enqueue releases too (#132).
+- **The maintenance cleanup loop died permanently on its first exception**, with
+  nothing observing it — artifacts, uploads and auth then grew forever with only
+  a stale `last_report` as the clue. A live trigger sat in the same file: the
+  `st_size` stat raced concurrent deletion while the `mtime` stat above it was
+  already guarded (#132).
+- **A corrupt cron store erased every cron job.** `_load` returned `{}` on a
+  parse error and the next `_save` wrote that empty dict over the damaged file.
+  It now quarantines the file and raises (#132).
+- **One torn line broke audit listing forever.** A kill mid-append leaves a
+  partial record; validation raised, so `list` 500s'd permanently and `_trim_sync`
+  could never age the bad line out (#132).
+- **Agent-job and orchestrator failures discarded the real exception.** Jobs
+  recorded the constant `"agent_job_failed"` and logged nothing; `orchestrator.py`
+  did not even import `logging`. A crashing provider adapter, a Playwright error
+  and a JSON parse failure were indistinguishable, with no traceback anywhere
+  (#132).
+- **The published client raised the wrong exception on a failed SSE stream.**
+  `_raise` read `r.text` on a streaming response, which raises
+  `httpx.ResponseNotRead` — so a 401 on `stream_events` surfaced as an httpx
+  internal error instead of `AutoBrowserError(401, ...)` (#133).
+- **`.get(key, default)` defeated by explicit null / empty list in the LangChain
+  package.** `{"content": []}` gave `IndexError`; `{"content": null}` gave
+  `TypeError`, inside a LangChain tool call. Same class as the crash that shipped
+  in v1.4.2 (#133).
+- **Fire-and-forget task failures** surfaced only as asyncio's GC-time "exception
+  was never retrieved" warning, and **SSE drops were DEBUG-only**, so an operator
+  watching a live stream silently missed actions (#132).
+
+### Security
+
+- **Rate limiting could not throttle bearer-token brute force.** The bucket key
+  was derived from the `authorization` header, so every guessed token hashed to
+  its own fresh bucket — an attacker never shared a counter with themselves and
+  never hit the limit. An attacker-chosen `X-Operator-Id` did the same, and a
+  flood of distinct values could evict legitimate buckets from the LRU.
+  Unauthenticated requests are now keyed by client IP (#134).
+- **Auth-profile export and import left no audit record.** `save_storage_state`,
+  which merely *writes* auth material, is wrapped in witness policy, an audit
+  event and a receipt. Export — which packages every cookie and localStorage
+  entry for a logged-in account into a downloadable archive — and import had
+  none of it (#135).
+- **Auth-profile archive import had no limits** on member count, member size, or
+  total expanded bytes, so a decompression bomb dropped in `AUTH_ROOT` could
+  exhaust the disk (#134).
+- **Production hardening had two holes.** `API_BEARER_TOKEN=x` satisfied
+  "required" — there is now a 32-character floor. And `SHARE_TOKEN_SECRET` was
+  unchecked: with no flag to disable sharing the endpoint is always reachable,
+  and without a configured secret the signing key is generated per process, so
+  every share link silently died on restart (#134).
+- **redis had no socket timeouts**, so a hung (not refused) server blocked
+  `upsert` indefinitely — and `upsert` runs inside `create_session` and after
+  every successful action (#132).
+- **Unbounded Prometheus label cardinality**: the raw URL path became a metric
+  label, so on a public MCP endpoint ordinary scanner traffic grew the registry
+  for the lifetime of the process (#132).
+
+### Changed
+
+- **`requires-python` raised to `>=3.11`** for `auto-browser-client` and
+  `auto-browser-mcp`, and the 3.10 classifier dropped. Both declared 3.10 support
+  that CI never tested — the same unbacked-claim pattern that shipped the v1.4.2
+  langchain bug (#133).
+- **`docker-compose.yml` pinned model defaults `config.py` had moved past**
+  (`gpt-4.1-mini`, `claude-sonnet-4-20250514`, `gemini-2.5-flash`). Docker is the
+  primary deploy path, so those users silently ran older models than pip installs
+  and than anything CI tested — a delayed failure surfacing as provider 404s when
+  an old model id retires. Synced and pinned by a test (#135).
+- Added `.gitattributes`; line endings previously depended on each contributor's
+  git config, on a repo whose `browser-node/Dockerfile` already carries a
+  `sed -i 's/\r$//'` workaround for that exact class (#133).
+
+### CI
+
+- **Security guards with zero coverage are now pinned.** Every rejection branch
+  in `require_approved` and in share-token validation never executed under the
+  suite, so a refactor weakening one would have shipped green. Covered: approval
+  from another session, of another kind, and for a **mutated action** (approve a
+  click on element A, execute on element B); rejected and unapproved approvals;
+  double execution; share-token tampering, foreign-secret signing, and expiry.
+  None of these found a bug — they exist so a future change cannot quietly
+  remove the guard (#134).
+- Compose-vs-config model parity is enforced by a test, joining the existing
+  version-string and Playwright-pin guards (#135).
+
 ## [1.5.1] — 2026-08-04
 
 Found by an adversarial audit of this repo, not by a user report. Several safety
