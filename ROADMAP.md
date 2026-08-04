@@ -2,8 +2,9 @@
 
 This is the near-term direction for Auto Browser.
 
-## Now (current in v1.5.0)
+## Now (current in v1.6.0)
 
+- Ed25519-signed Witness receipt chains — each receipt attests to itself and its whole history, and an exported bundle verifies anywhere via `scripts/verify_witness_bundle.py`, which imports nothing from this project
 - `text` observation preset — accessibility outline, extracted text, and interactables with no screenshot and no OCR
 - text/regex `query` mode on `browser.find_elements` — locate a string on the page without a full observe
 - any OpenAI-compatible model can drive the browser (OpenRouter, xAI, DeepSeek, MiniMax, custom base URL for Ollama / vLLM / Azure / Groq, …)
@@ -12,7 +13,7 @@ This is the near-term direction for Auto Browser.
 - reusable auth profiles + import/export
 - human takeover via noVNC
 - approvals and audit trails
-- Witness receipts with on-demand hash-chain verification (REST + MCP)
+- Witness receipts with on-demand hash-chain verification and Ed25519 signatures (REST + MCP), plus third-party-verifiable evidence bundles
 - MCP transport + REST API with 70+ tools (curated and full profiles)
 - Docker-based isolated session mode with orphan reaping and resource limits
 - Stage 0 convergence harness for governed skill induction
@@ -39,6 +40,8 @@ This is the near-term direction for Auto Browser.
 
 ## Recently Shipped
 
+- v1.6.0 Ed25519-signed Witness chains and exportable, independently verifiable evidence bundles
+- v1.5.1–v1.5.3 an adversarial execution audit of this repo and its fixes — several safety controls were asserted but never verified end to end, and three silently did nothing while reporting success. Findings, reproductions and the gates that close the class are in [`docs/audits/2026-08-execution-audit.md`](./docs/audits/2026-08-execution-audit.md)
 - v1.5.0 `text` observation preset, `find_elements` query mode, actionable MCP tool errors, and an MCP stdio bridge cold-start fix that names the endpoint and the remedy
 - v1.4.x whole-repo quality gates, nine-string version parity enforcement, `auto-browser-langchain` test coverage from zero to 94%, and the Python 3.14 `asyncio.get_event_loop()` fix
 - v1.4.0 generic OpenAI-compatible provider adapter (OpenRouter / xAI / DeepSeek / MiniMax / custom base URL), `browser://audit/events` MCP resource, and a CI guard for Playwright pin parity

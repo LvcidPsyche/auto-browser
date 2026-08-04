@@ -33,6 +33,8 @@ Works with:
 - **Login once, reuse later.** Save named auth profiles and reopen fresh sessions that are already signed in.
 - **Local-first by default.** Run the full stack on your own box with Docker Compose, or use Codespaces for a quick hosted demo.
 - **Safety rails built in.** Approvals, operator identity, PII scrubbing, Witness receipts, and policy presets are all part of the product surface.
+- **Evidence you can hand to someone else.** Witness receipt chains are Ed25519-signed, and an exported bundle verifies with [`scripts/verify_witness_bundle.py`](./scripts/verify_witness_bundle.py) — which imports nothing from this project, so a recipient need not run or trust this controller to check it.
+- **We audit ourselves in public.** [`docs/audits/2026-08-execution-audit.md`](./docs/audits/2026-08-execution-audit.md) documents an adversarial audit of this repo that found safety controls which reported success while doing nothing, with reproductions, the fixes, and the gates that close the class.
 - **Governed skill induction.** Verified browser traces can become staged skill candidates with signed provenance, verifier adapters, and review-only graduation — agents that prove they can repeat themselves correctly, not just act once.
 
 ## Release Highlights (v1.5.0)

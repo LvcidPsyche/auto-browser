@@ -4,6 +4,59 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-08-04
+
+Witness receipts are now signed, and an exported bundle can be verified by
+someone who does not run — and does not trust — this controller.
+
+This also closes the August execution audit. Its full findings, reproductions,
+and the gates that close the defect class are published in
+[`docs/audits/2026-08-execution-audit.md`](./docs/audits/2026-08-execution-audit.md).
+
+### Added
+
+- **Ed25519-signed Witness receipt chains.** The chain was SHA-256 linked and
+  nothing else, which detects accidental corruption and nothing more: anyone
+  holding the JSONL could edit a receipt, recompute every downstream hash, and
+  produce a chain that `verify()` passed. Each receipt's `chain_hash` is now
+  signed, and because that hash already covers the entire preceding chain, one
+  signature attests to both the receipt and its history to that point. Signing
+  is on by default — keys live at `<witness_root>/keys` and generate on first
+  use.
+- **Exportable evidence bundles.** `GET /sessions/{id}/witness/bundle` and
+  `browser.export_witness_bundle` produce a self-contained bundle: every
+  receipt, the head hash, the signing key id, and the public key.
+  `scripts/verify_witness_bundle.py` checks it while importing nothing from this
+  project — that independence is what makes a receipt evidence rather than an
+  assertion about itself.
+- **`verify_witness_chain` now returns a `signatures` block**, so `valid: true`
+  can never be mistaken for "attested". The hash chain only ever proved internal
+  consistency.
+- **Auth-profile export and import emit Witness receipts.** They previously had
+  none, because receipts were session-scoped and these operations have no
+  session; they now record under an `auth-profiles` scope with their own signed
+  chain. A witness outage logs and continues — recording evidence must never
+  fail the operation it records.
+
+### Fixed
+
+- `WitnessRecorder.list(limit=0)` sliced `lines[-0:]` — the whole list — so a
+  caller passing a computed limit that reached zero received the entire receipt
+  chain instead of an empty page.
+
+### Notes
+
+Existing chains keep verifying unchanged: the signature fields are excluded from
+the hash input, so it stays byte-identical to what pre-signing builds produced.
+
+Two limits are stated in `witness_signing.py` rather than left to assumption.
+**Tail truncation** remains undetectable without an external anchor — dropping
+the last k receipts leaves a shorter chain whose signatures all still verify, so
+`verify()` reports the head for comparison against an independently obtained
+one. **Key compromise** still allows rewriting history; signing raises the bar
+from "anyone with the file" to "anyone with the key", and is not tamper-proof
+storage.
+
 ## [1.5.3] — 2026-08-04
 
 Closes the audit. The remaining lead turned out to hide a worse defect than the
