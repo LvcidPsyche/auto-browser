@@ -4,6 +4,81 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.5.3] — 2026-08-04
+
+Closes the audit. The remaining lead turned out to hide a worse defect than the
+one it described.
+
+**If you set `REQUIRE_AUTH_STATE_ENCRYPTION=true`, upgrade.** It did not do what
+it says.
+
+### Security
+
+- **`REQUIRE_AUTH_STATE_ENCRYPTION=true` loaded plaintext auth state.** The
+  setting was enforced only at construction — "is a key configured?" — and never
+  on the read path, so a plaintext state file loaded happily and its cookies went
+  straight into a live browser context while the deployment believed encryption
+  was mandatory. Measured against the real code:
+
+  ```
+  inspect().encrypted  : False
+  encryption_required  : True
+  prepare_for_context  : ACCEPTED, cookie value = 'SUPER-SECRET'
+  ```
+
+  `prepare_for_context` now refuses unencrypted state when encryption is
+  required (#137).
+- **Auth-state encryption was classified by filename, not content.** `inspect()`
+  decided `encrypted` from `path.name.endswith(".enc")`, so the classification
+  was wrong in both directions. An encrypted envelope named without `.enc` was
+  *not* leaked as plaintext — it is ciphertext — but it was handed to Playwright
+  verbatim as if the envelope were storage state, so no cookies loaded and the
+  agent proceeded believing the auth profile had been applied. A silent auth
+  failure rather than an exposure. Content now decides for a file that exists;
+  the suffix remains only as the hint for a path that does not exist yet, and an
+  unclassifiable file falls back rather than guessing (#137).
+
+### Fixed
+
+- **`/readyz` could hang for a minute while holding the global browser lock.**
+  It called `ensure_browser()`, which retries `CONNECT_RETRIES` (default 60)
+  times a second apart while holding `_browser_lock`, so with browser-node down
+  every concurrent probe and every `create_session` queued behind it — the API
+  looked dead rather than reporting "not ready", which is the opposite of a
+  readiness probe's purpose. Now bounded at 5 seconds (#138).
+- **Isolated sessions leaked their entire profile tree.** `_release_sync` removed
+  the container but never `<data>/browser-sessions/<id>`, which holds a full
+  Chromium profile — tens to hundreds of megabytes per session — and the
+  maintenance sweep covers only the artifact, upload and auth roots. Unbounded
+  growth with no signal until the volume filled mid-session. Removal is refused
+  for any path resolving outside the managed runtime root (#138).
+- **browser-node's healthcheck watched the wrong service.** It probed noVNC
+  `:6080`, not the Playwright server `:9223` the controller actually depends on,
+  so a wedged or dead Chromium reported healthy for as long as websockify
+  survived — and the controller's `depends_on: service_healthy` gate passed
+  anyway (#137).
+- **No restart policy on controller or browser-node**, so a controller OOM left
+  the container stopped forever with nothing recovering. Added, with a 60s
+  `stop_grace_period`: sessions close sequentially and an isolated one can take
+  ~10s, so the 10s default SIGKILLed cleanup mid-flight and orphaned containers
+  and tunnels (#137).
+
+### Changed
+
+- `controller/pyproject.toml` raised to `requires-python = ">=3.11"` (with mypy
+  and ruff `target-version` to match) — the last instance of the unbacked-floor
+  pattern. Its ruff target also disagreed with the root `ruff.toml` (py310 vs
+  py311), which meant the two byte-identical stdio-bridge copies were formatted
+  under different targets and could have drifted apart silently (#137).
+
+### CI
+
+- **The Python floor is now an invariant, not a repeated correction.** This
+  pattern shipped two bugs — 3.14 advertised and untested in langchain, 3.10 in
+  the client and mcp packages. A test parses the CI matrix and fails if any
+  package declares a Python version CI does not run, or ships a classifier below
+  its own floor (#137).
+
 ## [1.5.2] — 2026-08-04
 
 The rest of the audit that produced 1.5.1. Same theme — guarantees that were

@@ -4,4 +4,4 @@ Bump together with the package versions in */pyproject.toml and
 browser-node/package.json during release prep.
 """
 
-__version__ = "1.5.2"
+__version__ = "1.5.3"

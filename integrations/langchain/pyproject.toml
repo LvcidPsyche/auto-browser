@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "auto-browser-langchain"
-version = "1.5.2"
+version = "1.5.3"
 description = "LangChain / LangGraph / CrewAI integration for auto-browser"
 readme = "README.md"
 license = { text = "MIT" }
