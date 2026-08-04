@@ -92,7 +92,16 @@ class RedisSessionStore(_MarkInterruptedMixin):
         self.client: Redis | None = None
 
     async def startup(self) -> None:
-        self.client = redis_from_url(self.url, decode_responses=True)
+        # Without timeouts a *hung* redis (as opposed to a refused connection)
+        # blocks indefinitely. upsert() runs inside create_session and after
+        # every successful action, so a silently wedged redis froze all session
+        # activity with no error and no timeout to surface it.
+        self.client = redis_from_url(
+            self.url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
         await self.client.ping()
 
     async def shutdown(self) -> None:

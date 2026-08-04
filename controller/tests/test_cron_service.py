@@ -92,8 +92,17 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
         scheduler.remove_job.assert_called_with(created["id"])
         self.assertIsInstance(updated["run_count"], int)
 
+        # A corrupt store must fail loudly and be quarantined. This previously
+        # asserted `_load() == {}` — pinning the destructive behaviour as
+        # correct, because the next _save() then wrote that empty dict over the
+        # damaged file and permanently erased every cron job.
         self.store_path.write_text("{bad json", encoding="utf-8")
-        self.assertEqual(service._load(), {})
+        with self.assertRaises(RuntimeError):
+            service._load()
+        self.assertFalse(self.store_path.exists())
+        quarantined = list(self.store_path.parent.glob("crons.corrupt-*.json"))
+        self.assertEqual(len(quarantined), 1)
+        self.assertEqual(quarantined[0].read_text(encoding="utf-8"), "{bad json")
 
         uninitialized = CronService(self.store_path)
         with self.assertRaises(RuntimeError):

@@ -101,6 +101,19 @@ def install_controller_http_middleware(
         finally:
             reset_current_operator(token)
 
+    def _metric_path(request: Request) -> str:
+        """Prometheus label for a request path — always a bounded value.
+
+        Only the matched route *template* may become a label. Using the raw URL
+        path meant unmatched requests each minted their own label, so on a public
+        MCP endpoint ordinary scanner traffic grew the metrics registry without
+        bound for the lifetime of the process. Unmatched requests all collapse
+        into one bucket instead.
+        """
+        route = request.scope.get("route")
+        template = getattr(route, "path", None)
+        return template or "__unmatched__"
+
     @application.middleware("http")
     async def record_http_metrics(request: Request, call_next):
         if not metrics.enabled:
@@ -113,15 +126,14 @@ def install_controller_http_middleware(
             duration = time.perf_counter() - start
             metrics.record_http_request(
                 method=request.method,
-                path=_request_path(request),
+                path=_metric_path(request),
                 status_code=500,
                 duration_seconds=duration,
             )
             raise
 
         duration = time.perf_counter() - start
-        route = request.scope.get("route")
-        path = getattr(route, "path", None) or _request_path(request)
+        path = _metric_path(request)
         metrics.record_http_request(
             method=request.method,
             path=path,

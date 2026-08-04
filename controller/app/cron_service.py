@@ -72,6 +72,9 @@ class CronService:
         self.manager = manager
         self._scheduler: Any = None
         self._lock = asyncio.Lock()
+        # cron job id -> session id currently hosting its run. Guards against
+        # overlapping fires and records what _release_run must close.
+        self._active_runs: dict[str, str] = {}
 
     async def startup(self) -> None:
         """Start the scheduler and register all enabled cron jobs."""
@@ -254,6 +257,17 @@ class CronService:
 
         from .models import AgentRunRequest
 
+        # Refuse to start a second run while this job's previous one is still in
+        # flight. Without this, a schedule faster than its own runtime stacks up
+        # sessions and hits the session cap even with the release below.
+        if job_id in self._active_runs:
+            logger.warning(
+                "cron job %s skipped: previous run (session %s) is still active",
+                job_id,
+                self._active_runs[job_id],
+            )
+            return {"triggered": False, "job_id": job_id, "reason": "previous_run_active"}
+
         # Create session for the job
         session_result = await self.manager.create_session(
             name=f"cron-{job_id}",
@@ -262,6 +276,7 @@ class CronService:
             proxy_persona=job.get("proxy_persona"),
         )
         session_id = session_result["id"]
+        self._active_runs[job_id] = session_id
 
         # Enqueue agent run
         run_request = AgentRunRequest(
@@ -269,7 +284,24 @@ class CronService:
             goal=job["goal"],
             max_steps=job.get("max_steps", 20),
         )
-        queued = await self.job_queue.enqueue_run(session_id, run_request)
+        try:
+            queued = await self.job_queue.enqueue_run(session_id, run_request)
+        except Exception:
+            # Enqueue can reject (queue at capacity). The session exists but
+            # nothing will ever run in it, so release it here rather than
+            # stranding it until restart.
+            await self._release_run(job_id, session_id)
+            raise
+
+        # This session exists only to host this job, and nothing else will ever
+        # close it. Before this, the first cron fire consumed a session slot
+        # permanently — with MAX_SESSIONS defaulting to 1, every later fire and
+        # every manual create_session then failed "Session limit reached", and
+        # under docker_ephemeral each fire also leaked a browser container.
+        self.job_queue.on_finish(
+            queued["id"],
+            lambda: self._release_run(job_id, session_id),
+        )
 
         # Update run metadata
         async with self._lock:
@@ -287,14 +319,48 @@ class CronService:
             "queued_job": queued,
         }
 
+    async def _release_run(self, job_id: str, session_id: str) -> None:
+        """Close the session a cron run was given, and clear the in-flight mark.
+
+        Called from the job queue's finish callback on completion, failure and
+        cancellation alike. The mark is cleared even if the close fails —
+        otherwise one stuck close would block that cron job forever.
+        """
+        self._active_runs.pop(job_id, None)
+        if self.manager is None:
+            return
+        try:
+            await self.manager.close_session(session_id)
+        except Exception as exc:
+            logger.warning(
+                "cron job %s: failed to close session %s: %s",
+                job_id,
+                session_id,
+                exc,
+            )
+
     def _load(self) -> dict[str, Any]:
         if not self._store_path.exists():
             return {}
         try:
             return json.loads(self._store_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            logger.warning("failed to load cron store %s: %s", self._store_path, exc)
-            return {}
+            # Do NOT return {} here. That looked harmless but was destructive:
+            # the next _save() persisted the empty dict over the damaged file,
+            # permanently erasing every cron job the operator had defined. A
+            # fallback that hides a bug is worse than the bug.
+            quarantine = self._store_path.with_suffix(f".corrupt-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json")
+            try:
+                self._store_path.replace(quarantine)
+                logger.error(
+                    "cron store %s is unreadable (%s); moved to %s. Cron jobs are not loaded until this is resolved.",
+                    self._store_path,
+                    exc,
+                    quarantine,
+                )
+            except Exception:
+                logger.exception("cron store %s is unreadable and could not be quarantined", self._store_path)
+            raise RuntimeError(f"cron store {self._store_path} is unreadable: {exc}") from exc
 
     def _save(self, data: dict[str, Any]) -> None:
         self._store_path.parent.mkdir(parents=True, exist_ok=True)

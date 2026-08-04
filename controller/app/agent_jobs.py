@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from uuid import uuid4
 
@@ -240,6 +241,27 @@ class AgentJobQueue:
         self.audit = audit_store
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._cancellation_reasons: dict[str, str] = {}
+        # job_id -> coroutine function invoked once the job reaches a terminal
+        # state, whatever that state is. Used by callers that created a session
+        # solely to run this job and must close it afterwards (see CronService).
+        # Deliberately in-memory: if the controller restarts, the browser
+        # sessions these callbacks would close are gone with it.
+        self._on_finish: dict[str, Callable[[], Awaitable[None]]] = {}
+
+    def on_finish(self, job_id: str, callback: Callable[[], Awaitable[None]]) -> None:
+        """Register a callback to run when `job_id` reaches a terminal state."""
+        self._on_finish[job_id] = callback
+
+    async def _run_finish_callback(self, job_id: str) -> None:
+        callback = self._on_finish.pop(job_id, None)
+        if callback is None:
+            return
+        try:
+            await callback()
+        except Exception:
+            # Never let cleanup failure escape into the worker loop — but never
+            # swallow it silently either, or a leaked session looks like success.
+            logger.exception("finish callback for agent job %s failed", job_id)
 
     async def startup(self) -> None:
         await self.store.startup()
@@ -386,8 +408,18 @@ class AgentJobQueue:
                 self.queue.task_done()
 
     async def _process_job(self, job_id: str) -> None:
+        try:
+            await self._process_job_inner(job_id)
+        finally:
+            # Runs on success, failure, and cancellation alike. Whoever created a
+            # session purely to host this job gets it back here or not at all.
+            await self._run_finish_callback(job_id)
+
+    async def _process_job_inner(self, job_id: str) -> None:
         record = await self.store.start_queued(job_id)
         if record is None:
+            # Not in a queued state — nothing will run, so the caller's session
+            # still needs releasing. _process_job's finally does that.
             return
 
         await self._audit("agent_job_started", "running", record)
@@ -433,8 +465,19 @@ class AgentJobQueue:
             event_type = "agent_job_cancelled" if user_cancelled else "agent_job_interrupted"
             await self._audit(event_type, record.status, record)
             raise
-        except Exception:
-            record = await self.store.finish(record.id, status="failed", result=None, error="agent_job_failed")
+        except Exception as exc:
+            # Previously a bare `except Exception` that recorded the constant
+            # string "agent_job_failed" and logged nothing at all, so a crashing
+            # provider adapter, a Playwright error, or a JSON parse failure were
+            # indistinguishable and left no server-side traceback.
+            logger.exception("agent job %s failed", job_id)
+            detail = f"{type(exc).__name__}: {exc}"
+            record = await self.store.finish(
+                record.id,
+                status="failed",
+                result=None,
+                error=detail[:500],
+            )
         await self._audit("agent_job_finished", record.status, record)
 
     async def _audit(self, event_type: str, status: str, record: AgentJobRecord) -> None:
