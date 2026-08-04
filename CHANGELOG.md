@@ -4,6 +4,13 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Security
+- **`cryptography` 49.0.0 → 50.0.0 for CVE-2026-69247.** [GHSA-g6cj-pr64-35w5](https://github.com/advisories/GHSA-g6cj-pr64-35w5) is a Bleichenbacher oracle in PKCS#7 `EnvelopedData` decryption: `pkcs7_decrypt_der`/`_pem`/`_smime` distinguished invalid RSA padding from a wrong key length (leaking the recovered length) from bad content padding, by both error and timing. **Not reachable in this controller** — `cryptography` is used here only for `Fernet` (auth state at rest) and `Ed25519` (mesh identity), neither of which is on the affected path. The bump clears a real CVE off a pinned runtime dependency rather than closing a live hole here, and it unblocked `dependency-audit`, which had gone red on every open PR the day the advisory published (#120).
+
+### Changed
+- **Playwright upgraded to 1.62.0 on both the pip and npm sides together** (#122), and Dependabot no longer proposes it from either ecosystem (#124). Playwright's websocket protocol requires an exact client/server version match, but the two pins are separate ecosystems to Dependabot, so it can only ever open half the change — which is not a smaller upgrade but the #60 outage, where every `docker compose up --build` crash-looped on readiness. It re-proposed that half in #97 (npm) and #121 (pip); `scripts/check_playwright_pins.py` blocked both. The guard stays and Playwright is now bumped by hand on both sides at once. 1.62 also raises the engine floor to Node ≥ 20, which `browser-node` meets because `python:3.11-slim` now aliases Debian trixie (Node 20.19).
+- Dependency bumps: `fastapi` `>=0.141.1,<0.142` (#115), `uvicorn[standard]` 0.52.0, `redis` 8.1.0, `prometheus-client` 0.26.0, `ruff` 0.16.1 (#124).
+
 ### Added
 - **`session_id` may be omitted on MCP tools.** With exactly one live session, tools target it; with none live, observe/act tools (`observe`, `execute_action`, `find_elements`, `screenshot`, `get_html`, `wait_for_selector`) create one on demand — an agent's first `browser.observe` now works with zero setup calls. Anything ambiguous (multiple live sessions, or a non-create tool with none) stays an explicit structured error (`ambiguous_session` / `no_session`) rather than a guess. Explicit `session_id` behavior is unchanged.
 
