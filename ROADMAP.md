@@ -2,8 +2,10 @@
 
 This is the near-term direction for Auto Browser.
 
-## Now (current in v1.4.0)
+## Now (current in v1.5.0)
 
+- `text` observation preset — accessibility outline, extracted text, and interactables with no screenshot and no OCR
+- text/regex `query` mode on `browser.find_elements` — locate a string on the page without a full observe
 - any OpenAI-compatible model can drive the browser (OpenRouter, xAI, DeepSeek, MiniMax, custom base URL for Ollama / vLLM / Azure / Groq, …)
 - PyPI packages: `auto-browser-client` SDK, `auto-browser-langchain` adapters, `uvx auto-browser-mcp` stdio bridge
 - stable local-first browser control
@@ -37,6 +39,8 @@ This is the near-term direction for Auto Browser.
 
 ## Recently Shipped
 
+- v1.5.0 `text` observation preset, `find_elements` query mode, actionable MCP tool errors, and an MCP stdio bridge cold-start fix that names the endpoint and the remedy
+- v1.4.x whole-repo quality gates, nine-string version parity enforcement, `auto-browser-langchain` test coverage from zero to 94%, and the Python 3.14 `asyncio.get_event_loop()` fix
 - v1.4.0 generic OpenAI-compatible provider adapter (OpenRouter / xAI / DeepSeek / MiniMax / custom base URL), `browser://audit/events` MCP resource, and a CI guard for Playwright pin parity
 - v1.3.x operator dashboard run replay, auth-profile setup wizard, `browser_manager` facade refactor, encrypted fork-state exports, and fixture proof layers
 - v1.2.1 PyPI publishing: client SDK, LangChain adapters, and the `auto-browser-mcp` bridge via tag-triggered trusted publishing
