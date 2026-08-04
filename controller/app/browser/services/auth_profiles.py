@@ -18,6 +18,16 @@ if TYPE_CHECKING:
     from ...browser_manager import BrowserSession
 
 
+# Import limits. An auth profile is cookies plus storage state — kilobytes in
+# practice — so these are generous. Without them a decompression bomb dropped in
+# AUTH_ROOT could exhaust the disk: extraction streamed every member with no cap
+# on member count, member size, or total expanded bytes.
+MAX_ARCHIVE_MEMBERS = 2_000
+MAX_ARCHIVE_MEMBER_BYTES = 64 * 1024 * 1024
+MAX_ARCHIVE_TOTAL_BYTES = 256 * 1024 * 1024
+_COPY_CHUNK_BYTES = 64 * 1024
+
+
 class BrowserAuthProfileService:
     def __init__(self, manager: Any) -> None:
         self.manager = manager
@@ -319,13 +329,20 @@ class BrowserAuthProfileService:
                 if not members:
                     raise ValueError("archive is empty")
 
+                if len(members) > MAX_ARCHIVE_MEMBERS:
+                    raise ValueError(f"archive contains too many members (limit {MAX_ARCHIVE_MEMBERS})")
+
                 safe_members: list[tuple[tarfile.TarInfo, PurePosixPath]] = []
                 top_level: str | None = None
+                declared_total = 0
                 for member in members:
                     if member.issym() or member.islnk() or member.isdev():
                         raise ValueError("archive contains an unsupported member type")
                     if not member.isdir() and not member.isfile():
                         continue
+                    declared_total += max(0, member.size)
+                    if declared_total > MAX_ARCHIVE_TOTAL_BYTES:
+                        raise ValueError(f"archive expands beyond the {MAX_ARCHIVE_TOTAL_BYTES} byte limit")
                     safe_path = self.safe_archive_member_name(member.name)
                     if len(safe_path.parts) == 1 and not member.isdir():
                         raise ValueError("archive must contain a top-level profile directory")
@@ -356,8 +373,22 @@ class BrowserAuthProfileService:
                     source = tar.extractfile(member)
                     if source is None:
                         raise ValueError("archive member could not be read")
+                    # Bounded copy. A tar header's declared size is attacker
+                    # controlled, so the pre-scan above is a cheap early reject,
+                    # not a guarantee — this is what actually stops a gzip bomb
+                    # from filling the disk mid-extraction.
                     with source, target.open("wb") as output:
-                        shutil.copyfileobj(source, output)
+                        written = 0
+                        while True:
+                            chunk = source.read(_COPY_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            written += len(chunk)
+                            if written > MAX_ARCHIVE_MEMBER_BYTES:
+                                raise ValueError(
+                                    f"archive member '{member.name}' exceeds the {MAX_ARCHIVE_MEMBER_BYTES} byte limit"
+                                )
+                            output.write(chunk)
 
                 return profile_name
 

@@ -21,6 +21,10 @@ class RuntimePolicyReport:
 
 LOCAL_HOSTS = {"", "127.0.0.1", "localhost", "::1", "0.0.0.0"}
 
+# Production floor for API_BEARER_TOKEN. "Required" alone was satisfied by
+# API_BEARER_TOKEN=x, which is not meaningfully different from no token.
+MIN_PRODUCTION_BEARER_TOKEN_LENGTH = 32
+
 CLI_PROVIDER_CHECKS = (
     {
         "provider": "openai",
@@ -138,6 +142,25 @@ def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
 
     if not settings.api_bearer_token:
         report.errors.append("API_BEARER_TOKEN is required when APP_ENV=production")
+    elif len(settings.api_bearer_token) < MIN_PRODUCTION_BEARER_TOKEN_LENGTH:
+        # "Required" was satisfied by API_BEARER_TOKEN=x. A one-character token
+        # is not meaningfully different from no token, and unauthenticated
+        # requests are only throttled per-IP, so a weak token is guessable.
+        report.errors.append(
+            f"API_BEARER_TOKEN must be at least {MIN_PRODUCTION_BEARER_TOKEN_LENGTH} characters "
+            f"when APP_ENV=production (got {len(settings.api_bearer_token)})"
+        )
+
+    if not settings.share_token_secret:
+        # There is no flag that disables sharing, so the endpoint is always
+        # reachable. With no configured secret, SessionShareService generates an
+        # ephemeral one per process (session_share.py) — so every issued link
+        # silently dies on restart, and links minted by one replica are invalid
+        # on another. Silent, and only discovered by a user whose link broke.
+        report.errors.append(
+            "SHARE_TOKEN_SECRET is required when APP_ENV=production; without it the share-link "
+            "signing key is generated per process, so every link breaks on restart"
+        )
 
     if not settings.require_operator_id:
         report.errors.append("REQUIRE_OPERATOR_ID=true is required when APP_ENV=production")

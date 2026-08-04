@@ -97,12 +97,31 @@ def build_rate_limit_key(
     operator_id_header: str,
     headers: dict | object,
     client_host: str | None,
+    authenticated: bool = True,
 ) -> str:
-    authorization = getattr(headers, "get", lambda *_args, **_kwargs: None)("authorization")
+    """Build the throttling bucket key for a request.
+
+    `authenticated` must be False for any request that has not proven it holds
+    the bearer token. Previously the key was derived from the `authorization`
+    header unconditionally, which made brute force free: every guessed token
+    hashed to its own fresh bucket, so an attacker never shared a counter with
+    themselves and never hit the limit. An attacker-chosen operator-id header
+    did the same, and thousands of distinct values also evicted every legitimate
+    bucket from the LRU — a denial of service against the limiter itself.
+
+    Unauthenticated traffic is therefore keyed by client IP only, which is the
+    one identifier the caller cannot mint at will.
+    """
+    get = getattr(headers, "get", lambda *_args, **_kwargs: None)
+
+    if not authenticated:
+        return f"unauth-ip:{client_host or 'unknown'}"
+
+    authorization = get("authorization")
     if authorization:
         token_hash = hashlib.sha256(str(authorization).encode("utf-8")).hexdigest()[:16]
         return f"auth:{token_hash}"
-    operator_id = getattr(headers, "get", lambda *_args, **_kwargs: None)(operator_id_header)
+    operator_id = get(operator_id_header)
     if operator_id:
         operator_hash = hashlib.sha256(str(operator_id).strip().encode("utf-8")).hexdigest()[:16]
         return f"operator:{operator_hash}"
