@@ -12,6 +12,10 @@ from cryptography.fernet import Fernet
 
 from .utils import UTC
 
+# Auth state is cookies plus storage state — kilobytes. Anything larger is not
+# a state file, and content-sniffing it is not worth the read.
+_MAX_INSPECT_BYTES = 8 * 1024 * 1024
+
 
 @dataclass
 class PreparedAuthState:
@@ -82,6 +86,16 @@ class AuthStateManager:
                 f"Auth state is stale ({info['age_hours']}h old, max {info['max_age_hours']}h): {source_path}"
             )
         if not info["encrypted"]:
+            if self.require_encryption:
+                # REQUIRE_AUTH_STATE_ENCRYPTION was only enforced at
+                # construction ("is a key configured?") and never on read, so a
+                # plaintext state file loaded happily and its cookies went
+                # straight into a live browser context. The setting promised
+                # encrypted-at-rest and silently did not deliver it.
+                raise PermissionError(
+                    "REQUIRE_AUTH_STATE_ENCRYPTION=true but this auth state is not encrypted: "
+                    f"{source_path}. Re-save it with an encryption key configured."
+                )
             return PreparedAuthState(path=source_path, source_info=info)
         if self._fernet is None:
             raise RuntimeError("Encrypted auth state provided but AUTH_STATE_ENCRYPTION_KEY is not configured")
@@ -108,9 +122,17 @@ class AuthStateManager:
         }
         if path is None:
             return payload
+        # Suffix is only a hint for a path that does not exist yet. For a real
+        # file the content decides: naming alone meant a mislabelled file was
+        # classified wrongly in both directions — an encrypted envelope without
+        # `.enc` was passed to Playwright verbatim as if it were storage state
+        # (no cookies load, and the agent proceeds believing the profile applied).
         payload["encrypted"] = path.name.endswith(".enc")
         if not path.exists():
             return payload
+        detected = self._detect_encrypted(path)
+        if detected is not None:
+            payload["encrypted"] = detected
         stat = path.stat()
         modified = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
         age_hours = max(0.0, (datetime.now(UTC) - modified).total_seconds() / 3600.0)
@@ -124,6 +146,29 @@ class AuthStateManager:
             }
         )
         return payload
+
+    @staticmethod
+    def _detect_encrypted(path: Path) -> bool | None:
+        """Whether `path` holds a fernet envelope, by content.
+
+        Returns None when the file cannot be classified (unreadable, not JSON,
+        implausibly large) so the caller keeps its suffix-based assumption
+        rather than guessing.
+        """
+        try:
+            if path.stat().st_size > _MAX_INSPECT_BYTES:
+                return None
+            body = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(body, dict):
+            return None
+        if body.get("format") == "fernet-json" and isinstance(body.get("ciphertext"), str):
+            return True
+        # A Playwright storage-state file is the other legitimate shape here.
+        if "cookies" in body or "origins" in body:
+            return False
+        return None
 
     def _encrypt(self, plaintext: bytes) -> str:
         if self._fernet is None:

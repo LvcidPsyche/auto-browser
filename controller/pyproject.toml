@@ -6,7 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "auto-browser-controller"
 version = "1.5.2"
 description = "Controller API for auto-browser"
-requires-python = ">=3.10"
+# 3.11, not 3.10: CI tests 3.11 and 3.14, the Dockerfile pins python:3.11-slim,
+# and the published packages were corrected to >=3.11 in 1.5.2. A floor nothing
+# exercises is the same unbacked claim that shipped the 3.14 langchain bug.
+requires-python = ">=3.11"
 dynamic = ["dependencies", "optional-dependencies"]
 
 [project.urls]
@@ -30,14 +33,17 @@ python_functions = ["test_*"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+# Matches the root ruff.toml and requires-python. These disagreeing (py310 here
+# vs py311 at the root) meant the two byte-identical stdio-bridge copies were
+# formatted under different targets and could have drifted apart silently.
+target-version = "py311"
 
 [tool.ruff.lint]
 # Enforce syntax errors, unused imports, and import sorting
 select = ["E9", "F", "I"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 ignore_missing_imports = true
 strict = false
 warn_unused_ignores = true
