@@ -45,13 +45,23 @@ DEFAULT_REPLACEMENT = "[REDACTED]"
 
 _RAW_PATTERNS: list[tuple[str, str]] = [
     # AWS access key IDs: AKIA / ASIA / AROA / AIDA / AIPA / ANPA / ANVA / APKA
-    ("aws_access_key", r"(?<![A-Z0-9])(A[KSIARP][IDA][A-Z0-9]{16})(?![A-Z0-9])"),
+    # The prefix is 4 characters and the identifier is 20 total. The previous
+    # pattern spelled the prefix as `A[KSIARP][IDA]` (3 chars) + 16, i.e. 19 —
+    # one short — so the trailing lookahead rejected every real key and this
+    # pattern could never match anything. Spell the prefixes out instead.
+    (
+        "aws_access_key",
+        r"(?<![A-Z0-9])((?:AKIA|ASIA|AROA|AIDA|AIPA|ANPA|ANVA|APKA)[A-Z0-9]{16})(?![A-Z0-9])",
+    ),
     # AWS secret access keys: 40 chars base64url after = sign or whitespace
     ("aws_secret_key", r"(?i)(?:aws_secret(?:_access)?_key|secret_access_key)\s*[=:]\s*([A-Za-z0-9/+=]{40})"),
     # JWT tokens: header.payload.signature (base64url)
     ("jwt_token", r"eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}"),
-    # Bearer tokens in Authorization headers
-    ("bearer_token", r"(?i)Bearer\s+([A-Za-z0-9\-._~+/]+=*)\b"),
+    # Bearer tokens in Authorization headers.
+    # No trailing \b: a word boundary cannot occur after '=', so it forced the
+    # engine to backtrack off the base64 padding and leave it in the output
+    # ("Bearer abc123==" redacted to "[REDACTED]==").
+    ("bearer_token", r"(?i)Bearer\s+([A-Za-z0-9\-._~+/]+=*)"),
     # Private / public key PEM headers
     ("pem_header", r"-----BEGIN\s+(?:RSA\s+)?(?:PRIVATE|PUBLIC)\s+KEY-----"),
     # Generic API key / token / secret / password in query params or JSON fields
@@ -228,10 +238,26 @@ def scrub_screenshot(
             continue
         result = scrub_text(text, replacement=replacement, enabled_patterns=enabled_patterns)
         if result.scrubbed:
-            x = int(block.get("x", 0))
-            y = int(block.get("y", 0))
-            w = int(block.get("width", 0))
-            h = int(block.get("height", 0))
+            # OCRExtractor emits geometry nested under "bbox" (see ocr.py); this
+            # read them as flat top-level keys, so every .get(..., 0) fell to its
+            # default and every rectangle computed to (0, 0, 0, 0). Redaction was
+            # a silent no-op in production while `hits` stayed non-empty, so the
+            # caller wrote a "pii_redaction / ok" audit event over an unredacted
+            # screenshot. The flat shape is still accepted for callers that pass
+            # geometry directly.
+            geometry = block.get("bbox") or block
+            x = int(geometry.get("x", 0))
+            y = int(geometry.get("y", 0))
+            w = int(geometry.get("width", 0))
+            h = int(geometry.get("height", 0))
+            if w <= 0 or h <= 0:
+                # A degenerate box redacts nothing. Refuse to report success for
+                # it — that is exactly how this defect stayed invisible.
+                logger.warning(
+                    "pii_scrub: OCR block matched %s but carries no usable geometry; cannot redact pixels",
+                    [h["pattern"] for h in result.hits],
+                )
+                continue
             boxes_to_redact.append((x, y, x + w, y + h))
             for hit in result.hits:
                 hit["bbox"] = {"x": x, "y": y, "width": w, "height": h}
@@ -361,8 +387,17 @@ class PiiScrubber:
         patterns: set[str] | None = None
         if raw_patterns:
             patterns = {p.strip() for p in raw_patterns.split(",") if p.strip()}
-            # validate — silently drop unknown names
-            patterns = patterns & set(ALL_PATTERN_NAMES)
+            # Fail closed on an unknown name. This previously intersected with the
+            # known set and silently dropped anything unrecognised, so a single
+            # typo ("emial") could reduce the set to empty — and an empty (but not
+            # None) set makes scrub_text skip every pattern, disabling PII
+            # scrubbing entirely while summary() still reported enabled: True.
+            unknown = sorted(patterns - set(ALL_PATTERN_NAMES))
+            if unknown:
+                raise ValueError(
+                    f"PII_SCRUB_PATTERNS contains unknown pattern name(s): {', '.join(unknown)}. "
+                    f"Valid names: {', '.join(sorted(ALL_PATTERN_NAMES))}"
+                )
         else:
             patterns = set(ALL_PATTERN_NAMES) - _NOISY_PATTERNS
 

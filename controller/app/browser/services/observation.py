@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -38,7 +39,7 @@ class BrowserObservationService:
     async def capture_screenshot(self, session_id: str, *, label: str = "manual") -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         async with session.lock:
-            screenshot = await self.manager._capture_screenshot(session, label)
+            screenshot = await self._capture_screenshot_redacted(session, label)
             return {
                 "session": await self.manager._session_summary(session),
                 "url": session.page.url,
@@ -71,7 +72,7 @@ class BrowserObservationService:
             preset = "normal"
 
         if preset == "fast":
-            screenshot = await self.manager._capture_screenshot(session, screenshot_label)
+            screenshot = await self._capture_screenshot_redacted(session, screenshot_label)
             title = await session.page.title()
             tabs = await self.manager.tabs.summaries(session)
             return {
@@ -173,8 +174,28 @@ class BrowserObservationService:
             return None
         return await self.manager.ocr.extract_from_image(screenshot["path"])
 
-    async def light_snapshot(self, session: "BrowserSession", *, label: str) -> dict[str, Any]:
+    async def _capture_screenshot_redacted(self, session: "BrowserSession", label: str) -> dict[str, str]:
+        """Capture a screenshot and redact PII pixels before it settles on disk.
+
+        The normal/rich observe path runs OCR for its own payload and redacts via
+        `_scrub_screenshot_if_needed`. Every *other* screenshot write — the `fast`
+        preset, manual captures, and the before/after snapshot taken on every
+        action — skipped redaction entirely, so `PII_SCRUB_SCREENSHOT=true` only
+        ever covered a fraction of the images written under /data/artifacts and
+        served over /artifacts/.
+
+        OCR here costs time, but it is gated on the operator having explicitly
+        asked for screenshot scrubbing; silently honouring that setting for some
+        screenshots and not others is the worse trade.
+        """
         screenshot = await self.manager._capture_screenshot(session, label)
+        if self.manager.pii_scrubber.screenshot_enabled:
+            ocr = await self.manager.ocr.extract_from_image(screenshot["path"])
+            await self._scrub_screenshot_if_needed(session, screenshot, ocr)
+        return screenshot
+
+    async def light_snapshot(self, session: "BrowserSession", *, label: str) -> dict[str, Any]:
+        screenshot = await self._capture_screenshot_redacted(session, label)
         summary = await self.page_summary(session.page)
         return {
             "url": session.page.url,
@@ -301,12 +322,21 @@ class BrowserObservationService:
         ocr: dict[str, Any] | None,
     ) -> None:
         pii_scrubber = self.manager.pii_scrubber
-        if not pii_scrubber.screenshot_enabled or not ocr or not ocr.get("blocks"):
+        if not pii_scrubber.screenshot_enabled or not ocr:
+            return
+        # Prefer the uncapped redaction list. `blocks` is truncated to
+        # ocr_max_blocks (default 20) for the model-facing payload, and since
+        # image_to_data emits one block per *word*, redacting from it covered
+        # only the first ~20 words of a page.
+        blocks = ocr.get("redaction_blocks") or ocr.get("blocks")
+        if not blocks:
             return
         try:
             scrubbed_path = Path(screenshot["path"])
             raw_bytes = scrubbed_path.read_bytes()
-            scrubbed_bytes, hits = pii_scrubber.screenshot(raw_bytes, ocr["blocks"])
+            # PIL decode/draw/encode is CPU-bound and this runs while holding
+            # session.lock; keep it off the event loop.
+            scrubbed_bytes, hits = await asyncio.to_thread(pii_scrubber.screenshot, raw_bytes, blocks)
             if hits:
                 scrubbed_path.write_bytes(scrubbed_bytes)
                 if pii_scrubber.audit_report:
