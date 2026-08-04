@@ -27,6 +27,16 @@ from app.witness_signing import WitnessSigner, verify_signature
 
 VERIFIER = Path(__file__).resolve().parents[2] / "scripts" / "verify_witness_bundle.py"
 
+# The controller image COPYs only app/ and tests/, so scripts/ is absent inside
+# the container (the controller-tests CI job). The verifier is a tool for bundle
+# *recipients*, not for the runtime, so it does not belong in the image — and
+# both host-tests jobs run this from a real checkout, so the round-trip stays
+# covered in CI.
+requires_verifier = pytest.mark.skipif(
+    not VERIFIER.is_file(),
+    reason="scripts/verify_witness_bundle.py is not shipped inside the controller image",
+)
+
 
 def _receipt_kwargs(action: str = "click"):
     from app.models import OperatorIdentity
@@ -160,6 +170,7 @@ async def test_pre_signing_receipts_still_verify(tmp_path: Path) -> None:
     assert (await recorder.verify("sess-1"))["valid"] is True
 
 
+@requires_verifier
 @pytest.mark.asyncio
 async def test_exported_bundle_verifies_with_the_standalone_script(
     signed_recorder: WitnessRecorder, tmp_path: Path
@@ -187,6 +198,7 @@ async def test_exported_bundle_verifies_with_the_standalone_script(
     assert "RESULT: VERIFIED" in result.stdout
 
 
+@requires_verifier
 @pytest.mark.asyncio
 async def test_standalone_verifier_rejects_a_tampered_bundle(signed_recorder: WitnessRecorder, tmp_path: Path) -> None:
     await signed_recorder.startup()
