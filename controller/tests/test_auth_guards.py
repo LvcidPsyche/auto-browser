@@ -350,3 +350,79 @@ async def test_auth_profile_export_and_import_are_audited(tmp_path: Path) -> Non
         "auth_profile_exported",
         "auth_profile_imported",
     ]
+
+
+@pytest.mark.asyncio
+async def test_auth_profile_operations_emit_signed_witness_receipts(tmp_path: Path) -> None:
+    """Credential movement now leaves a signed receipt, not just an audit line.
+
+    Receipts used to be session-scoped only, which is why export and import —
+    the two operations that move credentials on and off the box — had none.
+    They record under a dedicated `auth-profiles` scope with their own chain.
+    """
+    from types import SimpleNamespace
+
+    from app.browser.services import BrowserAuthProfileService
+    from app.witness import WitnessRecorder
+    from app.witness_signing import WitnessSigner
+
+    class _Audit:
+        async def append(self, **kwargs) -> None:
+            return None
+
+    recorder = WitnessRecorder(tmp_path / "witness", signer=WitnessSigner(tmp_path / "keys"))
+    await recorder.startup()
+
+    auth_root = tmp_path / "auth"
+    service = BrowserAuthProfileService(
+        SimpleNamespace(
+            settings=SimpleNamespace(auth_root=str(auth_root), auth_state_encryption_key=None),
+            audit=_Audit(),
+            witness=recorder,
+        )
+    )
+
+    profile_dir = service.dir("demo", create=True)
+    (profile_dir / "state.json").write_text('{"cookies": []}', encoding="utf-8")
+
+    exported = await service.export("demo")
+    await service.import_profile(exported["archive_name"], overwrite=True)
+
+    receipts = await recorder.list("auth-profiles", limit=10)
+    actions = sorted(r.action for r in receipts)
+    assert actions == ["export_auth_profile", "import_auth_profile"]
+    assert all(r.chain_signature for r in receipts), "profile receipts must be signed like session receipts"
+
+    signatures = await recorder.verify_signatures("auth-profiles")
+    assert signatures["valid"] is True
+    assert signatures["signed"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_witness_outage_does_not_break_the_export(tmp_path: Path) -> None:
+    """Recording evidence must never be able to fail the operation it records."""
+    from types import SimpleNamespace
+
+    from app.browser.services import BrowserAuthProfileService
+
+    class _Audit:
+        async def append(self, **kwargs) -> None:
+            return None
+
+    class _BrokenWitness:
+        async def record(self, *args, **kwargs):
+            raise RuntimeError("witness store unavailable")
+
+    auth_root = tmp_path / "auth"
+    service = BrowserAuthProfileService(
+        SimpleNamespace(
+            settings=SimpleNamespace(auth_root=str(auth_root), auth_state_encryption_key=None),
+            audit=_Audit(),
+            witness=_BrokenWitness(),
+        )
+    )
+    profile_dir = service.dir("demo", create=True)
+    (profile_dir / "state.json").write_text('{"cookies": []}', encoding="utf-8")
+
+    exported = await service.export("demo")
+    assert exported["profile_name"] == "demo"

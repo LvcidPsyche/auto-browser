@@ -213,6 +213,16 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
     async def verify_session_witness(session_id: str) -> dict[str, Any]:
         return await manager.verify_witness_chain(session_id)
 
+    @router.get("/sessions/{session_id}/witness/bundle")
+    async def export_session_witness_bundle(session_id: str) -> dict[str, Any]:
+        """Self-contained evidence bundle: receipts, head hash, and public key.
+
+        Verify it anywhere with scripts/verify_witness_bundle.py, which imports
+        nothing from this project — that independence is what makes a receipt
+        evidence rather than an assertion about itself.
+        """
+        return await manager.export_witness_bundle(session_id)
+
     @router.get("/sessions/{session_id}/export-script")
     async def export_script(session_id: str) -> dict[str, Any]:
         session = await manager.get_session(session_id)

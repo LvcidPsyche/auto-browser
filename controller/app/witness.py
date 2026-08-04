@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
@@ -12,6 +13,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .models import OperatorIdentity, ProtectionMode
 from .utils import utc_now
+from .witness_signing import SIGNATURE_ALGORITHM
+
+logger = logging.getLogger(__name__)
 
 EvidenceMode = Literal["standard", "restricted"]
 ConcernSeverity = Literal["info", "warn", "high", "critical"]
@@ -74,9 +78,17 @@ class WitnessReceipt(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     chain_prev_hash: str | None = None
     chain_hash: str | None = None
+    # Ed25519 signature over chain_hash, and the signing key's id. Optional so
+    # chains written before signing existed still parse and still verify.
+    chain_signature: str | None = None
+    signing_key_id: str | None = None
 
     def chain_payload(self) -> dict[str, Any]:
-        return self.model_dump(mode="json", exclude={"chain_hash"})
+        # The signature fields are excluded because they are derived *from* the
+        # hash — including them would be circular. Excluding them also keeps the
+        # hash input byte-identical to what pre-signing receipts were hashed
+        # over, so existing chains continue to verify unchanged.
+        return self.model_dump(mode="json", exclude={"chain_hash", "chain_signature", "signing_key_id"})
 
 
 class WitnessSessionContext(BaseModel):
@@ -269,10 +281,11 @@ class WitnessRecorder:
     multi-worker is actually adopted.
     """
 
-    def __init__(self, root: str | Path):
+    def __init__(self, root: str | Path, *, signer: Any = None):
         self.root = Path(root)
         self._lock = asyncio.Lock()
         self._heads: dict[str, str] = {}
+        self.signer = signer
 
     async def startup(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -294,6 +307,17 @@ class WitnessRecorder:
             item.scope = scope
             item.chain_prev_hash = previous
             item.chain_hash = self._compute_hash(item)
+            if self.signer is not None:
+                try:
+                    item.chain_signature = self.signer.sign(item.chain_hash)
+                    item.signing_key_id = self.signer.key_id
+                except Exception:
+                    # An unsigned receipt is worth far more than a lost one, so
+                    # signing failure degrades rather than drops the record —
+                    # but loudly, because a silently unsigned chain is the exact
+                    # false assurance signing exists to remove. verify() reports
+                    # unsigned receipts, so the gap stays visible downstream.
+                    logger.exception("witness: failed to sign receipt %s; recording it unsigned", item.receipt_id)
             await asyncio.to_thread(self._append_text, path, item.model_dump_json() + "\n")
             self._heads[scope] = item.chain_hash
             return item
@@ -310,6 +334,92 @@ class WitnessRecorder:
         """
         return await asyncio.to_thread(self._verify_sync, scope, self._path(scope))
 
+    async def verify_signatures(self, scope: str, *, public_key_b64: str | None = None) -> dict[str, Any]:
+        """Verify every receipt signature in a scope against a public key.
+
+        Separate from verify() because they answer different questions: verify()
+        asks "is this chain internally consistent?", which anyone can forge by
+        recomputing hashes. This asks "did the holder of this key attest to it?",
+        which they cannot.
+        """
+        key = public_key_b64 or (self.signer.public_key_b64 if self.signer is not None else None)
+        return await asyncio.to_thread(self._verify_signatures_sync, scope, self._path(scope), key)
+
+    @staticmethod
+    def _verify_signatures_sync(scope: str, path: Path, public_key_b64: str | None) -> dict[str, Any]:
+        from .witness_signing import verify_signature
+
+        result: dict[str, Any] = {
+            "scope": scope,
+            "valid": True,
+            "checked": 0,
+            "signed": 0,
+            "unsigned": 0,
+            "public_key_b64": public_key_b64,
+            "first_invalid_index": None,
+            "first_invalid_receipt_id": None,
+            "reason": None,
+        }
+        if public_key_b64 is None:
+            result["valid"] = False
+            result["reason"] = "no public key available to verify against"
+            return result
+        if not path.exists():
+            return result
+
+        for index, line in enumerate(line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()):
+            receipt = WitnessReceipt.model_validate_json(line)
+            result["checked"] = index + 1
+            if not receipt.chain_signature:
+                result["unsigned"] += 1
+                continue
+            if not verify_signature(
+                public_key_b64=public_key_b64,
+                chain_hash=receipt.chain_hash or "",
+                signature_b64=receipt.chain_signature,
+            ):
+                result["valid"] = False
+                result["first_invalid_index"] = index
+                result["first_invalid_receipt_id"] = receipt.receipt_id
+                result["reason"] = "signature does not verify against the supplied public key"
+                return result
+            result["signed"] += 1
+        return result
+
+    async def export_bundle(self, scope: str) -> dict[str, Any]:
+        """A self-contained, third-party-verifiable evidence bundle.
+
+        Receipts alone prove nothing off-box. This packages them with the head
+        hash, the public key, and the algorithm, so a recipient with
+        `scripts/verify_witness_bundle.py` — which imports nothing from this
+        project — can check the chain and its signatures independently.
+        """
+        receipts = await asyncio.to_thread(self._read_all_sync, self._path(scope))
+        chain = await self.verify(scope)
+        return {
+            "format": "auto-browser-witness-bundle",
+            "version": 1,
+            "scope": scope,
+            "exported_at": utc_now(),
+            "algorithm": SIGNATURE_ALGORITHM,
+            "signing_key_id": self.signer.key_id if self.signer is not None else None,
+            "public_key_b64": self.signer.public_key_b64 if self.signer is not None else None,
+            "receipt_count": len(receipts),
+            "head_hash": chain.get("head_hash"),
+            "chain_valid_at_export": chain.get("valid"),
+            "receipts": [r.model_dump(mode="json") for r in receipts],
+        }
+
+    @staticmethod
+    def _read_all_sync(path: Path) -> list[WitnessReceipt]:
+        if not path.exists():
+            return []
+        return [
+            WitnessReceipt.model_validate_json(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
     @classmethod
     def _verify_sync(cls, scope: str, path: Path) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -317,6 +427,8 @@ class WitnessRecorder:
             "valid": True,
             "receipt_count": 0,
             "head_hash": None,
+            "signed_count": 0,
+            "unsigned_count": 0,
             "first_invalid_index": None,
             "first_invalid_receipt_id": None,
             "reason": None,
@@ -351,6 +463,12 @@ class WitnessRecorder:
             previous = receipt.chain_hash
             result["receipt_count"] = index + 1
             result["head_hash"] = receipt.chain_hash
+            # Surfaced so an unsigned chain cannot masquerade as a verified one:
+            # "valid" here only ever meant internally consistent.
+            if receipt.chain_signature:
+                result["signed_count"] += 1
+            else:
+                result["unsigned_count"] += 1
         return result
 
     @staticmethod
@@ -379,8 +497,13 @@ class WitnessRecorder:
     def _list_sync(path: Path, limit: int) -> list[WitnessReceipt]:
         if not path.exists():
             return []
+        # limit <= 0 returns nothing. It used to slice `lines[-0:]`, which is the
+        # whole list — so a caller passing a computed limit that reached zero got
+        # the entire receipt chain dumped into a response instead of an empty page.
+        if limit <= 0:
+            return []
         lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        items = [WitnessReceipt.model_validate_json(line) for line in lines[-max(0, limit) :]]
+        items = [WitnessReceipt.model_validate_json(line) for line in lines[-limit:]]
         items.reverse()
         return items
 

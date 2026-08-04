@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -11,8 +12,11 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+from ...audit import get_current_operator
 from ...utils import UTC, utc_now
 from ...witness import WitnessActionContext
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ...browser_manager import BrowserSession
@@ -31,6 +35,44 @@ _COPY_CHUNK_BYTES = 64 * 1024
 class BrowserAuthProfileService:
     def __init__(self, manager: Any) -> None:
         self.manager = manager
+
+    async def _record_profile_receipt(
+        self,
+        *,
+        action: str,
+        profile_name: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Witness receipt for an operation that moves credentials but has no session.
+
+        Receipts were previously session-scoped only, which is why auth-profile
+        export and import — the two operations that move credentials on and off
+        the box — had none. `session_id` is optional on the receipt model, so
+        these record under a dedicated `auth-profiles` scope with their own
+        signed chain.
+
+        Never allowed to break the operation it is recording: a witness outage
+        must not make exporting a profile fail. It is logged loudly instead, and
+        verify() reports the gap.
+        """
+        witness = getattr(self.manager, "witness", None)
+        if witness is None:
+            return
+        try:
+            await witness.record(
+                "auth-profiles",
+                profile="normal",
+                event_type="auth_profile",
+                status="ok",
+                action=action,
+                action_class="auth",
+                session_id=None,
+                operator=get_current_operator(),
+                target={"profile_name": profile_name},
+                metadata=metadata,
+            )
+        except Exception:
+            logger.exception("witness: failed to record %s receipt for profile %s", action, profile_name)
 
     @staticmethod
     def _host_matches(host: str, *domains: str) -> bool:
@@ -316,6 +358,14 @@ class BrowserAuthProfileService:
                 "encrypted_at_rest": bool(self.manager.settings.auth_state_encryption_key),
             },
         )
+        await self._record_profile_receipt(
+            action="export_auth_profile",
+            profile_name=normalized,
+            metadata={
+                "archive_name": archive_name,
+                "encrypted_at_rest": bool(self.manager.settings.auth_state_encryption_key),
+            },
+        )
 
         return {
             "profile_name": normalized,
@@ -420,6 +470,11 @@ class BrowserAuthProfileService:
             action="import_auth_profile",
             session_id=None,
             details={"profile_name": profile_name, "archive_name": archive_name, "overwrite": overwrite},
+        )
+        await self._record_profile_receipt(
+            action="import_auth_profile",
+            profile_name=profile_name,
+            metadata={"archive_name": archive_name, "overwrite": overwrite},
         )
 
         return {
