@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -211,7 +212,31 @@ class DockerBrowserNodeProvisioner:
             try:
                 container.remove(force=True)
             except Exception as exc:
-                logger.debug("Could not remove browser container %s: %s", runtime.container_name, exc)
+                logger.warning("Could not remove browser container %s: %s", runtime.container_name, exc)
+            self._remove_runtime_dirs(runtime.session_id)
+
+    def _remove_runtime_dirs(self, session_id: str) -> None:
+        """Delete the per-session profile and downloads tree.
+
+        Only the container was ever removed on release. Each isolated session
+        leaves behind a full Chromium profile — tens to hundreds of megabytes —
+        and nothing cleaned it: MaintenanceService sweeps only the artifact,
+        upload and auth roots. On a long-lived host that is unbounded growth
+        with no signal until the volume fills mid-session.
+        """
+        runtime_root = self._local_runtime_root(session_id)
+        try:
+            resolved = runtime_root.resolve()
+            base = self._local_runtime_root("").resolve()
+            # Never delete outside the managed runtime root, whatever a
+            # malformed session id might resolve to.
+            if base not in resolved.parents:
+                logger.warning("Refusing to remove %s: outside the session runtime root", resolved)
+                return
+            shutil.rmtree(resolved, ignore_errors=True)
+            logger.debug("Removed isolated session runtime dir %s", resolved)
+        except Exception as exc:
+            logger.warning("Could not remove runtime dir for session %s: %s", session_id, exc)
 
     def _ensure_context(self):
         if self._client is None:

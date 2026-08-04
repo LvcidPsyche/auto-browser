@@ -268,6 +268,76 @@ def test_metrics_path_collapses_unmatched_routes() -> None:
     assert "_metric_path" in text
 
 
+def test_isolated_session_runtime_dirs_are_removed_on_release(tmp_path: Path) -> None:
+    """Releasing an isolated session must delete its profile tree.
+
+    Only the container was ever removed. Each session leaves a full Chromium
+    profile behind — tens to hundreds of MB — and MaintenanceService sweeps only
+    the artifact, upload and auth roots, so this grew without bound until the
+    volume filled mid-session.
+    """
+    from app.session_isolation import DockerBrowserNodeProvisioner
+
+    settings = SimpleNamespace(
+        artifact_root=str(tmp_path / "artifacts"),
+        isolated_browser_keep_containers=False,
+    )
+    provisioner = DockerBrowserNodeProvisioner.__new__(DockerBrowserNodeProvisioner)
+    provisioner.settings = settings
+
+    runtime_root = provisioner._local_runtime_root("sess-1")
+    (runtime_root / "profile").mkdir(parents=True)
+    (runtime_root / "profile" / "Cookies").write_bytes(b"x" * 4096)
+    (runtime_root / "downloads").mkdir(parents=True)
+    assert runtime_root.exists()
+
+    provisioner._remove_runtime_dirs("sess-1")
+
+    assert not runtime_root.exists(), "the per-session profile tree must be deleted"
+
+
+def test_runtime_dir_removal_refuses_paths_outside_the_root(tmp_path: Path) -> None:
+    """A malformed session id must not delete anything outside browser-sessions."""
+    from app.session_isolation import DockerBrowserNodeProvisioner
+
+    settings = SimpleNamespace(
+        artifact_root=str(tmp_path / "artifacts"),
+        isolated_browser_keep_containers=False,
+    )
+    provisioner = DockerBrowserNodeProvisioner.__new__(DockerBrowserNodeProvisioner)
+    provisioner.settings = settings
+
+    victim = tmp_path / "important"
+    victim.mkdir(parents=True)
+    (victim / "keep.txt").write_text("do not delete", encoding="utf-8")
+
+    provisioner._remove_runtime_dirs("../../important")
+
+    assert victim.exists(), "traversal outside the runtime root must be refused"
+    assert (victim / "keep.txt").read_text(encoding="utf-8") == "do not delete"
+
+
+def test_readyz_timeout_is_bounded_and_shorter_than_the_connect_budget() -> None:
+    """/readyz must answer within a probe interval, not the retry budget.
+
+    ensure_browser() retries CONNECT_RETRIES (default 60) times a second apart
+    while holding the global browser lock, so with browser-node down the probe
+    hung for a minute-plus and every concurrent readyz and create_session queued
+    behind it — the API looked dead rather than "not ready".
+    """
+    from app.config import Settings
+    from app.routes.system import READYZ_TIMEOUT_SECONDS
+
+    settings = Settings(_env_file=None)
+    worst_case = settings.connect_retries * settings.connect_retry_delay_seconds
+
+    assert READYZ_TIMEOUT_SECONDS > 0
+    assert READYZ_TIMEOUT_SECONDS < worst_case, (
+        f"readyz timeout {READYZ_TIMEOUT_SECONDS}s must be well under the "
+        f"{worst_case}s connect retry budget it is meant to bound"
+    )
+
+
 def test_cron_store_roundtrips_valid_json(tmp_path: Path) -> None:
     """Guard the guard: quarantine must not fire on healthy stores."""
     service = CronService(tmp_path / "cron.json")
