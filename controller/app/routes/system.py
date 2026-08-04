@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -10,6 +11,11 @@ from fastapi.responses import JSONResponse, Response
 
 from ..audit import get_current_operator
 from ..readiness import run_readiness_checks
+
+# A readiness probe must answer within a probe interval, not within the
+# session-creation retry budget (CONNECT_RETRIES x CONNECT_RETRY_DELAY_SECONDS,
+# 60s by default). Failing fast is the correct answer for "are you ready?".
+READYZ_TIMEOUT_SECONDS = 5.0
 
 if TYPE_CHECKING:
     from ..browser_manager import BrowserManager
@@ -117,8 +123,18 @@ def create_system_router(
     @router.get("/readyz")
     async def readyz() -> dict[str, str]:
         try:
-            await manager.ensure_browser()
+            # Bounded. ensure_browser() retries CONNECT_RETRIES times (default
+            # 60) at CONNECT_RETRY_DELAY_SECONDS apart *while holding the global
+            # browser lock*, so with browser-node down this probe used to hang
+            # for a minute or more and every concurrent readyz and every
+            # create_session queued behind it — the API looked dead instead of
+            # reporting "not ready". A readiness probe must answer promptly;
+            # cancelling releases the lock via its async context manager.
+            await asyncio.wait_for(manager.ensure_browser(), timeout=READYZ_TIMEOUT_SECONDS)
             return {"status": "ready", "environment": settings.environment_name}
+        except TimeoutError:
+            logger.warning("readiness check timed out after %ss", READYZ_TIMEOUT_SECONDS)
+            raise HTTPException(status_code=503, detail="Service unavailable") from None
         except Exception:
             logger.exception("readiness check failed")
             raise HTTPException(status_code=503, detail="Service unavailable") from None
