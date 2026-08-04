@@ -6,6 +6,7 @@ small HTTP call plus response unwrapping — which is exactly where a silent
 shape change (``content[0].text`` moving, an error flag renamed) goes unnoticed
 until a user's agent starts returning empty strings.
 """
+
 from __future__ import annotations
 
 import json
@@ -40,9 +41,7 @@ class AutoBrowserToolTests(unittest.TestCase):
 
     @respx.mock
     def test_run_defaults_arguments_to_an_empty_object(self) -> None:
-        route = respx.post(f"{BASE_URL}/mcp/tools/call").mock(
-            return_value=httpx.Response(200, json=_content("ok"))
-        )
+        route = respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json=_content("ok")))
 
         AutoBrowserTool(base_url=BASE_URL)._run("browser.observe")
 
@@ -52,9 +51,7 @@ class AutoBrowserToolTests(unittest.TestCase):
 class AutoBrowserToolAsyncTests(unittest.IsolatedAsyncioTestCase):
     @respx.mock
     async def test_arun_returns_the_first_content_text(self) -> None:
-        respx.post(f"{BASE_URL}/mcp/tools/call").mock(
-            return_value=httpx.Response(200, json=_content("page title"))
-        )
+        respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json=_content("page title")))
 
         result = await AutoBrowserTool(base_url=BASE_URL)._arun("browser.observe", {})
 
@@ -81,9 +78,7 @@ class AutoBrowserToolAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     @respx.mock
     async def test_arun_sends_the_action_and_arguments(self) -> None:
-        route = respx.post(f"{BASE_URL}/mcp/tools/call").mock(
-            return_value=httpx.Response(200, json=_content("ok"))
-        )
+        route = respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json=_content("ok")))
 
         await AutoBrowserTool(base_url=BASE_URL)._arun("browser.click", {"selector": "#go"})
 
@@ -92,9 +87,7 @@ class AutoBrowserToolAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     @respx.mock
     async def test_arun_sends_bearer_token_when_configured(self) -> None:
-        route = respx.post(f"{BASE_URL}/mcp/tools/call").mock(
-            return_value=httpx.Response(200, json=_content("ok"))
-        )
+        route = respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json=_content("ok")))
 
         await AutoBrowserTool(base_url=BASE_URL, bearer_token="s3cret")._arun("browser.observe", {})
 
@@ -102,9 +95,7 @@ class AutoBrowserToolAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     @respx.mock
     async def test_arun_omits_authorization_without_a_token(self) -> None:
-        route = respx.post(f"{BASE_URL}/mcp/tools/call").mock(
-            return_value=httpx.Response(200, json=_content("ok"))
-        )
+        route = respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json=_content("ok")))
 
         await AutoBrowserTool(base_url=BASE_URL)._arun("browser.observe", {})
 
@@ -121,9 +112,7 @@ class AutoBrowserToolAsyncTests(unittest.IsolatedAsyncioTestCase):
 class AutoBrowserToolListToolsTests(unittest.TestCase):
     @respx.mock
     def test_list_tools_returns_the_catalogue(self) -> None:
-        respx.get(f"{BASE_URL}/mcp/tools").mock(
-            return_value=httpx.Response(200, json=[{"name": "browser.observe"}])
-        )
+        respx.get(f"{BASE_URL}/mcp/tools").mock(return_value=httpx.Response(200, json=[{"name": "browser.observe"}]))
 
         self.assertEqual(AutoBrowserTool.list_tools(base_url=BASE_URL), [{"name": "browser.observe"}])
 
@@ -154,9 +143,7 @@ class AutoBrowserNodeAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     @respx.mock
     async def test_call_tool_posts_name_and_arguments(self) -> None:
-        route = respx.post(f"{BASE_URL}/mcp/tools/call").mock(
-            return_value=httpx.Response(200, json={"ok": True})
-        )
+        route = respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json={"ok": True}))
 
         result = await self.node.call_tool("browser.observe", {"session_id": "s1"})
 
@@ -249,9 +236,7 @@ class AutoBrowserNodeAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     @respx.mock
     async def test_run_defaults_missing_observation_fields_to_empty_strings(self) -> None:
-        respx.post(f"{BASE_URL}/mcp/tools/call").mock(
-            return_value=httpx.Response(200, json=_content(json.dumps({})))
-        )
+        respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json=_content(json.dumps({}))))
 
         state = await self.node.run({"session_id": "sess-1"})
 

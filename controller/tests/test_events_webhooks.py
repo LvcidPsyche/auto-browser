@@ -83,7 +83,10 @@ class WebhookTests(unittest.IsolatedAsyncioTestCase):
         client = Mock()
         client.post = AsyncMock(return_value=Mock(status_code=200))
 
-        with patch.object(webhooks, "get_client", return_value=client), patch.object(webhooks.logger, "warning") as mock_warning:
+        with (
+            patch.object(webhooks, "get_client", return_value=client),
+            patch.object(webhooks.logger, "warning") as mock_warning,
+        ):
             blocked_urls = [
                 "http://127.0.0.1:8080/approval",
                 "http://[::1]/approval",
@@ -99,7 +102,6 @@ class WebhookTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.post.await_count, 0)
         self.assertEqual(mock_warning.call_count, len(blocked_urls))
-
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 """Pillar 1 — Mesh routes (/mesh)."""
+
 from __future__ import annotations
 
 import logging
@@ -64,6 +65,7 @@ async def mesh_list_peers(request: Request):
 @mesh_router.post("/peers")
 async def mesh_add_peer(body: dict[str, Any], request: Request):
     from app.mesh import PeerRecord
+
     peers = getattr(request.app.state, "peer_registry", None)
     if peers is None:
         raise HTTPException(503, "Mesh not initialized")

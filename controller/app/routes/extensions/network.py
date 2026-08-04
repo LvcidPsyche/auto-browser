@@ -1,4 +1,5 @@
 """Pillar 3 — Network inspector routes (/sessions/{session_id}/network)."""
+
 from __future__ import annotations
 
 import logging

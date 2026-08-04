@@ -12,6 +12,7 @@ Ships with graceful degradation:
 
 Carried into the current release line from an earlier staging branch.
 """
+
 from __future__ import annotations
 
 import logging

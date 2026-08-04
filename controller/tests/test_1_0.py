@@ -7,6 +7,7 @@ Covers: mesh (identity, peers, policy, transport, delegation),
 
 Run with: pytest tests/test_1_0.py -v
 """
+
 from __future__ import annotations
 
 import json
@@ -25,15 +26,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # Mesh — Identity
 # ===========================================================================
 
+
 class TestMeshIdentity:
     def test_generates_keypair(self, tmp_path):
         from app.mesh.identity import NodeIdentity
+
         ident = NodeIdentity(tmp_path / "identity")
         assert len(ident.node_id) == 64  # hex SHA-256
         assert len(ident.pubkey_b64) == 44  # base64 of 32 bytes
 
     def test_node_id_stable_across_loads(self, tmp_path):
         from app.mesh.identity import NodeIdentity
+
         d = tmp_path / "identity"
         i1 = NodeIdentity(d)
         i2 = NodeIdentity(d)
@@ -42,6 +46,7 @@ class TestMeshIdentity:
 
     def test_sign_verify_roundtrip(self, tmp_path):
         from app.mesh.identity import NodeIdentity
+
         ident = NodeIdentity(tmp_path / "identity")
         data = b"hello mesh"
         sig = ident.sign(data)
@@ -50,6 +55,7 @@ class TestMeshIdentity:
 
     def test_tamper_detection(self, tmp_path):
         from app.mesh.identity import NodeIdentity
+
         d = tmp_path / "identity"
         NodeIdentity(d)  # generate
         # Corrupt the meta file
@@ -60,6 +66,7 @@ class TestMeshIdentity:
 
     def test_sign_detects_tampering(self, tmp_path):
         from app.mesh.identity import NodeIdentity
+
         ident = NodeIdentity(tmp_path / "identity")
         data = b"hello"
         sig = ident.sign(data)
@@ -72,9 +79,11 @@ class TestMeshIdentity:
 # Mesh — Peers
 # ===========================================================================
 
+
 class TestMeshPeers:
     def _make_peer(self, node_id: str = "abc123"):
         from app.mesh.models import PeerRecord
+
         return PeerRecord(
             node_id=node_id,
             pubkey_b64="A" * 44,
@@ -83,6 +92,7 @@ class TestMeshPeers:
 
     def test_add_and_get(self, tmp_path):
         from app.mesh.peers import PeerRegistryFile
+
         reg = PeerRegistryFile(tmp_path / "peers.json")
         peer = self._make_peer()
         reg.add(peer)
@@ -90,17 +100,20 @@ class TestMeshPeers:
 
     def test_unknown_peer_raises(self, tmp_path):
         from app.mesh.peers import PeerRegistryFile
+
         reg = PeerRegistryFile(tmp_path / "peers.json")
         with pytest.raises(KeyError):
             reg.get("nonexistent")
 
     def test_get_optional_returns_none(self, tmp_path):
         from app.mesh.peers import PeerRegistryFile
+
         reg = PeerRegistryFile(tmp_path / "peers.json")
         assert reg.get_optional("nonexistent") is None
 
     def test_remove(self, tmp_path):
         from app.mesh.peers import PeerRegistryFile
+
         reg = PeerRegistryFile(tmp_path / "peers.json")
         peer = self._make_peer()
         reg.add(peer)
@@ -109,6 +122,7 @@ class TestMeshPeers:
 
     def test_persists_across_instances(self, tmp_path):
         from app.mesh.peers import PeerRegistryFile
+
         path = tmp_path / "peers.json"
         reg1 = PeerRegistryFile(path)
         reg1.add(self._make_peer("node1"))
@@ -118,6 +132,7 @@ class TestMeshPeers:
 
     def test_hot_reload(self, tmp_path):
         from app.mesh.peers import PeerRegistryFile
+
         path = tmp_path / "peers.json"
         reg1 = PeerRegistryFile(path)
         reg1.add(self._make_peer("node1"))
@@ -135,9 +150,11 @@ class TestMeshPeers:
 # Mesh — Policy
 # ===========================================================================
 
+
 class TestMeshPolicy:
     def _make_peer(self, grants=None):
         from app.mesh.models import PeerRecord
+
         return PeerRecord(
             node_id="peer1",
             pubkey_b64="A" * 44,
@@ -146,14 +163,17 @@ class TestMeshPolicy:
 
     def _make_request(self, capability="tool:browser.click", arguments=None):
         from app.mesh.models import DelegationRequest
+
         return DelegationRequest(capability=capability, arguments=arguments or {})
 
     def _make_grant(self, capability, **kwargs):
         from app.mesh.models import CapabilityGrant
+
         return CapabilityGrant(capability=capability, **kwargs)
 
     def test_default_deny_no_grants(self):
         from app.mesh.policy import PolicyDenied, PolicyEvaluator
+
         ev = PolicyEvaluator()
         peer = self._make_peer()
         with pytest.raises(PolicyDenied):
@@ -161,6 +181,7 @@ class TestMeshPolicy:
 
     def test_exact_match_permit(self):
         from app.mesh.policy import PolicyEvaluator
+
         grant = self._make_grant("tool:browser.click")
         peer = self._make_peer([grant])
         ev = PolicyEvaluator()
@@ -169,6 +190,7 @@ class TestMeshPolicy:
 
     def test_wildcard_match(self):
         from app.mesh.policy import PolicyEvaluator
+
         grant = self._make_grant("tool:*")
         peer = self._make_peer([grant])
         ev = PolicyEvaluator()
@@ -177,6 +199,7 @@ class TestMeshPolicy:
 
     def test_expires_at_rejected(self):
         from app.mesh.policy import PolicyEvaluator, PolicyExpired
+
         grant = self._make_grant("tool:*", expires_at=time.time() - 1)
         peer = self._make_peer([grant])
         ev = PolicyEvaluator()
@@ -185,6 +208,7 @@ class TestMeshPolicy:
 
     def test_expires_at_future_ok(self):
         from app.mesh.policy import PolicyEvaluator
+
         grant = self._make_grant("tool:*", expires_at=time.time() + 3600)
         peer = self._make_peer([grant])
         ev = PolicyEvaluator()
@@ -193,6 +217,7 @@ class TestMeshPolicy:
 
     def test_url_allowlist_permit(self):
         from app.mesh.policy import PolicyEvaluator
+
         grant = self._make_grant("tool:*", url_allowlist=["*example.com*"])
         peer = self._make_peer([grant])
         ev = PolicyEvaluator()
@@ -202,6 +227,7 @@ class TestMeshPolicy:
 
     def test_url_allowlist_deny(self):
         from app.mesh.policy import PolicyDenied, PolicyEvaluator
+
         grant = self._make_grant("tool:*", url_allowlist=["*example.com*"])
         peer = self._make_peer([grant])
         ev = PolicyEvaluator()
@@ -211,6 +237,7 @@ class TestMeshPolicy:
 
     def test_rate_limit_enforcement(self):
         from app.mesh.policy import PolicyEvaluator, PolicyRateLimited
+
         grant = self._make_grant("tool:limited", max_invocations_per_hour=2)
         peer = self._make_peer([grant])
         ev = PolicyEvaluator()
@@ -227,13 +254,16 @@ class TestMeshPolicy:
 # Mesh — Transport (envelope crypto)
 # ===========================================================================
 
+
 class TestMeshTransport:
     def _make_identity(self, tmp_path, subdir="id"):
         from app.mesh.identity import NodeIdentity
+
         return NodeIdentity(tmp_path / subdir)
 
     def _make_peer_from_identity(self, identity, endpoint="https://peer.example.com"):
         from app.mesh.models import PeerRecord
+
         return PeerRecord(
             node_id=identity.node_id,
             pubkey_b64=identity.pubkey_b64,
@@ -242,6 +272,7 @@ class TestMeshTransport:
 
     def test_make_and_verify_envelope(self, tmp_path):
         from app.mesh.transport import make_envelope, verify_envelope
+
         ident = self._make_identity(tmp_path)
         peer = self._make_peer_from_identity(ident)
         env = make_envelope(ident, {"action": "test"}, recipient_node_id="other")
@@ -250,6 +281,7 @@ class TestMeshTransport:
 
     def test_tampered_payload_rejected(self, tmp_path):
         from app.mesh.transport import EnvelopeVerificationError, make_envelope, verify_envelope
+
         ident = self._make_identity(tmp_path)
         peer = self._make_peer_from_identity(ident)
         env = make_envelope(ident, {"action": "test"})
@@ -260,6 +292,7 @@ class TestMeshTransport:
     def test_wrong_sender_rejected(self, tmp_path):
         from app.mesh.models import PeerRecord
         from app.mesh.transport import EnvelopeVerificationError, make_envelope, verify_envelope
+
         ident = self._make_identity(tmp_path)
         env = make_envelope(ident, {"action": "test"})
         wrong_peer = PeerRecord(node_id="wrong", pubkey_b64="A" * 44)
@@ -277,6 +310,7 @@ class TestMeshTransport:
 
     def test_truncated_signature_rejected(self, tmp_path):
         from app.mesh.transport import EnvelopeVerificationError, make_envelope, verify_envelope
+
         ident = self._make_identity(tmp_path)
         peer = self._make_peer_from_identity(ident)
         env = make_envelope(ident, {"x": 1})
@@ -288,6 +322,7 @@ class TestMeshTransport:
 # ===========================================================================
 # Mesh — Delegation
 # ===========================================================================
+
 
 class TestMeshDelegation:
     def _setup(self, tmp_path):
@@ -382,32 +417,39 @@ class TestMeshDelegation:
 # Stealth — Humanizer
 # ===========================================================================
 
+
 class TestStealth:
     def test_profile_off_is_none(self):
         from app.stealth.humanizer import PROFILES
+
         assert PROFILES["off"] is None
 
     def test_profile_light_is_human_profile(self):
         from app.stealth.humanizer import PROFILES, HumanProfile
+
         assert isinstance(PROFILES["light"], HumanProfile)
 
     def test_humanizer_inactive_when_off(self):
         from app.stealth.humanizer import Humanizer
+
         h = Humanizer("off")
         assert not h.active
 
     def test_humanizer_active_when_light(self):
         from app.stealth.humanizer import Humanizer
+
         h = Humanizer("light")
         assert h.active
 
     def test_bezier_points_count(self):
         from app.stealth.humanizer import _bezier_points
+
         pts = _bezier_points(0, 0, 100, 100, steps=20, jitter=5)
         assert len(pts) == 21  # steps + 1
 
     def test_bezier_starts_and_ends_near_target(self):
         from app.stealth.humanizer import _bezier_points
+
         pts = _bezier_points(0.0, 0.0, 100.0, 100.0, steps=30, jitter=0)
         # With zero jitter, start and end should be exact
         assert abs(pts[0][0]) < 1.0
@@ -415,6 +457,7 @@ class TestStealth:
 
     def test_fingerprint_stable_within_session(self):
         from app.stealth.fingerprint import FingerprintConfig
+
         c1 = FingerprintConfig("session-abc", "light")
         c2 = FingerprintConfig("session-abc", "light")
         assert c1.user_agent == c2.user_agent
@@ -422,12 +465,14 @@ class TestStealth:
 
     def test_fingerprint_differs_across_sessions(self):
         from app.stealth.fingerprint import FingerprintConfig
+
         configs = [FingerprintConfig(f"session-{i}", "light") for i in range(10)]
         ua_set = {c.user_agent for c in configs}
         assert len(ua_set) > 1  # should vary
 
     def test_init_script_contains_webdriver_mask(self):
         from app.stealth.fingerprint import FingerprintConfig
+
         c = FingerprintConfig("test-session")
         script = c.init_script()
         assert "webdriver" in script
@@ -439,20 +484,24 @@ class TestStealth:
 # with hook registration grafted on in v1.0)
 # ===========================================================================
 
+
 class TestNetworkInspector:
     def test_empty_buffer(self):
         from app.network_inspector import NetworkInspector
+
         insp = NetworkInspector(session_id="s1")
         assert insp.entries() == []
 
     def test_register_and_list_hooks(self):
         from app.network_inspector import NetworkInspector
+
         insp = NetworkInspector(session_id="s1")
         insp.register_hook("*api*", AsyncMock())
         assert "*api*" in insp.list_hooks()
 
     def test_remove_hook(self):
         from app.network_inspector import NetworkInspector
+
         insp = NetworkInspector(session_id="s1")
         insp.register_hook("*api*", AsyncMock())
         assert insp.remove_hook("*api*")
@@ -460,6 +509,7 @@ class TestNetworkInspector:
 
     def test_clear(self):
         from app.network_inspector import NetworkInspector
+
         insp = NetworkInspector(session_id="s1")
         insp.clear()
         assert insp.entries() == []
@@ -469,15 +519,16 @@ class TestNetworkInspector:
 # DOM Pruner
 # ===========================================================================
 
+
 class TestDOMPruner:
     def _make_elements(self, n: int) -> list[dict]:
         return [
-            {"element_id": f"el-{i}", "role": "button", "text": f"Button {i}", "is_visible": True}
-            for i in range(n)
+            {"element_id": f"el-{i}", "role": "button", "text": f"Button {i}", "is_visible": True} for i in range(n)
         ]
 
     def test_prune_returns_limit(self):
         from app.browser.dom_pruner import DOMPruner
+
         pruner = DOMPruner(max_elements=10)
         elements = self._make_elements(50)
         pruned = pruner.prune(elements, task_goal="click the submit button")
@@ -485,11 +536,13 @@ class TestDOMPruner:
 
     def test_prune_empty_input(self):
         from app.browser.dom_pruner import DOMPruner
+
         pruner = DOMPruner(max_elements=10)
         assert pruner.prune([]) == []
 
     def test_prune_under_limit_unchanged(self):
         from app.browser.dom_pruner import DOMPruner
+
         pruner = DOMPruner(max_elements=20)
         elements = self._make_elements(5)
         pruned = pruner.prune(elements)
@@ -497,6 +550,7 @@ class TestDOMPruner:
 
     def test_keyword_match_boosts_rank(self):
         from app.browser.dom_pruner import DOMPruner
+
         pruner = DOMPruner(max_elements=3)
         elements = [
             {"element_id": "login-btn", "role": "button", "text": "Login", "is_visible": True},
@@ -509,6 +563,7 @@ class TestDOMPruner:
 
     def test_hidden_elements_deprioritized(self):
         from app.browser.dom_pruner import DOMPruner
+
         pruner = DOMPruner(max_elements=1)
         elements = [
             {"element_id": "hidden", "role": "button", "text": "Hidden", "is_visible": False},
@@ -519,6 +574,7 @@ class TestDOMPruner:
 
     def test_recency_boost(self):
         from app.browser.dom_pruner import DOMPruner
+
         pruner = DOMPruner(max_elements=1)
         elements = [
             {"element_id": "recent", "role": "link", "text": "Link"},
@@ -530,6 +586,7 @@ class TestDOMPruner:
 
     def test_prune_observation(self):
         from app.browser.dom_pruner import DOMPruner
+
         pruner = DOMPruner(max_elements=5)
         obs = {"interactable_elements": self._make_elements(30), "url": "https://example.com"}
         result = pruner.prune_observation(obs, task_goal="submit form")
@@ -541,6 +598,7 @@ class TestDOMPruner:
 # ===========================================================================
 # Workflow Engine
 # ===========================================================================
+
 
 class TestWorkflowEngine:
     async def test_simple_workflow(self, tmp_path):
@@ -556,8 +614,7 @@ class TestWorkflowEngine:
         engine.register_action("test.step", handler)
 
         steps = [{"id": "s1", "action": "test.step", "params": {"key": "value"}}]
-        run = await engine.run("test_wf", steps, {"initial": "ctx"}
-        )
+        run = await engine.run("test_wf", steps, {"initial": "ctx"})
         assert run.status.value == "completed"
         assert run.step_statuses["s1"].value == "completed"
 
@@ -571,6 +628,7 @@ class TestWorkflowEngine:
 
     async def test_dependency_ordering(self, tmp_path):
         from app.workflow.engine import WorkflowEngine
+
         order = []
 
         async def handler(action: str, params: dict, ctx: dict) -> dict:
@@ -590,6 +648,7 @@ class TestWorkflowEngine:
 
     async def test_missing_action_fails_run(self, tmp_path):
         from app.workflow.engine import WorkflowEngine
+
         engine = WorkflowEngine(workflows_root=tmp_path / "workflows")
         steps = [{"id": "x", "action": "unregistered.action"}]
         run = await engine.run("fail_test", steps)
@@ -597,6 +656,7 @@ class TestWorkflowEngine:
 
     async def test_retry_on_transient_failure(self, tmp_path):
         from app.workflow.engine import WorkflowEngine
+
         call_count = [0]
 
         async def flaky(action, params, ctx):
@@ -614,6 +674,7 @@ class TestWorkflowEngine:
 
     async def test_persists_to_disk(self, tmp_path):
         from app.workflow.engine import WorkflowEngine
+
         engine = WorkflowEngine(workflows_root=tmp_path / "wf")
         engine.register_action("x", AsyncMock(return_value={}))
         steps = [{"id": "s", "action": "x"}]
@@ -626,39 +687,46 @@ class TestWorkflowEngine:
 # Skills Curator LLM adapter
 # ===========================================================================
 
+
 class TestCuratorLLMAdapter:
     def test_invalid_provider_rejected(self):
         import pytest
 
         from app.curator_llm import CuratorLLMAdapter
+
         with pytest.raises(ValueError):
             CuratorLLMAdapter("nonsense")
 
     def test_ready_false_without_api_key(self, monkeypatch):
         from app.curator_llm import CuratorLLMAdapter
+
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         adapter = CuratorLLMAdapter("claude")
         assert adapter.ready is False
 
     def test_ready_true_with_api_key(self, monkeypatch):
         from app.curator_llm import CuratorLLMAdapter
+
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
         adapter = CuratorLLMAdapter("claude")
         assert adapter.ready is True
 
     def test_default_models_per_provider(self):
         from app.curator_llm import CuratorLLMAdapter
+
         assert CuratorLLMAdapter("claude").model.startswith("claude")
         assert CuratorLLMAdapter("openai").model.startswith("gpt")
         assert CuratorLLMAdapter("gemini").model.startswith("gemini")
 
     def test_api_key_env_override(self):
         from app.curator_llm import CuratorLLMAdapter
+
         adapter = CuratorLLMAdapter("claude", api_key_env="CUSTOM_KEY")
         assert adapter._api_key_env() == "CUSTOM_KEY"
 
     def test_build_curator_adapter_returns_none_without_key(self, monkeypatch):
         from app.curator_llm import build_curator_adapter
+
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)

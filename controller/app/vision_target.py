@@ -150,7 +150,10 @@ class VisionTargeter:
         except (json.JSONDecodeError, IndexError) as exc:
             logger.warning("vision targeting: failed to parse response %r: %s", raw_text, exc)
             return {
-                "x": 0, "y": 0, "found": False, "confidence": 0.0,
+                "x": 0,
+                "y": 0,
+                "found": False,
+                "confidence": 0.0,
                 "description": f"parse error: {exc}",
                 "selector_hint": None,
                 "raw_response": raw_text,

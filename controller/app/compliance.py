@@ -53,9 +53,7 @@ def apply_compliance_template(settings: Any, template_name: str) -> dict[str, An
         )
         normalized = target
     if normalized not in _PRESETS:
-        raise ValueError(
-            f"Unknown compliance preset: {raw!r}. Valid options: {sorted(_PRESETS)}"
-        )
+        raise ValueError(f"Unknown compliance preset: {raw!r}. Valid options: {sorted(_PRESETS)}")
 
     overrides = _PRESETS[normalized]
     applied: dict[str, Any] = {}
@@ -74,8 +72,7 @@ def write_compliance_manifest(*, template_name: str, overrides: dict[str, Any], 
         "template": template_name,
         "applied_overrides": overrides,
         "note": (
-            "This manifest records the compliance preset applied at startup. "
-            "Settings were overridden as shown above."
+            "This manifest records the compliance preset applied at startup. Settings were overridden as shown above."
         ),
     }
     tmp_path = output_path.with_suffix(".json.tmp")

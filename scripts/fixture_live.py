@@ -41,8 +41,10 @@ def _run_live(base_url: str, fixture: str, expect: str) -> int:
         from app.main import app
         from fastapi.testclient import TestClient
     except Exception as exc:  # noqa: BLE001 - controller not installed is a skip, not a failure
-        print(f"[fixture-live] SKIP: controller app not importable ({exc}). "
-              "Install it with `pip install -e ./controller[dev]`.")
+        print(
+            f"[fixture-live] SKIP: controller app not importable ({exc}). "
+            "Install it with `pip install -e ./controller[dev]`."
+        )
         return SKIPPED
 
     target = f"{base_url}/{fixture}"
@@ -53,8 +55,9 @@ def _run_live(base_url: str, fixture: str, expect: str) -> int:
         with TestClient(app) as client:
             created = client.post("/sessions", json={"name": "fixture-live"})
             if created.status_code >= 500:
-                print(f"[fixture-live] SKIP: session creation returned {created.status_code} "
-                      "(browser stack unavailable).")
+                print(
+                    f"[fixture-live] SKIP: session creation returned {created.status_code} (browser stack unavailable)."
+                )
                 return SKIPPED
             created.raise_for_status()
             session_id = created.json().get("id") or created.json().get("session_id")
@@ -67,8 +70,10 @@ def _run_live(base_url: str, fixture: str, expect: str) -> int:
             finally:
                 client.delete(f"/sessions/{session_id}")
     except Exception as exc:  # noqa: BLE001 - opt-in path: treat env failures as skip
-        print(f"[fixture-live] SKIP: live browser stack unavailable ({type(exc).__name__}: {exc}). "
-              "Run `python -m playwright install chromium`.")
+        print(
+            f"[fixture-live] SKIP: live browser stack unavailable ({type(exc).__name__}: {exc}). "
+            "Run `python -m playwright install chromium`."
+        )
         return SKIPPED
 
     if body is not None and expect in body:

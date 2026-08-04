@@ -4,6 +4,7 @@ The mock-observation flags are what make a convergence run deterministic
 offline, so their parsing is the difference between a reproducible local run
 and one that silently drops the operator's input.
 """
+
 from __future__ import annotations
 
 import argparse

@@ -290,9 +290,7 @@ class OpenAIAdapter(BaseProviderAdapter):
                     response = await client.post("/openai/decide", json=payload)
                 except (httpx.TimeoutException, httpx.NetworkError) as exc:
                     if attempt < max_attempts:
-                        await asyncio.sleep(
-                            self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1))
-                        )
+                        await asyncio.sleep(self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1)))
                         continue
                     raise ProviderAPIError(
                         provider=self.provider,
@@ -309,9 +307,7 @@ class OpenAIAdapter(BaseProviderAdapter):
                 retryable_status = response.status_code == 429 or response.status_code >= 500
                 if response.status_code >= 400:
                     if retryable_status and attempt < max_attempts:
-                        await asyncio.sleep(
-                            self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1))
-                        )
+                        await asyncio.sleep(self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1)))
                         continue
                     detail = None
                     if isinstance(body, dict):

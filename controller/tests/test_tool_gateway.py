@@ -785,7 +785,9 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 self.url = "https://example.com"
                 self.mouse = FakeMouse()
-                self.evaluate = AsyncMock(side_effect=["eval-result", "plain text", [{"tag": "button"}], "stored", {"all": "items"}, None])
+                self.evaluate = AsyncMock(
+                    side_effect=["eval-result", "plain text", [{"tag": "button"}], "stored", {"all": "items"}, None]
+                )
                 self.wait_for_selector = AsyncMock()
                 self.content = AsyncMock(return_value="<html></html>")
                 self.set_viewport_size = AsyncMock()
@@ -851,7 +853,10 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             ),
             ("browser.set_viewport", {"session_id": "session-1", "width": 800, "height": 600}),
             ("browser.get_cookies", {"session_id": "session-1", "urls": ["https://example.com"]}),
-            ("browser.set_cookies", {"session_id": "session-1", "cookies": [{"name": "sid", "value": "1", "url": "https://example.com"}]}),
+            (
+                "browser.set_cookies",
+                {"session_id": "session-1", "cookies": [{"name": "sid", "value": "1", "url": "https://example.com"}]},
+            ),
             ("browser.get_local_storage", {"session_id": "session-1", "key": "k"}),
             ("browser.get_local_storage", {"session_id": "session-1"}),
             ("browser.set_local_storage", {"session_id": "session-1", "key": "k", "value": "v"}),
@@ -942,9 +947,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_omitted_session_id_resolves_to_single_live_session(self) -> None:
         self.manager.list_sessions = AsyncMock(return_value=[{"id": "session-42"}])
 
-        response = await self.full_gateway.call_tool(
-            McpToolCallRequest(name="browser.observe", arguments={})
-        )
+        response = await self.full_gateway.call_tool(McpToolCallRequest(name="browser.observe", arguments={}))
 
         self.assertFalse(response.isError)
         self.manager.observe.assert_awaited_once()
@@ -954,9 +957,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.manager.list_sessions = AsyncMock(return_value=[])
         self.manager.create_session = AsyncMock(return_value={"id": "session-new"})
 
-        response = await self.full_gateway.call_tool(
-            McpToolCallRequest(name="browser.observe", arguments={})
-        )
+        response = await self.full_gateway.call_tool(McpToolCallRequest(name="browser.observe", arguments={}))
 
         self.assertFalse(response.isError)
         self.manager.create_session.assert_awaited_once()
@@ -966,22 +967,16 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.manager.list_sessions = AsyncMock(return_value=[])
         self.manager.create_session = AsyncMock(return_value={"id": "session-new"})
 
-        response = await self.full_gateway.call_tool(
-            McpToolCallRequest(name="browser.get_console", arguments={})
-        )
+        response = await self.full_gateway.call_tool(McpToolCallRequest(name="browser.get_console", arguments={}))
 
         self.assertTrue(response.isError)
         self.assertEqual(response.structuredContent.get("code"), "no_session")
         self.manager.create_session.assert_not_awaited()
 
     async def test_omitted_session_id_errors_when_multiple_sessions_live(self) -> None:
-        self.manager.list_sessions = AsyncMock(
-            return_value=[{"id": "session-a"}, {"id": "session-b"}]
-        )
+        self.manager.list_sessions = AsyncMock(return_value=[{"id": "session-a"}, {"id": "session-b"}])
 
-        response = await self.full_gateway.call_tool(
-            McpToolCallRequest(name="browser.observe", arguments={})
-        )
+        response = await self.full_gateway.call_tool(McpToolCallRequest(name="browser.observe", arguments={}))
 
         self.assertTrue(response.isError)
         self.assertEqual(response.structuredContent.get("code"), "ambiguous_session")
@@ -1027,9 +1022,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("timed out", response.content[0].text)
 
     async def test_find_elements_invalid_regex_surfaces_structured_error(self) -> None:
-        page = SimpleNamespace(
-            evaluate=AsyncMock(return_value={"__invalid_regex": "Unterminated group"})
-        )
+        page = SimpleNamespace(evaluate=AsyncMock(return_value={"__invalid_regex": "Unterminated group"}))
         self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page))
 
         response = await self.full_gateway.call_tool(

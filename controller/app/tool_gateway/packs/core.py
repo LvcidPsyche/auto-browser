@@ -305,4 +305,3 @@ def register(registry, gateway):
         ),
     ]:
         registry.register(spec)
-

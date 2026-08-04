@@ -83,8 +83,7 @@ def register(registry, gateway):
         ToolSpec(
             name="harness.graduate",
             description=(
-                "Return the staged candidate for a converged run. "
-                "This does not promote it into production skills."
+                "Return the staged candidate for a converged run. This does not promote it into production skills."
             ),
             input_model=HarnessGraduateInput,
             handler=gateway._harness_graduate,

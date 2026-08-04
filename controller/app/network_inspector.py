@@ -101,7 +101,9 @@ class NetworkInspector:
         # Drain pending entries — requestfailed/requestfinished will never fire after detach
         spawn_background_task(self._flush_pending())
 
-    def entries(self, limit: int = 100, method: str | None = None, url_contains: str | None = None) -> list[dict[str, Any]]:
+    def entries(
+        self, limit: int = 100, method: str | None = None, url_contains: str | None = None
+    ) -> list[dict[str, Any]]:
         """Return captured network entries, most recent first."""
         items = list(self._log)
         if method:
@@ -191,10 +193,14 @@ class NetworkInspector:
             # Scrub request body
             pii_hit = False
             if req_body and self.scrubber:
-                ct = (request.headers.get("content-type") or "")
+                ct = request.headers.get("content-type") or ""
                 scrubbed, hits = self.scrubber.network_body(req_body, ct)
                 if hits:
-                    req_body = scrubbed if isinstance(scrubbed, str) else (scrubbed.decode("utf-8", "replace") if scrubbed else req_body)
+                    req_body = (
+                        scrubbed
+                        if isinstance(scrubbed, str)
+                        else (scrubbed.decode("utf-8", "replace") if scrubbed else req_body)
+                    )
                     pii_hit = True
 
             # Sanitize headers — remove Authorization / Cookie values
@@ -256,10 +262,7 @@ class NetworkInspector:
                 try:
                     raw_bytes = await response.body()
                     if raw_bytes and len(raw_bytes) <= self.body_max_bytes:
-                        is_text = any(
-                            m in content_type.lower()
-                            for m in ("json", "text", "html", "xml", "javascript")
-                        )
+                        is_text = any(m in content_type.lower() for m in ("json", "text", "html", "xml", "javascript"))
                         if is_text:
                             resp_body = raw_bytes.decode("utf-8", errors="replace")
                             if self.scrubber:
@@ -323,18 +326,23 @@ class NetworkInspector:
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
-_SENSITIVE_HEADER_NAMES = frozenset({
-    "authorization", "cookie", "set-cookie", "x-api-key", "x-auth-token",
-    "x-csrf-token", "proxy-authorization", "www-authenticate",
-})
+_SENSITIVE_HEADER_NAMES = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "x-auth-token",
+        "x-csrf-token",
+        "proxy-authorization",
+        "www-authenticate",
+    }
+)
 
 
 def _mask_sensitive_headers(headers: dict[str, str]) -> dict[str, str]:
     """Replace values of security-sensitive headers with [MASKED]."""
-    return {
-        k: "[MASKED]" if k.lower() in _SENSITIVE_HEADER_NAMES else v
-        for k, v in headers.items()
-    }
+    return {k: "[MASKED]" if k.lower() in _SENSITIVE_HEADER_NAMES else v for k, v in headers.items()}
 
 
 def _elapsed_ms(entry: dict[str, Any]) -> float | None:

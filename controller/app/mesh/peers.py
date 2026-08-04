@@ -4,6 +4,7 @@ mesh.peers — Peer registry backed by a JSON file.
 Hot-reloadable: the file is re-read when its mtime changes.
 Atomic writes via a temp file + rename.
 """
+
 from __future__ import annotations
 
 import json

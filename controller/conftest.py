@@ -1,4 +1,5 @@
 """pytest configuration — ensure app package is importable from tests."""
+
 import sys
 from pathlib import Path
 

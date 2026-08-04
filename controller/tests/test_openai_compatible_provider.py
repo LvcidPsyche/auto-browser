@@ -61,7 +61,11 @@ def _tool_call_response(arguments: dict) -> FakeResponse:
         {
             "model": "test-model",
             "choices": [
-                {"message": {"tool_calls": [{"function": {"name": "browser_action", "arguments": json.dumps(arguments)}}]}}
+                {
+                    "message": {
+                        "tool_calls": [{"function": {"name": "browser_action", "arguments": json.dumps(arguments)}}]
+                    }
+                }
             ],
             "usage": {"total_tokens": 5},
         }
@@ -122,9 +126,7 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.calls[0]["url"], "https://api.minimax.io/v1/chat/completions")
 
     async def test_decide_falls_back_to_content_when_no_tool_call(self):
-        adapter = self._adapter(
-            "openrouter", openrouter_api_key="k", openrouter_model="anthropic/claude-3.7-sonnet"
-        )
+        adapter = self._adapter("openrouter", openrouter_api_key="k", openrouter_model="anthropic/claude-3.7-sonnet")
         fake = FakeAsyncClient(_content_response(json.dumps({"action": "done", "reason": "ok"})))
         with patch("app.providers.base.httpx.AsyncClient", return_value=fake):
             decision = await adapter.decide(goal="g", observation=self._observation())

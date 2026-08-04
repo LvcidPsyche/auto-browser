@@ -4,6 +4,7 @@ mesh.delegation — Orchestrator for outbound and inbound capability delegation.
 receive_inbound is fully implemented: routes tool/session/workflow capabilities,
 honors require_approval, returns DelegationResponse.
 """
+
 from __future__ import annotations
 
 import logging
@@ -41,6 +42,7 @@ _NONCE_CACHE_MAX = 10_000
 # Errors
 # ---------------------------------------------------------------------------
 
+
 class DelegationError(Exception):
     pass
 
@@ -56,6 +58,7 @@ class DelegationReplayError(DelegationError):
 # ---------------------------------------------------------------------------
 # Nonce cache
 # ---------------------------------------------------------------------------
+
 
 class _NonceCache:
     """Thread-safe LRU nonce cache for replay defense."""
@@ -98,6 +101,7 @@ ApprovalFn = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 # ---------------------------------------------------------------------------
 # Main orchestrator
 # ---------------------------------------------------------------------------
+
 
 class DelegationManager:
     """
@@ -279,7 +283,10 @@ class DelegationManager:
             if approval_status != "approved":
                 logger.info(
                     "mesh.delegation.approval_denied peer=%s capability=%s approval_id=%s status=%s",
-                    sender_id, request.capability, approval_id, approval_status,
+                    sender_id,
+                    request.capability,
+                    approval_id,
+                    approval_status,
                 )
                 return DelegationResponse(
                     request_id=request.request_id,

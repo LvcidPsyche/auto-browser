@@ -6,6 +6,7 @@ script) and as ``app.mcp_stdio`` inside the controller image (Glama/Docker
 entrypoint). A guard test asserts the two copies stay byte-identical, so any
 edit here must be mirrored to the other copy.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -159,7 +160,9 @@ class StdioMcpBridge:
         if payload.get("id") is None:
             return None
         if response.body is None:
-            return self._jsonrpc_error(request_id, -32000, f"Empty response from Auto Browser MCP endpoint ({response.status_code})")
+            return self._jsonrpc_error(
+                request_id, -32000, f"Empty response from Auto Browser MCP endpoint ({response.status_code})"
+            )
         return response.body
 
     @staticmethod

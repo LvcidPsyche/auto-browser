@@ -14,7 +14,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run one auto-browser convergence harness task contract.")
     parser.add_argument("--contract", required=True, help="Path to a TaskContract JSON file.")
     parser.add_argument("--root", default=".autonomous/harness", help="Harness state root.")
-    parser.add_argument("--mock-final-observation", default="", help="JSON object or path for deterministic local runs.")
+    parser.add_argument(
+        "--mock-final-observation", default="", help="JSON object or path for deterministic local runs."
+    )
     parser.add_argument("--mock-final-url", default="", help="Convenience URL for deterministic local runs.")
     parser.add_argument("--mock-final-text", default="", help="Convenience text for deterministic local runs.")
     parser.add_argument("--max-attempts", type=int, default=None)

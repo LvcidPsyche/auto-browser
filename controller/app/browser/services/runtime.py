@@ -26,9 +26,7 @@ class BrowserRuntimeService:
 
             if manager.settings.cdp_connect_url:
                 logger.info("connecting to existing Chrome via CDP at %s", manager.settings.cdp_connect_url)
-                manager.browser = await manager.playwright.chromium.connect_over_cdp(
-                    manager.settings.cdp_connect_url
-                )
+                manager.browser = await manager.playwright.chromium.connect_over_cdp(manager.settings.cdp_connect_url)
                 logger.info("CDP attach succeeded")
                 return manager.browser
 

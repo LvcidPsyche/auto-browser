@@ -48,9 +48,7 @@ class TraceRecorderTests(unittest.TestCase):
             with closing(sqlite3.connect(Path(tmp) / "trace-index.sqlite3")) as conn:
                 indexes = {
                     row[1]
-                    for row in conn.execute(
-                        "SELECT type, name FROM sqlite_master WHERE type = 'index'"
-                    ).fetchall()
+                    for row in conn.execute("SELECT type, name FROM sqlite_master WHERE type = 'index'").fetchall()
                 }
             self.assertIn("idx_trace_events_run", indexes)
             self.assertIn("idx_trace_events_type", indexes)
@@ -88,7 +86,7 @@ class TraceRecorderTests(unittest.TestCase):
 
         self.assertNotIn("secret-token", payload_text)
         self.assertNotIn("session=secret", payload_text)
-        self.assertNotIn("api_key\": \"secret", payload_text)
+        self.assertNotIn('api_key": "secret', payload_text)
         self.assertIn("[REDACTED]", payload_text)
 
 
@@ -202,7 +200,9 @@ class SkillInducerTests(unittest.TestCase):
             self.assertIsNotNone(result.verification)
             assert result.verification is not None
             self.assertFalse(result.verification.passed)
-            drift = json.loads(Path(candidate.files["candidate.json"]).with_name("drift.json").read_text(encoding="utf-8"))
+            drift = json.loads(
+                Path(candidate.files["candidate.json"]).with_name("drift.json").read_text(encoding="utf-8")
+            )
             self.assertEqual(drift["status"], "degraded")
 
     def test_drift_monitor_ignores_tampered_recorded_artifact_paths(self) -> None:

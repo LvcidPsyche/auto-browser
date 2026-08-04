@@ -137,7 +137,9 @@ class MaintenanceService:
                 stats.deleted_files += 1
                 stats.bytes_reclaimed += size
 
-        for path in sorted((item for item in root.rglob("*") if item.is_dir()), key=lambda item: len(item.parts), reverse=True):
+        for path in sorted(
+            (item for item in root.rglob("*") if item.is_dir()), key=lambda item: len(item.parts), reverse=True
+        ):
             resolved = path.resolve()
             if self._protected_match(resolved, protected_roots) is not None:
                 continue

@@ -95,10 +95,7 @@ def _emit_scores(scores, *, json_output: bool) -> int:
         print(json.dumps(payload, indent=2))
     else:
         for key, summary in payload["summary"].items():
-            print(
-                f"{key}: {summary['successes']}/{summary['runs']} success, "
-                f"avg={summary['average_score']:.4f}"
-            )
+            print(f"{key}: {summary['successes']}/{summary['runs']} success, avg={summary['average_score']:.4f}")
         for score in payload["scores"]:
             status = "PASS" if score["success"] else "FAIL"
             print(f"- {status} {score['case_id']} {score['provider']}/{score['workflow_profile']}")

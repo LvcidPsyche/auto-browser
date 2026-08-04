@@ -10,6 +10,7 @@ These tests pin the *rejection* behaviour, which is the part that matters: a
 guard that stops rejecting still passes every happy-path test. Each test names
 the attack it prevents.
 """
+
 from __future__ import annotations
 
 import io

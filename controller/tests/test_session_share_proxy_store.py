@@ -148,8 +148,9 @@ class ShareHttpTests(unittest.TestCase):
         get_session = AsyncMock(return_value=SimpleNamespace(id="session-1"))
         create_token = Mock(return_value={"token": "tok", "session_id": "session-1"})
 
-        with patch.object(main_module.manager, "get_session", get_session), patch.object(
-            main_module.share_manager, "create_token", create_token
+        with (
+            patch.object(main_module.manager, "get_session", get_session),
+            patch.object(main_module.share_manager, "create_token", create_token),
         ):
             response = self.client.post("/sessions/session-1/share")
 
@@ -169,8 +170,9 @@ class ShareHttpTests(unittest.TestCase):
         token_info = Mock(return_value={"valid": True, "session_id": "missing", "scope": SCOPE_OBSERVE})
         observe = AsyncMock(side_effect=KeyError("missing"))
 
-        with patch.object(main_module.share_manager, "token_info", token_info), patch.object(
-            main_module.manager, "observe", observe
+        with (
+            patch.object(main_module.share_manager, "token_info", token_info),
+            patch.object(main_module.manager, "observe", observe),
         ):
             response = self.client.get("/share/fake-token/observe")
 
@@ -190,8 +192,9 @@ class ShareHttpTests(unittest.TestCase):
         token_info = Mock(return_value={"valid": True, "session_id": "session-1", "scope": SCOPE_OBSERVE})
         get_session = AsyncMock(return_value=SimpleNamespace(id="session-1"))
 
-        with patch.object(main_module.share_manager, "token_info", token_info), patch.object(
-            main_module.manager, "get_session", get_session
+        with (
+            patch.object(main_module.share_manager, "token_info", token_info),
+            patch.object(main_module.manager, "get_session", get_session),
         ):
             response = self.client.get("/share/fake-token")
 
@@ -205,8 +208,9 @@ class ShareHttpTests(unittest.TestCase):
         token_info = Mock(return_value={"valid": True, "session_id": "missing", "scope": SCOPE_OBSERVE})
         get_session = AsyncMock(side_effect=KeyError("missing"))
 
-        with patch.object(main_module.share_manager, "token_info", token_info), patch.object(
-            main_module.manager, "get_session", get_session
+        with (
+            patch.object(main_module.share_manager, "token_info", token_info),
+            patch.object(main_module.manager, "get_session", get_session),
         ):
             response = self.client.get("/share/fake-token")
 

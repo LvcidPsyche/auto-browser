@@ -73,8 +73,7 @@ class ClaudeAdapter(BaseProviderAdapter):
             "model": model,
             "max_tokens": 1024,
             "system": (
-                "You are the Auto Browser planner. Pick exactly one next action. "
-                "Return it via the browser_action tool."
+                "You are the Auto Browser planner. Pick exactly one next action. Return it via the browser_action tool."
             ),
             "tool_choice": {"type": "tool", "name": "browser_action"},
             "tools": [

@@ -7,6 +7,7 @@ Covers:
   content AND screenshot PII scrubbing is not active
 - OCR is never skipped while PII scrubbing is active, regardless of the config knob
 """
+
 from __future__ import annotations
 
 import unittest

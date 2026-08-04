@@ -18,6 +18,7 @@ Layer 3 matters on its own: since FastAPI 0.137 ``app.routes`` holds
 introspection and dispatch can diverge. Never enumerate ``app.routes`` expecting
 a ``.path`` attribute — use ``app.openapi()`` (layer 1) or a request (layer 3).
 """
+
 from __future__ import annotations
 
 import atexit

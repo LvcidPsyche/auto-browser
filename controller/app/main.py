@@ -108,6 +108,7 @@ app.include_router(
 )
 install_controller_http_middleware(app, settings=settings, rate_limiter=rate_limiter, metrics=metrics)
 
+
 # Legacy operator dashboard aliases now redirect to the auth-bootstrap-aware dashboard.
 @app.get("/ui", include_in_schema=False)
 @app.get("/ui/", include_in_schema=False)

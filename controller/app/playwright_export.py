@@ -43,14 +43,14 @@ def run() -> None:
 
 '''
 
-_SCRIPT_FOOTER = '''\
+_SCRIPT_FOOTER = """\
         context.close()
         browser.close()
 
 
 if __name__ == "__main__":
     run()
-'''
+"""
 
 
 def _indent(code: str, spaces: int = 8) -> str:
@@ -61,7 +61,7 @@ def _action_to_code(action: str, details: dict[str, Any]) -> str | None:
     """Convert a single audit action to a Playwright Python statement."""
     if action == "navigate":
         url = details.get("url", "")
-        return f'page.goto({url!r})\n'
+        return f"page.goto({url!r})\n"
 
     if action == "click":
         mode = details.get("mode")
@@ -69,7 +69,7 @@ def _action_to_code(action: str, details: dict[str, Any]) -> str | None:
             x, y = details.get("x", 0), details.get("y", 0)
             return f"page.mouse.click({x}, {y})\n"
         selector = details.get("selector", "")
-        return f'page.locator({selector!r}).first.click()\n'
+        return f"page.locator({selector!r}).first.click()\n"
 
     if action == "hover":
         mode = details.get("mode")
@@ -77,7 +77,7 @@ def _action_to_code(action: str, details: dict[str, Any]) -> str | None:
             x, y = details.get("x", 0), details.get("y", 0)
             return f"page.mouse.move({x}, {y})\n"
         selector = details.get("selector", "")
-        return f'page.locator({selector!r}).first.hover()\n'
+        return f"page.locator({selector!r}).first.hover()\n"
 
     if action == "type":
         selector = details.get("selector", "")
@@ -89,16 +89,16 @@ def _action_to_code(action: str, details: dict[str, Any]) -> str | None:
             text = details.get("text_preview", "")
             comment = ""
         clear_first = details.get("clear_first", True)
-        loc = f'page.locator({selector!r}).first'
+        loc = f"page.locator({selector!r}).first"
         lines = ""
         if clear_first:
-            lines += f'{loc}.clear()\n'
-        lines += f'{loc}.fill({text!r}){comment}\n' if not comment else f'{loc}.fill({text!r}){comment}'
+            lines += f"{loc}.clear()\n"
+        lines += f"{loc}.fill({text!r}){comment}\n" if not comment else f"{loc}.fill({text!r}){comment}"
         return lines
 
     if action == "press":
         key = details.get("key", "")
-        return f'page.keyboard.press({key!r})\n'
+        return f"page.keyboard.press({key!r})\n"
 
     if action == "scroll":
         dx = details.get("delta_x", 0)
@@ -124,23 +124,23 @@ def _action_to_code(action: str, details: dict[str, Any]) -> str | None:
         label = details.get("label")
         index = details.get("index")
         if value is not None:
-            return f'page.locator({selector!r}).first.select_option(value={value!r})\n'
+            return f"page.locator({selector!r}).first.select_option(value={value!r})\n"
         if label is not None:
-            return f'page.locator({selector!r}).first.select_option(label={label!r})\n'
+            return f"page.locator({selector!r}).first.select_option(label={label!r})\n"
         if index is not None:
-            return f'page.locator({selector!r}).first.select_option(index={index!r})\n'
+            return f"page.locator({selector!r}).first.select_option(index={index!r})\n"
         return None
 
     if action == "open_tab":
         url = details.get("url")
         if url:
-            return f'tab = context.new_page()\ntab.goto({url!r})\npage = tab\n'
+            return f"tab = context.new_page()\ntab.goto({url!r})\npage = tab\n"
         return "page = context.new_page()\n"
 
     if action == "upload":
         selector = details.get("selector", "")
         file_path = details.get("file_path", "<path/to/file>")
-        return f'page.locator({selector!r}).first.set_input_files({file_path!r})  # verify file path before running\n'
+        return f"page.locator({selector!r}).first.set_input_files({file_path!r})  # verify file path before running\n"
 
     return None  # unsupported — skip
 
@@ -248,9 +248,9 @@ async def export_session_script(
         filename=f"{session_id}_replay.py",
     )
     action_events = [
-        e for e in events
-        if e.get("event_type") in {"browser_action", "action"}
-        and e.get("status") in {"ok", "success", "completed"}
+        e
+        for e in events
+        if e.get("event_type") in {"browser_action", "action"} and e.get("status") in {"ok", "success", "completed"}
     ]
     return {
         "session_id": session_id,

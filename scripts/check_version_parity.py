@@ -97,8 +97,7 @@ def main() -> int:
         marker = "  " if version == expected else "->"
         print(f"{marker} {location:52} {version}", file=sys.stderr)
     print(
-        "\nAll of these must move together in a release commit. See "
-        "scripts/check_version_parity.py for why.",
+        "\nAll of these must move together in a release commit. See scripts/check_version_parity.py for why.",
         file=sys.stderr,
     )
     return 1

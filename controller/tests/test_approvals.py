@@ -143,6 +143,7 @@ class ApprovalQueueTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(approved.id, approval.id)
 
+
 class ApprovalStoreSQLiteTests(unittest.IsolatedAsyncioTestCase):
     async def test_sqlite_store_persists_and_filters_records(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

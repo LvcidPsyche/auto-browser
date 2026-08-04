@@ -1,4 +1,5 @@
 """Operator dashboard route (/dashboard)."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request

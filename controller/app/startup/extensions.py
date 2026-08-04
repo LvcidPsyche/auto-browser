@@ -5,6 +5,7 @@ Call register_extensions(app) from main.py after app creation.
 All clients are initialized from environment variables.
 Missing credentials = subsystem disabled with a warning (never crash on startup).
 """
+
 from __future__ import annotations
 
 import logging
@@ -41,10 +42,12 @@ def register_extensions(app) -> None:
 # Skills Curator adapter
 # ---------------------------------------------------------------------------
 
+
 def _init_curator(app) -> None:
     """Initialize the Skills Curator LLM adapter. None when no API key is set."""
     try:
         from app.curator_llm import build_curator_adapter
+
         adapter = build_curator_adapter()
         app.state.curator_adapter = adapter
         if adapter is not None and adapter.ready:
@@ -59,6 +62,7 @@ def _init_curator(app) -> None:
 # ---------------------------------------------------------------------------
 # Mesh
 # ---------------------------------------------------------------------------
+
 
 def _init_mesh(app) -> None:
     mesh_enabled = os.environ.get("MESH_ENABLED", "false").lower() == "true"
@@ -101,6 +105,7 @@ def _init_mesh(app) -> None:
 # ---------------------------------------------------------------------------
 # Convergence harness
 # ---------------------------------------------------------------------------
+
 
 def _init_harness(app) -> None:
     try:
@@ -159,9 +164,10 @@ def _harness_model_tiers(settings) -> dict[str, str]:
 # Network / CDP stores (populated per-session by session manager)
 # ---------------------------------------------------------------------------
 
+
 def _init_network_stores(app) -> None:
-    app.state.network_inspectors = {}   # session_id → NetworkInspector
-    app.state.cdp_sessions = {}         # session_id → CDPPassthrough
+    app.state.network_inspectors = {}  # session_id → NetworkInspector
+    app.state.cdp_sessions = {}  # session_id → CDPPassthrough
     logger.debug("startup.extensions: network/CDP stores initialized")
 
 
@@ -198,8 +204,10 @@ def _build_mesh_tool_gateway(app):
 # Workflow engine
 # ---------------------------------------------------------------------------
 
+
 def _init_workflow_engine(app) -> None:
     from app.workflow.engine import WorkflowEngine
+
     wf_root = Path(os.environ.get("WORKFLOWS_ROOT", "/data/workflows"))
     engine = WorkflowEngine(workflows_root=wf_root)
     app.state.workflow_engine = engine
@@ -209,6 +217,7 @@ def _init_workflow_engine(app) -> None:
 # ---------------------------------------------------------------------------
 # Extracted social/Veo3 state
 # ---------------------------------------------------------------------------
+
 
 def _disable_extracted_social_state(app) -> None:
     """Keep removed social/Veo3 app.state names inert for old extensions/tests."""
@@ -240,6 +249,7 @@ def _register_session_hooks(app) -> None:
 # Session lifecycle hooks (called by browser manager)
 # ---------------------------------------------------------------------------
 
+
 async def on_session_created(app, session_id: str, page) -> None:
     """
     Called when a new browser session is created.
@@ -262,6 +272,7 @@ async def on_session_created(app, session_id: str, page) -> None:
         stealth_profile = os.environ.get("STEALTH_PROFILE", "off")
         if getattr(settings, "stealth_enabled", False) and stealth_profile != "off":
             from app.stealth.fingerprint import FingerprintConfig, apply_fingerprint
+
             config = FingerprintConfig(session_id, stealth_profile)
             await apply_fingerprint(page.context, config)
             logger.debug("on_session_created: stealth profile=%s applied", stealth_profile)
@@ -280,6 +291,7 @@ async def on_session_closed(app, session_id: str) -> None:
         curator = getattr(app.state, "curator_adapter", None)
         if curator is not None and getattr(curator, "ready", False):
             from ..utils import spawn_background_task
+
             spawn_background_task(_curator_review_session(app, session_id, curator))
     except Exception as exc:
         logger.debug("on_session_closed: curator review skipped — %s", exc)
@@ -293,6 +305,7 @@ async def _curator_review_session(app, session_id: str, curator) -> None:
     """
     try:
         from pathlib import Path
+
         staging = Path(os.environ.get("SKILLS_STAGING_ROOT", "/data/skills-staging")) / session_id
         staging.mkdir(parents=True, exist_ok=True)
         # Build a lightweight transcript stub — callers that wire a richer

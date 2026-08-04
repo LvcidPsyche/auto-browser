@@ -48,13 +48,11 @@ from .utils import UTC
 try:
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
+
     _APSCHEDULER_AVAILABLE = True
 except ImportError:
     _APSCHEDULER_AVAILABLE = False
-    logger.info(
-        "APScheduler not installed — cron scheduling disabled. "
-        "Install: pip install apscheduler"
-    )
+    logger.info("APScheduler not installed — cron scheduling disabled. Install: pip install apscheduler")
 
 
 class CronService:
@@ -66,7 +64,7 @@ class CronService:
         *,
         max_jobs: int = 50,
         job_queue: Any = None,  # AgentJobQueue
-        manager: Any = None,   # BrowserManager
+        manager: Any = None,  # BrowserManager
     ):
         self._store_path = Path(store_path)
         self._max_jobs = max_jobs
@@ -156,8 +154,17 @@ class CronService:
             if job_id not in jobs:
                 raise KeyError(f"Cron job not found: {job_id}")
             job = jobs[job_id]
-            allowed = {"name", "goal", "provider", "schedule", "enabled", "start_url",
-                       "auth_profile", "proxy_persona", "max_steps"}
+            allowed = {
+                "name",
+                "goal",
+                "provider",
+                "schedule",
+                "enabled",
+                "start_url",
+                "auth_profile",
+                "proxy_persona",
+                "max_steps",
+            }
             for k, v in updates.items():
                 if k in allowed:
                     job[k] = v
@@ -191,9 +198,7 @@ class CronService:
 
     # ── Webhook trigger ─────────────────────────────────────────────────────
 
-    async def trigger_via_webhook(
-        self, job_id: str, webhook_key: str
-    ) -> dict[str, Any]:
+    async def trigger_via_webhook(self, job_id: str, webhook_key: str) -> dict[str, Any]:
         """Verify webhook key and enqueue the job for immediate execution."""
         jobs = self._load()
         if job_id not in jobs:

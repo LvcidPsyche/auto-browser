@@ -1,4 +1,5 @@
 """auto-browser Python client SDK."""
+
 from .client import AutoBrowserClient
 
 __all__ = ["AutoBrowserClient"]

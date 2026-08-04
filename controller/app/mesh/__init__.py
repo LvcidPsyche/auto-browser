@@ -3,6 +3,7 @@ auto-browser mesh — multi-node peer delegation with Ed25519 envelope security.
 
 Public surface (26 names):
 """
+
 from .delegation import (
     ApprovalFn,
     DelegationError,

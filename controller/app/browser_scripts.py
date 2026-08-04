@@ -1,4 +1,5 @@
 """Browser-side JavaScript constants used by BrowserManager for page observation."""
+
 from __future__ import annotations
 
 # Injected before every page load via add_init_script().
@@ -608,6 +609,7 @@ FIND_ACCESSIBLE_TARGET_SCRIPT = r"""
   return matches[index] || matches[0] || null;
 }
 """
+
 
 async def apply_stealth(page: object) -> None:
     """Inject stealth init script into a page before any navigation."""

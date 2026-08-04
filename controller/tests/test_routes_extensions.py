@@ -134,8 +134,12 @@ class RoutesExtensionsTests(unittest.TestCase):
         self.assertEqual(client.get("/mesh/identity").json()["node_id"], "node-1")
 
         self.assertEqual(client.get("/sessions/session-1/cdp/element?selector=button").json()["selector"], "button")
-        self.assertEqual(client.post("/sessions/session-1/cdp/raw", json={"method": "Runtime.evaluate"}).status_code, 200)
-        self.assertEqual(client.post("/sessions/session-1/cdp/raw", json={"method": "Forbidden.command"}).status_code, 403)
+        self.assertEqual(
+            client.post("/sessions/session-1/cdp/raw", json={"method": "Runtime.evaluate"}).status_code, 200
+        )
+        self.assertEqual(
+            client.post("/sessions/session-1/cdp/raw", json={"method": "Forbidden.command"}).status_code, 403
+        )
 
         run = client.post("/workflows/run", json={"workflow_id": "fixture", "steps": []}).json()
         self.assertEqual(run["status"], "completed")

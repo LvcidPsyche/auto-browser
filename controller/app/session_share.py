@@ -41,6 +41,7 @@ class SessionShareManager:
             # Auto-generate an ephemeral secret if none configured.
             # Tokens created with this secret won't survive server restarts.
             import os
+
             secret = os.urandom(32).hex()
             logger.warning(
                 "SHARE_TOKEN_SECRET not configured — using ephemeral secret. "

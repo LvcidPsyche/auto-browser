@@ -134,7 +134,9 @@ class McpHttpTransport:
 
         session_id = self._read_session_id(request)
         if not session_id:
-            return self._json_error_response(None, -32000, f"Missing required header: {MCP_SESSION_HEADER}", status_code=400)
+            return self._json_error_response(
+                None, -32000, f"Missing required header: {MCP_SESSION_HEADER}", status_code=400
+            )
         if self._sessions.pop(session_id, None) is None:
             return self._json_error_response(None, -32001, f"Unknown MCP session: {session_id}", status_code=404)
         self._persist_sessions()
@@ -325,7 +327,7 @@ class McpHttpTransport:
         # Parse browser://{session_id}/{resource}
         if not uri.startswith("browser://"):
             return None
-        path = uri[len("browser://"):]
+        path = uri[len("browser://") :]
         parts = path.split("/", 1)
         if len(parts) != 2:
             return None
@@ -340,6 +342,7 @@ class McpHttpTransport:
                 shot_path = Path(shot["screenshot_path"])
                 if shot_path.exists():
                     import base64
+
                     img_b64 = base64.standard_b64encode(shot_path.read_bytes()).decode()
                     return {"uri": uri, "mimeType": "image/png", "blob": img_b64}
                 return None
@@ -545,7 +548,9 @@ class McpHttpTransport:
             )
         return session
 
-    def _validate_protocol_header(self, request: Request, session: McpSession, *, request_id: Any = None) -> Response | None:
+    def _validate_protocol_header(
+        self, request: Request, session: McpSession, *, request_id: Any = None
+    ) -> Response | None:
         protocol_version = request.headers.get(MCP_PROTOCOL_HEADER)
         if not protocol_version:
             return None
@@ -582,9 +587,7 @@ class McpHttpTransport:
 
         allowed_origins = {
             normalized
-            for normalized in (
-                self._normalize_origin(origin_value) for origin_value in self.allowed_origins
-            )
+            for normalized in (self._normalize_origin(origin_value) for origin_value in self.allowed_origins)
             if normalized
         }
         request_origin = self._normalize_origin(str(request.base_url))
@@ -631,9 +634,7 @@ class McpHttpTransport:
                     initialized=bool(item.get("initialized", False)),
                     created_at=str(item.get("created_at") or ""),
                     resource_subscriptions=[
-                        str(uri)
-                        for uri in item.get("resource_subscriptions", [])
-                        if isinstance(uri, str)
+                        str(uri) for uri in item.get("resource_subscriptions", []) if isinstance(uri, str)
                     ],
                 )
             except Exception:

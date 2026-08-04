@@ -6,6 +6,7 @@ animations, and asset references for a given CSS selector.
 
 raw_cdp_command() is a constrained passthrough for trusted CDP commands.
 """
+
 from __future__ import annotations
 
 import fnmatch
@@ -15,20 +16,22 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Commands allowed through the raw CDP passthrough
-_ALLOWED_CDP_COMMANDS = frozenset([
-    "Runtime.evaluate",
-    "DOM.getDocument",
-    "DOM.querySelector",
-    "DOM.getAttributes",
-    "DOM.getBoxModel",
-    "CSS.getComputedStyleForNode",
-    "CSS.getMatchedStylesForNode",
-    "Animation.getPlaybackRate",
-    "Network.getCookies",
-    "Performance.getMetrics",
-    "Page.getLayoutMetrics",
-    "Accessibility.getFullAXTree",
-])
+_ALLOWED_CDP_COMMANDS = frozenset(
+    [
+        "Runtime.evaluate",
+        "DOM.getDocument",
+        "DOM.querySelector",
+        "DOM.getAttributes",
+        "DOM.getBoxModel",
+        "CSS.getComputedStyleForNode",
+        "CSS.getMatchedStylesForNode",
+        "Animation.getPlaybackRate",
+        "Network.getCookies",
+        "Performance.getMetrics",
+        "Page.getLayoutMetrics",
+        "Accessibility.getFullAXTree",
+    ]
+)
 
 # Domains allowed for element extraction (empty = all allowed)
 _ALLOWED_DOMAINS: list[str] = []
@@ -68,10 +71,13 @@ class CDPPassthrough:
             doc_node_id = doc["root"]["nodeId"]
 
             # Find element
-            result = await self._cdp.send("DOM.querySelector", {
-                "nodeId": doc_node_id,
-                "selector": selector,
-            })
+            result = await self._cdp.send(
+                "DOM.querySelector",
+                {
+                    "nodeId": doc_node_id,
+                    "selector": selector,
+                },
+            )
             node_id = result.get("nodeId", 0)
             if node_id == 0:
                 return {"error": f"Selector not found: {selector!r}"}
@@ -86,19 +92,29 @@ class CDPPassthrough:
             computed = await self._cdp.send("CSS.getComputedStyleForNode", {"nodeId": node_id})
             # Filter to useful style properties
             _STYLE_KEYS = {
-                "display", "visibility", "opacity", "position", "z-index",
-                "width", "height", "color", "background-color", "font-size",
-                "cursor", "pointer-events", "overflow",
+                "display",
+                "visibility",
+                "opacity",
+                "position",
+                "z-index",
+                "width",
+                "height",
+                "color",
+                "background-color",
+                "font-size",
+                "cursor",
+                "pointer-events",
+                "overflow",
             }
             styles = {
-                prop["name"]: prop["value"]
-                for prop in computed.get("computedStyle", [])
-                if prop["name"] in _STYLE_KEYS
+                prop["name"]: prop["value"] for prop in computed.get("computedStyle", []) if prop["name"] in _STYLE_KEYS
             }
 
             # Event listeners via Runtime.evaluate (type names only)
-            listeners_result = await self._cdp.send("Runtime.evaluate", {
-                "expression": f"""
+            listeners_result = await self._cdp.send(
+                "Runtime.evaluate",
+                {
+                    "expression": f"""
                     (function() {{
                         const el = document.querySelector({selector!r});
                         if (!el) return [];
@@ -111,13 +127,16 @@ class CDPPassthrough:
                         return events;
                     }})()
                 """,
-                "returnByValue": True,
-            })
+                    "returnByValue": True,
+                },
+            )
             listener_types = listeners_result.get("result", {}).get("value", [])
 
             # Asset references
-            asset_result = await self._cdp.send("Runtime.evaluate", {
-                "expression": f"""
+            asset_result = await self._cdp.send(
+                "Runtime.evaluate",
+                {
+                    "expression": f"""
                     (function() {{
                         const el = document.querySelector({selector!r});
                         if (!el) return {{}};
@@ -129,8 +148,9 @@ class CDPPassthrough:
                         }};
                     }})()
                 """,
-                "returnByValue": True,
-            })
+                    "returnByValue": True,
+                },
+            )
             assets = asset_result.get("result", {}).get("value", {})
 
             return {
@@ -159,8 +179,7 @@ class CDPPassthrough:
         params = params or {}
         if method not in _ALLOWED_CDP_COMMANDS:
             raise ValueError(
-                f"CDP command {method!r} is not in the allowed list. "
-                f"Allowed: {sorted(_ALLOWED_CDP_COMMANDS)}"
+                f"CDP command {method!r} is not in the allowed list. Allowed: {sorted(_ALLOWED_CDP_COMMANDS)}"
             )
         try:
             result = await self._cdp.send(method, params)

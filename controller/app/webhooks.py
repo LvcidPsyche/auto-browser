@@ -8,6 +8,7 @@ Signature: X-Webhook-Signature: sha256=<hex>
 The signature covers the raw request body using HMAC-SHA256 with
 APPROVAL_WEBHOOK_SECRET as the key (Slack-compatible format).
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -41,14 +42,7 @@ def _is_disallowed_webhook_host(host: str) -> bool:
         ip = ipaddress.ip_address(normalized)
     except ValueError:
         return False
-    return (
-        ip.is_loopback
-        or ip.is_private
-        or ip.is_link_local
-        or ip.is_unspecified
-        or ip.is_multicast
-        or ip.is_reserved
-    )
+    return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved
 
 
 def _is_disallowed_webhook_url(webhook_url: str) -> bool:

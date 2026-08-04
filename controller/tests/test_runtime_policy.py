@@ -20,7 +20,7 @@ class HealthzUnixSocketServer:
                 b"Content-Type: application/json\r\n"
                 b"Content-Length: 15\r\n"
                 b"Connection: close\r\n\r\n"
-                b"{\"status\":\"ok\"}"
+                b'{"status":"ok"}'
             )
 
     def __init__(self, socket_path: Path) -> None:
@@ -64,9 +64,7 @@ class RuntimePolicyTests(unittest.TestCase):
         )
 
     def test_development_no_bearer_warning_when_token_set(self) -> None:
-        settings = Settings(
-            _env_file=None, APP_ENV="development", API_BEARER_TOKEN="dev-token"
-        )
+        settings = Settings(_env_file=None, APP_ENV="development", API_BEARER_TOKEN="dev-token")
 
         report = validate_runtime_policy(settings)
 

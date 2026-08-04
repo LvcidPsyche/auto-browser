@@ -362,11 +362,11 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         return self.environment_name == "production"
 
-
     @property
     def random_user_agent(self) -> str:
         agents = [a.strip() for a in self.user_agent_pool.split(",") if a.strip()]
         return random.choice(agents) if agents else ""
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

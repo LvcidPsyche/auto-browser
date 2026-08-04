@@ -6,6 +6,7 @@ Registers: /mesh, /network, /cdp, /workflow, /dashboard
 One module per pillar; this package facade preserves the original
 ``app.routes.extensions`` import surface.
 """
+
 from __future__ import annotations
 
 import logging

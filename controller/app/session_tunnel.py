@@ -234,10 +234,7 @@ class IsolatedSessionTunnelBroker:
             "-i",
             self.settings.isolated_tunnel_key_path,
             "-R",
-            (
-                f"{tunnel.remote_bind_address}:{tunnel.remote_port}:"
-                f"{tunnel.local_host}:{tunnel.local_port}"
-            ),
+            (f"{tunnel.remote_bind_address}:{tunnel.remote_port}:{tunnel.local_host}:{tunnel.local_port}"),
             f"{tunnel.ssh_user}@{tunnel.ssh_host}",
         ]
 
@@ -258,9 +255,7 @@ class IsolatedSessionTunnelBroker:
             return
         if tunnel.status in {"inactive", "error", "degraded"}:
             return
-        tunnel.error = self._tail_file(tunnel.log_path) or (
-            f"autossh exited with code {tunnel.process.returncode}"
-        )
+        tunnel.error = self._tail_file(tunnel.log_path) or (f"autossh exited with code {tunnel.process.returncode}")
         self._write_metadata(tunnel, status="degraded")
 
     def _write_metadata(self, tunnel: IsolatedSessionTunnel, *, status: str) -> None:
@@ -308,7 +303,9 @@ class IsolatedSessionTunnelBroker:
         }
         missing = [name for name, value in required.items() if not value]
         if missing:
-            raise RuntimeError(f"isolated tunnel support is enabled but missing required settings: {', '.join(missing)}")
+            raise RuntimeError(
+                f"isolated tunnel support is enabled but missing required settings: {', '.join(missing)}"
+            )
 
         key_path = Path(self.settings.isolated_tunnel_key_path)
         if not key_path.is_file():
@@ -318,8 +315,7 @@ class IsolatedSessionTunnelBroker:
         known_hosts = Path(self.settings.isolated_tunnel_known_hosts_path)
         if strict in {"yes", "accept-new"} and not known_hosts.is_file():
             raise RuntimeError(
-                "isolated tunnel known_hosts file is required when strict host key checking is enabled: "
-                f"{known_hosts}"
+                f"isolated tunnel known_hosts file is required when strict host key checking is enabled: {known_hosts}"
             )
 
         allowed_modes = {"private", "tailscale", "cloudflare-access", "unsafe-public"}
@@ -344,10 +340,7 @@ class IsolatedSessionTunnelBroker:
         ):
             raise RuntimeError("Cloudflare Access mode expects ISOLATED_TUNNEL_PUBLIC_SCHEME=https")
 
-        if (
-            self.settings.isolated_tunnel_remote_port_start
-            > self.settings.isolated_tunnel_remote_port_end
-        ):
+        if self.settings.isolated_tunnel_remote_port_start > self.settings.isolated_tunnel_remote_port_end:
             raise RuntimeError("ISOLATED_TUNNEL_REMOTE_PORT_START must be <= ISOLATED_TUNNEL_REMOTE_PORT_END")
 
     @staticmethod
@@ -358,4 +351,3 @@ class IsolatedSessionTunnelBroker:
         if not text:
             return None
         return text[-max_chars:]
-

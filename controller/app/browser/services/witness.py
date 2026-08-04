@@ -198,13 +198,10 @@ class BrowserWitnessService:
         risk_category = witness_context.get("risk_category")
         action_class = self.action_class(action_name, risk_category=risk_category)
         sensitive_input = bool(
-            witness_context.get("sensitive_input")
-            or target.get("text_redacted")
-            or target.get("sensitive")
+            witness_context.get("sensitive_input") or target.get("text_redacted") or target.get("sensitive")
         )
         stores_auth_material = bool(
-            witness_context.get("stores_auth_material")
-            or action_name in {"save_auth_profile", "save_storage_state"}
+            witness_context.get("stores_auth_material") or action_name in {"save_auth_profile", "save_storage_state"}
         )
         return WitnessActionContext(
             action=action_name,

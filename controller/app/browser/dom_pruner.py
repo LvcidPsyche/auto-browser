@@ -10,6 +10,7 @@ Scoring factors:
   - Visibility (above fold, not hidden)
   - Recency (recently interacted elements score higher)
 """
+
 from __future__ import annotations
 
 import re
@@ -86,7 +87,11 @@ def _visibility_score(element: dict[str, Any]) -> float:
     """Prefer elements that appear to be visible and above the fold."""
     if not element.get("is_visible", True):
         return -20.0  # strongly penalize hidden elements
-    y = element.get("y") or element.get("bounding_box", {}).get("y", 500) if isinstance(element.get("bounding_box"), dict) else 500
+    y = (
+        element.get("y") or element.get("bounding_box", {}).get("y", 500)
+        if isinstance(element.get("bounding_box"), dict)
+        else 500
+    )
     # Above fold (y < 800) gets a bonus, below gets a penalty
     if isinstance(y, (int, float)):
         return max(0.0, 5.0 - (y / 200.0))

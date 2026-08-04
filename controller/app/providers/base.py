@@ -263,8 +263,7 @@ class BaseProviderAdapter(ABC):
                 continue
             if key in {"properties", "$defs", "definitions"} and isinstance(value, dict):
                 normalized[key] = {
-                    child_key: cls._normalize_json_schema_node(child_value)
-                    for child_key, child_value in value.items()
+                    child_key: cls._normalize_json_schema_node(child_value) for child_key, child_value in value.items()
                 }
                 continue
             if key in {"items", "anyOf", "allOf", "oneOf", "not", "if", "then", "else"}:
@@ -295,14 +294,11 @@ class BaseProviderAdapter(ABC):
                 "Do not wrap it in markdown.\n"
                 f"{json.dumps(self.action_schema, ensure_ascii=False)}\n\n"
             )
-        return (
-            schema_text
-            + self.build_text_prompt(
-                goal=goal,
-                observation=observation,
-                context_hints=context_hints,
-                previous_steps=previous_steps,
-            )
+        return schema_text + self.build_text_prompt(
+            goal=goal,
+            observation=observation,
+            context_hints=context_hints,
+            previous_steps=previous_steps,
         )
 
     def cli_environment(self) -> dict[str, str]:
@@ -353,7 +349,10 @@ class BaseProviderAdapter(ABC):
 
         cli_home = (self.settings.cli_home or "").strip()
         if not cli_home:
-            return True, f"ready via {cli_label} CLI ({resolved_cli}); CLI_HOME is unset so auth state is delegated to the CLI environment"
+            return (
+                True,
+                f"ready via {cli_label} CLI ({resolved_cli}); CLI_HOME is unset so auth state is delegated to the CLI environment",
+            )
 
         home_path = Path(cli_home)
         if not home_path.exists():

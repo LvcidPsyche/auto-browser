@@ -29,10 +29,7 @@ class BrowserSessionService:
         self.manager = manager
 
     async def list(self) -> list[dict[str, Any]]:
-        session_map = {
-            record.id: record.model_dump()
-            for record in await self.manager.session_store.list()
-        }
+        session_map = {record.id: record.model_dump() for record in await self.manager.session_store.list()}
         for session in self.manager.sessions.values():
             summary = await self.manager._session_summary(session)
             session_map[summary["id"]] = summary
@@ -257,9 +254,8 @@ class BrowserSessionService:
             },
             "accept_downloads": True,
         }
-        effective_ua = (
-            user_agent
-            or (self.manager.settings.random_user_agent if self.manager.settings.stealth_enabled else None)
+        effective_ua = user_agent or (
+            self.manager.settings.random_user_agent if self.manager.settings.stealth_enabled else None
         )
         if effective_ua:
             kwargs["user_agent"] = effective_ua

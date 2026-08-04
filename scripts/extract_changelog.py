@@ -5,6 +5,7 @@ Usage: python scripts/extract_changelog.py 1.2.1 [CHANGELOG.md]
 Exits non-zero if the version has no section, so a release with missing
 notes fails loudly instead of publishing empty.
 """
+
 from __future__ import annotations
 
 import re

@@ -1,4 +1,5 @@
 """Operator dashboard HTML template (served by routes.extensions.dashboard)."""
+
 from __future__ import annotations
 
 _DASHBOARD_HTML = """<!DOCTYPE html>

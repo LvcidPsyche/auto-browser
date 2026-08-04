@@ -4,6 +4,7 @@ tool_inputs.py — Pydantic input models for McpToolGateway tool handlers.
 Kept in a separate module so tool_gateway.py stays focused on dispatch
 logic rather than schema definitions.
 """
+
 from __future__ import annotations
 
 from typing import Any, Literal
@@ -109,8 +110,7 @@ class HarnessGetStatusInput(StrictInputModel):
         min_length=1,
         max_length=120,
         description=(
-            "ID of the convergence run, as returned by harness.start_convergence "
-            "or listed by harness.list_runs."
+            "ID of the convergence run, as returned by harness.start_convergence or listed by harness.list_runs."
         ),
     )
 
@@ -217,10 +217,7 @@ class AuthProfileNameInput(StrictInputModel):
     profile_name: str = Field(
         min_length=1,
         max_length=120,
-        description=(
-            "Name of the saved auth profile to inspect, as listed by "
-            "browser.list_auth_profiles."
-        ),
+        description=("Name of the saved auth profile to inspect, as listed by browser.list_auth_profiles."),
     )
 
 
@@ -243,9 +240,7 @@ class ListTabsInput(SessionIdInput):
 class TabActionInput(SessionIdInput):
     index: int = Field(
         ge=0,
-        description=(
-            "Zero-based index of the target tab, as reported by browser.list_tabs."
-        ),
+        description=("Zero-based index of the target tab, as reported by browser.list_tabs."),
     )
 
 
