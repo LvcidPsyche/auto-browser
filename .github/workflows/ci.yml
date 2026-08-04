@@ -162,7 +162,15 @@ jobs:
         run: docker compose build controller
 
       - name: Run controller unit tests
-        run: docker compose run --no-deps --rm controller python -m unittest discover -s tests -v
+        # pytest, not `unittest discover`. unittest only collects unittest.TestCase
+        # subclasses, so it silently ran 566 of 637 tests -- skipping test_1_0.py
+        # (61: mesh Ed25519 identity/signing, peer registry, delegation policy,
+        # stealth, network inspector, CDP, workflow engine), test_pii_scrub.py (8)
+        # and test_readiness.py (4) because they are pytest-style. The one job that
+        # validates the shipped container was running zero PII and zero mesh-crypto
+        # tests, and any new pytest-style file was excluded with no warning.
+        # controller/Dockerfile installs requirements-dev.txt, so pytest is present.
+        run: docker compose run --no-deps --rm controller python -m pytest tests/ -q
 
   compose-smoke:
     runs-on: ubuntu-latest
