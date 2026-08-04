@@ -279,10 +279,17 @@ class Settings(BaseSettings):
     approval_webhook_secret: str | None = Field(None, alias="APPROVAL_WEBHOOK_SECRET")
 
     # Perception presets — default mode for /observe
+    # text: no screenshot, no OCR — accessibility tree + text extraction only
     # fast: screenshot only (skip OCR and accessibility tree)
     # normal: screenshot + OCR + accessibility tree (current default)
     # rich: normal + extended text + full DOM outline
     perception_preset_default: str = Field("normal", alias="PERCEPTION_PRESET_DEFAULT")
+
+    # Skip OCR on normal/rich observes when text extraction already produced usable
+    # content (non-empty text_excerpt + available accessibility tree). Never skipped
+    # while screenshot PII scrubbing is active, since scrubbing consumes OCR blocks.
+    # Escape hatch: set to false to always run OCR.
+    ocr_skip_when_text_available: bool = Field(True, alias="OCR_SKIP_WHEN_TEXT_AVAILABLE")
 
     # SSE keepalive — how often to send a comment to prevent proxy timeouts
     sse_keepalive_seconds: float = Field(15.0, alias="SSE_KEEPALIVE_SECONDS")

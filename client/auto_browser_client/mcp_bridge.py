@@ -131,7 +131,13 @@ class StdioMcpBridge:
                 protocol_version=self.protocol_version,
             )
         except URLError as exc:
-            return self._jsonrpc_error(request_id, -32000, f"Unable to reach Auto Browser MCP HTTP endpoint: {exc.reason}")
+            return self._jsonrpc_error(
+                request_id,
+                -32000,
+                f"No Auto Browser controller reachable at {self.client.base_url} — "
+                "start one with 'docker compose up -d' in the auto-browser repo, or pass "
+                f"--base-url/AUTO_BROWSER_BASE_URL for a remote deployment. (underlying: {exc.reason})",
+            )
         except Exception as exc:  # pragma: no cover - defensive bridge guard
             print(f"stdio bridge unexpected error: {exc}", file=self.stderr)
             return self._jsonrpc_error(request_id, -32000, f"Unexpected stdio bridge failure: {exc}")

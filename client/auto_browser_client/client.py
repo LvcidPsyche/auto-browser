@@ -188,23 +188,33 @@ class AutoBrowserClient:
         self,
         session_id: str,
         *,
-        preset: str = "normal",
+        preset: str | None = None,
         limit: int = 40,
     ) -> dict:
         """Observe the current browser state.
 
-        preset: "fast" (screenshot only), "normal" (default), "rich" (extended)
+        preset: "text" (no screenshot/OCR — cheapest way to read a page),
+        "fast" (screenshot only), "normal" (screenshot + OCR + accessibility),
+        "rich" (extended text + DOM outline). Omit to use the controller's
+        deployment default (PERCEPTION_PRESET_DEFAULT, normally "normal").
         """
-        return self._post(f"/sessions/{session_id}/observe", {"preset": preset, "limit": limit})
+        body: dict = {"limit": limit}
+        if preset is not None:
+            body["preset"] = preset
+        return self._post(f"/sessions/{session_id}/observe", body)
 
     async def async_observe(
         self,
         session_id: str,
         *,
-        preset: str = "normal",
+        preset: str | None = None,
         limit: int = 40,
     ) -> dict:
-        return await self._apost(f"/sessions/{session_id}/observe", {"preset": preset, "limit": limit})
+        """Async variant of observe; see observe for the preset values."""
+        body: dict = {"limit": limit}
+        if preset is not None:
+            body["preset"] = preset
+        return await self._apost(f"/sessions/{session_id}/observe", body)
 
     # ── Navigation & actions ─────────────────────────────────────────────────
 

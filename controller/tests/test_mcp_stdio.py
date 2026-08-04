@@ -286,6 +286,8 @@ class BridgeProtocolTests(unittest.TestCase):
 
     def test_unreachable_endpoint_becomes_a_jsonrpc_error(self) -> None:
         class DeadClient:
+            base_url = "http://ctrl.test/mcp"
+
             def post_json(self, *_args: object, **_kwargs: object):
                 raise URLError("connection refused")
 
@@ -295,7 +297,10 @@ class BridgeProtocolTests(unittest.TestCase):
         lines = self._run(DeadClient(), json.dumps({"jsonrpc": "2.0", "id": 7, "method": "tools/list"}) + "\n")
         self.assertEqual(lines[0]["id"], 7)
         self.assertEqual(lines[0]["error"]["code"], -32000)
-        self.assertIn("Unable to reach", lines[0]["error"]["message"])
+        message = lines[0]["error"]["message"]
+        self.assertIn("http://ctrl.test/mcp", message)
+        self.assertIn("docker compose up -d", message)
+        self.assertIn("--base-url/AUTO_BROWSER_BASE_URL", message)
 
     def test_empty_body_for_a_request_becomes_an_error(self) -> None:
         class EmptyBodyClient:

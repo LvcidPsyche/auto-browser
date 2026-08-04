@@ -30,6 +30,8 @@ jobs:
         run: python scripts/check_playwright_pins.py
       - name: Check version strings matched across packages
         run: python scripts/check_version_parity.py
+      - name: Check stdio bridge copies matched (client <-> controller)
+        run: python scripts/check_bridge_parity.py
       - name: Validate agent eval matrix
         run: python scripts/agent_eval.py --mock --json --report-file /tmp/agent-evals.md
       - name: Validate fixture eval matrix

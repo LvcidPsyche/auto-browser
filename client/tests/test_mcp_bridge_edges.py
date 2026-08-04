@@ -20,8 +20,9 @@ from auto_browser_client.mcp_bridge import (
 class RecordingHttpMcpClient:
     """Configurable fake honoring the HttpMcpClient interface."""
 
-    def __init__(self, response: HttpMcpResponse | Exception):
+    def __init__(self, response: HttpMcpResponse | Exception, *, base_url: str = "http://ctrl.test/mcp"):
         self.response = response
+        self.base_url = base_url
         self.posts: list[dict[str, object]] = []
         self.deleted_session_ids: list[str | None] = []
 
@@ -67,12 +68,15 @@ class BridgeProtocolEdgeTests(unittest.TestCase):
         self.assertEqual(len(client.posts), 1)
 
     def test_unreachable_endpoint_maps_to_jsonrpc_error(self) -> None:
-        client = RecordingHttpMcpClient(URLError("connection refused"))
+        client = RecordingHttpMcpClient(URLError("connection refused"), base_url="http://ctrl.test/mcp")
         bridge = StdioMcpBridge(client=client)
         payload = _run_line(bridge, json.dumps({"jsonrpc": "2.0", "id": 7, "method": "tools/list"}))
         self.assertEqual(payload["id"], 7)
         self.assertEqual(payload["error"]["code"], -32000)
-        self.assertIn("Unable to reach", payload["error"]["message"])
+        message = payload["error"]["message"]
+        self.assertIn("http://ctrl.test/mcp", message)
+        self.assertIn("docker compose up -d", message)
+        self.assertIn("--base-url/AUTO_BROWSER_BASE_URL", message)
 
     def test_empty_body_with_id_maps_to_error_with_status(self) -> None:
         client = RecordingHttpMcpClient(HttpMcpResponse(status_code=204, headers={}, body=None))
