@@ -90,7 +90,14 @@ class AutoBrowserClient:
             try:
                 detail = r.json()
             except Exception:
-                detail = r.text
+                try:
+                    detail = r.text
+                except Exception:
+                    # Streaming responses raise httpx.ResponseNotRead from both
+                    # .json() and .text until .read()/.aread() is called. Callers
+                    # of a streaming endpoint are expected to read the body first
+                    # (see stream_events), but fall back cleanly if one doesn't.
+                    detail = f"<unreadable response body, status {r.status_code}>"
             raise AutoBrowserError(r.status_code, detail)
 
     def _get(self, path: str, **params) -> Any:
@@ -392,6 +399,8 @@ class AutoBrowserClient:
 
         url = f"{self.base_url}/sessions/{session_id}/events"
         with httpx.stream("GET", url, headers=self._headers, timeout=None) as r:
+            if r.status_code >= 400:
+                r.read()
             self._raise(r)
             buffer = ""
             for chunk in r.iter_text():

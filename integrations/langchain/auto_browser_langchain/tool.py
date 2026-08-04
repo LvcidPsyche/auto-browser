@@ -61,9 +61,9 @@ class AutoBrowserTool(BaseTool):
             response.raise_for_status()
             data = response.json()
         if data.get("isError"):
-            content = data.get("content", [{}])
+            content = data.get("content") or [{}]
             return f"ERROR: {content[0].get('text', 'Unknown error')}"
-        content = data.get("content", [{}])
+        content = data.get("content") or [{}]
         return content[0].get("text", json.dumps(data))
 
     @classmethod

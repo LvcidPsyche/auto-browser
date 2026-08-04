@@ -11,7 +11,7 @@ version = "1.5.1"
 description = "MCP stdio bridge for Auto Browser (metapackage for `uvx auto-browser-mcp`)"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = ["auto-browser-client>=1.5.0"]
 keywords = ["auto-browser", "mcp", "mcp-server", "browser-automation"]
 classifiers = [

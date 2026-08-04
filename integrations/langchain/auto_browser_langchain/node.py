@@ -47,7 +47,7 @@ class AutoBrowserNode:
         if start_url:
             arguments["start_url"] = start_url
         result = await self.call_tool("browser.create_session", arguments)
-        content = result.get("content", [{}])
+        content = result.get("content") or [{}]
         data = json.loads(content[0].get("text", "{}"))
         session_id = data.get("session_id") or data.get("id")
         if not session_id:
@@ -56,7 +56,7 @@ class AutoBrowserNode:
 
     async def observe(self, session_id: str) -> dict[str, Any]:
         result = await self.call_tool("browser.observe", {"session_id": session_id})
-        content = result.get("content", [{}])
+        content = result.get("content") or [{}]
         return json.loads(content[0].get("text", "{}"))
 
     async def run(self, state: BrowserState) -> BrowserState:
