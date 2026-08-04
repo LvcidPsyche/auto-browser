@@ -201,6 +201,48 @@ class StreamEventsTests(unittest.TestCase):
         self.assertEqual(captured["url"], "http://auto-browser.test/sessions/s-1/events")
         self.assertEqual(captured["headers"]["Authorization"], "Bearer sekret")
 
+    def test_stream_events_error_raises_autobrowser_error_not_response_not_read(self) -> None:
+        # Regression: a streaming response is unread until .read() is called, so
+        # r.json() inside _raise() raised httpx.ResponseNotRead and the except
+        # block's r.text fallback raised the *same* error, uncaught -- leaking a
+        # raw httpx exception out of stream_events instead of AutoBrowserError.
+        class FakeErrorStream:
+            status_code = 401
+
+            def __init__(self) -> None:
+                self._is_read = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return None
+
+            def read(self) -> None:
+                self._is_read = True
+
+            def json(self):
+                if not self._is_read:
+                    raise httpx.ResponseNotRead()
+                return {"detail": "unauthorized"}
+
+            @property
+            def text(self):
+                if not self._is_read:
+                    raise httpx.ResponseNotRead()
+                return '{"detail": "unauthorized"}'
+
+            def iter_text(self):
+                return iter(())
+
+        client = AutoBrowserClient("http://auto-browser.test", token="bad")
+        with patch("auto_browser_client.client.httpx.stream", return_value=FakeErrorStream()):
+            with self.assertRaises(AutoBrowserError) as ctx:
+                list(client.stream_events("s-1"))
+
+        self.assertEqual(ctx.exception.status_code, 401)
+        self.assertEqual(ctx.exception.detail, {"detail": "unauthorized"})
+
 
 class AsyncClientContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_async_error_raises_autobrowser_error(self) -> None:
