@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 _SESSION_QUEUES: dict[str, list[asyncio.Queue]] = defaultdict(list)
 _GLOBAL_QUEUES: list[asyncio.Queue] = []
+# id(queue) -> events dropped for that subscriber. Keyed by id rather than the
+# queue itself because asyncio.Queue is unhashable-by-value and we only need a
+# counter, not a reference (holding one would pin dead subscribers in memory).
+_DROPPED_EVENTS: dict[int, int] = {}
 
 
 def _now() -> str:
@@ -64,13 +68,34 @@ def _dispatch(session_id: str, event: dict[str, Any]) -> None:
         try:
             q.put_nowait(payload)
         except asyncio.QueueFull:
-            logger.debug("SSE queue full for session %s — dropping event", session_id)
+            _record_drop(q, f"session {session_id}")
     # Push to global subscribers
     for q in list(_GLOBAL_QUEUES):
         try:
             q.put_nowait(payload)
         except asyncio.QueueFull:
-            logger.debug("SSE queue full for global subscriber — dropping event")
+            _record_drop(q, "global subscriber")
+
+
+def _record_drop(queue: asyncio.Queue, who: str) -> None:
+    """Count a dropped SSE event and warn the first time it happens per queue.
+
+    Drops were logged at DEBUG, so an operator watching a live stream silently
+    missed actions with nothing at the default log level to tell them. WARNING
+    once per subscriber keeps that visible without flooding the log when a slow
+    consumer drops continuously.
+    """
+    count = _DROPPED_EVENTS.get(id(queue), 0) + 1
+    _DROPPED_EVENTS[id(queue)] = count
+    if count == 1:
+        logger.warning("SSE queue full for %s — dropping events (consumer is too slow)", who)
+    else:
+        logger.debug("SSE queue full for %s — %d events dropped so far", who, count)
+
+
+def dropped_event_count() -> int:
+    """Total SSE events dropped across all subscribers since process start."""
+    return sum(_DROPPED_EVENTS.values())
 
 
 # ── Public emit helpers ──────────────────────────────────────────────────────

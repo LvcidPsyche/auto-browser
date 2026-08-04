@@ -243,8 +243,16 @@ class BrowserManagerProxyPersonaTests(unittest.IsolatedAsyncioTestCase):
 class CronServiceProxyPersonaTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
-        self.manager = SimpleNamespace(create_session=AsyncMock(return_value={"id": "session-1"}))
-        self.job_queue = SimpleNamespace(enqueue_run=AsyncMock(return_value={"id": "job-1"}))
+        self.manager = SimpleNamespace(
+            create_session=AsyncMock(return_value={"id": "session-1"}),
+            close_session=AsyncMock(),
+        )
+        # on_finish is how the cron service hands back the session it created;
+        # without it the run would leak a session slot (see test_runtime_lifecycle).
+        self.job_queue = SimpleNamespace(
+            enqueue_run=AsyncMock(return_value={"id": "job-1"}),
+            on_finish=lambda job_id, callback: None,
+        )
         self.cron = CronService(
             Path(self.tempdir.name) / "crons.json",
             job_queue=self.job_queue,

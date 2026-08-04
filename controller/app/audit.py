@@ -102,12 +102,21 @@ class FileAuditStore:
         if not self.events_path.exists():
             return []
         events: list[AuditEvent] = []
+        malformed = 0
         with self.events_path.open(encoding="utf-8") as fh:
             for raw in fh:
                 raw = raw.strip()
                 if not raw:
                     continue
-                event = AuditEvent.model_validate_json(raw)
+                try:
+                    event = AuditEvent.model_validate_json(raw)
+                except Exception:
+                    # One torn line — a kill mid-append leaves a partial record —
+                    # used to raise here, so listing 500s'd permanently and
+                    # _trim_sync could never age the bad line out. Skip and count
+                    # instead, matching AgentJobStore._list_sync.
+                    malformed += 1
+                    continue
                 if session_id and event.session_id != session_id:
                     continue
                 if event_type and event.event_type != event_type:
@@ -115,6 +124,12 @@ class FileAuditStore:
                 if operator_id and event.operator.id != operator_id:
                     continue
                 events.append(event)
+        if malformed:
+            logger.warning(
+                "skipped %d malformed line(s) in %s while listing audit events",
+                malformed,
+                self.events_path,
+            )
         events.reverse()
         return events[:limit]
 
