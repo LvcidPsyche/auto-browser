@@ -18,15 +18,27 @@ def install_controller_http_middleware(
     rate_limiter: Any,
     metrics: Any,
 ) -> None:
+    def _has_valid_bearer_token(request: Request) -> bool:
+        """Whether this request has proven it holds the configured bearer token.
+
+        Used by both the auth gate and the rate limiter. The limiter needs it
+        because it runs *outside* the auth gate (deliberately — unauthenticated
+        traffic is exactly what must be throttled) and so cannot assume the
+        caller is who their headers claim.
+        """
+        if not settings.api_bearer_token:
+            return True
+        header = request.headers.get("authorization", "")
+        expected = f"Bearer {settings.api_bearer_token}"
+        return hmac.compare_digest(header.encode(), expected.encode())
+
     @application.middleware("http")
     async def require_api_bearer_token(request: Request, call_next):
         path = _request_path(request)
         if not settings.api_bearer_token or _is_bearer_token_exempt_path(path):
             return await call_next(request)
 
-        header = request.headers.get("authorization", "")
-        expected = f"Bearer {settings.api_bearer_token}"
-        if not hmac.compare_digest(header.encode(), expected.encode()):
+        if not _has_valid_bearer_token(request):
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Missing or invalid bearer token"},
@@ -40,11 +52,16 @@ def install_controller_http_middleware(
         if rate_limiter is None or is_exempt_path(path, settings.request_rate_limit_exempt_path_list):
             return await call_next(request)
 
+        # Key unauthenticated requests by IP only. Deriving the bucket from the
+        # authorization header meant every guessed token got a fresh counter, so
+        # bearer-token brute force was never throttled at all, and a flood of
+        # distinct operator-id headers could evict legitimate buckets from the LRU.
         decision = await rate_limiter.evaluate(
             build_rate_limit_key(
                 operator_id_header=settings.operator_id_header,
                 headers=request.headers,
                 client_host=request.client.host if request.client else None,
+                authenticated=_has_valid_bearer_token(request),
             )
         )
         headers = {

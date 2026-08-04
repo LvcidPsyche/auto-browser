@@ -8,7 +8,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.config import Settings
-from app.runtime_policy import validate_runtime_policy
+from app.runtime_policy import MIN_PRODUCTION_BEARER_TOKEN_LENGTH, validate_runtime_policy
+
+# A production-valid bearer token. These tests used "secret" (6 chars), which
+# satisfied the old "is it set?" check but is not meaningfully different from no
+# token at all — production now enforces a length floor.
+PRODUCTION_BEARER_TOKEN = "p" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH
 
 
 class HealthzUnixSocketServer:
@@ -93,11 +98,58 @@ class RuntimePolicyTests(unittest.TestCase):
         self.assertIn("CONTROLLER_ALLOWED_HOSTS is required when APP_ENV=production", report.errors)
         self.assertIn("ALLOWED_HOSTS=* is not permitted when APP_ENV=production", report.errors)
 
+    def _production_settings(self, **overrides) -> Settings:
+        base = {
+            "_env_file": None,
+            "APP_ENV": "production",
+            "API_BEARER_TOKEN": PRODUCTION_BEARER_TOKEN,
+            "SHARE_TOKEN_SECRET": "share-secret-for-tests",
+            "REQUIRE_OPERATOR_ID": "true",
+            "AUTH_STATE_ENCRYPTION_KEY": "b" * 44,
+            "REQUIRE_AUTH_STATE_ENCRYPTION": "true",
+            "ALLOWED_HOSTS": "example.com",
+            "CONTROLLER_ALLOWED_HOSTS": "controller.example.com",
+        }
+        base.update(overrides)
+        return Settings(**base)
+
+    def test_production_rejects_a_weak_bearer_token(self) -> None:
+        """ "Required" was satisfied by API_BEARER_TOKEN=x.
+
+        A one-character token is not meaningfully different from no token, and
+        unauthenticated requests are only throttled per-IP, so a weak token is
+        guessable.
+        """
+        report = validate_runtime_policy(self._production_settings(API_BEARER_TOKEN="x"))
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any("API_BEARER_TOKEN must be at least" in error for error in report.errors),
+            report.errors,
+        )
+
+    def test_production_requires_a_share_token_secret(self) -> None:
+        """Without it the signing key is per-process, so every link dies on restart."""
+        report = validate_runtime_policy(self._production_settings(SHARE_TOKEN_SECRET=None))
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any("SHARE_TOKEN_SECRET is required" in error for error in report.errors),
+            report.errors,
+        )
+
+    def test_production_accepts_a_strong_token_and_share_secret(self) -> None:
+        """Guard the guards: a properly configured production instance passes."""
+        report = validate_runtime_policy(self._production_settings())
+
+        self.assertTrue(report.ok, report.errors)
+
     def test_production_emits_operational_warnings(self) -> None:
         settings = Settings(
             _env_file=None,
             APP_ENV="production",
-            API_BEARER_TOKEN="secret",
+            API_BEARER_TOKEN=PRODUCTION_BEARER_TOKEN,
+            SHARE_TOKEN_SECRET="share-secret-for-tests",
             REQUIRE_OPERATOR_ID="true",
             AUTH_STATE_ENCRYPTION_KEY="b" * 44,
             REQUIRE_AUTH_STATE_ENCRYPTION="true",
@@ -122,7 +174,8 @@ class RuntimePolicyTests(unittest.TestCase):
         settings = Settings(
             _env_file=None,
             APP_ENV="production",
-            API_BEARER_TOKEN="secret",
+            API_BEARER_TOKEN=PRODUCTION_BEARER_TOKEN,
+            SHARE_TOKEN_SECRET="share-secret-for-tests",
             REQUIRE_OPERATOR_ID="true",
             AUTH_STATE_ENCRYPTION_KEY="b" * 44,
             REQUIRE_AUTH_STATE_ENCRYPTION="true",
@@ -139,7 +192,8 @@ class RuntimePolicyTests(unittest.TestCase):
         settings = Settings(
             _env_file=None,
             APP_ENV="production",
-            API_BEARER_TOKEN="secret",
+            API_BEARER_TOKEN=PRODUCTION_BEARER_TOKEN,
+            SHARE_TOKEN_SECRET="share-secret-for-tests",
             REQUIRE_OPERATOR_ID="true",
             AUTH_STATE_ENCRYPTION_KEY="b" * 44,
             REQUIRE_AUTH_STATE_ENCRYPTION="true",
@@ -157,7 +211,8 @@ class RuntimePolicyTests(unittest.TestCase):
         settings = Settings(
             _env_file=None,
             APP_ENV="production",
-            API_BEARER_TOKEN="secret",
+            API_BEARER_TOKEN=PRODUCTION_BEARER_TOKEN,
+            SHARE_TOKEN_SECRET="share-secret-for-tests",
             REQUIRE_OPERATOR_ID="true",
             AUTH_STATE_ENCRYPTION_KEY="b" * 44,
             REQUIRE_AUTH_STATE_ENCRYPTION="false",
@@ -175,7 +230,8 @@ class RuntimePolicyTests(unittest.TestCase):
         settings = Settings(
             _env_file=None,
             APP_ENV="production",
-            API_BEARER_TOKEN="secret",
+            API_BEARER_TOKEN=PRODUCTION_BEARER_TOKEN,
+            SHARE_TOKEN_SECRET="share-secret-for-tests",
             REQUIRE_OPERATOR_ID="true",
             AUTH_STATE_ENCRYPTION_KEY="b" * 44,
             REQUIRE_AUTH_STATE_ENCRYPTION="true",
@@ -194,7 +250,8 @@ class RuntimePolicyTests(unittest.TestCase):
         settings = Settings(
             _env_file=None,
             APP_ENV="production",
-            API_BEARER_TOKEN="secret",
+            API_BEARER_TOKEN=PRODUCTION_BEARER_TOKEN,
+            SHARE_TOKEN_SECRET="share-secret-for-tests",
             REQUIRE_OPERATOR_ID="true",
             AUTH_STATE_ENCRYPTION_KEY="b" * 44,
             REQUIRE_AUTH_STATE_ENCRYPTION="true",
@@ -212,7 +269,8 @@ class RuntimePolicyTests(unittest.TestCase):
         settings = Settings(
             _env_file=None,
             APP_ENV="production",
-            API_BEARER_TOKEN="secret",
+            API_BEARER_TOKEN=PRODUCTION_BEARER_TOKEN,
+            SHARE_TOKEN_SECRET="share-secret-for-tests",
             REQUIRE_OPERATOR_ID="true",
             AUTH_STATE_ENCRYPTION_KEY="b" * 44,
             REQUIRE_AUTH_STATE_ENCRYPTION="true",
@@ -231,7 +289,8 @@ class RuntimePolicyTests(unittest.TestCase):
             settings = Settings(
                 _env_file=None,
                 APP_ENV="production",
-                API_BEARER_TOKEN="secret",
+                API_BEARER_TOKEN=PRODUCTION_BEARER_TOKEN,
+                SHARE_TOKEN_SECRET="share-secret-for-tests",
                 REQUIRE_OPERATOR_ID="true",
                 AUTH_STATE_ENCRYPTION_KEY="b" * 44,
                 REQUIRE_AUTH_STATE_ENCRYPTION="true",
@@ -257,7 +316,8 @@ class RuntimePolicyTests(unittest.TestCase):
             settings = Settings(
                 _env_file=None,
                 APP_ENV="production",
-                API_BEARER_TOKEN="secret",
+                API_BEARER_TOKEN=PRODUCTION_BEARER_TOKEN,
+                SHARE_TOKEN_SECRET="share-secret-for-tests",
                 REQUIRE_OPERATOR_ID="true",
                 AUTH_STATE_ENCRYPTION_KEY="b" * 44,
                 REQUIRE_AUTH_STATE_ENCRYPTION="true",
@@ -282,7 +342,8 @@ class RuntimePolicyTests(unittest.TestCase):
             settings = Settings(
                 _env_file=None,
                 APP_ENV="production",
-                API_BEARER_TOKEN="secret",
+                API_BEARER_TOKEN=PRODUCTION_BEARER_TOKEN,
+                SHARE_TOKEN_SECRET="share-secret-for-tests",
                 REQUIRE_OPERATOR_ID="true",
                 AUTH_STATE_ENCRYPTION_KEY="b" * 44,
                 REQUIRE_AUTH_STATE_ENCRYPTION="true",
