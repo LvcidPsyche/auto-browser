@@ -3,8 +3,25 @@ services:
     build:
       context: ./browser-node
     shm_size: 2gb
+    restart: unless-stopped
+    # Health means "the Playwright server the controller connects to is up",
+    # not "noVNC answers". This previously checked only :6080 (websockify), so
+    # a wedged or dead Chromium reported healthy for as long as noVNC survived
+    # — and the controller's depends_on: service_healthy gate passed anyway.
+    #   1. endpoint file non-empty — server.mjs writes it once it is listening,
+    #      and entrypoint.sh removes it on every start
+    #   2. :9223 accepts a connection — no -f, because the Playwright server
+    #      answers a plain GET with an HTTP error; only connection refusal
+    #      (curl exit 7) should fail the check
+    #   3. :6080 still serves — human takeover is a real feature and its
+    #      silent death should be visible too
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:6080/ >/dev/null || exit 1"]
+      test:
+        - CMD-SHELL
+        - >-
+          test -s "${BROWSER_WS_ENDPOINT_FILE:-/data/profile/browser-ws-endpoint.txt}"
+          && curl -s --max-time 3 -o /dev/null http://127.0.0.1:${PLAYWRIGHT_SERVER_PORT:-9223}/
+          && curl -fsS --max-time 3 http://127.0.0.1:6080/ >/dev/null
       interval: 10s
       timeout: 5s
       retries: 12
@@ -27,6 +44,15 @@ services:
   controller:
     build:
       context: ./controller
+    # Without this a controller OOM — a real risk on small hosts, where a
+    # leaked browser container plus Chromium is enough — left the container
+    # stopped forever. depends_on only gates startup ordering; nothing
+    # recovered afterwards, so MCP clients just got connection refused.
+    restart: unless-stopped
+    # Sessions are closed sequentially on shutdown and an isolated one can take
+    # ~10s (tunnel terminate + container stop), so the 10s default SIGKILLed
+    # cleanup mid-flight and orphaned containers and tunnels.
+    stop_grace_period: 60s
     depends_on:
       browser-node:
         condition: service_healthy

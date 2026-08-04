@@ -180,6 +180,131 @@ def test_malformed_share_tokens_are_rejected() -> None:
             svc.validate_token(bad)
 
 
+# ── Auth state must fail closed ────────────────────────────────────────────
+
+
+def _auth_manager(tmp_path: Path, *, require_encryption: bool, with_key: bool = True):
+    from cryptography.fernet import Fernet
+
+    from app.auth_state import AuthStateManager
+
+    key = Fernet.generate_key().decode() if with_key else None
+    return AuthStateManager(encryption_key=key, require_encryption=require_encryption, max_age_hours=0), key
+
+
+_STATE = {"cookies": [{"name": "session", "value": "SUPER-SECRET"}], "origins": []}
+
+
+def _write_plaintext(path: Path) -> Path:
+    import json
+
+    path.write_text(json.dumps(_STATE), encoding="utf-8")
+    return path
+
+
+def _write_envelope(path: Path, key: str) -> Path:
+    import json
+
+    from cryptography.fernet import Fernet
+
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "format": "fernet-json",
+                "ciphertext": Fernet(key.encode()).encrypt(json.dumps(_STATE).encode()).decode(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_require_encryption_refuses_plaintext_auth_state(tmp_path: Path) -> None:
+    """REQUIRE_AUTH_STATE_ENCRYPTION was only enforced at construction.
+
+    It checked "is a key configured?" and never checked the file being read, so
+    a plaintext state file loaded happily and its cookies went straight into a
+    live browser context. The setting promised encrypted-at-rest and silently
+    did not deliver it.
+    """
+    manager, _ = _auth_manager(tmp_path, require_encryption=True)
+    plain = _write_plaintext(tmp_path / "state.json")
+
+    with pytest.raises(PermissionError, match="not encrypted"):
+        manager.prepare_for_context(plain)
+
+
+def test_plaintext_is_allowed_when_encryption_is_not_required(tmp_path: Path) -> None:
+    """Guard the guard: the refusal is conditional on the setting."""
+    manager, _ = _auth_manager(tmp_path, require_encryption=False, with_key=False)
+    plain = _write_plaintext(tmp_path / "state.json")
+
+    prepared = manager.prepare_for_context(plain)
+    assert prepared.path == plain
+
+
+def test_encrypted_content_is_detected_without_the_enc_suffix(tmp_path: Path) -> None:
+    """Encryption status came from the filename, not the content.
+
+    An encrypted envelope named without `.enc` was classified as plaintext and
+    handed to Playwright verbatim — so no cookies loaded and the agent carried
+    on believing the auth profile had been applied.
+    """
+    import json
+
+    manager, key = _auth_manager(tmp_path, require_encryption=False)
+    mislabelled = _write_envelope(tmp_path / "state-no-suffix.json", key)
+
+    assert manager.inspect(mislabelled)["encrypted"] is True
+
+    prepared = manager.prepare_for_context(mislabelled)
+    body = json.loads(Path(prepared.path).read_text(encoding="utf-8"))
+    assert "cookies" in body, "the envelope must be decrypted, not passed through"
+    assert body["cookies"][0]["value"] == "SUPER-SECRET"
+    prepared.cleanup()
+
+
+def test_plaintext_named_enc_is_detected_as_plaintext(tmp_path: Path) -> None:
+    """The mislabelling is caught in both directions."""
+    manager, _ = _auth_manager(tmp_path, require_encryption=False)
+    mislabelled = _write_plaintext(tmp_path / "state.json.enc")
+
+    assert manager.inspect(mislabelled)["encrypted"] is False
+    assert manager.prepare_for_context(mislabelled).path == mislabelled
+
+
+def test_encrypted_state_without_a_key_is_refused(tmp_path: Path) -> None:
+    manager_with_key, key = _auth_manager(tmp_path, require_encryption=False)
+    encrypted = _write_envelope(tmp_path / "state.json.enc", key)
+
+    keyless, _ = _auth_manager(tmp_path, require_encryption=False, with_key=False)
+    with pytest.raises(RuntimeError, match="AUTH_STATE_ENCRYPTION_KEY"):
+        keyless.prepare_for_context(encrypted)
+
+
+def test_require_encryption_without_a_key_fails_at_construction(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="AUTH_STATE_ENCRYPTION_KEY"):
+        _auth_manager(tmp_path, require_encryption=True, with_key=False)
+
+
+def test_tampered_ciphertext_is_rejected(tmp_path: Path) -> None:
+    """A corrupted envelope must raise, not silently yield empty auth state."""
+    import json
+
+    from cryptography.fernet import InvalidToken
+
+    manager, key = _auth_manager(tmp_path, require_encryption=False)
+    path = _write_envelope(tmp_path / "state.json.enc", key)
+
+    body = json.loads(path.read_text(encoding="utf-8"))
+    body["ciphertext"] = body["ciphertext"][:-6] + "AAAAAA"
+    path.write_text(json.dumps(body), encoding="utf-8")
+
+    with pytest.raises(InvalidToken):
+        manager.prepare_for_context(path)
+
+
 # ── Credential movement leaves a record ────────────────────────────────────
 
 
