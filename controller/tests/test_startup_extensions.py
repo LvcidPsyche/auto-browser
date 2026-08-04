@@ -39,7 +39,9 @@ class StartupExtensionsTests(unittest.IsolatedAsyncioTestCase):
         app = SimpleNamespace(
             state=SimpleNamespace(
                 browser_manager=FakeManager(),
-                settings=SimpleNamespace(stealth_enabled=False, harness_root=os.path.join(self.temp_dir.name, "harness")),
+                settings=SimpleNamespace(
+                    stealth_enabled=False, harness_root=os.path.join(self.temp_dir.name, "harness")
+                ),
                 tool_gateway=gateway,
             )
         )

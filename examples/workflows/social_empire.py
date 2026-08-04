@@ -9,6 +9,7 @@ Usage:
 
     httpx.post("http://localhost:8000/workflows/run", json=VIRAL_PIPELINE("tech gadgets", "My Channel"))
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -63,7 +64,7 @@ def VIRAL_PIPELINE(
                 "depends_on": ["research"],
                 "params": {
                     "prompt": "{{ context.research.veo3_prompt }}",
-                    "output_filename": "",   # engine uses uuid-based path
+                    "output_filename": "",  # engine uses uuid-based path
                     "duration_seconds": video_duration,
                     "aspect_ratio": aspect_ratio,
                 },
@@ -133,46 +134,52 @@ def SHORTS_BLITZ(
     steps = []
 
     # Single shared research step
-    steps.append({
-        "id": "research",
-        "action": "social.research.viral",
-        "params": {"niche": niche, "yt_results": 15},
-        "retry_max": 2,
-        "timeout_seconds": 60,
-    })
+    steps.append(
+        {
+            "id": "research",
+            "action": "social.research.viral",
+            "params": {"niche": niche, "yt_results": 15},
+            "retry_max": 2,
+            "timeout_seconds": 60,
+        }
+    )
 
     for i in range(count):
         gen_id = f"generate_{i}"
         upload_id = f"upload_{i}"
 
-        steps.append({
-            "id": gen_id,
-            "action": "social.veo3.generate",
-            "depends_on": ["research"],
-            "params": {
-                "prompt": "{{ context.research.veo3_prompt }}",
-                "duration_seconds": 30,   # Shorts are ≤60s
-                "aspect_ratio": "9:16",   # vertical for Shorts
-            },
-            "retry_max": 1,
-            "timeout_seconds": 240,
-        })
+        steps.append(
+            {
+                "id": gen_id,
+                "action": "social.veo3.generate",
+                "depends_on": ["research"],
+                "params": {
+                    "prompt": "{{ context.research.veo3_prompt }}",
+                    "duration_seconds": 30,  # Shorts are ≤60s
+                    "aspect_ratio": "9:16",  # vertical for Shorts
+                },
+                "retry_max": 1,
+                "timeout_seconds": 240,
+            }
+        )
 
-        steps.append({
-            "id": upload_id,
-            "action": "social.youtube.upload",
-            "depends_on": [gen_id],
-            "params": {
-                "file_path": "{{ context." + gen_id + ".path }}",
-                "title": f"#Shorts {{{{ context.research.trending_topics }}}} #{i + 1}",
-                "description": "#Shorts",
-                "tags": ["Shorts"],
-                "privacy": privacy,
-                "make_short": True,
-            },
-            "retry_max": 2,
-            "timeout_seconds": 300,
-        })
+        steps.append(
+            {
+                "id": upload_id,
+                "action": "social.youtube.upload",
+                "depends_on": [gen_id],
+                "params": {
+                    "file_path": "{{ context." + gen_id + ".path }}",
+                    "title": f"#Shorts {{{{ context.research.trending_topics }}}} #{i + 1}",
+                    "description": "#Shorts",
+                    "tags": ["Shorts"],
+                    "privacy": privacy,
+                    "make_short": True,
+                },
+                "retry_max": 2,
+                "timeout_seconds": 300,
+            }
+        )
 
     return {
         "workflow_id": "shorts_blitz",
@@ -193,16 +200,18 @@ def WARMUP_CHECK(
 
     steps = []
     for platform in platforms:
-        steps.append({
-            "id": f"check_{platform}",
-            "action": "social.auth.verify",
-            "params": {
-                "platform": platform,
-                "auth_profile": f"{platform}-default",
-            },
-            "retry_max": 1,
-            "timeout_seconds": 30,
-        })
+        steps.append(
+            {
+                "id": f"check_{platform}",
+                "action": "social.auth.verify",
+                "params": {
+                    "platform": platform,
+                    "auth_profile": f"{platform}-default",
+                },
+                "retry_max": 1,
+                "timeout_seconds": 30,
+            }
+        )
 
     return {
         "workflow_id": "warmup_check",

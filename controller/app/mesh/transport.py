@@ -4,6 +4,7 @@ mesh.transport — Envelope signing, verification, and HTTP delivery.
 All envelope crypto is real Ed25519.
 send_envelope is a real async HTTPS POST — no longer a stub.
 """
+
 from __future__ import annotations
 
 import base64
@@ -26,6 +27,7 @@ _SEND_TIMEOUT_SECONDS = 10.0
 # Exceptions
 # ---------------------------------------------------------------------------
 
+
 class EnvelopeVerificationError(Exception):
     pass
 
@@ -37,6 +39,7 @@ class TransportError(Exception):
 # ---------------------------------------------------------------------------
 # Signing helpers
 # ---------------------------------------------------------------------------
+
 
 def _canonical_bytes(envelope: SignedEnvelope) -> bytes:
     """Produce a deterministic byte string over the envelope fields that matter."""
@@ -86,13 +89,11 @@ def verify_envelope(
     # Resolve sender's pinned public key
     if envelope.sender_node_id != expected_peer.node_id:
         raise EnvelopeVerificationError(
-            f"sender_node_id {envelope.sender_node_id!r} != "
-            f"expected {expected_peer.node_id!r}"
+            f"sender_node_id {envelope.sender_node_id!r} != expected {expected_peer.node_id!r}"
         )
     if expected_recipient_node_id is not None and envelope.recipient_node_id != expected_recipient_node_id:
         raise EnvelopeVerificationError(
-            f"recipient_node_id {envelope.recipient_node_id!r} != "
-            f"expected {expected_recipient_node_id!r}"
+            f"recipient_node_id {envelope.recipient_node_id!r} != expected {expected_recipient_node_id!r}"
         )
 
     try:
@@ -114,6 +115,7 @@ def verify_envelope(
 # ---------------------------------------------------------------------------
 # HTTP transport — REAL implementation (was stub)
 # ---------------------------------------------------------------------------
+
 
 async def send_envelope(peer: PeerRecord, envelope: SignedEnvelope) -> SignedEnvelope:
     """
@@ -140,8 +142,7 @@ async def send_envelope(peer: PeerRecord, envelope: SignedEnvelope) -> SignedEnv
 
     if response.status_code not in (200, 201, 202):
         raise TransportError(
-            f"Peer {peer.node_id!r} returned HTTP {response.status_code} "
-            f"from {url}: {response.text[:200]}"
+            f"Peer {peer.node_id!r} returned HTTP {response.status_code} from {url}: {response.text[:200]}"
         )
 
     try:

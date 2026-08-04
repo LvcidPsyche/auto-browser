@@ -41,8 +41,7 @@ class DownloadCaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(session.downloads), 2)
 
             records = [
-                json.loads(line)
-                for line in (artifact_dir / "downloads.jsonl").read_text(encoding="utf-8").splitlines()
+                json.loads(line) for line in (artifact_dir / "downloads.jsonl").read_text(encoding="utf-8").splitlines()
             ]
             self.assertEqual([record["filename"] for record in records], [first["filename"], second["filename"]])
 

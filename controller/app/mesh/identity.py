@@ -5,6 +5,7 @@ Each auto-browser instance generates a keypair on first start.
 The node_id is the hex-encoded SHA-256 of the public key bytes.
 Private key lives on disk at 0600; never transmitted.
 """
+
 from __future__ import annotations
 
 import base64
@@ -45,16 +46,12 @@ class NodeIdentity:
         if priv_path.exists():
             logger.info("mesh.identity: loading existing keypair from %s", self._dir)
             pem = priv_path.read_bytes()
-            self._private_key = Ed25519PrivateKey.from_private_bytes(
-                self._extract_raw_ed25519(pem)
-            )
+            self._private_key = Ed25519PrivateKey.from_private_bytes(self._extract_raw_ed25519(pem))
         else:
             logger.info("mesh.identity: generating new keypair in %s", self._dir)
             self._private_key = Ed25519PrivateKey.generate()
             # Write private key
-            priv_pem = self._private_key.private_bytes(
-                Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()
-            )
+            priv_pem = self._private_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
             priv_path.write_bytes(priv_pem)
             priv_path.chmod(0o600)
 
@@ -87,6 +84,7 @@ class NodeIdentity:
     def _extract_raw_ed25519(pem: bytes) -> bytes:
         """Extract 32-byte raw private key from PKCS8 PEM."""
         from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
         key = load_pem_private_key(pem, password=None)
         return key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
 

@@ -16,6 +16,7 @@ Usage (async):
         obs = await client.async_observe(session["id"])
         await client.async_close_session(session["id"])
 """
+
 from __future__ import annotations
 
 from typing import Any, Generator
@@ -224,7 +225,15 @@ class AutoBrowserClient:
     async def async_navigate(self, session_id: str, url: str) -> dict:
         return await self._apost(f"/sessions/{session_id}/actions/navigate", {"url": url})
 
-    def click(self, session_id: str, *, selector: str | None = None, element_id: str | None = None, x: float | None = None, y: float | None = None) -> dict:
+    def click(
+        self,
+        session_id: str,
+        *,
+        selector: str | None = None,
+        element_id: str | None = None,
+        x: float | None = None,
+        y: float | None = None,
+    ) -> dict:
         body: dict[str, Any] = {}
         if selector:
             body["selector"] = selector
@@ -236,7 +245,15 @@ class AutoBrowserClient:
             body["y"] = y
         return self._post(f"/sessions/{session_id}/actions/click", body)
 
-    async def async_click(self, session_id: str, *, selector: str | None = None, element_id: str | None = None, x: float | None = None, y: float | None = None) -> dict:
+    async def async_click(
+        self,
+        session_id: str,
+        *,
+        selector: str | None = None,
+        element_id: str | None = None,
+        x: float | None = None,
+        y: float | None = None,
+    ) -> dict:
         body: dict[str, Any] = {}
         if selector:
             body["selector"] = selector
@@ -248,7 +265,15 @@ class AutoBrowserClient:
             body["y"] = y
         return await self._apost(f"/sessions/{session_id}/actions/click", body)
 
-    def type_text(self, session_id: str, text: str, *, selector: str | None = None, element_id: str | None = None, clear_first: bool = True) -> dict:
+    def type_text(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        selector: str | None = None,
+        element_id: str | None = None,
+        clear_first: bool = True,
+    ) -> dict:
         body: dict[str, Any] = {"text": text, "clear_first": clear_first}
         if selector:
             body["selector"] = selector
@@ -256,7 +281,15 @@ class AutoBrowserClient:
             body["element_id"] = element_id
         return self._post(f"/sessions/{session_id}/actions/type", body)
 
-    async def async_type_text(self, session_id: str, text: str, *, selector: str | None = None, element_id: str | None = None, clear_first: bool = True) -> dict:
+    async def async_type_text(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        selector: str | None = None,
+        element_id: str | None = None,
+        clear_first: bool = True,
+    ) -> dict:
         body: dict[str, Any] = {"text": text, "clear_first": clear_first}
         if selector:
             body["selector"] = selector
@@ -292,10 +325,14 @@ class AutoBrowserClient:
         return await self._apost(f"/sessions/{session_id}/agent/step", {"provider": provider, "goal": goal, **kwargs})
 
     def agent_run(self, session_id: str, *, provider: str, goal: str, max_steps: int = 6, **kwargs) -> dict:
-        return self._post(f"/sessions/{session_id}/agent/run", {"provider": provider, "goal": goal, "max_steps": max_steps, **kwargs})
+        return self._post(
+            f"/sessions/{session_id}/agent/run", {"provider": provider, "goal": goal, "max_steps": max_steps, **kwargs}
+        )
 
     async def async_agent_run(self, session_id: str, *, provider: str, goal: str, max_steps: int = 6, **kwargs) -> dict:
-        return await self._apost(f"/sessions/{session_id}/agent/run", {"provider": provider, "goal": goal, "max_steps": max_steps, **kwargs})
+        return await self._apost(
+            f"/sessions/{session_id}/agent/run", {"provider": provider, "goal": goal, "max_steps": max_steps, **kwargs}
+        )
 
     # ── Approvals ────────────────────────────────────────────────────────────
 

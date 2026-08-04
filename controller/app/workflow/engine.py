@@ -8,6 +8,7 @@ Features:
   - Disk persistence under /data/workflows/
   - Async execution
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -30,6 +31,7 @@ _DEFAULT_WORKFLOWS_ROOT = Path("/data/workflows")
 # Step / Workflow definitions
 # ---------------------------------------------------------------------------
 
+
 class StepStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -41,13 +43,13 @@ class StepStatus(str, Enum):
 @dataclass
 class WorkflowStep:
     id: str
-    action: str                         # e.g. "browser.observe" or "approval.request"
+    action: str  # e.g. "browser.observe" or "approval.request"
     params: dict[str, Any] = field(default_factory=dict)
     depends_on: list[str] = field(default_factory=list)
     retry_max: int = 2
     retry_backoff_seconds: float = 3.0
     timeout_seconds: float = 120.0
-    condition: str = ""                 # Python-like expression (not eval'd; reserved for future)
+    condition: str = ""  # Python-like expression (not eval'd; reserved for future)
 
 
 @dataclass
@@ -79,6 +81,7 @@ _TEMPLATE_RE = re.compile(r"\{\{\s*context\.(\w+(?:\.\w+)*)\s*\}\}")
 def _resolve_templates(value: Any, context: dict[str, Any]) -> Any:
     """Recursively replace {{ context.key }} in strings."""
     if isinstance(value, str):
+
         def replacer(m: re.Match) -> str:
             key_path = m.group(1).split(".")
             v = context
@@ -88,6 +91,7 @@ def _resolve_templates(value: Any, context: dict[str, Any]) -> Any:
                 else:
                     return ""
             return str(v)
+
         return _TEMPLATE_RE.sub(replacer, value)
     if isinstance(value, dict):
         return {k: _resolve_templates(v, context) for k, v in value.items()}
@@ -99,6 +103,7 @@ def _resolve_templates(value: Any, context: dict[str, Any]) -> Any:
 # ---------------------------------------------------------------------------
 # Workflow engine
 # ---------------------------------------------------------------------------
+
 
 class WorkflowEngine:
     """
@@ -191,10 +196,7 @@ class WorkflowEngine:
                 break
 
         if failed:
-            raise RuntimeError(
-                f"Workflow {run.workflow_id!r}: steps failed: {sorted(failed)}"
-            )
-
+            raise RuntimeError(f"Workflow {run.workflow_id!r}: steps failed: {sorted(failed)}")
 
     async def _run_step(self, step: WorkflowStep, run: WorkflowRun) -> None:
         run.step_statuses[step.id] = StepStatus.RUNNING
@@ -223,19 +225,24 @@ class WorkflowEngine:
                 last_exc = TimeoutError(f"Step {step.id!r} timed out after {step.timeout_seconds}s")
                 logger.warning(
                     "workflow.step %r attempt %d/%d timed out",
-                    step.id, attempt + 1, step.retry_max + 1,
+                    step.id,
+                    attempt + 1,
+                    step.retry_max + 1,
                 )
                 if attempt < step.retry_max:
-                    backoff = step.retry_backoff_seconds * (2 ** attempt)
+                    backoff = step.retry_backoff_seconds * (2**attempt)
                     await asyncio.sleep(backoff)
             except Exception as exc:
                 last_exc = exc
                 logger.warning(
                     "workflow.step %r attempt %d/%d failed: %s",
-                    step.id, attempt + 1, step.retry_max + 1, exc,
+                    step.id,
+                    attempt + 1,
+                    step.retry_max + 1,
+                    exc,
                 )
                 if attempt < step.retry_max:
-                    backoff = step.retry_backoff_seconds * (2 ** attempt)
+                    backoff = step.retry_backoff_seconds * (2**attempt)
                     await asyncio.sleep(backoff)
 
         run.step_statuses[step.id] = StepStatus.FAILED

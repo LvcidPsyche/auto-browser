@@ -14,7 +14,7 @@ class DashboardSecurityTests(unittest.TestCase):
         self.assertIn("discardAgentJob", _DASHBOARD_HTML)
         self.assertIn("cancelAgentJob", _DASHBOARD_HTML)
         self.assertNotIn("innerHTML", _DASHBOARD_HTML)
-        self.assertNotIn("onclick=\"removePeer", _DASHBOARD_HTML)
+        self.assertNotIn('onclick="removePeer', _DASHBOARD_HTML)
 
     def test_replay_view_present_and_renders_safely(self) -> None:
         # Panel + wiring exist.

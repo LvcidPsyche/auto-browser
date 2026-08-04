@@ -60,6 +60,7 @@ class AuthStateManagerTests(unittest.IsolatedAsyncioTestCase):
 
             old_timestamp = state_path.stat().st_mtime - 3600
             import os
+
             os.utime(state_path, (old_timestamp, old_timestamp))
 
             info = manager.inspect(state_path)

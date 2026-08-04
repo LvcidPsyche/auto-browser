@@ -22,8 +22,7 @@ from app.providers.openai_adapter import OpenAIAdapter
 
 def _decision_json(element_id: str = "e1") -> str:
     return (
-        '{"action": "click", "reason": "advance the task", '
-        f'"element_id": "{element_id}", "risk_category": "write"}}'
+        f'{{"action": "click", "reason": "advance the task", "element_id": "{element_id}", "risk_category": "write"}}'
     )
 
 
@@ -45,9 +44,7 @@ class ProviderReadinessHelperTests(unittest.TestCase):
         self.assertFalse(no_path[0])
         self.assertIn("not configured", no_path[1])
 
-        missing = BaseProviderAdapter.describe_socket_readiness(
-            socket_path="/nonexistent/socket.sock", label="bridge"
-        )
+        missing = BaseProviderAdapter.describe_socket_readiness(socket_path="/nonexistent/socket.sock", label="bridge")
         self.assertFalse(missing[0])
         self.assertIn("does not exist", missing[1])
 
@@ -90,9 +87,7 @@ class ProviderObservationPromptTests(unittest.TestCase):
             "session": "s1",
             "url": "https://example.com",
             "title": "Example",
-            "interactables": [
-                {"element_id": "e1", "label": "Submit", "role": "button", "extra": "dropme"}
-            ],
+            "interactables": [{"element_id": "e1", "label": "Submit", "role": "button", "extra": "dropme"}],
             "unexpected_top_level": "dropme",
         }
         compact = self.adapter.compact_observation(observation)

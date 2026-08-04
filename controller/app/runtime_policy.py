@@ -70,9 +70,7 @@ def _validate_provider_runtime(settings: Settings, report: RuntimePolicyReport) 
         auth_mode = (getattr(settings, auth_mode_attr.lower()) or "").strip().lower()
         if auth_mode not in allowed_modes:
             supported = ", ".join(sorted(allowed_modes))
-            report.errors.append(
-                f"{auth_mode_attr}={auth_mode or '<empty>'} is invalid; expected one of: {supported}"
-            )
+            report.errors.append(f"{auth_mode_attr}={auth_mode or '<empty>'} is invalid; expected one of: {supported}")
             continue
 
         if auth_mode == "api":
@@ -96,9 +94,7 @@ def _validate_provider_runtime(settings: Settings, report: RuntimePolicyReport) 
         cli_path = getattr(settings, cli_path_attr.lower())
         resolved_cli = which(cli_path) if cli_path else None
         if not resolved_cli:
-            report.errors.append(
-                f"{auth_mode_attr}=cli requires a working {cli_label} CLI in {cli_path_attr}"
-            )
+            report.errors.append(f"{auth_mode_attr}=cli requires a working {cli_label} CLI in {cli_path_attr}")
             continue
 
         if cli_home_path is None:
@@ -150,17 +146,13 @@ def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
         report.errors.append("AUTH_STATE_ENCRYPTION_KEY is required when APP_ENV=production")
 
     if not settings.require_auth_state_encryption:
-        report.errors.append(
-            "REQUIRE_AUTH_STATE_ENCRYPTION=true is required when APP_ENV=production"
-        )
+        report.errors.append("REQUIRE_AUTH_STATE_ENCRYPTION=true is required when APP_ENV=production")
 
     if not settings.request_rate_limit_enabled:
         report.errors.append("REQUEST_RATE_LIMIT_ENABLED=true is required when APP_ENV=production")
 
     if settings.request_rate_limit_requests <= 0 or settings.request_rate_limit_window_seconds <= 0:
-        report.errors.append(
-            "REQUEST_RATE_LIMIT_REQUESTS and REQUEST_RATE_LIMIT_WINDOW_SECONDS must be positive"
-        )
+        report.errors.append("REQUEST_RATE_LIMIT_REQUESTS and REQUEST_RATE_LIMIT_WINDOW_SECONDS must be positive")
 
     if settings.request_rate_limit_max_buckets <= 0:
         report.errors.append("REQUEST_RATE_LIMIT_MAX_BUCKETS must be positive")
@@ -180,9 +172,7 @@ def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
         "example.com,localhost,127.0.0.1,::1",
     }
     if settings.allowed_hosts.strip() in default_allowed_hosts:
-        report.warnings.append(
-            "ALLOWED_HOSTS still contains the default placeholder values; tighten it before launch"
-        )
+        report.warnings.append("ALLOWED_HOSTS still contains the default placeholder values; tighten it before launch")
 
     if settings.session_isolation_mode != "docker_ephemeral":
         report.warnings.append(

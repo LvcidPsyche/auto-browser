@@ -31,10 +31,7 @@ class MemoryProfile(BaseModel):
             steps = "\n".join(f"  - {step}" for step in self.completed_steps[-10:])
             parts.append(f"Previously completed steps:\n{steps}")
         if self.discovered_selectors:
-            selectors = "\n".join(
-                f"  {key}: {value}"
-                for key, value in list(self.discovered_selectors.items())[:20]
-            )
+            selectors = "\n".join(f"  {key}: {value}" for key, value in list(self.discovered_selectors.items())[:20])
             parts.append(f"Known selectors:\n{selectors}")
         if self.notes:
             notes = "\n".join(f"  - {note}" for note in self.notes[-5:])

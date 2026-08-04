@@ -26,7 +26,7 @@ class HealthzUnixSocketServer:
                 b"Content-Type: application/json\r\n"
                 b"Content-Length: 15\r\n"
                 b"Connection: close\r\n\r\n"
-                b"{\"status\":\"ok\"}"
+                b'{"status":"ok"}'
             )
 
     def __init__(self, socket_path: Path) -> None:
@@ -301,19 +301,13 @@ class ProviderCLITests(unittest.IsolatedAsyncioTestCase):
         self.touch(".gemini/config.json")
         with patch("app.providers.base.which", return_value="/usr/bin/fake"):
             self.assertTrue(
-                OpenAIAdapter(
-                    Settings(_env_file=None, OPENAI_AUTH_MODE="cli", CLI_HOME=self.tempdir.name)
-                ).configured
+                OpenAIAdapter(Settings(_env_file=None, OPENAI_AUTH_MODE="cli", CLI_HOME=self.tempdir.name)).configured
             )
             self.assertTrue(
-                ClaudeAdapter(
-                    Settings(_env_file=None, CLAUDE_AUTH_MODE="cli", CLI_HOME=self.tempdir.name)
-                ).configured
+                ClaudeAdapter(Settings(_env_file=None, CLAUDE_AUTH_MODE="cli", CLI_HOME=self.tempdir.name)).configured
             )
             self.assertTrue(
-                GeminiAdapter(
-                    Settings(_env_file=None, GEMINI_AUTH_MODE="cli", CLI_HOME=self.tempdir.name)
-                ).configured
+                GeminiAdapter(Settings(_env_file=None, GEMINI_AUTH_MODE="cli", CLI_HOME=self.tempdir.name)).configured
             )
 
     def test_cli_configured_requires_auth_state_when_cli_home_is_set(self) -> None:

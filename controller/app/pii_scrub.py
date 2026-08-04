@@ -57,11 +57,11 @@ _RAW_PATTERNS: list[tuple[str, str]] = [
     # Generic API key / token / secret / password in query params or JSON fields
     (
         "api_key_param",
-        r'(?i)(?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|'
-        r'client[_-]?secret|app[_-]?secret|secret[_-]?key|private[_-]?key|'
-        r'x-api-key|access_key|refresh_token|id_token|session_token|'
-        r'auth_secret|webhook_secret|signing_secret|consumer_secret|'
-        r'oauth_token|oauth_secret)'
+        r"(?i)(?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|"
+        r"client[_-]?secret|app[_-]?secret|secret[_-]?key|private[_-]?key|"
+        r"x-api-key|access_key|refresh_token|id_token|session_token|"
+        r"auth_secret|webhook_secret|signing_secret|consumer_secret|"
+        r"oauth_token|oauth_secret)"
         r'\s*[=:]\s*["\']?([A-Za-z0-9\-._~+/!@#$%^&*()]{8,})["\']?',
     ),
     # Password fields in JSON or form data
@@ -97,7 +97,7 @@ _RAW_PATTERNS: list[tuple[str, str]] = [
     # Azure / generic client secrets (long hex strings after known labels)
     (
         "azure_secret",
-        r'(?i)(?:client_secret|tenant_id|application_id)\s*[=:]\s*'
+        r"(?i)(?:client_secret|tenant_id|application_id)\s*[=:]\s*"
         r'["\']?([a-f0-9\-]{32,})["\']?',
     ),
     # Generic hex API tokens 32+ chars (last resort, low-specificity)
@@ -106,14 +106,12 @@ _RAW_PATTERNS: list[tuple[str, str]] = [
     # (appears after = in assignments / JSON)
     (
         "generic_b64_secret",
-        r'(?i)(?:secret|token|key|credential|cred)\s*[=:]\s*'
+        r"(?i)(?:secret|token|key|credential|cred)\s*[=:]\s*"
         r'"?([A-Za-z0-9+/]{30,}={0,2})"?',
     ),
 ]
 
-_COMPILED: dict[str, re.Pattern[str]] = {
-    name: re.compile(pattern) for name, pattern in _RAW_PATTERNS
-}
+_COMPILED: dict[str, re.Pattern[str]] = {name: re.compile(pattern) for name, pattern in _RAW_PATTERNS}
 
 # Pattern display order (for reports)
 ALL_PATTERN_NAMES = [name for name, _ in _RAW_PATTERNS]
@@ -121,6 +119,7 @@ _NOISY_PATTERNS = {"generic_hex_token"}
 
 
 # ── Luhn check for credit card validation ─────────────────────────────────
+
 
 def _luhn_check(number: str) -> bool:
     """Return True if number passes Luhn algorithm."""
@@ -139,6 +138,7 @@ def _luhn_check(number: str) -> bool:
 
 
 # ── Core text scrubber ─────────────────────────────────────────────────────
+
 
 @dataclass
 class ScrubResult:
@@ -195,6 +195,7 @@ def scrub_text(
 
 # ── Screenshot pixel redaction ─────────────────────────────────────────────
 
+
 def scrub_screenshot(
     image_bytes: bytes,
     ocr_blocks: list[dict[str, Any]],
@@ -241,6 +242,7 @@ def scrub_screenshot(
 
     try:
         from PIL import Image, ImageDraw  # lazy import — Pillow is in requirements
+
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         draw = ImageDraw.Draw(img)
         for box in boxes_to_redact:
@@ -254,6 +256,7 @@ def scrub_screenshot(
 
 
 # ── Network payload scrubber ───────────────────────────────────────────────
+
 
 def scrub_network_body(
     body: str | bytes | None,
@@ -271,10 +274,7 @@ def scrub_network_body(
         return body, []
 
     ct = content_type.lower()
-    is_text = any(
-        marker in ct
-        for marker in ("json", "text", "form", "xml", "javascript", "graphql")
-    )
+    is_text = any(marker in ct for marker in ("json", "text", "form", "xml", "javascript", "graphql"))
     if not is_text:
         return body, []
 
@@ -292,6 +292,7 @@ def scrub_network_body(
 
 
 # ── Console log scrubber ───────────────────────────────────────────────────
+
 
 def scrub_console_messages(
     messages: list[dict[str, Any]],
@@ -318,6 +319,7 @@ def scrub_console_messages(
 
 
 # ── Scrubber service (stateful, configured once) ───────────────────────────
+
 
 class PiiScrubber:
     """
@@ -382,15 +384,11 @@ class PiiScrubber:
             return ScrubResult(text=value)
         return scrub_text(value, self.replacement, self.enabled_patterns)
 
-    def screenshot(
-        self, image_bytes: bytes, ocr_blocks: list[dict[str, Any]]
-    ) -> tuple[bytes, list[dict[str, Any]]]:
+    def screenshot(self, image_bytes: bytes, ocr_blocks: list[dict[str, Any]]) -> tuple[bytes, list[dict[str, Any]]]:
         """Pixel-redact PII in a PNG screenshot using OCR bounding boxes."""
         if not self.screenshot_enabled:
             return image_bytes, []
-        return scrub_screenshot(
-            image_bytes, ocr_blocks, self.replacement, self.enabled_patterns
-        )
+        return scrub_screenshot(image_bytes, ocr_blocks, self.replacement, self.enabled_patterns)
 
     def network_body(
         self, body: str | bytes | None, content_type: str = ""
@@ -398,13 +396,9 @@ class PiiScrubber:
         """Scrub a network request/response body."""
         if not self.network_enabled:
             return body, []
-        return scrub_network_body(
-            body, content_type, self.replacement, self.enabled_patterns
-        )
+        return scrub_network_body(body, content_type, self.replacement, self.enabled_patterns)
 
-    def console(
-        self, messages: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def console(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Scrub PII from console log messages."""
         if not self.console_enabled:
             return messages, []
@@ -432,11 +426,7 @@ class PiiScrubber:
             "screenshot": self.screenshot_enabled,
             "network": self.network_enabled,
             "console": self.console_enabled,
-            "patterns": (
-                list(self.enabled_patterns)
-                if self.enabled_patterns is not None
-                else ALL_PATTERN_NAMES
-            ),
+            "patterns": (list(self.enabled_patterns) if self.enabled_patterns is not None else ALL_PATTERN_NAMES),
             "replacement": self.replacement,
             "audit_report": self.audit_report,
         }

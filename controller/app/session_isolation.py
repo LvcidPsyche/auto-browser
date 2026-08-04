@@ -275,9 +275,7 @@ class DockerBrowserNodeProvisioner:
                     return endpoint
             await asyncio.sleep(0.25)
         logs = self._container_logs(container)
-        raise RuntimeError(
-            f"Timed out waiting for isolated browser endpoint file {endpoint_file}. {logs}"
-        )
+        raise RuntimeError(f"Timed out waiting for isolated browser endpoint file {endpoint_file}. {logs}")
 
     def _cleanup_pending_container(self, pending: PendingBrowserProvision) -> None:
         runtime = IsolatedBrowserRuntime(

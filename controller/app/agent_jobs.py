@@ -229,7 +229,6 @@ class AgentJobStore:
                 time.sleep(0.01 * (attempt + 1))
 
 
-
 class AgentJobQueue:
     def __init__(self, *, orchestrator, store_root: str | Path, worker_count: int = 1, audit_store=None):
         self.orchestrator = orchestrator
@@ -502,8 +501,7 @@ class AgentJobQueue:
             f"Resuming background agent job {record.id} after {len(record.checkpoints)} completed step(s). "
             f"Latest checkpoint: status={latest.status}, action={latest.action or 'unknown'}, "
             f"url={latest.url or 'unknown'}. Continue from the current browser state; do not repeat completed "
-            "actions unless the page state requires it.\nCompleted checkpoints:\n"
-            + "\n".join(step_lines)
+            "actions unless the page state requires it.\nCompleted checkpoints:\n" + "\n".join(step_lines)
         )
 
     @staticmethod

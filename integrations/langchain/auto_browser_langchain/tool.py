@@ -19,6 +19,7 @@ except ImportError:
 
 
 if _LANGCHAIN_AVAILABLE:
+
     class AutoBrowserInput(BaseModel):
         action: str = PydanticField(description="MCP tool name, e.g. 'browser.observe'")
         arguments: dict[str, Any] = PydanticField(default_factory=dict, description="Tool arguments")

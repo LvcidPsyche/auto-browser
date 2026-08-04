@@ -120,9 +120,7 @@ class RemoteAccessInfoTests(unittest.TestCase):
             json.dumps(
                 {
                     "status": "active",
-                    "updated_at": (
-                        datetime.now(UTC) - timedelta(seconds=90)
-                    ).isoformat().replace("+00:00", "Z"),
+                    "updated_at": (datetime.now(UTC) - timedelta(seconds=90)).isoformat().replace("+00:00", "Z"),
                     "stale_after_seconds": 10,
                     "public_api_url": "http://bastion.example.com:18000",
                     "public_takeover_url": "http://bastion.example.com:16080/vnc.html",

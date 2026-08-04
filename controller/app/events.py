@@ -5,6 +5,7 @@ Subscribers receive a queue that gets populated when the browser manager
 emits observe/action/approval events. The SSE endpoint drains the queue
 and streams events to the client.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -74,44 +75,57 @@ def _dispatch(session_id: str, event: dict[str, Any]) -> None:
 
 # ── Public emit helpers ──────────────────────────────────────────────────────
 
+
 def emit_observe(session_id: str, url: str, title: str, screenshot_url: str | None = None) -> None:
-    _dispatch(session_id, {
-        "event": "observe",
-        "session_id": session_id,
-        "timestamp": _now(),
-        "url": url,
-        "title": title,
-        "screenshot_url": screenshot_url,
-    })
+    _dispatch(
+        session_id,
+        {
+            "event": "observe",
+            "session_id": session_id,
+            "timestamp": _now(),
+            "url": url,
+            "title": title,
+            "screenshot_url": screenshot_url,
+        },
+    )
 
 
 def emit_action(session_id: str, action: str, status: str, details: dict[str, Any] | None = None) -> None:
-    _dispatch(session_id, {
-        "event": "action",
-        "session_id": session_id,
-        "timestamp": _now(),
-        "action": action,
-        "status": status,
-        "details": details or {},
-    })
+    _dispatch(
+        session_id,
+        {
+            "event": "action",
+            "session_id": session_id,
+            "timestamp": _now(),
+            "action": action,
+            "status": status,
+            "details": details or {},
+        },
+    )
 
 
 def emit_approval(session_id: str, approval_id: str, kind: str, status: str, reason: str) -> None:
-    _dispatch(session_id, {
-        "event": "approval",
-        "session_id": session_id,
-        "timestamp": _now(),
-        "approval_id": approval_id,
-        "kind": kind,
-        "status": status,
-        "reason": reason,
-    })
+    _dispatch(
+        session_id,
+        {
+            "event": "approval",
+            "session_id": session_id,
+            "timestamp": _now(),
+            "approval_id": approval_id,
+            "kind": kind,
+            "status": status,
+            "reason": reason,
+        },
+    )
 
 
 def emit_session(session_id: str, status: str) -> None:
-    _dispatch(session_id, {
-        "event": "session",
-        "session_id": session_id,
-        "timestamp": _now(),
-        "status": status,
-    })
+    _dispatch(
+        session_id,
+        {
+            "event": "session",
+            "session_id": session_id,
+            "timestamp": _now(),
+            "status": status,
+        },
+    )

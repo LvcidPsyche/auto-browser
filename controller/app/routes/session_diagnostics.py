@@ -98,18 +98,24 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
         def esc(s: object) -> str:
             return _html.escape(str(s or ""))
 
-        screenshots_html = "".join(
-            f'<figure><img src="{esc(url)}" loading="lazy"><figcaption>{esc(lbl)}</figcaption></figure>'
-            for url, lbl in screenshots
-        ) or "<p class=muted>No screenshots captured yet.</p>"
+        screenshots_html = (
+            "".join(
+                f'<figure><img src="{esc(url)}" loading="lazy"><figcaption>{esc(lbl)}</figcaption></figure>'
+                for url, lbl in screenshots
+            )
+            or "<p class=muted>No screenshots captured yet.</p>"
+        )
 
-        events_html = "".join(
-            f'<tr><td class=muted>{esc(e.get("timestamp","")[:19])}</td>'
-            f'<td>{esc(e.get("event_type",""))}</td>'
-            f'<td>{esc(e.get("operator_id",""))}</td>'
-            f'<td>{esc(str(e.get("data",""))[:120])}</td></tr>'
-            for e in events
-        ) or '<tr><td colspan=4 class=muted>No audit events.</td></tr>'
+        events_html = (
+            "".join(
+                f"<tr><td class=muted>{esc(e.get('timestamp', '')[:19])}</td>"
+                f"<td>{esc(e.get('event_type', ''))}</td>"
+                f"<td>{esc(e.get('operator_id', ''))}</td>"
+                f"<td>{esc(str(e.get('data', ''))[:120])}</td></tr>"
+                for e in events
+            )
+            or "<tr><td colspan=4 class=muted>No audit events.</td></tr>"
+        )
 
         status = esc(session_info.get("status", "unknown"))
         current_url = esc(session_info.get("url", ""))
@@ -148,7 +154,7 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
   <span>Status: <strong>{status}</strong></span>
   <span>Created: {created}</span>
   <span>Title: {title}</span>
-  {f'<span>URL: <a href="{current_url}" target="_blank">{current_url}</a></span>' if current_url else ''}
+  {f'<span>URL: <a href="{current_url}" target="_blank">{current_url}</a></span>' if current_url else ""}
 </div>
 <h2>Screenshots ({len(screenshots)})</h2>
 <div class="gallery">{screenshots_html}</div>
@@ -168,9 +174,7 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
         method: str | None = None,
         url_contains: str | None = None,
     ) -> dict[str, Any]:
-        return await manager.get_network_log(
-            session_id, limit=limit, method=method, url_contains=url_contains
-        )
+        return await manager.get_network_log(session_id, limit=limit, method=method, url_contains=url_contains)
 
     @router.post("/sessions/{session_id}/shadow-browse")
     async def enable_shadow_browse(session_id: str) -> dict[str, Any]:

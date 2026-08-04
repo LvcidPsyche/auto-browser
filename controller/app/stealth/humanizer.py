@@ -6,6 +6,7 @@ Three profiles:
   light   — timing jitter + Bézier mouse (default for 1.0)
   aggressive — full fingerprint noise + tighter human mimicry
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -20,9 +21,11 @@ logger = logging.getLogger(__name__)
 # Config
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class HumanProfile:
     """Timing and movement parameters."""
+
     # Click/keystroke timing (ms)
     click_mean_ms: float = 180.0
     click_sigma_ms: float = 55.0
@@ -36,9 +39,9 @@ class HumanProfile:
     key_max_ms: float = 300.0
 
     # Mouse movement — Bézier segments
-    mouse_steps: int = 25       # points along the curve
+    mouse_steps: int = 25  # points along the curve
     mouse_step_ms: float = 8.0  # ms between steps
-    mouse_sigma: float = 12.0   # control-point jitter (px)
+    mouse_sigma: float = 12.0  # control-point jitter (px)
 
     # Scroll
     scroll_step_px: int = 80
@@ -69,6 +72,7 @@ PROFILES: dict[str, Optional[HumanProfile]] = {
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _clamp(val: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, val))
 
@@ -79,9 +83,7 @@ def _gaussian_delay(mean_ms: float, sigma_ms: float, lo: float, hi: float) -> fl
     return ms / 1000.0
 
 
-def _bezier_points(
-    x0: float, y0: float, x1: float, y1: float, steps: int, jitter: float
-) -> list[Tuple[float, float]]:
+def _bezier_points(x0: float, y0: float, x1: float, y1: float, steps: int, jitter: float) -> list[Tuple[float, float]]:
     """
     Generate a list of (x, y) waypoints along a cubic Bézier curve between
     two points.  The two control points are jittered to create natural curves.
@@ -104,6 +106,7 @@ def _bezier_points(
 # ---------------------------------------------------------------------------
 # Main humanizer class
 # ---------------------------------------------------------------------------
+
 
 class Humanizer:
     """

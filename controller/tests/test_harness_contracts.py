@@ -76,10 +76,13 @@ class ProgrammaticVerifierTests(unittest.IsolatedAsyncioTestCase):
         result = await ProgrammaticVerifier().verify(contract, trace)
 
         self.assertTrue(result.passed)
-        self.assertEqual(result.satisfied_postconditions, [
-            "postcondition[0]:url_contains:example.com/checkout",
-            "postcondition[1]:text_contains:Order confirmed",
-        ])
+        self.assertEqual(
+            result.satisfied_postconditions,
+            [
+                "postcondition[0]:url_contains:example.com/checkout",
+                "postcondition[1]:text_contains:Order confirmed",
+            ],
+        )
         self.assertEqual(result.missing_evidence, [])
 
     async def test_programmatic_dom_condition_and_url_matches(self) -> None:
@@ -202,7 +205,9 @@ class UniversalVerifierAdapterTests(unittest.IsolatedAsyncioTestCase):
             postconditions=[{"kind": "url_contains", "value": "example.com"}],
             evidence_required=[EvidenceRequirement(kind="trace")],
         )
-        result = await UniversalVerifierAdapter().verify(contract, {"final_observation": {"url": "https://example.com"}})
+        result = await UniversalVerifierAdapter().verify(
+            contract, {"final_observation": {"url": "https://example.com"}}
+        )
 
         self.assertIsNone(result.passed)
         self.assertEqual(result.backend, "uv")

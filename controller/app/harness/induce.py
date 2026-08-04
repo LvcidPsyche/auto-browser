@@ -209,7 +209,7 @@ def run(page: Page) -> dict:
 
 
 def _render_self_test(contract: TaskContract) -> str:
-    return f'''from __future__ import annotations
+    return f"""from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -219,4 +219,4 @@ def test_contract_is_embedded() -> None:
     contract = json.loads((Path(__file__).parent / "contract.json").read_text(encoding="utf-8"))
     assert contract["id"] == {contract.id!r}
     assert contract["postconditions"]
-'''
+"""

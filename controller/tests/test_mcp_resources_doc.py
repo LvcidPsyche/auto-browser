@@ -24,14 +24,19 @@ class McpResourcesDocTests(unittest.TestCase):
 
     def test_documented_resource_schemes_exist_in_code(self) -> None:
         for suffix in ("screenshot", "dom", "console", "network"):
-            self.assertIn(f'browser://{{session_id}}/{suffix}', self.transport, suffix)
+            self.assertIn(f"browser://{{session_id}}/{suffix}", self.transport, suffix)
             self.assertIn(f"browser://<session-id>/{suffix}", self.doc, suffix)
         self.assertIn('"browser://sessions"', self.transport)
         self.assertIn("browser://sessions", self.doc)
 
     def test_documented_methods_exist_in_code(self) -> None:
-        for method in ("resources/list", "resources/read", "resources/subscribe",
-                       "resources/unsubscribe", "notifications/resources/updated"):
+        for method in (
+            "resources/list",
+            "resources/read",
+            "resources/subscribe",
+            "resources/unsubscribe",
+            "notifications/resources/updated",
+        ):
             self.assertIn(method, self.transport, method)
             self.assertIn(method, self.doc, method)
 

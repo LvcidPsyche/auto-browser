@@ -518,18 +518,8 @@ class BrowserActionService:
         for step in range(1, steps + 1):
             t = step / steps
             inv = 1 - t
-            px = (
-                inv**3 * start_x
-                + 3 * inv * inv * t * control_1[0]
-                + 3 * inv * t * t * control_2[0]
-                + t**3 * x
-            )
-            py = (
-                inv**3 * start_y
-                + 3 * inv * inv * t * control_1[1]
-                + 3 * inv * t * t * control_2[1]
-                + t**3 * y
-            )
+            px = inv**3 * start_x + 3 * inv * inv * t * control_1[0] + 3 * inv * t * t * control_2[0] + t**3 * x
+            py = inv**3 * start_y + 3 * inv * inv * t * control_1[1] + 3 * inv * t * t * control_2[1] + t**3 * y
             await session.page.mouse.move(px, py)
             await asyncio.sleep(random.uniform(0.004, 0.018))
         session.mouse_position = (x, y)
@@ -720,9 +710,10 @@ class BrowserActionService:
                 & set(signals)
             )
         elif action_name == "hover":
-            verified = bool(
-                {"active_element_changed", "text_excerpt_changed", "accessibility_focus_changed"} & set(signals)
-            ) or target_seen_after is not None
+            verified = (
+                bool({"active_element_changed", "text_excerpt_changed", "accessibility_focus_changed"} & set(signals))
+                or target_seen_after is not None
+            )
         elif action_name in {"type", "select_option"}:
             verified = bool(
                 {"active_element_changed", "text_excerpt_changed", "accessibility_focus_changed"} & set(signals)

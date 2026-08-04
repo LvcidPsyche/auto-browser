@@ -83,11 +83,7 @@ class BrowserRemoteAccessService:
                 "source": "metadata_file",
                 "takeover_url": takeover_url,
                 "api_url": api_url,
-                "last_updated": (
-                    last_updated.isoformat().replace("+00:00", "Z")
-                    if last_updated is not None
-                    else None
-                ),
+                "last_updated": (last_updated.isoformat().replace("+00:00", "Z") if last_updated is not None else None),
                 "age_seconds": age_seconds,
                 "stale_after_seconds": stale_after_seconds,
                 "tunnel": tunnel,
@@ -148,9 +144,7 @@ class BrowserRemoteAccessService:
             {
                 "session_id": session.id,
                 "source": (
-                    "isolated_session_tunnel"
-                    if session_tunnel and session_tunnel.get("active")
-                    else "isolated_runtime"
+                    "isolated_session_tunnel" if session_tunnel and session_tunnel.get("active") else "isolated_runtime"
                 ),
                 "configured_takeover_url": takeover_url,
                 "takeover_url": effective_takeover_url,

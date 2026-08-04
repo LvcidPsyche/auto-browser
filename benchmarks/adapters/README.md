@@ -46,5 +46,6 @@ Or programmatically:
 
 ```python
 from verifier_adapter import adapt
-records = adapt(run_result_dict)   # {"online_mind2web": {...}, "cuaverifier": {...}}
+
+records = adapt(run_result_dict)  # {"online_mind2web": {...}, "cuaverifier": {...}}
 ```

@@ -5,6 +5,7 @@ Applied via Playwright's add_init_script() so it runs before any page JS.
 Covers: webdriver flag, canvas noise, WebGL noise, user-agent cycling,
 timezone/locale consistency per session.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -56,6 +57,7 @@ _LOCALES = ["en-US", "en-GB", "en-CA", "en-AU", "de-DE", "fr-FR"]
 # Session-stable fingerprint seed
 # ---------------------------------------------------------------------------
 
+
 def _session_seed(session_id: str) -> int:
     """Derive a stable integer seed from a session ID so fingerprint is consistent
     within a session but differs across sessions."""
@@ -65,6 +67,7 @@ def _session_seed(session_id: str) -> int:
 # ---------------------------------------------------------------------------
 # Fingerprint config
 # ---------------------------------------------------------------------------
+
 
 class FingerprintConfig:
     """Per-session fingerprint configuration."""
@@ -150,6 +153,7 @@ class FingerprintConfig:
 # ---------------------------------------------------------------------------
 # Apply fingerprint to a Playwright BrowserContext
 # ---------------------------------------------------------------------------
+
 
 async def apply_fingerprint(context: "BrowserContext", config: FingerprintConfig) -> None:  # noqa: F821
     """Inject the fingerprint init script into a Playwright BrowserContext."""

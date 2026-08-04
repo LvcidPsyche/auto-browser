@@ -45,9 +45,7 @@ class PlaywrightExportHelperTests(unittest.TestCase):
             (
                 "open_tab",
                 {"url": "https://example.com/new"},
-                "tab = context.new_page()\n"
-                "tab.goto('https://example.com/new')\n"
-                "page = tab\n",
+                "tab = context.new_page()\ntab.goto('https://example.com/new')\npage = tab\n",
             ),
             ("open_tab", {}, "page = context.new_page()\n"),
             (

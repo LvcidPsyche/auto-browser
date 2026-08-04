@@ -112,7 +112,9 @@ class BrowserManagerCreateSessionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.manager.create_session(storage_state_path="state.json", auth_profile="ops")
         with self.assertRaises(ValueError):
-            await self.manager.create_session(proxy_persona="east", request_proxy_server="http://proxy.example.com:8080")
+            await self.manager.create_session(
+                proxy_persona="east", request_proxy_server="http://proxy.example.com:8080"
+            )
 
     async def test_session_limit_message_mentions_shared_browser_mode(self) -> None:
         self.manager.settings.max_sessions = 1

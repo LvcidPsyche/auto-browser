@@ -94,23 +94,29 @@ class BrowserDiagnosticsService:
             return
         session.attached_pages.add(page)
 
-        page.on("console", lambda message: self._bounded_append(
-            session.console_messages,
-            {
-                "type": message.type,
-                "text": message.text,
-                "location": message.location,
-            },
-        ))
+        page.on(
+            "console",
+            lambda message: self._bounded_append(
+                session.console_messages,
+                {
+                    "type": message.type,
+                    "text": message.text,
+                    "location": message.location,
+                },
+            ),
+        )
         page.on("pageerror", lambda error: self._bounded_append(session.page_errors, str(error)))
-        page.on("requestfailed", lambda request: self._bounded_append(
-            session.request_failures,
-            {
-                "url": request.url,
-                "method": request.method,
-                "failure": str(request.failure) if request.failure else None,
-            },
-        ))
+        page.on(
+            "requestfailed",
+            lambda request: self._bounded_append(
+                session.request_failures,
+                {
+                    "url": request.url,
+                    "method": request.method,
+                    "failure": str(request.failure) if request.failure else None,
+                },
+            ),
+        )
         page.on("download", lambda download: spawn_background_task(self.manager._handle_download(session, download)))
 
     @staticmethod
@@ -198,9 +204,7 @@ class BrowserDiagnosticsService:
 
             data = diff.tobytes()
             changed = sum(
-                1
-                for index in range(0, len(data), 3)
-                if data[index] > 8 or data[index + 1] > 8 or data[index + 2] > 8
+                1 for index in range(0, len(data), 3) if data[index] > 8 or data[index + 1] > 8 or data[index + 2] > 8
             )
             changed_pct = round(changed / total_pixels * 100, 4) if total_pixels > 0 else 0.0
 

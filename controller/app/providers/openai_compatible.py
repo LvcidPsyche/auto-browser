@@ -171,9 +171,7 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
         ]
         if self.profile.supports_vision:
             mime_type, image_b64 = self.encode_image(observation["screenshot_path"])
-            content.append(
-                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}}
-            )
+            content.append({"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}})
 
         payload = {
             "model": model,
@@ -225,9 +223,7 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
             # Some OpenAI-compatible endpoints ignore tool_choice; parse the content.
             raw_text = str(message.get("content") or "").strip()
             if not raw_text:
-                raise RuntimeError(
-                    f"{self.profile.label} returned neither a browser_action tool call nor content"
-                )
+                raise RuntimeError(f"{self.profile.label} returned neither a browser_action tool call nor content")
             decision = self.parse_decision_text(raw_text)
 
         return ProviderDecision(

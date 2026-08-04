@@ -56,9 +56,7 @@ class CuratorLLMAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("OPENAI_API_KEY", joined)
 
     async def test_complete_builds_claude_request_and_extracts_text(self) -> None:
-        fake_client = _FakeAsyncClient(
-            _FakeResponse({"content": [{"type": "text", "text": "claude-output"}]})
-        )
+        fake_client = _FakeAsyncClient(_FakeResponse({"content": [{"type": "text", "text": "claude-output"}]}))
         adapter = CuratorLLMAdapter("claude", model="claude-test")
 
         with (
@@ -75,9 +73,7 @@ class CuratorLLMAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["messages"][0]["content"], "summarize this")
 
     async def test_complete_builds_openai_request_and_extracts_text(self) -> None:
-        fake_client = _FakeAsyncClient(
-            _FakeResponse({"choices": [{"message": {"content": "openai-output"}}]})
-        )
+        fake_client = _FakeAsyncClient(_FakeResponse({"choices": [{"message": {"content": "openai-output"}}]}))
         adapter = CuratorLLMAdapter("openai", model="gpt-test")
 
         with (

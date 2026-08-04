@@ -8,6 +8,7 @@ Covers:
 - New config settings
 - New models (ObserveRequest, ImportAuthProfileRequest, ScreenshotDiffResponse)
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -31,6 +32,7 @@ from app.models import (
 from app.webhooks import _sign
 
 # ── Perception Preset Models ─────────────────────────────────────────────────
+
 
 class TestObserveRequest(unittest.TestCase):
     def test_default_preset_is_unset(self) -> None:
@@ -65,11 +67,13 @@ class TestObserveRequest(unittest.TestCase):
 
     def test_limit_too_large_raises(self) -> None:
         from pydantic import ValidationError
+
         with self.assertRaises(ValidationError):
             ObserveRequest(limit=201)
 
     def test_invalid_preset_raises(self) -> None:
         from pydantic import ValidationError
+
         with self.assertRaises(ValidationError):
             ObserveRequest(preset="turbo")  # type: ignore[arg-type]
 
@@ -102,6 +106,7 @@ class TestScreenshotDiffResponse(unittest.TestCase):
 
 
 # ── SSE Event Bus ─────────────────────────────────────────────────────────────
+
 
 class TestEventBus(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -165,6 +170,7 @@ class TestEventBus(unittest.IsolatedAsyncioTestCase):
 
 # ── Webhook Signing ────────────────────────────────────────────────────────────
 
+
 class TestWebhookSigning(unittest.TestCase):
     def test_sign_produces_sha256_prefix(self) -> None:
         sig = _sign(b'{"test":1}', "secret123")
@@ -183,13 +189,14 @@ class TestWebhookSigning(unittest.TestCase):
         self.assertNotEqual(sig1, sig2)
 
     def test_sign_matches_manual_hmac(self) -> None:
-        payload = b'hello'
+        payload = b"hello"
         secret = "webhook-secret"
         expected = "sha256=" + hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
         self.assertEqual(_sign(payload, secret), expected)
 
 
 # ── Config: New Settings ─────────────────────────────────────────────────────
+
 
 class TestNewConfigSettings(unittest.TestCase):
     def test_approval_webhook_url_default_none(self) -> None:
@@ -234,6 +241,7 @@ class TestNewConfigSettings(unittest.TestCase):
 
 # ── Auth Export / Import ─────────────────────────────────────────────────────
 
+
 class TestAuthExportImport(unittest.TestCase):
     def test_export_creates_tar_gz(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -269,10 +277,12 @@ class TestAuthExportImport(unittest.TestCase):
 
 # ── Screenshot Diff ────────────────────────────────────────────────────────────
 
+
 class TestScreenshotDiff(unittest.TestCase):
     def _make_png(self, path: Path, color: tuple[int, int, int] = (0, 0, 0)) -> None:
         try:
             from PIL import Image
+
             img = Image.new("RGB", (100, 100), color=color)
             img.save(str(path))
         except ImportError:
@@ -283,9 +293,7 @@ class TestScreenshotDiff(unittest.TestCase):
             d = Path(tmp)
             self._make_png(d / "a.png", color=(0, 128, 255))
             self._make_png(d / "b.png", color=(0, 128, 255))
-            result = BrowserDiagnosticsService.compute_diff(
-                str(d / "a.png"), str(d / "b.png"), "/a.png", "/b.png", d
-            )
+            result = BrowserDiagnosticsService.compute_diff(str(d / "a.png"), str(d / "b.png"), "/a.png", "/b.png", d)
             self.assertEqual(result["changed_pixels"], 0)
             self.assertEqual(result["changed_pct"], 0.0)
 
@@ -294,9 +302,7 @@ class TestScreenshotDiff(unittest.TestCase):
             d = Path(tmp)
             self._make_png(d / "a.png", color=(0, 0, 0))
             self._make_png(d / "b.png", color=(255, 255, 255))
-            result = BrowserDiagnosticsService.compute_diff(
-                str(d / "a.png"), str(d / "b.png"), "/a.png", "/b.png", d
-            )
+            result = BrowserDiagnosticsService.compute_diff(str(d / "a.png"), str(d / "b.png"), "/a.png", "/b.png", d)
             self.assertGreater(result["changed_pixels"], 0)
             self.assertGreater(result["changed_pct"], 0.0)
             self.assertIsNotNone(result["diff_url"])

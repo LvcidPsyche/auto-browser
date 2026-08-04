@@ -226,9 +226,7 @@ class McpToolGateway:
             # Invalid tool arguments — report the field errors so the calling
             # agent can fix its call, instead of "Tool execution failed".
             details = "; ".join(
-                f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
-                if err.get("loc")
-                else err["msg"]
+                f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}" if err.get("loc") else err["msg"]
                 for err in exc.errors()
             )
             return self._error_response(f"Invalid arguments for {payload.name}: {details}")
@@ -573,9 +571,7 @@ class McpToolGateway:
     async def _get_html(self, payload: GetPageHtmlInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
         if payload.text_only:
-            text = await session.page.evaluate(
-                "() => document.body ? document.body.innerText : ''"
-            )
+            text = await session.page.evaluate("() => document.body ? document.body.innerText : ''")
             return {"session_id": payload.session_id, "content": text, "type": "text"}
         html = await session.page.content()
         return {"session_id": payload.session_id, "content": html, "type": "html"}
@@ -634,9 +630,7 @@ class McpToolGateway:
                 [payload.query, payload.regex, payload.context, payload.limit],
             )
             try:
-                elements = await asyncio.wait_for(
-                    evaluate, timeout=FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS
-                )
+                elements = await asyncio.wait_for(evaluate, timeout=FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
                 raise BrowserActionError(
                     f"find_elements query timed out after "
@@ -745,6 +739,7 @@ class McpToolGateway:
 
     async def _export_script(self, payload: ExportScriptInput) -> dict[str, Any]:
         from .playwright_export import export_session_script
+
         session = await self.manager.get_session(payload.session_id)
         start_url = session.page.url
         return await export_session_script(
@@ -760,9 +755,7 @@ class McpToolGateway:
 
     async def _find_by_vision(self, payload: VisionFindInput) -> dict[str, Any]:
         if self.vision_targeter is None:
-            raise RuntimeError(
-                "Vision targeting is not available — set ANTHROPIC_API_KEY to enable it."
-            )
+            raise RuntimeError("Vision targeting is not available — set ANTHROPIC_API_KEY to enable it.")
         session = await self.manager.get_session(payload.session_id)
         if payload.take_screenshot:
             screenshot = await self.manager.capture_screenshot(payload.session_id, label="vision")

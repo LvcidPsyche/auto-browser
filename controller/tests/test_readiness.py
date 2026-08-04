@@ -49,9 +49,7 @@ def test_warn_no_bearer() -> None:
 
 
 def test_fail_encryption_required_not_set() -> None:
-    report = run_readiness_checks(
-        _settings(auth_state_encryption_key=None, require_auth_state_encryption=True)
-    )
+    report = run_readiness_checks(_settings(auth_state_encryption_key=None, require_auth_state_encryption=True))
 
     assert report.overall == "fail"
 

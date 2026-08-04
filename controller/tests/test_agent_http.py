@@ -123,7 +123,14 @@ class AgentHttpTests(unittest.TestCase):
         self.assertEqual(
             response.json(),
             [
-                {"provider": "openai", "configured": True, "model": "gpt-4.1-mini", "auth_mode": "api", "detail": None, "login_command": None},
+                {
+                    "provider": "openai",
+                    "configured": True,
+                    "model": "gpt-4.1-mini",
+                    "auth_mode": "api",
+                    "detail": None,
+                    "login_command": None,
+                },
                 {
                     "provider": "claude",
                     "configured": False,
@@ -294,7 +301,9 @@ class AgentHttpTests(unittest.TestCase):
                 "approve": {"id": "approval-1", "status": "approved"},
                 "reject": {"id": "approval-1", "status": "rejected"},
                 "execute_approval": {"id": "approval-1", "status": "executed"},
-                "get_session": SimpleNamespace(page=SimpleNamespace(url="https://example.com"), trace_path=Path("missing.zip")),
+                "get_session": SimpleNamespace(
+                    page=SimpleNamespace(url="https://example.com"), trace_path=Path("missing.zip")
+                ),
                 "get_network_log": {"entries": []},
                 "fork_session": {"id": "fork-1"},
                 "enable_shadow_browse": {"enabled": True},
@@ -323,10 +332,20 @@ class AgentHttpTests(unittest.TestCase):
             for target, methods in async_methods.items():
                 for name, result in methods.items():
                     stack.enter_context(patch.object(target, name, new=AsyncMock(return_value=result)))
-            stack.enter_context(patch.object(main_module.manager, "get_remote_access_info", return_value={"active": False}))
-            stack.enter_context(patch.object(main_module.manager, "get_pii_scrubber_status", return_value={"enabled": True}))
-            stack.enter_context(patch.object(main_module.share_manager, "create_token", return_value={"token": "share"}))
-            stack.enter_context(patch.object(main_module.share_manager, "token_info", return_value={"valid": True, "session_id": "session-1"}))
+            stack.enter_context(
+                patch.object(main_module.manager, "get_remote_access_info", return_value={"active": False})
+            )
+            stack.enter_context(
+                patch.object(main_module.manager, "get_pii_scrubber_status", return_value={"enabled": True})
+            )
+            stack.enter_context(
+                patch.object(main_module.share_manager, "create_token", return_value={"token": "share"})
+            )
+            stack.enter_context(
+                patch.object(
+                    main_module.share_manager, "token_info", return_value={"valid": True, "session_id": "session-1"}
+                )
+            )
             stack.enter_context(patch.object(main_module.proxy_store, "list_personas", return_value=[]))
             stack.enter_context(patch.object(main_module.proxy_store, "set_persona", return_value={"name": "us-east"}))
             stack.enter_context(patch.object(main_module.proxy_store, "get_persona", return_value={"name": "us-east"}))
@@ -406,7 +425,11 @@ class AgentHttpTests(unittest.TestCase):
 
             for method, path, payload in requests:
                 with self.subTest(path=path):
-                    response = getattr(self.client, method)(path, json=payload) if payload is not None else getattr(self.client, method)(path)
+                    response = (
+                        getattr(self.client, method)(path, json=payload)
+                        if payload is not None
+                        else getattr(self.client, method)(path)
+                    )
                     self.assertLess(response.status_code, 400, response.text)
 
     def test_replay_export_and_public_error_edges(self) -> None:
@@ -458,21 +481,69 @@ class AgentHttpTests(unittest.TestCase):
     def test_http_error_mappings_are_stable(self) -> None:
         cases = [
             (main_module.manager, "ensure_browser", Exception("down"), "get", "/readyz", None, 503),
-            (main_module.manager, "get_session_record", KeyError("missing"), "get", "/remote-access?session_id=missing", None, 404),
-            (main_module.manager, "approve", PermissionError("conflict"), "post", "/approvals/a/approve", {"comment": "ok"}, 409),
-            (main_module.manager, "reject", PermissionError("conflict"), "post", "/approvals/a/reject", {"comment": "no"}, 409),
-            (main_module.manager, "execute_approval", PermissionError("conflict"), "post", "/approvals/a/execute", None, 409),
+            (
+                main_module.manager,
+                "get_session_record",
+                KeyError("missing"),
+                "get",
+                "/remote-access?session_id=missing",
+                None,
+                404,
+            ),
+            (
+                main_module.manager,
+                "approve",
+                PermissionError("conflict"),
+                "post",
+                "/approvals/a/approve",
+                {"comment": "ok"},
+                409,
+            ),
+            (
+                main_module.manager,
+                "reject",
+                PermissionError("conflict"),
+                "post",
+                "/approvals/a/reject",
+                {"comment": "no"},
+                409,
+            ),
+            (
+                main_module.manager,
+                "execute_approval",
+                PermissionError("conflict"),
+                "post",
+                "/approvals/a/execute",
+                None,
+                409,
+            ),
             (main_module.manager, "execute_approval", ValueError("bad"), "post", "/approvals/a/execute", None, 400),
             (main_module.manager, "execute_approval", Exception("boom"), "post", "/approvals/a/execute", None, 500),
             (main_module.manager, "create_session", ValueError("bad"), "post", "/sessions", {"name": "s"}, 400),
-            (main_module.manager, "create_session", FileNotFoundError("missing"), "post", "/sessions", {"name": "s"}, 404),
+            (
+                main_module.manager,
+                "create_session",
+                FileNotFoundError("missing"),
+                "post",
+                "/sessions",
+                {"name": "s"},
+                404,
+            ),
             (main_module.manager, "create_session", PermissionError("no"), "post", "/sessions", {"name": "s"}, 403),
             (main_module.manager, "create_session", RuntimeError("busy"), "post", "/sessions", {"name": "s"}, 409),
             (main_module.manager, "create_session", Exception("boom"), "post", "/sessions", {"name": "s"}, 500),
             (main_module.manager, "get_auth_profile", ValueError("bad"), "get", "/auth-profiles/bad", None, 400),
             (main_module.manager, "observe", KeyError("missing"), "get", "/sessions/s/observe", None, 404),
             (main_module.manager, "observe", Exception("boom"), "post", "/sessions/s/observe", {"limit": 1}, 500),
-            (main_module.manager, "activate_tab", ValueError("bad"), "post", "/sessions/s/tabs/activate", {"index": 99}, 400),
+            (
+                main_module.manager,
+                "activate_tab",
+                ValueError("bad"),
+                "post",
+                "/sessions/s/tabs/activate",
+                {"index": 99},
+                400,
+            ),
             (main_module.manager, "close_tab", ValueError("bad"), "post", "/sessions/s/tabs/close", {"index": 99}, 400),
             (
                 main_module.manager,
@@ -501,7 +572,15 @@ class AgentHttpTests(unittest.TestCase):
                 {"url": "https://example.com"},
                 500,
             ),
-            (main_module.manager, "click", ValueError("bad"), "post", "/sessions/s/actions/click", {"selector": "button"}, 400),
+            (
+                main_module.manager,
+                "click",
+                ValueError("bad"),
+                "post",
+                "/sessions/s/actions/click",
+                {"selector": "button"},
+                400,
+            ),
             (
                 main_module.manager,
                 "click",
@@ -511,7 +590,15 @@ class AgentHttpTests(unittest.TestCase):
                 {"selector": "button"},
                 403,
             ),
-            (main_module.manager, "click", Exception("boom"), "post", "/sessions/s/actions/click", {"selector": "button"}, 500),
+            (
+                main_module.manager,
+                "click",
+                Exception("boom"),
+                "post",
+                "/sessions/s/actions/click",
+                {"selector": "button"},
+                500,
+            ),
             (
                 main_module.manager,
                 "type",
@@ -539,10 +626,42 @@ class AgentHttpTests(unittest.TestCase):
                 {"selector": "input", "text": "hi"},
                 500,
             ),
-            (main_module.manager, "press", PermissionError("no"), "post", "/sessions/s/actions/press", {"key": "Enter"}, 403),
-            (main_module.manager, "press", Exception("boom"), "post", "/sessions/s/actions/press", {"key": "Enter"}, 500),
-            (main_module.manager, "scroll", PermissionError("no"), "post", "/sessions/s/actions/scroll", {"delta_y": 1}, 403),
-            (main_module.manager, "scroll", Exception("boom"), "post", "/sessions/s/actions/scroll", {"delta_y": 1}, 500),
+            (
+                main_module.manager,
+                "press",
+                PermissionError("no"),
+                "post",
+                "/sessions/s/actions/press",
+                {"key": "Enter"},
+                403,
+            ),
+            (
+                main_module.manager,
+                "press",
+                Exception("boom"),
+                "post",
+                "/sessions/s/actions/press",
+                {"key": "Enter"},
+                500,
+            ),
+            (
+                main_module.manager,
+                "scroll",
+                PermissionError("no"),
+                "post",
+                "/sessions/s/actions/scroll",
+                {"delta_y": 1},
+                403,
+            ),
+            (
+                main_module.manager,
+                "scroll",
+                Exception("boom"),
+                "post",
+                "/sessions/s/actions/scroll",
+                {"delta_y": 1},
+                500,
+            ),
             (
                 main_module.manager,
                 "execute_decision",
@@ -606,7 +725,15 @@ class AgentHttpTests(unittest.TestCase):
                 {"selector": "input", "file_path": "missing.txt"},
                 500,
             ),
-            (main_module.manager, "hover", ValueError("bad"), "post", "/sessions/s/actions/hover", {"selector": "button"}, 400),
+            (
+                main_module.manager,
+                "hover",
+                ValueError("bad"),
+                "post",
+                "/sessions/s/actions/hover",
+                {"selector": "button"},
+                400,
+            ),
             (
                 main_module.manager,
                 "hover",
@@ -616,7 +743,15 @@ class AgentHttpTests(unittest.TestCase):
                 {"selector": "button"},
                 403,
             ),
-            (main_module.manager, "hover", Exception("boom"), "post", "/sessions/s/actions/hover", {"selector": "button"}, 500),
+            (
+                main_module.manager,
+                "hover",
+                Exception("boom"),
+                "post",
+                "/sessions/s/actions/hover",
+                {"selector": "button"},
+                500,
+            ),
             (
                 main_module.manager,
                 "select_option",
@@ -650,7 +785,15 @@ class AgentHttpTests(unittest.TestCase):
             (main_module.manager, "reload", Exception("boom"), "post", "/sessions/s/actions/reload", None, 500),
             (main_module.manager, "go_back", PermissionError("no"), "post", "/sessions/s/actions/go-back", None, 403),
             (main_module.manager, "go_back", Exception("boom"), "post", "/sessions/s/actions/go-back", None, 500),
-            (main_module.manager, "go_forward", PermissionError("no"), "post", "/sessions/s/actions/go-forward", None, 403),
+            (
+                main_module.manager,
+                "go_forward",
+                PermissionError("no"),
+                "post",
+                "/sessions/s/actions/go-forward",
+                None,
+                403,
+            ),
             (main_module.manager, "go_forward", Exception("boom"), "post", "/sessions/s/actions/go-forward", None, 500),
             (
                 main_module.manager,
@@ -680,7 +823,15 @@ class AgentHttpTests(unittest.TestCase):
                 403,
             ),
             (main_module.manager, "fork_session", RuntimeError("busy"), "post", "/sessions/s/fork", None, 409),
-            (main_module.manager, "enable_shadow_browse", RuntimeError("bad"), "post", "/sessions/s/shadow-browse", None, 400),
+            (
+                main_module.manager,
+                "enable_shadow_browse",
+                RuntimeError("bad"),
+                "post",
+                "/sessions/s/shadow-browse",
+                None,
+                400,
+            ),
         ]
 
         with patch.object(main_module, "rate_limiter", None):
@@ -808,7 +959,11 @@ class AgentHttpTests(unittest.TestCase):
 
         for method, path, body in endpoints:
             with self.subTest(path=path):
-                response = getattr(self.client, method)(path, json=body) if body is not None else getattr(self.client, method)(path)
+                response = (
+                    getattr(self.client, method)(path, json=body)
+                    if body is not None
+                    else getattr(self.client, method)(path)
+                )
                 self.assertEqual(response.status_code, 404)
 
 

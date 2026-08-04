@@ -182,9 +182,7 @@ class SQLiteAuditStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_audit_events_session ON audit_events(session_id, timestamp DESC)"
             )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_audit_events_type ON audit_events(event_type, timestamp DESC)"
-            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_type ON audit_events(event_type, timestamp DESC)")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_audit_events_operator ON audit_events(operator_id, timestamp DESC)"
             )
@@ -324,4 +322,3 @@ class AuditStore:
             event_type=event_type,
             operator_id=operator_id,
         )
-

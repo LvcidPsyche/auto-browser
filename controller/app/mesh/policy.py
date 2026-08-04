@@ -4,6 +4,7 @@ mesh.policy — Capability grant evaluator.
 Default-deny: if no matching grant exists, the request is rejected.
 All four constraint evaluators are real implementations (no stubs).
 """
+
 from __future__ import annotations
 
 import fnmatch
@@ -63,6 +64,7 @@ def _count_invocations(key: str) -> int:
 # Constraint evaluators
 # ---------------------------------------------------------------------------
 
+
 def _check_url_allowlist(grant: CapabilityGrant, request: DelegationRequest) -> None:
     """
     Enforce url_allowlist constraint.
@@ -82,8 +84,7 @@ def _check_url_allowlist(grant: CapabilityGrant, request: DelegationRequest) -> 
             return  # matched
 
     raise PolicyDenied(
-        f"URL {url!r} not in allowlist for capability {grant.capability!r}. "
-        f"Allowed patterns: {grant.url_allowlist}"
+        f"URL {url!r} not in allowlist for capability {grant.capability!r}. Allowed patterns: {grant.url_allowlist}"
     )
 
 
@@ -93,8 +94,7 @@ def _check_expires_at(grant: CapabilityGrant) -> None:
         return  # never expires
     if time.time() > grant.expires_at:
         raise PolicyExpired(
-            f"Grant for capability {grant.capability!r} expired at "
-            f"{grant.expires_at} (now={time.time():.1f})"
+            f"Grant for capability {grant.capability!r} expired at {grant.expires_at} (now={time.time():.1f})"
         )
 
 
@@ -122,6 +122,7 @@ def _record_invocation_for_grant(grant: CapabilityGrant, peer_node_id: str) -> N
 # Main evaluator
 # ---------------------------------------------------------------------------
 
+
 class PolicyEvaluator:
     """
     Evaluates whether a peer's DelegationRequest is permitted.
@@ -144,8 +145,7 @@ class PolicyEvaluator:
 
         if matching_grant is None:
             raise PolicyDenied(
-                f"No grant for capability {request.capability!r} "
-                f"from peer {peer.node_id!r}. Default-deny."
+                f"No grant for capability {request.capability!r} from peer {peer.node_id!r}. Default-deny."
             )
 
         # Run all constraint evaluators

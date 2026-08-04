@@ -27,9 +27,7 @@ class RecordingHttpMcpClient:
         self.deleted_session_ids: list[str | None] = []
 
     def post_json(self, payload, *, session_id=None, protocol_version=None):
-        self.posts.append(
-            {"payload": payload, "session_id": session_id, "protocol_version": protocol_version}
-        )
+        self.posts.append({"payload": payload, "session_id": session_id, "protocol_version": protocol_version})
         if isinstance(self.response, Exception):
             raise self.response
         return self.response
@@ -144,9 +142,7 @@ class HttpMcpClientTests(unittest.TestCase):
     def test_http_error_is_returned_as_response_not_raised(self) -> None:
         headers = email.message.Message()
         headers["Content-Type"] = "application/json"
-        error = HTTPError(
-            "http://ctrl.test/mcp", 401, "Unauthorized", headers, io.BytesIO(b'{"detail": "no"}')
-        )
+        error = HTTPError("http://ctrl.test/mcp", 401, "Unauthorized", headers, io.BytesIO(b'{"detail": "no"}'))
 
         def fake(request, timeout=None):
             raise error

@@ -8,10 +8,7 @@ def register(registry, gateway):
     for spec in [
         ToolSpec(
             name="browser.get_cookies",
-            description=(
-                "Get all cookies for the current session context. "
-                "Optionally filter by URL(s)."
-            ),
+            description=("Get all cookies for the current session context. Optionally filter by URL(s)."),
             input_model=GetCookiesInput,
             handler=gateway._get_cookies,
             profiles=("full",),
@@ -29,20 +26,14 @@ def register(registry, gateway):
         ),
         ToolSpec(
             name="browser.get_local_storage",
-            description=(
-                "Read a key (or all keys) from localStorage or sessionStorage "
-                "in the current page context."
-            ),
+            description=("Read a key (or all keys) from localStorage or sessionStorage in the current page context."),
             input_model=GetStorageInput,
             handler=gateway._get_local_storage,
             profiles=("full",),
         ),
         ToolSpec(
             name="browser.set_local_storage",
-            description=(
-                "Write a key-value pair to localStorage or sessionStorage "
-                "in the current page context."
-            ),
+            description=("Write a key-value pair to localStorage or sessionStorage in the current page context."),
             input_model=SetStorageInput,
             handler=gateway._set_local_storage,
             profiles=("full",),

@@ -481,6 +481,4 @@ class WitnessRemoteClient:
         except Exception:
             payload = response.text
         detail = payload.get("detail") if isinstance(payload, dict) else str(payload)
-        raise RuntimeError(
-            f"Witness remote {operation} failed with HTTP {response.status_code}: {detail}"
-        )
+        raise RuntimeError(f"Witness remote {operation} failed with HTTP {response.status_code}: {detail}")
