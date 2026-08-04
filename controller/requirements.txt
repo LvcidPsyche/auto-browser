@@ -7,7 +7,8 @@
 #
 # What 0.137 DID change: app.routes holds _IncludedRouter wrappers instead of
 # flattened Route objects. Never enumerate app.routes expecting .path -- use
-# app.openapi() or a request. The <0.140 bound keeps minor bumps reviewed.
+# app.openapi() or a request. The upper bound keeps minor bumps reviewed;
+# Dependabot moves it, so it is deliberately not restated as a number here.
 fastapi>=0.141.1,<0.142
 starlette==1.3.1
 uvicorn[standard]==0.52.0
