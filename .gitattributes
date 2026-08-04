@@ -1,0 +1,14 @@
+# Normalize line endings so they don't depend on each contributor's git
+# config. core.autocrlf is enabled repo-wide, and browser-node/Dockerfile
+# already carries `sed -i 's/\r$//' /entrypoint.sh` as a workaround for a
+# script that picked up CRLF -- this is the general fix for that class.
+* text=auto
+
+*.sh text eol=lf
+Dockerfile* text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+*.png binary
+*.gif binary
+*.ico binary
