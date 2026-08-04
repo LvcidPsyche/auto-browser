@@ -86,7 +86,7 @@ services:
       CONNECT_RETRY_DELAY_SECONDS: ${CONNECT_RETRY_DELAY_SECONDS:-1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5-mini}
       OPENAI_AUTH_MODE: ${OPENAI_AUTH_MODE:-api}
       OPENAI_CLI_PATH: ${OPENAI_CLI_PATH:-codex}
       OPENAI_CLI_MODEL: ${OPENAI_CLI_MODEL:-}
@@ -94,13 +94,13 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com/v1}
       ANTHROPIC_VERSION: ${ANTHROPIC_VERSION:-2023-06-01}
-      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-4-20250514}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-4-6}
       CLAUDE_AUTH_MODE: ${CLAUDE_AUTH_MODE:-api}
       CLAUDE_CLI_PATH: ${CLAUDE_CLI_PATH:-claude}
       CLAUDE_CLI_MODEL: ${CLAUDE_CLI_MODEL:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_BASE_URL: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash}
       GEMINI_AUTH_MODE: ${GEMINI_AUTH_MODE:-api}
       GEMINI_CLI_PATH: ${GEMINI_CLI_PATH:-gemini}
       GEMINI_CLI_MODEL: ${GEMINI_CLI_MODEL:-}

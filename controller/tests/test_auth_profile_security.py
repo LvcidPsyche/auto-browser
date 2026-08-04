@@ -26,9 +26,28 @@ from app.browser.services import BrowserAuthProfileService
 Service = BrowserAuthProfileService
 
 
+class _RecordingAudit:
+    """Captures audit events so tests can assert credential moves are recorded."""
+
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    async def append(self, **kwargs) -> None:
+        self.events.append(kwargs)
+
+
 def _service(auth_root: Path) -> BrowserAuthProfileService:
-    """Service backed by a throwaway auth root; only `settings.auth_root` is used."""
-    return BrowserAuthProfileService(SimpleNamespace(settings=SimpleNamespace(auth_root=str(auth_root))))
+    """Service backed by a throwaway auth root.
+
+    `audit` is real (recording) rather than absent: export and import move
+    credentials off and onto the box, and both now record that they happened.
+    """
+    return BrowserAuthProfileService(
+        SimpleNamespace(
+            settings=SimpleNamespace(auth_root=str(auth_root), auth_state_encryption_key=None),
+            audit=_RecordingAudit(),
+        )
+    )
 
 
 def _tar_with(members: list[tuple[tarfile.TarInfo, bytes | None]], dest: Path) -> None:

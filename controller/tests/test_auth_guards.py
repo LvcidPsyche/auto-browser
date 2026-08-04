@@ -178,3 +178,50 @@ def test_malformed_share_tokens_are_rejected() -> None:
     for bad in ("", "no-dot", "not-base64.sig", "."):
         with pytest.raises(ValueError):
             svc.validate_token(bad)
+
+
+# ── Credential movement leaves a record ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_auth_profile_export_and_import_are_audited(tmp_path: Path) -> None:
+    """Exporting a profile ships every cookie for a logged-in account.
+
+    `save_storage_state` — which merely *writes* that material — is wrapped in
+    witness policy, an audit event and a receipt. Export, which lets it leave
+    the box, and import, which installs credentials the controller will replay
+    into a real browser, had no audit record whatsoever: nothing in
+    /audit/events showed it had happened.
+    """
+    from types import SimpleNamespace
+
+    from app.browser.services import BrowserAuthProfileService
+
+    class _Audit:
+        def __init__(self) -> None:
+            self.events: list[dict] = []
+
+        async def append(self, **kwargs) -> None:
+            self.events.append(kwargs)
+
+    audit = _Audit()
+    auth_root = tmp_path / "auth"
+    service = BrowserAuthProfileService(
+        SimpleNamespace(
+            settings=SimpleNamespace(auth_root=str(auth_root), auth_state_encryption_key=None),
+            audit=audit,
+        )
+    )
+
+    profile_dir = service.dir("demo", create=True)
+    (profile_dir / "state.json").write_text('{"cookies": []}', encoding="utf-8")
+
+    exported = await service.export("demo")
+    assert [e["event_type"] for e in audit.events] == ["auth_profile_exported"]
+    assert audit.events[0]["details"]["profile_name"] == "demo"
+
+    await service.import_profile(exported["archive_name"], overwrite=True)
+    assert [e["event_type"] for e in audit.events] == [
+        "auth_profile_exported",
+        "auth_profile_imported",
+    ]

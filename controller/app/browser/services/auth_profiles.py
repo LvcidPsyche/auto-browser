@@ -299,6 +299,24 @@ class BrowserAuthProfileService:
         archive_path = Path(archive_path_str)
 
         await asyncio.to_thread(self.write_tar, Path(profile_dir_str), archive_path)
+
+        # Export packages every cookie and localStorage entry for a logged-in
+        # account into a downloadable archive. save_storage_state — which merely
+        # *writes* that material — is wrapped in witness policy, an audit event
+        # and a receipt; this path, which lets the material leave the box, had
+        # none of it. Nothing in /audit/events recorded that it happened.
+        await self.manager.audit.append(
+            event_type="auth_profile_exported",
+            status="ok",
+            action="export_auth_profile",
+            session_id=None,
+            details={
+                "profile_name": normalized,
+                "archive_name": archive_name,
+                "encrypted_at_rest": bool(self.manager.settings.auth_state_encryption_key),
+            },
+        )
+
         return {
             "profile_name": normalized,
             "archive_path": str(archive_path),
@@ -393,6 +411,17 @@ class BrowserAuthProfileService:
                 return profile_name
 
         profile_name = await asyncio.to_thread(_extract)
+
+        # Import installs credentials the controller will later replay into a
+        # real browser. Like export, it had no audit record at all.
+        await self.manager.audit.append(
+            event_type="auth_profile_imported",
+            status="ok",
+            action="import_auth_profile",
+            session_id=None,
+            details={"profile_name": profile_name, "archive_name": archive_name, "overwrite": overwrite},
+        )
+
         return {
             "profile_name": profile_name,
             "profile_path": str(profile_root / profile_name),
