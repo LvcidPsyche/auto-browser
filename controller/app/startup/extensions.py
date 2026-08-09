@@ -110,7 +110,7 @@ def _init_mesh(app) -> None:
 def _init_harness(app) -> None:
     try:
         from app.harness.iterate import HarnessService
-        from app.harness.register import mesh_identity_signer
+        from app.harness.register import mesh_identity_signer, mesh_identity_verifier
 
         settings = getattr(app.state, "settings", None)
         root = Path(getattr(settings, "harness_root", None) or os.environ.get("HARNESS_ROOT", "/data/harness"))
@@ -120,6 +120,7 @@ def _init_harness(app) -> None:
             root,
             verifier=_build_harness_verifier(settings),
             signer=signer,
+            envelope_verifier=mesh_identity_verifier(identity) if identity is not None else None,
             model_tiers=_harness_model_tiers(settings),
         )
         app.state.harness_service = service

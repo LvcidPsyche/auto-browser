@@ -32,6 +32,14 @@ class SkillCandidate(BaseModel):
     cost_usd: float = 0.0
     model_tiers: dict[str, str] = Field(default_factory=dict)
     created_at: float = Field(default_factory=time.time)
+    # Whether the envelope carries a real signature. Without this, an unsigned
+    # envelope is just a dict that looks like a signed one — which is how a
+    # candidate could claim "signed provenance" while being unsigned.
+    signed: bool = False
+    # Induced from a mock trace: no browser ever ran. Recorded on the candidate,
+    # inside the provenance hash, and in the envelope, so a simulated skill
+    # cannot quietly present itself as a converged one.
+    simulated: bool = False
     files: dict[str, str] = Field(default_factory=dict)
     envelope: dict[str, Any] | None = None
 
@@ -73,6 +81,8 @@ class SkillInducer:
             attempts=attempts,
             cost_usd=cost_usd,
             model_tiers={key: value for key, value in (model_tiers or {}).items() if value},
+            signed=self.signer is not None,
+            simulated=str(trace.metadata.get("mode") or "").lower() == "mock",
         )
         skill_md = _render_skill_markdown(contract, candidate, verification)
         helper_py = _render_helper(contract)
@@ -85,6 +95,7 @@ class SkillInducer:
                 "trace_hash": trace_hash,
                 "event_count": len(trace.events),
                 "evidence": trace.evidence,
+                "simulated": candidate.simulated,
             },
             "verification": verification.model_dump(mode="json"),
         }
@@ -107,12 +118,16 @@ class SkillInducer:
                 "model_tiers": candidate.model_tiers,
                 "validated_executor_model": candidate.model_tiers.get("executor", ""),
                 "credential_free": True,
+                "simulated": candidate.simulated,
             },
         }
         if self.signer is not None:
             candidate.envelope = self.signer(envelope_payload)
         else:
-            candidate.envelope = envelope_payload
+            # Say so, in the artifact itself. An unsigned payload that is shaped
+            # exactly like a signed one is how "signed provenance" becomes a
+            # claim nobody can check.
+            candidate.envelope = {**envelope_payload, "signed": False}
 
         files = {
             "SKILL.md": skill_md,
