@@ -15,6 +15,7 @@ At minimum:
 
 ```env
 APP_ENV=production
+API_BIND_SCOPE=exposed
 API_BEARER_TOKEN=<strong-random-secret>
 REQUIRE_OPERATOR_ID=true
 AUTH_STATE_ENCRYPTION_KEY=<44-char-fernet-key>

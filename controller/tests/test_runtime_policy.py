@@ -87,7 +87,12 @@ class RuntimePolicyTests(unittest.TestCase):
         report = validate_runtime_policy(settings)
 
         self.assertFalse(report.ok)
-        self.assertIn("API_BEARER_TOKEN is required when APP_ENV=production", report.errors)
+        # The message now names the remedy as well as the requirement, so this
+        # asserts the requirement rather than the exact sentence.
+        self.assertTrue(
+            any(error.startswith("API_BEARER_TOKEN is required when APP_ENV=production") for error in report.errors),
+            report.errors,
+        )
         self.assertIn("REQUIRE_OPERATOR_ID=true is required when APP_ENV=production", report.errors)
         self.assertIn("AUTH_STATE_ENCRYPTION_KEY is required when APP_ENV=production", report.errors)
         self.assertIn(
