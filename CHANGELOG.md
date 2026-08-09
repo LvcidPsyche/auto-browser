@@ -42,6 +42,25 @@ All notable changes to auto-browser are documented here.
   publish only on loopback with a compose file of your own, add
   `API_BIND_SCOPE=loopback`.
 
+- **Auth profiles now belong to the operator who saved them.** Profiles lived in
+  a flat root with no owner, so any caller who could reach the API could read
+  one, export its cookie archive, or — the takeover that matters — open a
+  session against it and drive a browser already logged in as somebody else.
+
+  A profile saved by a caller with a *proven* identity records that operator as
+  its owner. Reading, exporting, overwriting on import, saving over it, and
+  opening a session from it then require authenticating as that operator, and
+  listing hides profiles you cannot access rather than advertising which sites
+  someone else holds logins for. Refusals are `403`, including on export, where
+  the route's catch-all previously turned any refusal into a `500`.
+
+  Ownership keys on `source: "token"`, so *claiming* to be the owner in an
+  `X-Operator-Id` header does not work. It also means ownership starts applying
+  exactly when named credentials do: a profile saved without a proven identity
+  records no owner, so shared-token deployments and every profile written before
+  this release keep working, with no migration step and no way to be locked out
+  of your own logins.
+
 - **Operator identity can now be proven instead of asserted.** `X-Operator-Id`
   is a request header, and until now it was the only thing that ever set the
   operator on an audit event — so the trail attributed actions to a string the

@@ -30,6 +30,8 @@ def create_auth_profiles_router(*, manager: Any, settings: Any) -> APIRouter:
             return await manager.get_auth_profile(profile_name)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid request") from None
+        except PermissionError:
+            raise HTTPException(status_code=403, detail="Not permitted") from None
 
     @router.post("/sessions/{session_id}/storage-state")
     async def save_storage_state(session_id: str, payload: SaveStorageStateRequest) -> dict[str, Any]:
@@ -54,6 +56,10 @@ def create_auth_profiles_router(*, manager: Any, settings: Any) -> APIRouter:
             result = await manager.export_auth_profile(safe_profile_name)
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Not found") from None
+        except PermissionError:
+            # Must precede the catch-all below, which would otherwise turn a
+            # refusal to hand over someone else's cookies into a 500.
+            raise HTTPException(status_code=403, detail="Not permitted") from None
         except Exception:
             raise internal_error(logger, "auth profile export failed for profile %s", profile_name) from None
 
