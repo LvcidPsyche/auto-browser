@@ -6,7 +6,12 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
 
 ## Hard requirements for the private beta target
 
-- Production startup refuses to boot without:
+- Startup refuses to boot without `API_BEARER_TOKEN` (at least 32 characters)
+  whenever the API is reachable off-box — that is, `API_BIND_SCOPE=exposed`,
+  which is the default for any deployment that does not declare otherwise. The
+  shipped base compose declares `loopback` to match its `127.0.0.1` publish
+  mapping, which is the only reason `docker compose up` runs without a token.
+- Production startup additionally refuses to boot without:
   - `API_BEARER_TOKEN`
   - `REQUIRE_OPERATOR_ID=true`
   - `AUTH_STATE_ENCRYPTION_KEY`

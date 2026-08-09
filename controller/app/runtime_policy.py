@@ -5,6 +5,7 @@ from pathlib import Path
 from shutil import which
 from urllib.parse import urlparse
 
+from .auth_policy import BIND_SCOPE_EXPOSED, resolve_bind_scope
 from .config import Settings
 from .providers.base import BaseProviderAdapter
 
@@ -129,27 +130,48 @@ def _validate_provider_runtime(settings: Settings, report: RuntimePolicyReport) 
         )
 
 
-def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
-    report = RuntimePolicyReport()
+def _validate_api_authentication(settings: Settings, report: RuntimePolicyReport) -> None:
+    """The API must carry a token whenever it is reachable, or in production.
 
-    if not settings.is_production:
+    Reachability is the load-bearing half. `APP_ENV=production` was the only
+    trigger until 1.7.0, and shipped compose defaulted it to `development`, so
+    the check that was supposed to guarantee authentication never ran on the
+    configuration people actually deployed.
+    """
+    scope = resolve_bind_scope(settings)
+    exposed = scope == BIND_SCOPE_EXPOSED
+    if not (exposed or settings.is_production):
         if not settings.api_bearer_token:
             report.warnings.append(
                 "API_BEARER_TOKEN is unset; the controller serves every route unauthenticated. "
-                "Set it before exposing this instance on a non-loopback address."
+                "That is allowed only because API_BIND_SCOPE=loopback declares this instance "
+                "unreachable off-box — set a token before publishing it anywhere else."
             )
-        return report
+        return
 
+    trigger = "the API is reachable off-box (API_BIND_SCOPE=exposed)" if exposed else "APP_ENV=production"
     if not settings.api_bearer_token:
-        report.errors.append("API_BEARER_TOKEN is required when APP_ENV=production")
+        report.errors.append(
+            f"API_BEARER_TOKEN is required when {trigger}. Set a token, or set "
+            "API_BIND_SCOPE=loopback if this instance is only published on 127.0.0.1."
+        )
     elif len(settings.api_bearer_token) < MIN_PRODUCTION_BEARER_TOKEN_LENGTH:
         # "Required" was satisfied by API_BEARER_TOKEN=x. A one-character token
         # is not meaningfully different from no token, and unauthenticated
         # requests are only throttled per-IP, so a weak token is guessable.
         report.errors.append(
             f"API_BEARER_TOKEN must be at least {MIN_PRODUCTION_BEARER_TOKEN_LENGTH} characters "
-            f"when APP_ENV=production (got {len(settings.api_bearer_token)})"
+            f"when {trigger} (got {len(settings.api_bearer_token)})"
         )
+
+
+def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
+    report = RuntimePolicyReport()
+
+    _validate_api_authentication(settings, report)
+
+    if not settings.is_production:
+        return report
 
     if not settings.share_token_secret:
         # There is no flag that disables sharing, so the endpoint is always

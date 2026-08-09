@@ -6,6 +6,42 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- **The API is no longer unauthenticated by default when it is reachable.**
+  Three layers were supposed to answer "is this API authenticated?" and all
+  three failed open. `API_BEARER_TOKEN` defaulted to unset; the bearer
+  middleware returned early when it was unset, so the *absence* of a credential
+  disabled authentication instead of denying requests; and the only hard check
+  lived in startup validation, which downgraded to a warning unless
+  `APP_ENV=production` — while shipped compose set
+  `APP_ENV: ${APP_ENV:-development}`. The default was an open control plane
+  driving a browser that holds stored logins.
+
+  The switch is now reachability rather than an environment name, because
+  reachability is what decides whether an open control plane is a local
+  convenience or an account takeover. New setting **`API_BIND_SCOPE`**
+  (`loopback` | `exposed`) declares it, and the controller refuses to start when
+  the scope is `exposed` without a token of at least 32 characters — in any
+  `APP_ENV`.
+
+  It defaults to **`exposed`**, so a deployment that declares nothing is assumed
+  reachable and fails closed. The base `docker-compose.yml` declares `loopback`
+  to match its `127.0.0.1:8000:8000` publish mapping, so `docker compose up` on
+  a clean checkout still needs no token; the Codespaces overlay declares
+  `exposed`. A hand-rolled compose file that publishes on `0.0.0.0` without
+  saying so now refuses to start instead of silently serving an open API. If you
+  run the controller directly, a loopback bind host in `API_BIND_HOST`,
+  `UVICORN_HOST` or `HOST` is detected and treated as `loopback`.
+
+  Authentication is decided in one place (`app/auth_policy.py`) for both the
+  auth gate and the rate limiter, and the request path is what the tests assert:
+  a reachable, tokenless controller answers 401 to `/sessions` while `/healthz`
+  stays reachable for orchestrators.
+
+  **Upgrading:** if you publish the API anywhere other than loopback and were
+  relying on it being open, set `API_BEARER_TOKEN` (32+ characters). If you
+  publish only on loopback with a compose file of your own, add
+  `API_BIND_SCOPE=loopback`.
+
 - **A privately reported advisory can no longer sit unnoticed.**
   [GHSA-xmh3-cw7j-9gp5](https://github.com/LvcidPsyche/auto-browser/security/advisories/GHSA-xmh3-cw7j-9gp5)
   was reported on 2026-06-17 and sat in triage for seven weeks, because a

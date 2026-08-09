@@ -23,7 +23,6 @@ import argparse
 import json
 import shutil
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 

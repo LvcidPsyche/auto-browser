@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from ..audit import reset_current_operator, set_current_operator
+from ..auth_policy import AuthPolicy, policy_for_scope, resolve_bind_scope
 from ..rate_limits import build_rate_limit_key, is_exempt_path
 
 
@@ -18,6 +19,16 @@ def install_controller_http_middleware(
     rate_limiter: Any,
     metrics: Any,
 ) -> None:
+    # Where this API is reachable from is fixed by the deployment, so it is
+    # resolved once. Whether a request is authenticated is then one function of
+    # that scope and the configured credential — the same function for the auth
+    # gate and the rate limiter, rather than each layer re-deciding from the
+    # presence of a token (GHSA-xmh3-cw7j-9gp5).
+    bind_scope = resolve_bind_scope(settings)
+
+    def _auth_policy() -> AuthPolicy:
+        return policy_for_scope(bind_scope, settings.api_bearer_token)
+
     def _has_valid_bearer_token(request: Request) -> bool:
         """Whether this request has proven it holds the configured bearer token.
 
@@ -26,8 +37,13 @@ def install_controller_http_middleware(
         traffic is exactly what must be throttled) and so cannot assume the
         caller is who their headers claim.
         """
-        if not settings.api_bearer_token:
+        if not _auth_policy().required:
             return True
+        if not settings.api_bearer_token:
+            # Auth is required and there is no credential that could satisfy it.
+            # Startup refuses this configuration; if it is somehow reached, the
+            # answer is "no", never "everyone".
+            return False
         header = request.headers.get("authorization", "")
         expected = f"Bearer {settings.api_bearer_token}"
         return hmac.compare_digest(header.encode(), expected.encode())
@@ -35,7 +51,7 @@ def install_controller_http_middleware(
     @application.middleware("http")
     async def require_api_bearer_token(request: Request, call_next):
         path = _request_path(request)
-        if not settings.api_bearer_token or _is_bearer_token_exempt_path(path):
+        if not _auth_policy().required or _is_bearer_token_exempt_path(path):
             return await call_next(request)
 
         if not _has_valid_bearer_token(request):

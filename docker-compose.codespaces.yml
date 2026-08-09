@@ -29,5 +29,9 @@ services:
   controller:
     environment:
       API_BEARER_TOKEN: ${API_BEARER_TOKEN:?set API_BEARER_TOKEN before using the Codespaces overlay - it publishes the API on 0.0.0.0 and must not run unauthenticated}
+      # Overrides the base file's `loopback`. Compose refuses to start without a
+      # token above; this makes the controller itself refuse too, so the guard
+      # survives anyone copying these service definitions somewhere else.
+      API_BIND_SCOPE: exposed
     ports: !override
       - "0.0.0.0:${API_PORT:-8000}:8000"

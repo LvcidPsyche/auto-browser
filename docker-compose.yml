@@ -59,6 +59,12 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-development}
       API_BEARER_TOKEN: ${API_BEARER_TOKEN:-}
+      # Declares what the publish mapping below already does: this API is bound
+      # to 127.0.0.1 and is not reachable off-box, which is the only reason it
+      # may run without a token. The controller cannot see the host publish
+      # mapping itself, and the setting defaults to `exposed`, so a compose file
+      # that publishes on 0.0.0.0 without saying so refuses to start.
+      API_BIND_SCOPE: ${API_BIND_SCOPE:-loopback}
       CONTROLLER_ALLOWED_HOSTS: ${CONTROLLER_ALLOWED_HOSTS:-localhost,127.0.0.1,::1,testserver}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       BROWSER_WS_ENDPOINT_FILE: /data/browser-profile/browser-ws-endpoint.txt

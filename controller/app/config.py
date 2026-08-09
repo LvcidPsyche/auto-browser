@@ -11,6 +11,12 @@ from .stealth.fingerprint import CHROME_UA_POOL
 class Settings(BaseSettings):
     app_env: str = Field("development", validation_alias=AliasChoices("APP_ENV", "ENVIRONMENT"))
     api_bearer_token: str | None = Field(None, alias="API_BEARER_TOKEN")
+    # Whether this API is reachable off-box. Defaults to `exposed` on purpose:
+    # an undeclared deployment is assumed reachable and must carry a token, so a
+    # hand-rolled compose file that publishes on 0.0.0.0 fails closed. The base
+    # compose declares `loopback` to match its 127.0.0.1 publish mapping.
+    # See app/auth_policy.py.
+    api_bind_scope: Literal["loopback", "exposed"] = Field("exposed", alias="API_BIND_SCOPE")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
     browser_ws_endpoint: str | None = Field(
         None,
