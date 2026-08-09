@@ -42,6 +42,27 @@ All notable changes to auto-browser are documented here.
   publish only on loopback with a compose file of your own, add
   `API_BIND_SCOPE=loopback`.
 
+- **Operator identity can now be proven instead of asserted.** `X-Operator-Id`
+  is a request header, and until now it was the only thing that ever set the
+  operator on an audit event — so the trail attributed actions to a string the
+  caller chose, which reads as identity while being a label.
+
+  New setting **`API_BEARER_TOKENS`** takes named credentials
+  (`alice:token-a,bob:token-b`). A request authenticating with one of those has
+  a verified identity recorded as `source: "token"`, and a `X-Operator-Id`
+  header that disagrees no longer wins — the credential does, and the false
+  claim is kept on the audit record as `asserted_id` rather than dropped. A
+  named credential also satisfies `REQUIRE_OPERATOR_ID` on its own.
+
+  The shared `API_BEARER_TOKEN` still works and still records
+  `source: "header"`, because one shared credential genuinely cannot tell
+  operators apart. That distinction is now explicit in the data, so
+  authorization can require `source: "token"` — which is what the next release
+  needs in order to scope auth profiles to an owner.
+
+  Every named token must also clear the 32-character floor; one weak entry in
+  `API_BEARER_TOKENS` is a way in.
+
 - **A privately reported advisory can no longer sit unnoticed.**
   [GHSA-xmh3-cw7j-9gp5](https://github.com/LvcidPsyche/auto-browser/security/advisories/GHSA-xmh3-cw7j-9gp5)
   was reported on 2026-06-17 and sat in triage for seven weeks, because a

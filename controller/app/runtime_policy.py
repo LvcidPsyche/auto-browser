@@ -5,7 +5,7 @@ from pathlib import Path
 from shutil import which
 from urllib.parse import urlparse
 
-from .auth_policy import BIND_SCOPE_EXPOSED, resolve_bind_scope
+from .auth_policy import BIND_SCOPE_EXPOSED, credentials_for, resolve_bind_scope
 from .config import Settings
 from .providers.base import BaseProviderAdapter
 
@@ -150,18 +150,25 @@ def _validate_api_authentication(settings: Settings, report: RuntimePolicyReport
         return
 
     trigger = "the API is reachable off-box (API_BIND_SCOPE=exposed)" if exposed else "APP_ENV=production"
-    if not settings.api_bearer_token:
+    credentials = credentials_for(settings)
+    if not credentials:
         report.errors.append(
             f"API_BEARER_TOKEN is required when {trigger}. Set a token, or set "
             "API_BIND_SCOPE=loopback if this instance is only published on 127.0.0.1."
         )
-    elif len(settings.api_bearer_token) < MIN_PRODUCTION_BEARER_TOKEN_LENGTH:
-        # "Required" was satisfied by API_BEARER_TOKEN=x. A one-character token
-        # is not meaningfully different from no token, and unauthenticated
-        # requests are only throttled per-IP, so a weak token is guessable.
+        return
+
+    # "Required" was satisfied by API_BEARER_TOKEN=x. A one-character token is
+    # not meaningfully different from no token, and unauthenticated requests are
+    # only throttled per-IP, so a weak token is guessable. Every credential has
+    # to clear the floor — one weak entry in API_BEARER_TOKENS is a way in.
+    for credential in credentials:
+        if len(credential.token) >= MIN_PRODUCTION_BEARER_TOKEN_LENGTH:
+            continue
+        name = f"the token for operator '{credential.operator_id}'" if credential.operator_id else "API_BEARER_TOKEN"
         report.errors.append(
-            f"API_BEARER_TOKEN must be at least {MIN_PRODUCTION_BEARER_TOKEN_LENGTH} characters "
-            f"when {trigger} (got {len(settings.api_bearer_token)})"
+            f"{name} must be at least {MIN_PRODUCTION_BEARER_TOKEN_LENGTH} characters "
+            f"when {trigger} (got {len(credential.token)})"
         )
 
 
