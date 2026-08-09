@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "auto-browser-controller"
-version = "1.6.1"
+version = "1.7.0"
 description = "Controller API for auto-browser"
 # 3.11, not 3.10: CI tests 3.11 and 3.14, the Dockerfile pins python:3.11-slim,
 # and the published packages were corrected to >=3.11 in 1.5.2. A floor nothing

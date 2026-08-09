@@ -4,6 +4,23 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-08-08
+
+Closes the design issues raised in
+[GHSA-xmh3-cw7j-9gp5](https://github.com/LvcidPsyche/auto-browser/security/advisories/GHSA-xmh3-cw7j-9gp5)
+that 1.6.1 fixed the patchable half of and listed the rest of as *Known and not
+yet addressed*, plus one item from the same report that list omitted. Two of the
+three witness limits documented in 1.6.0 are fixed as well.
+
+The thread running through all of it: a control that fails open is not a control.
+Authentication that switched itself off when no token was set, an operator
+identity anybody could assert, profiles with no owner, a signature nothing
+checked, and a sandbox flag that disabled the sandbox.
+
+**If you publish the API anywhere other than loopback, read the first entry
+before upgrading** — it is the one change that can stop an existing deployment
+from starting, deliberately.
+
 ### Security
 
 - **The API is no longer unauthenticated by default when it is reachable.**
