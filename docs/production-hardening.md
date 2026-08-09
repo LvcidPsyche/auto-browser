@@ -18,6 +18,12 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   - `REQUIRE_AUTH_STATE_ENCRYPTION=true`
   - `CONTROLLER_ALLOWED_HOSTS` configured for the controller ingress hostnames
   - request rate limiting enabled
+- Operator identity is only authentication when it comes from a named
+  credential (`API_BEARER_TOKENS=alice:token-a,bob:token-b`), which records
+  `source: "token"` on the audit event. With the shared `API_BEARER_TOKEN`,
+  `X-Operator-Id` is attribution only and is recorded as `source: "header"`.
+  When a header disagrees with the authenticated operator, the credential wins
+  and the claim is kept in `asserted_id`.
 - Request-rate limiting with 429 responses and reset headers
 - Metrics endpoint for scraping and alert wiring
 - Automated retention cleanup for:

@@ -11,6 +11,11 @@ from .stealth.fingerprint import CHROME_UA_POOL
 class Settings(BaseSettings):
     app_env: str = Field("development", validation_alias=AliasChoices("APP_ENV", "ENVIRONMENT"))
     api_bearer_token: str | None = Field(None, alias="API_BEARER_TOKEN")
+    # Named credentials: `alice:token-a,bob:token-b`. A request authenticating
+    # against one of these has a *verified* operator identity, as opposed to the
+    # self-asserted X-Operator-Id header. The shared API_BEARER_TOKEN above
+    # still works and still leaves identity unverified.
+    api_bearer_tokens: str = Field("", alias="API_BEARER_TOKENS")
     # Whether this API is reachable off-box. Defaults to `exposed` on purpose:
     # an undeclared deployment is assumed reachable and must carry a token, so a
     # hand-rolled compose file that publishes on 0.0.0.0 fails closed. The base

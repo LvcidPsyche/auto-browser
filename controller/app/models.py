@@ -480,7 +480,14 @@ class ApprovalDecisionRequest(StrictInputModel):
 class OperatorIdentity(BaseModel):
     id: str
     name: str | None = None
+    # "token" — proven by a named bearer credential. "header" — asserted by the
+    # caller and not verified. "anonymous" — not claimed at all. Authorization
+    # may only ever rely on "token"; the other two are attribution.
     source: str = "anonymous"
+    # What X-Operator-Id claimed, when it disagreed with the verified identity.
+    # Recorded rather than dropped: a caller asserting someone else's id is a
+    # fact worth having in the audit trail.
+    asserted_id: str | None = None
 
 
 class WitnessRemoteState(BaseModel):

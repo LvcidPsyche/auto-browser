@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import hmac
+import logging
 import time
 from typing import Any
 
@@ -8,8 +8,17 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from ..audit import reset_current_operator, set_current_operator
-from ..auth_policy import AuthPolicy, policy_for_scope, resolve_bind_scope
+from ..auth_policy import (
+    AuthPolicy,
+    Credential,
+    credentials_for,
+    match_credential,
+    policy_for_scope,
+    resolve_bind_scope,
+)
 from ..rate_limits import build_rate_limit_key, is_exempt_path
+
+logger = logging.getLogger(__name__)
 
 
 def install_controller_http_middleware(
@@ -27,7 +36,10 @@ def install_controller_http_middleware(
     bind_scope = resolve_bind_scope(settings)
 
     def _auth_policy() -> AuthPolicy:
-        return policy_for_scope(bind_scope, settings.api_bearer_token)
+        return policy_for_scope(bind_scope, credentials_for(settings))
+
+    def _matched_credential(request: Request) -> Credential | None:
+        return match_credential(credentials_for(settings), request.headers.get("authorization", ""))
 
     def _has_valid_bearer_token(request: Request) -> bool:
         """Whether this request has proven it holds the configured bearer token.
@@ -37,16 +49,15 @@ def install_controller_http_middleware(
         traffic is exactly what must be throttled) and so cannot assume the
         caller is who their headers claim.
         """
-        if not _auth_policy().required:
+        policy = _auth_policy()
+        if not policy.required:
             return True
-        if not settings.api_bearer_token:
+        if not policy.has_credential:
             # Auth is required and there is no credential that could satisfy it.
             # Startup refuses this configuration; if it is somehow reached, the
             # answer is "no", never "everyone".
             return False
-        header = request.headers.get("authorization", "")
-        expected = f"Bearer {settings.api_bearer_token}"
-        return hmac.compare_digest(header.encode(), expected.encode())
+        return _matched_credential(request) is not None
 
     @application.middleware("http")
     async def require_api_bearer_token(request: Request, call_next):
@@ -117,8 +128,29 @@ def install_controller_http_middleware(
             "/ui",
             "/mesh/receive",
         )
-        operator_id = request.headers.get(settings.operator_id_header)
+        asserted_id = request.headers.get(settings.operator_id_header)
         operator_name = request.headers.get(settings.operator_name_header)
+
+        # A named credential proves who the caller is. The header only ever
+        # claims it, so when the two disagree the credential wins and the claim
+        # is recorded — a caller asserting someone else's id belongs in the
+        # audit trail, not in the identity.
+        credential = _matched_credential(request)
+        if credential is not None and credential.verifies_identity:
+            operator_id = credential.operator_id
+            source = "token"
+            conflicting = asserted_id if asserted_id and asserted_id != operator_id else None
+            if conflicting:
+                logger.warning(
+                    "operator header %s=%r conflicts with the authenticated operator %r; using the credential",
+                    settings.operator_id_header,
+                    conflicting,
+                    operator_id,
+                )
+        else:
+            operator_id = asserted_id
+            source = "header"
+            conflicting = None
 
         if settings.require_operator_id and not path.startswith(exempt_prefixes) and not operator_id:
             return JSONResponse(
@@ -128,7 +160,12 @@ def install_controller_http_middleware(
                 },
             )
 
-        token = set_current_operator(operator_id, name=operator_name, source="header")
+        token = set_current_operator(
+            operator_id,
+            name=operator_name,
+            source=source,
+            asserted_id=conflicting,
+        )
         try:
             return await call_next(request)
         finally:

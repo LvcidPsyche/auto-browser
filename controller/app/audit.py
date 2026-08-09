@@ -24,11 +24,18 @@ _CURRENT_OPERATOR: ContextVar[OperatorIdentity | None] = ContextVar(
 )
 
 
-def set_current_operator(operator_id: str | None, *, name: str | None = None, source: str = "header") -> Token:
+def set_current_operator(
+    operator_id: str | None,
+    *,
+    name: str | None = None,
+    source: str = "header",
+    asserted_id: str | None = None,
+) -> Token:
     identity = OperatorIdentity(
         id=(operator_id or "anonymous").strip() or "anonymous",
         name=(name or None),
         source=source if operator_id else "anonymous",
+        asserted_id=(asserted_id or None),
     )
     return _CURRENT_OPERATOR.set(identity)
 

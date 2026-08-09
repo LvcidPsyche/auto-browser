@@ -25,10 +25,12 @@ checkout still needs no token because the base compose declares `loopback`.
 
 from __future__ import annotations
 
+import hmac
 import ipaddress
 import os
 from dataclasses import dataclass
-from typing import Any, Mapping
+from functools import lru_cache
+from typing import Any, Mapping, Sequence
 
 BIND_SCOPE_LOOPBACK = "loopback"
 BIND_SCOPE_EXPOSED = "exposed"
@@ -98,19 +100,87 @@ def resolve_bind_scope(settings: Any, environ: Mapping[str, str] | None = None) 
     return declared
 
 
-def policy_for_scope(scope: str, token: str | None) -> AuthPolicy:
+@dataclass(frozen=True, slots=True)
+class Credential:
+    """A bearer token, and the operator it proves the holder to be — if any.
+
+    `operator_id is None` means the shared `API_BEARER_TOKEN`: it proves the
+    caller is authorised, and nothing at all about who they are. Named tokens
+    from `API_BEARER_TOKENS` prove both, which is the difference between
+    attribution and authentication.
+    """
+
+    token: str
+    operator_id: str | None = None
+
+    @property
+    def verifies_identity(self) -> bool:
+        return self.operator_id is not None
+
+
+def parse_operator_tokens(raw: str) -> tuple[Credential, ...]:
+    """Parse `alice:token-a,bob:token-b` into named credentials.
+
+    Split on the first colon only — a token may contain colons, an operator id
+    may not. Entries without a colon are skipped rather than guessed at: a
+    malformed pair that silently became a shared token would hand one operator's
+    identity to everyone holding it.
+    """
+    credentials: list[Credential] = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        operator_id, _, token = entry.partition(":")
+        operator_id, token = operator_id.strip(), token.strip()
+        if operator_id and token:
+            credentials.append(Credential(token=token, operator_id=operator_id))
+    return tuple(credentials)
+
+
+@lru_cache(maxsize=16)
+def _credentials(named: str, shared: str | None) -> tuple[Credential, ...]:
+    credentials = list(parse_operator_tokens(named))
+    if shared:
+        credentials.append(Credential(token=shared))
+    return tuple(credentials)
+
+
+def credentials_for(settings: Any) -> tuple[Credential, ...]:
+    return _credentials(
+        getattr(settings, "api_bearer_tokens", "") or "",
+        getattr(settings, "api_bearer_token", None),
+    )
+
+
+def match_credential(credentials: Sequence[Credential], authorization: str) -> Credential | None:
+    """The credential this request presented, or None.
+
+    Every candidate is compared even after a match, so the work does not depend
+    on which token was presented or how many are configured.
+    """
+    presented = authorization.encode()
+    matched: Credential | None = None
+    for credential in credentials:
+        expected = f"Bearer {credential.token}".encode()
+        if hmac.compare_digest(presented, expected) and matched is None:
+            matched = credential
+    return matched
+
+
+def policy_for_scope(scope: str, credentials: Sequence[Credential]) -> AuthPolicy:
     """The decision itself, split out from where its inputs come from.
 
-    Bind scope is fixed by the deployment and resolved once; the credential is
+    Bind scope is fixed by the deployment and resolved once; credentials are
     read from live settings on each request. Both callers — the auth gate and
     the rate limiter — go through here, so "is this authenticated?" cannot drift
     between them again.
     """
-    if token:
+    if credentials:
         return AuthPolicy(
             scope=scope,
             required=True,
-            reason="API_BEARER_TOKEN is set",
+            reason="at least one bearer credential is configured",
             has_credential=True,
         )
 
@@ -119,8 +189,8 @@ def policy_for_scope(scope: str, token: str | None) -> AuthPolicy:
             scope=scope,
             required=True,
             reason=(
-                "the API is reachable off-box (API_BIND_SCOPE=exposed) and no API_BEARER_TOKEN "
-                "is set, so no request can be authorised"
+                "the API is reachable off-box (API_BIND_SCOPE=exposed) and no bearer credential "
+                "is configured, so no request can be authorised"
             ),
             has_credential=False,
         )
@@ -128,13 +198,10 @@ def policy_for_scope(scope: str, token: str | None) -> AuthPolicy:
     return AuthPolicy(
         scope=scope,
         required=False,
-        reason="loopback-only bind with no API_BEARER_TOKEN set",
+        reason="loopback-only bind with no bearer credential configured",
         has_credential=False,
     )
 
 
 def resolve_auth_policy(settings: Any, environ: Mapping[str, str] | None = None) -> AuthPolicy:
-    return policy_for_scope(
-        resolve_bind_scope(settings, environ),
-        getattr(settings, "api_bearer_token", None),
-    )
+    return policy_for_scope(resolve_bind_scope(settings, environ), credentials_for(settings))
