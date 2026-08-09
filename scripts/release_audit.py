@@ -39,12 +39,25 @@ SECRET_PATTERN = (
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the auto-browser release audit.")
     parser.add_argument("--skip-doctor", action="store_true", help="Skip the bash-based readiness doctor.")
+    parser.add_argument(
+        "--skip-advisory-check",
+        action="store_true",
+        help="Skip the unacknowledged-advisory gate (offline dry-runs only).",
+    )
     args = parser.parse_args()
 
     os.chdir(ROOT)
     _check_launch_files()
     _require("git")
     _require("npm")
+
+    # Early, because it is the cheapest possible failure and the one most likely
+    # to mean "do not ship yet".
+    if args.skip_advisory_check:
+        print("Skipping the security-advisory triage check by request.")
+    else:
+        print("Checking for security advisories waiting in triage...")
+        _run([PYTHON, "scripts/check_open_advisories.py"])
 
     print("Running lint...")
     _run([PYTHON, "-m", "ruff", "check", "controller/app", "controller/tests", "scripts", "--select", "E9,F,I"])
