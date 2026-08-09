@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import threading
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
@@ -13,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .models import OperatorIdentity, ProtectionMode
 from .utils import utc_now
+from .witness_anchor import compare_to_anchor, exclusive_lock, read_anchor, read_tail_line, write_anchor
 from .witness_signing import SIGNATURE_ALGORITHM
 
 logger = logging.getLogger(__name__)
@@ -284,6 +287,12 @@ class WitnessRecorder:
     def __init__(self, root: str | Path, *, signer: Any = None):
         self.root = Path(root)
         self._lock = asyncio.Lock()
+        # Three scopes, because each covers what the next cannot: the asyncio
+        # lock orders tasks on one event loop, this one orders threads inside
+        # this process (appends run in a worker thread, and Windows byte-range
+        # locks are owned per process, so two threads contending for the file
+        # lock deadlock rather than queue), and the file lock orders processes.
+        self._thread_lock = threading.Lock()
         self._heads: dict[str, str] = {}
         self.signer = signer
 
@@ -302,10 +311,23 @@ class WitnessRecorder:
     async def append(self, scope: str, receipt: WitnessReceipt) -> WitnessReceipt:
         async with self._lock:
             path = self._path(scope)
-            previous = self._heads.get(scope) or await asyncio.to_thread(self._read_last_hash, path)
             item = receipt.model_copy(deep=True)
             item.scope = scope
-            item.chain_prev_hash = previous
+            # Reading the head, signing, and appending are one critical section
+            # under a lock on the chain file. The asyncio lock above only orders
+            # this process; two workers on a shared volume could otherwise read
+            # the same head and write two receipts claiming the same
+            # predecessor, forking the chain.
+            item = await asyncio.to_thread(self._append_locked, path, item)
+            self._heads[scope] = item.chain_hash
+            return item
+
+    def _append_locked(self, path: Path, item: WitnessReceipt) -> WitnessReceipt:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self._thread_lock, open(path, "a+", encoding="utf-8") as handle, exclusive_lock(handle):
+            last_line = read_tail_line(handle)
+            item.chain_prev_hash = WitnessReceipt.model_validate_json(last_line).chain_hash if last_line else None
+            previous_count = self._previous_count(path, handle, item.chain_prev_hash)
             item.chain_hash = self._compute_hash(item)
             if self.signer is not None:
                 try:
@@ -318,9 +340,32 @@ class WitnessRecorder:
                     # false assurance signing exists to remove. verify() reports
                     # unsigned receipts, so the gap stays visible downstream.
                     logger.exception("witness: failed to sign receipt %s; recording it unsigned", item.receipt_id)
-            await asyncio.to_thread(self._append_text, path, item.model_dump_json() + "\n")
-            self._heads[scope] = item.chain_hash
-            return item
+            handle.seek(0, os.SEEK_END)
+            handle.write(item.model_dump_json() + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            write_anchor(path, head_hash=item.chain_hash, receipt_count=previous_count + 1)
+        return item
+
+    @staticmethod
+    def _previous_count(path: Path, handle: Any, previous_hash: str | None) -> int:
+        """How many receipts precede this one.
+
+        Read through the already-open handle, never a second one: a Windows
+        byte-range lock excludes every other handle, including this process's
+        own, so reopening the chain inside the lock fails with EACCES.
+
+        The anchor supplies the count in the steady state; a full count is only
+        needed when the anchor is missing or stale, which is a chain written
+        before this release or one appended to by an older build.
+        """
+        if previous_hash is None:
+            return 0
+        anchor = read_anchor(path)
+        if anchor and anchor.get("head_hash") == previous_hash and isinstance(anchor.get("receipt_count"), int):
+            return anchor["receipt_count"]
+        handle.seek(0)
+        return sum(1 for line in handle if line.strip())
 
     async def list(self, scope: str, *, limit: int = 100) -> list[WitnessReceipt]:
         return await asyncio.to_thread(self._list_sync, self._path(scope), limit)
@@ -469,6 +514,20 @@ class WitnessRecorder:
                 result["signed_count"] += 1
             else:
                 result["unsigned_count"] += 1
+
+        # Signing cannot detect tail truncation: drop the last k receipts and
+        # what remains is a shorter chain whose signatures all still verify. The
+        # anchor is a separate record of where the chain had got to, so a short
+        # chain stops being indistinguishable from a complete one.
+        anchor = compare_to_anchor(
+            path,
+            head_hash=result["head_hash"],
+            receipt_count=result["receipt_count"],
+        )
+        result["anchor"] = anchor
+        if anchor["status"] in {"truncated", "diverged"}:
+            result["valid"] = False
+            result["reason"] = anchor.get("reason")
         return result
 
     @staticmethod

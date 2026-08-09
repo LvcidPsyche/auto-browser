@@ -12,9 +12,15 @@ receipt and its whole history up to that point.
 Deliberately not solved here — state it rather than let a reader assume it:
 
 * **Tail truncation.** Dropping the last k receipts leaves a shorter chain whose
-  every signature is still valid. Detecting that needs an external anchor (a
-  published head, a countersigning peer). `verify()` reports the signed head so
-  a caller holding a previously-published head can check for themselves.
+  every signature is still valid — signing cannot see it at all. Since 1.7.0 an
+  anchor file kept beside each chain records the head hash and receipt count on
+  every append, and `verify()` compares the two, so truncation is detected
+  without any third party (`app/witness_anchor.py`). An attacker who rewrites the
+  anchor along with the chain still defeats it: that is what a genuinely
+  *external* anchor — a published head, a countersigning peer — is for, and the
+  anchor is a separate artifact precisely so one can be shipped elsewhere.
+  `verify()` also still reports the signed head for a caller holding a
+  previously published one.
 * **Key compromise.** A holder of the private key can rewrite history and
   re-sign it. This raises the bar from "anyone with the file" to "anyone with
   the key", which is the point, but it is not tamper-proof storage.

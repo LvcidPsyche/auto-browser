@@ -107,7 +107,13 @@ async def test_a_rehashed_forgery_is_caught_by_signatures(signed_recorder: Witne
     path.write_text("\n".join(json.dumps(r) for r in receipts) + "\n", encoding="utf-8")
 
     chain = await signed_recorder.verify("sess-1")
-    assert chain["valid"] is True, "a re-hashed forgery is internally consistent — this is the gap"
+    # The hash walk itself still passes — a re-hashed forgery is internally
+    # consistent, which is exactly why signatures exist. Since 1.7.0 the anchor
+    # catches it too: the rewritten chain's head no longer matches the head
+    # recorded when the receipts were written.
+    assert chain["anchor"]["status"] == "diverged"
+    assert chain["valid"] is False
+    assert chain["first_invalid_index"] is None, "the chain walk found nothing wrong; the anchor did"
 
     signatures = await signed_recorder.verify_signatures("sess-1")
     assert signatures["valid"] is False

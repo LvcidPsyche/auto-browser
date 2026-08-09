@@ -42,6 +42,32 @@ All notable changes to auto-browser are documented here.
   publish only on loopback with a compose file of your own, add
   `API_BIND_SCOPE=loopback`.
 
+- **Two of the witness limits documented in 1.6.0 are now fixed.**
+
+  *Chain forking* was a correctness bug rather than a limit. Appends were
+  serialised with an `asyncio.Lock`, which orders tasks on one event loop —
+  not threads in this process, and not other processes. Two workers
+  (`AGENT_JOB_WORKER_COUNT > 1`, several uvicorn workers, or two replicas on a
+  shared volume) could read the same head and write two receipts claiming the
+  same predecessor. Reading the head, signing, and appending are now one
+  critical section under an OS-level lock on the chain file, with an in-process
+  thread lock inside it.
+
+  *Tail truncation* was undetectable: drop the last k receipts and what remains
+  is a shorter chain whose every signature still verifies. Each append now also
+  updates an anchor file beside the chain holding the head hash and receipt
+  count, and `verify()` compares them — the result gains an `anchor` block, and
+  a truncated or rewritten chain reports `valid: false` with the reason.
+  Chains written before this release report `anchor: {"status": "unanchored"}`
+  and keep verifying, because a missing anchor is not evidence of tampering.
+
+  This needs no third party. An attacker who rewrites the anchor as well still
+  defeats it, which is what a genuinely external anchor is for; the anchor is a
+  separate artifact so one can be added later without changing this shape.
+  Key compromise remains a stated limit.
+
+  Appends also stopped re-reading the whole chain to find its head.
+
 - **Staged skill candidates are verified on read, not just signed on write.**
   Induction could sign a candidate envelope, but nothing on the read side ever
   verified one — so the signature was an assertion the artifact made about
