@@ -185,6 +185,10 @@ class BrowserAuthProfileService:
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized = self.normalize_name(profile_name)
+        # Before writing anything: saving over a profile you do not own is the
+        # same takeover as reading it, and this method rewrites the metadata
+        # file wholesale, so the owner has to be carried across explicitly.
+        owner = self.require_access(normalized, action="saving an auth profile")
         profile_state_path = self.state_base_path(normalized, create=True)
         auth_info = await self.manager.auth_state.write_storage_state(session.context, profile_state_path)
         session.last_auth_state_path = Path(auth_info["path"]) if auth_info["path"] else None
@@ -198,6 +202,8 @@ class BrowserAuthProfileService:
             "saved_from_title": await session.page.title(),
             "platform": self.current_platform(session),
         }
+        if owner:
+            profile_payload["owner"] = owner
         if metadata:
             profile_payload.update(metadata)
 
@@ -282,6 +288,7 @@ class BrowserAuthProfileService:
 
     async def get(self, profile_name: str) -> dict[str, Any]:
         normalized = self.normalize_name(profile_name)
+        self.require_access(normalized, action="reading an auth profile")
         profile_dir = self.dir(normalized, create=False)
         metadata = self.read_metadata(normalized)
         state_path = self.resolve_state_path(normalized, must_exist=False)
@@ -307,6 +314,11 @@ class BrowserAuthProfileService:
             return []
         profiles: list[dict[str, Any]] = []
         for directory in sorted((item for item in root.iterdir() if item.is_dir()), key=lambda item: item.name.lower()):
+            # Listing another operator's profiles would leak both their existence
+            # and the sites they hold logins for. Checked before `get` so that a
+            # genuine containment error still raises instead of being skipped.
+            if not self.accessible(directory.name):
+                continue
             try:
                 profiles.append(await self.get(directory.name))
             except KeyError:
@@ -319,6 +331,7 @@ class BrowserAuthProfileService:
 
     async def export(self, profile_name: str) -> dict[str, Any]:
         normalized = self.normalize_name(profile_name)
+        self.require_access(normalized, action="exporting an auth profile")
         auth_root = Path(self.manager.settings.auth_root).resolve()
         profile_root = self.root()
         profile_dir = self.dir(normalized, create=False)
@@ -426,8 +439,11 @@ class BrowserAuthProfileService:
 
                 profile_name = self.normalize_name(top_level)
                 dest_dir = self.resolve_contained_path(profile_root, profile_name)
-                if dest_dir.exists() and not overwrite:
-                    raise FileExistsError(f"profile '{profile_name}' already exists; pass overwrite=true")
+                if dest_dir.exists():
+                    if not overwrite:
+                        raise FileExistsError(f"profile '{profile_name}' already exists; pass overwrite=true")
+                    # Overwriting is a write to somebody's stored logins.
+                    self.require_access(profile_name, action="overwriting an auth profile")
                 if dest_dir.exists():
                     shutil.rmtree(dest_dir)
 
@@ -482,6 +498,50 @@ class BrowserAuthProfileService:
             "profile_path": str(profile_root / profile_name),
             "imported": True,
         }
+
+    def owner_of(self, profile_name: str) -> str | None:
+        owner = self.read_metadata(self.normalize_name(profile_name)).get("owner")
+        return owner.strip() if isinstance(owner, str) and owner.strip() else None
+
+    @staticmethod
+    def verified_operator() -> str | None:
+        """The current operator, but only when it was actually proven.
+
+        `source: "header"` is a self-asserted label (see app/auth_policy.py), so
+        it can never grant access to a profile — anyone able to reach the API
+        could set it to any value.
+        """
+        operator = get_current_operator()
+        return operator.id if operator.source == "token" else None
+
+    def require_access(self, profile_name: str, *, action: str) -> str | None:
+        """Authorize this operator against a profile; return who now owns it.
+
+        A profile is owned only if it was saved by a caller with a proven
+        identity. Deployments using the shared `API_BEARER_TOKEN` therefore
+        record no owner and are unaffected, and profiles that pre-date this
+        release stay usable — ownership starts applying the moment named
+        credentials do, with no migration and no risk of locking anyone out of
+        their own logins.
+        """
+        normalized = self.normalize_name(profile_name)
+        owner = self.owner_of(normalized)
+        operator = self.verified_operator()
+        if owner is None:
+            return operator
+        if operator is not None and operator == owner:
+            return owner
+        raise PermissionError(
+            f"auth profile '{normalized}' belongs to operator '{owner}'; "
+            f"{action} requires authenticating as that operator"
+        )
+
+    def accessible(self, profile_name: str) -> bool:
+        try:
+            self.require_access(profile_name, action="access")
+        except PermissionError:
+            return False
+        return True
 
     def root(self) -> Path:
         root = Path(self.manager.settings.auth_root).resolve() / "profiles"

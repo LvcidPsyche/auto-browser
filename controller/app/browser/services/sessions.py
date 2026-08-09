@@ -84,6 +84,10 @@ class BrowserSessionService:
         context_kwargs = self.manager._build_context_kwargs(user_agent, proxy_server, proxy_username, proxy_password)
 
         if auth_profile:
+            # The takeover the report described: opening a session against
+            # someone else's stored profile drives a browser already logged in
+            # as them. Authorize before the state is ever loaded.
+            self.manager.auth_profiles.require_access(auth_profile, action="opening a session from an auth profile")
             source_path = self.manager.auth_profiles.resolve_state_path(auth_profile, must_exist=True)
         elif storage_state_path:
             source_path = self.manager.auth_profiles.safe_auth_path(storage_state_path, must_exist=True)
