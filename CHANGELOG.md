@@ -4,6 +4,31 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Security
+
+- **A privately reported advisory can no longer sit unnoticed.**
+  [GHSA-xmh3-cw7j-9gp5](https://github.com/LvcidPsyche/auto-browser/security/advisories/GHSA-xmh3-cw7j-9gp5)
+  was reported on 2026-06-17 and sat in triage for seven weeks, because a
+  private report appears in none of the views a maintainer opens day to day —
+  not issues, not pull requests — and was found only by listing advisories
+  through the API while publishing an unrelated one. `SECURITY.md` promises
+  reporters a quick acknowledgement.
+
+  `scripts/check_open_advisories.py` now fails the release audit while any
+  report is still waiting in triage. Accepted drafts are reported but do not
+  block, since accepted-and-being-fixed is a legitimate place to be mid-release.
+  The check attaches to cutting a release because that is the one process
+  guaranteed to run before users are affected by anything.
+
+  The blocking path is what the tests cover: a gate exercised only against a
+  clean repo is indistinguishable from one that always reports "all clear".
+
+### Notes
+
+The design items listed as *Known and not yet addressed* under 1.6.1 are the
+scope of 1.7.0, along with one more from the same report that the 1.6.1 list
+omitted: skill-candidate provenance is hashed but never signed or verified.
+
 ## [1.6.1] — 2026-08-04
 
 Security fixes from a **privately reported** vulnerability disclosure (received
