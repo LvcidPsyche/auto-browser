@@ -221,9 +221,14 @@ class Settings(BaseSettings):
     openai_cli_path: str = Field("codex", alias="OPENAI_CLI_PATH")
     openai_cli_model: str | None = Field(None, alias="OPENAI_CLI_MODEL")
     openai_host_bridge_socket: str = Field(
+    # How the Codex CLI is allowed to execute on the host. Both Codex paths used
+    # to pass --dangerously-bypass-approvals-and-sandbox unconditionally; they
+    # now run sandboxed unless a deployment opts back in. See app/codex_sandbox.py.
         "/data/host-bridge/codex.sock",
         alias="OPENAI_HOST_BRIDGE_SOCKET",
     )
+    codex_sandbox_mode: str = Field("read-only", alias="CODEX_SANDBOX_MODE")
+    codex_allow_host_exec: bool = Field(False, alias="CODEX_BRIDGE_ALLOW_HOST_EXEC")
 
     anthropic_api_key: str | None = Field(None, alias="ANTHROPIC_API_KEY")
     anthropic_base_url: str = Field("https://api.anthropic.com/v1", alias="ANTHROPIC_BASE_URL")

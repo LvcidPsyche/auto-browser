@@ -42,6 +42,21 @@ All notable changes to auto-browser are documented here.
   publish only on loopback with a compose file of your own, add
   `API_BIND_SCOPE=loopback`.
 
+- **Codex no longer runs on the host with approvals and sandboxing disabled.**
+  Both Codex paths — the `cli` provider adapter and the host bridge — passed
+  `--dangerously-bypass-approvals-and-sandbox`, a flag whose own help text reads
+  "EXTREMELY DANGEROUS. Intended solely for running in environments that are
+  externally sandboxed". A model decision could therefore run any command on the
+  host.
+
+  Nothing about the work needed it: both paths hand Codex a screenshot and a
+  prompt in an ephemeral temp directory and read back a JSON decision. Codex now
+  runs with `-s read-only` by default. **`CODEX_SANDBOX_MODE`** widens that to
+  `workspace-write` or `danger-full-access` if you need it, and
+  **`CODEX_BRIDGE_ALLOW_HOST_EXEC=true`** restores the bypass for the case its
+  help text actually describes — an environment that is itself sandboxed. That
+  opt-in logs a warning at startup and on the bridge's stderr.
+
 - **Auth profiles now belong to the operator who saved them.** Profiles lived in
   a flat root with no owner, so any caller who could reach the API could read
   one, export its cookie archive, or — the takeover that matters — open a

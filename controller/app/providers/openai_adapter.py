@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from ..codex_sandbox import codex_sandbox_flags
 from ..models import BrowserActionDecision
 from .base import BaseProviderAdapter, ProviderAPIError, ProviderDecision
 
@@ -206,11 +207,10 @@ class OpenAIAdapter(BaseProviderAdapter):
                 command.extend(["--model", model])
             for override in config_overrides:
                 command.extend(["-c", override])
+            command.extend(["exec", "--skip-git-repo-check"])
+            command.extend(codex_sandbox_flags(self.settings))
             command.extend(
                 [
-                    "exec",
-                    "--skip-git-repo-check",
-                    "--dangerously-bypass-approvals-and-sandbox",
                     "--cd",
                     tempdir,
                     "--ephemeral",

@@ -177,6 +177,13 @@ def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
 
     _validate_api_authentication(settings, report)
 
+    if getattr(settings, "codex_allow_host_exec", False):
+        report.warnings.append(
+            "CODEX_BRIDGE_ALLOW_HOST_EXEC is set; Codex runs with approvals and sandboxing "
+            "disabled, so a model decision can execute arbitrary commands on the host. Only "
+            "use this inside an environment that is itself sandboxed."
+        )
+
     if not settings.is_production:
         return report
 

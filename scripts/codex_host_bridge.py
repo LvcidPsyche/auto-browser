@@ -18,6 +18,25 @@ from pathlib import Path
 from socketserver import ThreadingMixIn, UnixStreamServer
 from typing import Any
 
+SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
+DEFAULT_SANDBOX_MODE = "read-only"
+
+
+def build_sandbox_flags(*, allow_host_exec: bool, sandbox_mode: str) -> list[str]:
+    """Mirror of app/codex_sandbox.py — this script runs outside the container.
+
+    Codex is handed a screenshot and a prompt and asked for a JSON decision; it
+    is never meant to run shell commands here, so the default is a read-only
+    sandbox and the bypass is an explicit opt-in (GHSA-xmh3-cw7j-9gp5).
+    """
+    if allow_host_exec:
+        return ["--dangerously-bypass-approvals-and-sandbox"]
+    mode = (sandbox_mode or DEFAULT_SANDBOX_MODE).strip() or DEFAULT_SANDBOX_MODE
+    if mode not in SANDBOX_MODES:
+        raise SystemExit(f"CODEX_SANDBOX_MODE must be one of {', '.join(SANDBOX_MODES)} (got {mode!r})")
+    return ["-s", mode]
+
+
 CONFIG_OVERRIDES = (
     "project_doc_fallback_filenames=[]",
     "agents={}",
@@ -41,10 +60,21 @@ class CodexBridgeService:
         codex_path: str,
         default_model: str | None = None,
         request_timeout_seconds: float = 55.0,
+        sandbox_mode: str = DEFAULT_SANDBOX_MODE,
+        allow_host_exec: bool = False,
     ) -> None:
         self.codex_path = codex_path
         self.default_model = default_model
         self.request_timeout_seconds = request_timeout_seconds
+        self.sandbox_flags = build_sandbox_flags(allow_host_exec=allow_host_exec, sandbox_mode=sandbox_mode)
+        if allow_host_exec:
+            print(
+                "WARNING: CODEX_BRIDGE_ALLOW_HOST_EXEC is set. Codex runs with approvals and "
+                "sandboxing disabled, so a model decision can execute arbitrary commands on this "
+                "host. Only do this inside an environment that is itself sandboxed.",
+                file=sys.stderr,
+                flush=True,
+            )
 
     def handle_openai_decide(self, payload: dict[str, Any]) -> dict[str, Any]:
         prompt = str(payload.get("prompt") or "").strip()
@@ -82,11 +112,10 @@ class CodexBridgeService:
                 command.extend(["--model", model])
             for override in CONFIG_OVERRIDES:
                 command.extend(["-c", override])
+            command.extend(["exec", "--skip-git-repo-check"])
+            command.extend(self.sandbox_flags)
             command.extend(
                 [
-                    "exec",
-                    "--dangerously-bypass-approvals-and-sandbox",
-                    "--skip-git-repo-check",
                     "--cd",
                     tempdir,
                     "--ephemeral",
@@ -230,6 +259,9 @@ def main() -> int:
         codex_path=args.codex_path,
         default_model=args.model,
         request_timeout_seconds=args.request_timeout_seconds,
+        sandbox_mode=os.environ.get("CODEX_SANDBOX_MODE", DEFAULT_SANDBOX_MODE),
+        allow_host_exec=os.environ.get("CODEX_BRIDGE_ALLOW_HOST_EXEC", "").strip().lower()
+        in {"1", "true", "yes", "on"},
     )
     server = UnixHTTPServer(str(socket_path), service)
 
