@@ -95,13 +95,16 @@ class HarnessService:
         *,
         verifier: VerifierAdapter | None = None,
         signer=None,
+        envelope_verifier=None,
         model_tiers: dict[str, str] | None = None,
     ):
         self.store = HarnessRunStore(root)
         self.verifier = verifier or ProgrammaticVerifier()
         self.model_tiers = {key: value for key, value in (model_tiers or {}).items() if value}
         self.inducer = SkillInducer(self.store.staging_root, signer=signer)
-        self.registry = SkillStagingRegistry(self.store.staging_root)
+        # Signing without a matching check is decoration; the registry gets the
+        # counterpart to whatever the inducer signs with.
+        self.registry = SkillStagingRegistry(self.store.staging_root, verifier=envelope_verifier)
         self.drift_monitor = SkillDriftMonitor(self.registry, verifier=self.verifier)
 
     async def start_convergence(

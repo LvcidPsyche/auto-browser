@@ -42,6 +42,26 @@ All notable changes to auto-browser are documented here.
   publish only on loopback with a compose file of your own, add
   `API_BIND_SCOPE=loopback`.
 
+- **Staged skill candidates are verified on read, not just signed on write.**
+  Induction could sign a candidate envelope, but nothing on the read side ever
+  verified one — so the signature was an assertion the artifact made about
+  itself, the same shape as the pre-1.6.0 witness chain. Anyone able to write to
+  the staging root could edit a staged skill, or drop a new one in, and it was
+  served as a governed candidate carrying provenance.
+
+  The registry now checks the signature before returning a candidate, and checks
+  that the envelope matches the artifact it sits in — a genuine signature lifted
+  from a different candidate is still a forgery. A candidate that fails is
+  refused; `list` omits what it cannot verify. Deployments with no signer
+  configured are unaffected: there is nothing to check, and `signed` on the
+  candidate now records which case it was, so an unsigned envelope is no longer
+  a dict shaped exactly like a signed one.
+
+  Candidates induced from a mock run are marked `simulated`, inside the
+  provenance hash and the envelope, so a skill that no browser ever executed
+  cannot present itself as converged. The README's "signed provenance" claim is
+  reworded to say what actually holds.
+
 - **Codex no longer runs on the host with approvals and sandboxing disabled.**
   Both Codex paths — the `cli` provider adapter and the host bridge — passed
   `--dangerously-bypass-approvals-and-sandbox`, a flag whose own help text reads

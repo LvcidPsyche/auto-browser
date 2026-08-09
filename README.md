@@ -35,7 +35,7 @@ Works with:
 - **Safety rails built in.** Approvals, operator identity, PII scrubbing, Witness receipts, and policy presets are all part of the product surface.
 - **Evidence you can hand to someone else.** Witness receipt chains are Ed25519-signed, and an exported bundle verifies with [`scripts/verify_witness_bundle.py`](./scripts/verify_witness_bundle.py) — which imports nothing from this project, so a recipient need not run or trust this controller to check it.
 - **We audit ourselves in public.** [`docs/audits/2026-08-execution-audit.md`](./docs/audits/2026-08-execution-audit.md) documents an adversarial audit of this repo that found safety controls which reported success while doing nothing, with reproductions, the fixes, and the gates that close the class.
-- **Governed skill induction.** Verified browser traces can become staged skill candidates with signed provenance, verifier adapters, and review-only graduation — agents that prove they can repeat themselves correctly, not just act once.
+- **Governed skill induction.** Verified browser traces can become staged skill candidates with provenance that is signed when a mesh identity is configured — and checked on read, not just produced — plus verifier adapters and review-only graduation — agents that prove they can repeat themselves correctly, not just act once.
 
 ## Release Highlights (v1.5.0)
 
@@ -179,7 +179,7 @@ see [`docs/mcp-clients.md#resources-and-subscriptions`](./docs/mcp-clients.md#re
 
 ## Convergence Harness
 
-Auto Browser ships a Stage 0 convergence harness for Agent Skill Induction. It runs a structured task contract, records tamper-checked traces, verifies completion, and writes a staged skill candidate with signed provenance. Generated skills are staged only — promotion stays explicit and reviewed.
+Auto Browser ships a Stage 0 convergence harness for Agent Skill Induction. It runs a structured task contract, records tamper-checked traces, verifies completion, and writes a staged skill candidate carrying provenance. With a mesh identity configured that provenance is signed, and the registry verifies the signature before serving a candidate — a candidate that fails the check, or that was dropped into the staging directory unsigned, is refused. Candidates induced from a mock run are marked `simulated` so they cannot pass as converged. Generated skills are staged only — promotion stays explicit and reviewed.
 
 Read-only inspection tools (`harness.list_runs`, `harness.get_status`, `harness.get_trace`) are exposed in the default `curated` MCP tool profile so agents can introspect harness state without elevated access. Convergence runs, drift checks, candidate management, and graduation require `MCP_TOOL_PROFILE=full`, or can be invoked directly over REST.
 
