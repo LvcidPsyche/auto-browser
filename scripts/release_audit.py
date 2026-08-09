@@ -20,7 +20,9 @@ LAUNCH_FILES = [
     "ROADMAP.md",
     "TIPS.md",
     "docs/agent-evals.md",
-    "docs/launch.md",
+    # docs/launch.md was retired in 6a5f705 as launch-era material pinned to
+    # v1.2.1. This list was not updated, so the audit has failed at its first
+    # check ever since — which is also how we know it had not been run.
     "docs/mcp-clients.md",
     "docs/good-first-issues.md",
     "docs/assets/hero.svg",
