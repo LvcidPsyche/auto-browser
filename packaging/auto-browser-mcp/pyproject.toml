@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=68"]
+# >=77 for the PEP 639 SPDX `license` string below (see client/pyproject.toml).
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 # Metapackage: exists so `uvx auto-browser-mcp` works without --from.
@@ -10,14 +11,14 @@ name = "auto-browser-mcp"
 version = "1.7.0"
 description = "MCP stdio bridge for Auto Browser (metapackage for `uvx auto-browser-mcp`)"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = ["auto-browser-client>=1.5.0"]
 keywords = ["auto-browser", "mcp", "mcp-server", "browser-automation"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    # No "License ::" classifier — see client/pyproject.toml.
     "Programming Language :: Python :: 3",
 ]
 
