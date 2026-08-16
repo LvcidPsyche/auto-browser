@@ -1,8 +1,8 @@
 """Pack registration modules for MCP tools."""
 
-from . import core, diagnostics, dom, harness, operations, session_ops, storage
+from . import core, diagnostics, dom, harness, operations, session_ops, storage, youcom
 
-__all__ = ["core", "diagnostics", "dom", "harness", "operations", "session_ops", "storage"]
+__all__ = ["core", "diagnostics", "dom", "harness", "operations", "session_ops", "storage", "youcom"]
 
 
 def register_all(registry, gateway) -> None:
@@ -13,3 +13,4 @@ def register_all(registry, gateway) -> None:
     dom.register(registry, gateway)
     storage.register(registry, gateway)
     operations.register(registry, gateway)
+    youcom.register(registry, gateway)

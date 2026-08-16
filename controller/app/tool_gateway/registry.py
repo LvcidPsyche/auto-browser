@@ -39,6 +39,8 @@ READ_ONLY_TOOL_NAMES = {
     "harness.get_trace",
     "harness.list_candidates",
     "harness.list_runs",
+    "youcom.search",
+    "youcom.contents",
 }
 
 READ_ONLY_NON_IDEMPOTENT_TOOL_NAMES = {
