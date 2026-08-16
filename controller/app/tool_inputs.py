@@ -90,6 +90,8 @@ __all__ = [
     "WaitForSelectorInput",
     "GetMemoryProfileInput",
     "DeleteMemoryProfileInput",
+    "YouSearchInput",
+    "YouContentsInput",
 ]
 
 
@@ -548,3 +550,64 @@ class GetPageHtmlInput(SessionIdInput):
         deprecated=True,
     )
     text_only: bool = False
+
+
+# You.com search tool inputs
+
+
+class YouSearchInput(StrictInputModel):
+    """Input for youcom_search tool."""
+
+    query: str = Field(description="Search query to execute")
+    count: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Number of search results to return (1-50, default: 10)",
+    )
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="Starting position for results (default: 0)",
+    )
+    search_type: str = Field(
+        default="search",
+        description="Type of search: 'search' (default), 'news', 'images', 'videos'",
+    )
+    country: str = Field(
+        default="US",
+        description="Country code for localized results (default: US)",
+    )
+    safe_search: str = Field(
+        default="moderate",
+        description="Safe search level: 'strict', 'moderate' (default), 'off'",
+    )
+
+    @field_validator("search_type")
+    @classmethod
+    def validate_search_type(cls, v: str) -> str:
+        allowed = {"search", "news", "images", "videos"}
+        if v not in allowed:
+            raise ValueError(f"search_type must be one of {allowed}")
+        return v
+
+    @field_validator("safe_search")
+    @classmethod
+    def validate_safe_search(cls, v: str) -> str:
+        allowed = {"strict", "moderate", "off"}
+        if v not in allowed:
+            raise ValueError(f"safe_search must be one of {allowed}")
+        return v
+
+
+class YouContentsInput(StrictInputModel):
+    """Input for youcom_contents tool."""
+
+    url: str = Field(description="URL to extract content from")
+
+    @field_validator("url")
+    @classmethod
+    def validate_url_format(cls, v: str) -> str:
+        if not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("URL must start with http:// or https://")
+        return v

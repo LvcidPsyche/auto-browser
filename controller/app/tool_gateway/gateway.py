@@ -74,6 +74,8 @@ from ..tool_inputs import (
     VerifyWitnessInput,
     VisionFindInput,
     WaitForSelectorInput,
+    YouContentsInput,
+    YouSearchInput,
 )
 from .packs import register_all
 from .registry import ToolRegistry, ToolSpec
@@ -845,3 +847,170 @@ class McpToolGateway:
 
     async def _pii_scrubber_status(self, _: EmptyInput) -> dict[str, Any]:
         return self.manager.get_pii_scrubber_status()
+
+    # You.com search handlers
+
+    async def _youcom_search(self, payload: YouSearchInput) -> dict[str, Any]:
+        """Search the web using You.com's search API."""
+        import os
+        import httpx
+        
+        api_key = os.getenv("YDC_API_KEY")
+        if not api_key:
+            return {
+                "error": "YDC_API_KEY environment variable not set",
+                "status": "disabled",
+                "message": "You.com search requires an API key. Set YDC_API_KEY to enable web search.",
+                "results": []
+            }
+
+        url = "https://api.ydc-index.io/search"
+        headers = {
+            "X-API-Key": api_key,
+            "Content-Type": "application/json"
+        }
+        
+        params = {
+            "query": payload.query,
+            "count": payload.count,
+            "offset": payload.offset,
+            "search_type": payload.search_type,
+            "country": payload.country,
+            "safe_search": payload.safe_search,
+        }
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url, headers=headers, params=params)
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                # Transform results to a consistent format
+                results = []
+                for hit in data.get("hits", []):
+                    result = {
+                        "url": hit.get("url"),
+                        "title": hit.get("title"),
+                        "description": hit.get("description"),
+                    }
+                    # Add additional fields if present
+                    if "published_date" in hit:
+                        result["published_date"] = hit["published_date"]
+                    if "image_url" in hit:
+                        result["image_url"] = hit["image_url"]
+                    results.append(result)
+                
+                return {
+                    "query": payload.query,
+                    "count": len(results),
+                    "total": data.get("total", len(results)),
+                    "offset": payload.offset,
+                    "search_type": payload.search_type,
+                    "results": results,
+                    "status": "success"
+                }
+                
+        except httpx.HTTPStatusError as exc:
+            error_detail = f"HTTP {exc.response.status_code}"
+            try:
+                error_data = exc.response.json()
+                if "error" in error_data:
+                    error_detail = f"{error_detail}: {error_data['error']}"
+            except Exception:
+                pass
+            
+            return {
+                "error": f"You.com API error: {error_detail}",
+                "status": "error",
+                "query": payload.query,
+                "results": []
+            }
+            
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            return {
+                "error": f"Network error: {str(exc)}",
+                "status": "error", 
+                "query": payload.query,
+                "results": []
+            }
+            
+        except Exception as exc:
+            return {
+                "error": f"Unexpected error: {str(exc)}",
+                "status": "error",
+                "query": payload.query,
+                "results": []
+            }
+
+    async def _youcom_contents(self, payload: YouContentsInput) -> dict[str, Any]:
+        """Extract content from a URL using You.com's contents API."""
+        import os
+        import httpx
+        
+        api_key = os.getenv("YDC_API_KEY")
+        if not api_key:
+            return {
+                "error": "YDC_API_KEY environment variable not set",
+                "status": "disabled",
+                "message": "You.com contents extraction requires an API key. Set YDC_API_KEY to enable content extraction.",
+                "url": payload.url,
+                "content": ""
+            }
+
+        url = "https://api.ydc-index.io/contents"
+        headers = {
+            "X-API-Key": api_key,
+            "Content-Type": "application/json"
+        }
+        
+        params = {
+            "url": payload.url
+        }
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url, headers=headers, params=params)
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                return {
+                    "url": payload.url,
+                    "title": data.get("title", ""),
+                    "content": data.get("content", ""),
+                    "description": data.get("description", ""),
+                    "status": "success"
+                }
+                
+        except httpx.HTTPStatusError as exc:
+            error_detail = f"HTTP {exc.response.status_code}"
+            try:
+                error_data = exc.response.json()
+                if "error" in error_data:
+                    error_detail = f"{error_detail}: {error_data['error']}"
+            except Exception:
+                pass
+            
+            return {
+                "error": f"You.com API error: {error_detail}",
+                "status": "error",
+                "url": payload.url,
+                "content": ""
+            }
+            
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            return {
+                "error": f"Network error: {str(exc)}",
+                "status": "error",
+                "url": payload.url,
+                "content": ""
+            }
+            
+        except Exception as exc:
+            return {
+                "error": f"Unexpected error: {str(exc)}",
+                "status": "error",
+                "url": payload.url,
+                "content": ""
+            }
