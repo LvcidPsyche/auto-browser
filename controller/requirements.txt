@@ -10,10 +10,10 @@
 # app.openapi() or a request. The upper bound keeps minor bumps reviewed;
 # Dependabot moves it, so it is deliberately not restated as a number here.
 fastapi>=0.141.1,<0.142
-starlette==1.4.1
-uvicorn[standard]==0.52.1
+starlette==1.6.0
+uvicorn[standard]==0.52.3
 playwright==1.62.0
-pydantic-settings==2.14.2
+pydantic-settings==2.15.0
 httpx==0.28.1
 redis==8.1.0
 cryptography==50.0.0
