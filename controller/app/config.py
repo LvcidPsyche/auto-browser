@@ -221,9 +221,9 @@ class Settings(BaseSettings):
     openai_cli_path: str = Field("codex", alias="OPENAI_CLI_PATH")
     openai_cli_model: str | None = Field(None, alias="OPENAI_CLI_MODEL")
     openai_host_bridge_socket: str = Field(
-    # How the Codex CLI is allowed to execute on the host. Both Codex paths used
-    # to pass --dangerously-bypass-approvals-and-sandbox unconditionally; they
-    # now run sandboxed unless a deployment opts back in. See app/codex_sandbox.py.
+        # How the Codex CLI is allowed to execute on the host. Both Codex paths used
+        # to pass --dangerously-bypass-approvals-and-sandbox unconditionally; they
+        # now run sandboxed unless a deployment opts back in. See app/codex_sandbox.py.
         "/data/host-bridge/codex.sock",
         alias="OPENAI_HOST_BRIDGE_SOCKET",
     )
@@ -268,6 +268,10 @@ class Settings(BaseSettings):
     minimax_api_key: str | None = Field(None, alias="MINIMAX_API_KEY")
     minimax_base_url: str = Field("https://api.minimax.io/v1", alias="MINIMAX_BASE_URL")
     minimax_model: str = Field("MiniMax-M3", alias="MINIMAX_MODEL")
+
+    atlascloud_api_key: str | None = Field(None, alias="ATLASCLOUD_API_KEY")
+    atlascloud_base_url: str = Field("https://api.atlascloud.ai/v1", alias="ATLASCLOUD_BASE_URL")
+    atlascloud_model: str = Field("google/gemini-3.1-flash-lite", alias="ATLASCLOUD_MODEL")
 
     openai_compatible_api_key: str | None = Field(None, alias="OPENAI_COMPATIBLE_API_KEY")
     openai_compatible_base_url: str = Field("", alias="OPENAI_COMPATIBLE_BASE_URL")

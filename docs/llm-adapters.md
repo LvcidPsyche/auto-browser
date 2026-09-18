@@ -34,7 +34,7 @@ The LLM does **not** talk to Playwright directly.
 ## Current implementation
 
 The controller now includes:
-- `ProviderRegistry` for `openai`, `claude`, and `gemini`
+- `ProviderRegistry` for `openai`, `claude`, `gemini`, and named OpenAI-compatible providers including Atlas Cloud
 - provider adapters under `controller/app/providers/`
 - `BrowserOrchestrator` for one-step or multi-step loops
 - provider discovery endpoint: `GET /agent/providers`
@@ -68,6 +68,12 @@ Uses the Gemini `generateContent` API with:
 - image input
 - `responseMimeType: application/json`
 - `responseJsonSchema`
+
+### OpenAI-compatible providers
+Uses the Chat Completions API through one shared adapter with provider-specific
+credentials, base URLs, and model defaults. Atlas Cloud is available as
+`atlascloud` with `ATLASCLOUD_API_KEY`; `ATLASCLOUD_BASE_URL` and
+`ATLASCLOUD_MODEL` remain overridable.
 
 ## Example step request
 

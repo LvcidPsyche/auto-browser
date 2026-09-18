@@ -7,6 +7,7 @@ providers. In particular this covers:
 - **OpenRouter** — one key proxies essentially every frontier model (Claude, GPT,
   Gemini, Grok, DeepSeek, Llama, Mistral, Qwen, ...), so "all models" is one config away.
 - **xAI (Grok)**, **DeepSeek**, **MiniMax** — popular direct endpoints.
+- **Atlas Cloud** — a unified endpoint for multiple model families.
 - **openai_compatible** — a fully custom base URL for anything else: a self-hosted
   Ollama / vLLM / LM Studio server, Azure OpenAI, Together, Groq, Fireworks, etc.
 
@@ -80,6 +81,15 @@ OPENAI_COMPATIBLE_PROFILES: tuple[OpenAICompatibleProfile, ...] = (
         base_url_attr="minimax_base_url",
         model_attr="minimax_model",
         env_var="MINIMAX_API_KEY",
+        supports_vision=True,
+    ),
+    OpenAICompatibleProfile(
+        provider="atlascloud",
+        label="Atlas Cloud",
+        api_key_attr="atlascloud_api_key",
+        base_url_attr="atlascloud_base_url",
+        model_attr="atlascloud_model",
+        env_var="ATLASCLOUD_API_KEY",
         supports_vision=True,
     ),
     OpenAICompatibleProfile(

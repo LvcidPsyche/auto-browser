@@ -287,6 +287,7 @@ ProviderName = Literal[
     "xai",
     "deepseek",
     "minimax",
+    "atlascloud",
     "openai_compatible",
 ]
 WorkflowProfile = Literal["fast", "governed"]

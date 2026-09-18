@@ -41,6 +41,7 @@ MODEL_KEYS = {
     "XAI_MODEL": "xai_model",
     "DEEPSEEK_MODEL": "deepseek_model",
     "MINIMAX_MODEL": "minimax_model",
+    "ATLASCLOUD_MODEL": "atlascloud_model",
 }
 
 

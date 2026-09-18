@@ -13,7 +13,7 @@ class ProviderRegistry:
             "claude": ClaudeAdapter(settings),
             "gemini": GeminiAdapter(settings),
             # OpenAI-compatible providers (openrouter, xai, deepseek, minimax,
-            # openai_compatible) — one generic adapter, so any model reachable over an
+            # atlascloud, openai_compatible) — one generic adapter, so any model reachable over an
             # OpenAI-style /chat/completions endpoint can drive the browser.
             **build_openai_compatible_adapters(settings),
         }

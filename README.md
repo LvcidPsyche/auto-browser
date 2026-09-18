@@ -42,7 +42,7 @@ Works with:
 - **Read a page without paying for pixels.** The new `text` observation preset returns the accessibility outline, extracted text, and interactables with no screenshot and no OCR — the cheapest way for an agent to read a page. Set `PERCEPTION_PRESET_DEFAULT=text` to make it a deployment-wide default.
 - **Find a string on the page in one call.** `browser.find_elements` now takes a `query` (plain text or regex, case-insensitive) instead of a CSS selector and returns each match with surrounding context — no full observe needed to check one value.
 - **Errors agents can act on.** Invalid tool arguments report field-level details, handler messages pass through instead of a generic failure, and the MCP bridge's cold-start error now says exactly how to start the controller.
-- **Any OpenAI-compatible model can drive the browser.** A single generic adapter serves every model reachable over an OpenAI `/chat/completions` endpoint. New providers: `openrouter` (one key → ~every frontier model), `xai` (Grok), `deepseek`, `minimax`, and `openai_compatible` (custom base URL for self-hosted Ollama / vLLM / LM Studio, Azure, Together, Groq, Fireworks, …). Vision + function-calling with a content-parse fallback for endpoints that ignore `tool_choice`.
+- **Any OpenAI-compatible model can drive the browser.** A single generic adapter serves every model reachable over an OpenAI `/chat/completions` endpoint. Named providers include `openrouter` (one key → ~every frontier model), `xai` (Grok), `deepseek`, `minimax`, `atlascloud`, and `openai_compatible` (custom base URL for self-hosted Ollama / vLLM / LM Studio, Azure, Together, Groq, Fireworks, …). Vision + function-calling with a content-parse fallback for endpoints that ignore `tool_choice`.
 - **`browser://audit/events` MCP resource.** List and read recent audit events across sessions directly over MCP.
 - **Playwright pin parity enforced in CI.** The controller (pip) and browser-node (npm) Playwright versions must match exactly — a single-side bump can no longer merge and crash-loop compose deployments.
 - **On PyPI.** `pip install auto-browser-client` for the SDK, `pip install auto-browser-langchain` for the LangChain/LangGraph/CrewAI adapters, and `uvx auto-browser-mcp` to run the MCP stdio bridge with zero setup. Releases publish via PyPI trusted publishing (OIDC) on tag push.
@@ -232,7 +232,7 @@ For deployment details, hosted Witness notes, CLI auth modes, and reverse-SSH gu
 ```mermaid
 flowchart LR
     User[Human operator] -->|watch / takeover| noVNC[noVNC]
-    LLM[Any model: OpenAI / Claude / Gemini / OpenRouter / Grok / DeepSeek / MiniMax / local] -->|shared tools| Controller[Controller API]
+    LLM[Any model: OpenAI / Claude / Gemini / OpenRouter / Grok / DeepSeek / MiniMax / Atlas Cloud / local] -->|shared tools| Controller[Controller API]
     Controller -->|Playwright protocol| Browser[Browser node]
     noVNC --> Browser
     Browser --> Artifacts[(screenshots / traces / auth state)]
@@ -252,6 +252,7 @@ a single generic **OpenAI-compatible** adapter drives any model reachable over a
 | `xai` | Grok |
 | `deepseek` | DeepSeek (text-only; driven from the DOM/accessibility outline) |
 | `minimax` | MiniMax |
+| `atlascloud` | Atlas Cloud's multi-model catalog |
 | `openai_compatible` | any custom base URL — self-hosted Ollama / vLLM / LM Studio, Azure OpenAI, Together, Groq, Fireworks, … |
 
 Vision (screenshots) is used for every provider except text-only ones. See `.env.example` for

@@ -92,7 +92,7 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
 
     def test_registry_registers_all_openai_compatible_providers(self):
         registry = ProviderRegistry(_settings())
-        for name in ("openrouter", "xai", "deepseek", "minimax", "openai_compatible"):
+        for name in ("openrouter", "xai", "deepseek", "minimax", "atlascloud", "openai_compatible"):
             self.assertIn(name, registry.providers)
             self.assertEqual(registry.providers[name].provider, name)
 
@@ -124,6 +124,17 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent["model"], "MiniMax-M3")
         self.assertIn("image_url", [c["type"] for c in sent["messages"][1]["content"]])
         self.assertEqual(fake.calls[0]["url"], "https://api.minimax.io/v1/chat/completions")
+
+    async def test_atlascloud_uses_default_endpoint_model_and_vision(self):
+        adapter = self._adapter("atlascloud", atlascloud_api_key="k")
+        fake = FakeAsyncClient(_tool_call_response({"action": "done", "reason": "complete"}))
+        with patch("app.providers.base.httpx.AsyncClient", return_value=fake):
+            decision = await adapter.decide(goal="g", observation=self._observation())
+        self.assertEqual(decision.provider, "atlascloud")
+        sent = fake.calls[0]["json"]
+        self.assertEqual(sent["model"], "google/gemini-3.1-flash-lite")
+        self.assertIn("image_url", [c["type"] for c in sent["messages"][1]["content"]])
+        self.assertEqual(fake.calls[0]["url"], "https://api.atlascloud.ai/v1/chat/completions")
 
     async def test_decide_falls_back_to_content_when_no_tool_call(self):
         adapter = self._adapter("openrouter", openrouter_api_key="k", openrouter_model="anthropic/claude-3.7-sonnet")
