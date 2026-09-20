@@ -1,309 +1,331 @@
-from __future__ import annotations
-
-import os
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from identity.app import RecordingEmailSender, create_app
+from approval_broker.app import TOTP_PERIOD, totp_code
+from identity.app import create_app
 
-ADMIN = "admin-secret-credential-" + "x" * 32
-
-
-def auth(token: str = ADMIN) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}"}
+ADMIN = "a" * 32
+INTERNAL = "i" * 32
 
 
 @pytest.fixture
-def identity(tmp_path: Path):
+def service(tmp_path: Path):
     now = [1_800_000_000.0]
-    sender = RecordingEmailSender()
     app = create_app(
-        state_root=tmp_path / "identity-state",
+        state_root=tmp_path / "identity",
         admin_token=ADMIN,
-        sender=sender,
-        invitation_ttl=120,
-        verification_ttl=60,
-        verification_attempts=3,
-        verification_requests=2,
-        source_rate_limit=1000,
-        token_rate_limit=100,
+        internal_token=INTERNAL,
+        encryption_key=Fernet.generate_key(),
+        recovery_pepper="p" * 16,
         clock=lambda: now[0],
+        source_rate_limit=1000,
+        token_rate_limit=1000,
     )
-    with TestClient(app) as client:
-        yield client, sender, now, app.state.identity_store.path
+    return TestClient(app), now, app
 
 
-def invite(client: TestClient, email: str, **extra) -> dict:
-    response = client.post("/admin/invitations", headers=auth(), json={"email": email, **extra})
-    assert response.status_code == 200, response.text
-    return response.json()
-
-
-def redeem(client: TestClient, invitation: dict, email: str | None = None) -> dict:
-    response = client.post(
+def enroll(client: TestClient, now: list[float], name: str = "Alice") -> tuple[dict, dict]:
+    invitation = client.post(
+        "/admin/invitations", headers={"Authorization": f"Bearer {ADMIN}"}, json={"intended_display_name": name}
+    ).json()
+    pending = client.post(
         "/invitations/redeem",
-        json={"invitation_token": invitation["invitation_token"], "email": email or invitation["email"]},
+        json={
+            "invitation_token": invitation["invitation_token"],
+            "display_name": name,
+            "recovery_email": "backup@example.com",
+        },
     )
-    assert response.status_code == 200, response.text
-    return response.json()
-
-
-def request_code(client: TestClient, sender: RecordingEmailSender, redemption: dict) -> tuple[dict, str]:
-    response = client.post("/verify/request", json={"redemption_token": redemption["redemption_token"]})
-    assert response.status_code == 200, response.text
-    return response.json(), str(sender.messages[-1]["token"])
-
-
-def enroll(client: TestClient, sender: RecordingEmailSender, email: str) -> tuple[dict, dict]:
-    invitation = invite(client, email)
-    redemption = redeem(client, invitation)
-    challenge, code = request_code(client, sender, redemption)
-    verified = client.post(
-        "/verify/confirm",
-        json={"challenge_id": challenge["challenge_id"], "verification_token": code},
+    assert pending.status_code == 200
+    enrollment = pending.json()
+    confirmed = client.post(
+        "/enrollments/confirm",
+        json={
+            "enrollment_id": enrollment["enrollment_id"],
+            "totp_code": totp_code(enrollment["secret"], int(now[0] // TOTP_PERIOD)),
+        },
     )
-    assert verified.status_code == 200, verified.text
-    return invitation, verified.json()
+    assert confirmed.status_code == 200
+    return enrollment, confirmed.json()
 
 
-def test_invited_email_redeems_and_verifies_but_other_email_cannot(identity) -> None:
-    client, sender, _, _ = identity
-    invitation = invite(client, "  Invited@Example.COM ")
-    assert invitation["email"] == "invited@example.com"
-    denied = client.post(
-        "/invitations/redeem",
-        json={"invitation_token": invitation["invitation_token"], "email": "other@example.com"},
+def test_invite_secret_once_enrolls_encrypted_and_codes_once(service):
+    client, now, app = service
+    pending, user = enroll(client, now)
+    assert pending["secret"] not in str(app.state.identity_store.path.read_bytes())
+    assert len(user["recovery_codes"]) == 10
+    assert (
+        client.post(
+            "/enrollments/confirm",
+            json={
+                "enrollment_id": pending["enrollment_id"],
+                "totp_code": totp_code(pending["secret"], int(now[0] // TOTP_PERIOD)),
+            },
+        ).status_code
+        == 400
     )
-    assert denied.status_code == 400
-    redemption = redeem(client, invitation, "INVITED@example.com")
-    challenge, code = request_code(client, sender, redemption)
-    assert sender.messages[-1]["email"] == "invited@example.com"
-    verified = client.post(
-        "/verify/confirm",
-        json={"challenge_id": challenge["challenge_id"], "verification_token": code},
+    assert (
+        client.post("/invitations/redeem", json={"invitation_token": "x" * 32, "display_name": "Alice"}).status_code
+        == 400
     )
-    assert verified.status_code == 200
-    assert verified.json()["status"] == "verified"
 
 
-def test_invitation_is_single_use_and_non_transferable(identity) -> None:
-    client, _, _, _ = identity
-    invitation = invite(client, "one@example.com")
-    redeem(client, invitation)
-    first_failure = client.post(
-        "/invitations/redeem",
-        json={"invitation_token": invitation["invitation_token"], "email": "one@example.com"},
+def test_verify_is_bearer_protected_and_consumes_timestep(service):
+    client, now, _ = service
+    _, user = enroll(client, now)
+    now[0] += TOTP_PERIOD
+    # Use the stored enrollment secret from a second enrollment fixture instead of exposing a lookup API.
+    invitation = client.post(
+        "/admin/invitations", headers={"Authorization": f"Bearer {ADMIN}"}, json={"intended_display_name": "Bob"}
+    ).json()
+    pending = client.post(
+        "/invitations/redeem", json={"invitation_token": invitation["invitation_token"], "display_name": "Bob"}
+    ).json()
+    client.post(
+        "/enrollments/confirm",
+        json={
+            "enrollment_id": pending["enrollment_id"],
+            "totp_code": totp_code(pending["secret"], int(now[0] // TOTP_PERIOD)),
+        },
     )
-    transfer_failure = client.post(
-        "/invitations/redeem",
-        json={"invitation_token": invitation["invitation_token"], "email": "two@example.com"},
-    )
-    assert (first_failure.status_code, first_failure.json()) == (400, {"detail": "Invitation unavailable"})
-    assert transfer_failure.json() == first_failure.json()
-
-
-def test_expired_revoked_used_and_unknown_invitations_fail_identically(identity) -> None:
-    client, _, now, _ = identity
-    used = invite(client, "used@example.com")
-    redeem(client, used)
-    expired = invite(client, "expired@example.com")
-    revoked = invite(client, "revoked@example.com")
-    assert client.post(
-        f"/admin/invitations/{revoked['invitation_id']}/revoke", headers=auth(), json={}
-    ).status_code == 200
-    now[0] += 121
-    cases = [
-        (used["invitation_token"], used["email"]),
-        (expired["invitation_token"], expired["email"]),
-        (revoked["invitation_token"], revoked["email"]),
-        ("forged-" + "z" * 40, "nobody@example.com"),
-    ]
-    responses = [
-        client.post("/invitations/redeem", json={"invitation_token": token, "email": email}) for token, email in cases
-    ]
-    assert {(response.status_code, response.text) for response in responses} == {
-        (400, '{"detail":"Invitation unavailable"}')
+    now[0] += TOTP_PERIOD
+    payload = {
+        "account": "bob",
+        "totp_code": totp_code(pending["secret"], int(now[0] // TOTP_PERIOD)),
+        "purpose": "portal-login",
     }
+    assert client.post("/internal/auth/verify", json=payload).status_code == 401
+    headers = {"Authorization": f"Bearer {INTERNAL}"}
+    assert client.post("/internal/auth/verify", headers=headers, json=payload).status_code == 200
+    assert client.post("/internal/auth/verify", headers=headers, json=payload).status_code == 403
+    assert user["display_name"] == "Alice"
 
 
-def test_revocation_after_redemption_invalidates_verification(identity) -> None:
-    client, sender, _, _ = identity
-    invitation = invite(client, "cancelled@example.com")
-    redemption = redeem(client, invitation)
-    challenge, code = request_code(client, sender, redemption)
-    assert client.post(
-        f"/admin/invitations/{invitation['invitation_id']}/revoke", headers=auth(), json={}
-    ).status_code == 200
-    response = client.post(
-        "/verify/confirm", json={"challenge_id": challenge["challenge_id"], "verification_token": code}
+def test_recovery_forces_new_enrollment(service):
+    client, now, _ = service
+    _, user = enroll(client, now)
+    headers = {"Authorization": f"Bearer {INTERNAL}"}
+    recovered = client.post(
+        "/internal/auth/recover", headers=headers, json={"account": "Alice", "recovery_code": user["recovery_codes"][0]}
     )
-    assert response.status_code == 400
-    assert response.json() == {"detail": "Verification failed"}
-
-
-def test_forged_verification_tokens_and_ids_are_generic(identity) -> None:
-    client, sender, _, _ = identity
-    invitation = invite(client, "verify@example.com")
-    challenge, _ = request_code(client, sender, redeem(client, invitation))
-    bad_token = client.post(
-        "/verify/confirm",
-        json={"challenge_id": challenge["challenge_id"], "verification_token": "forged-" + "a" * 40},
+    assert recovered.status_code == 200
+    assert (
+        client.post(
+            "/internal/auth/recover",
+            headers=headers,
+            json={"account": "Alice", "recovery_code": user["recovery_codes"][0]},
+        ).status_code
+        == 403
     )
-    bad_id = client.post(
-        "/verify/confirm",
-        json={"challenge_id": "ver_" + "b" * 32, "verification_token": "forged-" + "a" * 40},
+    pending = recovered.json()
+    assert (
+        client.post(
+            "/enrollments/confirm",
+            json={
+                "enrollment_id": pending["enrollment_id"],
+                "totp_code": totp_code(pending["secret"], int(now[0] // TOTP_PERIOD)),
+            },
+        ).status_code
+        == 200
     )
-    assert (bad_token.status_code, bad_token.json()) == (400, {"detail": "Verification failed"})
-    assert bad_id.json() == bad_token.json()
 
 
-def test_verification_token_is_expiring_and_one_time(identity) -> None:
-    client, sender, now, _ = identity
-    expired_invitation = invite(client, "expired-code@example.com")
-    expired_challenge, expired_code = request_code(client, sender, redeem(client, expired_invitation))
-    now[0] += 61
-    assert client.post(
-        "/verify/confirm",
-        json={"challenge_id": expired_challenge["challenge_id"], "verification_token": expired_code},
-    ).status_code == 400
-
-    fresh_invitation = invite(client, "one-code@example.com")
-    fresh_challenge, fresh_code = request_code(client, sender, redeem(client, fresh_invitation))
-    payload = {"challenge_id": fresh_challenge["challenge_id"], "verification_token": fresh_code}
-    assert client.post("/verify/confirm", json=payload).status_code == 200
-    assert client.post("/verify/confirm", json=payload).status_code == 400
-
-
-def test_verification_attempt_and_request_limits_lock_challenge(identity) -> None:
-    client, sender, _, _ = identity
-    invitation = invite(client, "limited@example.com")
-    redemption = redeem(client, invitation)
-    first, first_code = request_code(client, sender, redemption)
-    second, second_code = request_code(client, sender, redemption)
-    assert first["challenge_id"] != second["challenge_id"]
-    assert client.post("/verify/request", json={"redemption_token": redemption["redemption_token"]}).status_code == 400
-    assert client.post(
-        "/verify/confirm", json={"challenge_id": first["challenge_id"], "verification_token": first_code}
-    ).status_code == 400
-    for _ in range(3):
-        assert client.post(
-            "/verify/confirm",
-            json={"challenge_id": second["challenge_id"], "verification_token": "wrong-" + "w" * 40},
-        ).status_code == 400
-    assert client.post(
-        "/verify/confirm", json={"challenge_id": second["challenge_id"], "verification_token": second_code}
-    ).status_code == 400
-
-
-def test_per_source_and_per_token_rate_limits_trigger(tmp_path: Path) -> None:
-    now = [1_800_000_000.0]
-    sender = RecordingEmailSender()
-    token_limited = create_app(
-        state_root=tmp_path / "token", admin_token=ADMIN, sender=sender,
-        source_rate_limit=100, token_rate_limit=2, clock=lambda: now[0],
+def test_only_trusted_proxy_can_supply_forwarded_source(tmp_path: Path):
+    app = create_app(
+        state_root=tmp_path / "state",
+        admin_token=ADMIN,
+        internal_token=INTERNAL,
+        encryption_key=Fernet.generate_key(),
+        recovery_pepper="p" * 16,
+        trusted_proxy_cidrs=("10.0.0.0/8",),
     )
-    with TestClient(token_limited) as client:
-        invitation = invite(client, "rate@example.com")
-        payload = {"invitation_token": "unknown-" + "q" * 40, "email": invitation["email"]}
-        assert client.post("/invitations/redeem", json=payload).status_code == 400
-        assert client.post("/invitations/redeem", json=payload).status_code == 400
-        assert client.post("/invitations/redeem", json=payload).status_code == 429
-        with closing(sqlite3.connect(token_limited.state.identity_store.path)) as db:
-            assert db.execute(
-                "SELECT count(*) FROM audit_log WHERE action='invitation.redeem' AND result='rate_limited'"
-            ).fetchone()[0] == 1
+    with TestClient(app, client=("192.0.2.10", 5000)) as direct:
+        assert direct.get("/healthz", headers={"X-Forwarded-For": "not-an-ip"}).status_code == 200
+    with TestClient(app, client=("10.1.2.3", 5000)) as proxy:
+        assert proxy.get("/healthz", headers={"X-Forwarded-For": "not-an-ip"}).status_code == 400
 
-    source_limited = create_app(
-        state_root=tmp_path / "source", admin_token=ADMIN, sender=sender,
-        source_rate_limit=2, token_rate_limit=100, clock=lambda: now[0],
+
+def test_wrong_identity_reuse_and_revocation_are_generic(service):
+    client, _, _ = service
+    invitation = client.post(
+        "/admin/invitations", headers={"Authorization": f"Bearer {ADMIN}"}, json={"intended_display_name": "Bound"}
+    ).json()
+    wrong = client.post(
+        "/invitations/redeem", json={"invitation_token": invitation["invitation_token"], "display_name": "Other"}
     )
-    with TestClient(source_limited) as client:
-        assert client.get("/healthz").status_code == 200
-        assert client.get("/healthz").status_code == 200
-        assert client.get("/healthz").status_code == 429
-
-
-def test_admin_endpoints_reject_missing_and_wrong_bearers(identity) -> None:
-    client, _, _, _ = identity
-    assert client.post("/admin/invitations", json={"email": "a@example.com"}).status_code == 401
-    assert client.post(
-        "/admin/invitations", headers=auth("wrong-" + "x" * 40), json={"email": "a@example.com"}
-    ).status_code == 401
-    invitation = invite(client, "a@example.com")
-    path = f"/admin/invitations/{invitation['invitation_id']}/revoke"
-    assert client.post(path, json={}).status_code == 401
-    assert client.post(path, headers=auth("wrong-" + "x" * 40), json={}).status_code == 401
-
-
-def test_two_users_have_distinct_opaque_ids_and_no_record_read_surface(identity) -> None:
-    client, sender, _, _ = identity
-    first_invitation, first = enroll(client, sender, "first@example.com")
-    second_invitation, second = enroll(client, sender, "second@example.com")
-    assert first["user_id"] != second["user_id"]
-    assert first["tenant_id"] != second["tenant_id"]
-    assert first["tenant_id"] == first_invitation["tenant_id"]
-    assert second["tenant_id"] == second_invitation["tenant_id"]
-    for identifier in (first["user_id"], second["user_id"], first["tenant_id"], second["tenant_id"]):
-        assert client.get(f"/users/{identifier}").status_code == 404
-        assert client.get(f"/tenants/{identifier}").status_code == 404
-    assert client.get("/openapi.json").status_code == 404
-
-
-def test_audit_is_complete_and_contains_no_replayable_secrets(identity) -> None:
-    client, sender, _, database = identity
-    invitation = invite(client, "audit@example.com")
-    client.post(
-        "/invitations/redeem",
-        json={"invitation_token": "unknown-" + "u" * 40, "email": "audit@example.com"},
+    unknown = client.post("/invitations/redeem", json={"invitation_token": "x" * 32, "display_name": "Other"})
+    assert (
+        (wrong.status_code, wrong.json())
+        == (unknown.status_code, unknown.json())
+        == (400, {"detail": "Invitation unavailable"})
     )
-    redemption = redeem(client, invitation)
-    challenge, code = request_code(client, sender, redemption)
-    client.post(
-        "/verify/confirm",
-        json={"challenge_id": challenge["challenge_id"], "verification_token": "wrong-" + "w" * 40},
+    assert (
+        client.post(
+            f"/admin/invitations/{invitation['invitation_id']}/revoke", headers={"Authorization": f"Bearer {ADMIN}"}
+        ).status_code
+        == 200
     )
-    assert client.post(
-        "/verify/confirm", json={"challenge_id": challenge["challenge_id"], "verification_token": code}
-    ).status_code == 200
-    revoked = invite(client, "revoke-audit@example.com")
-    client.post(f"/admin/invitations/{revoked['invitation_id']}/revoke", headers=auth(), json={})
-    with closing(sqlite3.connect(database)) as db:
-        rows = db.execute(
-            "SELECT action, result, inviter, invitee_email, tenant_id, occurred_at FROM audit_log"
-        ).fetchall()
+    assert (
+        client.post(
+            "/invitations/redeem", json={"invitation_token": invitation["invitation_token"], "display_name": "Bound"}
+        ).status_code
+        == 400
+    )
+
+
+def test_invalid_confirmation_never_creates_user_and_locks(service):
+    client, now, _ = service
+    invitation = client.post("/admin/invitations", headers={"Authorization": f"Bearer {ADMIN}"}, json={}).json()
+    pending = client.post(
+        "/invitations/redeem", json={"invitation_token": invitation["invitation_token"], "display_name": "Locked"}
+    ).json()
+    payload = {"enrollment_id": pending["enrollment_id"], "totp_code": "000000"}
+    for _ in range(5):
+        assert client.post("/enrollments/confirm", json=payload).status_code == 400
+    valid = {
+        "enrollment_id": pending["enrollment_id"],
+        "totp_code": totp_code(pending["secret"], int(now[0] // TOTP_PERIOD)),
+    }
+    assert client.post("/enrollments/confirm", json=valid).status_code == 400
+
+
+def test_recovery_disables_old_authenticator_and_regeneration_needs_fresh_code(service):
+    client, now, _ = service
+    enrollment, user = enroll(client, now, "Recoverable")
+    headers = {"Authorization": f"Bearer {INTERNAL}"}
+    now[0] += TOTP_PERIOD
+    old = {"account": "recoverable", "totp_code": totp_code(enrollment["secret"], int(now[0] // TOTP_PERIOD))}
+    recovered = client.post(
+        "/internal/auth/recover",
+        headers=headers,
+        json={"account": "recoverable", "recovery_code": user["recovery_codes"][0]},
+    ).json()
+    assert client.post("/internal/auth/verify", headers=headers, json=old).status_code == 403
+    assert (
+        client.post(
+            "/enrollments/confirm",
+            json={
+                "enrollment_id": recovered["enrollment_id"],
+                "totp_code": totp_code(recovered["secret"], int(now[0] // TOTP_PERIOD)),
+            },
+        ).status_code
+        == 200
+    )
+    now[0] += TOTP_PERIOD
+    fresh = {"account": "recoverable", "totp_code": totp_code(recovered["secret"], int(now[0] // TOTP_PERIOD))}
+    assert len(client.post("/internal/auth/recovery-codes", headers=headers, json=fresh).json()["recovery_codes"]) == 10
+    assert client.post("/internal/auth/recovery-codes", headers=headers, json=fresh).status_code == 403
+
+
+def test_login_attempt_lock_and_audit_never_contain_authenticator_secret(service):
+    client, now, app = service
+    enrollment, user = enroll(client, now, "AuditUser")
+    now[0] += TOTP_PERIOD
+    headers = {"Authorization": f"Bearer {INTERNAL}"}
+    bad = {"account": "audituser", "totp_code": "000000"}
+    for _ in range(5):
+        assert client.post("/internal/auth/verify", headers=headers, json=bad).status_code == 403
+    good = {"account": "audituser", "totp_code": totp_code(enrollment["secret"], int(now[0] // TOTP_PERIOD))}
+    assert client.post("/internal/auth/verify", headers=headers, json=good).status_code == 403
+    assert enrollment["secret"] not in client.get("/healthz").text
+    with closing(sqlite3.connect(app.state.identity_store.path)) as db:
         columns = {row[1] for row in db.execute("PRAGMA table_info(audit_log)")}
-        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
-            db.execute("UPDATE audit_log SET result='tampered'")
+        audit = repr(db.execute("SELECT * FROM audit_log").fetchall())
         with pytest.raises(sqlite3.DatabaseError, match="append-only"):
             db.execute("DELETE FROM audit_log")
-    actions = [(row[0], row[1]) for row in rows]
-    assert ("invitation.create", "success") in actions
-    assert ("invitation.redeem", "unavailable") in actions
-    assert ("invitation.redeem", "success") in actions
-    assert ("verification.request", "success") in actions
-    assert ("verification.confirm", "failed") in actions
-    assert ("verification.confirm", "success") in actions
-    assert ("invitation.revoke", "success") in actions
-    assert all(row[5] == 1_800_000_000.0 for row in rows)
-    assert {"token", "code", "token_hash", "redemption_hash", "bearer"}.isdisjoint(columns)
-    rendered = repr(rows)
-    for secret in (ADMIN, invitation["invitation_token"], redemption["redemption_token"], code):
-        assert secret not in rendered
+    assert {"secret", "code", "token_hash"}.isdisjoint(columns)
+    assert enrollment["secret"] not in audit
+    assert user["recovery_codes"][0] not in audit
 
 
-def test_database_and_directory_are_private_and_state_survives_restart(tmp_path: Path) -> None:
-    root = tmp_path / "durable"
-    sender = RecordingEmailSender()
-    app = create_app(state_root=root, admin_token=ADMIN, sender=sender)
-    with TestClient(app) as client:
-        invitation = invite(client, "durable@example.com")
-    restarted = create_app(state_root=root, admin_token=ADMIN, sender=sender)
-    with TestClient(restarted) as client:
-        assert redeem(client, invitation)["status"] == "verification_required"
-    if os.name == "posix":
-        assert root.stat().st_mode & 0o777 == 0o700
-        assert (root / "identity.sqlite3").stat().st_mode & 0o777 == 0o600
+def test_wrong_login_is_subject_rate_limited_with_the_same_failure_body(tmp_path: Path):
+    now = [1_800_000_000.0]
+    app = create_app(
+        state_root=tmp_path / "rate-limited",
+        admin_token=ADMIN,
+        internal_token=INTERNAL,
+        encryption_key=Fernet.generate_key(),
+        recovery_pepper="p" * 16,
+        clock=lambda: now[0],
+        source_rate_limit=100,
+        token_rate_limit=2,
+    )
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {INTERNAL}"}
+    payload = {"account": "missing-user", "totp_code": "000000", "purpose": "portal_login"}
+    first = client.post("/internal/auth/verify", headers=headers, json=payload)
+    second = client.post("/internal/auth/verify", headers=headers, json=payload)
+    limited = client.post("/internal/auth/verify", headers=headers, json=payload)
+    assert (first.status_code, first.json()) == (403, {"detail": "Authentication failed"})
+    assert second.json() == first.json()
+    assert (limited.status_code, limited.json()) == (429, {"detail": "Rate limit exceeded"})
+
+
+def test_owner_can_force_reenrollment_with_a_fresh_bound_invitation(service):
+    client, now, _ = service
+    old_enrollment, user = enroll(client, now, "OwnerRecovery")
+    invitation = client.post(
+        "/admin/invitations",
+        headers={"Authorization": f"Bearer {ADMIN}"},
+        json={"tenant_id": user["tenant_id"], "intended_display_name": "OwnerRecovery"},
+    ).json()
+    replacement = client.post(
+        "/invitations/redeem",
+        json={"invitation_token": invitation["invitation_token"], "display_name": "ownerrecovery"},
+    ).json()
+    headers = {"Authorization": f"Bearer {INTERNAL}"}
+    now[0] += TOTP_PERIOD
+    old_code = totp_code(old_enrollment["secret"], int(now[0] // TOTP_PERIOD))
+    assert client.post(
+        "/internal/auth/verify",
+        headers=headers,
+        json={"account": "OwnerRecovery", "totp_code": old_code},
+    ).status_code == 403
+    assert client.post(
+        "/enrollments/confirm",
+        json={
+            "enrollment_id": replacement["enrollment_id"],
+            "totp_code": totp_code(replacement["secret"], int(now[0] // TOTP_PERIOD)),
+        },
+    ).status_code == 200
+
+
+def test_phase1_database_is_preserved_and_new_enrollment_tables_are_created(tmp_path: Path):
+    root = tmp_path / "phase1"
+    root.mkdir()
+    database = root / "identity.sqlite3"
+    with closing(sqlite3.connect(database)) as db:
+        db.executescript("""
+            CREATE TABLE tenants(tenant_id TEXT PRIMARY KEY, created_at REAL NOT NULL) WITHOUT ROWID;
+            CREATE TABLE users(user_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE, created_at REAL NOT NULL) WITHOUT ROWID;
+            CREATE TABLE invitations(invitation_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
+                email TEXT NOT NULL, inviter TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
+                redemption_hash TEXT, created_at REAL NOT NULL, expires_at REAL NOT NULL,
+                redeemed_at REAL, revoked_at REAL, verification_requests INTEGER NOT NULL DEFAULT 0,
+                user_id TEXT) WITHOUT ROWID;
+            CREATE TABLE audit_log(audit_id TEXT PRIMARY KEY, occurred_at REAL NOT NULL,
+                action TEXT NOT NULL, result TEXT NOT NULL, inviter TEXT, invitee_email TEXT,
+                tenant_id TEXT, invitation_id TEXT, user_id TEXT, source TEXT) WITHOUT ROWID;
+            CREATE TABLE rate_limits(rate_key TEXT PRIMARY KEY, window_started REAL NOT NULL,
+                count INTEGER NOT NULL) WITHOUT ROWID;
+            INSERT INTO tenants VALUES('legacy-tenant', 1);
+            INSERT INTO users VALUES('legacy-user','legacy-tenant','old@example.com',1);
+        """)
+    app = create_app(
+        state_root=root,
+        admin_token=ADMIN,
+        internal_token=INTERNAL,
+        encryption_key=Fernet.generate_key(),
+        recovery_pepper="p" * 16,
+    )
+    with closing(sqlite3.connect(app.state.identity_store.path)) as db:
+        assert db.execute("SELECT email FROM legacy_users_phase1").fetchone()[0] == "old@example.com"
+        assert {row[1] for row in db.execute("PRAGMA table_info(users)")} >= {
+            "display_name", "totp_secret_encrypted", "reenrollment_pending"
+        }
