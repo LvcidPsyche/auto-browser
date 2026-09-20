@@ -171,6 +171,14 @@ def test_fresh_login_rotates_and_revokes_previous_cookie(tmp_path, clock, upstre
         assert client.cookies.get("ab_portal_session") != old
         client.cookies.set("ab_portal_session", old, domain="portal.example", path="/")
         assert client.get("/api/session").status_code == 401
+        assert client.post(
+            "/api/browser/open", headers={"Origin": ORIGIN, "X-CSRF-Token": "forged"}, json={},
+        ).status_code == 401
+        with app.state.portal_store.connect() as db:
+            cleared = db.execute(
+                "SELECT authenticated_at FROM portal_sessions WHERE revoked_at IS NOT NULL"
+            ).fetchall()
+        assert cleared and all(row["authenticated_at"] == 0 for row in cleared)
 
 
 def test_cookie_forgery_logout_and_csrf(tmp_path, clock, upstreams):
@@ -183,6 +191,12 @@ def test_cookie_forgery_logout_and_csrf(tmp_path, clock, upstreams):
         assert client.post("/logout", headers={"Origin": ORIGIN}, json={}).status_code == 403
         assert client.post("/logout", headers=mutate(csrf), json={}).status_code == 200
         assert client.get("/api/session").status_code == 401
+        assert client.post(
+            "/api/browser/open", headers=mutate(csrf), json={},
+        ).status_code == 401
+        with app.state.portal_store.connect() as db:
+            row = db.execute("SELECT authenticated_at FROM portal_sessions").fetchone()
+        assert row["authenticated_at"] == 0
 
 
 def test_absolute_and_idle_expiry(tmp_path, clock, upstreams):
@@ -191,6 +205,12 @@ def test_absolute_and_idle_expiry(tmp_path, clock, upstreams):
         login(client)
         clock[0] += 11
         assert client.get("/api/session").status_code == 401
+        assert client.post(
+            "/api/browser/open", headers={"Origin": ORIGIN, "X-CSRF-Token": "expired"}, json={},
+        ).status_code == 401
+        with app.state.portal_store.connect() as db:
+            row = db.execute("SELECT authenticated_at FROM portal_sessions").fetchone()
+        assert row["authenticated_at"] == 0
 
     absolute_clock = [1_800_100_000.0]
     absolute = app_at(
@@ -205,25 +225,74 @@ def test_absolute_and_idle_expiry(tmp_path, clock, upstreams):
         assert client.get("/api/session").status_code == 401
 
 
-def test_open_verifies_identity_then_forwards_same_fresh_code(tmp_path, clock, upstreams):
+def test_open_inside_freshness_window_needs_no_second_human_code(tmp_path, clock, upstreams):
     with TestClient(app_at(tmp_path, clock, upstreams), base_url=ORIGIN) as client:
         csrf = login(client)
         response = client.post(
             "/api/browser/open", headers=mutate(csrf),
-            json={"totp_code": "333333", "start_url": "https://example.com"},
+            json={"start_url": "https://example.com"},
         )
         assert response.json() == {"status": "open", "session_id": "browser-1"}
-        assert upstreams.identity_calls[-1][1]["purpose"] == "browser_open"
-        assert upstreams.identity_calls[-1][1]["totp_code"] == "333333"
+        assert [body["purpose"] for _, body in upstreams.identity_calls] == ["portal_login"]
         expected = totp_code(BROKER_TOTP_SECRET, int(clock[0] // TOTP_PERIOD))
         assert upstreams.broker_calls[-1][2]["totp_code"] == expected
-        assert upstreams.broker_calls[-1][2]["totp_code"] != "333333"
         assert upstreams.broker_calls[-1][3] == f"Bearer {BROKER_TOKEN}"
+
+
+def test_open_outside_freshness_window_requires_code_and_refreshes_it(tmp_path, clock, upstreams):
+    with TestClient(
+        app_at(tmp_path, clock, upstreams, authentication_freshness_ttl=120), base_url=ORIGIN,
+    ) as client:
+        csrf = login(client)
+        clock[0] += 120
+        assert "Fresh authenticator code" in client.get("/browser").text
+        missing = client.post("/api/browser/open", headers=mutate(csrf), json={})
+        assert missing.status_code == 422
+        opened = client.post(
+            "/api/browser/open", headers=mutate(csrf), json={"totp_code": "333333"},
+        )
+        assert opened.status_code == 200
+        assert upstreams.identity_calls[-1][1] == {
+            "account": "owner@example.com", "totp_code": "333333", "purpose": "browser_open",
+        }
+        assert client.get("/api/session").json()["browser_open_requires_code"] is False
+
+
+def test_client_input_cannot_forge_or_extend_freshness(tmp_path, clock, upstreams):
+    app = app_at(tmp_path, clock, upstreams, authentication_freshness_ttl=120)
+    with TestClient(app, base_url=ORIGIN) as client:
+        csrf = login(client)
+        with app.state.portal_store.connect() as db:
+            authenticated_at = db.execute(
+                "SELECT authenticated_at FROM portal_sessions WHERE revoked_at IS NULL"
+            ).fetchone()["authenticated_at"]
+        clock[0] += 120
+        forged = client.post(
+            "/api/browser/open?authentication_freshness_ttl=999999",
+            headers={**mutate(csrf), "X-Authentication-Fresh": "true"},
+            json={"authenticated_at": clock[0], "auth_fresh_until": clock[0] + 999999},
+        )
+        assert forged.status_code == 422
+        assert not upstreams.broker_calls
+        assert client.get("/api/session").json()["browser_open_requires_code"] is True
+        with app.state.portal_store.connect() as db:
+            unchanged = db.execute(
+                "SELECT authenticated_at FROM portal_sessions WHERE revoked_at IS NULL"
+            ).fetchone()["authenticated_at"]
+        assert unchanged == authenticated_at
 
 
 def test_login_code_cannot_be_reused_to_open(tmp_path, clock, upstreams):
     with TestClient(app_at(tmp_path, clock, upstreams), base_url=ORIGIN) as client:
         csrf = login(client)
+        opened = client.post(
+            "/api/browser/open", headers=mutate(csrf), json={"totp_code": "111111"},
+        )
+        assert opened.status_code == 200
+        assert [body["purpose"] for _, body in upstreams.identity_calls] == ["portal_login"]
+        assert client.post("/api/browser/close", headers=mutate(csrf), json={}).status_code == 200
+        upstreams.broker_calls.clear()
+        clock[0] += 120
         denied = client.post(
             "/api/browser/open", headers=mutate(csrf), json={"totp_code": "111111"},
         )
@@ -376,8 +445,10 @@ def test_authenticated_browser_page_matches_gateway_portal_link(tmp_path, clock,
         login(client)
         page = client.get("/browser?connection=opaque")
         assert page.status_code == 200
-        assert "Fresh authenticator code" in page.text
+        assert "Fresh authenticator code" not in page.text
         assert "/api/browser/open" in page.text and "/api/browser/close" in page.text
+        clock[0] += 120
+        assert "Fresh authenticator code" in client.get("/browser").text
 
 
 def test_all_responses_get_security_headers_and_mutations_require_origin(tmp_path, clock, upstreams):

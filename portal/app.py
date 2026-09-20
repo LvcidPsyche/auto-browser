@@ -126,6 +126,7 @@ class PortalStore:
                     last_seen_at REAL NOT NULL,
                     absolute_expires_at REAL NOT NULL,
                     idle_expires_at REAL NOT NULL,
+                    authenticated_at REAL NOT NULL,
                     revoked_at REAL
                 ) WITHOUT ROWID;
                 CREATE INDEX IF NOT EXISTS portal_sessions_user_idx
@@ -143,6 +144,16 @@ class PortalStore:
                 );
                 """
             )
+            columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(portal_sessions)")
+            }
+            if "authenticated_at" not in columns:
+                # Existing sessions predate freshness tracking and therefore
+                # fail closed until the human authenticates again.
+                db.execute(
+                    "ALTER TABLE portal_sessions "
+                    "ADD COLUMN authenticated_at REAL NOT NULL DEFAULT 0"
+                )
 
     def connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=5, isolation_level=None)
@@ -162,17 +173,18 @@ class PortalStore:
             # A successful login rotates all portal sessions for this immutable
             # identity.  Stolen older cookies cannot survive a fresh login.
             db.execute(
-                "UPDATE portal_sessions SET revoked_at=? "
+                "UPDATE portal_sessions SET revoked_at=?, authenticated_at=0 "
                 "WHERE user_id=? AND tenant_id=? AND revoked_at IS NULL",
                 (now, user_id, tenant_id),
             )
             db.execute(
                 """INSERT INTO portal_sessions
                    (token_hash, csrf_hash, user_id, tenant_id, account, created_at,
-                    last_seen_at, absolute_expires_at, idle_expires_at, revoked_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                    last_seen_at, absolute_expires_at, idle_expires_at,
+                    authenticated_at, revoked_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
                 (_digest(token), _digest(csrf), user_id, tenant_id, account, now,
-                 now, absolute, min(absolute, now + idle_ttl)),
+                 now, absolute, min(absolute, now + idle_ttl), now),
             )
             db.commit()
         return token, csrf
@@ -188,7 +200,8 @@ class PortalStore:
                 return None
             if row["absolute_expires_at"] <= now or row["idle_expires_at"] <= now:
                 db.execute(
-                    "UPDATE portal_sessions SET revoked_at=? WHERE token_hash=?",
+                    """UPDATE portal_sessions
+                       SET revoked_at=?, authenticated_at=0 WHERE token_hash=?""",
                     (now, _digest(token)),
                 )
                 db.commit()
@@ -201,10 +214,22 @@ class PortalStore:
             db.commit()
             return row
 
+    def refresh_authentication(self, token: str, *, now: float) -> bool:
+        """Record a completed server-verified reauthentication."""
+        with closing(self.connect()) as db:
+            updated = db.execute(
+                """UPDATE portal_sessions SET authenticated_at=?
+                   WHERE token_hash=? AND revoked_at IS NULL
+                   AND absolute_expires_at>? AND idle_expires_at>?""",
+                (now, _digest(token), now, now),
+            ).rowcount
+        return updated == 1
+
     def revoke(self, token: str, *, now: float) -> None:
         with closing(self.connect()) as db:
             db.execute(
-                "UPDATE portal_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL",
+                """UPDATE portal_sessions SET revoked_at=?, authenticated_at=0
+                   WHERE token_hash=? AND revoked_at IS NULL""",
                 (now, _digest(token)),
             )
 
@@ -300,6 +325,7 @@ def create_app(
     gateway_transport: httpx.AsyncBaseTransport | None = None,
     absolute_session_ttl: int = 12 * 60 * 60,
     idle_session_ttl: int = 30 * 60,
+    authentication_freshness_ttl: int = 120,
     clock: Callable[[], float] = time.time,
 ) -> FastAPI:
     """Build the portal with injectable upstream clients or transports."""
@@ -310,6 +336,8 @@ def create_app(
     gateway_internal_token = _credential(gateway_internal_token, "gateway_internal_token")
     if absolute_session_ttl <= 0 or idle_session_ttl <= 0:
         raise ValueError("Session expiry settings must be positive")
+    if authentication_freshness_ttl <= 0:
+        raise ValueError("Authentication freshness must be positive")
     if identity_client is not None and identity_transport is not None:
         raise ValueError("Pass an identity client or transport, not both")
     if broker_client is not None and broker_transport is not None:
@@ -356,6 +384,9 @@ def create_app(
         if row is None:
             raise HTTPException(401, "Session expired or revoked")
         return row
+
+    def authentication_is_fresh(row: Mapping[str, Any], *, now: float) -> bool:
+        return now < float(row["authenticated_at"]) + authentication_freshness_ttl
 
     async def mutation(request: Request, *, require_session: bool = True) -> sqlite3.Row | None:
         origin = request.headers.get("origin")
@@ -454,6 +485,7 @@ def create_app(
         return {
             "authenticated": True, "user_id": row["user_id"], "tenant_id": row["tenant_id"],
             "account": row["account"], "browser": browser,
+            "browser_open_requires_code": not authentication_is_fresh(row, now=clock()),
         }
 
     @app.get("/browser")
@@ -474,14 +506,19 @@ def create_app(
                 state = "open" if owner["broker_session_id"] else "opening"
         csrf = html.escape(request.cookies.get(CSRF_COOKIE, ""), quote=True)
         account = html.escape(row["account"])
+        authenticator_field = ""
+        if not authentication_is_fresh(row, now=clock()):
+            authenticator_field = (
+                "<label>Fresh authenticator code <input name=totp_code inputmode=numeric "
+                "autocomplete=one-time-code pattern='[0-9]{6}' required></label>"
+            )
         return HTMLResponse(
             "<!doctype html><meta charset=utf-8><title>Secure Browser</title>"
             f"<h1>Secure Browser</h1><p>Signed in as {account}</p><p>Browser: {state}</p>"
             "<h2>Open browser</h2><form method=post action=/api/browser/open>"
             f"<input type=hidden name=csrf_token value='{csrf}'>"
             "<label>Start URL <input name=start_url type=url value='https://example.com' required></label>"
-            "<label>Fresh authenticator code <input name=totp_code inputmode=numeric "
-            "autocomplete=one-time-code pattern='[0-9]{6}' required></label><button>Open</button></form>"
+            f"{authenticator_field}<button>Open</button></form>"
             "<h2>Close browser</h2><form method=post action=/api/browser/close>"
             f"<input type=hidden name=csrf_token value='{csrf}'><button>Close server session</button></form>"
         )
@@ -490,7 +527,11 @@ def create_app(
     async def open_browser(request: Request):
         row = await mutation(request)
         data = await _payload(request)
-        code = _totp(data)
+        now = clock()
+        code = None
+        requires_code = not authentication_is_fresh(row, now=now)
+        if requires_code:
+            code = _totp(data)
         newly_claimed = False
         with closing(store.connect()) as db:
             db.execute("BEGIN IMMEDIATE")
@@ -509,18 +550,23 @@ def create_app(
                 newly_claimed = True
             db.commit()
         try:
-            verified = await identity_http.post(
-                IDENTITY_VERIFY_PATH, headers=internal_headers(identity_internal_token),
-                json={"account": row["account"], "totp_code": code, "purpose": "browser_open"},
-            )
-            if verified.status_code != 200:
-                raise _upstream_error(verified, "Authenticator verification failed")
-            verified_user, verified_tenant, _ = _identity(verified.json(), row["account"])
-            if verified_user != row["user_id"] or verified_tenant != row["tenant_id"]:
-                raise HTTPException(403, "Identity binding changed")
-            # The human code has now been consumed exactly once by identity.
-            # The unchanged broker has a separate server-only authenticator;
-            # never forward the user's code or expose this derived proof.
+            if requires_code:
+                verified = await identity_http.post(
+                    IDENTITY_VERIFY_PATH, headers=internal_headers(identity_internal_token),
+                    json={"account": row["account"], "totp_code": code, "purpose": "browser_open"},
+                )
+                if verified.status_code != 200:
+                    raise _upstream_error(verified, "Authenticator verification failed")
+                verified_user, verified_tenant, _ = _identity(verified.json(), row["account"])
+                if verified_user != row["user_id"] or verified_tenant != row["tenant_id"]:
+                    raise HTTPException(403, "Identity binding changed")
+                session_token = request.cookies.get(SESSION_COOKIE, "")
+                if not store.refresh_authentication(session_token, now=clock()):
+                    raise HTTPException(401, "Session expired or revoked")
+            # This broker-only TOTP makes the portal a trusted holder of the
+            # broker seed. Phase 3 should replace it with a portal-signed
+            # assertion verified by the broker, so this gate is not reducible
+            # to a secret held by the portal.
             current_step = int(clock() // TOTP_PERIOD)
             with closing(store.connect()) as db:
                 totp_state = db.execute("SELECT last_step FROM broker_totp_state WHERE slot=1").fetchone()
@@ -529,7 +575,7 @@ def create_app(
                 raise HTTPException(429, "Wait for a fresh broker authenticator time step")
             broker_step = current_step if last_broker_step < current_step else current_step + 1
             broker_code = totp_code(broker_totp_secret, broker_step)
-            if secrets.compare_digest(broker_code, code):
+            if code is not None and secrets.compare_digest(broker_code, code):
                 # Keep the human-entered value single-use even in the rare
                 # event that two independent TOTP seeds produce the same six digits.
                 if broker_step >= current_step + 1:
@@ -842,6 +888,9 @@ def app_from_environment() -> FastAPI:
         identity_base_url=os.environ.get("PORTAL_IDENTITY_URL", "http://identity"),
         broker_base_url=os.environ.get("PORTAL_BROKER_URL", "http://approval-broker:18001"),
         gateway_base_url=os.environ.get("PORTAL_GATEWAY_URL", "http://mcp-gateway"),
+        authentication_freshness_ttl=int(
+            os.environ.get("PORTAL_AUTHENTICATION_FRESHNESS_SECONDS", "120")
+        ),
     )
 
 
