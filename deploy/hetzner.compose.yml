@@ -1,0 +1,36 @@
+services:
+  controller:
+    environment:
+      API_BEARER_TOKENS: owner:${OWNER_API_TOKEN:?Set an owner credential}
+      SHARE_TOKEN_SECRET: ${SHARE_TOKEN_SECRET:?Set a share-link signing secret}
+      STATE_DB_PATH: /data/db/operator.db
+      SESSION_ISOLATION_MODE: shared_browser_node
+      ARTIFACT_RETENTION_HOURS: 168
+      UPLOAD_RETENTION_HOURS: 168
+      AUTH_RETENTION_HOURS: 168
+  approval-broker:
+    build:
+      context: .
+      dockerfile: approval_broker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      controller:
+        condition: service_started
+    environment:
+      BROKER_OWNER_TOKEN: ${BROKER_OWNER_TOKEN:?Set a broker owner credential}
+      BROKER_AGENT_TOKENS: ${BROKER_AGENT_TOKENS:?Set named agent credentials}
+      API_BEARER_TOKEN: ${OWNER_API_TOKEN:?Set an upstream owner credential}
+      BROKER_UPSTREAM_URL: http://controller:8000
+      BROKER_TOTP_DB: /broker-state/totp.sqlite3
+    volumes:
+      - ${BROKER_STATE_ROOT:?Set a private broker state directory}:/broker-state
+    ports:
+      - "127.0.0.1:${BROKER_PORT:-18001}:18001"
+    networks:
+      - default
+      - hermes_browser_private
+
+networks:
+  hermes_browser_private:
+    external: true
+    name: hermes-browser-private
