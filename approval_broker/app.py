@@ -12,6 +12,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import sqlite3
@@ -23,6 +24,8 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -142,7 +145,8 @@ class AccessRequest(StrictModel):
 class OwnerSessionRequest(StrictModel):
     start_url: str = Field(min_length=1, max_length=2000, pattern=r"^https?://")
     auth_profile: str | None = Field(default=None, min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.-]+$")
-    totp_code: str = Field(pattern=r"^[0-9]{6}$")
+    totp_code: str | None = Field(default=None, pattern=r"^[0-9]{6}$")
+    portal_assertion: str | None = Field(default=None, min_length=40, max_length=4096)
 
 
 class TotpProof(StrictModel):
@@ -203,10 +207,32 @@ def create_app(
     transport: httpx.AsyncBaseTransport | None = None,
     totp_db_path: str | Path | None = None,
     portal_url: str | None = None,
+    portal_assertion_public_key: str | None = None,
+    expected_user_id: str | None = None,
+    expected_tenant_id: str | None = None,
+    assertion_clock_skew_seconds: int = 5,
 ) -> FastAPI:
     if totp_db_path is None:
         raise ValueError("BROKER_TOTP_DB is required")
     totp = TotpStore(totp_db_path)
+    assertion_key: Ed25519PublicKey | None = None
+    if portal_assertion_public_key is not None:
+        if not expected_user_id or not expected_tenant_id:
+            raise ValueError("Assertion-enabled broker requires immutable user and tenant ids")
+        try:
+            raw_key = base64.urlsafe_b64decode(
+                portal_assertion_public_key + "=" * (-len(portal_assertion_public_key) % 4)
+            )
+            assertion_key = Ed25519PublicKey.from_public_bytes(raw_key)
+        except (ValueError, TypeError):
+            raise ValueError("BROKER_PORTAL_ASSERTION_PUBLIC_KEY must be a base64url Ed25519 key") from None
+        if assertion_clock_skew_seconds < 0 or assertion_clock_skew_seconds > 30:
+            raise ValueError("Assertion clock skew must be between 0 and 30 seconds")
+        with closing(totp.connect()) as db:
+            db.execute("""CREATE TABLE IF NOT EXISTS portal_assertion_replay (
+                jti_hash TEXT PRIMARY KEY,
+                expires_at REAL NOT NULL
+            )""")
     named_agents: dict[str, str] = {}
     if agent_token:
         named_agents["agent"] = agent_token
@@ -331,6 +357,56 @@ def create_app(
             if candidate.session_id == session_id and candidate.session_generation == generation:
                 candidate.status = "revoked"
 
+    def verify_portal_assertion(assertion: str) -> None:
+        """Verify a short-lived, user-scoped, single-use portal assertion."""
+        if assertion_key is None:
+            raise HTTPException(403, "Portal assertion is not configured")
+        encoded_payload, separator, encoded_signature = assertion.partition(".")
+        if not separator or "." in encoded_signature:
+            raise HTTPException(403, "Invalid portal assertion")
+        try:
+            payload_bytes = base64.urlsafe_b64decode(
+                encoded_payload + "=" * (-len(encoded_payload) % 4)
+            )
+            signature = base64.urlsafe_b64decode(
+                encoded_signature + "=" * (-len(encoded_signature) % 4)
+            )
+            assertion_key.verify(signature, encoded_payload.encode("ascii"))
+            claims = json.loads(payload_bytes)
+        except (InvalidSignature, ValueError, TypeError, UnicodeError, json.JSONDecodeError):
+            raise HTTPException(403, "Invalid portal assertion") from None
+        now = time.time()
+        if (
+            not isinstance(claims, dict)
+            or claims.get("sub") != expected_user_id
+            or claims.get("tenant") != expected_tenant_id
+            or claims.get("purpose") != "browser_open"
+            or not isinstance(claims.get("iat"), (int, float))
+            or not isinstance(claims.get("exp"), (int, float))
+            or not isinstance(claims.get("jti"), str)
+            or not 16 <= len(claims["jti"]) <= 200
+            or claims["iat"] > now + assertion_clock_skew_seconds
+            or claims["exp"] <= now
+            or claims["exp"] > claims["iat"] + 120
+        ):
+            raise HTTPException(403, "Expired or wrongly scoped portal assertion")
+        replay_key = hashlib.sha256(claims["jti"].encode("utf-8")).hexdigest()
+        try:
+            with closing(totp.connect()) as db:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("DELETE FROM portal_assertion_replay WHERE expires_at<?", (now,))
+                if db.execute(
+                    "SELECT 1 FROM portal_assertion_replay WHERE jti_hash=?", (replay_key,)
+                ).fetchone():
+                    raise HTTPException(403, "Portal assertion was already used")
+                db.execute(
+                    "INSERT INTO portal_assertion_replay(jti_hash,expires_at) VALUES(?,?)",
+                    (replay_key, claims["exp"] + assertion_clock_skew_seconds),
+                )
+                db.commit()
+        except sqlite3.Error:
+            raise HTTPException(503, "Assertion replay state unavailable") from None
+
     async def ensure_live(grant: Grant) -> None:
         if grant.status != "approved":
             raise HTTPException(403, "Agent grant is not active")
@@ -435,7 +511,14 @@ def create_app(
                 session_opening = True
                 try:
                     await ensure_no_active_session()
-                    totp.verify(payload.totp_code)
+                    if assertion_key is not None:
+                        if payload.totp_code is not None or payload.portal_assertion is None:
+                            raise HTTPException(403, "A portal assertion is required")
+                        verify_portal_assertion(payload.portal_assertion)
+                    else:
+                        if payload.portal_assertion is not None or payload.totp_code is None:
+                            raise HTTPException(403, "A fresh authenticator code is required")
+                        totp.verify(payload.totp_code)
                     session_payload = {"name": "owner-login", "start_url": payload.start_url}
                     if payload.auth_profile is not None:
                         session_payload["auth_profile"] = payload.auth_profile
@@ -741,6 +824,9 @@ def app_from_environment() -> FastAPI:
         upstream_url=os.environ.get("BROKER_UPSTREAM_URL", "http://127.0.0.1:8000"),
         totp_db_path=os.environ["BROKER_TOTP_DB"],
         portal_url=os.environ.get("BROKER_PORTAL_URL"),
+        portal_assertion_public_key=os.environ.get("BROKER_PORTAL_ASSERTION_PUBLIC_KEY"),
+        expected_user_id=os.environ.get("BROKER_USER_ID"),
+        expected_tenant_id=os.environ.get("BROKER_TENANT_ID"),
     )
 
 

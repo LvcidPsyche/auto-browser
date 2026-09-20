@@ -16,7 +16,7 @@ import sqlite3
 import time
 from contextlib import asynccontextmanager, closing
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -211,10 +211,24 @@ class Store:
                     FOREIGN KEY(grant_id) REFERENCES grants(grant_id)
                 );
                 CREATE TABLE IF NOT EXISTS runtime_binding (
-                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                    user_id TEXT NOT NULL, tenant_id TEXT NOT NULL, updated_at REAL NOT NULL
+                    user_id TEXT NOT NULL, tenant_id TEXT NOT NULL, updated_at REAL NOT NULL,
+                    PRIMARY KEY(user_id, tenant_id)
                 );
             """)
+            runtime_columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(runtime_binding)")
+            }
+            if "singleton" in runtime_columns:
+                db.executescript("""
+                    ALTER TABLE runtime_binding RENAME TO runtime_binding_singleton;
+                    CREATE TABLE runtime_binding (
+                        user_id TEXT NOT NULL, tenant_id TEXT NOT NULL, updated_at REAL NOT NULL,
+                        PRIMARY KEY(user_id, tenant_id)
+                    );
+                    INSERT OR IGNORE INTO runtime_binding(user_id,tenant_id,updated_at)
+                        SELECT user_id,tenant_id,updated_at FROM runtime_binding_singleton;
+                    DROP TABLE runtime_binding_singleton;
+                """)
 
     def connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=5, isolation_level=None)
@@ -231,25 +245,32 @@ def create_app(
     resource_url: str,
     portal_url: str,
     internal_token: str,
-    broker_token: str,
+    broker_token: str | None,
     database_path: str | Path,
     broker_url: str = "http://approval-broker:18001",
     broker_transport: httpx.AsyncBaseTransport | None = None,
     broker_client: httpx.AsyncClient | None = None,
+    broker_resolver: Callable[[str, str], tuple[httpx.AsyncClient, str]] | None = None,
     clock: Any = time.time,
 ) -> FastAPI:
     issuer = _origin_url(issuer_url, "issuer_url")
     resource = _mcp_resource(resource_url)
     portal = _origin_url(portal_url, "portal_url")
-    if len(internal_token) < 32 or len(broker_token) < 32 or secrets.compare_digest(internal_token, broker_token):
+    if len(internal_token) < 32:
+        raise ValueError("Internal credential must have at least 32 characters")
+    if broker_resolver is None and (
+        not broker_token or len(broker_token) < 32 or secrets.compare_digest(internal_token, broker_token)
+    ):
         raise ValueError("Internal and broker credentials must be distinct and at least 32 characters")
     if broker_client is not None and broker_transport is not None:
         raise ValueError("Inject broker_client or broker_transport, not both")
     store = Store(database_path)
-    owns_client = broker_client is None
-    client = broker_client or httpx.AsyncClient(
-        base_url=broker_url, transport=broker_transport, timeout=20, follow_redirects=False,
-    )
+    owns_client = broker_resolver is None and broker_client is None
+    client = broker_client
+    if client is None and broker_resolver is None:
+        client = httpx.AsyncClient(
+            base_url=broker_url, transport=broker_transport, timeout=20, follow_redirects=False,
+        )
     resource_metadata = f"{issuer}/.well-known/oauth-protected-resource"
 
     @asynccontextmanager
@@ -257,8 +278,11 @@ def create_app(
         try:
             yield
         finally:
-            if owns_client:
+            if owns_client and client is not None:
                 await client.aclose()
+            close_resolver = getattr(broker_resolver, "aclose", None)
+            if close_resolver is not None:
+                await close_resolver()
 
     app = FastAPI(title="Auto Browser OAuth MCP gateway", docs_url=None, redoc_url=None,
                   openapi_url=None, lifespan=lifespan)
@@ -273,10 +297,19 @@ def create_app(
             raise HTTPException(401, "Internal bearer required")
 
     def bind_active(db: sqlite3.Connection, user_id: str, tenant_id: str) -> None:
-        row = db.execute("SELECT user_id, tenant_id FROM runtime_binding WHERE singleton=1").fetchone()
-        if row and (row["user_id"] != user_id or row["tenant_id"] != tenant_id):
-            raise HTTPException(409, "Another user owns the active browser node")
-        db.execute("INSERT OR REPLACE INTO runtime_binding VALUES (1,?,?,?)", (user_id, tenant_id, clock()))
+        db.execute(
+            "INSERT OR REPLACE INTO runtime_binding(user_id,tenant_id,updated_at) VALUES(?,?,?)",
+            (user_id, tenant_id, clock()),
+        )
+
+    def broker_for(user_id: str, tenant_id: str) -> tuple[httpx.AsyncClient, str]:
+        if broker_resolver is not None:
+            try:
+                return broker_resolver(user_id, tenant_id)
+            except LookupError:
+                raise HTTPException(403, "No browser stack is bound to this identity") from None
+        assert client is not None and broker_token is not None
+        return client, broker_token
 
     def load_access(authorization: str | None) -> sqlite3.Row:
         challenge = f'Bearer resource_metadata="{resource_metadata}"'
@@ -393,10 +426,16 @@ def create_app(
             if payload.active:
                 bind_active(db, user_id, tenant_id)
             else:
-                row = db.execute("SELECT user_id,tenant_id FROM runtime_binding WHERE singleton=1").fetchone()
-                if not row or (row["user_id"], row["tenant_id"]) != (user_id, tenant_id):
+                row = db.execute(
+                    "SELECT 1 FROM runtime_binding WHERE user_id=? AND tenant_id=?",
+                    (user_id, tenant_id),
+                ).fetchone()
+                if not row:
                     raise HTTPException(404, "Active binding not found")
-                db.execute("DELETE FROM runtime_binding WHERE singleton=1")
+                db.execute(
+                    "DELETE FROM runtime_binding WHERE user_id=? AND tenant_id=?",
+                    (user_id, tenant_id),
+                )
             db.commit()
         return {"active": payload.active}
 
@@ -559,12 +598,16 @@ def create_app(
             db.commit()
         return {"disconnected": True}
 
-    async def broker_call(name: str, arguments: dict[str, Any]) -> Any:
+    async def broker_call(
+        user_id: str, tenant_id: str, name: str, arguments: dict[str, Any]
+    ) -> Any:
         payload = {"jsonrpc": "2.0", "id": secrets.token_hex(8), "method": "tools/call",
                    "params": {"name": name, "arguments": arguments}}
+        selected_broker, selected_token = broker_for(user_id, tenant_id)
         try:
-            response = await client.post("/mcp", json=payload,
-                                         headers={"Authorization": f"Bearer {broker_token}"})
+            response = await selected_broker.post(
+                "/mcp", json=payload, headers={"Authorization": f"Bearer {selected_token}"}
+            )
         except httpx.HTTPError:
             raise HTTPException(502, "Private browser broker unavailable") from None
         if response.status_code >= 400:
@@ -590,29 +633,34 @@ def create_app(
         if _contains_forbidden_id(arguments):
             raise HTTPException(400, "Identity and browser ownership selectors are not accepted")
         grant_id = token_row["grant_id"]
+        user_id, tenant_id = token_row["user_id"], token_row["tenant_id"]
         if name == "browser.session_status":
             if arguments:
                 raise HTTPException(400, "session_status accepts no arguments")
             with closing(store.connect()) as db:
-                binding = db.execute("SELECT user_id,tenant_id FROM runtime_binding WHERE singleton=1").fetchone()
-            if not binding or (binding["user_id"], binding["tenant_id"]) != (
-                    token_row["user_id"], token_row["tenant_id"]):
+                binding = db.execute(
+                    "SELECT 1 FROM runtime_binding WHERE user_id=? AND tenant_id=?",
+                    (user_id, tenant_id),
+                ).fetchone()
+            if not binding:
                 state = "session_closed"
             else:
-                status = _redact_ids(await broker_call(name, {}))
+                status = _redact_ids(await broker_call(user_id, tenant_id, name, {}))
                 state = status.get("status", "unknown") if isinstance(status, dict) else "unknown"
             return {"state": state, "portal_url": f"{portal}/browser?" + urlencode({
                 "connection": token_row["connection_ref"]
             })}
         with closing(store.connect()) as db:
-            binding = db.execute("SELECT user_id,tenant_id FROM runtime_binding WHERE singleton=1").fetchone()
-        if not binding or (binding["user_id"], binding["tenant_id"]) != (
-                token_row["user_id"], token_row["tenant_id"]):
-            raise HTTPException(403, "This connection does not own the active browser node")
+            binding = db.execute(
+                "SELECT 1 FROM runtime_binding WHERE user_id=? AND tenant_id=?",
+                (user_id, tenant_id),
+            ).fetchone()
+        if not binding:
+            raise HTTPException(403, "This connection has no active browser stack")
         if name == "browser.request_access":
             if set(arguments) != {"purpose"} or not isinstance(arguments.get("purpose"), str):
                 raise HTTPException(400, "A purpose string is required")
-            result = await broker_call(name, arguments)
+            result = await broker_call(user_id, tenant_id, name, arguments)
             upstream_ref = result.get("id") if isinstance(result, dict) else None
             if not isinstance(upstream_ref, str):
                 raise HTTPException(502, "Broker did not return an access reference")
@@ -644,7 +692,7 @@ def create_app(
             if _contains_forbidden_id(arguments.get("arguments", {})):
                 raise HTTPException(400, "Identity and browser ownership selectors are not accepted")
             broker_arguments = {"request_id": upstream_ref, "arguments": arguments.get("arguments", {})}
-        result = _redact_ids(await broker_call(name, broker_arguments))
+        result = _redact_ids(await broker_call(user_id, tenant_id, name, broker_arguments))
         if isinstance(result, dict):
             result.pop("id", None)
             result["request_id"] = public_ref
@@ -693,14 +741,20 @@ def create_app(
 
 
 def app_from_environment() -> FastAPI:
+    broker_resolver = None
+    if os.environ.get("TENANT_STACK_ROOT"):
+        from tenant_stacks import TenantBrokerRegistry
+
+        broker_resolver = TenantBrokerRegistry(os.environ["TENANT_STACK_ROOT"], "gateway")
     return create_app(
         issuer_url=os.environ["MCP_GATEWAY_ISSUER_URL"],
         resource_url=os.environ["MCP_GATEWAY_RESOURCE_URL"],
         portal_url=os.environ["MCP_GATEWAY_PORTAL_URL"],
         internal_token=os.environ["MCP_GATEWAY_INTERNAL_TOKEN"],
-        broker_token=os.environ["MCP_GATEWAY_BROKER_TOKEN"],
+        broker_token=os.environ.get("MCP_GATEWAY_BROKER_TOKEN"),
         database_path=os.environ["MCP_GATEWAY_DB"],
         broker_url=os.environ.get("MCP_GATEWAY_BROKER_URL", "http://approval-broker:18001"),
+        broker_resolver=broker_resolver,
     )
 
 

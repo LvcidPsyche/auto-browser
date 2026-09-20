@@ -6,7 +6,6 @@ the broker, controller, VNC server, or OAuth gateway.
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import html
 import json
@@ -21,10 +20,9 @@ from typing import Any, Callable, Mapping
 from urllib.parse import quote, urlsplit
 
 import httpx
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-
-from approval_broker.app import TOTP_PERIOD, totp_code
 
 SESSION_COOKIE = "ab_portal_session"
 CSRF_COOKIE = "ab_portal_csrf"
@@ -86,17 +84,34 @@ def _safe_next(value: Any) -> str | None:
     return None
 
 
-def _totp_secret(value: str) -> str:
-    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z2-7]+", value):
-        raise ValueError("broker_totp_secret must be a valid private base32 secret")
-    normalized = value.upper()
+def _assertion_private_key(value: str) -> Ed25519PrivateKey:
+    import base64
+
     try:
-        decoded = base64.b32decode(normalized + "=" * ((-len(normalized)) % 8))
+        raw = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        return Ed25519PrivateKey.from_private_bytes(raw)
     except (ValueError, TypeError):
-        raise ValueError("broker_totp_secret must be a valid private base32 secret") from None
-    if len(decoded) < 20:
-        raise ValueError("broker_totp_secret must contain at least 160 bits")
-    return normalized
+        raise ValueError("portal_assertion_private_key must be a base64url Ed25519 key") from None
+
+
+def _portal_assertion(
+    key: Ed25519PrivateKey, *, user_id: str, tenant_id: str, now: float,
+) -> str:
+    import base64
+
+    claims = {
+        "sub": user_id,
+        "tenant": tenant_id,
+        "purpose": "browser_open",
+        "iat": int(now),
+        "exp": int(now) + 60,
+        "jti": secrets.token_urlsafe(24),
+    }
+    payload = base64.urlsafe_b64encode(
+        json.dumps(claims, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).rstrip(b"=").decode("ascii")
+    signature = base64.urlsafe_b64encode(key.sign(payload.encode("ascii"))).rstrip(b"=").decode("ascii")
+    return f"{payload}.{signature}"
 
 
 class PortalStore:
@@ -131,16 +146,12 @@ class PortalStore:
                 ) WITHOUT ROWID;
                 CREATE INDEX IF NOT EXISTS portal_sessions_user_idx
                     ON portal_sessions(user_id, tenant_id);
-                CREATE TABLE IF NOT EXISTS browser_ownership (
-                    slot INTEGER PRIMARY KEY CHECK(slot = 1),
+                CREATE TABLE IF NOT EXISTS browser_ownership_v2 (
                     user_id TEXT NOT NULL,
                     tenant_id TEXT NOT NULL,
                     broker_session_id TEXT,
-                    claimed_at REAL NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS broker_totp_state (
-                    slot INTEGER PRIMARY KEY CHECK(slot = 1),
-                    last_step INTEGER NOT NULL
+                    claimed_at REAL NOT NULL,
+                    PRIMARY KEY(user_id, tenant_id)
                 );
                 """
             )
@@ -153,6 +164,14 @@ class PortalStore:
                 db.execute(
                     "ALTER TABLE portal_sessions "
                     "ADD COLUMN authenticated_at REAL NOT NULL DEFAULT 0"
+                )
+            if db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_ownership'"
+            ).fetchone():
+                db.execute(
+                    """INSERT OR IGNORE INTO browser_ownership_v2
+                       (user_id,tenant_id,broker_session_id,claimed_at)
+                       SELECT user_id,tenant_id,broker_session_id,claimed_at FROM browser_ownership"""
                 )
 
     def connect(self) -> sqlite3.Connection:
@@ -310,8 +329,8 @@ def create_app(
     *,
     state_root: str | Path,
     identity_internal_token: str,
-    broker_owner_token: str,
-    broker_totp_secret: str,
+    broker_owner_token: str | None,
+    portal_assertion_private_key: str,
     gateway_internal_token: str,
     public_origin: str,
     identity_base_url: str = "http://identity",
@@ -322,6 +341,7 @@ def create_app(
     gateway_client: httpx.AsyncClient | None = None,
     identity_transport: httpx.AsyncBaseTransport | None = None,
     broker_transport: httpx.AsyncBaseTransport | None = None,
+    broker_resolver: Callable[[str, str], tuple[httpx.AsyncClient, str]] | None = None,
     gateway_transport: httpx.AsyncBaseTransport | None = None,
     absolute_session_ttl: int = 12 * 60 * 60,
     idle_session_ttl: int = 30 * 60,
@@ -331,8 +351,9 @@ def create_app(
     """Build the portal with injectable upstream clients or transports."""
     public_origin = _origin(public_origin)
     identity_internal_token = _credential(identity_internal_token, "identity_internal_token")
-    broker_owner_token = _credential(broker_owner_token, "broker_owner_token")
-    broker_totp_secret = _totp_secret(broker_totp_secret)
+    if broker_resolver is None:
+        broker_owner_token = _credential(broker_owner_token or "", "broker_owner_token")
+    assertion_key = _assertion_private_key(portal_assertion_private_key)
     gateway_internal_token = _credential(gateway_internal_token, "gateway_internal_token")
     if absolute_session_ttl <= 0 or idle_session_ttl <= 0:
         raise ValueError("Session expiry settings must be positive")
@@ -364,6 +385,9 @@ def create_app(
         yield
         for item in owned:
             await item.aclose()
+        close_resolver = getattr(broker_resolver, "aclose", None)
+        if close_resolver is not None:
+            await close_resolver()
 
     app = FastAPI(title="Auto Browser portal", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.portal_store = store
@@ -408,6 +432,15 @@ def create_app(
 
     def internal_headers(token: str) -> dict[str, str]:
         return {"Authorization": f"Bearer {token}"}
+
+    def broker_for(user_id: str, tenant_id: str) -> tuple[httpx.AsyncClient, str]:
+        if broker_resolver is not None:
+            try:
+                return broker_resolver(user_id, tenant_id)
+            except LookupError:
+                raise HTTPException(404, "Browser stack is not provisioned for this identity") from None
+        assert broker_owner_token is not None
+        return broker_http, broker_owner_token
 
     @app.get("/healthz")
     async def health():
@@ -476,12 +509,11 @@ def create_app(
     async def session_state(request: Request):
         row = session_for(request)
         with closing(store.connect()) as db:
-            owner = db.execute("SELECT * FROM browser_ownership WHERE slot=1").fetchone()
-        browser = "closed"
-        if owner is not None:
-            browser = "open" if owner["broker_session_id"] else "opening"
-            if owner["user_id"] != row["user_id"] or owner["tenant_id"] != row["tenant_id"]:
-                browser = "unavailable"
+            owner = db.execute(
+                "SELECT * FROM browser_ownership_v2 WHERE user_id=? AND tenant_id=?",
+                (row["user_id"], row["tenant_id"]),
+            ).fetchone()
+        browser = "closed" if owner is None else "open" if owner["broker_session_id"] else "opening"
         return {
             "authenticated": True, "user_id": row["user_id"], "tenant_id": row["tenant_id"],
             "account": row["account"], "browser": browser,
@@ -497,13 +529,11 @@ def create_app(
                 raise
             return RedirectResponse("/signin?next=%2Fbrowser", status_code=303)
         with closing(store.connect()) as db:
-            owner = db.execute("SELECT * FROM browser_ownership WHERE slot=1").fetchone()
-        state = "closed"
-        if owner is not None:
-            if owner["user_id"] != row["user_id"] or owner["tenant_id"] != row["tenant_id"]:
-                state = "unavailable"
-            else:
-                state = "open" if owner["broker_session_id"] else "opening"
+            owner = db.execute(
+                "SELECT * FROM browser_ownership_v2 WHERE user_id=? AND tenant_id=?",
+                (row["user_id"], row["tenant_id"]),
+            ).fetchone()
+        state = "closed" if owner is None else "open" if owner["broker_session_id"] else "opening"
         csrf = html.escape(request.cookies.get(CSRF_COOKIE, ""), quote=True)
         account = html.escape(row["account"])
         authenticator_field = ""
@@ -535,16 +565,16 @@ def create_app(
         newly_claimed = False
         with closing(store.connect()) as db:
             db.execute("BEGIN IMMEDIATE")
-            owner = db.execute("SELECT * FROM browser_ownership WHERE slot=1").fetchone()
-            if owner is not None and (owner["user_id"] != row["user_id"] or owner["tenant_id"] != row["tenant_id"]):
-                db.commit()
-                raise HTTPException(409, "The shared browser node is in use")
+            owner = db.execute(
+                "SELECT * FROM browser_ownership_v2 WHERE user_id=? AND tenant_id=?",
+                (row["user_id"], row["tenant_id"]),
+            ).fetchone()
             if owner is not None and owner["broker_session_id"]:
                 db.commit()
                 raise HTTPException(409, "Browser session is already open")
             if owner is None:
                 db.execute(
-                    "INSERT INTO browser_ownership(slot,user_id,tenant_id,broker_session_id,claimed_at) VALUES(1,?,?,NULL,?)",
+                    "INSERT INTO browser_ownership_v2(user_id,tenant_id,broker_session_id,claimed_at) VALUES(?,?,NULL,?)",
                     (row["user_id"], row["tenant_id"], clock()),
                 )
                 newly_claimed = True
@@ -563,38 +593,18 @@ def create_app(
                 session_token = request.cookies.get(SESSION_COOKIE, "")
                 if not store.refresh_authentication(session_token, now=clock()):
                     raise HTTPException(401, "Session expired or revoked")
-            # This broker-only TOTP makes the portal a trusted holder of the
-            # broker seed. Phase 3 should replace it with a portal-signed
-            # assertion verified by the broker, so this gate is not reducible
-            # to a secret held by the portal.
-            current_step = int(clock() // TOTP_PERIOD)
-            with closing(store.connect()) as db:
-                totp_state = db.execute("SELECT last_step FROM broker_totp_state WHERE slot=1").fetchone()
-            last_broker_step = totp_state["last_step"] if totp_state else -1
-            if last_broker_step > current_step:
-                raise HTTPException(429, "Wait for a fresh broker authenticator time step")
-            broker_step = current_step if last_broker_step < current_step else current_step + 1
-            broker_code = totp_code(broker_totp_secret, broker_step)
-            if code is not None and secrets.compare_digest(broker_code, code):
-                # Keep the human-entered value single-use even in the rare
-                # event that two independent TOTP seeds produce the same six digits.
-                if broker_step >= current_step + 1:
-                    raise HTTPException(429, "Wait for a fresh broker authenticator time step")
-                broker_code = totp_code(broker_totp_secret, broker_step + 1)
-                broker_step += 1
-            with closing(store.connect()) as db:
-                db.execute(
-                    "INSERT OR REPLACE INTO broker_totp_state(slot,last_step) VALUES(1,?)",
-                    (broker_step,),
-                )
             broker_payload: dict[str, Any] = {
-                "totp_code": broker_code, "start_url": "https://example.com",
+                "portal_assertion": _portal_assertion(
+                    assertion_key, user_id=row["user_id"], tenant_id=row["tenant_id"], now=clock()
+                ),
+                "start_url": "https://example.com",
             }
             for key in ("start_url", "auth_profile"):
                 if key in data:
                     broker_payload[key] = _required_text(data, key, 2048 if key == "start_url" else 200)
-            opened = await broker_http.post(
-                BROKER_OPEN_PATH, headers=internal_headers(broker_owner_token), json=broker_payload,
+            selected_broker, selected_owner_token = broker_for(row["user_id"], row["tenant_id"])
+            opened = await selected_broker.post(
+                BROKER_OPEN_PATH, headers=internal_headers(selected_owner_token), json=broker_payload,
             )
             if opened.status_code not in (200, 201):
                 raise _upstream_error(opened, "Browser could not be opened")
@@ -605,8 +615,8 @@ def create_app(
                 raise HTTPException(502, "Broker response missing session id")
             with closing(store.connect()) as db:
                 updated = db.execute(
-                    """UPDATE browser_ownership SET broker_session_id=?
-                       WHERE slot=1 AND user_id=? AND tenant_id=? AND broker_session_id IS NULL""",
+                    """UPDATE browser_ownership_v2 SET broker_session_id=?
+                       WHERE user_id=? AND tenant_id=? AND broker_session_id IS NULL""",
                     (session_id, row["user_id"], row["tenant_id"]),
                 ).rowcount
             if updated != 1:
@@ -621,14 +631,14 @@ def create_app(
             if active is None or active.status_code != 200:
                 # Do not leave a browser usable by agents if the OAuth gateway
                 # could not bind its credentials to this human owner.
-                cleanup = await broker_http.delete(
-                    BROKER_CLOSE_PREFIX + session_id, headers=internal_headers(broker_owner_token),
+                cleanup = await selected_broker.delete(
+                    BROKER_CLOSE_PREFIX + session_id, headers=internal_headers(selected_owner_token),
                 )
                 if cleanup.status_code not in (200, 204, 404):
                     raise HTTPException(502, "Gateway binding failed and browser cleanup was not confirmed")
                 with closing(store.connect()) as db:
                     db.execute(
-                        "DELETE FROM browser_ownership WHERE slot=1 AND user_id=? AND tenant_id=? AND broker_session_id=?",
+                        "DELETE FROM browser_ownership_v2 WHERE user_id=? AND tenant_id=? AND broker_session_id=?",
                         (row["user_id"], row["tenant_id"], session_id),
                     )
                 if active is None:
@@ -643,7 +653,7 @@ def create_app(
             if newly_claimed:
                 with closing(store.connect()) as db:
                     db.execute(
-                        """DELETE FROM browser_ownership WHERE slot=1 AND user_id=? AND tenant_id=?
+                        """DELETE FROM browser_ownership_v2 WHERE user_id=? AND tenant_id=?
                            AND broker_session_id IS NULL""",
                         (row["user_id"], row["tenant_id"]),
                     )
@@ -652,17 +662,19 @@ def create_app(
     async def close_browser(request: Request):
         row = await mutation(request)
         with closing(store.connect()) as db:
-            owner = db.execute("SELECT * FROM browser_ownership WHERE slot=1").fetchone()
+            owner = db.execute(
+                "SELECT * FROM browser_ownership_v2 WHERE user_id=? AND tenant_id=?",
+                (row["user_id"], row["tenant_id"]),
+            ).fetchone()
         if owner is None:
             return {"status": "closed"}
-        if owner["user_id"] != row["user_id"] or owner["tenant_id"] != row["tenant_id"]:
-            raise HTTPException(409, "The shared browser node is in use")
         if not owner["broker_session_id"]:
             raise HTTPException(409, "Browser session is still opening")
+        selected_broker, selected_owner_token = broker_for(row["user_id"], row["tenant_id"])
         try:
-            closed = await broker_http.delete(
+            closed = await selected_broker.delete(
                 BROKER_CLOSE_PREFIX + owner["broker_session_id"],
-                headers=internal_headers(broker_owner_token),
+                headers=internal_headers(selected_owner_token),
             )
         except httpx.HTTPError:
             raise HTTPException(502, "Browser service unavailable") from None
@@ -679,7 +691,7 @@ def create_app(
             raise HTTPException(502, "Browser closed but gateway state could not be cleared")
         with closing(store.connect()) as db:
             db.execute(
-                "DELETE FROM browser_ownership WHERE slot=1 AND user_id=? AND tenant_id=? AND broker_session_id=?",
+                "DELETE FROM browser_ownership_v2 WHERE user_id=? AND tenant_id=? AND broker_session_id=?",
                 (row["user_id"], row["tenant_id"], owner["broker_session_id"]),
             )
         return {"status": "closed"}
@@ -878,15 +890,21 @@ def create_app(
 
 
 def app_from_environment() -> FastAPI:
+    broker_resolver = None
+    if os.environ.get("TENANT_STACK_ROOT"):
+        from tenant_stacks import TenantBrokerRegistry
+
+        broker_resolver = TenantBrokerRegistry(os.environ["TENANT_STACK_ROOT"], "portal")
     return create_app(
         state_root=os.environ["PORTAL_STATE_ROOT"],
         identity_internal_token=os.environ["IDENTITY_INTERNAL_TOKEN"],
-        broker_owner_token=os.environ["BROKER_OWNER_TOKEN"],
-        broker_totp_secret=os.environ["PORTAL_BROKER_TOTP_SECRET"],
+        broker_owner_token=os.environ.get("BROKER_OWNER_TOKEN"),
+        portal_assertion_private_key=os.environ["PORTAL_ASSERTION_PRIVATE_KEY"],
         gateway_internal_token=os.environ["MCP_GATEWAY_INTERNAL_TOKEN"],
         public_origin=os.environ["PORTAL_PUBLIC_ORIGIN"],
         identity_base_url=os.environ.get("PORTAL_IDENTITY_URL", "http://identity"),
         broker_base_url=os.environ.get("PORTAL_BROKER_URL", "http://approval-broker:18001"),
+        broker_resolver=broker_resolver,
         gateway_base_url=os.environ.get("PORTAL_GATEWAY_URL", "http://mcp-gateway"),
         authentication_freshness_ttl=int(
             os.environ.get("PORTAL_AUTHENTICATION_FRESHNESS_SECONDS", "120")

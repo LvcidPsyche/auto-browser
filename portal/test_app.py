@@ -1,19 +1,28 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 from pathlib import Path
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
-from approval_broker.app import TOTP_PERIOD, totp_code
 from portal.app import BROKER_OPEN_PATH, create_app
 
 IDENTITY_TOKEN = "i" * 40
 BROKER_TOKEN = "b" * 40
 GATEWAY_TOKEN = "g" * 40
-BROKER_TOTP_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+ASSERTION_PRIVATE_KEY = base64.urlsafe_b64encode(
+    Ed25519PrivateKey.generate().private_bytes(
+        serialization.Encoding.Raw,
+        serialization.PrivateFormat.Raw,
+        serialization.NoEncryption(),
+    )
+).rstrip(b"=").decode()
 ORIGIN = "https://portal.example"
 
 
@@ -23,7 +32,7 @@ class Upstreams:
         self.identity_calls: list[tuple[str, dict]] = []
         self.broker_calls: list[tuple[str, str, dict | None, str | None]] = []
         self.gateway_calls: list[tuple[str, str, dict | None]] = []
-        self.broker_codes: set[str] = set()
+        self.broker_assertions: set[str] = set()
         self.active = False
         self.fail_active_binding = False
 
@@ -64,9 +73,9 @@ class Upstreams:
         if request.headers.get("authorization") != f"Bearer {BROKER_TOKEN}":
             return httpx.Response(401)
         if request.method == "POST" and request.url.path == BROKER_OPEN_PATH:
-            if body["totp_code"] in self.broker_codes:
-                return httpx.Response(403, json={"detail": "Authenticator code already used"})
-            self.broker_codes.add(body["totp_code"])
+            if body["portal_assertion"] in self.broker_assertions:
+                return httpx.Response(403, json={"detail": "Assertion already used"})
+            self.broker_assertions.add(body["portal_assertion"])
             self.active = True
             return httpx.Response(200, json={
                 "id": "browser-1", "owner_token": BROKER_TOKEN,
@@ -116,7 +125,9 @@ def app_at(tmp_path: Path, clock: list[float], upstreams: Upstreams, **kwargs):
         state_root=tmp_path / "portal-state",
         identity_internal_token=IDENTITY_TOKEN,
         broker_owner_token=BROKER_TOKEN,
-        broker_totp_secret=kwargs.pop("broker_totp_secret", BROKER_TOTP_SECRET),
+        portal_assertion_private_key=kwargs.pop(
+            "portal_assertion_private_key", ASSERTION_PRIVATE_KEY
+        ),
         gateway_internal_token=GATEWAY_TOKEN,
         public_origin=ORIGIN,
         identity_transport=httpx.MockTransport(upstreams.identity),
@@ -141,9 +152,9 @@ def mutate(csrf: str) -> dict[str, str]:
     return {"Origin": ORIGIN, "X-CSRF-Token": csrf}
 
 
-def test_broker_totp_secret_is_required_to_have_160_bits(tmp_path, clock, upstreams):
-    with pytest.raises(ValueError, match="160 bits"):
-        app_at(tmp_path, clock, upstreams, broker_totp_secret="JBSWY3DP")
+def test_portal_assertion_private_key_must_be_valid(tmp_path, clock, upstreams):
+    with pytest.raises(ValueError, match="Ed25519"):
+        app_at(tmp_path, clock, upstreams, portal_assertion_private_key="invalid")
 
 
 def test_login_cookie_is_hardened_and_replay_is_rejected(tmp_path, clock, upstreams):
@@ -234,8 +245,9 @@ def test_open_inside_freshness_window_needs_no_second_human_code(tmp_path, clock
         )
         assert response.json() == {"status": "open", "session_id": "browser-1"}
         assert [body["purpose"] for _, body in upstreams.identity_calls] == ["portal_login"]
-        expected = totp_code(BROKER_TOTP_SECRET, int(clock[0] // TOTP_PERIOD))
-        assert upstreams.broker_calls[-1][2]["totp_code"] == expected
+        assertion = upstreams.broker_calls[-1][2]["portal_assertion"]
+        assert assertion.count(".") == 1
+        assert "totp_code" not in upstreams.broker_calls[-1][2]
         assert upstreams.broker_calls[-1][3] == f"Bearer {BROKER_TOKEN}"
 
 
@@ -314,16 +326,51 @@ def test_gateway_binding_failure_closes_broker_and_releases_owner(tmp_path, cloc
         assert client.get("/api/session").json()["browser"] == "closed"
 
 
-def test_second_distinct_user_fails_closed_while_node_is_owned(tmp_path, clock, upstreams):
+def test_second_distinct_user_gets_independent_ownership(tmp_path, clock, upstreams):
     app = app_at(tmp_path, clock, upstreams)
     with TestClient(app, base_url=ORIGIN) as first:
         csrf = login(first)
         assert first.post("/api/browser/open", headers=mutate(csrf), json={"totp_code": "333333"}).status_code == 200
         first.cookies.clear()
         csrf = login(first, "second@example.com", "222222")
-        denied = first.post("/api/browser/open", headers=mutate(csrf), json={"totp_code": "444444"})
-        assert denied.status_code == 409
-        assert len(upstreams.broker_calls) == 1
+        opened = first.post("/api/browser/open", headers=mutate(csrf), json={"totp_code": "444444"})
+        assert opened.status_code == 200
+        assert len(upstreams.broker_calls) == 2
+
+
+def test_broker_route_uses_authenticated_identity_and_ignores_client_ids(
+    tmp_path, clock, upstreams
+):
+    routed: list[tuple[str, str]] = []
+    calls: list[tuple[str, str]] = []
+
+    def make_broker(label: str) -> httpx.AsyncClient:
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append((label, request.headers["authorization"]))
+            return httpx.Response(200, json={"id": f"browser-{label}"})
+
+        return httpx.AsyncClient(
+            base_url=f"http://broker-{label}:18001", transport=httpx.MockTransport(handler)
+        )
+
+    brokers = {"user-1": make_broker("one"), "user-2": make_broker("two")}
+
+    def resolver(user_id: str, tenant_id: str):
+        routed.append((user_id, tenant_id))
+        suffix = "one" if user_id == "user-1" else "two"
+        return brokers[user_id], f"owner-{suffix}-" + "x" * 32
+
+    app = app_at(tmp_path, clock, upstreams, broker_resolver=resolver)
+    with TestClient(app, base_url=ORIGIN) as client:
+        csrf = login(client)
+        opened = client.post("/api/browser/open", headers=mutate(csrf), json={
+            "user_id": "user-2", "tenant_id": "tenant-2", "stack": "two",
+        })
+        assert opened.json()["session_id"] == "browser-one"
+    asyncio.run(brokers["user-1"].aclose())
+    asyncio.run(brokers["user-2"].aclose())
+    assert routed == [("user-1", "tenant-1")]
+    assert calls == [("one", "Bearer owner-one-" + "x" * 32)]
 
 
 def test_close_clears_local_owner_and_allows_next_user(tmp_path, clock, upstreams):
@@ -345,7 +392,7 @@ def test_broker_credential_and_private_fields_never_leak(tmp_path, clock, upstre
         client.post("/api/browser/close", headers=mutate(csrf), json={})
         combined = opened.text + listed.text
         assert BROKER_TOKEN not in combined
-        assert BROKER_TOTP_SECRET not in combined
+        assert ASSERTION_PRIVATE_KEY not in combined
         assert GATEWAY_TOKEN not in combined
         assert "controller_url" not in combined and "access_token" not in combined
 

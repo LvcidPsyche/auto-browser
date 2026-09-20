@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
 import json
 import threading
 from pathlib import Path
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
 from approval_broker.app import create_app, totp_code
@@ -39,6 +42,22 @@ def enroll(client: TestClient, clock: list[float]) -> str:
 def fresh(secret: str, clock: list[float]) -> str:
     clock[0] += 30
     return totp_code(secret, int(clock[0] // 30))
+
+
+def signed_assertion(
+    key: Ed25519PrivateKey, clock: list[float], *, user: str = "user-a",
+    tenant: str = "tenant-a", purpose: str = "browser_open", expires_in: int = 60,
+    jti: str = "assertion-id-123456",
+) -> str:
+    claims = {
+        "sub": user, "tenant": tenant, "purpose": purpose,
+        "iat": int(clock[0]), "exp": int(clock[0]) + expires_in, "jti": jti,
+    }
+    payload = base64.urlsafe_b64encode(
+        json.dumps(claims, sort_keys=True, separators=(",", ":")).encode()
+    ).rstrip(b"=").decode()
+    signature = base64.urlsafe_b64encode(key.sign(payload.encode())).rstrip(b"=").decode()
+    return f"{payload}.{signature}"
 
 
 def test_owner_totp_opens_one_session_with_optional_profile(tmp_path: Path, clock: list[float]) -> None:
@@ -173,6 +192,58 @@ def test_agent_session_status_is_safe_and_portal_is_opt_in(tmp_path: Path, clock
         assert ready == {"status": "ready", "portal_url": "https://portal.example"}
         tools = {entry["name"] for entry in client.get("/mcp/tools", headers=auth(AGENT)).json()}
         assert "browser.session_status" in tools
+
+
+def test_portal_assertion_is_signed_scoped_fresh_and_single_use(
+    tmp_path: Path, clock: list[float]
+) -> None:
+    active = False
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal active
+        if request.method == "GET":
+            return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
+        if request.method == "POST" and request.url.path == "/sessions":
+            active = True
+            return httpx.Response(200, json={"id": "owner-1"})
+        if request.method == "DELETE":
+            active = False
+        return httpx.Response(200, json={})
+
+    key = Ed25519PrivateKey.generate()
+    public = base64.urlsafe_b64encode(
+        key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw
+        )
+    ).rstrip(b"=").decode()
+    app = app_at(
+        tmp_path, upstream, portal_assertion_public_key=public,
+        expected_user_id="user-a", expected_tenant_id="tenant-a",
+    )
+    with TestClient(app) as client:
+        valid = signed_assertion(key, clock)
+        opened = client.post("/owner/sessions", headers=auth(OWNER), json={
+            "start_url": "https://example.com", "portal_assertion": valid,
+        })
+        assert opened.status_code == 200
+        assert client.delete("/owner/sessions/owner-1", headers=auth(OWNER)).status_code == 200
+        assert client.post("/owner/sessions", headers=auth(OWNER), json={
+            "start_url": "https://example.com", "portal_assertion": valid,
+        }).status_code == 403
+        for assertion in (
+            signed_assertion(key, clock, expires_in=-1, jti="expired-assertion-1"),
+            signed_assertion(key, clock, user="user-b", jti="wrong-user-assertion"),
+            signed_assertion(key, clock, tenant="tenant-b", jti="wrong-tenant-assertion"),
+            signed_assertion(key, clock, purpose="other", jti="wrong-purpose-assertion"),
+            "unsigned-payload-that-is-long-enough.invalid-signature-that-is-long-enough",
+        ):
+            response = client.post("/owner/sessions", headers=auth(OWNER), json={
+                "start_url": "https://example.com", "portal_assertion": assertion,
+            })
+            assert response.status_code == 403
+        assert client.post("/owner/sessions", headers=auth(OWNER), json={
+            "start_url": "https://example.com", "totp_code": "123456",
+        }).status_code == 403
 
 
 def test_owner_deny_or_revoke_blocks_agent_until_next_owner_session(tmp_path: Path, clock: list[float]) -> None:

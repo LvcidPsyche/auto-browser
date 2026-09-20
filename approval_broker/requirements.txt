@@ -1,3 +1,4 @@
 fastapi>=0.141.1,<0.142
 httpx==0.28.1
+cryptography>=46,<47
 uvicorn>=0.35,<0.36

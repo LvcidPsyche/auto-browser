@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -268,21 +269,74 @@ def test_refresh_rotation_and_replay_revokes_family(tmp_path: Path, clock, broke
         assert client.post("/mcp", headers=bearer(new_access), json={}).status_code == 401
 
 
-def test_user_a_cannot_use_user_b_mapping_or_active_browser(tmp_path: Path, clock, broker_calls) -> None:
+def test_two_users_can_be_active_but_cannot_use_each_others_mapping(tmp_path: Path, clock, broker_calls) -> None:
     with TestClient(app_at(tmp_path, clock, broker_calls)) as client:
         _, access_a, _ = connection(client, user="user-a", tenant="tenant")
         _, access_b, _ = connection(client, user="user-b", tenant="tenant")
         assert activate(client, "user-b", "tenant").status_code == 200
         request_b = json.loads(mcp(client, access_b, "browser.request_access", {"purpose": "b-task"}).json()["result"]["content"][0]["text"])["request_id"]
-        assert mcp(client, access_a, "browser.request_access", {"purpose": "a-task"}).status_code == 403
-        status_a = json.loads(mcp(client, access_a, "browser.session_status", {}).json()["result"]["content"][0]["text"])
-        assert status_a["state"] == "session_closed"
-        assert activate(client, "user-b", "tenant", False).status_code == 200
         assert activate(client, "user-a", "tenant").status_code == 200
+        assert mcp(client, access_a, "browser.request_access", {"purpose": "a-task"}).status_code == 200
+        status_a = json.loads(mcp(client, access_a, "browser.session_status", {}).json()["result"]["content"][0]["text"])
+        assert status_a["state"] == "ready"
+        assert activate(client, "user-b", "tenant", False).status_code == 200
         guessed = mcp(client, access_a, "browser.click", {"request_id": request_b, "arguments": {}})
         assert guessed.status_code == 404
         forbidden = mcp(client, access_a, "browser.request_access", {"purpose": "x", "user_id": "user-b"})
         assert forbidden.status_code == 400
+
+
+def test_access_token_identity_selects_distinct_broker_and_credential(
+    tmp_path: Path, clock
+) -> None:
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    calls: list[tuple[str, str, str]] = []
+
+    def make_client(label: str) -> httpx.AsyncClient:
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            calls.append((label, request.headers["authorization"], body["params"]["name"]))
+            value = {"status": "ready"} if body["params"]["name"] == "browser.session_status" else {
+                "id": f"raw-{label}", "status": "approved"
+            }
+            return httpx.Response(200, json={"result": {
+                "content": [{"type": "text", "text": json.dumps(value)}]
+            }})
+
+        return httpx.AsyncClient(
+            base_url=f"http://broker-{label}:18001", transport=httpx.MockTransport(handler)
+        )
+
+    brokers = {"user-a": make_client("a"), "user-b": make_client("b")}
+
+    def resolver(user_id: str, tenant_id: str):
+        assert tenant_id == "tenant"
+        return brokers[user_id], f"agent-{user_id}-" + "x" * 32
+
+    app = create_app(
+        issuer_url=ISSUER, resource_url=RESOURCE, portal_url=PORTAL,
+        internal_token=INTERNAL, broker_token=BROKER,
+        database_path=private / "oauth.sqlite3", broker_resolver=resolver,
+        clock=lambda: clock[0],
+    )
+    with TestClient(app) as client:
+        _, access_a, _ = connection(client, user="user-a", tenant="tenant")
+        _, access_b, _ = connection(client, user="user-b", tenant="tenant")
+        assert activate(client, "user-a", "tenant").status_code == 200
+        assert activate(client, "user-b", "tenant").status_code == 200
+        assert mcp(client, access_a, "browser.session_status", {}).status_code == 200
+        assert mcp(client, access_b, "browser.session_status", {}).status_code == 200
+        forged = mcp(client, access_a, "browser.request_access", {
+            "purpose": "x", "tenant_id": "tenant", "user_id": "user-b",
+        })
+        assert forged.status_code == 400
+    asyncio.run(brokers["user-a"].aclose())
+    asyncio.run(brokers["user-b"].aclose())
+    assert calls == [
+        ("a", "Bearer agent-user-a-" + "x" * 32, "browser.session_status"),
+        ("b", "Bearer agent-user-b-" + "x" * 32, "browser.session_status"),
+    ]
 
 
 def test_disconnect_scoped_to_user_invalidates_access_and_refresh(tmp_path: Path, clock, broker_calls) -> None:
