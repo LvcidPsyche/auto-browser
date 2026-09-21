@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import hmac
 import json
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -25,6 +26,20 @@ def bearer(value: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {value}"}
 
 
+def site_scope(user: str, tenant: str, now: float) -> dict[str, str]:
+    claims = {
+        "sub": user, "tenant": tenant, "purpose": "site_requests",
+        "iat": int(now), "exp": int(now) + 60,
+    }
+    payload = base64.urlsafe_b64encode(
+        json.dumps(claims, sort_keys=True, separators=(",", ":")).encode()
+    ).rstrip(b"=").decode()
+    signature = base64.urlsafe_b64encode(
+        hmac.new(INTERNAL.encode(), payload.encode(), hashlib.sha256).digest()
+    ).rstrip(b"=").decode()
+    return bearer(payload + "." + signature)
+
+
 def pkce(verifier: str) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
 
@@ -39,7 +54,7 @@ def broker_calls() -> list[dict]:
     return []
 
 
-def app_at(tmp_path: Path, clock: list[float], broker_calls: list[dict]):
+def app_at(tmp_path: Path, clock: list[float], broker_calls: list[dict], **options):
     private = tmp_path / "private"
     private.mkdir(mode=0o700, exist_ok=True)
 
@@ -62,7 +77,7 @@ def app_at(tmp_path: Path, clock: list[float], broker_calls: list[dict]):
         issuer_url=ISSUER, resource_url=RESOURCE, portal_url=PORTAL,
         internal_token=INTERNAL, broker_token=BROKER,
         database_path=private / "oauth.sqlite3", broker_transport=httpx.MockTransport(broker),
-        clock=lambda: clock[0],
+        clock=lambda: clock[0], **options,
     )
 
 
@@ -373,3 +388,100 @@ def test_credentials_and_raw_ids_do_not_leak_or_rest_plaintext(tmp_path: Path, c
         assert access.encode() not in database_bytes
         assert refresh.encode() not in database_bytes
         assert client_id.encode() in database_bytes  # client ids are public, not credentials
+
+
+def test_site_request_is_persistent_without_a_browser_or_policy_change(tmp_path: Path, clock, broker_calls) -> None:
+    with TestClient(app_at(tmp_path, clock, broker_calls)) as client:
+        _, access, _ = connection(client)
+        response = mcp(client, access, "browser.request_site", {
+            "hostname": " Shop.Example ", "reason": "Need to check today’s orders.",
+        })
+        assert response.status_code == 200
+        created = json.loads(response.json()["result"]["content"][0]["text"])
+        assert created["state"] == "pending"
+        assert created["portal_url"].startswith(f"{PORTAL}/sites?")
+        assert broker_calls == []
+        duplicate = json.loads(mcp(client, access, "browser.request_site", {
+            "hostname": "shop.example", "reason": "Different wording does not create a second pending request.",
+        }).json()["result"]["content"][0]["text"])
+        assert duplicate["request_id"] == created["request_id"]
+        listed = client.get(
+            "/internal/site-requests", headers=site_scope("user-a", "tenant-a", clock[0])
+        )
+        assert listed.status_code == 200
+        assert len(listed.json()["requests"]) == 1
+        assert listed.json()["requests"][0]["hostname"] == "shop.example"
+        assert listed.json()["requests"][0]["reason"] == "Need to check today’s orders."
+        assert client.get(
+            "/internal/site-requests", headers=site_scope("user-b", "tenant-a", clock[0])
+        ).json() == {"requests": []}
+        assert client.get(
+            "/internal/site-requests", headers=bearer(INTERNAL),
+            params={"user_id": "user-a", "tenant_id": "tenant-a"},
+        ).status_code == 401
+        assert mcp(client, access, "browser.site_request_status", {
+            "request_id": created["request_id"],
+        }).status_code == 200
+        assert mcp(client, access, "browser.approve_site", {"request_id": created["request_id"]}).status_code == 404
+
+
+def test_site_request_rejects_selectors_and_isolated_by_grant_and_user(tmp_path: Path, clock, broker_calls) -> None:
+    with TestClient(app_at(tmp_path, clock, broker_calls)) as client:
+        _, access_a, _ = connection(client, user="user-a", tenant="tenant")
+        _, access_a_second, _ = connection(client, user="user-a", tenant="tenant")
+        _, access_b, _ = connection(client, user="user-b", tenant="tenant")
+        created = json.loads(mcp(client, access_a, "browser.request_site", {
+            "hostname": "billing.example", "reason": "Invoices",
+        }).json()["result"]["content"][0]["text"])
+        assert mcp(client, access_a_second, "browser.site_request_status", {
+            "request_id": created["request_id"],
+        }).status_code == 404
+        assert mcp(client, access_b, "browser.site_request_status", {
+            "request_id": created["request_id"],
+        }).status_code == 404
+        assert mcp(client, access_b, "browser.request_site", {
+            "hostname": "billing.example", "reason": "Separate user request",
+        }).status_code == 200
+        assert mcp(client, access_a, "browser.request_site", {
+            "hostname": "https://billing.example", "reason": "bad",
+        }).status_code == 400
+        assert mcp(client, access_a, "browser.request_site", {
+            "hostname": "billing.example", "reason": "x", "tenant_id": "tenant",
+        }).status_code == 400
+
+
+def test_site_request_rate_expiry_and_portal_decision(tmp_path: Path, clock, broker_calls) -> None:
+    with TestClient(app_at(tmp_path, clock, broker_calls, site_request_rate_limit=2,
+                           site_request_rate_window=60, site_request_ttl=10)) as client:
+        _, access, _ = connection(client)
+        first = json.loads(mcp(client, access, "browser.request_site", {
+            "hostname": "one.example", "reason": "one",
+        }).json()["result"]["content"][0]["text"])
+        assert mcp(client, access, "browser.request_site", {"hostname": "two.example", "reason": "two"}).status_code == 200
+        assert mcp(client, access, "browser.request_site", {"hostname": "three.example", "reason": "three"}).status_code == 429
+        clock[0] += 11
+        expired = json.loads(mcp(client, access, "browser.site_request_status", {
+            "request_id": first["request_id"],
+        }).json()["result"]["content"][0]["text"])
+        assert expired["state"] == "expired"
+        decision = client.post(
+            f"/internal/site-requests/{first['request_id']}/decision",
+            headers=site_scope("user-a", "tenant-a", clock[0]),
+            json={"decision": "approved"},
+        )
+        assert decision.status_code == 200
+        assert decision.json()["status"] == "expired"
+
+
+def test_session_status_only_exposes_the_callers_allowed_hosts(tmp_path: Path, clock, broker_calls) -> None:
+    def policy(user_id: str, tenant_id: str):
+        assert tenant_id == "tenant"
+        return {"allowed_hosts": ["A.Example", "b.example"]} if user_id == "user-a" else {"allowed_hosts": ["private.example"]}
+
+    with TestClient(app_at(tmp_path, clock, broker_calls, policy_resolver=policy)) as client:
+        _, access_a, _ = connection(client, user="user-a", tenant="tenant")
+        _, access_b, _ = connection(client, user="user-b", tenant="tenant")
+        status_a = json.loads(mcp(client, access_a, "browser.session_status", {}).json()["result"]["content"][0]["text"])
+        status_b = json.loads(mcp(client, access_b, "browser.session_status", {}).json()["result"]["content"][0]["text"])
+        assert status_a["allowed_hosts"] == ["a.example", "b.example"]
+        assert status_b["allowed_hosts"] == ["private.example"]

@@ -51,6 +51,12 @@ services:
     depends_on:
       browser-node:
         condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).read()"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 10s
     environment:
       APP_ENV: production
       API_BIND_SCOPE: exposed

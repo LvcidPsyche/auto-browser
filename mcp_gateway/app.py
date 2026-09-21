@@ -7,7 +7,9 @@ select a user, tenant, profile, session, connection, or upstream grant.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -24,6 +26,8 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from tenant_stacks import normalize_hostname
+
 ACCESS_TTL = 900
 REFRESH_TTL = 30 * 24 * 60 * 60
 CODE_TTL = 120
@@ -35,6 +39,9 @@ FORBIDDEN_ID_KEYS = frozenset({
     "grant", "grant_id", "grantid", "connection", "connection_id", "connectionid",
 })
 ID_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,160}$")
+SITE_REQUEST_TTL = 24 * 60 * 60
+SITE_REQUEST_RATE_LIMIT = 5
+SITE_REQUEST_RATE_WINDOW = 60 * 60
 
 
 def _digest(value: str) -> str:
@@ -100,6 +107,22 @@ def _safe_identity(value: str, label: str) -> str:
     return value
 
 
+def _canonical_hostname(value: Any) -> str:
+    try:
+        return normalize_hostname(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "A valid hostname is required") from exc
+
+
+def _clean_reason(value: Any) -> str:
+    if not isinstance(value, str):
+        raise HTTPException(400, "A reason string is required")
+    cleaned = " ".join("".join(ch for ch in value if ch.isprintable() and ch not in "<>\r\n\t").split())
+    if not cleaned:
+        raise HTTPException(400, "A reason string is required")
+    return cleaned[:500]
+
+
 def _contains_forbidden_id(value: Any) -> bool:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -148,6 +171,10 @@ class ActiveUserRequest(StrictModel):
 class DisconnectRequest(StrictModel):
     user_id: str = Field(min_length=1, max_length=160)
     tenant_id: str = Field(min_length=1, max_length=160)
+
+
+class SiteRequestDecision(StrictModel):
+    decision: Literal["approved", "denied"]
 
 
 class McpRequest(StrictModel):
@@ -214,7 +241,29 @@ class Store:
                     user_id TEXT NOT NULL, tenant_id TEXT NOT NULL, updated_at REAL NOT NULL,
                     PRIMARY KEY(user_id, tenant_id)
                 );
+                CREATE TABLE IF NOT EXISTS site_requests (
+                    request_id TEXT PRIMARY KEY, grant_id TEXT NOT NULL,
+                    connection_ref TEXT NOT NULL, user_id TEXT NOT NULL, tenant_id TEXT NOT NULL,
+                    hostname TEXT NOT NULL, reason TEXT NOT NULL, created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL, status TEXT NOT NULL,
+                    decided_at REAL,
+                    FOREIGN KEY(grant_id) REFERENCES grants(grant_id)
+                );
+                CREATE INDEX IF NOT EXISTS site_requests_owner ON site_requests(grant_id, request_id);
+                CREATE INDEX IF NOT EXISTS site_requests_portal ON site_requests(user_id, tenant_id, created_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS pending_site_request_hostname
+                    ON site_requests(user_id, tenant_id, hostname) WHERE status='pending';
+                CREATE TABLE IF NOT EXISTS site_request_rate_windows (
+                    user_id TEXT NOT NULL, tenant_id TEXT NOT NULL, window_start REAL NOT NULL,
+                    request_count INTEGER NOT NULL,
+                    PRIMARY KEY(user_id, tenant_id)
+                );
             """)
+            # This index was introduced while the table was new.  Rebuild it on
+            # startup so a pre-release database cannot retain the old scope.
+            db.execute("DROP INDEX IF EXISTS pending_site_request_hostname")
+            db.execute("""CREATE UNIQUE INDEX pending_site_request_hostname
+                        ON site_requests(user_id, tenant_id, hostname) WHERE status='pending'""")
             runtime_columns = {
                 row["name"] for row in db.execute("PRAGMA table_info(runtime_binding)")
             }
@@ -251,6 +300,10 @@ def create_app(
     broker_transport: httpx.AsyncBaseTransport | None = None,
     broker_client: httpx.AsyncClient | None = None,
     broker_resolver: Callable[[str, str], tuple[httpx.AsyncClient, str]] | None = None,
+    policy_resolver: Callable[[str, str], Any] | None = None,
+    site_request_rate_limit: int = SITE_REQUEST_RATE_LIMIT,
+    site_request_rate_window: float = SITE_REQUEST_RATE_WINDOW,
+    site_request_ttl: float = SITE_REQUEST_TTL,
     clock: Any = time.time,
 ) -> FastAPI:
     issuer = _origin_url(issuer_url, "issuer_url")
@@ -264,6 +317,15 @@ def create_app(
         raise ValueError("Internal and broker credentials must be distinct and at least 32 characters")
     if broker_client is not None and broker_transport is not None:
         raise ValueError("Inject broker_client or broker_transport, not both")
+    if site_request_rate_limit < 1 or site_request_rate_window <= 0 or site_request_ttl <= 0:
+        raise ValueError("Site request limits and lifetime must be positive")
+    if policy_resolver is None and os.environ.get("TENANT_STACK_ROOT"):
+        try:
+            from tenant_stacks import TenantPolicyRegistry  # type: ignore[attr-defined]
+
+            policy_resolver = TenantPolicyRegistry(os.environ["TENANT_STACK_ROOT"])
+        except (ImportError, AttributeError):
+            pass
     store = Store(database_path)
     owns_client = broker_resolver is None and broker_client is None
     client = broker_client
@@ -295,6 +357,35 @@ def create_app(
         if not authorization or not authorization.startswith("Bearer ") or not secrets.compare_digest(
                 authorization[7:], internal_token):
             raise HTTPException(401, "Internal bearer required")
+
+    def require_site_scope(authorization: str | None) -> tuple[str, str]:
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(401, "Scoped internal bearer required")
+        try:
+            payload, signature = authorization[7:].split(".", 1)
+            expected = base64.urlsafe_b64encode(
+                hmac.new(internal_token.encode(), payload.encode("ascii"), hashlib.sha256).digest()
+            ).rstrip(b"=").decode("ascii")
+            if not secrets.compare_digest(signature, expected):
+                raise ValueError
+            decoded = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+            claims = json.loads(decoded)
+        except (ValueError, UnicodeError, json.JSONDecodeError):
+            raise HTTPException(401, "Invalid scoped internal bearer") from None
+        now = clock()
+        if (
+            not isinstance(claims, dict)
+            or claims.get("purpose") != "site_requests"
+            or not isinstance(claims.get("iat"), int)
+            or not isinstance(claims.get("exp"), int)
+            or claims["iat"] > now + 5
+            or claims["exp"] < now
+            or claims["exp"] - claims["iat"] > 60
+        ):
+            raise HTTPException(401, "Invalid or expired scoped internal bearer")
+        return _safe_identity(claims.get("sub"), "user_id"), _safe_identity(
+            claims.get("tenant"), "tenant_id"
+        )
 
     def bind_active(db: sqlite3.Connection, user_id: str, tenant_id: str) -> None:
         db.execute(
@@ -598,6 +689,66 @@ def create_app(
             db.commit()
         return {"disconnected": True}
 
+    def expire_site_requests(db: sqlite3.Connection, now: float) -> None:
+        db.execute(
+            "UPDATE site_requests SET status='expired' WHERE status='pending' AND expires_at<=?",
+            (now,),
+        )
+
+    def portal_site_request(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "request_id": row["request_id"], "hostname": row["hostname"], "reason": row["reason"],
+            "created_at": row["created_at"], "expires_at": row["expires_at"],
+            "status": row["status"], "decided_at": row["decided_at"],
+        }
+
+    @app.get("/internal/site-requests")
+    async def list_site_requests(authorization: str | None = Header(default=None)):
+        user_id, tenant_id = require_site_scope(authorization)
+        with closing(store.connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            expire_site_requests(db, clock())
+            rows = db.execute("""SELECT * FROM site_requests WHERE user_id=? AND tenant_id=?
+                               ORDER BY created_at DESC""", (user_id, tenant_id)).fetchall()
+            db.commit()
+        return {"requests": [portal_site_request(row) for row in rows]}
+
+    @app.get("/internal/site-requests/{request_id}")
+    async def get_site_request(request_id: str, authorization: str | None = Header(default=None)):
+        user_id, tenant_id = require_site_scope(authorization)
+        with closing(store.connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            expire_site_requests(db, clock())
+            row = db.execute("SELECT * FROM site_requests WHERE request_id=? AND user_id=? AND tenant_id=?",
+                             (request_id, user_id, tenant_id)).fetchone()
+            db.commit()
+        if not row:
+            raise HTTPException(404, "Site request not found")
+        return portal_site_request(row)
+
+    @app.post("/internal/site-requests/{request_id}/decision")
+    async def decide_site_request(request_id: str, payload: SiteRequestDecision,
+                                  authorization: str | None = Header(default=None)):
+        """Record the portal's completed policy action; this route never changes policy."""
+        user_id, tenant_id = require_site_scope(authorization)
+        now = clock()
+        with closing(store.connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            expire_site_requests(db, now)
+            row = db.execute("SELECT * FROM site_requests WHERE request_id=? AND user_id=? AND tenant_id=?",
+                             (request_id, user_id, tenant_id)).fetchone()
+            if not row:
+                raise HTTPException(404, "Site request not found")
+            if row["status"] != "pending":
+                db.commit()
+                return portal_site_request(row)
+            db.execute("UPDATE site_requests SET status=?, decided_at=? WHERE request_id=?",
+                       (payload.decision, now, request_id))
+            decided = db.execute("SELECT * FROM site_requests WHERE request_id=?", (request_id,)).fetchone()
+            db.commit()
+        assert decided is not None
+        return portal_site_request(decided)
+
     async def broker_call(
         user_id: str, tenant_id: str, name: str, arguments: dict[str, Any]
     ) -> Any:
@@ -629,6 +780,82 @@ def create_app(
             raise HTTPException(404, "Unknown request reference")
         return row["upstream_ref"]
 
+    def allowed_hosts(user_id: str, tenant_id: str) -> list[str]:
+        if policy_resolver is None:
+            return []
+        try:
+            policy = policy_resolver(user_id, tenant_id)
+        except (LookupError, OSError, ValueError):
+            return []
+        values = policy.get("allowed_hosts", []) if isinstance(policy, dict) else getattr(policy, "allowed_hosts", policy)
+        if not isinstance(values, (list, tuple, set, frozenset)):
+            return []
+        result: set[str] = set()
+        for value in values:
+            try:
+                result.add(_canonical_hostname(value))
+            except HTTPException:
+                continue
+        return sorted(result)
+
+    def site_request_view(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "request_id": row["request_id"], "state": row["status"],
+            "expires_at": row["expires_at"],
+            "portal_url": f"{portal}/sites?" + urlencode({"request_id": row["request_id"]}),
+        }
+
+    def create_site_request(token_row: sqlite3.Row, arguments: dict[str, Any]) -> dict[str, Any]:
+        if set(arguments) != {"hostname", "reason"}:
+            raise HTTPException(400, "hostname and reason are required")
+        hostname, reason = _canonical_hostname(arguments.get("hostname")), _clean_reason(arguments.get("reason"))
+        now = clock()
+        user_id, tenant_id, grant_id = token_row["user_id"], token_row["tenant_id"], token_row["grant_id"]
+        with closing(store.connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            expire_site_requests(db, now)
+            existing = db.execute("""SELECT * FROM site_requests
+                                   WHERE user_id=? AND tenant_id=? AND hostname=? AND status='pending'""",
+                                  (user_id, tenant_id, hostname)).fetchone()
+            if existing:
+                db.commit()
+                return site_request_view(existing)
+            window_start = now - (now % site_request_rate_window)
+            limit = db.execute("SELECT * FROM site_request_rate_windows WHERE user_id=? AND tenant_id=?",
+                               (user_id, tenant_id)).fetchone()
+            if not limit or limit["window_start"] != window_start:
+                db.execute("""INSERT OR REPLACE INTO site_request_rate_windows(user_id,tenant_id,window_start,request_count)
+                           VALUES(?,?,?,1)""", (user_id, tenant_id, window_start))
+            elif limit["request_count"] >= site_request_rate_limit:
+                db.commit()
+                raise HTTPException(429, "Site request rate limit exceeded")
+            else:
+                db.execute("""UPDATE site_request_rate_windows SET request_count=request_count+1
+                           WHERE user_id=? AND tenant_id=?""", (user_id, tenant_id))
+            request_id = _random()
+            db.execute("""INSERT INTO site_requests
+                       (request_id,grant_id,connection_ref,user_id,tenant_id,hostname,reason,created_at,expires_at,status,decided_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,'pending',NULL)""",
+                       (request_id, grant_id, token_row["connection_ref"], user_id, tenant_id, hostname, reason,
+                        now, now + site_request_ttl))
+            row = db.execute("SELECT * FROM site_requests WHERE request_id=?", (request_id,)).fetchone()
+            db.commit()
+        assert row is not None
+        return site_request_view(row)
+
+    def site_request_status(grant_id: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if set(arguments) != {"request_id"} or not isinstance(arguments.get("request_id"), str):
+            raise HTTPException(400, "A site request_id is required")
+        with closing(store.connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            expire_site_requests(db, clock())
+            row = db.execute("SELECT * FROM site_requests WHERE request_id=? AND grant_id=?",
+                             (arguments["request_id"], grant_id)).fetchone()
+            db.commit()
+        if not row:
+            raise HTTPException(404, "Site request not found")
+        return site_request_view(row)
+
     async def invoke_tool(token_row: sqlite3.Row, name: str, arguments: dict[str, Any]) -> Any:
         if _contains_forbidden_id(arguments):
             raise HTTPException(400, "Identity and browser ownership selectors are not accepted")
@@ -647,9 +874,17 @@ def create_app(
             else:
                 status = _redact_ids(await broker_call(user_id, tenant_id, name, {}))
                 state = status.get("status", "unknown") if isinstance(status, dict) else "unknown"
-            return {"state": state, "portal_url": f"{portal}/browser?" + urlencode({
-                "connection": token_row["connection_ref"]
-            })}
+            return {"state": state, "allowed_hosts": allowed_hosts(user_id, tenant_id),
+                    "portal_url": f"{portal}/browser?" + urlencode({
+                        "connection": token_row["connection_ref"]
+                    })}
+        if name == "browser.request_site":
+            return create_site_request(token_row, arguments)
+        if name == "browser.site_request_status":
+            return site_request_status(grant_id, arguments)
+        if name not in {"browser.request_access", "browser.get_request", "browser.complete",
+                        *(f"browser.{action}" for action in ALLOWED_ACTIONS)}:
+            raise HTTPException(404, "Tool unavailable")
         with closing(store.connect()) as db:
             binding = db.execute(
                 "SELECT 1 FROM runtime_binding WHERE user_id=? AND tenant_id=?",
@@ -676,8 +911,6 @@ def create_app(
                 safe.pop("id", None)
                 safe["request_id"] = public_ref
             return safe
-        if name not in {"browser.get_request", "browser.complete", *(f"browser.{x}" for x in ALLOWED_ACTIONS)}:
-            raise HTTPException(404, "Tool unavailable")
         if not isinstance(arguments.get("request_id"), str):
             raise HTTPException(400, "A gateway request_id is required")
         public_ref = arguments["request_id"]
@@ -701,6 +934,13 @@ def create_app(
     def tools() -> list[dict[str, Any]]:
         result = [{"name": "browser.session_status", "description": "Show safe browser readiness and the human portal link.",
                    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+                  {"name": "browser.request_site", "description": "Ask the human portal to consider adding a hostname. This never changes site policy.",
+                   "inputSchema": {"type": "object", "properties": {"hostname": {"type": "string"},
+                                                                      "reason": {"type": "string"}},
+                                   "required": ["hostname", "reason"], "additionalProperties": False}},
+                  {"name": "browser.site_request_status", "description": "Read this connection's site-request state.",
+                   "inputSchema": {"type": "object", "properties": {"request_id": {"type": "string"}},
+                                   "required": ["request_id"], "additionalProperties": False}},
                   {"name": "browser.request_access", "description": "Request access for an ordinary browser task.",
                    "inputSchema": {"type": "object", "properties": {"purpose": {"type": "string"}},
                                    "required": ["purpose"], "additionalProperties": False}}]
@@ -742,10 +982,12 @@ def create_app(
 
 def app_from_environment() -> FastAPI:
     broker_resolver = None
+    policy_resolver = None
     if os.environ.get("TENANT_STACK_ROOT"):
-        from tenant_stacks import TenantBrokerRegistry
+        from tenant_stacks import TenantBrokerRegistry, TenantPolicyRegistry
 
         broker_resolver = TenantBrokerRegistry(os.environ["TENANT_STACK_ROOT"], "gateway")
+        policy_resolver = TenantPolicyRegistry(os.environ["TENANT_STACK_ROOT"])
     return create_app(
         issuer_url=os.environ["MCP_GATEWAY_ISSUER_URL"],
         resource_url=os.environ["MCP_GATEWAY_RESOURCE_URL"],
@@ -755,6 +997,7 @@ def app_from_environment() -> FastAPI:
         database_path=os.environ["MCP_GATEWAY_DB"],
         broker_url=os.environ.get("MCP_GATEWAY_BROKER_URL", "http://approval-broker:18001"),
         broker_resolver=broker_resolver,
+        policy_resolver=policy_resolver,
     )
 
 

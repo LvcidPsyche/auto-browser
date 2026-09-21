@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tenant_stacks.registry import TenantBrokerRegistry, stack_key_for
+from tenant_stacks.registry import TenantBrokerRegistry, TenantPolicyRegistry, stack_key_for
 
 
 def descriptor(root: Path, user: str, tenant: str, **changes) -> Path:
@@ -23,6 +23,8 @@ def descriptor(root: Path, user: str, tenant: str, **changes) -> Path:
         "broker_mcp_url": f"http://tenant-broker-{key}:18001/mcp",
         "portal_owner_token": (f"portal-{user}-" + "p" * 48)[:48],
         "gateway_agent_token": (f"gateway-{user}-" + "g" * 48)[:48],
+        "allowed_hosts": ["example.com"],
+        "policy_revision": 1,
     }
     value.update(changes)
     path = home / "descriptor.json"
@@ -59,6 +61,24 @@ def test_guessed_identity_cannot_reuse_or_relabel_descriptor(tmp_path: Path) -> 
     registry = TenantBrokerRegistry(root, "gateway")
     with pytest.raises(LookupError):
         registry("user-b", "tenant")
+    value = json.loads(path.read_text())
+    value["user_id"] = "user-b"
+    path.write_text(json.dumps(value))
+    with pytest.raises(LookupError, match="ownership"):
+        registry("user-a", "tenant")
+
+
+def test_policy_registry_returns_only_bound_non_secret_policy(tmp_path: Path) -> None:
+    root = tmp_path / "stacks"
+    root.mkdir()
+    descriptor(root, "user-a", "tenant", allowed_hosts=["A.example"], policy_revision=3)
+    descriptor(root, "user-b", "tenant", allowed_hosts=["b.example"], policy_revision=7)
+
+    registry = TenantPolicyRegistry(root)
+    assert registry("user-a", "tenant") == {"allowed_hosts": ["a.example"], "revision": 3}
+    assert registry("user-b", "tenant") == {"allowed_hosts": ["b.example"], "revision": 7}
+
+    path = root / stack_key_for("user-a", "tenant") / "descriptor.json"
     value = json.loads(path.read_text())
     value["user_id"] = "user-b"
     path.write_text(json.dumps(value))

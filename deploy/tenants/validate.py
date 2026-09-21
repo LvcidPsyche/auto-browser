@@ -10,6 +10,7 @@ def main() -> None:
     assert "TENANT_BROKER_ALIAS" in compose
     assert "external: true" in compose
     assert "TENANT_DATA_VOLUME" in compose
+    assert "http://127.0.0.1:8000/healthz" in compose
     print("Offline enrolled-tenant compose invariants passed.")
 
 

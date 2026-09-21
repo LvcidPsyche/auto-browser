@@ -43,10 +43,12 @@ services:
       PORTAL_PUBLIC_ORIGIN: ${PORTAL_PUBLIC_ORIGIN:?Set canonical portal HTTPS origin}
       PORTAL_IDENTITY_URL: http://identity:18003
       PORTAL_GATEWAY_URL: http://mcp-gateway:18002
+      PORTAL_TENANT_POLICY_URL: http://tenant-policy:18005
       PORTAL_AUTHENTICATION_FRESHNESS_SECONDS: ${PORTAL_AUTHENTICATION_FRESHNESS_SECONDS:?Set portal authentication freshness seconds}
       IDENTITY_INTERNAL_TOKEN: ${IDENTITY_INTERNAL_TOKEN:?Set identity internal token}
       PORTAL_ASSERTION_PRIVATE_KEY: ${PORTAL_ASSERTION_PRIVATE_KEY:?Set portal assertion private key}
       MCP_GATEWAY_INTERNAL_TOKEN: ${MCP_GATEWAY_INTERNAL_TOKEN:?Set gateway internal token}
+      TENANT_POLICY_INTERNAL_TOKEN: ${TENANT_POLICY_INTERNAL_TOKEN:?Set tenant policy internal token}
       TENANT_STACK_ROOT: /tenant-stacks
     volumes:
       # Host directory must be owned by UID 10001 and mode 0700 before deploy.
@@ -89,6 +91,30 @@ services:
       - traefik.http.middlewares.ab-portal-rate.ratelimit.burst=40
     healthcheck:
       test: [CMD, python, -c, "import socket; s=socket.create_connection(('127.0.0.1',18004),3); s.close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  tenant-policy:
+    build:
+      context: ../..
+      dockerfile: tenant_policy_service/Dockerfile
+    restart: unless-stopped
+    environment:
+      TENANT_POLICY_INTERNAL_TOKEN: ${TENANT_POLICY_INTERNAL_TOKEN:?Set tenant policy internal token}
+      BROKER_PORTAL_ASSERTION_PUBLIC_KEY: ${BROKER_PORTAL_ASSERTION_PUBLIC_KEY:?Set portal assertion public key}
+      TENANT_STACK_ROOT: /tenant-stacks
+      TENANT_COMPOSE_FILE: /app/deploy/tenants/compose.yml
+      TENANT_MAX_RUNNING: "1"
+      TENANT_IDLE_TIMEOUT_SECONDS: "900"
+    volumes:
+      - ${TENANT_STACK_HOST_ROOT:?Set private tenant stack root}:/tenant-stacks
+      # This private service is the sole public-stack component with Docker
+      # control. It has no public route and accepts assertion-bound updates.
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [control-plane]
+    healthcheck:
+      test: [CMD, python3, -c, "import socket; s=socket.create_connection(('127.0.0.1',18005),3); s.close()"]
       interval: 15s
       timeout: 5s
       retries: 5

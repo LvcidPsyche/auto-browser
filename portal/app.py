@@ -6,7 +6,9 @@ the broker, controller, VNC server, or OAuth gateway.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import html
 import json
 import os
@@ -16,13 +18,15 @@ import sqlite3
 import time
 from contextlib import asynccontextmanager, closing
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Awaitable, Callable, Mapping
 from urllib.parse import quote, urlsplit
 
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+
+from tenant_stacks import MAX_ALLOWED_HOSTS, normalize_hostname
 
 SESSION_COOKIE = "ab_portal_session"
 CSRF_COOKIE = "ab_portal_csrf"
@@ -42,6 +46,8 @@ GATEWAY_CONNECTIONS_PATH = "/internal/connected-clients"
 GATEWAY_ACTIVE_USER_PATH = "/internal/active-user"
 GATEWAY_CONSENT_PREVIEW_PATH = "/internal/consent/preview"
 GATEWAY_CONSENT_PATH = "/internal/consent"
+GATEWAY_SITE_REQUESTS_PATH = "/internal/site-requests"
+TENANT_POLICY_APPLY_PATH = "/internal/allowed-hosts/apply"
 SECURITY_HEADERS = {
     "Cache-Control": "no-store, max-age=0",
     "Pragma": "no-cache",
@@ -96,13 +102,14 @@ def _assertion_private_key(value: str) -> Ed25519PrivateKey:
 
 def _portal_assertion(
     key: Ed25519PrivateKey, *, user_id: str, tenant_id: str, now: float,
+    purpose: str = "browser_open",
 ) -> str:
     import base64
 
     claims = {
         "sub": user_id,
         "tenant": tenant_id,
-        "purpose": "browser_open",
+        "purpose": purpose,
         "iat": int(now),
         "exp": int(now) + 60,
         "jti": secrets.token_urlsafe(24),
@@ -112,6 +119,33 @@ def _portal_assertion(
     ).rstrip(b"=").decode("ascii")
     signature = base64.urlsafe_b64encode(key.sign(payload.encode("ascii"))).rstrip(b"=").decode("ascii")
     return f"{payload}.{signature}"
+
+
+def _site_request_scope_token(
+    internal_token: str, *, user_id: str, tenant_id: str, now: float,
+) -> str:
+    claims = {
+        "sub": user_id,
+        "tenant": tenant_id,
+        "purpose": "site_requests",
+        "iat": int(now),
+        "exp": int(now) + 60,
+    }
+    payload = base64.urlsafe_b64encode(
+        json.dumps(claims, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).rstrip(b"=").decode("ascii")
+    signature = base64.urlsafe_b64encode(
+        hmac.new(internal_token.encode(), payload.encode("ascii"), hashlib.sha256).digest()
+    ).rstrip(b"=").decode("ascii")
+    return f"{payload}.{signature}"
+
+
+def _canonical_hostname(value: Any) -> str:
+    """Use the shared policy canonicalizer for every portal hostname."""
+    try:
+        return normalize_hostname(value)
+    except (TypeError, ValueError):
+        raise HTTPException(422, "Invalid hostname") from None
 
 
 class PortalStore:
@@ -153,6 +187,23 @@ class PortalStore:
                     claimed_at REAL NOT NULL,
                     PRIMARY KEY(user_id, tenant_id)
                 );
+                CREATE TABLE IF NOT EXISTS portal_site_policy_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recorded_at REAL NOT NULL,
+                    user_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    actor_type TEXT NOT NULL CHECK(actor_type IN ('human', 'assistant', 'system')),
+                    action TEXT NOT NULL,
+                    hostname TEXT,
+                    outcome TEXT NOT NULL,
+                    request_id TEXT
+                );
+                CREATE TRIGGER IF NOT EXISTS portal_site_policy_audit_no_update
+                BEFORE UPDATE ON portal_site_policy_audit
+                BEGIN SELECT RAISE(ABORT, 'portal site policy audit is append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS portal_site_policy_audit_no_delete
+                BEFORE DELETE ON portal_site_policy_audit
+                BEGIN SELECT RAISE(ABORT, 'portal site policy audit is append-only'); END;
                 """
             )
             columns = {
@@ -343,6 +394,12 @@ def create_app(
     broker_transport: httpx.AsyncBaseTransport | None = None,
     broker_resolver: Callable[[str, str], tuple[httpx.AsyncClient, str]] | None = None,
     gateway_transport: httpx.AsyncBaseTransport | None = None,
+    tenant_policy_internal_token: str | None = None,
+    tenant_policy_base_url: str = "http://tenant-policy:18005",
+    tenant_policy_client: httpx.AsyncClient | None = None,
+    tenant_policy_transport: httpx.AsyncBaseTransport | None = None,
+    policy_resolver: Callable[[str, str], Awaitable[Mapping[str, Any]] | Mapping[str, Any]] | None = None,
+    policy_applier: Callable[[str, str, list[str], int], Awaitable[Mapping[str, Any]]] | None = None,
     absolute_session_ttl: int = 12 * 60 * 60,
     idle_session_ttl: int = 30 * 60,
     authentication_freshness_ttl: int = 120,
@@ -365,6 +422,8 @@ def create_app(
         raise ValueError("Pass a broker client or transport, not both")
     if gateway_client is not None and gateway_transport is not None:
         raise ValueError("Pass a gateway client or transport, not both")
+    if tenant_policy_client is not None and tenant_policy_transport is not None:
+        raise ValueError("Pass a tenant policy client or transport, not both")
 
     owned: list[httpx.AsyncClient] = []
 
@@ -378,6 +437,10 @@ def create_app(
     identity_http = client(identity_client, identity_base_url, identity_transport)
     broker_http = client(broker_client, broker_base_url, broker_transport)
     gateway_http = client(gateway_client, gateway_base_url, gateway_transport)
+    policy_http = (
+        client(tenant_policy_client, tenant_policy_base_url, tenant_policy_transport)
+        if tenant_policy_internal_token is not None else None
+    )
     store = PortalStore(state_root)
 
     @asynccontextmanager
@@ -433,6 +496,15 @@ def create_app(
     def internal_headers(token: str) -> dict[str, str]:
         return {"Authorization": f"Bearer {token}"}
 
+    def site_request_headers(row: Mapping[str, Any]) -> dict[str, str]:
+        scoped = _site_request_scope_token(
+            gateway_internal_token,
+            user_id=row["user_id"],
+            tenant_id=row["tenant_id"],
+            now=clock(),
+        )
+        return {"Authorization": f"Bearer {scoped}"}
+
     def broker_for(user_id: str, tenant_id: str) -> tuple[httpx.AsyncClient, str]:
         if broker_resolver is not None:
             try:
@@ -441,6 +513,148 @@ def create_app(
                 raise HTTPException(404, "Browser stack is not provisioned for this identity") from None
         assert broker_owner_token is not None
         return broker_http, broker_owner_token
+
+    def audit(
+        *, row: Mapping[str, Any], action: str, hostname: str | None,
+        outcome: str, request_id: str | None = None,
+    ) -> None:
+        """Audit only identifiers and outcomes: never supplied authenticator codes."""
+        with closing(store.connect()) as db:
+            db.execute(
+                """INSERT INTO portal_site_policy_audit
+                   (recorded_at,user_id,tenant_id,actor_type,action,hostname,outcome,request_id)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (clock(), row["user_id"], row["tenant_id"], "human", action,
+                 hostname, outcome, request_id),
+            )
+
+    async def resolve_policy(user_id: str, tenant_id: str) -> tuple[list[str], int]:
+        if policy_resolver is None:
+            raise HTTPException(503, "Site policy service is not configured")
+        try:
+            value = policy_resolver(user_id, tenant_id)
+            if hasattr(value, "__await__"):
+                value = await value
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(502, "Site policy could not be read") from None
+        if not isinstance(value, Mapping):
+            raise HTTPException(502, "Invalid site policy response")
+        hosts, revision = value.get("allowed_hosts"), value.get("revision")
+        if not isinstance(hosts, list) or isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise HTTPException(502, "Invalid site policy response")
+        try:
+            canonical = [_canonical_hostname(host) for host in hosts]
+        except HTTPException:
+            raise HTTPException(502, "Invalid site policy response") from None
+        if len(canonical) > MAX_ALLOWED_HOSTS or len(set(canonical)) != len(canonical):
+            raise HTTPException(502, "Invalid site policy response")
+        return sorted(canonical), revision
+
+    async def apply_policy(
+        user_id: str, tenant_id: str, desired_hosts: list[str], expected_revision: int,
+    ) -> tuple[list[str], int]:
+        if policy_applier is not None:
+            try:
+                result = await policy_applier(user_id, tenant_id, desired_hosts, expected_revision)
+            except HTTPException:
+                raise
+            except Exception:
+                raise HTTPException(502, "Site policy could not be applied") from None
+            # The injected seam is trusted application code.  Let a small fake
+            # applier use a side-effect-only contract without weakening the
+            # production service's explicit response confirmation.
+            if result is None:
+                result = {"allowed_hosts": desired_hosts, "revision": expected_revision + 1}
+        else:
+            if policy_http is None or tenant_policy_internal_token is None:
+                raise HTTPException(503, "Site policy service is not configured")
+            try:
+                response = await policy_http.post(
+                    TENANT_POLICY_APPLY_PATH,
+                    headers=internal_headers(tenant_policy_internal_token),
+                    json={
+                        "portal_assertion": _portal_assertion(
+                            assertion_key, user_id=user_id, tenant_id=tenant_id,
+                            now=clock(), purpose="site_policy_change",
+                        ),
+                        "allowed_hosts": desired_hosts,
+                        "expected_revision": expected_revision,
+                    },
+                )
+            except httpx.HTTPError:
+                raise HTTPException(502, "Site policy service unavailable") from None
+            if response.status_code not in (200, 201):
+                raise _upstream_error(response, "Site policy could not be applied")
+            result = response.json()
+        if not isinstance(result, Mapping):
+            raise HTTPException(502, "Invalid site policy response")
+        hosts, revision = result.get("allowed_hosts"), result.get("revision")
+        if not isinstance(hosts, list) or isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise HTTPException(502, "Invalid site policy response")
+        try:
+            returned_hosts = sorted(_canonical_hostname(host) for host in hosts)
+        except HTTPException:
+            raise HTTPException(502, "Invalid site policy response") from None
+        if returned_hosts != desired_hosts or len(returned_hosts) > MAX_ALLOWED_HOSTS:
+            raise HTTPException(502, "Site policy application was not confirmed")
+        return returned_hosts, revision
+
+    async def require_fresh_site_change(
+        request: Request, row: Mapping[str, Any], data: Mapping[str, Any], *, action: str,
+    ) -> None:
+        if authentication_is_fresh(row, now=clock()):
+            return
+        response = await identity_http.post(
+            IDENTITY_VERIFY_PATH, headers=internal_headers(identity_internal_token),
+            json={"account": row["account"], "totp_code": _totp(data), "purpose": "site_policy_change"},
+        )
+        if response.status_code != 200:
+            audit(row=row, action=action, hostname=None, outcome="reauthentication_failed")
+            raise _upstream_error(response, "Authenticator verification failed")
+        verified_user, verified_tenant, _ = _identity(response.json(), row["account"])
+        if verified_user != row["user_id"] or verified_tenant != row["tenant_id"]:
+            audit(row=row, action=action, hostname=None, outcome="binding_rejected")
+            raise HTTPException(403, "Identity binding changed")
+        if not store.refresh_authentication(request.cookies.get(SESSION_COOKIE, ""), now=clock()):
+            raise HTTPException(401, "Session expired or revoked")
+
+    async def close_owned_browser(row: Mapping[str, Any]) -> None:
+        """Close the identity-bound browser before a controller restart."""
+        with closing(store.connect()) as db:
+            owner = db.execute(
+                "SELECT * FROM browser_ownership_v2 WHERE user_id=? AND tenant_id=?",
+                (row["user_id"], row["tenant_id"]),
+            ).fetchone()
+        if owner is None:
+            return
+        if not owner["broker_session_id"]:
+            raise HTTPException(409, "Browser session is still opening")
+        selected_broker, selected_owner_token = broker_for(row["user_id"], row["tenant_id"])
+        try:
+            closed = await selected_broker.delete(
+                BROKER_CLOSE_PREFIX + owner["broker_session_id"],
+                headers=internal_headers(selected_owner_token),
+            )
+        except httpx.HTTPError:
+            raise HTTPException(502, "Browser service unavailable") from None
+        if closed.status_code not in (200, 204, 404):
+            raise _upstream_error(closed, "Browser could not be closed")
+        try:
+            inactive = await gateway_http.post(
+                GATEWAY_ACTIVE_USER_PATH, headers=internal_headers(gateway_internal_token),
+                json={"user_id": row["user_id"], "tenant_id": row["tenant_id"], "active": False},
+            )
+        except httpx.HTTPError:
+            inactive = None
+        if inactive is None or inactive.status_code not in (200, 404):
+            raise HTTPException(502, "Browser closed but gateway state could not be cleared")
+        with closing(store.connect()) as db:
+            db.execute(
+                "DELETE FROM browser_ownership_v2 WHERE user_id=? AND tenant_id=? AND broker_session_id=?",
+                (row["user_id"], row["tenant_id"], owner["broker_session_id"]),
+            )
 
     @app.get("/healthz")
     async def health():
@@ -545,6 +759,7 @@ def create_app(
         return HTMLResponse(
             "<!doctype html><meta charset=utf-8><title>Secure Browser</title>"
             f"<h1>Secure Browser</h1><p>Signed in as {account}</p><p>Browser: {state}</p>"
+            "<p><a href='/sites'>Manage allowed sites and assistant requests</a></p>"
             "<h2>Open browser</h2><form method=post action=/api/browser/open>"
             f"<input type=hidden name=csrf_token value='{csrf}'>"
             "<label>Start URL <input name=start_url type=url value='https://example.com' required></label>"
@@ -552,6 +767,241 @@ def create_app(
             "<h2>Close browser</h2><form method=post action=/api/browser/close>"
             f"<input type=hidden name=csrf_token value='{csrf}'><button>Close server session</button></form>"
         )
+
+    def safe_site_request(value: Any, row: Mapping[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(value, Mapping):
+            return None
+        request_id = value.get("request_id", value.get("id"))
+        raw_host = value.get("hostname", value.get("host"))
+        if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", request_id):
+            return None
+        if value.get("status") != "pending":
+            return None
+        try:
+            hostname = _canonical_hostname(raw_host)
+        except HTTPException:
+            return None
+        # A gateway response must never be used to cross an immutable binding.
+        if value.get("user_id", row["user_id"]) != row["user_id"]:
+            return None
+        if value.get("tenant_id", row["tenant_id"]) != row["tenant_id"]:
+            return None
+        expires_at = value.get("expires_at")
+        if isinstance(expires_at, (int, float)) and not isinstance(expires_at, bool):
+            if expires_at <= clock():
+                return None
+        elif expires_at is not None and (not isinstance(expires_at, str) or len(expires_at) > 80):
+            return None
+        result: dict[str, Any] = {"request_id": request_id, "hostname": hostname}
+        if expires_at is not None:
+            result["expires_at"] = expires_at
+        for key in ("reason", "client_name"):
+            item = value.get(key)
+            if isinstance(item, str) and item.strip() and len(item) <= 500:
+                result[key] = item.strip()
+        return result
+
+    async def pending_site_requests(row: Mapping[str, Any]) -> list[dict[str, Any]]:
+        try:
+            response = await gateway_http.get(
+                GATEWAY_SITE_REQUESTS_PATH, headers=site_request_headers(row),
+            )
+        except httpx.HTTPError:
+            raise HTTPException(502, "Assistant request service unavailable") from None
+        if response.status_code != 200:
+            raise _upstream_error(response, "Assistant requests could not be listed")
+        body = response.json()
+        values = body.get("requests", body) if isinstance(body, (Mapping, list)) else []
+        if not isinstance(values, list):
+            raise HTTPException(502, "Invalid assistant request response")
+        return [item for value in values if (item := safe_site_request(value, row)) is not None]
+
+    async def site_request(request_id: str, row: Mapping[str, Any]) -> dict[str, Any]:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", request_id):
+            raise HTTPException(404, "Assistant request not found")
+        try:
+            response = await gateway_http.get(
+                f"{GATEWAY_SITE_REQUESTS_PATH}/{request_id}",
+                headers=site_request_headers(row),
+            )
+        except httpx.HTTPError:
+            raise HTTPException(502, "Assistant request service unavailable") from None
+        if response.status_code == 404:
+            raise HTTPException(404, "Assistant request not found")
+        if response.status_code != 200:
+            raise _upstream_error(response, "Assistant request could not be read")
+        item = safe_site_request(response.json(), row)
+        if item is None:
+            raise HTTPException(404, "Assistant request not found")
+        return item
+
+    async def decide_site_request(
+        *, row: Mapping[str, Any], request_id: str, decision: str,
+    ) -> None:
+        try:
+            response = await gateway_http.post(
+                f"{GATEWAY_SITE_REQUESTS_PATH}/{request_id}/decision",
+                headers=site_request_headers(row),
+                json={"decision": decision},
+            )
+        except httpx.HTTPError:
+            raise HTTPException(502, "Assistant request service unavailable") from None
+        if response.status_code not in (200, 204):
+            raise _upstream_error(response, "Assistant request decision could not be recorded")
+
+    @app.get("/sites")
+    async def sites_page(request: Request):
+        try:
+            row = session_for(request)
+        except HTTPException as exc:
+            if exc.status_code != 401:
+                raise
+            return RedirectResponse("/signin?next=%2Fsites", status_code=303)
+        csrf = html.escape(request.cookies.get(CSRF_COOKIE, ""), quote=True)
+        fresh = authentication_is_fresh(row, now=clock())
+        code = "" if fresh else (
+            "<label>Fresh authenticator code <input name=totp_code inputmode=numeric "
+            "autocomplete=one-time-code pattern='[0-9]{6}' required></label>"
+        )
+        hosts, _ = await resolve_policy(row["user_id"], row["tenant_id"])
+        requests = await pending_site_requests(row)
+        host_items = "".join(
+            "<li><code>" + html.escape(host) + "</code>"
+            "<form method=post action=/api/sites/remove><input type=hidden name=csrf_token value='" + csrf + "'>"
+            "<input type=hidden name=hostname value='" + html.escape(host, quote=True) + "'>"
+            + code + "<button>Remove</button></form></li>"
+            for host in hosts
+        ) or "<li>No sites are currently allowed.</li>"
+        request_items = "".join(
+            "<li><code>" + html.escape(item["hostname"]) + "</code>"
+            + (" expires " + html.escape(str(item["expires_at"])) if "expires_at" in item else "")
+            + (" from " + html.escape(item["client_name"]) if "client_name" in item else "")
+            + (" — " + html.escape(item["reason"]) if "reason" in item else "")
+            + "<form method=post action=/api/site-requests/" + html.escape(item["request_id"], quote=True)
+            + "/decision><input type=hidden name=csrf_token value='" + csrf + "'>"
+            + code + "<button name=decision value=approved>Approve</button>"
+            "<button name=decision value=denied>Deny</button></form></li>"
+            for item in requests
+        ) or "<li>No pending assistant requests.</li>"
+        return HTMLResponse(
+            "<!doctype html><meta charset=utf-8><title>Allowed sites</title>"
+            "<h1>Allowed sites</h1><p><a href='/browser'>Back to browser</a></p>"
+            "<p>Applying a change briefly restarts only your controller. Your current browser session "
+            "will close and must be reopened; saved authentication profiles stay intact.</p>"
+            "<h2>Allowed sites</h2><ul>" + host_items + "</ul>"
+            "<form method=post action=/api/sites><input type=hidden name=csrf_token value='" + csrf + "'>"
+            "<label>Hostname <input name=hostname required></label>" + code + "<button>Add site</button></form>"
+            "<h2>Pending assistant requests</h2><ul>" + request_items + "</ul>"
+        )
+
+    @app.get("/api/sites")
+    async def list_sites(request: Request):
+        row = session_for(request)
+        allowed_hosts, revision = await resolve_policy(row["user_id"], row["tenant_id"])
+        return {"allowed_hosts": allowed_hosts, "revision": revision}
+
+    @app.post("/api/sites")
+    async def add_site(request: Request):
+        row = await mutation(request)
+        data = await _payload(request)
+        hostname = _canonical_hostname(data.get("hostname"))
+        await require_fresh_site_change(request, row, data, action="site_add")
+        hosts, revision = await resolve_policy(row["user_id"], row["tenant_id"])
+        if hostname in hosts:
+            audit(row=row, action="site_add", hostname=hostname, outcome="already_allowed")
+            raise HTTPException(409, "Hostname is already allowed")
+        if len(hosts) >= MAX_ALLOWED_HOSTS:
+            audit(row=row, action="site_add", hostname=hostname, outcome="limit_rejected")
+            raise HTTPException(422, "At most 64 hostnames are allowed")
+        desired = sorted([*hosts, hostname])
+        try:
+            await close_owned_browser(row)
+            applied_hosts, applied_revision = await apply_policy(
+                row["user_id"], row["tenant_id"], desired, revision,
+            )
+        except HTTPException as exc:
+            audit(row=row, action="site_add", hostname=hostname, outcome="failed")
+            raise exc
+        audit(row=row, action="site_add", hostname=hostname, outcome="applied")
+        return {"allowed_hosts": applied_hosts, "revision": applied_revision}
+
+    @app.delete("/api/sites/{hostname}")
+    async def remove_site(hostname: str, request: Request):
+        row = await mutation(request)
+        data = await _payload(request)
+        hostname = _canonical_hostname(hostname)
+        await require_fresh_site_change(request, row, data, action="site_remove")
+        hosts, revision = await resolve_policy(row["user_id"], row["tenant_id"])
+        if hostname not in hosts:
+            audit(row=row, action="site_remove", hostname=hostname, outcome="not_allowed")
+            raise HTTPException(404, "Hostname is not allowed")
+        desired = [host for host in hosts if host != hostname]
+        try:
+            await close_owned_browser(row)
+            applied_hosts, applied_revision = await apply_policy(
+                row["user_id"], row["tenant_id"], desired, revision,
+            )
+        except HTTPException as exc:
+            audit(row=row, action="site_remove", hostname=hostname, outcome="failed")
+            raise exc
+        audit(row=row, action="site_remove", hostname=hostname, outcome="applied")
+        return {"allowed_hosts": applied_hosts, "revision": applied_revision}
+
+    @app.post("/api/sites/remove")
+    async def remove_site_form(request: Request):
+        row = await mutation(request)
+        data = await _payload(request)
+        hostname = _canonical_hostname(data.get("hostname"))
+        await require_fresh_site_change(request, row, data, action="site_remove")
+        hosts, revision = await resolve_policy(row["user_id"], row["tenant_id"])
+        if hostname not in hosts:
+            audit(row=row, action="site_remove", hostname=hostname, outcome="not_allowed")
+            raise HTTPException(404, "Hostname is not allowed")
+        desired = [host for host in hosts if host != hostname]
+        try:
+            await close_owned_browser(row)
+            applied_hosts, applied_revision = await apply_policy(
+                row["user_id"], row["tenant_id"], desired, revision,
+            )
+        except HTTPException as exc:
+            audit(row=row, action="site_remove", hostname=hostname, outcome="failed")
+            raise exc
+        audit(row=row, action="site_remove", hostname=hostname, outcome="applied")
+        return {"allowed_hosts": applied_hosts, "revision": applied_revision}
+
+    @app.get("/api/site-requests")
+    async def list_site_requests(request: Request):
+        return {"requests": await pending_site_requests(session_for(request))}
+
+    @app.post("/api/site-requests/{request_id}/decision")
+    async def site_request_decision(request_id: str, request: Request):
+        row = await mutation(request)
+        data = await _payload(request)
+        decision = data.get("decision")
+        if decision not in ("approved", "denied"):
+            raise HTTPException(422, "Invalid assistant request decision")
+        item = await site_request(request_id, row)
+        await require_fresh_site_change(request, row, data, action="site_request_" + decision)
+        if decision == "approved":
+            hosts, revision = await resolve_policy(row["user_id"], row["tenant_id"])
+            desired = sorted(set([*hosts, item["hostname"]]))
+            if len(desired) > MAX_ALLOWED_HOSTS:
+                audit(row=row, action="site_request_approved", hostname=item["hostname"], outcome="limit_rejected", request_id=request_id)
+                raise HTTPException(422, "At most 64 hostnames are allowed")
+            if desired != hosts:
+                try:
+                    await close_owned_browser(row)
+                    await apply_policy(row["user_id"], row["tenant_id"], desired, revision)
+                except HTTPException as exc:
+                    audit(row=row, action="site_request_approved", hostname=item["hostname"], outcome="failed", request_id=request_id)
+                    raise exc
+        try:
+            await decide_site_request(row=row, request_id=request_id, decision=decision)
+        except HTTPException as exc:
+            audit(row=row, action="site_request_" + decision, hostname=item["hostname"], outcome="decision_failed", request_id=request_id)
+            raise exc
+        audit(row=row, action="site_request_" + decision, hostname=item["hostname"], outcome="recorded", request_id=request_id)
+        return {"status": decision, "request_id": request_id}
 
     @app.post("/api/browser/open")
     async def open_browser(request: Request):
@@ -661,39 +1111,7 @@ def create_app(
     @app.post("/api/browser/close")
     async def close_browser(request: Request):
         row = await mutation(request)
-        with closing(store.connect()) as db:
-            owner = db.execute(
-                "SELECT * FROM browser_ownership_v2 WHERE user_id=? AND tenant_id=?",
-                (row["user_id"], row["tenant_id"]),
-            ).fetchone()
-        if owner is None:
-            return {"status": "closed"}
-        if not owner["broker_session_id"]:
-            raise HTTPException(409, "Browser session is still opening")
-        selected_broker, selected_owner_token = broker_for(row["user_id"], row["tenant_id"])
-        try:
-            closed = await selected_broker.delete(
-                BROKER_CLOSE_PREFIX + owner["broker_session_id"],
-                headers=internal_headers(selected_owner_token),
-            )
-        except httpx.HTTPError:
-            raise HTTPException(502, "Browser service unavailable") from None
-        if closed.status_code not in (200, 204, 404):
-            raise _upstream_error(closed, "Browser could not be closed")
-        try:
-            inactive = await gateway_http.post(
-                GATEWAY_ACTIVE_USER_PATH, headers=internal_headers(gateway_internal_token),
-                json={"user_id": row["user_id"], "tenant_id": row["tenant_id"], "active": False},
-            )
-        except httpx.HTTPError:
-            inactive = None
-        if inactive is None or inactive.status_code not in (200, 404):
-            raise HTTPException(502, "Browser closed but gateway state could not be cleared")
-        with closing(store.connect()) as db:
-            db.execute(
-                "DELETE FROM browser_ownership_v2 WHERE user_id=? AND tenant_id=? AND broker_session_id=?",
-                (row["user_id"], row["tenant_id"], owner["broker_session_id"]),
-            )
+        await close_owned_browser(row)
         return {"status": "closed"}
 
     @app.get("/api/connections")
@@ -937,10 +1355,12 @@ def create_app(
 
 def app_from_environment() -> FastAPI:
     broker_resolver = None
+    policy_resolver = None
     if os.environ.get("TENANT_STACK_ROOT"):
-        from tenant_stacks import TenantBrokerRegistry
+        from tenant_stacks import TenantBrokerRegistry, TenantPolicyRegistry
 
         broker_resolver = TenantBrokerRegistry(os.environ["TENANT_STACK_ROOT"], "portal")
+        policy_resolver = TenantPolicyRegistry(os.environ["TENANT_STACK_ROOT"])
     return create_app(
         state_root=os.environ["PORTAL_STATE_ROOT"],
         identity_internal_token=os.environ["IDENTITY_INTERNAL_TOKEN"],
@@ -952,6 +1372,11 @@ def app_from_environment() -> FastAPI:
         broker_base_url=os.environ.get("PORTAL_BROKER_URL", "http://approval-broker:18001"),
         broker_resolver=broker_resolver,
         gateway_base_url=os.environ.get("PORTAL_GATEWAY_URL", "http://mcp-gateway"),
+        policy_resolver=policy_resolver,
+        tenant_policy_internal_token=os.environ.get("TENANT_POLICY_INTERNAL_TOKEN"),
+        tenant_policy_base_url=os.environ.get(
+            "PORTAL_TENANT_POLICY_URL", "http://tenant-policy:18005"
+        ),
         authentication_freshness_ttl=int(
             os.environ.get("PORTAL_AUTHENTICATION_FRESHNESS_SECONDS", "120")
         ),

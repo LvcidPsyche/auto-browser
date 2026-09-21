@@ -87,6 +87,14 @@ def main() -> None:
     provision.add_argument("--allowed-hosts", required=True)
     provision.add_argument("--max-running", type=int, default=1)
     provision.add_argument("--idle-timeout-seconds", type=int, default=900)
+    for action, help_text in (
+        ("allow", "allow one hostname for an enrolled identity's browser stack"),
+        ("deny", "remove one hostname from an enrolled identity's browser stack"),
+    ):
+        policy = sub.add_parser(action, help=help_text)
+        policy.add_argument("--name", required=True)
+        policy.add_argument("--hostname", required=True)
+        policy.add_argument("--expected-revision", type=int)
     args = parser.parse_args()
 
     if os.geteuid() != 0:
@@ -127,10 +135,15 @@ def main() -> None:
         print(link)
         return
 
-    if args.max_running < 1 or args.idle_timeout_seconds < 1:
-        parser.error("provisioning limits must be positive")
-    if not args.allowed_hosts.strip() or "\n" in args.allowed_hosts or "\r" in args.allowed_hosts:
-        parser.error("--allowed-hosts must be a non-empty single-line value")
+    max_running = getattr(args, "max_running", 1)
+    idle_timeout_seconds = getattr(args, "idle_timeout_seconds", 900)
+    if args.command == "provision":
+        if max_running < 1 or idle_timeout_seconds < 1:
+            parser.error("provisioning limits must be positive")
+        if not args.allowed_hosts.strip() or "\n" in args.allowed_hosts or "\r" in args.allowed_hosts:
+            parser.error("--allowed-hosts must be a non-empty single-line value")
+    elif args.expected_revision is not None and args.expected_revision < 0:
+        parser.error("--expected-revision must be non-negative")
     lookup = subprocess.run(
         [*compose_exec, LOOK_UP_IDENTITY, args.name],
         check=False,
@@ -149,12 +162,19 @@ def main() -> None:
     if not state_root.is_absolute() or not public_key:
         raise SystemExit("Tenant provisioning configuration is missing")
     provisioner = ROOT.parent / "tenants" / "provision.py"
+    provision_action = {"provision": "provision", "allow": "allow-host", "deny": "deny-host"}[args.command]
     command = [
-        sys.executable, str(provisioner), "provision", "--state-root", str(state_root),
-        "--user-id", user_id, "--tenant-id", tenant_id, "--allowed-hosts", args.allowed_hosts,
-        "--max-running", str(args.max_running), "--idle-timeout-seconds", str(args.idle_timeout_seconds),
+        sys.executable, str(provisioner), provision_action, "--state-root", str(state_root),
+        "--user-id", user_id, "--tenant-id", tenant_id,
+        "--max-running", str(max_running), "--idle-timeout-seconds", str(idle_timeout_seconds),
         "--portal-assertion-public-key", public_key,
     ]
+    if args.command == "provision":
+        command.extend(("--allowed-hosts", args.allowed_hosts))
+    else:
+        command.extend(("--hostname", args.hostname))
+        if args.expected_revision is not None:
+            command.extend(("--expected-revision", str(args.expected_revision)))
     result = subprocess.run(command, check=False, capture_output=True, text=True)
     if result.returncode:
         sys.stderr.write("Tenant provisioning failed. Check private host logs.\n")
@@ -164,7 +184,10 @@ def main() -> None:
     if home.resolve(strict=True).parent != root:
         raise SystemExit("Provisioned tenant state escaped its configured root")
     make_service_owned(home)
-    print("Tenant browser stack provisioned without printing identifiers or credentials.")
+    if args.command == "provision":
+        print("Tenant browser stack provisioned without printing identifiers or credentials.")
+    else:
+        print("Tenant browser hostname policy updated without printing identifiers or credentials.")
 
 
 if __name__ == "__main__":

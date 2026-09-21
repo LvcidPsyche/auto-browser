@@ -35,6 +35,7 @@ class Upstreams:
         self.broker_assertions: set[str] = set()
         self.active = False
         self.fail_active_binding = False
+        self.site_requests: list[dict] = []
 
     def identity(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else {}
@@ -89,6 +90,23 @@ class Upstreams:
     def gateway(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else None
         self.gateway_calls.append((request.method, request.url.path, body))
+        if request.url.path.startswith("/internal/site-requests"):
+            authorization = request.headers.get("authorization", "")
+            if not authorization.startswith("Bearer ") or authorization == f"Bearer {GATEWAY_TOKEN}":
+                return httpx.Response(401)
+            if request.method == "GET" and request.url.path == "/internal/site-requests":
+                return httpx.Response(200, json={"requests": self.site_requests})
+            if request.method == "GET":
+                request_id = request.url.path.rsplit("/", 1)[-1]
+                item = next((item for item in self.site_requests if item["request_id"] == request_id), None)
+                return httpx.Response(200, json=item) if item else httpx.Response(404)
+            if request.method == "POST" and request.url.path.endswith("/decision"):
+                request_id = request.url.path.split("/")[-2]
+                item = next((item for item in self.site_requests if item["request_id"] == request_id), None)
+                if item is None:
+                    return httpx.Response(404)
+                item["status"] = body["decision"]
+                return httpx.Response(200, json=item)
         if request.headers.get("authorization") != f"Bearer {GATEWAY_TOKEN}":
             return httpx.Response(401)
         if request.method == "GET" and request.url.path == "/internal/connected-clients":
@@ -531,3 +549,96 @@ def test_all_responses_get_security_headers_and_mutations_require_origin(tmp_pat
         assert page.headers["strict-transport-security"].startswith("max-age=")
         denied = client.post("/signin", json={"account": "owner@example.com", "totp_code": "111111"})
         assert denied.status_code == 403
+
+
+def test_allowed_sites_are_user_scoped_normalized_and_require_fresh_auth(tmp_path, clock, upstreams):
+    policies = {
+        ("user-1", "tenant-1"): {"allowed_hosts": ["example.com", "keep.example"], "revision": 1},
+        ("user-2", "tenant-2"): {"allowed_hosts": ["private.example"], "revision": 4},
+    }
+
+    def resolve(user_id: str, tenant_id: str):
+        return policies[(user_id, tenant_id)]
+
+    async def apply(user_id: str, tenant_id: str, hosts: list[str], revision: int):
+        current = policies[(user_id, tenant_id)]
+        assert revision == current["revision"]
+        current["allowed_hosts"] = list(hosts)
+        current["revision"] += 1
+        return current.copy()
+
+    app = app_at(tmp_path, clock, upstreams, policy_resolver=resolve, policy_applier=apply)
+    with TestClient(app, base_url=ORIGIN) as client:
+        csrf = login(client)
+        added = client.post(
+            "/api/sites", headers=mutate(csrf), json={"hostname": " BÜCHER.example "},
+        )
+        assert added.status_code == 200
+        assert added.json()["allowed_hosts"] == ["example.com", "keep.example", "xn--bcher-kva.example"]
+        assert client.post(
+            "/api/sites", headers=mutate(csrf), json={"hostname": "EXAMPLE.com"},
+        ).status_code == 409
+        assert client.post(
+            "/api/sites", headers=mutate(csrf), json={"hostname": "a" * 254},
+        ).status_code == 422
+
+        clock[0] += 120
+        assert client.request(
+            "DELETE", "/api/sites/example.com", headers=mutate(csrf), json={},
+        ).status_code == 422
+        removed = client.request(
+            "DELETE", "/api/sites/example.com", headers=mutate(csrf),
+            json={"totp_code": "222222"},
+        )
+        assert removed.status_code == 200
+        assert policies[("user-1", "tenant-1")]["allowed_hosts"] == [
+            "keep.example", "xn--bcher-kva.example",
+        ]
+        assert policies[("user-2", "tenant-2")]["allowed_hosts"] == ["private.example"]
+        assert upstreams.identity_calls[-1][1]["purpose"] == "site_policy_change"
+
+
+def test_site_request_approval_applies_before_decision_and_failed_apply_keeps_policy(
+    tmp_path, clock, upstreams,
+):
+    policy = {"allowed_hosts": ["example.com"], "revision": 1}
+    upstreams.site_requests = [{
+        "request_id": "request-1", "hostname": "shop.example", "reason": "Check orders",
+        "created_at": clock[0], "expires_at": clock[0] + 300, "status": "pending",
+    }]
+    fail = [True]
+
+    def resolve(_user_id: str, _tenant_id: str):
+        return policy.copy()
+
+    async def apply(_user_id: str, _tenant_id: str, hosts: list[str], revision: int):
+        assert revision == policy["revision"]
+        if fail[0]:
+            raise RuntimeError("simulated apply failure")
+        policy["allowed_hosts"] = list(hosts)
+        policy["revision"] += 1
+        return policy.copy()
+
+    app = app_at(tmp_path, clock, upstreams, policy_resolver=resolve, policy_applier=apply)
+    with TestClient(app, base_url=ORIGIN) as client:
+        csrf = login(client)
+        page = client.get("/sites")
+        assert "shop.example" in page.text and "Check orders" in page.text
+        failed = client.post(
+            "/api/site-requests/request-1/decision", headers=mutate(csrf),
+            json={"decision": "approved"},
+        )
+        assert failed.status_code == 502
+        assert policy == {"allowed_hosts": ["example.com"], "revision": 1}
+        assert upstreams.site_requests[0]["status"] == "pending"
+
+        fail[0] = False
+        approved = client.post(
+            "/api/site-requests/request-1/decision", headers=mutate(csrf),
+            json={"decision": "approved"},
+        )
+        assert approved.status_code == 200
+        assert policy["allowed_hosts"] == ["example.com", "shop.example"]
+        assert upstreams.site_requests[0]["status"] == "approved"
+        decision_call = upstreams.gateway_calls[-1]
+        assert decision_call[2] == {"decision": "approved"}

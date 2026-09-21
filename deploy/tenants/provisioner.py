@@ -16,13 +16,22 @@ import secrets
 import shutil
 import stat
 import subprocess
+import sys
 import time
-from dataclasses import asdict, dataclass
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Iterator, Protocol, Sequence
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from tenant_stacks.policy import normalize_hostnames
 
 CONTROL_NETWORK = "auto-browser-tenant-control"
 STACK_SCHEMA_VERSION = 1
+DENY_ALL_HOST = "deny-all.invalid"
 
 
 class ProvisioningError(RuntimeError):
@@ -59,6 +68,8 @@ class TenantStackDescriptor:
     broker_mcp_url: str
     portal_owner_token: str
     gateway_agent_token: str
+    allowed_hosts: tuple[str, ...] = ()
+    policy_revision: int = 0
 
 
 @dataclass(frozen=True)
@@ -76,8 +87,8 @@ class ProvisioningConfig:
             raise ValueError("max_running must be at least one")
         if self.idle_timeout_seconds < 1:
             raise ValueError("idle_timeout_seconds must be at least one")
-        if not self.allowed_hosts or "\n" in self.allowed_hosts or "\r" in self.allowed_hosts:
-            raise ValueError("allowed_hosts must be a non-empty single-line value")
+        if self.allowed_hosts:
+            normalize_hostnames(self.allowed_hosts)
         try:
             decoded_public_key = base64.urlsafe_b64decode(
                 self.portal_assertion_public_key + "=" * (-len(self.portal_assertion_public_key) % 4)
@@ -194,6 +205,71 @@ class TenantProvisioner:
         descriptor, _ = self._read_owned(self._home(key), enrollment, key)
         return descriptor
 
+    def update_allowed_hosts(
+        self,
+        enrollment: TenantEnrollment,
+        allowed_hosts: str | Sequence[str],
+        *,
+        expected_revision: int | None = None,
+    ) -> TenantStackDescriptor:
+        """Atomically apply a canonical allow-list to one immutable tenant stack."""
+
+        requested = normalize_hostnames(allowed_hosts, allow_empty=True)
+        key = stack_key_for(enrollment)
+        with self._tenant_lock(key):
+            home = self._home(key)
+            descriptor, metadata = self._read_owned(home, enrollment, key)
+            if metadata.get("status") not in {"running", "idle"}:
+                raise ProvisioningError("Existing stack has an unknown lifecycle state")
+            if expected_revision is not None and expected_revision != descriptor.policy_revision:
+                raise ProvisioningError("Allow-list policy revision does not match")
+            previous = self._current_allowed_hosts(home, descriptor)
+            is_legacy = not descriptor.allowed_hosts or descriptor.policy_revision == 0
+            if requested == previous and not is_legacy:
+                return descriptor
+
+            replacement = replace(
+                descriptor,
+                allowed_hosts=requested,
+                policy_revision=max(1, descriptor.policy_revision + (requested != previous)),
+            )
+            env_path = home / ".env"
+            descriptor_path = home / "descriptor.json"
+            old_env = self._read_private_text(env_path)
+            old_descriptor = self._read_private_text(descriptor_path)
+            values = self._parse_env(old_env)
+            values["TENANT_ALLOWED_HOSTS"] = ",".join(requested) or DENY_ALL_HOST
+            apply_started = False
+            try:
+                self._write_private(env_path, self._render_env(values))
+                self._write_json(descriptor_path, asdict(replacement))
+                if metadata.get("status") == "running" and requested != previous:
+                    apply_started = True
+                    self._recreate_controller(home, key)
+            except Exception as exc:
+                rollback_error: Exception | None = None
+                try:
+                    self._write_private(env_path, old_env)
+                    self._write_private(descriptor_path, old_descriptor)
+                    if apply_started:
+                        self._recreate_controller(home, key)
+                except Exception as rollback_exc:
+                    rollback_error = rollback_exc
+                if rollback_error is not None:
+                    try:
+                        # Ambiguous controller state must fail closed. The
+                        # persistent browser volume and auth profiles remain.
+                        self._compose(home, key, "stop", "controller")
+                    except Exception as stop_exc:
+                        raise ProvisioningError(
+                            "Allow-list update, rollback, and fail-closed stop all failed"
+                        ) from stop_exc
+                    raise ProvisioningError(
+                        "Allow-list update rollback failed; controller was stopped"
+                    ) from rollback_error
+                raise ProvisioningError("Allow-list update was rolled back") from exc
+            return replacement
+
     def touch_activity(self, enrollment: TenantEnrollment, *, now: float | None = None) -> None:
         """Record trusted portal/gateway activity for a running tenant only."""
 
@@ -284,6 +360,8 @@ class TenantProvisioner:
             broker_mcp_url=f"http://{alias}:18001/mcp",
             portal_owner_token=_secret(),
             gateway_agent_token=_secret(),
+            allowed_hosts=normalize_hostnames(self.config.allowed_hosts),
+            policy_revision=1,
         )
 
     def _create_private_state(
@@ -308,7 +386,7 @@ class TenantProvisioner:
             "TENANT_CONTROLLER_TOKEN": _secret(),
             "TENANT_SHARE_SECRET": _secret(),
             "TENANT_FERNET_KEY": _fernet_key(),
-            "TENANT_ALLOWED_HOSTS": self.config.allowed_hosts,
+            "TENANT_ALLOWED_HOSTS": ",".join(descriptor.allowed_hosts),
             "BROKER_PORTAL_ASSERTION_PUBLIC_KEY": self.config.portal_assertion_public_key,
             "BROKER_USER_ID": descriptor.user_id,
             "BROKER_TENANT_ID": descriptor.tenant_id,
@@ -348,6 +426,19 @@ class TenantProvisioner:
         if any(metadata.get(field) != value for field, value in expected.items()):
             raise ProvisioningError("Refusing tenant state whose immutable ownership does not match")
         raw_descriptor = self._read_json(home / "descriptor.json")
+        raw_hosts = raw_descriptor.get("allowed_hosts", ())
+        if raw_hosts == () or raw_hosts == []:
+            normalized_hosts: tuple[str, ...] = ()
+        else:
+            try:
+                normalized_hosts = normalize_hostnames(raw_hosts)
+            except (TypeError, ValueError) as exc:
+                raise ProvisioningError("Tenant descriptor allow-list is malformed") from exc
+        policy_revision = raw_descriptor.get("policy_revision", 0)
+        if isinstance(policy_revision, bool) or not isinstance(policy_revision, int) or policy_revision < 0:
+            raise ProvisioningError("Tenant descriptor policy revision is malformed")
+        raw_descriptor["allowed_hosts"] = normalized_hosts
+        raw_descriptor["policy_revision"] = policy_revision
         try:
             descriptor = TenantStackDescriptor(**raw_descriptor)
         except TypeError as exc:
@@ -440,19 +531,81 @@ class TenantProvisioner:
             )
         )
 
+    def _recreate_controller(self, home: Path, key: str) -> None:
+        self._compose(
+            home,
+            key,
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "--wait",
+            "--wait-timeout",
+            "60",
+            "controller",
+        )
+
     def _replace_broker_credentials(self, home: Path, descriptor: TenantStackDescriptor) -> None:
         path = home / ".env"
-        if path.is_symlink() or not path.is_file():
-            raise ProvisioningError("Tenant environment is missing or unsafe")
-        values: dict[str, str] = {}
-        for line in path.read_text(encoding="utf-8").splitlines():
-            name, separator, value = line.partition("=")
-            if not separator or not name:
-                raise ProvisioningError("Tenant environment is malformed")
-            values[name] = value
+        values = self._parse_env(self._read_private_text(path))
         values["BROKER_OWNER_TOKEN"] = descriptor.portal_owner_token
         values["BROKER_AGENT_TOKENS"] = f"gateway:{descriptor.gateway_agent_token}"
-        self._write_private(path, "".join(f"{name}={value}\n" for name, value in values.items()))
+        self._write_private(path, self._render_env(values))
+
+    def _current_allowed_hosts(self, home: Path, descriptor: TenantStackDescriptor) -> tuple[str, ...]:
+        if descriptor.allowed_hosts or descriptor.policy_revision > 0:
+            return descriptor.allowed_hosts
+        values = self._parse_env(self._read_private_text(home / ".env"))
+        try:
+            return normalize_hostnames(values["TENANT_ALLOWED_HOSTS"])
+        except (KeyError, ValueError) as exc:
+            raise ProvisioningError("Tenant environment allow-list is malformed") from exc
+
+    @staticmethod
+    def _parse_env(content: str) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for line in content.splitlines():
+            name, separator, value = line.partition("=")
+            if not separator or not name or name in values:
+                raise ProvisioningError("Tenant environment is malformed")
+            values[name] = value
+        return values
+
+    @staticmethod
+    def _render_env(values: dict[str, str]) -> str:
+        return "".join(f"{name}={value}\n" for name, value in values.items())
+
+    @staticmethod
+    def _read_private_text(path: Path) -> str:
+        if path.is_symlink() or not path.is_file():
+            raise ProvisioningError("Tenant environment is missing or unsafe")
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ProvisioningError("Tenant environment is unreadable") from exc
+
+    @contextmanager
+    def _tenant_lock(self, key: str) -> Iterator[None]:
+        locks = self.root / ".locks"
+        if locks.is_symlink():
+            raise ProvisioningError("Tenant lock directory is unsafe")
+        locks.mkdir(mode=0o700, exist_ok=True)
+        if not locks.is_dir() or locks.resolve(strict=True).parent != self.root:
+            raise ProvisioningError("Tenant lock directory is unsafe")
+        path = locks / f"{key}.lock"
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            if os.name == "posix":
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            if os.name == "posix":
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, object]:
@@ -473,9 +626,15 @@ class TenantProvisioner:
     @staticmethod
     def _write_private(path: Path, content: str) -> None:
         temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        if path.is_symlink() or path.exists() and not path.is_file():
+            raise ProvisioningError("Tenant state file is missing or unsafe")
+        existing = path.stat() if path.exists() else None
+        mode = stat.S_IMODE(existing.st_mode) if existing is not None else 0o600
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            if os.name == "posix":
+                os.fchmod(output.fileno(), mode)
+                if existing is not None:
+                    os.fchown(output.fileno(), existing.st_uid, existing.st_gid)
             output.write(content)
         os.replace(temporary, path)
-        if os.name == "posix":
-            path.chmod(0o600)

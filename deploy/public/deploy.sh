@@ -23,7 +23,7 @@ required=(
   TENANT_CONTROL_NETWORK IDENTITY_TRUSTED_PROXY_CIDRS PORTAL_AUTHENTICATION_FRESHNESS_SECONDS
   IDENTITY_ADMIN_TOKEN IDENTITY_INTERNAL_TOKEN
   IDENTITY_ENCRYPTION_KEY IDENTITY_RECOVERY_PEPPER MCP_GATEWAY_INTERNAL_TOKEN
-  PORTAL_ASSERTION_PRIVATE_KEY BROKER_PORTAL_ASSERTION_PUBLIC_KEY
+  TENANT_POLICY_INTERNAL_TOKEN PORTAL_ASSERTION_PRIVATE_KEY BROKER_PORTAL_ASSERTION_PUBLIC_KEY
 )
 for name in "${required[@]}"; do
   value="$(sed -n "s/^${name}=//p" "$ENV_FILE")"
@@ -67,4 +67,4 @@ for name, spec in services.items():
 PY
 
 # The explicit list prevents an accidental profile or tenant workload from starting.
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --build identity portal mcp-gateway
+docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --build identity tenant-policy portal mcp-gateway

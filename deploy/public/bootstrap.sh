@@ -92,6 +92,7 @@ IDENTITY_INTERNAL_TOKEN=$(token)
 IDENTITY_ENCRYPTION_KEY=$(head -c 32 /dev/urandom | base64 -w 0)
 IDENTITY_RECOVERY_PEPPER=$(token)
 MCP_GATEWAY_INTERNAL_TOKEN=$(token)
+TENANT_POLICY_INTERNAL_TOKEN=$(token)
 PORTAL_ASSERTION_PRIVATE_KEY=$private_key
 # This is intentionally public and is copied into each tenant's private env.
 BROKER_PORTAL_ASSERTION_PUBLIC_KEY=$public_key

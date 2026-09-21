@@ -457,7 +457,10 @@ def verify_portal(
         except VerificationError:
             reporter.failed(f"portal public enrollment route has POST-only boundary: {path}", "request failed")
 
-    protected_gets = ("/browser", "/api/session", "/api/connections", "/oauth/authorize")
+    protected_gets = (
+        "/browser", "/sites", "/api/session", "/api/sites", "/api/site-requests",
+        "/api/connections", "/oauth/authorize",
+    )
     for path in protected_gets:
         try:
             response = request(base + path, timeout=timeout)
@@ -470,6 +473,7 @@ def verify_portal(
     protected_posts = (
         "/logout", "/api/browser/open", "/api/browser/close",
         "/api/connections/public-verifier/disconnect", "/api/recovery-codes/regenerate",
+        "/api/sites", "/api/sites/remove", "/api/site-requests/public-verifier/decision",
         "/oauth/authorize",
     )
     for path in protected_posts:

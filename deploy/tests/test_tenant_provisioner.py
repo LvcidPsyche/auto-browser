@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 
@@ -252,3 +254,140 @@ def test_creating_state_retries_only_after_verifying_owned_resources(tmp_path: P
     assert manager.provision(enrollment) == descriptor
     assert json.loads((tmp_path / key / "metadata.json").read_text(encoding="utf-8"))["status"] == "running"
     assert any(command[-3:] == ("up", "-d", "--build") for command, _ in runner.commands)
+
+
+class FailFirstControllerRecreateRunner(RecordingRunner):
+    def __init__(self) -> None:
+        super().__init__(control_network_exists=True)
+        self.controller_recreates = 0
+
+    def run(self, argv: tuple[str, ...], *, check: bool = True) -> CommandResult:
+        result = super().run(argv, check=check)
+        if argv[-1:] == ("controller",):
+            self.controller_recreates += 1
+            if self.controller_recreates == 1:
+                raise ProvisioningError("Docker lifecycle command failed")
+        return result
+
+
+class FailBothControllerRecreatesRunner(RecordingRunner):
+    def run(self, argv: tuple[str, ...], *, check: bool = True) -> CommandResult:
+        result = super().run(argv, check=check)
+        if argv[-1:] == ("controller",) and "--force-recreate" in argv:
+            raise ProvisioningError("Docker lifecycle command failed")
+        return result
+
+
+def test_allow_list_update_recreates_only_controller_and_persists_revision(tmp_path: Path) -> None:
+    runner = RecordingRunner(control_network_exists=True)
+    manager = provisioner(tmp_path, runner)
+    enrollment = TenantEnrollment("user-a", "tenant-a")
+    key = stack_key_for(enrollment)
+    manager.provision(enrollment)
+    runner.commands.clear()
+
+    updated = manager.update_allowed_hosts(enrollment, "Example.com,B\u00dcCHER.example", expected_revision=1)
+
+    assert updated.allowed_hosts == ("example.com", "xn--bcher-kva.example")
+    assert updated.policy_revision == 2
+    assert manager.lookup(enrollment) == updated
+    assert "TENANT_ALLOWED_HOSTS=example.com,xn--bcher-kva.example\n" in (tmp_path / key / ".env").read_text()
+    assert [command for command, _ in runner.commands] == [
+        (
+            "docker", "compose", "--project-name", f"ab-{key}", "--env-file", str(tmp_path / key / ".env"),
+            "-f", str((Path(__file__).parents[1] / "tenants" / "compose.yml").resolve()), "--profile", "tenant",
+            "up", "-d", "--no-deps", "--force-recreate", "--wait", "--wait-timeout", "60", "controller",
+        )
+    ]
+
+
+def test_allow_list_update_rejects_a_stale_revision_before_changing_files(tmp_path: Path) -> None:
+    runner = RecordingRunner(control_network_exists=True)
+    manager = provisioner(tmp_path, runner)
+    enrollment = TenantEnrollment("user-a", "tenant-a")
+    key = stack_key_for(enrollment)
+    manager.provision(enrollment)
+    old_env = (tmp_path / key / ".env").read_text()
+    old_descriptor = (tmp_path / key / "descriptor.json").read_text()
+    runner.commands.clear()
+
+    with pytest.raises(ProvisioningError, match="revision"):
+        manager.update_allowed_hosts(enrollment, "other.example", expected_revision=0)
+
+    assert (tmp_path / key / ".env").read_text() == old_env
+    assert (tmp_path / key / "descriptor.json").read_text() == old_descriptor
+    assert runner.commands == []
+
+
+def test_allow_list_can_be_empty_and_serializes_a_non_resolving_deny_all_sentinel(tmp_path: Path) -> None:
+    runner = RecordingRunner(control_network_exists=True)
+    manager = provisioner(tmp_path, runner)
+    enrollment = TenantEnrollment("user-a", "tenant-a")
+    key = stack_key_for(enrollment)
+    manager.provision(enrollment)
+    runner.commands.clear()
+
+    updated = manager.update_allowed_hosts(enrollment, [], expected_revision=1)
+
+    assert updated.allowed_hosts == ()
+    assert updated.policy_revision == 2
+    assert manager.lookup(enrollment).allowed_hosts == ()
+    assert "TENANT_ALLOWED_HOSTS=deny-all.invalid\n" in (tmp_path / key / ".env").read_text()
+    assert runner.commands[-1][0][-1] == "controller"
+
+
+def test_failed_allow_list_apply_restores_old_files_and_controller(tmp_path: Path) -> None:
+    runner = FailFirstControllerRecreateRunner()
+    manager = provisioner(tmp_path, runner)
+    enrollment = TenantEnrollment("user-a", "tenant-a")
+    key = stack_key_for(enrollment)
+    manager.provision(enrollment)
+    old_env = (tmp_path / key / ".env").read_text()
+    old_descriptor = (tmp_path / key / "descriptor.json").read_text()
+    runner.commands.clear()
+
+    with pytest.raises(ProvisioningError, match="rolled back"):
+        manager.update_allowed_hosts(enrollment, "replacement.example", expected_revision=1)
+
+    assert (tmp_path / key / ".env").read_text() == old_env
+    assert (tmp_path / key / "descriptor.json").read_text() == old_descriptor
+    controller_commands = [command for command, _ in runner.commands]
+    assert len(controller_commands) == 2
+    assert all(command[-1] == "controller" for command in controller_commands)
+    assert not any(f"ab-data-{key}" in command for command in controller_commands)
+
+
+def test_failed_apply_and_rollback_stop_controller_to_prevent_divergence(tmp_path: Path) -> None:
+    runner = FailBothControllerRecreatesRunner(control_network_exists=True)
+    manager = provisioner(tmp_path, runner)
+    enrollment = TenantEnrollment("user-a", "tenant-a")
+    key = stack_key_for(enrollment)
+    manager.provision(enrollment)
+    old_env = (tmp_path / key / ".env").read_text()
+    old_descriptor = (tmp_path / key / "descriptor.json").read_text()
+    runner.commands.clear()
+
+    with pytest.raises(ProvisioningError, match="controller was stopped"):
+        manager.update_allowed_hosts(enrollment, "replacement.example", expected_revision=1)
+
+    assert (tmp_path / key / ".env").read_text() == old_env
+    assert (tmp_path / key / "descriptor.json").read_text() == old_descriptor
+    assert runner.commands[-1][0][-2:] == ("stop", "controller")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX ownership and modes are production behavior")
+def test_allow_list_update_preserves_private_file_mode_and_owner(tmp_path: Path) -> None:
+    runner = RecordingRunner(control_network_exists=True)
+    manager = provisioner(tmp_path, runner)
+    enrollment = TenantEnrollment("user-a", "tenant-a")
+    key = stack_key_for(enrollment)
+    manager.provision(enrollment)
+    env_path = tmp_path / key / ".env"
+    descriptor_path = tmp_path / key / "descriptor.json"
+    env_path.chmod(0o640)
+    descriptor_path.chmod(0o640)
+    expected = [(path.stat().st_uid, path.stat().st_gid, stat.S_IMODE(path.stat().st_mode)) for path in (env_path, descriptor_path)]
+
+    manager.update_allowed_hosts(enrollment, "changed.example", expected_revision=1)
+
+    assert [(path.stat().st_uid, path.stat().st_gid, stat.S_IMODE(path.stat().st_mode)) for path in (env_path, descriptor_path)] == expected

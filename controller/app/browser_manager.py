@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import fnmatch
 import logging
 import weakref
 from dataclasses import dataclass, field
@@ -35,6 +34,7 @@ from .browser.services import (
 )
 from .config import Settings
 from .downloads import DownloadCaptureService
+from .host_policy import host_is_allowed
 from .memory_manager import MemoryManager
 from .models import (
     BrowserActionDecision,
@@ -641,14 +641,8 @@ class BrowserManager:
         host = urlparse(url).hostname
         if not host:
             raise PermissionError(f"Could not determine hostname for URL: {url}")
-        patterns = self.settings.allowed_host_patterns
-        if not patterns or "*" in patterns:
+        if host_is_allowed(host, self.settings.allowed_host_patterns):
             return
-        for pattern in patterns:
-            pattern = pattern.lower()
-            normalized = pattern.removeprefix("*.")
-            if fnmatch.fnmatch(host, pattern) or host == normalized or host.endswith(f".{normalized}"):
-                return
         raise PermissionError(f"Host {host!r} is not allowlisted")
 
     def _assert_runtime_url_allowed(self, url: str) -> None:

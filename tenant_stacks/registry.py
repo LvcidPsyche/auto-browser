@@ -12,6 +12,8 @@ from pathlib import Path
 
 import httpx
 
+from .policy import normalize_hostnames
+
 
 def stack_key_for(user_id: str, tenant_id: str) -> str:
     digest = hashlib.sha256()
@@ -109,3 +111,61 @@ class TenantBrokerRegistry:
         for client in self.clients.values():
             await client.aclose()
         self.clients.clear()
+
+
+class TenantPolicyRegistry:
+    """Read only the non-secret policy bound to an immutable identity pair."""
+
+    def __init__(self, root: str | Path):
+        self.root = Path(root)
+        if not self.root.is_absolute() or self.root.is_symlink() or not self.root.is_dir():
+            raise ValueError("Tenant stack root must be an existing absolute directory")
+        self.root = self.root.resolve(strict=True)
+        if os.name == "posix" and stat.S_IMODE(self.root.stat().st_mode) & 0o077:
+            raise ValueError("Tenant stack root must be private (0700)")
+
+    def __call__(self, user_id: str, tenant_id: str) -> dict[str, object]:
+        key = stack_key_for(user_id, tenant_id)
+        home = self.root / key
+        descriptor_path, metadata_path = home / "descriptor.json", home / "metadata.json"
+        for path in (descriptor_path, metadata_path):
+            if path.is_symlink() or not path.is_file() or path.resolve().parent != home:
+                raise LookupError("Tenant policy is unavailable")
+            if os.name == "posix" and stat.S_IMODE(path.stat().st_mode) & 0o077:
+                raise LookupError("Tenant policy is not private")
+        try:
+            descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise LookupError("Tenant policy is unavailable") from None
+        expected = {"user_id": user_id, "tenant_id": tenant_id, "stack_key": key}
+        if (
+            not isinstance(descriptor, dict)
+            or not isinstance(metadata, dict)
+            or any(descriptor.get(name) != value for name, value in expected.items())
+            or any(metadata.get(name) != value for name, value in expected.items())
+            or metadata.get("status") not in {"running", "idle"}
+        ):
+            raise LookupError("Tenant policy ownership is invalid")
+        revision = descriptor.get("policy_revision", 0)
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise LookupError("Tenant policy is invalid")
+        raw_hosts = descriptor.get("allowed_hosts")
+        if raw_hosts is None or (raw_hosts == [] and revision == 0):
+            env_path = home / ".env"
+            if env_path.is_symlink() or not env_path.is_file() or env_path.resolve().parent != home:
+                raise LookupError("Tenant policy is unavailable")
+            try:
+                entries = dict(
+                    line.split("=", 1)
+                    for line in env_path.read_text(encoding="utf-8").splitlines()
+                    if "=" in line
+                )
+                raw_hosts = entries["TENANT_ALLOWED_HOSTS"].split(",")
+            except (OSError, KeyError, ValueError):
+                raise LookupError("Tenant policy is unavailable") from None
+        try:
+            hosts = normalize_hostnames(raw_hosts, allow_empty=True)
+        except (TypeError, ValueError):
+            raise LookupError("Tenant policy is invalid") from None
+        return {"allowed_hosts": list(hosts), "revision": revision}
