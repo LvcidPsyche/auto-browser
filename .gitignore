@@ -1,4 +1,6 @@
 .env
+deploy/public/hetzner.env
+deploy/public/tenant-provisioning.env
 .autonomous/
 .agents/
 docs/brainstorms/

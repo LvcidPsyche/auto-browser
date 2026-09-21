@@ -434,6 +434,32 @@ def test_invitation_secrets_are_no_store_shown_once_and_filtered(tmp_path, clock
         assert confirmed.headers["cache-control"].startswith("no-store")
 
 
+def test_public_invitation_page_completes_authenticator_enrollment(tmp_path, clock, upstreams):
+    with TestClient(app_at(tmp_path, clock, upstreams), base_url=ORIGIN) as client:
+        invitation = client.get("/invite/invite-token-long-enough")
+        assert invitation.status_code == 200
+        assert "action=/enroll" in invitation.text
+        enrolled = client.post(
+            "/enroll",
+            headers={"Origin": ORIGIN, "Content-Type": "application/x-www-form-urlencoded"},
+            content=(
+                "invitation_token=invite-token-long-enough&display_name=Owner"
+                "&recovery_email=owner%40example.com"
+            ),
+        )
+        assert enrolled.status_code == 200
+        assert "otpauth://totp/example" in enrolled.text
+        assert "ONE-TIME-SECRET" not in enrolled.text
+        confirmed = client.post(
+            "/enroll/confirm",
+            headers={"Origin": ORIGIN, "Content-Type": "application/x-www-form-urlencoded"},
+            content="enrollment_id=enroll-1&totp_code=123456",
+        )
+        assert confirmed.status_code == 200
+        assert "r1" in confirmed.text and "r2" in confirmed.text
+        assert "Continue to sign in" in confirmed.text
+
+
 def test_recovery_regeneration_requires_session_csrf_and_fresh_totp(tmp_path, clock, upstreams):
     with TestClient(app_at(tmp_path, clock, upstreams), base_url=ORIGIN) as client:
         assert client.post(

@@ -1,0 +1,145 @@
+# Public control plane only.  This file is intentionally unapplied: it neither
+# creates networks nor publishes host ports.  Dokploy Traefik is the TLS edge.
+#
+# The broker, controller, browser node, noVNC, VNC, and CDP are tenant-private.
+# They never join dokploy-network and are never routed through Traefik.
+services:
+  identity:
+    build:
+      context: ../..
+      dockerfile: identity/Dockerfile
+    restart: unless-stopped
+    # The image defaults to loopback.  This private control network needs a
+    # reachable listener, but identity is deliberately not an edge service.
+    command: [uvicorn, identity.app:app, --host, 0.0.0.0, --port, "18003", --no-access-log]
+    environment:
+      IDENTITY_STATE_ROOT: /data
+      IDENTITY_ADMIN_TOKEN: ${IDENTITY_ADMIN_TOKEN:?Set identity admin token}
+      IDENTITY_INTERNAL_TOKEN: ${IDENTITY_INTERNAL_TOKEN:?Set identity internal token}
+      IDENTITY_ENCRYPTION_KEY: ${IDENTITY_ENCRYPTION_KEY:?Set identity encryption key}
+      IDENTITY_RECOVERY_PEPPER: ${IDENTITY_RECOVERY_PEPPER:?Set identity recovery pepper}
+      IDENTITY_TRUSTED_PROXY_CIDRS: ${IDENTITY_TRUSTED_PROXY_CIDRS:?Set trusted private proxy CIDRs}
+    volumes:
+      # Host directory must be owned by UID 10001 and mode 0700 before deploy.
+      - ${IDENTITY_HOST_STATE_ROOT:?Set private identity state host directory}:/data
+    # Identity is reachable only on this private, stack-local control plane.
+    networks: [control-plane]
+    healthcheck:
+      test: [CMD, python, -c, "import socket; s=socket.create_connection(('127.0.0.1',18003),3); s.close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  portal:
+    build:
+      context: ../..
+      dockerfile: portal/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      identity:
+        condition: service_healthy
+    environment:
+      PORTAL_STATE_ROOT: /data
+      PORTAL_PUBLIC_ORIGIN: ${PORTAL_PUBLIC_ORIGIN:?Set canonical portal HTTPS origin}
+      PORTAL_IDENTITY_URL: http://identity:18003
+      PORTAL_GATEWAY_URL: http://mcp-gateway:18002
+      PORTAL_AUTHENTICATION_FRESHNESS_SECONDS: ${PORTAL_AUTHENTICATION_FRESHNESS_SECONDS:?Set portal authentication freshness seconds}
+      IDENTITY_INTERNAL_TOKEN: ${IDENTITY_INTERNAL_TOKEN:?Set identity internal token}
+      PORTAL_ASSERTION_PRIVATE_KEY: ${PORTAL_ASSERTION_PRIVATE_KEY:?Set portal assertion private key}
+      MCP_GATEWAY_INTERNAL_TOKEN: ${MCP_GATEWAY_INTERNAL_TOKEN:?Set gateway internal token}
+      TENANT_STACK_ROOT: /tenant-stacks
+    volumes:
+      # Host directory must be owned by UID 10001 and mode 0700 before deploy.
+      - ${PORTAL_HOST_STATE_ROOT:?Set private portal state host directory}:/data
+      # Registry updates lifecycle metadata; this is not browser/profile storage.
+      - ${TENANT_STACK_HOST_ROOT:?Set private tenant stack root}:/tenant-stacks
+    # Tenant-control resolves broker aliases; control-plane reaches identity.
+    networks: [dokploy-network, control-plane, tenant-control]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      - traefik.http.routers.ab-portal.rule=Host(`secure-browser.fareeqk.com`) && !Path(`/healthz`)
+      - traefik.http.routers.ab-portal.entrypoints=websecure
+      - traefik.http.routers.ab-portal.priority=1000
+      - traefik.http.routers.ab-portal.tls.certresolver=letsencrypt-dns
+      - traefik.http.routers.ab-portal.middlewares=ab-portal-security@docker,ab-portal-rate@docker
+      - traefik.http.services.ab-portal.loadbalancer.server.port=18004
+      - traefik.http.routers.ab-portal-http.rule=Host(`secure-browser.fareeqk.com`)
+      - traefik.http.routers.ab-portal-http.entrypoints=web
+      - traefik.http.routers.ab-portal-http.priority=1000
+      - traefik.http.routers.ab-portal-http.middlewares=ab-portal-https@docker
+      - traefik.http.middlewares.ab-portal-https.redirectscheme.scheme=https
+      - traefik.http.middlewares.ab-portal-https.redirectscheme.permanent=true
+      - traefik.http.middlewares.ab-portal-security.headers.stsSeconds=31536000
+      - traefik.http.middlewares.ab-portal-security.headers.stsIncludeSubdomains=true
+      - traefik.http.middlewares.ab-portal-security.headers.stsPreload=true
+      - traefik.http.middlewares.ab-portal-security.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.ab-portal-security.headers.frameDeny=true
+      - traefik.http.middlewares.ab-portal-security.headers.referrerPolicy=no-referrer
+      - traefik.http.middlewares.ab-portal-rate.ratelimit.average=20
+      - traefik.http.middlewares.ab-portal-rate.ratelimit.burst=40
+    healthcheck:
+      test: [CMD, python, -c, "import socket; s=socket.create_connection(('127.0.0.1',18004),3); s.close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  mcp-gateway:
+    build:
+      context: ../..
+      dockerfile: mcp_gateway/Dockerfile
+    restart: unless-stopped
+    environment:
+      MCP_GATEWAY_ISSUER_URL: ${MCP_GATEWAY_ISSUER_URL:?Set canonical gateway HTTPS issuer origin}
+      MCP_GATEWAY_RESOURCE_URL: ${MCP_GATEWAY_RESOURCE_URL:?Set canonical gateway HTTPS MCP resource URL}
+      MCP_GATEWAY_PORTAL_URL: ${MCP_GATEWAY_PORTAL_URL:?Set canonical portal HTTPS origin for OAuth}
+      MCP_GATEWAY_INTERNAL_TOKEN: ${MCP_GATEWAY_INTERNAL_TOKEN:?Set gateway internal token}
+      MCP_GATEWAY_DB: /data/gateway.sqlite3
+      TENANT_STACK_ROOT: /tenant-stacks
+    volumes:
+      # Host directory must be owned by UID 10001 and mode 0700 before deploy.
+      - ${MCP_GATEWAY_HOST_STATE_ROOT:?Set private gateway state host directory}:/data
+      - ${TENANT_STACK_HOST_ROOT:?Set private tenant stack root}:/tenant-stacks
+    networks: [dokploy-network, control-plane, tenant-control]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      # This is an allow-list, not a broad host rule: no docs or private APIs.
+      - traefik.http.routers.ab-mcp.rule=Host(`mcp-browser.fareeqk.com`) && (Path(`/.well-known/oauth-authorization-server`) || Path(`/.well-known/oauth-protected-resource`) || Path(`/register`) || Path(`/authorize`) || Path(`/token`) || Path(`/mcp`))
+      - traefik.http.routers.ab-mcp.entrypoints=websecure
+      - traefik.http.routers.ab-mcp.priority=1000
+      - traefik.http.routers.ab-mcp.tls.certresolver=letsencrypt-dns
+      - traefik.http.routers.ab-mcp.middlewares=ab-mcp-security@docker,ab-mcp-rate@docker
+      - traefik.http.services.ab-mcp.loadbalancer.server.port=18002
+      - traefik.http.routers.ab-mcp-http.rule=Host(`mcp-browser.fareeqk.com`) && (Path(`/.well-known/oauth-authorization-server`) || Path(`/.well-known/oauth-protected-resource`) || Path(`/register`) || Path(`/authorize`) || Path(`/token`) || Path(`/mcp`))
+      - traefik.http.routers.ab-mcp-http.entrypoints=web
+      - traefik.http.routers.ab-mcp-http.priority=1000
+      - traefik.http.routers.ab-mcp-http.middlewares=ab-mcp-https@docker
+      - traefik.http.middlewares.ab-mcp-https.redirectscheme.scheme=https
+      - traefik.http.middlewares.ab-mcp-https.redirectscheme.permanent=true
+      - traefik.http.middlewares.ab-mcp-security.headers.stsSeconds=31536000
+      - traefik.http.middlewares.ab-mcp-security.headers.stsIncludeSubdomains=true
+      - traefik.http.middlewares.ab-mcp-security.headers.stsPreload=true
+      - traefik.http.middlewares.ab-mcp-security.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.ab-mcp-security.headers.frameDeny=true
+      - traefik.http.middlewares.ab-mcp-security.headers.referrerPolicy=no-referrer
+      - traefik.http.middlewares.ab-mcp-rate.ratelimit.average=15
+      - traefik.http.middlewares.ab-mcp-rate.ratelimit.burst=30
+    healthcheck:
+      test: [CMD, python, -c, "import socket; s=socket.create_connection(('127.0.0.1',18002),3); s.close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+networks:
+  # Existing Traefik overlay.  Only portal and mcp-gateway join it.
+  dokploy-network:
+    external: true
+    name: dokploy-network
+  # Stack-local private traffic between identity, portal, and MCP gateway.
+  control-plane:
+    internal: true
+  # Existing private tenant-control network used only to resolve broker aliases.
+  tenant-control:
+    external: true
+    name: ${TENANT_CONTROL_NETWORK:?Set existing private tenant control network}

@@ -736,16 +736,13 @@ def create_app(
         escaped = html.escape(invitation_token, quote=True)
         return HTMLResponse(
             "<!doctype html><meta charset=utf-8><title>Enrollment</title><h1>Accept invitation</h1>"
-            f"<form method=post action=/api/invitations/redeem><input type=hidden name=invitation_token value='{escaped}'>"
+            f"<form method=post action=/enroll><input type=hidden name=invitation_token value='{escaped}'>"
             "<label>Display name <input name=display_name required></label>"
             "<label>Recovery email <input name=recovery_email type=email></label>"
             "<button>Continue</button></form>"
         )
 
-    @app.post("/api/invitations/redeem")
-    async def redeem_invitation(request: Request):
-        await mutation(request, require_session=False)
-        data = await _payload(request)
+    async def redeem_payload(data: Mapping[str, Any]) -> dict[str, Any]:
         token = _required_text(data, "invitation_token")
         display_name = _required_text(data, "display_name", 120)
         identity_payload: dict[str, Any] = {
@@ -761,10 +758,59 @@ def create_app(
             json=identity_payload,
         )
         if response.status_code != 200:
-            # Compatibility with the current identity service's email field is
-            # intentionally left to its contract adapter, not retried here.
             raise _upstream_error(response, "Invitation could not be redeemed")
         return _safe_enrollment(response.json())
+
+    @app.post("/enroll")
+    async def enroll_page(request: Request):
+        await mutation(request, require_session=False)
+        enrollment = await redeem_payload(await _payload(request))
+        enrollment_id = enrollment.get("enrollment_id")
+        provisioning_uri = enrollment.get("provisioning_uri")
+        if (not isinstance(enrollment_id, str) or not enrollment_id
+                or not isinstance(provisioning_uri, str)
+                or not provisioning_uri.startswith("otpauth://totp/")):
+            raise HTTPException(502, "Invalid identity enrollment response")
+        escaped_id = html.escape(enrollment_id, quote=True)
+        escaped_uri = html.escape(provisioning_uri, quote=True)
+        return HTMLResponse(
+            "<!doctype html><meta charset=utf-8><title>Authenticator enrollment</title>"
+            "<h1>Add your authenticator</h1>"
+            f"<p><a href='{escaped_uri}'>Open in your authenticator app</a></p>"
+            f"<p><code>{escaped_uri}</code></p>"
+            "<form method=post action=/enroll/confirm>"
+            f"<input type=hidden name=enrollment_id value='{escaped_id}'>"
+            "<label>Authenticator code <input name=totp_code inputmode=numeric "
+            "autocomplete=one-time-code pattern='[0-9]{6}' required></label>"
+            "<button>Confirm enrollment</button></form>"
+        )
+
+    @app.post("/enroll/confirm")
+    async def enroll_confirm_page(request: Request):
+        await mutation(request, require_session=False)
+        data = await _payload(request)
+        response = await identity_http.post(
+            IDENTITY_ENROLLMENT_CONFIRM_PATH,
+            json={"enrollment_id": _required_text(data, "enrollment_id"), "totp_code": _totp(data)},
+        )
+        if response.status_code != 200:
+            raise _upstream_error(response, "Enrollment could not be confirmed")
+        enrollment = _safe_enrollment(response.json())
+        recovery_codes = enrollment.get("recovery_codes")
+        if not isinstance(recovery_codes, list) or any(not isinstance(code, str) for code in recovery_codes):
+            raise HTTPException(502, "Invalid identity enrollment response")
+        items = "".join(f"<li><code>{html.escape(code)}</code></li>" for code in recovery_codes)
+        return HTMLResponse(
+            "<!doctype html><meta charset=utf-8><title>Enrollment complete</title>"
+            "<h1>Enrollment complete</h1>"
+            "<p>Save these one-time recovery codes now. They will not be shown again.</p>"
+            f"<ul>{items}</ul><p><a href='/signin'>Continue to sign in</a></p>"
+        )
+
+    @app.post("/api/invitations/redeem")
+    async def redeem_invitation(request: Request):
+        await mutation(request, require_session=False)
+        return await redeem_payload(await _payload(request))
 
     @app.post("/api/enrollments/confirm")
     async def confirm_enrollment(request: Request):
