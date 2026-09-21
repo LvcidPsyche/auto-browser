@@ -17,15 +17,37 @@ if [[ ${EUID} -ne 0 ]]; then
 fi
 
 rotate=false
+fill_missing=false
 case "${1:-}" in
   '') ;;
   --rotate) rotate=true ;;
-  *) echo 'Usage: bootstrap.sh [--rotate]' >&2; exit 2 ;;
+  --fill-missing) fill_missing=true ;;
+  *) echo 'Usage: bootstrap.sh [--rotate|--fill-missing]' >&2; exit 2 ;;
 esac
 
-if [[ ( -e "$ENV_FILE" || -e "$TENANT_PUBLIC_ENV" ) && "$rotate" != true ]]; then
+if [[ ( -e "$ENV_FILE" || -e "$TENANT_PUBLIC_ENV" ) && "$rotate" != true && "$fill_missing" != true ]]; then
   echo 'Refusing to replace existing host environment; use --rotate explicitly.' >&2
   exit 1
+fi
+
+# An upgrade that introduces a new variable must not force a full rotation:
+# rotating would replace encryption keys and invalidate existing enrolments.
+# --fill-missing appends only variables the protected file does not yet have.
+if [[ "$fill_missing" == true ]]; then
+  [[ -e "$ENV_FILE" ]] || { echo 'No existing environment to fill; run without --fill-missing.' >&2; exit 1; }
+  umask 077
+  added=0
+  for name in IDENTITY_INTERNAL_TOKEN MCP_GATEWAY_INTERNAL_TOKEN TENANT_POLICY_INTERNAL_TOKEN; do
+    if ! grep -q "^${name}=" "$ENV_FILE"; then
+      printf '%s=%s
+' "$name" "$(head -c 48 /dev/urandom | base64 -w 0 | tr '+/' '-_' | tr -d '=')" >>"$ENV_FILE"
+      added=$((added + 1))
+    fi
+  done
+  chown root:root "$ENV_FILE"
+  chmod 0600 "$ENV_FILE"
+  echo "Filled ${added} missing variable(s); nothing existing was changed and no value was printed."
+  exit 0
 fi
 
 # The three images run as UID 10001.  Tenant descriptors carry broker
