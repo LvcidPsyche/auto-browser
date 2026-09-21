@@ -128,7 +128,7 @@ services:
       # answer with.  A deny-all allow-list returns 403 and serves nothing.
       - traefik.http.routers.ab-mcp-deny.rule=Host(`mcp-browser.fareeqk.com`)
       - traefik.http.routers.ab-mcp-deny.entrypoints=websecure
-      - traefik.http.routers.ab-mcp-deny.priority=1
+      - traefik.http.routers.ab-mcp-deny.priority=500
       - traefik.http.routers.ab-mcp-deny.tls.certresolver=letsencrypt-dns
       - traefik.http.routers.ab-mcp-deny.middlewares=ab-mcp-denyall@docker
       - traefik.http.routers.ab-mcp-deny.service=ab-mcp
