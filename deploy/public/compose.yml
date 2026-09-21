@@ -70,6 +70,15 @@ services:
       - traefik.http.routers.ab-portal-http.middlewares=ab-portal-https@docker
       - traefik.http.middlewares.ab-portal-https.redirectscheme.scheme=https
       - traefik.http.middlewares.ab-portal-https.redirectscheme.permanent=true
+      # /healthz is excluded from the portal router; without this it would
+      # fall through to another host's catch-all instead of serving nothing.
+      - traefik.http.routers.ab-portal-deny.rule=Host(`secure-browser.fareeqk.com`)
+      - traefik.http.routers.ab-portal-deny.entrypoints=websecure
+      - traefik.http.routers.ab-portal-deny.priority=500
+      - traefik.http.routers.ab-portal-deny.tls.certresolver=letsencrypt-dns
+      - traefik.http.routers.ab-portal-deny.middlewares=ab-portal-denyall@docker
+      - traefik.http.routers.ab-portal-deny.service=ab-portal
+      - traefik.http.middlewares.ab-portal-denyall.ipallowlist.sourcerange=127.0.0.1/32
       - traefik.http.middlewares.ab-portal-security.headers.stsSeconds=31536000
       - traefik.http.middlewares.ab-portal-security.headers.stsIncludeSubdomains=true
       - traefik.http.middlewares.ab-portal-security.headers.stsPreload=true

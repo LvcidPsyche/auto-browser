@@ -507,7 +507,7 @@ def verify_nothing_served(
         try:
             response = request(base + path, timeout=timeout)
             responses.append((base + path, response, f"{surface} forbidden path {path}"))
-            reporter.expect(response.status in {404, 410}, f"{surface} serves nothing at {path}", f"HTTP {response.status}")
+            reporter.expect(response.status in {403, 404, 410}, f"{surface} serves nothing at {path}", f"HTTP {response.status}")
         except VerificationError:
             reporter.failed(f"{surface} serves nothing at {path}", "request failed")
 
