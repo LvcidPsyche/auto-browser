@@ -123,6 +123,16 @@ services:
       - traefik.http.middlewares.ab-mcp-security.headers.contentTypeNosniff=true
       - traefik.http.middlewares.ab-mcp-security.headers.frameDeny=true
       - traefik.http.middlewares.ab-mcp-security.headers.referrerPolicy=no-referrer
+      # Everything outside the allow-list must come from THIS host, not from
+      # whichever other app a wildcard-DNS catch-all router would otherwise
+      # answer with.  A deny-all allow-list returns 403 and serves nothing.
+      - traefik.http.routers.ab-mcp-deny.rule=Host(`mcp-browser.fareeqk.com`)
+      - traefik.http.routers.ab-mcp-deny.entrypoints=websecure
+      - traefik.http.routers.ab-mcp-deny.priority=1
+      - traefik.http.routers.ab-mcp-deny.tls.certresolver=letsencrypt-dns
+      - traefik.http.routers.ab-mcp-deny.middlewares=ab-mcp-denyall@docker
+      - traefik.http.routers.ab-mcp-deny.service=ab-mcp
+      - traefik.http.middlewares.ab-mcp-denyall.ipallowlist.sourcerange=127.0.0.1/32
       - traefik.http.middlewares.ab-mcp-rate.ratelimit.average=15
       - traefik.http.middlewares.ab-mcp-rate.ratelimit.burst=30
     healthcheck:
