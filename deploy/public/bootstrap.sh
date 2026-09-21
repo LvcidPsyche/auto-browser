@@ -41,7 +41,11 @@ for directory in "$IDENTITY_STATE" "$PORTAL_STATE" "$GATEWAY_STATE" "$TENANT_STA
       echo "Existing state path has unsafe ownership or mode: $directory" >&2; exit 1;
     }
   else
-    install -d -o 10001 -g 10001 -m 0700 "$directory"
+    # `install -o` requires a resolvable account name; the service UID is
+    # deliberately not a host user, so create then chown numerically.
+    mkdir -p -- "$directory"
+    chmod 0700 -- "$directory"
+    chown 10001:10001 -- "$directory"
   fi
 done
 
