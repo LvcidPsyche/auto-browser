@@ -965,7 +965,7 @@ def create_app(
             + "></label>"
         )
         viewer_link = (
-            "<p><a href='/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify'>"
+            "<p><a href='/vnc/vnc.html?autoconnect=true&resize=scale&path=websockify'>"
             "شوف المتصفح (Watch and control the browser)</a></p>"
             if state == "open" else
             "<p>شوف المتصفح: افتح المتصفح أولاً.</p>"
