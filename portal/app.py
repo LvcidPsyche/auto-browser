@@ -965,7 +965,7 @@ def create_app(
             f"{viewer_link}"
             "<h2>Open browser</h2><form method=post action=/api/browser/open>"
             f"<input type=hidden name=csrf_token value='{csrf}'>"
-            "<label>Start URL <input name=start_url type=url value='https://example.com' required></label>"
+            "<label>Start URL <input name=start_url type=url value='https://www.google.com' required></label>"
             "<label>Saved login (optional) <input name=auth_profile placeholder='leave blank for a fresh browser'></label>"
             f"{authenticator_field}<button>Open</button></form>"
             "<h2>Close browser</h2><form method=post action=/api/browser/close>"
@@ -1251,7 +1251,7 @@ def create_app(
                 "portal_assertion": _portal_assertion(
                     assertion_key, user_id=row["user_id"], tenant_id=row["tenant_id"], now=clock()
                 ),
-                "start_url": "https://example.com",
+                "start_url": "https://www.google.com",
             }
             if "start_url" in data:
                 broker_payload["start_url"] = _required_text(data, "start_url", 2048)
