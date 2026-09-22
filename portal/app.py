@@ -547,7 +547,10 @@ def create_app(
         # Referer. An attacker's cross-site POST carries Sec-Fetch-Site: cross-site (or a foreign
         # Referer), so this stays a real CSRF check rather than an open door.
         origin = request.headers.get("origin")
-        if origin is not None:
+        # An in-app browser (WhatsApp, Facebook, some webviews) can send `Origin: null` for a
+        # same-origin form POST; treat that exactly like a missing Origin and fall through to
+        # the other same-origin signals instead of rejecting the owner's own enrollment.
+        if origin not in (None, "", "null"):
             return origin == public_origin
         if request.headers.get("sec-fetch-site") == "same-origin":
             return True
