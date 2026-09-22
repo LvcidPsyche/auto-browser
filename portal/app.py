@@ -884,9 +884,12 @@ def create_app(
             absolute_ttl=absolute_session_ttl, idle_ttl=idle_session_ttl,
         )
         next_path = _safe_next(data.get("next"))
+        # A browser form post lands a human on this response, so send them to the browser page
+        # instead of raw JSON; only a non-browser client (no HTML in Accept) sees the JSON body.
+        wants_html = "text/html" in (request.headers.get("accept") or "")
         result = (
-            RedirectResponse(next_path, status_code=303)
-            if next_path
+            RedirectResponse(next_path or "/browser", status_code=303)
+            if (next_path or wants_html)
             else JSONResponse({"status": "signed_in", "user_id": user_id, "tenant_id": tenant_id})
         )
         result.set_cookie(SESSION_COOKIE, token, httponly=True, secure=True, samesite="lax", path="/")
