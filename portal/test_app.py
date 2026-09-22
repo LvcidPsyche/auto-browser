@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -11,7 +12,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
-from portal.app import BROKER_OPEN_PATH, create_app
+from portal.app import BROKER_OPEN_PATH, SOLE_OWNER_DENIAL_AR, create_app
 
 IDENTITY_TOKEN = "i" * 40
 BROKER_TOKEN = "b" * 40
@@ -36,6 +37,9 @@ class Upstreams:
         self.active = False
         self.fail_active_binding = False
         self.site_requests: list[dict] = []
+        self.profile_calls: list[tuple] = []
+        self.saved_profiles: set[str] = set()
+        self.novnc_calls: list[str] = []
 
     def identity(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else {}
@@ -85,6 +89,32 @@ class Upstreams:
         if request.method == "DELETE" and request.url.path == "/owner/sessions/browser-1":
             self.active = False
             return httpx.Response(200, json={"owner_credential": BROKER_TOKEN})
+        if request.method == "GET" and request.url.path == "/owner/visual-access":
+            if self.active:
+                return httpx.Response(200, json={"session_id": "browser-1"})
+            return httpx.Response(403, json={"detail": "Owner must open a verified browser session first"})
+        if request.method == "POST" and request.url.path == "/owner/sessions/browser-1/auth-profiles":
+            self.profile_calls.append(("save", body["profile_name"]))
+            self.saved_profiles.add(body["profile_name"])
+            return httpx.Response(200, json={"profile_name": body["profile_name"]})
+        if request.method == "POST" and request.url.path.startswith("/owner/auth-profiles/") and request.url.path.endswith("/rename"):
+            name = request.url.path.split("/")[3]
+            self.profile_calls.append(("rename", name, body["new_name"]))
+            self.saved_profiles.discard(name)
+            self.saved_profiles.add(body["new_name"])
+            return httpx.Response(200, json={"profile_name": body["new_name"], "previous_name": name})
+        if request.method == "DELETE" and request.url.path.startswith("/owner/auth-profiles/"):
+            name = request.url.path.split("/")[3]
+            self.profile_calls.append(("delete", name))
+            self.saved_profiles.discard(name)
+            return httpx.Response(200, json={"profile_name": name, "deleted": True})
+        if request.method in ("GET", "HEAD") and request.url.path.startswith("/owner/vnc/"):
+            self.novnc_calls.append(request.url.path.removeprefix("/owner/vnc"))
+            if not self.active:
+                return httpx.Response(403, json={"detail": "Owner must open a verified browser session first"})
+            if request.url.path == "/owner/vnc/vnc.html":
+                return httpx.Response(200, text="<html>fake novnc page</html>", headers={"content-type": "text/html"})
+            return httpx.Response(404)
         return httpx.Response(404)
 
     def gateway(self, request: httpx.Request) -> httpx.Response:
@@ -430,8 +460,12 @@ def test_connections_are_scoped_and_disconnect_is_narrow(tmp_path, clock, upstre
         )
         assert disconnected.json() == {"status": "disconnected", "connection_id": "conn-1"}
         assert upstreams.gateway_calls[-1][2] == {"user_id": "user-1", "tenant_id": "tenant-1"}
-        for forbidden in ("/proxy", "/api/proxy", "/vnc", "/controller", "/owner/sessions"):
+        for forbidden in ("/proxy", "/api/proxy", "/controller", "/owner/sessions"):
             assert client.get(forbidden).status_code == 404
+        # /vnc is now a real, authenticated route (the noVNC viewer proxy), so
+        # it must not 404 -- but with no open browser it must still refuse,
+        # never fall through to the private noVNC socket.
+        assert client.get("/vnc").status_code == 403
 
 
 def test_invitation_secrets_are_no_store_shown_once_and_filtered(tmp_path, clock, upstreams):
@@ -466,8 +500,15 @@ def test_public_invitation_page_completes_authenticator_enrollment(tmp_path, clo
             ),
         )
         assert enrolled.status_code == 200
+        # The tap-to-open link (useful on the same phone) still carries the
+        # full otpauth URI, and a scannable QR is now rendered inline...
         assert "otpauth://totp/example" in enrolled.text
-        assert "ONE-TIME-SECRET" not in enrolled.text
+        assert "<svg" in enrolled.text
+        # ...but the raw manual-entry secret only appears behind the
+        # "اضغط لإظهار المفتاح" collapse, never as bare visible page text.
+        assert "اضغط لإظهار المفتاح" in enrolled.text
+        assert "<details>" in enrolled.text
+        assert "ONE-TIME-SECRET" in enrolled.text
         confirmed = client.post(
             "/enroll/confirm",
             headers={"Origin": ORIGIN, "Content-Type": "application/x-www-form-urlencoded"},
@@ -642,3 +683,140 @@ def test_site_request_approval_applies_before_decision_and_failed_apply_keeps_po
         assert upstreams.site_requests[0]["status"] == "approved"
         decision_call = upstreams.gateway_calls[-1]
         assert decision_call[2] == {"decision": "approved"}
+
+
+def test_enrollment_qr_renders_inline_without_logging_the_secret(tmp_path, clock, upstreams, caplog):
+    with TestClient(app_at(tmp_path, clock, upstreams), base_url=ORIGIN) as client:
+        with caplog.at_level("DEBUG"):
+            enrolled = client.post(
+                "/enroll",
+                headers={"Origin": ORIGIN, "Content-Type": "application/x-www-form-urlencoded"},
+                content="invitation_token=invite-token-long-enough&display_name=Owner",
+            )
+        assert enrolled.status_code == 200
+        # A real, scannable QR is rendered inline -- no third-party QR service
+        # is ever contacted (there is no outbound call to make one at all).
+        assert "<svg" in enrolled.text
+        assert "ONE-TIME-SECRET" not in caplog.text
+        assert "otpauth://totp/example" not in caplog.text
+
+
+def test_viewer_denies_unauthenticated_missing_session_and_cross_identity(tmp_path, clock, upstreams):
+    app = app_at(tmp_path, clock, upstreams)
+    with TestClient(app, base_url=ORIGIN) as client:
+        assert client.get("/vnc/vnc.html").status_code == 401
+        csrf = login(client)
+        denied = client.get("/vnc/vnc.html")
+        assert denied.status_code == 403
+        assert denied.json()["detail"] == "لا يمكن عرض المتصفح الآن — يجب فتح جلسة متصفح أولاً من نفس حسابك."
+        assert not upstreams.novnc_calls
+
+        opened = client.post("/api/browser/open", headers=mutate(csrf), json={"totp_code": "333333"})
+        assert opened.status_code == 200
+        served = client.get("/vnc/vnc.html")
+        assert served.status_code == 200
+        assert "fake novnc page" in served.text
+        assert upstreams.novnc_calls == ["/vnc.html"]
+
+        client.cookies.clear()
+        login(client, "second@example.com", "222222")
+        other = client.get("/vnc/vnc.html")
+        assert other.status_code == 403
+        assert other.json()["detail"] == SOLE_OWNER_DENIAL_AR
+        assert upstreams.novnc_calls == ["/vnc.html"]
+
+
+def test_viewer_websocket_denies_without_session_and_rechecks_each_frame(tmp_path, clock, upstreams, monkeypatch):
+    import portal.app as portal_app
+
+    sent: list[bytes] = []
+
+    class FakeUpstream:
+        async def send(self, frame):
+            sent.append(frame)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.sleep(30)
+
+    @asynccontextmanager
+    async def fake_connect(*_args, **_kwargs):
+        yield FakeUpstream()
+
+    monkeypatch.setattr(portal_app, "ws_connect", fake_connect)
+    with TestClient(app_at(tmp_path, clock, upstreams), base_url=ORIGIN) as client:
+        # starlette's TestClient does not carry the shared cookie jar into a
+        # websocket handshake automatically, unlike a real same-origin browser
+        # tab opening a WebSocket back to its own page; pass it explicitly.
+        def connect():
+            cookie_header = "; ".join(f"{key}={value}" for key, value in client.cookies.items())
+            return client.websocket_connect("/vnc/websockify", headers={"Cookie": cookie_header})
+
+        with pytest.raises(Exception):
+            with connect():
+                pass
+        csrf = login(client)
+        with pytest.raises(Exception):
+            with connect():
+                pass
+        client.post("/api/browser/open", headers=mutate(csrf), json={"totp_code": "333333"})
+        with connect() as socket:
+            socket.send_bytes(b"first-frame")
+            upstreams.active = False
+            socket.send_bytes(b"second-frame")
+            with pytest.raises(Exception):
+                socket.receive_bytes()
+        assert b"second-frame" not in sent
+
+
+def test_auth_profiles_save_list_rename_delete_round_trip(tmp_path, clock, upstreams):
+    with TestClient(app_at(tmp_path, clock, upstreams), base_url=ORIGIN) as client:
+        csrf = login(client)
+        client.post("/api/browser/open", headers=mutate(csrf), json={"totp_code": "333333"})
+
+        saved = client.post("/api/auth-profiles", headers=mutate(csrf), json={"profile_name": "facebook"})
+        assert saved.status_code == 200
+        assert saved.json() == {"status": "saved", "profile_name": "facebook"}
+        assert ("save", "facebook") in upstreams.profile_calls
+        assert client.get("/api/auth-profiles").json() == {"profiles": ["facebook"]}
+
+        renamed = client.post(
+            "/api/auth-profiles/facebook/rename", headers=mutate(csrf), json={"new_name": "fb"},
+        )
+        assert renamed.status_code == 200
+        assert client.get("/api/auth-profiles").json() == {"profiles": ["fb"]}
+
+        deleted = client.request(
+            "DELETE", "/api/auth-profiles/fb", headers=mutate(csrf), json={},
+        )
+        assert deleted.status_code == 200
+        assert client.get("/api/auth-profiles").json() == {"profiles": []}
+
+
+def test_auth_profiles_are_denied_to_a_second_identity(tmp_path, clock, upstreams):
+    with TestClient(app_at(tmp_path, clock, upstreams), base_url=ORIGIN) as client:
+        csrf = login(client)
+        client.post("/api/browser/open", headers=mutate(csrf), json={"totp_code": "333333"})
+        client.post("/api/auth-profiles", headers=mutate(csrf), json={"profile_name": "facebook"})
+
+        client.cookies.clear()
+        csrf2 = login(client, "second@example.com", "222222")
+        denied_list = client.get("/api/auth-profiles")
+        assert denied_list.status_code == 403
+        assert denied_list.json()["detail"] == SOLE_OWNER_DENIAL_AR
+
+        # A second identity must never be able to open pre-logged-in as the
+        # owner's saved Facebook login, even by guessing the saved name...
+        denied_open = client.post(
+            "/api/browser/open", headers=mutate(csrf2),
+            json={"totp_code": "444444", "auth_profile": "facebook"},
+        )
+        assert denied_open.status_code == 403
+        assert denied_open.json()["detail"] == SOLE_OWNER_DENIAL_AR
+        # ...but it can still open its own plain browser (unchanged,
+        # pre-existing behaviour) once it stops asking for someone else's login.
+        assert client.post(
+            "/api/browser/open", headers=mutate(csrf2), json={"totp_code": "555555"},
+        ).status_code == 200

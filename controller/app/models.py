@@ -190,6 +190,10 @@ class SaveAuthProfileRequest(StrictInputModel):
     profile_name: str = Field(min_length=1, max_length=120)
 
 
+class RenameAuthProfileRequest(StrictInputModel):
+    new_name: str = Field(min_length=1, max_length=120)
+
+
 class HumanTakeoverRequest(StrictInputModel):
     reason: str = Field(default="Manual review requested", min_length=1, max_length=500)
 

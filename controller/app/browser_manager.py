@@ -687,6 +687,12 @@ class BrowserManager:
         """Extract a .tar.gz archive into the reusable auth profile root."""
         return await self.auth_profiles.import_profile(archive_path, overwrite=overwrite)
 
+    async def delete_auth_profile(self, profile_name: str) -> dict[str, Any]:
+        return await self.auth_profiles.delete(profile_name)
+
+    async def rename_auth_profile(self, profile_name: str, new_name: str) -> dict[str, Any]:
+        return await self.auth_profiles.rename(profile_name, new_name)
+
     async def get_auth_state_info(self, session_id: str) -> dict[str, Any]:
         return await self.auth_profiles.auth_state_info(session_id)
 

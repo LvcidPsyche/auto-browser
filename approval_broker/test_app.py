@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -353,3 +355,145 @@ def test_revoking_old_grant_also_stops_newer_active_grant(tmp_path: Path, clock:
         assert client.post(f"/requests/{old}/revoke", headers=auth(OWNER)).status_code == 200
         assert client.get(f"/requests/{current}/observe", headers=auth(AGENT)).status_code == 403
         assert client.post("/requests", headers=auth(AGENT), json={"purpose": "retry"}).status_code == 403
+
+
+def test_owner_can_delete_and_rename_auth_profiles(tmp_path: Path, clock: list[float]) -> None:
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content) if request.content else None
+        calls.append((request.method, request.url.path, payload))
+        if request.method == "POST" and request.url.path == "/auth-profiles/shop-one/rename":
+            return httpx.Response(200, json={"profile_name": "shop-two", "previous_name": "shop-one"})
+        if request.method == "DELETE" and request.url.path == "/auth-profiles/shop-two":
+            return httpx.Response(200, json={"profile_name": "shop-two", "deleted": True})
+        return httpx.Response(404)
+
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        renamed = client.post(
+            "/owner/auth-profiles/shop-one/rename", headers=auth(OWNER), json={"new_name": "shop-two"},
+        )
+        assert renamed.status_code == 200
+        assert renamed.json() == {"profile_name": "shop-two", "previous_name": "shop-one"}
+        deleted = client.delete("/owner/auth-profiles/shop-two", headers=auth(OWNER))
+        assert deleted.status_code == 200
+        assert deleted.json() == {"profile_name": "shop-two", "deleted": True}
+        assert ("POST", "/auth-profiles/shop-one/rename", {"new_name": "shop-two"}) in calls
+        assert ("DELETE", "/auth-profiles/shop-two", None) in calls
+
+
+def test_agent_cannot_manage_auth_profiles(tmp_path: Path, clock: list[float]) -> None:
+    with TestClient(app_at(tmp_path, lambda request: httpx.Response(200, json={}))) as client:
+        assert client.delete("/owner/auth-profiles/shop-one", headers=auth(AGENT)).status_code == 403
+        assert client.post(
+            "/owner/auth-profiles/shop-one/rename", headers=auth(AGENT), json={"new_name": "x"},
+        ).status_code == 403
+
+
+def test_malformed_profile_names_are_rejected_before_reaching_the_controller(
+    tmp_path: Path, clock: list[float],
+) -> None:
+    calls: list[str] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, json={})
+
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        assert client.delete("/owner/auth-profiles/bad*name", headers=auth(OWNER)).status_code == 400
+        assert client.post(
+            "/owner/auth-profiles/shop-one/rename", headers=auth(OWNER), json={"new_name": "bad*name"},
+        ).status_code == 422
+        assert not calls
+
+
+def test_owner_vnc_static_requires_an_open_session_and_proxies_files(tmp_path: Path, clock: list[float]) -> None:
+    active = False
+    novnc_calls: list[str] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal active
+        if request.method == "GET":
+            return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
+        if request.method == "POST" and request.url.path == "/sessions":
+            active = True
+            return httpx.Response(200, json={"id": "owner-1"})
+        return httpx.Response(200, json={})
+
+    def novnc(request: httpx.Request) -> httpx.Response:
+        novnc_calls.append(request.url.path)
+        return httpx.Response(200, text="<html>vnc</html>", headers={"content-type": "text/html"})
+
+    app = app_at(tmp_path, upstream, novnc_transport=httpx.MockTransport(novnc))
+    with TestClient(app) as client:
+        secret = enroll(client, clock)
+        denied = client.get("/owner/vnc/vnc.html", headers=auth(OWNER))
+        assert denied.status_code == 403
+        assert not novnc_calls
+        assert client.post("/owner/sessions", headers=auth(OWNER), json={
+            "start_url": "https://example.com", "totp_code": fresh(secret, clock),
+        }).status_code == 200
+        served = client.get("/owner/vnc/vnc.html", headers=auth(OWNER))
+        assert served.status_code == 200
+        assert "vnc" in served.text
+        assert novnc_calls == ["/vnc.html"]
+        assert client.get("/owner/vnc/../../etc/passwd", headers=auth(OWNER)).status_code == 404
+        assert client.get("/owner/vnc/vnc.html", headers=auth(AGENT)).status_code == 403
+
+
+def test_owner_vnc_websocket_requires_bearer_and_open_session_and_rechecks_frames(
+    tmp_path: Path, clock: list[float], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import approval_broker.app as broker_module
+
+    active = False
+    sent: list[bytes] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal active
+        if request.method == "GET":
+            return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
+        if request.method == "POST" and request.url.path == "/sessions":
+            active = True
+            return httpx.Response(200, json={"id": "owner-1"})
+        return httpx.Response(200, json={})
+
+    class FakeUpstream:
+        async def send(self, frame):
+            sent.append(frame)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.sleep(30)
+
+    @asynccontextmanager
+    async def fake_connect(*_args, **_kwargs):
+        yield FakeUpstream()
+
+    monkeypatch.setattr(broker_module, "ws_connect", fake_connect)
+    app = app_at(tmp_path, upstream)
+    with TestClient(app) as client:
+        secret = enroll(client, clock)
+        # No bearer at all, and an agent bearer, must both be refused.
+        with pytest.raises(Exception):
+            with client.websocket_connect("/owner/vnc/websockify"):
+                pass
+        with pytest.raises(Exception):
+            with client.websocket_connect("/owner/vnc/websockify", headers=auth(AGENT)):
+                pass
+        # No open session yet.
+        with pytest.raises(Exception):
+            with client.websocket_connect("/owner/vnc/websockify", headers=auth(OWNER)):
+                pass
+        client.post("/owner/sessions", headers=auth(OWNER), json={
+            "start_url": "https://example.com", "totp_code": fresh(secret, clock),
+        })
+        with client.websocket_connect("/owner/vnc/websockify", headers=auth(OWNER)) as socket:
+            socket.send_bytes(b"first-frame")
+            active = False
+            socket.send_bytes(b"second-frame")
+            with pytest.raises(Exception):
+                socket.receive_bytes()
+        assert b"second-frame" not in sent

@@ -6,10 +6,12 @@ the broker, controller, VNC server, or OAuth gateway.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import html
+import io
 import json
 import os
 import re
@@ -19,12 +21,16 @@ import time
 from contextlib import asynccontextmanager, closing
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
+import qrcode
+import qrcode.image.svg
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.websockets import WebSocketDisconnect, WebSocketState
+from websockets.asyncio.client import connect as ws_connect
 
 from tenant_stacks import MAX_ALLOWED_HOSTS, normalize_hostname
 
@@ -42,6 +48,16 @@ IDENTITY_RECOVERY_CONFIRM_PATH = IDENTITY_ENROLLMENT_CONFIRM_PATH
 IDENTITY_RECOVERY_CODES_PATH = "/internal/auth/recovery-codes"
 BROKER_OPEN_PATH = "/owner/sessions"
 BROKER_CLOSE_PREFIX = "/owner/sessions/"
+BROKER_VISUAL_ACCESS_PATH = "/owner/visual-access"
+BROKER_AUTH_PROFILE_SAVE_PREFIX = "/owner/sessions/"
+BROKER_AUTH_PROFILE_PREFIX = "/owner/auth-profiles/"
+PROFILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
+# The owner is shown this exact sentence whenever a request is denied because
+# it did not come from the single identity this browser stack belongs to.
+# It is deliberately plain Arabic prose (see CLAUDE.md's BiDi rule) with no
+# embedded Latin tokens, so it always renders correctly in the portal UI.
+SOLE_OWNER_DENIAL_AR = "هذا المتصفح وبياناته المحفوظة مخصصة لصاحب الحساب فقط، ولا يمكن لحساب آخر الوصول لها."
+VIEWER_DENIAL_AR = "لا يمكن عرض المتصفح الآن — يجب فتح جلسة متصفح أولاً من نفس حسابك."
 GATEWAY_CONNECTIONS_PATH = "/internal/connected-clients"
 GATEWAY_ACTIVE_USER_PATH = "/internal/active-user"
 GATEWAY_CONSENT_PREVIEW_PATH = "/internal/consent/preview"
@@ -140,6 +156,39 @@ def _site_request_scope_token(
     return f"{payload}.{signature}"
 
 
+def _otpauth_qr_svg(provisioning_uri: str) -> str:
+    """Render the enrollment QR entirely server-side as inline SVG.
+
+    This never calls a third-party QR service, never writes to disk, and the
+    markup is handed straight back in the HTTP response -- nothing here is
+    logged. `qrcode.image.svg.SvgPathImage` is pure XML generation; it does
+    not touch the network or the filesystem.
+    """
+    image = qrcode.make(
+        provisioning_uri, image_factory=qrcode.image.svg.SvgPathImage, box_size=8, border=2,
+    )
+    buffer = io.BytesIO()
+    image.save(buffer)
+    svg = buffer.getvalue().decode("ascii")
+    # Strip the XML prolog: it is not valid embedded inside an HTML document.
+    return svg.split("?>", 1)[-1].strip()
+
+
+def _totp_manual_secret(provisioning_uri: str, enrollment: Mapping[str, Any]) -> str | None:
+    """Extract the manual-entry key, preferring the otpauth URI's own secret."""
+    try:
+        values = parse_qs(urlsplit(provisioning_uri).query).get("secret")
+    except ValueError:
+        values = None
+    if values and values[0]:
+        return values[0]
+    for key in ("secret", "totp_secret"):
+        value = enrollment.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def _canonical_hostname(value: Any) -> str:
     """Use the shared policy canonicalizer for every portal hostname."""
     try:
@@ -204,6 +253,21 @@ class PortalStore:
                 CREATE TRIGGER IF NOT EXISTS portal_site_policy_audit_no_delete
                 BEFORE DELETE ON portal_site_policy_audit
                 BEGIN SELECT RAISE(ABORT, 'portal site policy audit is append-only'); END;
+                CREATE TABLE IF NOT EXISTS portal_sole_owner_lock (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    user_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    bound_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS portal_auth_profiles (
+                    user_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    profile_name TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY(user_id, tenant_id, profile_name)
+                );
+                CREATE INDEX IF NOT EXISTS portal_auth_profiles_name_idx
+                    ON portal_auth_profiles(profile_name);
                 """
             )
             columns = {
@@ -528,6 +592,103 @@ def create_app(
                  hostname, outcome, request_id),
             )
 
+    def require_sole_new_surface_owner(row: Mapping[str, Any]) -> None:
+        """Pin the noVNC viewer and the auth-profile UI to a single identity.
+
+        This deployment is single-owner today: `broker_resolver` is only set
+        once real per-tenant stack isolation exists (each tenant then gets
+        its own broker/browser, so no extra lock is needed here). Without a
+        resolver every identity shares the exact same physical broker and
+        browser data, so the *first* identity ever to touch one of these two
+        new, more sensitive surfaces is permanently bound as the only one
+        allowed to use them again. This does not affect signing in, opening
+        the shared browser, or the sites page -- only the live view and the
+        saved-login UI added by this change.
+        """
+        if broker_resolver is not None:
+            return
+        with closing(store.connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            bound = db.execute(
+                "SELECT user_id, tenant_id FROM portal_sole_owner_lock WHERE id=1"
+            ).fetchone()
+            if bound is None:
+                db.execute(
+                    "INSERT INTO portal_sole_owner_lock(id,user_id,tenant_id,bound_at) VALUES(1,?,?,?)",
+                    (row["user_id"], row["tenant_id"], clock()),
+                )
+                db.commit()
+                return
+            db.commit()
+        if bound["user_id"] != row["user_id"] or bound["tenant_id"] != row["tenant_id"]:
+            raise HTTPException(403, SOLE_OWNER_DENIAL_AR)
+
+    def owned_profile_names(row: Mapping[str, Any]) -> list[str]:
+        with closing(store.connect()) as db:
+            rows = db.execute(
+                "SELECT profile_name, created_at FROM portal_auth_profiles "
+                "WHERE user_id=? AND tenant_id=? ORDER BY created_at DESC",
+                (row["user_id"], row["tenant_id"]),
+            ).fetchall()
+        return [item["profile_name"] for item in rows]
+
+    def owns_profile(row: Mapping[str, Any], profile_name: str) -> bool:
+        with closing(store.connect()) as db:
+            found = db.execute(
+                "SELECT 1 FROM portal_auth_profiles WHERE user_id=? AND tenant_id=? AND profile_name=?",
+                (row["user_id"], row["tenant_id"], profile_name),
+            ).fetchone()
+        return found is not None
+
+    def claim_profile_name(row: Mapping[str, Any], profile_name: str) -> None:
+        """Record local ownership of a broker profile name.
+
+        The underlying broker/controller profile store has no per-tenant
+        namespace of its own in this single-owner deployment, so this table
+        is what stops one identity from silently reusing -- and overwriting
+        -- a name another identity already saved.
+        """
+        with closing(store.connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            if broker_resolver is None:
+                other = db.execute(
+                    "SELECT 1 FROM portal_auth_profiles WHERE profile_name=? "
+                    "AND NOT (user_id=? AND tenant_id=?)",
+                    (profile_name, row["user_id"], row["tenant_id"]),
+                ).fetchone()
+                if other is not None:
+                    db.commit()
+                    raise HTTPException(409, "Profile name already belongs to a different identity")
+            db.execute(
+                "INSERT INTO portal_auth_profiles(user_id,tenant_id,profile_name,created_at) "
+                "VALUES(?,?,?,?) ON CONFLICT(user_id,tenant_id,profile_name) "
+                "DO UPDATE SET created_at=excluded.created_at",
+                (row["user_id"], row["tenant_id"], profile_name, clock()),
+            )
+            db.commit()
+
+    def rename_profile_claim(row: Mapping[str, Any], old_name: str, new_name: str) -> None:
+        with closing(store.connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "DELETE FROM portal_auth_profiles WHERE user_id=? AND tenant_id=? AND profile_name=?",
+                (row["user_id"], row["tenant_id"], old_name),
+            )
+            db.execute(
+                "INSERT INTO portal_auth_profiles(user_id,tenant_id,profile_name,created_at) "
+                "VALUES(?,?,?,?) ON CONFLICT(user_id,tenant_id,profile_name) "
+                "DO UPDATE SET created_at=excluded.created_at",
+                (row["user_id"], row["tenant_id"], new_name, clock()),
+            )
+            db.commit()
+
+    def drop_profile_claim(row: Mapping[str, Any], profile_name: str) -> None:
+        with closing(store.connect()) as db:
+            db.execute(
+                "DELETE FROM portal_auth_profiles WHERE user_id=? AND tenant_id=? AND profile_name=?",
+                (row["user_id"], row["tenant_id"], profile_name),
+            )
+
     async def resolve_policy(user_id: str, tenant_id: str) -> tuple[list[str], int]:
         if policy_resolver is None:
             raise HTTPException(503, "Site policy service is not configured")
@@ -604,6 +765,13 @@ def create_app(
     async def require_fresh_site_change(
         request: Request, row: Mapping[str, Any], data: Mapping[str, Any], *, action: str,
     ) -> None:
+        """Require a fresh authenticator code for a sensitive settings change.
+
+        Despite the name (kept for the identity service's existing
+        "site_policy_change" purpose bucket), this also gates saving,
+        renaming, and deleting an auth profile -- those are exactly as
+        sensitive as changing allowed sites.
+        """
         if authentication_is_fresh(row, now=clock()):
             return
         response = await identity_http.post(
@@ -756,13 +924,22 @@ def create_app(
                 "<label>Fresh authenticator code <input name=totp_code inputmode=numeric "
                 "autocomplete=one-time-code pattern='[0-9]{6}' required></label>"
             )
+        viewer_link = (
+            "<p><a href='/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify'>"
+            "شوف المتصفح (Watch and control the browser)</a></p>"
+            if state == "open" else
+            "<p>شوف المتصفح: افتح المتصفح أولاً.</p>"
+        )
         return HTMLResponse(
             "<!doctype html><meta charset=utf-8><title>Secure Browser</title>"
             f"<h1>Secure Browser</h1><p>Signed in as {account}</p><p>Browser: {state}</p>"
             "<p><a href='/sites'>Manage allowed sites and assistant requests</a></p>"
+            "<p><a href='/profiles'>احفظ الدخول (saved logins)</a></p>"
+            f"{viewer_link}"
             "<h2>Open browser</h2><form method=post action=/api/browser/open>"
             f"<input type=hidden name=csrf_token value='{csrf}'>"
             "<label>Start URL <input name=start_url type=url value='https://example.com' required></label>"
+            "<label>Saved login (optional) <input name=auth_profile placeholder='leave blank for a fresh browser'></label>"
             f"{authenticator_field}<button>Open</button></form>"
             "<h2>Close browser</h2><form method=post action=/api/browser/close>"
             f"<input type=hidden name=csrf_token value='{csrf}'><button>Close server session</button></form>"
@@ -1049,9 +1226,36 @@ def create_app(
                 ),
                 "start_url": "https://example.com",
             }
-            for key in ("start_url", "auth_profile"):
-                if key in data:
-                    broker_payload[key] = _required_text(data, key, 2048 if key == "start_url" else 200)
+            if "start_url" in data:
+                broker_payload["start_url"] = _required_text(data, "start_url", 2048)
+            if "auth_profile" in data:
+                profile_name = _required_text(data, "auth_profile", 200)
+                if not PROFILE_NAME_PATTERN.fullmatch(profile_name):
+                    raise HTTPException(422, "Invalid auth_profile")
+                # Opening a browser pre-logged-in from a saved profile is exactly
+                # as sensitive as viewing or managing that profile, so it is
+                # gated the same way (see require_sole_new_surface_owner).
+                require_sole_new_surface_owner(row)
+                if not owns_profile(row, profile_name):
+                    # A name nobody has claimed yet is either brand new or a
+                    # profile saved before this ownership table existed; adopt
+                    # it for this identity instead of orphaning a real login.
+                    with closing(store.connect()) as db:
+                        db.execute("BEGIN IMMEDIATE")
+                        if broker_resolver is None and db.execute(
+                            "SELECT 1 FROM portal_auth_profiles WHERE profile_name=? "
+                            "AND NOT (user_id=? AND tenant_id=?)",
+                            (profile_name, row["user_id"], row["tenant_id"]),
+                        ).fetchone():
+                            db.commit()
+                            raise HTTPException(403, SOLE_OWNER_DENIAL_AR)
+                        db.execute(
+                            "INSERT OR IGNORE INTO portal_auth_profiles"
+                            "(user_id,tenant_id,profile_name,created_at) VALUES(?,?,?,?)",
+                            (row["user_id"], row["tenant_id"], profile_name, clock()),
+                        )
+                        db.commit()
+                broker_payload["auth_profile"] = profile_name
             selected_broker, selected_owner_token = broker_for(row["user_id"], row["tenant_id"])
             opened = await selected_broker.post(
                 BROKER_OPEN_PATH, headers=internal_headers(selected_owner_token), json=broker_payload,
@@ -1113,6 +1317,311 @@ def create_app(
         row = await mutation(request)
         await close_owned_browser(row)
         return {"status": "closed"}
+
+    async def viewer_session_id(row: Mapping[str, Any]) -> str | None:
+        """The live broker session id for this identity, or None if there isn't one.
+
+        This is the single gate the noVNC viewer relies on: it re-runs before
+        the socket is accepted, before every inbound control frame, and once
+        a second on a timer, mirroring the broker's own `/owner/visual-access`
+        guard so a closed or replaced session can never keep giving a view.
+        """
+        with closing(store.connect()) as db:
+            owner = db.execute(
+                "SELECT broker_session_id FROM browser_ownership_v2 WHERE user_id=? AND tenant_id=?",
+                (row["user_id"], row["tenant_id"]),
+            ).fetchone()
+        if owner is None or not owner["broker_session_id"]:
+            return None
+        selected_broker, selected_owner_token = broker_for(row["user_id"], row["tenant_id"])
+        try:
+            guard = await selected_broker.get(
+                BROKER_VISUAL_ACCESS_PATH, headers=internal_headers(selected_owner_token), timeout=5,
+            )
+        except httpx.HTTPError:
+            return None
+        if guard.status_code != 200:
+            return None
+        try:
+            session_id = guard.json().get("session_id") if guard.content else None
+        except ValueError:
+            return None
+        if not isinstance(session_id, str) or session_id != owner["broker_session_id"]:
+            return None
+        return session_id
+
+    _VNC_DROP_REQUEST_HEADERS = {
+        "host", "connection", "upgrade", "cookie", "authorization",
+        "content-length", "x-csrf-token", "origin",
+    }
+    _VNC_KEEP_RESPONSE_HEADERS = {"content-type", "content-length", "etag", "last-modified", "cache-control"}
+
+    @app.api_route("/vnc/{path:path}", methods=["GET", "HEAD"])
+    async def vnc_static(path: str, request: Request):
+        # Interactive access is intentional and required: the owner types
+        # passwords and scans WhatsApp/Facebook QR codes through this exact
+        # view, so it is never downgraded to a read-only/view-only mode.
+        row = session_for(request)
+        require_sole_new_surface_owner(row)
+        if ".." in path or path.startswith("/") or not re.fullmatch(r"[A-Za-z0-9._/-]*", path):
+            raise HTTPException(404, "Not found")
+        if await viewer_session_id(row) is None:
+            raise HTTPException(403, VIEWER_DENIAL_AR)
+        # noVNC itself lives on browser-node, which only the broker can reach
+        # (the tenant-private network never includes the portal), so this
+        # proxies through the broker's own gated /owner/vnc/* relay rather
+        # than reaching browser-node directly.
+        selected_broker, selected_owner_token = broker_for(row["user_id"], row["tenant_id"])
+        headers = {
+            key: value for key, value in request.headers.items()
+            if key.lower() not in _VNC_DROP_REQUEST_HEADERS
+        }
+        headers["Authorization"] = f"Bearer {selected_owner_token}"
+        try:
+            upstream = await selected_broker.request(
+                request.method, f"/owner/vnc/{path}", params=request.query_params, headers=headers, timeout=10,
+            )
+        except httpx.HTTPError:
+            raise HTTPException(502, "Browser view is unavailable") from None
+        if upstream.status_code == 403:
+            raise HTTPException(403, VIEWER_DENIAL_AR)
+        if upstream.status_code >= 400:
+            raise _upstream_error(upstream, "Browser view is unavailable")
+        response_headers = {
+            key: value for key, value in upstream.headers.items()
+            if key.lower() in _VNC_KEEP_RESPONSE_HEADERS
+        }
+        return Response(
+            content=upstream.content if request.method != "HEAD" else b"",
+            status_code=upstream.status_code, headers=response_headers,
+        )
+
+    @app.websocket("/vnc/websockify")
+    async def vnc_websocket(websocket: WebSocket):
+        if websocket.headers.get("origin") not in (None, public_origin):
+            await websocket.close(code=1008)
+            return
+        token = websocket.cookies.get(SESSION_COOKIE)
+        row = store.session(token, now=clock(), idle_ttl=idle_session_ttl) if token else None
+        if row is None:
+            await websocket.close(code=1008)
+            return
+        try:
+            require_sole_new_surface_owner(row)
+        except HTTPException:
+            await websocket.close(code=1008)
+            return
+        session_id = await viewer_session_id(row)
+        if session_id is None:
+            await websocket.close(code=1008)
+            return
+        selected_broker, selected_owner_token = broker_for(row["user_id"], row["tenant_id"])
+        ws_url = "ws" + str(selected_broker.base_url).removeprefix("http") + "/owner/vnc/websockify"
+        try:
+            async with ws_connect(
+                ws_url, additional_headers={"Authorization": f"Bearer {selected_owner_token}"},
+                max_size=16 * 1024 * 1024, open_timeout=5,
+            ) as upstream:
+                if await viewer_session_id(row) != session_id:
+                    await websocket.close(code=1008)
+                    return
+                await websocket.accept()
+
+                async def browser_to_vnc() -> None:
+                    try:
+                        while True:
+                            message = await websocket.receive()
+                            if message["type"] == "websocket.disconnect":
+                                break
+                            # Every inbound frame can carry keyboard/mouse input,
+                            # so a closed or reassigned session must lose control
+                            # immediately, not merely at the next periodic check.
+                            if await viewer_session_id(row) != session_id:
+                                break
+                            if message.get("bytes") is not None:
+                                await upstream.send(message["bytes"])
+                            elif message.get("text") is not None:
+                                await upstream.send(message["text"])
+                    except (WebSocketDisconnect, RuntimeError):
+                        pass
+
+                async def vnc_to_browser() -> None:
+                    async for message in upstream:
+                        if await viewer_session_id(row) != session_id:
+                            break
+                        if isinstance(message, bytes):
+                            await websocket.send_bytes(message)
+                        else:
+                            await websocket.send_text(message)
+
+                async def periodic_guard() -> None:
+                    while True:
+                        await asyncio.sleep(1)
+                        if await viewer_session_id(row) != session_id:
+                            break
+
+                tasks = [
+                    asyncio.create_task(browser_to_vnc()),
+                    asyncio.create_task(vnc_to_browser()),
+                    asyncio.create_task(periodic_guard()),
+                ]
+                _done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                if websocket.application_state != WebSocketState.DISCONNECTED:
+                    await websocket.close(code=1008)
+        except Exception:
+            if websocket.application_state != WebSocketState.DISCONNECTED:
+                await websocket.close(code=1011)
+
+    @app.get("/profiles")
+    async def profiles_page(request: Request):
+        try:
+            row = session_for(request)
+        except HTTPException as exc:
+            if exc.status_code != 401:
+                raise
+            return RedirectResponse("/signin?next=%2Fprofiles", status_code=303)
+        try:
+            require_sole_new_surface_owner(row)
+        except HTTPException as exc:
+            return HTMLResponse(
+                "<!doctype html><meta charset=utf-8><title>Saved logins</title>"
+                f"<h1>Saved logins</h1><p>{html.escape(str(exc.detail))}</p>"
+                "<p><a href='/browser'>Back to browser</a></p>",
+                status_code=exc.status_code,
+            )
+        csrf = html.escape(request.cookies.get(CSRF_COOKIE, ""), quote=True)
+        fresh = authentication_is_fresh(row, now=clock())
+        code = "" if fresh else (
+            "<label>Fresh authenticator code <input name=totp_code inputmode=numeric "
+            "autocomplete=one-time-code pattern='[0-9]{6}' required></label>"
+        )
+        names = owned_profile_names(row)
+        items = "".join(
+            "<li><code>" + html.escape(name) + "</code> "
+            "<form style='display:inline' method=post action='/api/auth-profiles/"
+            + html.escape(name, quote=True) + "/rename'>"
+            "<input type=hidden name=csrf_token value='" + csrf + "'>"
+            "<input name=new_name placeholder='new name' required>" + code
+            + "<button>Rename</button></form> "
+            "<form style='display:inline' method=post action='/api/auth-profiles/"
+            + html.escape(name, quote=True) + "/delete'>"
+            "<input type=hidden name=csrf_token value='" + csrf + "'>" + code
+            + "<button>Delete</button></form></li>"
+            for name in names
+        ) or "<li>No saved logins yet.</li>"
+        return HTMLResponse(
+            "<!doctype html><meta charset=utf-8><title>Saved logins</title>"
+            "<h1>احفظ الدخول — Saved logins</h1><p><a href='/browser'>Back to browser</a></p>"
+            "<p>This stores the browser's cookies and site session for the sites you were logged "
+            "into, encrypted on the server. Your actual passwords are never stored.</p>"
+            "<h2>Save the currently open browser's login</h2>"
+            "<form method=post action=/api/auth-profiles>"
+            f"<input type=hidden name=csrf_token value='{csrf}'>"
+            "<label>Name this login <input name=profile_name placeholder='e.g. facebook' required "
+            "pattern='[A-Za-z0-9_.-]{1,120}'></label>" + code + "<button>احفظ الدخول</button></form>"
+            "<h2>Saved logins</h2><ul>" + items + "</ul>"
+            "<p>To open the browser already signed in, go back to the browser page and type the "
+            "saved login's name in the \"Saved login\" field before pressing Open.</p>"
+        )
+
+    @app.get("/api/auth-profiles")
+    async def list_auth_profiles_api(request: Request):
+        row = session_for(request)
+        require_sole_new_surface_owner(row)
+        return {"profiles": owned_profile_names(row)}
+
+    @app.post("/api/auth-profiles")
+    async def save_auth_profile_api(request: Request):
+        row = await mutation(request)
+        data = await _payload(request)
+        name = _required_text(data, "profile_name", 120)
+        if not PROFILE_NAME_PATTERN.fullmatch(name):
+            raise HTTPException(422, "Names may contain letters, numbers, dots, underscores, and hyphens")
+        require_sole_new_surface_owner(row)
+        await require_fresh_site_change(request, row, data, action="auth_profile_save")
+        with closing(store.connect()) as db:
+            owner = db.execute(
+                "SELECT broker_session_id FROM browser_ownership_v2 WHERE user_id=? AND tenant_id=?",
+                (row["user_id"], row["tenant_id"]),
+            ).fetchone()
+        if owner is None or not owner["broker_session_id"]:
+            raise HTTPException(409, "Open the browser before saving its login")
+        claim_profile_name(row, name)
+        selected_broker, selected_owner_token = broker_for(row["user_id"], row["tenant_id"])
+        try:
+            saved = await selected_broker.post(
+                f"{BROKER_AUTH_PROFILE_SAVE_PREFIX}{owner['broker_session_id']}/auth-profiles",
+                headers=internal_headers(selected_owner_token), json={"profile_name": name},
+            )
+        except httpx.HTTPError:
+            drop_profile_claim(row, name)
+            raise HTTPException(502, "Browser service unavailable") from None
+        if saved.status_code not in (200, 201):
+            drop_profile_claim(row, name)
+            audit(row=row, action="auth_profile_save", hostname=None, outcome="failed")
+            raise _upstream_error(saved, "Login could not be saved")
+        audit(row=row, action="auth_profile_save", hostname=None, outcome="saved")
+        return {"status": "saved", "profile_name": name}
+
+    async def _delete_auth_profile(name: str, request: Request) -> dict[str, Any]:
+        row = await mutation(request)
+        require_sole_new_surface_owner(row)
+        if not PROFILE_NAME_PATTERN.fullmatch(name) or not owns_profile(row, name):
+            raise HTTPException(404, "Saved login not found")
+        data = await _payload(request)
+        await require_fresh_site_change(request, row, data, action="auth_profile_delete")
+        selected_broker, selected_owner_token = broker_for(row["user_id"], row["tenant_id"])
+        try:
+            deleted = await selected_broker.delete(
+                f"{BROKER_AUTH_PROFILE_PREFIX}{name}", headers=internal_headers(selected_owner_token),
+            )
+        except httpx.HTTPError:
+            raise HTTPException(502, "Browser service unavailable") from None
+        if deleted.status_code not in (200, 204, 404):
+            audit(row=row, action="auth_profile_delete", hostname=None, outcome="failed")
+            raise _upstream_error(deleted, "Saved login could not be deleted")
+        drop_profile_claim(row, name)
+        audit(row=row, action="auth_profile_delete", hostname=None, outcome="deleted")
+        return {"status": "deleted", "profile_name": name}
+
+    @app.delete("/api/auth-profiles/{name}")
+    async def delete_auth_profile_api(name: str, request: Request):
+        return await _delete_auth_profile(name, request)
+
+    @app.post("/api/auth-profiles/{name}/delete")
+    async def delete_auth_profile_form(name: str, request: Request):
+        return await _delete_auth_profile(name, request)
+
+    @app.post("/api/auth-profiles/{name}/rename")
+    async def rename_auth_profile_api(name: str, request: Request):
+        row = await mutation(request)
+        require_sole_new_surface_owner(row)
+        if not PROFILE_NAME_PATTERN.fullmatch(name) or not owns_profile(row, name):
+            raise HTTPException(404, "Saved login not found")
+        data = await _payload(request)
+        new_name = _required_text(data, "new_name", 120)
+        if not PROFILE_NAME_PATTERN.fullmatch(new_name):
+            raise HTTPException(422, "Names may contain letters, numbers, dots, underscores, and hyphens")
+        if new_name == name:
+            raise HTTPException(422, "New name must differ from the current name")
+        await require_fresh_site_change(request, row, data, action="auth_profile_rename")
+        selected_broker, selected_owner_token = broker_for(row["user_id"], row["tenant_id"])
+        try:
+            renamed = await selected_broker.post(
+                f"{BROKER_AUTH_PROFILE_PREFIX}{name}/rename",
+                headers=internal_headers(selected_owner_token), json={"new_name": new_name},
+            )
+        except httpx.HTTPError:
+            raise HTTPException(502, "Browser service unavailable") from None
+        if renamed.status_code not in (200, 201):
+            audit(row=row, action="auth_profile_rename", hostname=None, outcome="failed")
+            raise _upstream_error(renamed, "Saved login could not be renamed")
+        rename_profile_claim(row, name, new_name)
+        audit(row=row, action="auth_profile_rename", hostname=None, outcome="renamed")
+        return {"status": "renamed", "profile_name": new_name}
 
     @app.get("/api/connections")
     async def connections(request: Request):
@@ -1191,11 +1700,20 @@ def create_app(
             raise HTTPException(502, "Invalid identity enrollment response")
         escaped_id = html.escape(enrollment_id, quote=True)
         escaped_uri = html.escape(provisioning_uri, quote=True)
+        qr_svg = _otpauth_qr_svg(provisioning_uri)
+        manual_secret = _totp_manual_secret(provisioning_uri, enrollment)
+        manual_secret_html = (
+            "<details><summary>اضغط لإظهار المفتاح</summary>"
+            f"<p>Manual entry key: <code>{html.escape(manual_secret)}</code></p></details>"
+            if manual_secret else ""
+        )
         return HTMLResponse(
             "<!doctype html><meta charset=utf-8><title>Authenticator enrollment</title>"
             "<h1>Add your authenticator</h1>"
-            f"<p><a href='{escaped_uri}'>Open in your authenticator app</a></p>"
-            f"<p><code>{escaped_uri}</code></p>"
+            "<p>Scan this with your authenticator app (Google Authenticator or similar).</p>"
+            f"<p>{qr_svg}</p>"
+            f"<p><a href='{escaped_uri}'>Open in your authenticator app</a> (same device only)</p>"
+            f"{manual_secret_html}"
             "<form method=post action=/enroll/confirm>"
             f"<input type=hidden name=enrollment_id value='{escaped_id}'>"
             "<label>Authenticator code <input name=totp_code inputmode=numeric "

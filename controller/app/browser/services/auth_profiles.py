@@ -499,6 +499,79 @@ class BrowserAuthProfileService:
             "imported": True,
         }
 
+    async def delete(self, profile_name: str) -> dict[str, Any]:
+        normalized = self.normalize_name(profile_name)
+        self.require_access(normalized, action="deleting an auth profile")
+        profile_dir = self.dir(normalized, create=False)
+        profile_root_str = os.path.realpath(os.fspath(self.root()))
+        profile_dir_str = os.path.realpath(os.fspath(profile_dir))
+        profile_root_prefix = profile_root_str if profile_root_str.endswith(os.sep) else profile_root_str + os.sep
+        if not profile_dir_str.startswith(profile_root_prefix):
+            raise PermissionError("auth profile path must stay inside auth profile root")
+        if not os.path.isdir(profile_dir_str):
+            raise FileNotFoundError(f"auth profile '{normalized}' not found")
+        await asyncio.to_thread(shutil.rmtree, profile_dir_str)
+        await self.manager.audit.append(
+            event_type="auth_profile_deleted",
+            status="ok",
+            action="delete_auth_profile",
+            session_id=None,
+            details={"profile_name": normalized},
+        )
+        await self._record_profile_receipt(
+            action="delete_auth_profile", profile_name=normalized, metadata={},
+        )
+        return {"profile_name": normalized, "deleted": True}
+
+    async def rename(self, profile_name: str, new_name: str) -> dict[str, Any]:
+        normalized = self.normalize_name(profile_name)
+        normalized_new = self.normalize_name(new_name)
+        if normalized == normalized_new:
+            raise ValueError("new auth profile name must differ from the current name")
+        # Renaming rewrites where the credentials live, so it needs the same
+        # proof of ownership as saving or exporting them.
+        owner = self.require_access(normalized, action="renaming an auth profile")
+        profile_root_str = os.path.realpath(os.fspath(self.root()))
+        source_dir_str = os.path.realpath(os.fspath(self.dir(normalized, create=False)))
+        source_root_prefix = profile_root_str if profile_root_str.endswith(os.sep) else profile_root_str + os.sep
+        if not source_dir_str.startswith(source_root_prefix):
+            raise PermissionError("auth profile path must stay inside auth profile root")
+        if not os.path.isdir(source_dir_str):
+            raise FileNotFoundError(f"auth profile '{normalized}' not found")
+        destination_dir = self.dir(normalized_new, create=False)
+        if destination_dir.exists():
+            # Renaming onto an existing name is the same takeover as saving
+            # over it, so the destination's own ownership must allow the write.
+            self.require_access(normalized_new, action="overwriting an auth profile")
+            await asyncio.to_thread(shutil.rmtree, os.path.realpath(os.fspath(destination_dir)))
+        profile_root = self.root()
+        source = self.resolve_contained_path(profile_root, normalized)
+        destination = self.resolve_contained_path(profile_root, normalized_new)
+        await asyncio.to_thread(shutil.move, str(source), str(destination))
+        metadata = self.read_metadata(normalized_new)
+        metadata["profile_name"] = normalized_new
+        if owner:
+            metadata["owner"] = owner
+        metadata_path_str = os.path.realpath(os.fspath(self.metadata_path(normalized_new, create=False)))
+        profile_root_prefix = profile_root_str if profile_root_str.endswith(os.sep) else profile_root_str + os.sep
+        if not metadata_path_str.startswith(profile_root_prefix):
+            raise PermissionError("auth profile metadata path must stay inside auth profile root")
+        with open(metadata_path_str, "w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, indent=2, sort_keys=True)
+        await self.manager.audit.append(
+            event_type="auth_profile_renamed",
+            status="ok",
+            action="rename_auth_profile",
+            session_id=None,
+            details={"profile_name": normalized, "new_profile_name": normalized_new},
+        )
+        await self._record_profile_receipt(
+            action="rename_auth_profile",
+            profile_name=normalized_new,
+            metadata={"previous_name": normalized},
+        )
+        return {"profile_name": normalized_new, "previous_name": normalized}
+
     def owner_of(self, profile_name: str) -> str | None:
         owner = self.read_metadata(self.normalize_name(profile_name)).get("owner")
         return owner.strip() if isinstance(owner, str) and owner.strip() else None

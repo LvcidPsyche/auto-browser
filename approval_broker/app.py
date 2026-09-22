@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -26,9 +27,11 @@ from urllib.parse import urlsplit
 import httpx
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi import FastAPI, Header, HTTPException, Request, Response, WebSocket
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from starlette.websockets import WebSocketDisconnect, WebSocketState
+from websockets.asyncio.client import connect as ws_connect
 
 ALLOWED_ACTIONS = frozenset({"click", "type", "press", "scroll", "navigate", "wait"})
 TOTP_PERIOD = 30
@@ -157,6 +160,10 @@ class OwnerSaveProfileRequest(StrictModel):
     profile_name: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.-]+$")
 
 
+class OwnerRenameProfileRequest(StrictModel):
+    new_name: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.-]+$")
+
+
 class Action(StrictModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
 
@@ -204,7 +211,9 @@ def create_app(
     agent_tokens: str | None = None,
     upstream_token: str,
     upstream_url: str = "http://127.0.0.1:8000",
+    novnc_url: str = "http://browser-node:6080",
     transport: httpx.AsyncBaseTransport | None = None,
+    novnc_transport: httpx.AsyncBaseTransport | None = None,
     totp_db_path: str | Path | None = None,
     portal_url: str | None = None,
     portal_assertion_public_key: str | None = None,
@@ -255,6 +264,8 @@ def create_app(
         raise ValueError("Owner, agents, and upstream credentials must be distinct")
     if upstream_url not in {"http://127.0.0.1:8000", "http://controller:8000"}:
         raise ValueError("Upstream must be the private controller endpoint")
+    if novnc_url not in {"http://127.0.0.1:6080", "http://browser-node:6080"}:
+        raise ValueError("noVNC upstream must be the private browser-node endpoint")
     if portal_url is not None:
         try:
             parsed_portal = urlsplit(portal_url)
@@ -287,6 +298,9 @@ def create_app(
         timeout=20,
         follow_redirects=False,
     )
+    # No fixed Authorization header: the noVNC static file server has no
+    # concept of the owner bearer at all, unlike the controller above.
+    novnc_client = httpx.AsyncClient(base_url=novnc_url, transport=novnc_transport, timeout=20, follow_redirects=False)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -297,6 +311,7 @@ def create_app(
         finally:
             stop.set()
             await client.aclose()
+            await novnc_client.aclose()
 
     app = FastAPI(
         title="Auto Browser approval broker", lifespan=lifespan,
@@ -446,6 +461,13 @@ def create_app(
             raise HTTPException(400, "Invalid session id")
         return session_id
 
+    def safe_profile_name(profile_name: str) -> str:
+        if not profile_name or len(profile_name) > 120 or not all(
+            character.isalnum() or character in "_.-" for character in profile_name
+        ):
+            raise HTTPException(400, "Invalid profile name")
+        return profile_name
+
     async def ensure_no_active_session() -> None:
         sessions = await upstream("GET", "/sessions")
         if not isinstance(sessions, list) or not all(isinstance(item, dict) for item in sessions):
@@ -502,6 +524,118 @@ def create_app(
         async with session_state_lock:
             return {"session_id": await trusted_owner_session()}
 
+    _NOVNC_DROP_REQUEST_HEADERS = {
+        "host", "connection", "upgrade", "authorization", "content-length", "cookie",
+    }
+    _NOVNC_KEEP_RESPONSE_HEADERS = {"content-type", "content-length", "etag", "last-modified", "cache-control"}
+
+    @app.api_route("/owner/vnc/{path:path}", methods=["GET", "HEAD"])
+    async def owner_vnc_static(path: str, request: Request, authorization: str | None = Header(default=None)):
+        """Proxy the private noVNC static files -- only browser-node can reach
+
+        this on the tenant-private network, so only this broker (which sits on
+        both the tenant network and the portal-reachable control network) can
+        serve them onward, and only once a TOTP-opened owner session exists.
+        """
+        require_role(authorization, "owner")
+        async with session_state_lock:
+            await trusted_owner_session()
+        if ".." in path or path.startswith("/") or not re.fullmatch(r"[A-Za-z0-9._/-]*", path):
+            raise HTTPException(404, "Not found")
+        headers = {key: value for key, value in request.headers.items() if key.lower() not in _NOVNC_DROP_REQUEST_HEADERS}
+        try:
+            response = await novnc_client.request(
+                request.method, f"/{path}", params=request.query_params, headers=headers, timeout=10,
+            )
+        except httpx.HTTPError:
+            raise HTTPException(502, "Browser view is unavailable") from None
+        response_headers = {
+            key: value for key, value in response.headers.items() if key.lower() in _NOVNC_KEEP_RESPONSE_HEADERS
+        }
+        return Response(
+            content=response.content if request.method != "HEAD" else b"",
+            status_code=response.status_code, headers=response_headers,
+        )
+
+    @app.websocket("/owner/vnc/websockify")
+    async def owner_vnc_websocket(websocket: WebSocket):
+        auth_header = websocket.headers.get("authorization") or ""
+        supplied = auth_header[7:] if auth_header.startswith("Bearer ") else ""
+        if not supplied or not secrets.compare_digest(supplied, owner_token):
+            await websocket.close(code=1008)
+            return
+        async with session_state_lock:
+            try:
+                session_id = await trusted_owner_session()
+            except HTTPException:
+                await websocket.close(code=1008)
+                return
+
+        async def still_live() -> bool:
+            # Re-verify against the controller's live session list every time,
+            # exactly like an agent's ensure_live() check -- comparing only the
+            # cached owner_session_id would miss the owner's session ending
+            # for any reason other than an explicit close through this broker.
+            async with session_state_lock:
+                try:
+                    await trusted_owner_session()
+                except HTTPException:
+                    return False
+                return owner_session_id == session_id
+
+        ws_url = "ws" + novnc_url.removeprefix("http") + "/websockify"
+        try:
+            async with ws_connect(ws_url, max_size=16 * 1024 * 1024, open_timeout=5) as upstream:
+                if not await still_live():
+                    await websocket.close(code=1008)
+                    return
+                await websocket.accept()
+
+                async def browser_to_vnc() -> None:
+                    try:
+                        while True:
+                            message = await websocket.receive()
+                            if message["type"] == "websocket.disconnect":
+                                break
+                            if not await still_live():
+                                break
+                            if message.get("bytes") is not None:
+                                await upstream.send(message["bytes"])
+                            elif message.get("text") is not None:
+                                await upstream.send(message["text"])
+                    except (WebSocketDisconnect, RuntimeError):
+                        pass
+
+                async def vnc_to_browser() -> None:
+                    async for message in upstream:
+                        if not await still_live():
+                            break
+                        if isinstance(message, bytes):
+                            await websocket.send_bytes(message)
+                        else:
+                            await websocket.send_text(message)
+
+                async def periodic_guard() -> None:
+                    while True:
+                        await asyncio.sleep(1)
+                        if not await still_live():
+                            break
+
+                tasks = [
+                    asyncio.create_task(browser_to_vnc()),
+                    asyncio.create_task(vnc_to_browser()),
+                    asyncio.create_task(periodic_guard()),
+                ]
+                _done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                if websocket.application_state != WebSocketState.DISCONNECTED:
+                    await websocket.close(code=1008)
+        except Exception:
+            if websocket.application_state != WebSocketState.DISCONNECTED:
+                await websocket.close(code=1011)
+
     @app.post("/owner/sessions")
     async def owner_create_session(payload: OwnerSessionRequest, authorization: str | None = Header(default=None)):
         nonlocal owner_session_id, owner_session_generation, session_opening
@@ -546,6 +680,20 @@ def create_app(
         require_role(authorization, "owner")
         session_id = safe_session_id(session_id)
         return await upstream("POST", f"/sessions/{session_id}/auth-profiles", {"profile_name": payload.profile_name})
+
+    @app.delete("/owner/auth-profiles/{profile_name}")
+    async def owner_delete_profile(profile_name: str, authorization: str | None = Header(default=None)):
+        require_role(authorization, "owner")
+        profile_name = safe_profile_name(profile_name)
+        return await upstream("DELETE", f"/auth-profiles/{profile_name}")
+
+    @app.post("/owner/auth-profiles/{profile_name}/rename")
+    async def owner_rename_profile(
+        profile_name: str, payload: OwnerRenameProfileRequest, authorization: str | None = Header(default=None),
+    ):
+        require_role(authorization, "owner")
+        profile_name = safe_profile_name(profile_name)
+        return await upstream("POST", f"/auth-profiles/{profile_name}/rename", {"new_name": payload.new_name})
 
     @app.delete("/owner/sessions/{session_id}")
     async def owner_close_session(session_id: str, authorization: str | None = Header(default=None)):
@@ -822,6 +970,7 @@ def app_from_environment() -> FastAPI:
         agent_tokens=os.environ.get("BROKER_AGENT_TOKENS"),
         upstream_token=os.environ["API_BEARER_TOKEN"],
         upstream_url=os.environ.get("BROKER_UPSTREAM_URL", "http://127.0.0.1:8000"),
+        novnc_url=os.environ.get("BROKER_NOVNC_URL", "http://browser-node:6080"),
         totp_db_path=os.environ["BROKER_TOTP_DB"],
         portal_url=os.environ.get("BROKER_PORTAL_URL"),
         portal_assertion_public_key=os.environ.get("BROKER_PORTAL_ASSERTION_PUBLIC_KEY"),

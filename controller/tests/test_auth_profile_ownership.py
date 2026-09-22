@@ -50,6 +50,11 @@ class StubSession:
     auth_profile_name = None
 
 
+class StubAudit:
+    async def append(self, **_kwargs) -> None:
+        return None
+
+
 class AuthProfileOwnershipTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="auto-browser-profile-owner-"))
@@ -57,6 +62,7 @@ class AuthProfileOwnershipTests(unittest.TestCase):
         manager = SimpleNamespace(
             settings=SimpleNamespace(auth_root=str(self.root), auth_state_encryption_key=None),
             auth_state=StubAuthState(),
+            audit=StubAudit(),
         )
         self.service = BrowserAuthProfileService(manager)
         self._operator_token = None
@@ -132,6 +138,55 @@ class AuthProfileOwnershipTests(unittest.TestCase):
 
         self.as_operator("bob")
         self.assertTrue(self.service.accessible("legacy"))
+
+    def test_owner_can_rename_their_own_profile(self) -> None:
+        self.as_operator("alice")
+        self.save("alice-login")
+        result = asyncio.run(self.service.rename("alice-login", "alice-login-2"))
+        self.assertEqual(result, {"profile_name": "alice-login-2", "previous_name": "alice-login"})
+        self.assertEqual(self.owner_recorded("alice-login-2"), "alice")
+        self.assertFalse((self.root / "profiles" / "alice-login").exists())
+
+    def test_another_operator_cannot_rename_it(self) -> None:
+        self.as_operator("alice")
+        self.save("alice-login")
+        self.as_operator("bob")
+        with self.assertRaises(PermissionError):
+            asyncio.run(self.service.rename("alice-login", "bob-took-it"))
+        self.assertTrue((self.root / "profiles" / "alice-login").exists())
+
+    def test_rename_onto_someone_elses_name_is_refused(self) -> None:
+        self.as_operator("alice")
+        self.save("alice-login")
+        self.as_operator("bob")
+        self.save("bob-login")
+        with self.assertRaises(PermissionError):
+            asyncio.run(self.service.rename("bob-login", "alice-login"))
+
+    def test_rename_missing_profile_raises_not_found(self) -> None:
+        self.as_operator("alice")
+        with self.assertRaises(FileNotFoundError):
+            asyncio.run(self.service.rename("missing", "also-missing"))
+
+    def test_owner_can_delete_their_own_profile(self) -> None:
+        self.as_operator("alice")
+        self.save("alice-login")
+        result = asyncio.run(self.service.delete("alice-login"))
+        self.assertEqual(result, {"profile_name": "alice-login", "deleted": True})
+        self.assertFalse((self.root / "profiles" / "alice-login").exists())
+
+    def test_another_operator_cannot_delete_it(self) -> None:
+        self.as_operator("alice")
+        self.save("alice-login")
+        self.as_operator("bob")
+        with self.assertRaises(PermissionError):
+            asyncio.run(self.service.delete("alice-login"))
+        self.assertTrue((self.root / "profiles" / "alice-login").exists())
+
+    def test_delete_missing_profile_raises_not_found(self) -> None:
+        self.as_operator("alice")
+        with self.assertRaises(FileNotFoundError):
+            asyncio.run(self.service.delete("missing"))
 
     def test_listing_hides_profiles_you_cannot_access(self) -> None:
         self.as_operator("alice")
