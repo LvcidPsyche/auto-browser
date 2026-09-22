@@ -64,6 +64,13 @@ GATEWAY_CONSENT_PREVIEW_PATH = "/internal/consent/preview"
 GATEWAY_CONSENT_PATH = "/internal/consent"
 GATEWAY_SITE_REQUESTS_PATH = "/internal/site-requests"
 TENANT_POLICY_APPLY_PATH = "/internal/allowed-hosts/apply"
+VIEWER_CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; "
+    "media-src 'self' blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; "
+    "form-action 'self'"
+)
+
 SECURITY_HEADERS = {
     "Cache-Control": "no-store, max-age=0",
     "Pragma": "no-cache",
@@ -524,6 +531,12 @@ def create_app(
         response = await call_next(request)
         for key, value in SECURITY_HEADERS.items():
             response.headers[key] = value
+        # The noVNC viewer is a real application served through this origin: it loads its own
+        # scripts, styles, images and opens a WebSocket back here. The site-wide
+        # "default-src 'none'" policy blocked all of that and rendered an unusable page, so the
+        # viewer paths get a policy that is still same-origin-only but lets the app run.
+        if request.url.path == "/vnc" or request.url.path.startswith("/vnc/"):
+            response.headers["Content-Security-Policy"] = VIEWER_CONTENT_SECURITY_POLICY
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
 
