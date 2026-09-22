@@ -1367,6 +1367,31 @@ def create_app(
             return RedirectResponse("/browser", status_code=303)
         return {"status": "closed"}
 
+    _viewer_session_cache: dict[tuple[str, str], tuple[float, str | None]] = {}
+    _VIEWER_SESSION_CACHE_SECONDS = 3.0
+
+    async def viewer_session_id_cached(row: Mapping[str, Any]) -> str | None:
+        """Same check as `viewer_session_id`, memoised for a few seconds.
+
+        The noVNC client pulls ~50 static files in one burst and each one used to run the full
+        broker/controller guard, which tripped the upstream rate limiter and left the viewer
+        stuck loading. The websocket path deliberately does NOT use this cache: it keeps
+        re-running the uncached check before accept and on every inbound frame.
+        """
+        key = (row["user_id"], row["tenant_id"])
+        now = clock()
+        cached = _viewer_session_cache.get(key)
+        if cached is not None and now - cached[0] < _VIEWER_SESSION_CACHE_SECONDS:
+            return cached[1]
+        value = await viewer_session_id(row)
+        # Only a positive result is cached. Caching "no session" would keep denying for seconds
+        # after the owner opens the browser, which is exactly when he reloads the viewer.
+        if value is not None:
+            _viewer_session_cache[key] = (now, value)
+        else:
+            _viewer_session_cache.pop(key, None)
+        return value
+
     async def viewer_session_id(row: Mapping[str, Any]) -> str | None:
         """The live broker session id for this identity, or None if there isn't one.
 
@@ -1414,7 +1439,7 @@ def create_app(
         require_sole_new_surface_owner(row)
         if ".." in path or path.startswith("/") or not re.fullmatch(r"[A-Za-z0-9._/-]*", path):
             raise HTTPException(404, "Not found")
-        if await viewer_session_id(row) is None:
+        if await viewer_session_id_cached(row) is None:
             raise HTTPException(403, VIEWER_DENIAL_AR)
         # noVNC itself lives on browser-node, which only the broker can reach
         # (the tenant-private network never includes the portal), so this
