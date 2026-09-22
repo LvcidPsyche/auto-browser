@@ -539,9 +539,23 @@ def create_app(
     def authentication_is_fresh(row: Mapping[str, Any], *, now: float) -> bool:
         return now < float(row["authenticated_at"]) + authentication_freshness_ttl
 
-    async def mutation(request: Request, *, require_session: bool = True) -> sqlite3.Row | None:
+    def _request_origin_is_trusted(request: Request) -> bool:
+        # Chrome/Firefox send Origin on cross-origin and (usually) same-origin form POSTs, but
+        # several mobile browsers omit it entirely on a same-origin top-level form submission --
+        # which locked the owner out of the enrollment form. When Origin is absent we fall back
+        # to the two other same-origin signals the browser does send: Sec-Fetch-Site and the
+        # Referer. An attacker's cross-site POST carries Sec-Fetch-Site: cross-site (or a foreign
+        # Referer), so this stays a real CSRF check rather than an open door.
         origin = request.headers.get("origin")
-        if origin != public_origin:
+        if origin is not None:
+            return origin == public_origin
+        if request.headers.get("sec-fetch-site") == "same-origin":
+            return True
+        referer = request.headers.get("referer") or ""
+        return referer == public_origin or referer.startswith(public_origin + "/")
+
+    async def mutation(request: Request, *, require_session: bool = True) -> sqlite3.Row | None:
+        if not _request_origin_is_trusted(request):
             raise HTTPException(403, "Invalid request origin")
         if not require_session:
             return None
