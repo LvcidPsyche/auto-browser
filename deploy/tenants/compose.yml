@@ -31,7 +31,7 @@ services:
       PLAYWRIGHT_SERVER_ADVERTISED_HOST: browser-node
     volumes:
       - type: volume
-        source: ${TENANT_DATA_VOLUME:?Provision an isolated data volume}
+        source: data
         target: /data
 
   controller:
@@ -82,7 +82,7 @@ services:
       GEMINI_API_KEY: ""
     volumes:
       - type: volume
-        source: ${TENANT_DATA_VOLUME:?Provision an isolated data volume}
+        source: data
         target: /data
 
   approval-broker:
@@ -112,7 +112,7 @@ services:
       BROKER_TENANT_ID: ${BROKER_TENANT_ID:?Missing immutable tenant identity}
     volumes:
       - type: volume
-        source: ${TENANT_BROKER_VOLUME:?Provision an isolated broker volume}
+        source: broker-state
         target: /broker-state
     networks:
       tenant: {}
