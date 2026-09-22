@@ -938,12 +938,19 @@ def create_app(
         state = "closed" if owner is None else "open" if owner["broker_session_id"] else "opening"
         csrf = html.escape(request.cookies.get(CSRF_COOKIE, ""), quote=True)
         account = html.escape(row["account"])
-        authenticator_field = ""
-        if not authentication_is_fresh(row, now=clock()):
-            authenticator_field = (
-                "<label>Fresh authenticator code <input name=totp_code inputmode=numeric "
-                "autocomplete=one-time-code pattern='[0-9]{6}' required></label>"
-            )
+        # Always render the code field. Freshness can expire between rendering this page and
+        # pressing Open, which used to produce a bare "A 6-digit authenticator code is required"
+        # JSON error with no field to type it into.
+        fresh = authentication_is_fresh(row, now=clock())
+        label = (
+            "كود المصادقة لو اتطلب منك (authenticator code)" if fresh else "Fresh authenticator code"
+        )
+        authenticator_field = (
+            f"<label>{label} <input name=totp_code inputmode=numeric "
+            "autocomplete=one-time-code pattern='[0-9]{6}'"
+            + ("" if fresh else " required")
+            + "></label>"
+        )
         viewer_link = (
             "<p><a href='/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify'>"
             "شوف المتصفح (Watch and control the browser)</a></p>"
@@ -1318,6 +1325,8 @@ def create_app(
                 if active is None:
                     raise HTTPException(502, "Browser ownership could not be activated")
                 raise _upstream_error(active, "Browser ownership could not be activated")
+            if "text/html" in (request.headers.get("accept") or ""):
+                return RedirectResponse("/browser", status_code=303)
             return {"status": "open", "session_id": session_id}
         except httpx.HTTPError:
             raise HTTPException(502, "Browser service unavailable") from None
@@ -1336,6 +1345,8 @@ def create_app(
     async def close_browser(request: Request):
         row = await mutation(request)
         await close_owned_browser(row)
+        if "text/html" in (request.headers.get("accept") or ""):
+            return RedirectResponse("/browser", status_code=303)
         return {"status": "closed"}
 
     async def viewer_session_id(row: Mapping[str, Any]) -> str | None:
