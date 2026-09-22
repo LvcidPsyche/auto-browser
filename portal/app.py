@@ -1255,6 +1255,11 @@ def create_app(
             }
             if "start_url" in data:
                 broker_payload["start_url"] = _required_text(data, "start_url", 2048)
+            # An HTML form always submits the field, empty or not; an empty value means
+            # "fresh browser, no saved login", not an invalid profile name.
+            raw_profile = data.get("auth_profile")
+            if isinstance(raw_profile, str) and not raw_profile.strip():
+                data = {k: v for k, v in data.items() if k != "auth_profile"}
             if "auth_profile" in data:
                 profile_name = _required_text(data, "auth_profile", 200)
                 if not PROFILE_NAME_PATTERN.fullmatch(profile_name):
