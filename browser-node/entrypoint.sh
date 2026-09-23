@@ -22,7 +22,9 @@ rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
 
 Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" -ac +extension RANDR >/tmp/xvfb.log 2>&1 &
 fluxbox >/tmp/fluxbox.log 2>&1 &
-x11vnc -display "$DISPLAY" -forever -shared -rfbport 5900 -nopw -xkb >/tmp/x11vnc.log 2>&1 &
+# -add_keysyms: the X keymap has no Arabic (or other non-Latin) keysyms, so without it
+# every Arabic character typed in the viewer was silently dropped.
+x11vnc -display "$DISPLAY" -forever -shared -rfbport 5900 -nopw -xkb -add_keysyms >/tmp/x11vnc.log 2>&1 &
 /usr/share/novnc/utils/novnc_proxy --vnc localhost:5900 --listen 6080 >/tmp/novnc.log 2>&1 &
 
 cleanup() {
