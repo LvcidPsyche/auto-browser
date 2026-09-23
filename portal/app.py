@@ -965,7 +965,7 @@ def create_app(
             + "></label>"
         )
         viewer_link = (
-            "<p><a href='/vnc/vnc.html?autoconnect=true&resize=scale&path=websockify'>"
+            "<p><a href='/vnc/vnc.html?autoconnect=true&resize=scale&path=websockify&quality=4&compression=7'>"
             "شوف المتصفح (Watch and control the browser)</a></p>"
             if state == "open" else
             "<p>شوف المتصفح: افتح المتصفح أولاً.</p>"
@@ -1368,7 +1368,7 @@ def create_app(
         return {"status": "closed"}
 
     _viewer_session_cache: dict[tuple[str, str], tuple[float, str | None]] = {}
-    _VIEWER_SESSION_CACHE_SECONDS = 3.0
+    _VIEWER_SESSION_CACHE_SECONDS = 1.0
 
     async def viewer_session_id_cached(row: Mapping[str, Any]) -> str | None:
         """Same check as `viewer_session_id`, memoised for a few seconds.
@@ -1507,10 +1507,13 @@ def create_app(
                             message = await websocket.receive()
                             if message["type"] == "websocket.disconnect":
                                 break
-                            # Every inbound frame can carry keyboard/mouse input,
-                            # so a closed or reassigned session must lose control
-                            # immediately, not merely at the next periodic check.
-                            if await viewer_session_id(row) != session_id:
+                            # Every inbound frame can carry keyboard/mouse input, so control
+                            # must drop as soon as the session closes. The check runs on every
+                            # frame but through a 1-second memo: an uncached broker+controller
+                            # round trip per keystroke and per video frame made typing lag and
+                            # drop characters. `periodic_guard` re-runs the uncached check every
+                            # second, so control still ends within a second of revocation.
+                            if await viewer_session_id_cached(row) != session_id:
                                 break
                             if message.get("bytes") is not None:
                                 await upstream.send(message["bytes"])
@@ -1521,7 +1524,7 @@ def create_app(
 
                 async def vnc_to_browser() -> None:
                     async for message in upstream:
-                        if await viewer_session_id(row) != session_id:
+                        if await viewer_session_id_cached(row) != session_id:
                             break
                         if isinstance(message, bytes):
                             await websocket.send_bytes(message)

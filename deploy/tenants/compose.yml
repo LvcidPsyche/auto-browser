@@ -8,9 +8,9 @@ services:
       context: ../../browser-node
     init: true
     restart: "no"
-    mem_limit: 1536m
-    memswap_limit: 1536m
-    cpus: 1.0
+    mem_limit: 2560m
+    memswap_limit: 2560m
+    cpus: 2.0
     pids_limit: 256
     shm_size: 256m
     security_opt: [no-new-privileges:true]
@@ -66,11 +66,15 @@ services:
       AUTH_STATE_ENCRYPTION_KEY: ${TENANT_FERNET_KEY:?Missing encryption key}
       REQUIRE_AUTH_STATE_ENCRYPTION: "true"
       REQUIRE_OPERATOR_ID: "true"
+      # Screenshot capture through the virtual display costs ~33s per call here, while a
+      # text observation costs ~0.4s -- and the owner watches the live noVNC view anyway,
+      # so employees read pages as text by default.
+      PERCEPTION_PRESET_DEFAULT: text
       REQUEST_RATE_LIMIT_ENABLED: "true"
       # One stack serves exactly one owner, and opening the noVNC viewer alone pulls ~50
       # assets, each of which runs a guard call through here. The shipped 120/min budget
       # is a public-API default and just made the viewer fail to connect.
-      REQUEST_RATE_LIMIT_REQUESTS: "900"
+      REQUEST_RATE_LIMIT_REQUESTS: "20000"
       CONTROLLER_ALLOWED_HOSTS: controller,localhost,127.0.0.1
       ALLOWED_HOSTS: ${TENANT_ALLOWED_HOSTS:?Choose permitted websites}
       MCP_ALLOWED_ORIGINS: ""
