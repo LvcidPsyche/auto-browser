@@ -126,6 +126,12 @@ class BrowserSession:
     pending_witness_context: dict[str, Any] | None = None
     witness_remote_state: WitnessRemoteState = field(default_factory=WitnessRemoteState)
     metadata: dict[str, Any] = field(default_factory=dict)
+    # "Remember me": which profile this session's login state is silently kept
+    # in sync with (see Settings.auto_persist_*), and the background task doing
+    # the periodic re-save. Independent of auth_profile_name, which is only
+    # set when the caller explicitly named a saved profile.
+    auto_persist_profile_name: str | None = None
+    auto_persist_task: "asyncio.Task[None] | None" = None
 
 
 SessionCreatedHook = Callable[[str, Page], Awaitable[None]]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -91,7 +93,30 @@ class BrowserSessionService:
             source_path = self.manager.auth_profiles.resolve_state_path(auth_profile, must_exist=True)
         elif storage_state_path:
             source_path = self.manager.auth_profiles.safe_auth_path(storage_state_path, must_exist=True)
-        if source_path is not None:
+
+        # "Remember me": nobody named a profile, so fall back to whatever is
+        # already sitting in the default auto-persist profile (an earlier
+        # session's automatic save). Best-effort only — no profile yet, a
+        # stale/corrupt one, or a permission quirk must open a fresh browser
+        # instead of failing Open outright.
+        auto_persist_name = self.manager.settings.auto_persist_profile_name
+        auto_loaded_profile = False
+        if source_path is None and self.manager.settings.auto_persist_login_enabled:
+            try:
+                self.manager.auth_profiles.require_access(
+                    auto_persist_name, action="auto-loading the remembered login"
+                )
+                candidate_path = self.manager.auth_profiles.resolve_state_path(auto_persist_name, must_exist=True)
+                prepared_candidate = self.manager.auth_state.prepare_for_context(candidate_path)
+                context_kwargs["storage_state"] = str(prepared_candidate.path)
+                prepared_auth_state = prepared_candidate
+                source_path = candidate_path
+                auto_loaded_profile = True
+            except Exception as exc:
+                logger.info(
+                    "auto-persist: no remembered login to load yet ('%s'): %s", auto_persist_name, exc
+                )
+        elif source_path is not None:
             prepared_auth_state = self.manager.auth_state.prepare_for_context(source_path)
             context_kwargs["storage_state"] = str(prepared_auth_state.path)
 
@@ -170,6 +195,14 @@ class BrowserSessionService:
                 await self.manager._settle(page)
 
             await self.manager._maybe_provision_session_tunnel(session)
+            if (
+                self.manager.settings.auto_persist_login_enabled
+                and self.manager.settings.auto_persist_interval_seconds > 0
+            ):
+                session.auto_persist_profile_name = auto_persist_name
+                session.auto_persist_task = asyncio.create_task(
+                    self._auto_persist_loop(session, auto_persist_name)
+                )
             if memory_profile and self.manager.memory is not None:
                 memory = await self.manager.memory.get(memory_profile)
                 if memory is not None:
@@ -286,6 +319,8 @@ class BrowserSessionService:
         runtime: "IsolatedBrowserRuntime | None",
     ) -> None:
         self.manager.sessions.pop(session_id, None)
+        if session is not None and session.auto_persist_task is not None:
+            session.auto_persist_task.cancel()
         if session is not None and session.tunnel is not None:
             try:
                 await self.manager.tunnel_broker.release(session.tunnel)
@@ -330,6 +365,26 @@ class BrowserSessionService:
             if session.network_inspector is not None:
                 session.network_inspector.detach()
                 session.network_inspector = None
+            if session.auto_persist_task is not None:
+                session.auto_persist_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await session.auto_persist_task
+                session.auto_persist_task = None
+            if session.auto_persist_profile_name:
+                # Last chance to remember this login before the context (and
+                # its cookies/localStorage) disappears. Best-effort: a page
+                # left on an unreadable state (e.g. mid-navigation) must not
+                # stop the browser from closing.
+                try:
+                    await self.manager.auth_profiles.save_auto_persist(
+                        session, session.auto_persist_profile_name
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "auto-persist: failed to save remembered login on close for session %s: %s",
+                        session_id,
+                        exc,
+                    )
             try:
                 await session.context.close()
             finally:
@@ -372,6 +427,27 @@ class BrowserSessionService:
             summary["witness_remote"] = session.witness_remote_state.model_dump()
             await self.manager.session_store.upsert(SessionRecord.model_validate(summary))
             return {"closed": True, "trace_path": str(session.trace_path), "session": summary}
+
+    async def _auto_persist_loop(self, session: "BrowserSession", profile_name: str) -> None:
+        """Keep the "remember me" profile warm while a session is live.
+
+        Runs for the lifetime of the session, saving into `profile_name`
+        every `auto_persist_interval_seconds`. Cancelled from `close()`,
+        which also does one final save — this loop only covers the case of
+        a session that stays open a long time, or is lost without a clean
+        close (server restart, crash), so at most one interval's worth of
+        login activity is ever at risk instead of the whole session.
+        """
+        interval = self.manager.settings.auto_persist_interval_seconds
+        while True:
+            await asyncio.sleep(interval)
+            async with session.lock:
+                try:
+                    await self.manager.auth_profiles.save_auto_persist(session, profile_name)
+                except Exception as exc:
+                    logger.warning(
+                        "auto-persist: periodic save failed for session %s: %s", session.id, exc
+                    )
 
     async def fork(
         self,

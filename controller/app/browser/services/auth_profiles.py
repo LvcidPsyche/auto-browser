@@ -183,6 +183,7 @@ class BrowserAuthProfileService:
         profile_name: str,
         *,
         metadata: dict[str, Any] | None = None,
+        track_on_session: bool = True,
     ) -> dict[str, Any]:
         normalized = self.normalize_name(profile_name)
         # Before writing anything: saving over a profile you do not own is the
@@ -191,8 +192,16 @@ class BrowserAuthProfileService:
         owner = self.require_access(normalized, action="saving an auth profile")
         profile_state_path = self.state_base_path(normalized, create=True)
         auth_info = await self.manager.auth_state.write_storage_state(session.context, profile_state_path)
-        session.last_auth_state_path = Path(auth_info["path"]) if auth_info["path"] else None
-        session.auth_profile_name = normalized
+        if track_on_session:
+            # Only a caller-named save (the manual "save my login" feature,
+            # or an explicit request) should change what this session
+            # considers *its* profile. The background auto-persist writer
+            # below shares this code path but must not relabel a session that
+            # was opened from (or explicitly saved to) a different named
+            # profile just because it also keeps the default "remember me"
+            # profile warm.
+            session.last_auth_state_path = Path(auth_info["path"]) if auth_info["path"] else None
+            session.auth_profile_name = normalized
 
         profile_payload = {
             "profile_name": normalized,
@@ -222,6 +231,25 @@ class BrowserAuthProfileService:
             "auth_state": auth_info,
             "metadata": profile_payload,
         }
+
+    async def save_auto_persist(self, session: "BrowserSession", profile_name: str) -> dict[str, Any]:
+        """Silently refresh the "remember me" profile from a live session.
+
+        Used by the automatic-persistence background writer (periodic tick
+        and session close) — never by an operator-triggered API call, which
+        goes through :meth:`save` and gets the full witness/audit treatment.
+        This still enforces profile ownership (`require_access`) and still
+        encrypts at rest via `write_storage_state`; it only skips the witness
+        policy gate and the audit/receipt trail that would otherwise fire
+        every few minutes for a purely internal write, and it never changes
+        which profile the session itself is considered to belong to.
+        """
+        return await self.save_for_session(
+            session,
+            profile_name,
+            metadata={"auto_persisted": True},
+            track_on_session=False,
+        )
 
     async def save(self, session_id: str, profile_name: str) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)

@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     auth_state_encryption_key: str | None = Field(None, alias="AUTH_STATE_ENCRYPTION_KEY")
     require_auth_state_encryption: bool = Field(False, alias="REQUIRE_AUTH_STATE_ENCRYPTION")
     auth_state_max_age_hours: float = Field(72.0, alias="AUTH_STATE_MAX_AGE_HOURS")
+    # Automatic "remember me": on Open, when the caller does not name a saved
+    # profile, silently load this default profile if one exists; while a
+    # session is live, periodically re-save into it; on Close, save into it
+    # one last time. This never touches a profile the caller explicitly named
+    # (auth_profile=...), so the manual saved-login feature is unaffected —
+    # it just means an owner who never picks a profile still gets one.
+    auto_persist_login_enabled: bool = Field(True, alias="AUTO_PERSIST_LOGIN_ENABLED")
+    auto_persist_profile_name: str = Field("owner-default", alias="AUTO_PERSIST_PROFILE_NAME")
+    auto_persist_interval_seconds: float = Field(180.0, alias="AUTO_PERSIST_INTERVAL_SECONDS")
     harness_root: str = Field("/data/harness", alias="HARNESS_ROOT")
     harness_verifier: str = Field("programmatic", alias="HARNESS_VERIFIER")
     harness_uv_command: str = Field("", alias="HARNESS_UV_COMMAND")
