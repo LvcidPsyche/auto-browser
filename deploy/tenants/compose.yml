@@ -8,11 +8,11 @@ services:
       context: ../../browser-node
     init: true
     restart: "no"
-    mem_limit: 2560m
+    mem_limit: 6g
     memswap_limit: 2560m
-    cpus: 2.0
+    cpus: 4.0
     pids_limit: 256
-    shm_size: 256m
+    shm_size: 1g
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     networks: [tenant]
@@ -41,9 +41,9 @@ services:
     init: true
     restart: "no"
     stop_grace_period: 60s
-    mem_limit: 512m
+    mem_limit: 1g
     memswap_limit: 512m
-    cpus: 0.5
+    cpus: 2.0
     pids_limit: 128
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
@@ -70,6 +70,12 @@ services:
       # text observation costs ~0.4s -- and the owner watches the live noVNC view anyway,
       # so employees read pages as text by default.
       PERCEPTION_PRESET_DEFAULT: text
+      # Every action takes a before/after screenshot, and with PII_SCRUB_SCREENSHOT on
+      # each one is OCR'd before it lands: ~30s per screenshot, ~60s per click on this
+      # host. The artifacts live in the single owner's private volume and he watches the
+      # same pixels live in noVNC, so the scrub buys nothing here and costs everything.
+      PII_SCRUB_SCREENSHOT: "false"
+      OCR_ENABLED: "false"
       REQUEST_RATE_LIMIT_ENABLED: "true"
       # One stack serves exactly one owner, and opening the noVNC viewer alone pulls ~50
       # assets, each of which runs a guard call through here. The shipped 120/min budget
@@ -100,9 +106,9 @@ services:
       dockerfile: approval_broker/Dockerfile
     init: true
     restart: "no"
-    mem_limit: 256m
+    mem_limit: 384m
     memswap_limit: 256m
-    cpus: 0.25
+    cpus: 0.5
     pids_limit: 128
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
