@@ -20,6 +20,7 @@ from ..models import (
     ScrollRequest,
     SelectOptionRequest,
     TabIndexRequest,
+    TypeFocusedRequest,
     TypeRequest,
     UploadRequest,
     WaitRequest,
@@ -170,6 +171,19 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             raise
         except Exception:
             raise internal_error(logger, "type failed for session %s", session_id) from None
+
+    @router.post("/sessions/{session_id}/actions/type-focused")
+    async def type_focused_text(session_id: str, payload: TypeFocusedRequest) -> dict[str, Any]:
+        try:
+            return await manager.type_focused(session_id, text=payload.text)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid request") from None
+        except PermissionError:
+            raise HTTPException(status_code=403, detail="Not permitted") from None
+        except ApprovalRequiredError:
+            raise
+        except Exception:
+            raise internal_error(logger, "type-focused failed for session %s", session_id) from None
 
     @router.post("/sessions/{session_id}/actions/press")
     async def press_key(session_id: str, payload: PressRequest) -> dict[str, Any]:

@@ -182,6 +182,27 @@ class BrowserActionService:
 
         return await self.manager._run_action(session, "type", payload, operation)
 
+    async def type_focused(self, session_id: str, *, text: str) -> dict[str, Any]:
+        """Insert text into whatever element already has focus, no target needed.
+
+        This backs the owner's "type here" bridge in the noVNC viewer: the owner
+        clicks a field through the VNC mouse (real click, so real DOM focus,
+        unaffected by any VNC keyboard limitation) and this delivers the text via
+        CDP directly, bypassing X11 keysyms entirely. That is the only reliable
+        path for Arabic and other non-Latin scripts typed on a phone keyboard,
+        since a mobile IME composes such text through `input`/composition events
+        that the VNC keyboard channel never sees.
+        """
+        session = await self.manager.get_session(session_id)
+        target = {"mode": "focused"}
+        payload = self.text_target_payload(target, text, clear_first=False, sensitive=False, preview_chars=80)
+
+        async def operation() -> None:
+            await session.page.keyboard.insert_text(text)
+            await self.manager._settle(session.page)
+
+        return await self.manager._run_action(session, "type", payload, operation)
+
     async def press(self, session_id: str, key: str) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
 

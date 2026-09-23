@@ -117,6 +117,10 @@ class TypeRequest(StrictInputModel):
         return self
 
 
+class TypeFocusedRequest(StrictInputModel):
+    text: str = Field(min_length=1, max_length=5000)
+
+
 class PressRequest(StrictInputModel):
     key: str = Field(min_length=1, max_length=120)
 

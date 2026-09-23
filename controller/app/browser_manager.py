@@ -564,6 +564,9 @@ class BrowserManager:
             sensitive=sensitive,
         )
 
+    async def type_focused(self, session_id: str, *, text: str) -> dict[str, Any]:
+        return await self.actions.type_focused(session_id, text=text)
+
     async def press(self, session_id: str, key: str) -> dict[str, Any]:
         return await self.actions.press(session_id, key)
 

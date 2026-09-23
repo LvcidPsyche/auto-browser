@@ -40,6 +40,7 @@ class Upstreams:
         self.profile_calls: list[tuple] = []
         self.saved_profiles: set[str] = set()
         self.novnc_calls: list[str] = []
+        self.typed_text: list[str] = []
 
     def identity(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else {}
@@ -97,6 +98,11 @@ class Upstreams:
             self.profile_calls.append(("save", body["profile_name"]))
             self.saved_profiles.add(body["profile_name"])
             return httpx.Response(200, json={"profile_name": body["profile_name"]})
+        if request.method == "POST" and request.url.path == "/owner/sessions/browser-1/type":
+            if not self.active:
+                return httpx.Response(403, json={"detail": "Owner must open a verified browser session first"})
+            self.typed_text.append(body["text"])
+            return httpx.Response(200, json={"action": "type"})
         if request.method == "POST" and request.url.path.startswith("/owner/auth-profiles/") and request.url.path.endswith("/rename"):
             name = request.url.path.split("/")[3]
             self.profile_calls.append(("rename", name, body["new_name"]))
@@ -724,6 +730,41 @@ def test_viewer_denies_unauthenticated_missing_session_and_cross_identity(tmp_pa
         assert other.status_code == 403
         assert other.json()["detail"] == SOLE_OWNER_DENIAL_AR
         assert upstreams.novnc_calls == ["/vnc.html"]
+
+
+def test_type_bridge_forwards_text_and_stays_owner_only(tmp_path, clock, upstreams):
+    """The Arabic-typing bridge next to the viewer: same gates as the viewer itself.
+
+    The noVNC keyboard channel does not reliably carry Arabic typed through a
+    phone IME, so the owner clicks a field in the viewer and sends text through
+    this box instead. It must require an open, owned session -- exactly like
+    the viewer -- and forward the text unchanged to the one live session.
+    """
+    app = app_at(tmp_path, clock, upstreams)
+    with TestClient(app, base_url=ORIGIN) as client:
+        unauthenticated = client.post("/api/browser/type", headers={"Origin": ORIGIN}, json={"text": "hi"})
+        assert unauthenticated.status_code == 401
+
+        csrf = login(client)
+        not_open = client.post("/api/browser/type", headers=mutate(csrf), json={"text": "hi"})
+        assert not_open.status_code == 403
+        assert not_open.json()["detail"] == "لا يمكن عرض المتصفح الآن — يجب فتح جلسة متصفح أولاً من نفس حسابك."
+        assert not upstreams.typed_text
+
+        opened = client.post("/api/browser/open", headers=mutate(csrf), json={"totp_code": "333333"})
+        assert opened.status_code == 200
+
+        sent = client.post("/api/browser/type", headers=mutate(csrf), json={"text": "مرحبا"})
+        assert sent.status_code == 200
+        assert sent.json() == {"status": "sent"}
+        assert upstreams.typed_text == ["مرحبا"]
+
+        client.cookies.clear()
+        second_csrf = login(client, "second@example.com", "222222")
+        other = client.post("/api/browser/type", headers=mutate(second_csrf), json={"text": "nope"})
+        assert other.status_code == 403
+        assert other.json()["detail"] == SOLE_OWNER_DENIAL_AR
+        assert upstreams.typed_text == ["مرحبا"]
 
 
 def test_viewer_websocket_denies_without_session_and_rechecks_each_frame(tmp_path, clock, upstreams, monkeypatch):

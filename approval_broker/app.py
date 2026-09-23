@@ -164,6 +164,10 @@ class OwnerRenameProfileRequest(StrictModel):
     new_name: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.-]+$")
 
 
+class OwnerTypeRequest(StrictModel):
+    text: str = Field(min_length=1, max_length=2000)
+
+
 class Action(StrictModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
 
@@ -694,6 +698,23 @@ def create_app(
         require_role(authorization, "owner")
         profile_name = safe_profile_name(profile_name)
         return await upstream("POST", f"/auth-profiles/{profile_name}/rename", {"new_name": payload.new_name})
+
+    @app.post("/owner/sessions/{session_id}/type")
+    async def owner_type(
+        session_id: str, payload: OwnerTypeRequest, authorization: str | None = Header(default=None),
+    ):
+        """Insert text into whatever is focused in the owner's live session.
+
+        Backs the "type here" box next to the noVNC viewer: the owner clicks a
+        field through the VNC mouse, then sends text here instead of through
+        the VNC keyboard channel. Delivered to the controller over CDP, this
+        never touches X11 keysyms, which is what makes it work for Arabic (and
+        any other non-Latin script) typed on a phone, unlike the viewer's raw
+        VNC keyboard input.
+        """
+        require_role(authorization, "owner")
+        session_id = safe_session_id(session_id)
+        return await upstream("POST", f"/sessions/{session_id}/actions/type-focused", {"text": payload.text})
 
     @app.delete("/owner/sessions/{session_id}")
     async def owner_close_session(session_id: str, authorization: str | None = Header(default=None)):

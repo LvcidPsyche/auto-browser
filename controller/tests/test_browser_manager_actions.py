@@ -43,6 +43,7 @@ class FakeKeyboard:
     def __init__(self) -> None:
         self.press = AsyncMock()
         self.type = AsyncMock()
+        self.insert_text = AsyncMock()
 
 
 class FakeLocator:
@@ -198,6 +199,17 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reload_result["action"], "reload")
         self.assertEqual(back_result["action"], "go_back")
         self.assertEqual(forward_result["action"], "go_forward")
+
+    async def test_type_focused_inserts_text_without_a_target(self) -> None:
+        with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):
+            result = await self.manager.type_focused("session-1", text="مرحبا")
+
+        self.session.page.keyboard.insert_text.assert_awaited_once_with("مرحبا")
+        self.assertEqual(result["action"], "type")
+        self.assertEqual(result["target"]["mode"], "focused")
+        self.assertEqual(result["target"]["text_preview"], "مرحبا")
+        self.assertNotIn("selector", result["target"])
+        self.assertNotIn("element_id", result["target"])
 
     async def test_tabs_diagnostics_takeover_and_trace_use_session_state(self) -> None:
         self.session.console_messages = [{"type": "log", "text": "ready", "location": {}}]

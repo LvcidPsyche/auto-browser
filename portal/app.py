@@ -970,12 +970,27 @@ def create_app(
             if state == "open" else
             "<p>شوف المتصفح: افتح المتصفح أولاً.</p>"
         )
+        # The viewer's keyboard goes through VNC/X11, which does not reliably carry
+        # Arabic (or other non-Latin) typing from a phone keyboard. This box sends
+        # typed text straight to whatever field is focused in the browser instead --
+        # click the field in the viewer above first, then type here and send.
+        type_bridge = (
+            "<h2>اكتب هنا (Type here)</h2>"
+            "<p>دوس على الحقل في المتصفح فوق الأول، وبعدين اكتب هنا وابعت.</p>"
+            "<form method=post action=/api/browser/type>"
+            f"<input type=hidden name=csrf_token value='{csrf}'>"
+            "<input name=text dir=auto lang=ar autocomplete=off "
+            "placeholder='اكتب هنا بأي لغة' style='width:100%;font-size:1.1em' required>"
+            "<button>ابعت (Send)</button></form>"
+            if state == "open" else ""
+        )
         return HTMLResponse(
             "<!doctype html><meta charset=utf-8><title>Secure Browser</title>"
             f"<h1>Secure Browser</h1><p>Signed in as {account}</p><p>Browser: {state}</p>"
             "<p><a href='/sites'>Manage allowed sites and assistant requests</a></p>"
             "<p><a href='/profiles'>احفظ الدخول (saved logins)</a></p>"
             f"{viewer_link}"
+            f"{type_bridge}"
             "<h2>Open browser</h2><form method=post action=/api/browser/open>"
             f"<input type=hidden name=csrf_token value='{csrf}'>"
             "<label>Start URL <input name=start_url type=url value='https://www.google.com' required></label>"
@@ -1386,6 +1401,38 @@ def create_app(
         if "text/html" in (request.headers.get("accept") or ""):
             return RedirectResponse("/browser", status_code=303)
         return {"status": "closed"}
+
+    @app.post("/api/browser/type")
+    async def type_into_browser(request: Request):
+        """Send text into whatever is focused in the live browser, bypassing VNC keys.
+
+        The noVNC viewer's keyboard channel goes through X11 keysyms, which mobile
+        IMEs (Gboard's Arabic layout included) do not reliably feed for non-Latin
+        scripts. This bridge lets the owner click a field through the viewer's
+        mouse, then type into this box instead: the text is delivered to the
+        focused element directly via the controller, independent of language.
+        """
+        row = await mutation(request)
+        require_sole_new_surface_owner(row)
+        data = await _payload(request)
+        text = _required_text(data, "text", 2000)
+        session_id = await viewer_session_id(row)
+        if session_id is None:
+            raise HTTPException(403, VIEWER_DENIAL_AR)
+        selected_broker, selected_owner_token = broker_for(row["user_id"], row["tenant_id"])
+        try:
+            response = await selected_broker.post(
+                f"/owner/sessions/{session_id}/type",
+                headers=internal_headers(selected_owner_token),
+                json={"text": text},
+            )
+        except httpx.HTTPError:
+            raise HTTPException(502, "Browser service unavailable") from None
+        if response.status_code != 200:
+            raise _upstream_error(response, "Text could not be sent")
+        if "text/html" in (request.headers.get("accept") or ""):
+            return RedirectResponse("/browser", status_code=303)
+        return {"status": "sent"}
 
     _viewer_session_cache: dict[tuple[str, str], tuple[float, str | None]] = {}
     _VIEWER_SESSION_CACHE_SECONDS = 1.0

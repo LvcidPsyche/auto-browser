@@ -382,6 +382,40 @@ def test_owner_can_delete_and_rename_auth_profiles(tmp_path: Path, clock: list[f
         assert ("DELETE", "/auth-profiles/shop-two", None) in calls
 
 
+def test_owner_type_forwards_text_to_the_focused_session_element(tmp_path: Path, clock: list[float]) -> None:
+    """The Arabic-typing bridge: text goes straight to the controller over CDP.
+
+    This is what backs the viewer's "type here" box -- it exists because the
+    VNC keyboard channel does not reliably carry Arabic (or any non-Latin
+    script) typed through a phone's on-screen keyboard.
+    """
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content) if request.content else None
+        calls.append((request.method, request.url.path, payload))
+        if request.method == "POST" and request.url.path == "/sessions/browser-1/actions/type-focused":
+            return httpx.Response(200, json={"action": "type"})
+        return httpx.Response(404)
+
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        sent = client.post(
+            "/owner/sessions/browser-1/type", headers=auth(OWNER), json={"text": "مرحبا"},
+        )
+        assert sent.status_code == 200
+        assert sent.json() == {"action": "type"}
+        assert (
+            "POST", "/sessions/browser-1/actions/type-focused", {"text": "مرحبا"},
+        ) in calls
+
+        assert client.post(
+            "/owner/sessions/browser-1/type", headers=auth(AGENT), json={"text": "nope"},
+        ).status_code == 403
+        assert client.post(
+            "/owner/sessions/bad*id/type", headers=auth(OWNER), json={"text": "hi"},
+        ).status_code == 400
+
+
 def test_agent_cannot_manage_auth_profiles(tmp_path: Path, clock: list[float]) -> None:
     with TestClient(app_at(tmp_path, lambda request: httpx.Response(200, json={}))) as client:
         assert client.delete("/owner/auth-profiles/shop-one", headers=auth(AGENT)).status_code == 403
