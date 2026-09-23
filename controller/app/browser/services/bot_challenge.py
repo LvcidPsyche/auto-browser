@@ -23,6 +23,19 @@ BOT_CHALLENGE_SIGNALS = (
 )
 
 
+def _is_invisible_captcha_widget(src: str) -> bool:
+    """True for an invisible reCAPTCHA/hCaptcha *anchor* iframe: the slot the widget would
+    render into if it ever became visible, present on countless ordinary Google/other pages
+    as a background risk signal and interacted with by no one. `size=invisible` (or `size=`
+    absent on an explicitly non-"normal"/"compact" anchor) means nothing is shown and there is
+    nothing for a human to do -- flagging it made every Google sign-in/sign-up page permanently
+    unusable. A real, solvable challenge renders in a *different* frame (bframe/checkbox,
+    Cloudflare's challenge page, hCaptcha's challenge iframe) which this still catches."""
+    if "size=invisible" in src:
+        return True
+    return "recaptcha" in src and "/anchor" in src and "size=normal" not in src and "size=compact" not in src
+
+
 class BrowserBotChallengeService:
     async def check(self, session: Any) -> dict[str, Any] | None:
         url = session.page.url.lower()
@@ -44,7 +57,8 @@ class BrowserBotChallengeService:
             # Page may be mid-navigation or already closed; check with what we have.
             logger.debug("bot challenge probe could not read page content: %s", exc)
 
-        combined = f"{url} {title} {body_text} {' '.join(iframe_sources)}"
+        visible_iframe_sources = [src for src in iframe_sources if not _is_invisible_captcha_widget(src)]
+        combined = f"{url} {title} {body_text} {' '.join(visible_iframe_sources)}"
         for signal in BOT_CHALLENGE_SIGNALS:
             if signal in combined:
                 return {
