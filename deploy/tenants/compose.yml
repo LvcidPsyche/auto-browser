@@ -9,7 +9,7 @@ services:
     init: true
     restart: "no"
     mem_limit: 6g
-    memswap_limit: 2560m
+    memswap_limit: 6g
     cpus: 4.0
     pids_limit: 256
     shm_size: 1g
@@ -42,7 +42,7 @@ services:
     restart: "no"
     stop_grace_period: 60s
     mem_limit: 1g
-    memswap_limit: 512m
+    memswap_limit: 1g
     cpus: 2.0
     pids_limit: 128
     security_opt: [no-new-privileges:true]
@@ -107,7 +107,7 @@ services:
     init: true
     restart: "no"
     mem_limit: 384m
-    memswap_limit: 256m
+    memswap_limit: 384m
     cpus: 0.5
     pids_limit: 128
     security_opt: [no-new-privileges:true]
