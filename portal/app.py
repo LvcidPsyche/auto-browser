@@ -1238,8 +1238,28 @@ def create_app(
             ).fetchone()
             if owner is not None and owner["broker_session_id"]:
                 db.commit()
-                raise HTTPException(409, "Browser session is already open")
-            if owner is None:
+                # The recorded session can die upstream (the tenant stack was rebuilt or
+                # restarted, or the session was closed out of band) while this row still
+                # points at it. That used to wedge the owner permanently: Open said "already
+                # open" and the viewer said "no session", with no way out except a manual
+                # database fix. Verify against the broker and clear a dead record instead of
+                # trusting the local row blindly.
+                if await viewer_session_id(row) is not None:
+                    raise HTTPException(409, "Browser session is already open")
+                with closing(store.connect()) as cleanup_db:
+                    cleanup_db.execute(
+                        """UPDATE browser_ownership_v2 SET broker_session_id=NULL
+                           WHERE user_id=? AND tenant_id=? AND broker_session_id=?""",
+                        (row["user_id"], row["tenant_id"], owner["broker_session_id"]),
+                    )
+                    cleanup_db.commit()
+                # The row already exists (broker_session_id now NULL) -- do not INSERT again,
+                # that would violate the (user_id, tenant_id) primary key. `newly_claimed=True`
+                # only controls the failure-cleanup below, which deletes on `broker_session_id
+                # IS NULL` regardless of whether the row is fresh or just-healed, so this is
+                # safe either way.
+                newly_claimed = True
+            elif owner is None:
                 db.execute(
                     "INSERT INTO browser_ownership_v2(user_id,tenant_id,broker_session_id,claimed_at) VALUES(?,?,NULL,?)",
                     (row["user_id"], row["tenant_id"], clock()),
