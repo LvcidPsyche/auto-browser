@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from ..config import Settings
 from ..models import BROWSER_ACTION_SCHEMA, BrowserActionDecision, ProviderName
+from ..result_shaping import compact_session
 
 # Parse strategies fall through on malformed input only. model_validate* raise
 # ValidationError; json.loads / raw_decode raise JSONDecodeError (a ValueError).
@@ -189,7 +190,7 @@ class BaseProviderAdapter(ABC):
                 }
             )
         return {
-            "session": observation.get("session"),
+            "session": compact_session(observation.get("session")),
             "url": observation.get("url"),
             "title": observation.get("title"),
             "active_element": observation.get("active_element"),

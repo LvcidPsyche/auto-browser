@@ -28,6 +28,7 @@ from .models import (
     validate_coordinate_pair,
     validate_url,
 )
+from .result_shaping import ResultDetail
 
 __all__ = [
     "AgentJobIdInput",
@@ -45,6 +46,7 @@ __all__ = [
     "EmptyInput",
     "EvalJsInput",
     "ExecuteActionInput",
+    "ExecuteApprovalInput",
     "ExportScriptInput",
     "FindElementsInput",
     "ForkCdpInput",
@@ -158,10 +160,22 @@ class VerifyWitnessInput(SessionIdInput):
     """Verify the Witness receipt hash chain for one session scope."""
 
 
+def _result_detail_field() -> Any:
+    return Field(
+        default="compact",
+        description=(
+            "'compact' (default) leaves out what choosing the next step does not need: the full "
+            "session record (see browser.get_session), remote-access diagnostics and, for actions, "
+            "the pre-action snapshot. 'full' returns the complete payload."
+        ),
+    )
+
+
 class ObserveInput(SessionIdInput):
     # None → the deployment default (PERCEPTION_PRESET_DEFAULT, normally "normal")
     preset: PerceptionPreset | None = None
     limit: int = Field(default=40, ge=1, le=200)
+    detail: ResultDetail = _result_detail_field()
 
 
 class SessionTailInput(SessionIdInput):
@@ -187,6 +201,7 @@ class ExecuteActionInput(SessionIdInput):
             "URL for navigate or an element selector/index for click and type."
         ),
     )
+    detail: ResultDetail = _result_detail_field()
 
 
 class SaveAuthStateInput(SessionIdInput):
@@ -250,6 +265,10 @@ class ApprovalIdInput(StrictInputModel):
 
 class ApprovalDecisionInput(ApprovalIdInput):
     comment: str | None = Field(default=None, max_length=2000)
+
+
+class ExecuteApprovalInput(ApprovalIdInput):
+    detail: ResultDetail = _result_detail_field()
 
 
 class ListApprovalsInput(StrictInputModel):

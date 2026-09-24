@@ -3,12 +3,12 @@ from __future__ import annotations
 from ...tool_inputs import (
     AgentJobIdInput,
     ApprovalDecisionInput,
-    ApprovalIdInput,
     AuthProfileNameInput,
     CreateSessionRequest,
     DeleteMemoryProfileInput,
     EmptyInput,
     ExecuteActionInput,
+    ExecuteApprovalInput,
     GetMemoryProfileInput,
     ListAgentJobsInput,
     ListApprovalsInput,
@@ -71,7 +71,10 @@ def register(registry, gateway):
         ),
         ToolSpec(
             name="browser.list_sessions",
-            description="List live and persisted browser sessions.",
+            description=(
+                "List live and persisted browser sessions, one reference each (id, name, status, "
+                "live, current page, takeover URL). browser.get_session returns a full record."
+            ),
             input_model=EmptyInput,
             handler=gateway._list_sessions,
         ),
@@ -183,8 +186,8 @@ def register(registry, gateway):
                 "select_option, scroll, …) in a session, using the same action schema the "
                 "agent planner emits. Actions are policy-checked and audited, and governed "
                 "actions may require a granted approval_id. Call browser.observe first to "
-                "get targetable element IDs and selectors; returns the executed action's "
-                "result payload."
+                "get targetable element IDs and selectors. Returns the action's verification "
+                "(what changed) and an observation of the page after it (up to 20 interactables)."
             ),
             input_model=ExecuteActionInput,
             handler=gateway._execute_action,
@@ -243,7 +246,7 @@ def register(registry, gateway):
         ToolSpec(
             name="browser.execute_approval",
             description="Execute an already approved action.",
-            input_model=ApprovalIdInput,
+            input_model=ExecuteApprovalInput,
             handler=gateway._execute_approval,
             profiles=("full",),
         ),

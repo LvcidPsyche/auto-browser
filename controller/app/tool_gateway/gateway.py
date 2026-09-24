@@ -18,10 +18,10 @@ from ..models import (
     McpToolCallResponse,
 )
 from ..readiness import run_readiness_checks
+from ..result_shaping import shape_mcp_result
 from ..tool_inputs import (
     AgentJobIdInput,
     ApprovalDecisionInput,
-    ApprovalIdInput,
     AuthProfileNameInput,
     CdpAttachInput,
     CreateCronJobInput,
@@ -33,6 +33,7 @@ from ..tool_inputs import (
     EmptyInput,
     EvalJsInput,
     ExecuteActionInput,
+    ExecuteApprovalInput,
     ExportScriptInput,
     FindElementsInput,
     ForkSessionInput,
@@ -227,6 +228,7 @@ class McpToolGateway:
             result = await spec.handler(arguments)
             if approval is not None:
                 await self.manager.approvals.mark_executed(approval.id)
+            result = shape_mcp_result(spec.name, result, detail=getattr(arguments, "detail", "compact"))
             return McpToolCallResponse(
                 content=[McpToolCallContent(text=json.dumps(result, ensure_ascii=False))],
                 structuredContent=result,
@@ -515,7 +517,7 @@ class McpToolGateway:
     async def _reject_approval(self, payload: ApprovalDecisionInput) -> dict[str, Any]:
         return await self.manager.reject(payload.approval_id, comment=payload.comment)
 
-    async def _execute_approval(self, payload: ApprovalIdInput) -> dict[str, Any]:
+    async def _execute_approval(self, payload: ExecuteApprovalInput) -> dict[str, Any]:
         return await self.manager.execute_approval(payload.approval_id)
 
     async def _list_agent_jobs(self, payload: ListAgentJobsInput) -> list[dict[str, Any]]:
