@@ -67,6 +67,18 @@ class Settings(BaseSettings):
     auth_state_encryption_key: str | None = Field(None, alias="AUTH_STATE_ENCRYPTION_KEY")
     require_auth_state_encryption: bool = Field(False, alias="REQUIRE_AUTH_STATE_ENCRYPTION")
     auth_state_max_age_hours: float = Field(72.0, alias="AUTH_STATE_MAX_AGE_HOURS")
+    # An auto-load that happens with nobody watching -- the default "remember
+    # me" profile, or a named profile opened by an unattended cron job -- must
+    # not be refused just because nobody happened to open the browser in the
+    # last 72h; the sites themselves expire their own cookies. Interactive,
+    # operator-initiated opens of a named auth_profile keep the tighter
+    # auth_state_max_age_hours check above, since a human is there to notice
+    # and re-authenticate.
+    auth_state_unattended_max_age_hours: float = Field(2160.0, alias="AUTH_STATE_UNATTENDED_MAX_AGE_HOURS")
+    # How many rotated copies of a profile's state file to keep (state.json.enc.<ts>)
+    # every time it is overwritten, so an auto-persist write that turns out to have
+    # been a mistake is never the last surviving copy.
+    auth_state_history_keep: int = Field(20, alias="AUTH_STATE_HISTORY_KEEP")
     # Automatic "remember me": on Open, when the caller does not name a saved
     # profile, silently load this default profile if one exists; while a
     # session is live, periodically re-save into it; on Close, save into it

@@ -56,7 +56,18 @@ class BrowserSessionService:
         user_agent: str | None = None,
         protection_mode: str | None = None,
         totp_secret: str | None = None,
+        unattended: bool = False,
     ) -> dict[str, Any]:
+        """Open a session.
+
+        `unattended` marks a call where nobody is watching to notice or retry
+        a failed auto-load -- currently only the cron scheduler (see
+        CronService._run_job_now). It relaxes the staleness check on an
+        explicitly named `auth_profile` to the same much-larger limit the
+        default "remember me" profile always uses below, since a named
+        profile driven by an unattended schedule has exactly the same silent-
+        failure risk as the default one.
+        """
         if storage_state_path and auth_profile:
             raise ValueError("Provide auth_profile or storage_state_path, not both")
         if proxy_persona and any((request_proxy_server, request_proxy_username, request_proxy_password)):
@@ -85,6 +96,24 @@ class BrowserSessionService:
 
         context_kwargs = self.manager._build_context_kwargs(user_agent, proxy_server, proxy_username, proxy_password)
 
+        # Whether the remembered login actually loaded, and why not when it
+        # didn't -- surfaced on the session summary (see `summary()` below) so
+        # the calling app can tell the owner "your saved login did not load"
+        # instead of silently showing a logged-out browser. Only meaningful
+        # for the "remember me" fallback path below; an explicitly named
+        # auth_profile is a deliberate operator choice, not a "remembered
+        # login", so it leaves these at their defaults.
+        remembered_login_loaded = False
+        remembered_login_error: str | None = None
+        # A saved profile existed but failed to load into this session's
+        # context -- belt and braces with the auto-persist downgrade guard in
+        # BrowserAuthProfileService.save_auto_persist: this session must never
+        # be allowed to auto-persist over that profile, since whatever it
+        # holds now did not come from the remembered login.
+        remembered_load_failed_over_existing_profile = False
+
+        unattended_max_age = self.manager.settings.auth_state_unattended_max_age_hours
+
         if auth_profile:
             # The takeover the report described: opening a session against
             # someone else's stored profile drives a browser already logged in
@@ -98,24 +127,45 @@ class BrowserSessionService:
         # already sitting in the default auto-persist profile (an earlier
         # session's automatic save). Best-effort only — no profile yet, a
         # stale/corrupt one, or a permission quirk must open a fresh browser
-        # instead of failing Open outright.
+        # instead of failing Open outright. This auto-load happens with
+        # nobody watching by definition, so it always uses the much larger
+        # unattended staleness limit -- sites expire their own cookies; going
+        # 72h between browser opens must not be what silently erases a login
+        # (the incident this whole fix responds to).
         auto_persist_name = self.manager.settings.auto_persist_profile_name
         if source_path is None and self.manager.settings.auto_persist_login_enabled:
+            candidate_path: Path | None = None
             try:
                 self.manager.auth_profiles.require_access(
                     auto_persist_name, action="auto-loading the remembered login"
                 )
                 candidate_path = self.manager.auth_profiles.resolve_state_path(auto_persist_name, must_exist=True)
-                prepared_candidate = self.manager.auth_state.prepare_for_context(candidate_path)
-                context_kwargs["storage_state"] = str(prepared_candidate.path)
-                prepared_auth_state = prepared_candidate
-                source_path = candidate_path
+            except FileNotFoundError:
+                pass  # nothing saved yet -- not an error, nothing lost
             except Exception as exc:
-                logger.info(
-                    "auto-persist: no remembered login to load yet ('%s'): %s", auto_persist_name, exc
+                logger.warning(
+                    "auto-persist: could not access remembered login profile '%s': %s", auto_persist_name, exc
                 )
+
+            if candidate_path is not None:
+                try:
+                    prepared_candidate = self.manager.auth_state.prepare_for_context(
+                        candidate_path, max_age_hours=unattended_max_age
+                    )
+                    context_kwargs["storage_state"] = str(prepared_candidate.path)
+                    prepared_auth_state = prepared_candidate
+                    source_path = candidate_path
+                    remembered_login_loaded = True
+                except Exception as exc:
+                    remembered_login_error = str(exc)
+                    remembered_load_failed_over_existing_profile = True
+                    logger.warning(
+                        "auto-persist: remembered login ('%s') did not load: %s", auto_persist_name, exc
+                    )
         elif source_path is not None:
-            prepared_auth_state = self.manager.auth_state.prepare_for_context(source_path)
+            prepared_auth_state = self.manager.auth_state.prepare_for_context(
+                source_path, max_age_hours=unattended_max_age if unattended else None
+            )
             context_kwargs["storage_state"] = str(prepared_auth_state.path)
 
         context: BrowserContext | None = None
@@ -163,6 +213,8 @@ class BrowserSessionService:
                 protection_mode=resolved_protection_mode,
                 totp_secret=totp_secret,
                 witness_remote_state=self.manager._initial_witness_remote_state(resolved_protection_mode),
+                remembered_login_loaded=remembered_login_loaded,
+                remembered_login_error=remembered_login_error,
             )
             if source_path is not None:
                 session.last_auth_state_path = source_path
@@ -196,6 +248,7 @@ class BrowserSessionService:
             if (
                 self.manager.settings.auto_persist_login_enabled
                 and self.manager.settings.auto_persist_interval_seconds > 0
+                and not remembered_load_failed_over_existing_profile
             ):
                 session.auto_persist_profile_name = auto_persist_name
                 session.auto_persist_task = asyncio.create_task(
@@ -719,6 +772,8 @@ class BrowserSessionService:
             "proxy_persona": session.proxy_persona,
             "protection_mode": session.protection_mode,
             "witness_remote": session.witness_remote_state.model_dump(),
+            "remembered_login_loaded": session.remembered_login_loaded,
+            "remembered_login_error": session.remembered_login_error,
         }
 
     async def get_summary(self, session_id: str) -> dict[str, Any]:

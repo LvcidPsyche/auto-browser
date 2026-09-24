@@ -244,13 +244,68 @@ class BrowserAuthProfileService:
         policy gate and the audit/receipt trail that would otherwise fire
         every few minutes for a purely internal write, and it never changes
         which profile the session itself is considered to belong to.
+
+        Guarded against the incident this exists to prevent: a session that
+        never actually held the saved logins (auto-load failed, a site kicked
+        it, a fresh context that just never signed in) silently overwriting a
+        good profile with a worse one. See `_check_auto_persist_downgrade`.
         """
+        normalized = self.normalize_name(profile_name)
+        downgrade = await self._check_auto_persist_downgrade(session, normalized)
+        if downgrade is not None:
+            return downgrade
         return await self.save_for_session(
             session,
             profile_name,
             metadata={"auto_persisted": True},
             track_on_session=False,
         )
+
+    async def _check_auto_persist_downgrade(
+        self, session: "BrowserSession", normalized: str
+    ) -> dict[str, Any] | None:
+        """Refuse an auto-persist write that would erase a signed-in site.
+
+        Compares the sites the *currently saved* profile is signed into
+        against the sites the live context is signed into right now. If the
+        live context would lose a site the saved profile has -- the session
+        failed to load the remembered login, or a site kicked the session out
+        -- the write is skipped and the old file is kept untouched. Returns a
+        skip payload when the write must not happen, else ``None``.
+        """
+        try:
+            existing_path = self.resolve_state_path(normalized, must_exist=True)
+        except FileNotFoundError:
+            return None  # nothing saved yet -- nothing to lose
+        old_sites = self.manager.auth_state.signed_in_sites(
+            self.manager.auth_state.read_cookies(existing_path)
+        )
+        if not old_sites:
+            return None
+        try:
+            new_state = await session.context.storage_state()
+        except Exception:
+            logger.warning(
+                "auto-persist: could not read live storage state for profile '%s' to compare", normalized,
+                exc_info=True,
+            )
+            return None
+        new_cookies = new_state.get("cookies") if isinstance(new_state, dict) else None
+        new_sites = self.manager.auth_state.signed_in_sites(new_cookies)
+        lost = sorted(old_sites - new_sites)
+        if not lost:
+            return None
+        logger.warning(
+            "auto-persist: skipping save into profile '%s' -- would lose signed-in site(s): %s",
+            normalized,
+            ", ".join(lost),
+        )
+        return {
+            "profile_name": normalized,
+            "skipped": True,
+            "reason": "would_lose_signed_in_sites",
+            "lost_sites": lost,
+        }
 
     async def save(self, session_id: str, profile_name: str) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
