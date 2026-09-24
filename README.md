@@ -97,7 +97,7 @@ Run `make doctor` from a normal terminal with local Docker access and permission
 Open:
 
 - API docs: `http://127.0.0.1:8000/docs`
-- Operator dashboard: `http://127.0.0.1:8000/dashboard`
+- Operator dashboard: `http://127.0.0.1:8000/dashboard`, which includes the queue of actions waiting on your approval
 - Visual takeover: `http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale`
 
 All published ports bind to `127.0.0.1` by default.

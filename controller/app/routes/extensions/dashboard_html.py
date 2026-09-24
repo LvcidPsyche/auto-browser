@@ -51,6 +51,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .timeline-item { color: var(--muted); font-size: 12px; }
   .timeline-item strong { color: var(--text); font-weight: 600; }
   .empty { padding: 32px; text-align: center; color: var(--muted); }
+  .section-note { padding: 10px 20px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--border); }
+  .wrap { white-space: pre-wrap; word-break: break-word; max-width: 360px; }
   .refresh-btn { background: none; border: 1px solid var(--border); color: var(--muted);
                  padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
   .refresh-btn:hover { color: var(--text); }
@@ -63,6 +65,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 </header>
 <nav>
   <a href="#sessions" class="active">Sessions</a>
+  <a href="#approvals">Approvals</a>
   <a href="#workflows">Workflows</a>
   <a href="#agent-jobs">Agent Jobs</a>
   <a href="#peers">Peers</a>
@@ -72,10 +75,23 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <!-- Stats -->
   <div class="grid" id="stats">
     <div class="card"><h3>Active Sessions</h3><div class="value" id="stat-sessions">—</div></div>
+    <div class="card"><h3>Pending Approvals</h3><div class="value" id="stat-approvals">—</div></div>
     <div class="card"><h3>Workflow Runs</h3><div class="value" id="stat-workflows">—</div></div>
     <div class="card"><h3>Agent Jobs</h3><div class="value" id="stat-agent-jobs">—</div></div>
     <div class="card"><h3>Mesh Peers</h3><div class="value" id="stat-peers">—</div></div>
     <div class="card"><h3>Audit Events</h3><div class="value" id="stat-audit">—</div></div>
+  </div>
+
+  <!-- Pending approvals: an agent blocked on one waits here for an operator -->
+  <div class="section" id="approvals">
+    <div class="section-header">
+      <h2>Pending Approvals</h2>
+      <button class="refresh-btn" id="refresh-approvals">↻ Refresh</button>
+    </div>
+    <div class="section-note" id="approvals-status">Once approved, the waiting agent retries its action with the approval id.</div>
+    <table><thead><tr>
+      <th>Requested</th><th>Session</th><th>Kind</th><th>Action</th><th>Reason</th><th>Decision</th>
+    </tr></thead><tbody id="approvals-tbody"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody></table>
   </div>
 
   <!-- Sessions -->
@@ -314,7 +330,7 @@ const safeHttpUrl = (value) => {
 };
 
 async function loadAll() {
-  await Promise.all([loadIdentity(), loadSessions(), loadWorkflows(), loadAgentJobs(), loadPeers(), loadAudit(), loadAuthProfiles()]);
+  await Promise.all([loadIdentity(), loadApprovals(), loadSessions(), loadWorkflows(), loadAgentJobs(), loadPeers(), loadAudit(), loadAuthProfiles()]);
 }
 
 async function loadIdentity() {
@@ -470,6 +486,70 @@ async function loadAgentJobs() {
       ));
     }
     if (!actions.childNodes.length) actions.textContent = '—';
+    appendNodeCell(row, actions);
+    tbody.appendChild(row);
+  });
+}
+
+// --- Pending approvals -----------------------------------------------------
+// Reasons and actions come from pages and agents, so they are written as text
+// only. An approval stores the exact action it authorises, typed text
+// included; a type action marked sensitive never shows that text here.
+const describeAction = (action) => {
+  if (!action || typeof action !== 'object') return '—';
+  // A governed tool call (eval_js, set_cookies, ...) is approved through a
+  // stand-in action whose text is "<tool> sha256:<digest of its arguments>"
+  // (McpToolGateway._governed_call_decision); its reason previews the arguments.
+  const toolCall = action.action === 'request_human_takeover'
+    && /^([a-z_.]+) sha256:[0-9a-f]{64}$/.exec(String(action.text || ''));
+  if (toolCall) return `tool call ${toolCall[1]} (arguments under Reason)`;
+  const parts = [asText(action.action, 'unknown')];
+  [action.url, action.selector || action.element_id, action.file_path, action.key].forEach((value) => {
+    if (value) parts.push(String(value));
+  });
+  if (action.text) {
+    parts.push(action.sensitive ? '(sensitive text hidden)' : JSON.stringify(String(action.text).slice(0, 200)));
+  }
+  return parts.join(' · ');
+};
+
+async function decideApproval(approval, decision) {
+  const statusEl = document.getElementById('approvals-status');
+  const approvalId = asText(approval.id, '');
+  let comment = null;
+  if (decision === 'approve') {
+    const summary = `${asText(approval.kind, 'unknown')} action in session ${asText(approval.session_id)}:\n\n`
+      + `${describeAction(approval.action)}\n\n${asText(approval.reason, '')}`;
+    if (!confirm(`Approve this ${summary}`)) return;
+  } else {
+    comment = prompt('Reason for rejecting (optional):', '');
+    if (comment === null) return;
+  }
+  const result = await apiPost(`/approvals/${encodeURIComponent(approvalId)}/${decision}`, {comment: comment || null});
+  statusEl.textContent = result && result.status
+    ? `Approval ${approvalId} ${result.status}.`
+    : `Could not ${decision} approval ${approvalId}: ${asText(result && result.detail, 'request failed')}.`;
+  loadApprovals();
+}
+
+async function loadApprovals() {
+  const d = await api('/approvals?status=pending');
+  const items = Array.isArray(d) ? d : [];
+  document.getElementById('stat-approvals').textContent = items.length;
+  const tbody = document.getElementById('approvals-tbody');
+  if (!items.length) { appendEmptyRow(tbody, 6, 'No approvals waiting'); return; }
+  tbody.replaceChildren();
+  items.forEach(a => {
+    const row = document.createElement('tr');
+    appendCell(row, formatEventTime(a.created_at), {className: 'mono'});
+    appendCell(row, asText(a.session_id, '').slice(0, 12), {className: 'mono'});
+    appendCell(row, a.kind);
+    appendCell(row, describeAction(a.action), {className: 'mono wrap'});
+    appendCell(row, a.reason, {className: 'wrap'});
+    const actions = document.createElement('div');
+    actions.className = 'btn-row';
+    actions.appendChild(jobActionButton('Approve', 'btn btn-primary btn-sm', () => decideApproval(a, 'approve')));
+    actions.appendChild(jobActionButton('Reject', 'btn btn-danger btn-sm', () => decideApproval(a, 'reject')));
     appendNodeCell(row, actions);
     tbody.appendChild(row);
   });
@@ -733,6 +813,7 @@ document.getElementById('wizard-save').addEventListener('click', wizardSave);
 document.getElementById('wizard-reopen').addEventListener('click', wizardReopen);
 document.getElementById('refresh-auth-profiles').addEventListener('click', loadAuthProfiles);
 
+document.getElementById('refresh-approvals').addEventListener('click', loadApprovals);
 document.getElementById('refresh-sessions').addEventListener('click', loadSessions);
 document.getElementById('refresh-workflows').addEventListener('click', loadWorkflows);
 document.getElementById('refresh-agent-jobs').addEventListener('click', loadAgentJobs);
