@@ -98,24 +98,118 @@ STEALTH_INIT_SCRIPT = r"""
 }
 """
 
-INTERACTABLES_SCRIPT = r"""
+# Shared by the observation scripts below, which inject it at the top of their
+# function body (``/*__ELEMENT_NAMING__*/``) so all three name elements the same
+# way. It follows the order of the accessible-name computation that matters in
+# practice: aria-labelledby, aria-label, associated <label>s, button captions and
+# image alt text, visible text, title, then placeholder, name and id.
+#
+# A field's *value* is never used as its name. The previous fallback chain did,
+# so a password typed into a field with no placeholder became that field's
+# "label" in every later observation — in the interactables, the active element
+# and the form outline — and from there reached model prompts, MCP clients and
+# logs, even though the type action itself had redacted the text. Captions of
+# submit/button/reset inputs are the one exception: that value is visible text.
+_ELEMENT_NAMING_JS = r"""
+  function abClean(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function abLabelText(label) {
+    const clone = label.cloneNode(true);
+    clone.querySelectorAll('input, select, textarea, button').forEach((node) => node.remove());
+    return abClean(clone.textContent);
+  }
+
+  function abName(el) {
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    const labelledBy = (el.getAttribute('aria-labelledby') || '')
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((id) => document.getElementById(id))
+      .filter(Boolean)
+      .map((node) => abClean(node.innerText || node.textContent))
+      .filter(Boolean)
+      .join(' ');
+    if (labelledBy) return labelledBy;
+    const aria = abClean(el.getAttribute('aria-label'));
+    if (aria) return aria;
+    if (el.labels && el.labels.length) {
+      const fromLabels = Array.from(el.labels).map(abLabelText).filter(Boolean).join(' ');
+      if (fromLabels) return fromLabels;
+    }
+    if (tag === 'input' && ['button', 'submit', 'reset'].includes(type)) {
+      const caption = abClean(el.value);
+      if (caption) return caption;
+    }
+    if (tag === 'img' || (tag === 'input' && type === 'image')) {
+      const alt = abClean(el.getAttribute('alt'));
+      if (alt) return alt;
+    }
+    const isField = tag === 'input' || tag === 'textarea' || tag === 'select';
+    if (!isField) {
+      const text = abClean(el.innerText);
+      if (text) return text;
+      const image = el.querySelector ? el.querySelector('img[alt]') : null;
+      const alt = image ? abClean(image.getAttribute('alt')) : '';
+      if (alt) return alt;
+    }
+    return abClean(
+      el.getAttribute('title')
+        || el.getAttribute('placeholder')
+        || el.getAttribute('name')
+        || el.id
+        || (tag === 'a' ? el.getAttribute('href') : '')
+    );
+  }
+
+  function abRole(el) {
+    const explicit = abClean(el.getAttribute('role')).split(' ')[0];
+    if (explicit) return explicit;
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute('type') || 'text').toLowerCase();
+    if (tag === 'a') return el.hasAttribute('href') ? 'link' : 'generic';
+    if (tag === 'button' || tag === 'summary') return 'button';
+    if (tag === 'textarea') return 'textbox';
+    if (tag === 'select') return el.multiple || el.size > 1 ? 'listbox' : 'combobox';
+    if (tag === 'input') {
+      if (['button', 'submit', 'reset', 'image'].includes(type)) return 'button';
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (type === 'range') return 'slider';
+      if (type === 'number') return 'spinbutton';
+      if (type === 'search') return 'searchbox';
+      if (type === 'file') return 'file';
+      return 'textbox';
+    }
+    if (el.isContentEditable) return 'textbox';
+    return tag;
+  }
+
+  function abChecked(el) {
+    const aria = el.getAttribute('aria-checked') || el.getAttribute('aria-pressed') || el.getAttribute('aria-selected');
+    if (aria === 'true' || aria === 'mixed') return aria === 'true' ? true : 'mixed';
+    if (aria === 'false') return false;
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    if (el.tagName.toLowerCase() === 'input' && (type === 'checkbox' || type === 'radio')) return Boolean(el.checked);
+    return null;
+  }
+"""
+
+
+def _with_element_naming(source: str) -> str:
+    return source.replace("/*__ELEMENT_NAMING__*/", _ELEMENT_NAMING_JS)
+
+
+INTERACTABLES_SCRIPT = _with_element_naming(
+    r"""
 (limit) => {
+/*__ELEMENT_NAMING__*/
   function isVisible(el) {
     const rect = el.getBoundingClientRect();
     const style = window.getComputedStyle(el);
     return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-  }
-
-  function getLabel(el) {
-    const raw = el.getAttribute('aria-label')
-      || el.getAttribute('placeholder')
-      || el.innerText
-      || el.value
-      || el.getAttribute('name')
-      || el.id
-      || el.href
-      || '';
-    return String(raw).replace(/\s+/g, ' ').trim().slice(0, 160);
   }
 
   const selector = [
@@ -124,9 +218,19 @@ INTERACTABLES_SCRIPT = r"""
     'input',
     'textarea',
     'select',
+    'summary',
     '[role="button"]',
     '[role="link"]',
     '[role="textbox"]',
+    '[role="searchbox"]',
+    '[role="combobox"]',
+    '[role="checkbox"]',
+    '[role="radio"]',
+    '[role="switch"]',
+    '[role="tab"]',
+    '[role="menuitem"]',
+    '[role="option"]',
+    '[role="slider"]',
     '[contenteditable="true"]',
     '[tabindex]'
   ].join(',');
@@ -143,8 +247,9 @@ INTERACTABLES_SCRIPT = r"""
       selector_hint: `[data-operator-id="${el.dataset.operatorId}"]`,
       tag: el.tagName.toLowerCase(),
       type: el.getAttribute('type'),
-      role: el.getAttribute('role') || el.tagName.toLowerCase(),
-      label: getLabel(el),
+      role: abRole(el),
+      label: abName(el).slice(0, 160),
+      checked: abChecked(el),
       disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
       href: el.href || null,
       bbox: {
@@ -159,9 +264,12 @@ INTERACTABLES_SCRIPT = r"""
   return out;
 }
 """
+)
 
-ACTIVE_ELEMENT_SCRIPT = r"""
+ACTIVE_ELEMENT_SCRIPT = _with_element_naming(
+    r"""
 () => {
+/*__ELEMENT_NAMING__*/
   const el = document.activeElement;
   if (!el) return null;
   return {
@@ -169,13 +277,16 @@ ACTIVE_ELEMENT_SCRIPT = r"""
     element_id: el.dataset?.operatorId || null,
     name: el.getAttribute('name'),
     id: el.id || null,
-    label: (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.innerText || el.value || '').toString().replace(/\s+/g, ' ').trim().slice(0, 120)
+    label: abName(el).slice(0, 120)
   };
 }
 """
+)
 
-PAGE_SUMMARY_SCRIPT = r"""
+PAGE_SUMMARY_SCRIPT = _with_element_naming(
+    r"""
 (textLimit) => {
+/*__ELEMENT_NAMING__*/
   const squash = (value, maxLength = textLimit) =>
     String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
 
@@ -198,15 +309,7 @@ PAGE_SUMMARY_SCRIPT = r"""
           tag: field.tagName.toLowerCase(),
           type: field.getAttribute('type') || null,
           name: field.getAttribute('name') || null,
-          label: squash(
-            field.getAttribute('aria-label')
-              || field.getAttribute('placeholder')
-              || field.innerText
-              || field.value
-              || field.getAttribute('name')
-              || field.id,
-            80
-          ),
+          label: abName(field).slice(0, 80),
           disabled: Boolean(field.disabled || field.getAttribute('aria-disabled') === 'true')
         }))
     }));
@@ -226,6 +329,7 @@ PAGE_SUMMARY_SCRIPT = r"""
   };
 }
 """
+)
 
 # Feed/profile extraction helpers
 EXTRACT_POSTS_SCRIPT = r"""
