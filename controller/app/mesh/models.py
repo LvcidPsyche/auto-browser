@@ -36,7 +36,13 @@ class CapabilityGrant(BaseModel):
     """A single permission entry: what this peer may ask us to do."""
 
     capability: str = Field(..., description="e.g. 'tool:browser.click' or 'session:observe'")
-    url_allowlist: list[str] = Field(default_factory=list, description="Allowed URL patterns (empty = unrestricted)")
+    url_allowlist: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Allowed URL patterns (empty = unrestricted). 'https://*.example.com/*' matches scheme, host and path "
+            "separately; a pattern without a scheme, such as '*.example.com', matches the host only."
+        ),
+    )
     require_approval: bool = Field(False, description="Gate this capability behind operator approval")
     max_invocations_per_hour: int = Field(0, description="Rate limit (0 = unlimited)")
     expires_at: float = Field(0.0, description="Unix timestamp, 0 = never expires")
