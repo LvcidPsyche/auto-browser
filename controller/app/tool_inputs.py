@@ -71,6 +71,7 @@ __all__ = [
     "ProxyPersonaNameInput",
     "QueueAgentRunInput",
     "QueueAgentStepInput",
+    "ReadDownloadInput",
     "ReadinessCheckInput",
     "ResumeAgentJobInput",
     "SaveMemoryProfileInput",
@@ -226,6 +227,29 @@ class TakeoverInput(SessionIdInput):
 
 class ListDownloadsInput(SessionIdInput):
     pass
+
+
+def _offset_field() -> Any:
+    return Field(
+        default=0,
+        ge=0,
+        description="Character to start from. A result with truncated=true gives the next_offset to continue from.",
+    )
+
+
+def _max_chars_field() -> Any:
+    return Field(default=20_000, ge=1_000, le=1_000_000, description="Most characters to return.")
+
+
+class ReadDownloadInput(SessionIdInput):
+    download_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description="id from browser.list_downloads. Omit to read the most recent completed download.",
+    )
+    offset: int = _offset_field()
+    max_chars: int = _max_chars_field()
 
 
 class AuthProfileNameInput(StrictInputModel):
@@ -579,9 +603,5 @@ class GetPageHtmlInput(SessionIdInput):
         default=False,
         description="Return the page's visible text instead of HTML: line breaks kept, table cells tab-separated.",
     )
-    offset: int = Field(
-        default=0,
-        ge=0,
-        description="Character to start from. A result with truncated=true gives the next_offset to continue from.",
-    )
-    max_chars: int = Field(default=20_000, ge=1_000, le=1_000_000, description="Most characters to return.")
+    offset: int = _offset_field()
+    max_chars: int = _max_chars_field()

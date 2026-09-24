@@ -484,6 +484,9 @@ class BrowserManager:
     async def list_downloads(self, session_id: str) -> list[dict[str, Any]]:
         return await self.diagnostics.list_downloads(session_id)
 
+    async def read_download_text(self, session_id: str, download_id: str | None = None) -> dict[str, Any]:
+        return await self.diagnostics.read_download_text(session_id, download_id)
+
     async def screenshot_diff(self, session_id: str) -> dict[str, Any]:
         return await self.diagnostics.screenshot_diff(session_id)
 

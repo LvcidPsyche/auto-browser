@@ -18,6 +18,7 @@ from ...tool_inputs import (
     ObserveInput,
     QueueAgentRunInput,
     QueueAgentStepInput,
+    ReadDownloadInput,
     ResumeAgentJobInput,
     SaveAuthProfileInput,
     SaveAuthStateInput,
@@ -159,6 +160,17 @@ def register(registry, gateway):
             description="List files captured from browser downloads for one session.",
             input_model=ListDownloadsInput,
             handler=gateway._list_downloads,
+        ),
+        ToolSpec(
+            name="browser.read_download",
+            description=(
+                "Read a downloaded file as text (CSV, JSON, TXT, HTML, ...), by download_id "
+                "from browser.list_downloads or, if omitted, the latest completed download. "
+                "Paged like browser.get_html. Binary files (PDF, XLSX, images) are refused "
+                "with their artifact URL."
+            ),
+            input_model=ReadDownloadInput,
+            handler=gateway._read_download,
         ),
         ToolSpec(
             name="browser.list_tabs",

@@ -62,6 +62,7 @@ from ..tool_inputs import (
     ProxyPersonaNameInput,
     QueueAgentRunInput,
     QueueAgentStepInput,
+    ReadDownloadInput,
     ReadinessCheckInput,
     ResumeAgentJobInput,
     SaveAuthProfileInput,
@@ -129,6 +130,19 @@ def _redact_for_preview(value: Any) -> Any:
 # putting in a model's context; the text result still carries its URL.
 _INLINE_IMAGE_MAX_BYTES = 4 * 1024 * 1024
 _INLINE_IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+
+
+def _page_of(content: str, *, offset: int, max_chars: int) -> dict[str, Any]:
+    """One page of a long text result, and where the next one starts."""
+    end = offset + max_chars
+    truncated = end < len(content)
+    return {
+        "content": content[offset:end],
+        "offset": offset,
+        "total_chars": len(content),
+        "truncated": truncated,
+        "next_offset": end if truncated else None,
+    }
 
 
 def _read_inline_image(path: Path) -> bytes | None:
@@ -526,6 +540,15 @@ class McpToolGateway:
     async def _list_downloads(self, payload: ListDownloadsInput) -> list[dict[str, Any]]:
         return await self.manager.list_downloads(payload.session_id)
 
+    async def _read_download(self, payload: ReadDownloadInput) -> dict[str, Any]:
+        download = await self.manager.read_download_text(payload.session_id, payload.download_id)
+        text = download.pop("text")
+        return {
+            "session_id": payload.session_id,
+            **download,
+            **_page_of(text, offset=payload.offset, max_chars=payload.max_chars),
+        }
+
     async def _list_tabs(self, payload: ListTabsInput) -> list[dict[str, Any]]:
         return await self.manager.list_tabs(payload.session_id)
 
@@ -691,16 +714,10 @@ class McpToolGateway:
         else:
             content = await session.page.content()
             kind = "html"
-        end = payload.offset + payload.max_chars
-        truncated = end < len(content)
         return {
             "session_id": payload.session_id,
             "type": kind,
-            "content": content[payload.offset : end],
-            "offset": payload.offset,
-            "total_chars": len(content),
-            "truncated": truncated,
-            "next_offset": end if truncated else None,
+            **_page_of(content, offset=payload.offset, max_chars=payload.max_chars),
         }
 
     async def _find_elements(self, payload: FindElementsInput) -> dict[str, Any]:

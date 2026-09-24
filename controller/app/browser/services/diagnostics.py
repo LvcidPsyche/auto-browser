@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import logging
+import mimetypes
 import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ...action_errors import SessionNotFoundError
 from ...downloads import DownloadCaptureService
 from ...pii_scrub import PiiScrubber
 from ...utils import UTC, spawn_background_task
 
 logger = logging.getLogger(__name__)
+
+# Larger downloads are fetched from their artifact URL, not read into a model's context.
+DOWNLOAD_READ_MAX_BYTES = 10 * 1024 * 1024
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -129,8 +135,67 @@ class BrowserDiagnosticsService:
         session = self.manager.sessions.get(session_id)
         if session is not None:
             return list(session.downloads)
-        record = await self.manager.session_store.get(session_id)
+        try:
+            record = await self.manager.session_store.get(session_id)
+        except KeyError:
+            raise SessionNotFoundError(session_id) from None
         return list(record.downloads)
+
+    async def read_download_text(self, session_id: str, download_id: str | None = None) -> dict[str, Any]:
+        """A captured download's contents as text.
+
+        ``download_id`` defaults to the most recent completed download. Only
+        files in the session's own downloads directory are read, and only text:
+        binary files are refused with their size, type and artifact URL.
+        """
+        downloads = await self.list_downloads(session_id)
+        record = self._select_download(session_id, downloads, download_id)
+        downloads_dir = (Path(self.manager.settings.artifact_root) / session_id / "downloads").resolve()
+        path = Path(str(record.get("path") or "")).resolve()
+        if not path.is_relative_to(downloads_dir):
+            logger.warning("refusing to read download %s: %s is outside %s", record.get("id"), path, downloads_dir)
+            raise ValueError(f"Download {record.get('id')} is not in this session's downloads directory.")
+        try:
+            size = path.stat().st_size
+        except OSError:
+            raise ValueError(f"Download {record.get('id')} ({record.get('filename')}) is no longer on disk.") from None
+        content_type = mimetypes.guess_type(path.name)[0]
+        described = f"{record.get('filename')} ({content_type or 'unknown type'}, {size:,} bytes)"
+        if size > DOWNLOAD_READ_MAX_BYTES:
+            raise ValueError(
+                f"Download {described} is larger than {DOWNLOAD_READ_MAX_BYTES:,} bytes; fetch it from {record.get('url')}."
+            )
+        data = await asyncio.to_thread(path.read_bytes)
+        text, lossy = _decode_text(data, content_type)
+        if text is None:
+            raise ValueError(f"Download {described} is binary, not text; fetch it from {record.get('url')}.")
+        return {
+            "download_id": record.get("id"),
+            "filename": record.get("filename"),
+            "source_url": record.get("source_url"),
+            "url": record.get("url"),
+            "content_type": content_type,
+            "size_bytes": size,
+            "lossy": lossy,
+            "text": text,
+        }
+
+    @staticmethod
+    def _select_download(session_id: str, downloads: list[dict[str, Any]], download_id: str | None) -> dict[str, Any]:
+        if download_id is None:
+            completed = [item for item in downloads if item.get("status") == "completed"]
+            if not completed:
+                raise ValueError(f"Session {session_id} has no completed downloads.")
+            return completed[-1]
+        for item in downloads:
+            if item.get("id") == download_id:
+                if item.get("status") != "completed":
+                    raise ValueError(
+                        f"Download {download_id} did not complete ({item.get('failure') or item.get('status')})."
+                    )
+                return item
+        known = ", ".join(str(item.get("id")) for item in downloads[-10:]) or "none"
+        raise ValueError(f"No download {download_id} in session {session_id}. Recent downloads: {known}.")
 
     async def handle_download(self, session: "BrowserSession", download: Any) -> None:
         record = await self.download_capture.capture(session, download)
@@ -237,3 +302,50 @@ class BrowserDiagnosticsService:
                 "width": 0,
                 "height": 0,
             }
+
+
+_TEXTUAL_APPLICATION_TYPES = frozenset(
+    {
+        "application/javascript",
+        "application/json",
+        "application/sql",
+        "application/toml",
+        "application/x-sh",
+        "application/x-yaml",
+        "application/xml",
+        "application/yaml",
+    }
+)
+
+
+def _is_textual_type(content_type: str) -> bool:
+    return (
+        content_type.startswith("text/")
+        or content_type in _TEXTUAL_APPLICATION_TYPES
+        or content_type.endswith(("+json", "+xml"))
+    )
+
+
+def _decode_text(data: bytes, content_type: str | None) -> tuple[str | None, bool]:
+    """(text, lossy), or (None, False) for binary data.
+
+    A file whose extension names a binary type (pdf, xlsx, png, zip ...) is
+    binary whatever its first bytes are. Otherwise UTF-8 (with or without a
+    BOM) and BOM-marked UTF-16 decode exactly; anything else without a NUL byte
+    is text in some legacy encoding, decoded with replacement characters and
+    reported as lossy rather than refused.
+    """
+    if content_type is not None and not _is_textual_type(content_type):
+        return None, False
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        try:
+            return data.decode("utf-16"), False
+        except UnicodeDecodeError:
+            return None, False
+    try:
+        return data.decode("utf-8-sig"), False
+    except UnicodeDecodeError:
+        pass
+    if b"\x00" in data[:8192]:
+        return None, False
+    return data.decode("utf-8", errors="replace"), True
