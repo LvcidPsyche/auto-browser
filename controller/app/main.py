@@ -98,7 +98,7 @@ app.include_router(create_agent_router(manager=manager, orchestrator=orchestrato
 app.include_router(create_auth_profiles_router(manager=manager, settings=settings))
 app.include_router(create_session_diagnostics_router(manager=manager, settings=settings))
 app.include_router(create_sessions_router(manager=manager))
-app.include_router(create_share_router(manager=manager, share_manager=share_manager))
+app.include_router(create_share_router(manager=manager, share_manager=share_manager, settings=settings))
 app.include_router(
     create_operations_router(
         manager=manager,

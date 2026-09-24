@@ -16,3 +16,10 @@ import os
 # production-safety default it does not model. Tests that exercise the exposed
 # path build their own Settings and must not rely on this.
 os.environ.setdefault("API_BIND_SCOPE", "loopback")
+
+# A tokenless loopback controller answers only to loopback Host names unless
+# CONTROLLER_ALLOWED_HOSTS says otherwise (app/middleware/http.py) — the guard
+# against DNS rebinding. TestClient addresses every request to `testserver`, so
+# the suite declares it the way docker-compose.yml does. Tests of the guard
+# itself build their own Settings.
+os.environ.setdefault("CONTROLLER_ALLOWED_HOSTS", "localhost,127.0.0.1,::1,testserver")

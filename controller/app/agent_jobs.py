@@ -17,7 +17,7 @@ from .models import (
     AgentStepRequest,
     AgentStepResult,
 )
-from .utils import utc_now
+from .utils import record_path, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ class AgentJobStore:
         return records
 
     def _get_sync(self, job_id: str) -> AgentJobRecord:
-        path = self.root / f"{job_id}.json"
+        path = record_path(self.root, job_id, ".json")
         if not path.exists():
             raise KeyError(job_id)
         return AgentJobRecord.model_validate_json(path.read_text(encoding="utf-8"))
@@ -217,7 +217,7 @@ class AgentJobStore:
         return record, False
 
     def _write_sync(self, record: AgentJobRecord) -> None:
-        path = self.root / f"{record.id}.json"
+        path = record_path(self.root, record.id, ".json")
         tmp_path = path.with_suffix(".json.tmp")
         tmp_path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
         for attempt in range(5):

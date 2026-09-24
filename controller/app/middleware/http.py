@@ -12,6 +12,7 @@ from ..auth_policy import (
     AuthPolicy,
     Credential,
     credentials_for,
+    is_loopback_host,
     match_credential,
     policy_for_scope,
     resolve_bind_scope,
@@ -127,6 +128,7 @@ def install_controller_http_middleware(
             "/dashboard",
             "/ui",
             "/mesh/receive",
+            "/share/",
         )
         asserted_id = request.headers.get(settings.operator_id_header)
         operator_name = request.headers.get(settings.operator_name_header)
@@ -184,6 +186,37 @@ def install_controller_http_middleware(
         template = getattr(route, "path", None)
         return template or "__unmatched__"
 
+    # An API that answers without a credential is safe on loopback only while it
+    # also refuses requests addressed to any other name. Otherwise DNS rebinding
+    # turns a web page into a same-origin client: the attacker's hostname
+    # re-resolves to 127.0.0.1, the browser sends Host: attacker.example, and —
+    # with no token to present — the page drives sessions and exports stored
+    # logins. The MCP Origin check cannot catch it either, because it accepts the
+    # origin the Host header claims. Compose sets CONTROLLER_ALLOWED_HOSTS;
+    # running the controller directly left it empty, and empty meant any Host.
+    # Evaluated per request against the same policy as the auth gate, so a
+    # deployment with a bearer credential is unaffected.
+    configured_hosts = list(getattr(settings, "controller_allowed_host_patterns", None) or [])
+
+    @application.middleware("http")
+    async def require_loopback_host_when_unauthenticated(request: Request, call_next):
+        if configured_hosts or _auth_policy().required or _request_path(request) == "/healthz":
+            return await call_next(request)
+        host = request.headers.get("host", "")
+        if is_loopback_host(host):
+            return await call_next(request)
+        logger.warning("refused unauthenticated request for non-loopback Host %r", host)
+        return JSONResponse(
+            status_code=400,
+            content={
+                "detail": (
+                    "Invalid host header: this controller runs without an API credential, so it only answers "
+                    "to loopback host names. Set CONTROLLER_ALLOWED_HOSTS to the names clients use, or "
+                    "configure API_BEARER_TOKEN."
+                )
+            },
+        )
+
     @application.middleware("http")
     async def record_http_metrics(request: Request, call_next):
         if not metrics.enabled:
@@ -212,12 +245,48 @@ def install_controller_http_middleware(
         )
         return response
 
+    # Installed last, so it is outermost and also covers the 400/401/429
+    # responses the middleware above short-circuits with.
+    install_security_headers(application)
+
+
+_BASELINE_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+}
+
+# /artifacts serves files the *browser* produced, including downloads whose
+# name and bytes a visited site chooses. Served from the controller's origin, a
+# downloaded .html or .svg ran script there — and on a tokenless loopback
+# controller that script could call the whole API, auth-profile export
+# included. `sandbox` without allow-scripts gives the document an opaque origin
+# and no script; images and media still render when opened directly.
+_ARTIFACT_CSP = "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+
+
+def install_security_headers(application: FastAPI) -> None:
+    @application.middleware("http")
+    async def apply_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        for name, value in _BASELINE_SECURITY_HEADERS.items():
+            response.headers.setdefault(name, value)
+        path = _request_path(request)
+        if path == "/artifacts" or path.startswith("/artifacts/"):
+            response.headers["Content-Security-Policy"] = _ARTIFACT_CSP
+        return response
+
 
 def _request_path(request: Request) -> str:
     return str(request.scope.get("path") or "")
 
 
 def _is_bearer_token_exempt_path(path: str) -> bool:
+    # /share/{token}/... authenticates with the signed share token instead
+    # (app/routes/share.py). POST /sessions/{id}/share, which mints one, is not
+    # under this prefix and stays behind the bearer token.
+    if path.startswith("/share/"):
+        return True
     return path in {
         "/healthz",
         "/readyz",

@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .agent_jobs import AgentJobQueue
 from .browser_manager import BrowserManager
@@ -15,6 +14,7 @@ from .cron_service import CronService
 from .maintenance import MaintenanceService
 from .mcp_transport import McpHttpTransport
 from .metrics import MetricsRecorder
+from .middleware.hosts import ControllerHostMiddleware
 from .orchestrator import BrowserOrchestrator
 from .provider_registry import ProviderRegistry
 from .proxy_personas import ProxyPersonaStore
@@ -117,8 +117,10 @@ def build_controller_services(settings: Settings, *, version: str) -> Controller
 
 
 def install_controller_host_middleware(application: FastAPI, allowed_hosts: list[str]) -> None:
+    # An empty list is not "allow everything" for an unauthenticated API: the
+    # loopback-only Host rule in app/middleware/http.py covers that case.
     if allowed_hosts:
-        application.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+        application.add_middleware(ControllerHostMiddleware, allowed_hosts=allowed_hosts)
 
 
 def create_controller_app(

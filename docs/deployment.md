@@ -42,6 +42,12 @@ Keep `ALLOWED_HOSTS` for browser navigation targets, and set `CONTROLLER_ALLOWED
 to the hostnames operators use to reach the controller, such as `browser.example.com`
 or `localhost,127.0.0.1,::1` for a local-only install.
 
+When it is unset and the controller runs without a bearer credential (a loopback
+deployment), only loopback Host names — `localhost`, `127.0.0.1`, `[::1]` — are
+answered. An unauthenticated API that accepts any Host header can be driven by a web
+page through DNS rebinding, so this default holds until you either list the names
+clients use or configure `API_BEARER_TOKEN`. `/healthz` is exempt.
+
 ## Auth profiles
 
 Auto Browser now supports reusable named auth profiles under:
@@ -230,6 +236,17 @@ Use **one** of:
 - the included reverse-SSH path for bastion-style access when direct reachability is not available
 
 Do **not** expose raw controller or noVNC ports directly to the public internet.
+
+`VNC_PASSWORD` adds VNC authentication to noVNC (6080) and raw VNC (5900), on the
+shared browser-node and on isolated session containers; noVNC prompts for it. Set it
+whenever those ports are reachable beyond loopback — but treat it as a second layer,
+not the gateway: the VNC protocol uses only the first 8 characters and a
+DES-based challenge.
+
+Inside the browser container, Chromium, Xvfb, x11vnc and noVNC run as the
+unprivileged `browser` user (uid 10001). The entrypoint starts as root only to take
+ownership of the mounted `/data/profile` and `/data/downloads`, so on the host
+`./data/browser-profile` and `./data/downloads` end up owned by uid 10001.
 
 ## Backups
 

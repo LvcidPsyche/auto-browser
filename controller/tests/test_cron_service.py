@@ -29,9 +29,15 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(created["name"], "daily check")
         self.assertTrue(created["webhook_enabled"])
         self.assertIn("webhook_key_preview", created)
-        self.assertNotIn("webhook_key", created)
-        self.assertEqual((await service.get_job(created["id"]))["id"], created["id"])
-        self.assertEqual(len(await service.list_jobs()), 1)
+        # Disclosed once, on creation — otherwise no caller could ever trigger it.
+        self.assertEqual(len(created["webhook_key"]), 64)
+        self.assertTrue(created["webhook_key"].startswith(created["webhook_key_preview"].removesuffix("...")))
+        fetched = await service.get_job(created["id"])
+        self.assertEqual(fetched["id"], created["id"])
+        self.assertNotIn("webhook_key", fetched)
+        listed = await service.list_jobs()
+        self.assertEqual(len(listed), 1)
+        self.assertNotIn("webhook_key", listed[0])
 
         with self.assertRaises(ValueError):
             await service.create_job(name="overflow", goal="nope")
@@ -61,12 +67,17 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         raw = service._load()[created["id"]]
 
+        self.assertEqual(created["webhook_key"], raw["webhook_key"])
+
         with self.assertRaises(PermissionError):
             await service.trigger_via_webhook(created["id"], "wrong")
+        # Non-ASCII made hmac.compare_digest raise TypeError — a 500, not a refusal.
+        with self.assertRaises(PermissionError):
+            await service.trigger_via_webhook(created["id"], "clé-invalide")
         with self.assertRaises(KeyError):
             await service.trigger_job("missing")
 
-        result = await service.trigger_via_webhook(created["id"], raw["webhook_key"])
+        result = await service.trigger_via_webhook(created["id"], created["webhook_key"])
 
         self.assertTrue(result["triggered"])
         manager.create_session.assert_awaited_once_with(

@@ -10,6 +10,7 @@ raw_cdp_command() is a constrained passthrough for trusted CDP commands.
 from __future__ import annotations
 
 import fnmatch
+import json
 import logging
 from typing import Any
 
@@ -128,13 +129,20 @@ class CDPPassthrough:
                 prop["name"]: prop["value"] for prop in computed.get("computedStyle", []) if prop["name"] in _STYLE_KEYS
             }
 
+            # The selector goes into JavaScript source, so it is encoded as a JS
+            # string literal. It was embedded with Python's repr(), which is not
+            # one: it writes non-printable astral characters as \U0001xxxx, an
+            # escape JavaScript does not have, so the page queried a different
+            # selector than the one DOM.querySelector just matched.
+            selector_literal = json.dumps(selector)
+
             # Event listeners via Runtime.evaluate (type names only)
             listeners_result = await self._cdp.send(
                 "Runtime.evaluate",
                 {
                     "expression": f"""
                     (function() {{
-                        const el = document.querySelector({selector!r});
+                        const el = document.querySelector({selector_literal});
                         if (!el) return [];
                         const events = [];
                         // We can only detect inline handlers without getEventListeners (Chrome DevTools only)
@@ -156,7 +164,7 @@ class CDPPassthrough:
                 {
                     "expression": f"""
                     (function() {{
-                        const el = document.querySelector({selector!r});
+                        const el = document.querySelector({selector_literal});
                         if (!el) return {{}};
                         return {{
                             src: el.src || null,

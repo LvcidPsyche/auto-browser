@@ -20,8 +20,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.browser.services import BrowserAuthProfileService
+from app.browser.services import auth_profiles as auth_profiles_module
 
 Service = BrowserAuthProfileService
 
@@ -325,6 +327,46 @@ class ImportProfileSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((profile_dir / "state.json").exists())
         # Overwrite must replace the directory, not merge into it.
         self.assertFalse((profile_dir / "stale.json").exists())
+
+    async def test_failed_overwrite_leaves_the_existing_profile_intact(self) -> None:
+        # The old profile used to be deleted before extraction started, so an
+        # archive that failed part-way (here: a member over the size cap)
+        # destroyed a working login and left a half-written one in its place.
+        first = self._archive("first.tar.gz")
+        _tar_with([_dir_member("my-profile/"), _file_member("my-profile/state.json", b'{"v": 1}')], first)
+        await self.service.import_profile("first.tar.gz")
+
+        bad = self._archive("bad.tar.gz")
+        _tar_with(
+            [
+                _dir_member("my-profile/"),
+                _file_member("my-profile/a-partial.json", b'{"v": 2}'),
+                _file_member("my-profile/z-oversized.json", b"x" * 64),
+            ],
+            bad,
+        )
+        with patch.object(auth_profiles_module, "MAX_ARCHIVE_MEMBER_BYTES", 32):
+            with self.assertRaises(ValueError):
+                await self.service.import_profile("bad.tar.gz", overwrite=True)
+
+        profile_dir = self.profile_root / "my-profile"
+        self.assertEqual(sorted(p.name for p in profile_dir.iterdir()), ["state.json"])
+        self.assertEqual(json.loads((profile_dir / "state.json").read_text(encoding="utf-8")), {"v": 1})
+        # No staging debris is left for list() to trip over.
+        self.assertEqual(sorted(p.name for p in self.auth_root.iterdir() if p.is_dir()), ["profiles"])
+
+    async def test_failed_import_of_a_new_profile_leaves_nothing_behind(self) -> None:
+        bad = self._archive("bad.tar.gz")
+        _tar_with(
+            [_dir_member("fresh/"), _file_member("fresh/a.json"), _file_member("fresh/b.json", b"x" * 64)],
+            bad,
+        )
+        with patch.object(auth_profiles_module, "MAX_ARCHIVE_MEMBER_BYTES", 32):
+            with self.assertRaises(ValueError):
+                await self.service.import_profile("bad.tar.gz")
+
+        self.assertFalse((self.profile_root / "fresh").exists())
+        self.assertEqual(list(self.profile_root.iterdir()), [])
 
 
 class SafeAuthPathTests(unittest.TestCase):

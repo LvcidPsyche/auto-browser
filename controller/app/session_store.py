@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .models import SessionRecord
+from .utils import record_path
 
 logger = logging.getLogger(__name__)
 
@@ -71,13 +72,13 @@ class FileSessionStore(_MarkInterruptedMixin):
         return records
 
     def _get_sync(self, session_id: str) -> SessionRecord:
-        path = self.root / f"{session_id}.json"
+        path = record_path(self.root, session_id, ".json")
         if not path.exists():
             raise KeyError(session_id)
         return SessionRecord.model_validate_json(path.read_text(encoding="utf-8"))
 
     def _upsert_sync(self, record: SessionRecord) -> None:
-        path = self.root / f"{record.id}.json"
+        path = record_path(self.root, record.id, ".json")
         tmp_path = path.with_suffix(".json.tmp")
         tmp_path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
         tmp_path.replace(path)

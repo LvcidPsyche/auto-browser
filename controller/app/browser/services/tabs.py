@@ -18,6 +18,12 @@ class BrowserTabService:
             return await self.summaries(session)
 
     async def open(self, session_id: str, url: str | None, activate: bool) -> dict[str, Any]:
+        # Same host allowlist as navigate() and create_session(). This path
+        # called page.goto() directly, so opening a tab reached any host —
+        # internal services, cloud metadata — that ALLOWED_HOSTS refuses to
+        # navigate to. Checked before a page exists, so a refusal leaves no tab.
+        if url:
+            self.manager._assert_url_allowed(url)
         session = await self.manager.get_session(session_id)
         async with session.lock:
             new_page = await session.context.new_page()

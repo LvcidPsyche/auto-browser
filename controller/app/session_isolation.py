@@ -155,20 +155,26 @@ class DockerBrowserNodeProvisioner:
         if self.settings.isolated_browser_cpus > 0:
             resource_kwargs["nano_cpus"] = int(self.settings.isolated_browser_cpus * 1_000_000_000)
 
+        environment = {
+            "BROWSER_WIDTH": str(self.settings.default_viewport_width),
+            "BROWSER_HEIGHT": str(self.settings.default_viewport_height),
+            "BROWSER_WS_ENDPOINT_FILE": "/data/profile/browser-ws-endpoint.txt",
+            "PLAYWRIGHT_SERVER_HOST": "0.0.0.0",
+            "PLAYWRIGHT_SERVER_PORT": "9223",
+            "PLAYWRIGHT_SERVER_ADVERTISED_HOST": container_name,
+        }
+        # Each isolated container publishes its own noVNC and raw VNC ports, so a
+        # password set for the shared browser-node has to reach these too.
+        if self.settings.vnc_password:
+            environment["VNC_PASSWORD"] = self.settings.vnc_password
+
         container = client.containers.run(
             self.settings.isolated_browser_image,
             name=container_name,
             detach=True,
             network=network_name,
             shm_size="2g",
-            environment={
-                "BROWSER_WIDTH": str(self.settings.default_viewport_width),
-                "BROWSER_HEIGHT": str(self.settings.default_viewport_height),
-                "BROWSER_WS_ENDPOINT_FILE": "/data/profile/browser-ws-endpoint.txt",
-                "PLAYWRIGHT_SERVER_HOST": "0.0.0.0",
-                "PLAYWRIGHT_SERVER_PORT": "9223",
-                "PLAYWRIGHT_SERVER_ADVERTISED_HOST": container_name,
-            },
+            environment=environment,
             volumes={
                 str(host_profile_dir): {"bind": "/data/profile", "mode": "rw"},
                 str(host_downloads_dir): {"bind": "/data/downloads", "mode": "rw"},

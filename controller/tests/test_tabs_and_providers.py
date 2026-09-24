@@ -123,6 +123,39 @@ class BrowserTabManagementTests(unittest.IsolatedAsyncioTestCase):
         # Active page unchanged
         self.assertIs(self.session.page, original_page)
 
+    async def test_open_tab_refuses_a_host_outside_the_navigation_allowlist(self) -> None:
+        # open_tab called page.goto() directly, so it reached hosts that
+        # navigate() and create_session() refuse — cloud metadata included.
+        pages_before = list(self.session.context.pages)
+
+        with self.assertRaises(PermissionError):
+            await self.manager.open_tab(self.session.id, url="http://169.254.169.254/latest/meta-data/", activate=True)
+
+        # Refused before a page was created, and the active page is untouched.
+        self.assertEqual(self.session.context.pages, pages_before)
+        self.assertEqual(self.session.page.url, "https://example.com")
+
+    async def test_open_tab_navigates_to_an_allowlisted_host(self) -> None:
+        opened: list[str] = []
+
+        async def fake_new_page() -> FakeTabPage:
+            page = FakeTabPage(self.session.context, "about:blank", "New Tab")
+
+            async def goto(url: str, **_kwargs) -> None:
+                opened.append(url)
+                page.url = url
+
+            page.goto = goto  # type: ignore[attr-defined]
+            self.session.context.pages.append(page)
+            return page
+
+        self.session.context.new_page = fake_new_page  # type: ignore[method-assign]
+
+        result = await self.manager.open_tab(self.session.id, url="https://example.com/next", activate=True)
+
+        self.assertEqual(opened, ["https://example.com/next"])
+        self.assertEqual(result["tabs"][result["index"]]["url"], "https://example.com/next")
+
     async def test_close_active_tab_recovers_to_a_usable_tab(self) -> None:
         # Regression for closed-tab recovery: closing the ACTIVE tab must leave the
         # session pointing at a live, usable tab — never at the page we just closed.

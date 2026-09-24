@@ -104,6 +104,9 @@ class Settings(BaseSettings):
         alias="ISOLATED_BROWSER_KEEP_CONTAINERS",
     )
     isolated_browser_bind_host: str = Field("127.0.0.1", alias="ISOLATED_BROWSER_BIND_HOST")
+    # Handed to each isolated browser container, whose noVNC and raw VNC ports
+    # are published on ISOLATED_BROWSER_BIND_HOST. See browser-node/entrypoint.sh.
+    vnc_password: str | None = Field(None, alias="VNC_PASSWORD", repr=False)
     isolated_browser_mem_limit: str = Field("4g", alias="ISOLATED_BROWSER_MEM_LIMIT")
     isolated_browser_pids_limit: int = Field(2048, alias="ISOLATED_BROWSER_PIDS_LIMIT")
     isolated_browser_cpus: float = Field(0.0, alias="ISOLATED_BROWSER_CPUS")
@@ -221,12 +224,12 @@ class Settings(BaseSettings):
     openai_cli_path: str = Field("codex", alias="OPENAI_CLI_PATH")
     openai_cli_model: str | None = Field(None, alias="OPENAI_CLI_MODEL")
     openai_host_bridge_socket: str = Field(
-    # How the Codex CLI is allowed to execute on the host. Both Codex paths used
-    # to pass --dangerously-bypass-approvals-and-sandbox unconditionally; they
-    # now run sandboxed unless a deployment opts back in. See app/codex_sandbox.py.
         "/data/host-bridge/codex.sock",
         alias="OPENAI_HOST_BRIDGE_SOCKET",
     )
+    # How the Codex CLI is allowed to execute on the host. Both Codex paths used
+    # to pass --dangerously-bypass-approvals-and-sandbox unconditionally; they
+    # now run sandboxed unless a deployment opts back in. See app/codex_sandbox.py.
     codex_sandbox_mode: str = Field("read-only", alias="CODEX_SANDBOX_MODE")
     codex_allow_host_exec: bool = Field(False, alias="CODEX_BRIDGE_ALLOW_HOST_EXEC")
 

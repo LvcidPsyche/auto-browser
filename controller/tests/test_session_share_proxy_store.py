@@ -227,5 +227,124 @@ class ShareHttpTests(unittest.TestCase):
         self.assertEqual(response.json()["detail"], "Invalid token")
 
 
+class ShareLinkRecipientTests(unittest.TestCase):
+    """A share link must work for the person it is handed to.
+
+    That person does not hold the API bearer token, so with auth required every
+    /share/{token} route answered 401 and the screenshot the page renders came
+    from /artifacts, which needs the token too. The share token is now the
+    credential for exactly those routes — and, being unauthenticated, they hand
+    over only what the viewer renders.
+    """
+
+    TOKEN = "t" * 40
+
+    def setUp(self) -> None:
+        self.stack = ExitStack()
+        self.stack.enter_context(
+            patch.object(main_module, "validate_runtime_policy", return_value=SimpleNamespace(errors=[], warnings=[]))
+        )
+        for service, method_name in (
+            (main_module.manager, "startup"),
+            (main_module.manager, "shutdown"),
+            (main_module.job_queue, "startup"),
+            (main_module.job_queue, "shutdown"),
+            (main_module.cron_service, "startup"),
+            (main_module.cron_service, "shutdown"),
+            (main_module.maintenance, "startup"),
+            (main_module.maintenance, "shutdown"),
+        ):
+            self.stack.enter_context(patch.object(service, method_name, new=AsyncMock()))
+        # Auth required: the recipient holds a share token, not the API token.
+        self.stack.enter_context(patch.object(main_module.settings, "api_bearer_token", self.TOKEN))
+        self.client = self.stack.enter_context(TestClient(main_module.app))
+
+        self.session_id = "share-" + os.urandom(4).hex()
+        self.session_dir = Path(main_module.settings.artifact_root) / self.session_id
+        self.session_dir.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, self.session_dir, True)
+        self.shot = self.session_dir / "20260101T000000000000Z-observe.png"
+        self.shot.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+        self.token = main_module.share_manager.create_token(self.session_id)["token"]
+
+    def tearDown(self) -> None:
+        self.stack.close()
+
+    def _observe(self):
+        observe = AsyncMock(
+            return_value={
+                "session": {"id": self.session_id},
+                "url": "https://example.com/dash",
+                "title": "Dashboard",
+                "screenshot_path": str(self.shot),
+                "screenshot_url": f"/artifacts/{self.session_id}/{self.shot.name}",
+                "interactables": [{"id": "secret-field"}],
+                "text_excerpt": "account balance 1,234",
+                "console_messages": ["token=abc"],
+            }
+        )
+        return patch.object(main_module.manager, "observe", observe)
+
+    def test_a_recipient_without_the_api_token_can_view_and_poll(self) -> None:
+        with (
+            self._observe(),
+            patch.object(main_module.manager, "get_session", AsyncMock(return_value=SimpleNamespace(id="x"))),
+        ):
+            page = self.client.get(f"/share/{self.token}")
+            observed = self.client.get(f"/share/{self.token}/observe")
+
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(observed.status_code, 200)
+        payload = observed.json()
+        self.assertEqual(payload["title"], "Dashboard")
+        self.assertEqual(payload["session"], {"id": self.session_id})
+        # Only what the viewer renders — no DOM text, interactables or console.
+        self.assertEqual(set(payload), {"session", "url", "title", "screenshot_url"})
+        self.assertEqual(payload["screenshot_url"], f"/share/{self.token}/screenshots/{self.shot.name}")
+
+        image = self.client.get(payload["screenshot_url"] + "?ts=1")
+        self.assertEqual(image.status_code, 200)
+        self.assertEqual(image.headers["content-type"], "image/png")
+        self.assertEqual(image.content, self.shot.read_bytes())
+
+    def test_the_api_itself_still_needs_the_bearer_token(self) -> None:
+        self.assertEqual(self.client.post(f"/sessions/{self.session_id}/share").status_code, 401)
+        self.assertEqual(self.client.get(f"/artifacts/{self.session_id}/{self.shot.name}").status_code, 401)
+        self.assertEqual(self.client.get("/sessions").status_code, 401)
+
+    def test_screenshots_are_limited_to_the_shared_session(self) -> None:
+        other_dir = Path(main_module.settings.artifact_root) / (self.session_id + "-other")
+        other_dir.mkdir()
+        self.addCleanup(shutil.rmtree, other_dir, True)
+        (other_dir / "secret.png").write_bytes(b"png")
+        (self.session_dir / "actions.jsonl").write_text("{}", encoding="utf-8")
+
+        for name, expected in (
+            ("secret.png", 404),  # exists, but in another session's directory
+            ("actions.jsonl", 404),  # in this session, but not a screenshot
+            ("..%2Fsecret.png", 404),
+            (".hidden.png", 400),
+        ):
+            with self.subTest(name=name):
+                response = self.client.get(f"/share/{self.token}/screenshots/{name}")
+                self.assertEqual(response.status_code, expected)
+
+    def test_bad_tokens_are_refused_not_crashed_on(self) -> None:
+        payload_b64 = self.token.split(".")[0]
+        for token in ("garbage", f"{payload_b64}.é" + "0" * 31, self.token[:-1] + "0"):
+            with self.subTest(token=token):
+                self.assertEqual(self.client.get(f"/share/{token}/observe").status_code, 403)
+                self.assertEqual(self.client.get(f"/share/{token}/screenshots/{self.shot.name}").status_code, 403)
+
+    def test_required_operator_header_does_not_apply_to_recipients(self) -> None:
+        with (
+            patch.object(main_module.settings, "require_operator_id", True),
+            self._observe(),
+        ):
+            response = self.client.get(f"/share/{self.token}/observe")
+
+        self.assertEqual(response.status_code, 200)
+
+
 if __name__ == "__main__":
     unittest.main()

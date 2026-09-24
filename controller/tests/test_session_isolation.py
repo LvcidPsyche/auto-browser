@@ -255,6 +255,31 @@ class DockerBrowserNodeProvisionerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(kwargs["pids_limit"], 512)
             self.assertEqual(kwargs["nano_cpus"], 1_500_000_000)
 
+    async def test_vnc_password_reaches_isolated_containers_only_when_set(self) -> None:
+        for password in ("s3cret", None):
+            with self.subTest(password=password), tempfile.TemporaryDirectory() as tempdir:
+                data_root = Path(tempdir) / "data"
+                data_root.mkdir(parents=True, exist_ok=True)
+                overrides = {"VNC_PASSWORD": password} if password else {}
+                settings = Settings(_env_file=None, ARTIFACT_ROOT=str(data_root / "artifacts"), **overrides)
+                controller_container = FakeDockerContainer(
+                    container_id="controller-id",
+                    name="controller",
+                    attrs={
+                        "Mounts": [{"Destination": "/data", "Source": str(data_root)}],
+                        "NetworkSettings": {"Networks": {"auto-browser_default": {}}},
+                    },
+                )
+                client = FakeDockerClient(controller_container)
+                provisioner = DockerBrowserNodeProvisioner(settings, client=client)
+                provisioner._controller_container_id = controller_container.id
+
+                runtime = await provisioner.provision("session-vnc")
+
+                environment = client.containers.browser_containers[runtime.container_name].run_kwargs["environment"]
+                self.assertEqual(environment.get("VNC_PASSWORD"), password)
+                self.assertNotIn("s3cret", repr(settings))
+
     async def test_startup_reaps_orphaned_containers(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             data_root = Path(tempdir) / "data"

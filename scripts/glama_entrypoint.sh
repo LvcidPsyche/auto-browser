@@ -12,9 +12,17 @@ if [ -f /opt/venv/bin/activate ]; then
 fi
 
 # The app module lives under controller/ — move there so Python can find it
-cd /app/controller
+cd /app/controller || exit 1
 
-# Launch uvicorn in the background; skip browser-node connection for inspection
+# Launch uvicorn in the background; skip browser-node connection for inspection.
+#
+# API_BIND_SCOPE=loopback declares what --host 127.0.0.1 does: nothing outside
+# this container can reach the API, and the bridge below is its only client.
+# The controller cannot see uvicorn's --host flag (only API_BIND_HOST,
+# UVICORN_HOST or HOST in the environment), so without this it assumed the
+# fail-safe `exposed` scope and refused to start with no API_BEARER_TOKEN —
+# which left the stdio bridge talking to nothing since 1.7.0.
+API_BIND_SCOPE=loopback \
 SESSION_ISOLATION_MODE=glama_inspect \
     uvicorn app.main:app --host 127.0.0.1 --port 8000 &
 
