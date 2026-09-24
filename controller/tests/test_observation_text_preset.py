@@ -18,19 +18,16 @@ from app.browser.services.observation import BrowserObservationService
 from app.browser_scripts import ACTIVE_ELEMENT_SCRIPT, INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
 
 
-class FakeAccessibility:
-    async def snapshot(self, interesting_only: bool = True) -> dict:
-        return {"role": "WebArea", "name": "Example", "children": []}
-
-
 class FakePage:
     def __init__(self, *, text_excerpt: str = "Hello world") -> None:
         self.url = "https://example.com"
-        self.accessibility = FakeAccessibility()
         self._text_excerpt = text_excerpt
 
     async def title(self) -> str:
         return "Example"
+
+    async def aria_snapshot(self, **_: object) -> str:
+        return '- heading "Example" [level=1] [ref=e1]\n'
 
     async def evaluate(self, script: str, *args: object) -> object:
         if script is INTERACTABLES_SCRIPT:
