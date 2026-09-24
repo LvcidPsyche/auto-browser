@@ -346,7 +346,10 @@ class BaseProviderAdapter(ABC):
         resolved_cli = which(cli_path) if cli_path else None
         if not resolved_cli:
             expected_path = cli_path or cli_label
-            return False, f"{self.provider} CLI binary was not found: {expected_path}"
+            return False, (
+                f"{self.provider} CLI binary was not found: {expected_path}. The controller image includes "
+                "the provider CLIs only when built with INSTALL_AGENT_CLIS=true."
+            )
 
         cli_home = (self.settings.cli_home or "").strip()
         if not cli_home:

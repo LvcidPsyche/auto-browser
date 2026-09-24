@@ -99,7 +99,10 @@ def _validate_provider_runtime(settings: Settings, report: RuntimePolicyReport) 
         cli_path = getattr(settings, cli_path_attr.lower())
         resolved_cli = which(cli_path) if cli_path else None
         if not resolved_cli:
-            report.errors.append(f"{auth_mode_attr}=cli requires a working {cli_label} CLI in {cli_path_attr}")
+            report.errors.append(
+                f"{auth_mode_attr}=cli requires a working {cli_label} CLI in {cli_path_attr}; the controller "
+                "image includes the provider CLIs only when built with INSTALL_AGENT_CLIS=true"
+            )
             continue
 
         if cli_home_path is None:
