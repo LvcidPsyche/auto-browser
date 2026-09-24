@@ -128,6 +128,7 @@ def install_controller_http_middleware(
             "/dashboard",
             "/ui",
             "/mesh/receive",
+            "/share/",
         )
         asserted_id = request.headers.get(settings.operator_id_header)
         operator_name = request.headers.get(settings.operator_name_header)
@@ -281,6 +282,11 @@ def _request_path(request: Request) -> str:
 
 
 def _is_bearer_token_exempt_path(path: str) -> bool:
+    # /share/{token}/... authenticates with the signed share token instead
+    # (app/routes/share.py). POST /sessions/{id}/share, which mints one, is not
+    # under this prefix and stays behind the bearer token.
+    if path.startswith("/share/"):
+        return True
     return path in {
         "/healthz",
         "/readyz",

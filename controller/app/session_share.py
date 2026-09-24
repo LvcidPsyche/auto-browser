@@ -111,7 +111,9 @@ class SessionShareManager:
 
             # Verify signature
             expected_sig = self._sign(payload_b64)
-            if not hmac.compare_digest(sig, expected_sig):
+            # compare_digest raises TypeError for a non-ASCII str, which escaped
+            # token_info() as a 500 on an unauthenticated route.
+            if not sig.isascii() or not hmac.compare_digest(sig, expected_sig):
                 raise ValueError("invalid token signature")
 
             # Decode payload
