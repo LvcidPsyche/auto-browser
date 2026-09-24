@@ -95,16 +95,19 @@ def register(registry, gateway):
                 "Capture the current browser observation: interactables, tabs, console, and a "
                 "perception summary. Presets: 'text' — no screenshot, no OCR, just the "
                 "accessibility tree and extracted text; the cheapest choice for reading a page's "
-                "content. 'fast' — screenshot only, no text/accessibility extraction; for visual "
-                "models. 'normal' (default) — screenshot + OCR + accessibility tree. 'rich' — "
-                "normal with extended text and DOM outline."
+                "content. 'fast' — screenshot only, returned as an image, no text/accessibility "
+                "extraction; for vision models. 'normal' (default) — screenshot + OCR + "
+                "accessibility tree. 'rich' — normal with extended text and DOM outline."
             ),
             input_model=ObserveInput,
             handler=gateway._observe,
         ),
         ToolSpec(
             name="browser.screenshot",
-            description="Capture a lightweight screenshot for one session without the full observe payload.",
+            description=(
+                "Capture the current viewport and return it as an image (plus its artifact URL), "
+                "without the full observe payload."
+            ),
             input_model=ScreenshotInput,
             handler=gateway._screenshot,
         ),

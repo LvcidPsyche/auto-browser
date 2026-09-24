@@ -191,7 +191,7 @@ def _build_mesh_tool_gateway(app):
         elif structured is not None:
             result = {"result": structured}
         else:
-            text = "".join(item.text or "" for item in response.content)
+            text = "".join(getattr(item, "text", None) or "" for item in response.content)
             result = {"text": text} if text else {}
 
         if response.isError and result.get("status") != "approval_required":

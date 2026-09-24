@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -579,10 +579,19 @@ class McpToolCallContent(BaseModel):
     text: str
 
 
+class McpImageContent(BaseModel):
+    type: Literal["image"] = "image"
+    data: str  # base64
+    mimeType: str
+
+
+McpContentBlock = Annotated[McpToolCallContent | McpImageContent, Field(discriminator="type")]
+
+
 class McpToolCallResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    content: list[McpToolCallContent]
+    content: list[McpContentBlock]
     structuredContent: Any | None = None
     isError: bool = False
     meta: dict[str, Any] | None = Field(default=None, alias="_meta")

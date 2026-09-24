@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -13,12 +15,13 @@ from ..action_errors import BrowserActionError, SessionNotFoundError
 from ..approvals import ApprovalRequiredError
 from ..models import (
     BrowserActionDecision,
+    McpImageContent,
     McpToolCallContent,
     McpToolCallRequest,
     McpToolCallResponse,
 )
 from ..readiness import run_readiness_checks
-from ..result_shaping import shape_mcp_result
+from ..result_shaping import inline_screenshot_path, shape_mcp_result
 from ..tool_inputs import (
     AgentJobIdInput,
     ApprovalDecisionInput,
@@ -119,6 +122,18 @@ def _redact_for_preview(value: Any) -> Any:
     if isinstance(value, list):
         return [_redact_for_preview(item) for item in value]
     return value
+
+
+# A viewport PNG is typically well under 1 MB. Anything past this is not worth
+# putting in a model's context; the text result still carries its URL.
+_INLINE_IMAGE_MAX_BYTES = 4 * 1024 * 1024
+_INLINE_IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+
+
+def _read_inline_image(path: Path) -> bytes | None:
+    if path.stat().st_size > _INLINE_IMAGE_MAX_BYTES:
+        return None
+    return path.read_bytes()
 
 
 class McpToolGateway:
@@ -229,11 +244,15 @@ class McpToolGateway:
             if approval is not None:
                 await self.manager.approvals.mark_executed(approval.id)
             result = shape_mcp_result(spec.name, result, detail=getattr(arguments, "detail", "compact"))
-            return McpToolCallResponse(
-                content=[McpToolCallContent(text=json.dumps(result, ensure_ascii=False))],
-                structuredContent=result,
-                isError=False,
-            )
+            # The JSON stays the first block: clients (and the LangChain
+            # adapter) read content[0].text as the result.
+            content: list[McpToolCallContent | McpImageContent] = [
+                McpToolCallContent(text=json.dumps(result, ensure_ascii=False))
+            ]
+            image = await self._inline_image(spec.name, result)
+            if image is not None:
+                content.append(image)
+            return McpToolCallResponse(content=content, structuredContent=result, isError=False)
         except ApprovalRequiredError as exc:
             detail = exc.payload
             return McpToolCallResponse(
@@ -272,6 +291,32 @@ class McpToolGateway:
         except Exception:
             logger.exception("tool %s failed", payload.name)
             return self._error_response("Tool execution failed")
+
+    async def _inline_image(self, tool_name: str, result: Any) -> McpImageContent | None:
+        """The result's screenshot as MCP image content, when the tool's job is to show the page."""
+        path_value = inline_screenshot_path(tool_name, result)
+        if path_value is None:
+            return None
+        artifact_root = getattr(getattr(self.manager, "settings", None), "artifact_root", None)
+        if not artifact_root:
+            return None
+        path = Path(path_value).resolve()
+        # The path comes from the manager, but it is read back and sent to the
+        # client, so it has to be a screenshot artifact and nothing else.
+        if not path.is_relative_to(Path(artifact_root).resolve()):
+            logger.warning("not inlining %s: outside the artifact root", path)
+            return None
+        mime_type = _INLINE_IMAGE_TYPES.get(path.suffix.lower())
+        if mime_type is None:
+            return None
+        try:
+            data = await asyncio.to_thread(_read_inline_image, path)
+        except OSError as exc:
+            logger.debug("could not inline screenshot %s: %s", path, exc)
+            return None
+        if data is None:
+            return None
+        return McpImageContent(data=base64.b64encode(data).decode("ascii"), mimeType=mime_type)
 
     @staticmethod
     def _error_response(message: str) -> McpToolCallResponse:

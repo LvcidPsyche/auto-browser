@@ -110,3 +110,21 @@ def shape_mcp_result(tool_name: str, result: Any, *, detail: ResultDetail = "com
     if tool_name == "browser.list_sessions" and isinstance(result, list):
         return [compact_session(item) for item in result]
     return compact_nested_session(result)
+
+
+def inline_screenshot_path(tool_name: str, result: Any) -> str | None:
+    """The screenshot a result should also carry as image content, if any.
+
+    ``browser.screenshot`` exists to show the page, and observe's ``fast``
+    preset is the screenshot-only view for vision models. Both returned only a
+    path on the controller's disk and a URL on the controller, neither of which
+    a model behind an MCP client can open. Other results keep their screenshot
+    as a URL: an image costs more context than the text it accompanies, and the
+    other presets are for reading.
+    """
+    if not isinstance(result, dict):
+        return None
+    if tool_name == "browser.screenshot" or (tool_name == "browser.observe" and result.get("preset") == "fast"):
+        path = result.get("screenshot_path")
+        return path if isinstance(path, str) and path else None
+    return None
