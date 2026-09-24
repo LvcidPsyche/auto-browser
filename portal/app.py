@@ -13,6 +13,7 @@ import hmac
 import html
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -407,11 +408,34 @@ def _totp(data: Mapping[str, Any]) -> str:
     return value
 
 
+logger = logging.getLogger(__name__)
+
+
 def _upstream_error(response: httpx.Response, fallback: str) -> HTTPException:
     # Upstream bodies can contain credentials or operational details, so the
-    # portal never reflects them.  Preserve only a useful client status class.
+    # portal never reflects them to the CLIENT -- but that used to mean an
+    # Open failure left no trace anywhere except the broker/controller's own
+    # logs, which nobody watches for a single tenant's click. Log the
+    # upstream status and its short `detail` (a broker HTTPException message
+    # such as "Close the current session first", never raw body content) on
+    # the portal's own side so the real reason is findable from one place.
+    logger.warning(
+        "upstream error -> %s: broker/controller responded %s %s",
+        fallback, response.status_code, _safe_upstream_detail(response),
+    )
+    # Preserve only a useful client status class.
     status = response.status_code if 400 <= response.status_code < 500 else 502
     return HTTPException(status, fallback)
+
+
+def _safe_upstream_detail(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return "<non-JSON response body>"
+    if isinstance(body, dict) and isinstance(body.get("detail"), str):
+        return repr(body["detail"][:300])
+    return "<no 'detail' field>"
 
 
 def _identity(identity: Mapping[str, Any], account: str) -> tuple[str, str, str]:

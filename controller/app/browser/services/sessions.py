@@ -448,6 +448,84 @@ class BrowserSessionService:
                     logger.warning(
                         "auto-persist: periodic save failed for session %s: %s", session.id, exc
                     )
+                    # The tracked page can close out from under us — the site closed its
+                    # own tab/window, the page crashed, or the owner's tab died — while
+                    # the browser context (and the rest of the shared browser process)
+                    # stays perfectly alive. Before this check, that left `session`
+                    # sitting in `self.manager.sessions` forever: nothing ever removed
+                    # it, so it kept occupying this tenant's one-session slot
+                    # (max_sessions=1 by default) and every subsequent Open was refused
+                    # ("Close the current session first", or the session limit) with no
+                    # way out except restarting the controller. Detected here, since
+                    # this loop already probes the page every interval, retire the
+                    # session the same way an explicit close does.
+                    if session.page.is_closed():
+                        await self._retire_dead_session(
+                            session, reason="its tracked browser page has closed"
+                        )
+                        return
+
+    async def _retire_dead_session(self, session: "BrowserSession", *, reason: str) -> None:
+        """End a session whose underlying page died without an explicit close.
+
+        Mirrors `close()`'s teardown, but every step is best-effort: the
+        browser, context, or runtime behind a dead session may already be
+        half gone, and a raised exception here must not leave the session
+        wedged in `self.manager.sessions` — that is exactly the stuck state
+        this method exists to clear. Must be called with `session.lock` held.
+        """
+        if self.manager.sessions.get(session.id) is not session:
+            return  # already retired (e.g. an explicit close raced us) -- nothing to do
+        logger.warning("session %s: %s -- retiring the stale session record", session.id, reason)
+        self.manager.sessions.pop(session.id, None)
+        if session.auto_persist_task is not None:
+            session.auto_persist_task = None
+        if session.tunnel is not None:
+            try:
+                await self.manager.tunnel_broker.release(session.tunnel)
+            except Exception as exc:
+                logger.warning(
+                    "failed to release session tunnel while retiring session %s: %s", session.id, exc
+                )
+        if session.network_inspector is not None:
+            session.network_inspector.detach()
+            session.network_inspector = None
+        try:
+            await session.context.close()
+        except Exception as exc:
+            logger.debug("context close failed while retiring dead session %s: %s", session.id, exc)
+        if session.browser is not None and session.browser is not self.manager.browser:
+            try:
+                await session.browser.close()
+            except Exception as exc:
+                logger.debug("browser close failed while retiring dead session %s: %s", session.id, exc)
+        if session.runtime is not None:
+            try:
+                await self.manager.runtime_provisioner.release(session.runtime)
+            except Exception as exc:
+                logger.warning(
+                    "failed to release isolated runtime while retiring session %s: %s", session.id, exc
+                )
+        if self.manager._session_closed_hook is not None:
+            try:
+                await self.manager._session_closed_hook(session.id)
+            except Exception as exc:
+                logger.warning("session closed hook failed for %s: %s", session.id, exc)
+        try:
+            summary = await self.summary(session, status="interrupted", live=False)
+            await self.manager.session_store.upsert(SessionRecord.model_validate(summary))
+        except Exception as exc:
+            logger.warning("failed to persist retirement summary for session %s: %s", session.id, exc)
+        try:
+            await self.manager.audit.append(
+                event_type="session_closed",
+                status="ok",
+                action="auto_retire_dead_session",
+                session_id=session.id,
+                details={"reason": reason},
+            )
+        except Exception as exc:
+            logger.warning("audit append failed while retiring session %s: %s", session.id, exc)
 
     async def fork(
         self,
