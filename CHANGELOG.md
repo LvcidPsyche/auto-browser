@@ -9,10 +9,24 @@ files. The automated scanners (bandit, semgrep, pip-audit, npm audit,
 shellcheck) turned up nothing that survived triage; everything below came from
 reading the code and was confirmed with a reproduction before it was fixed.
 
+A second pass drove the controller the way an agent does, over MCP against a
+real Chromium. It measured what each call costs a model and fixed what got in
+the way. Sizes below are measured, and each fix was checked live.
+
 **If you run the controller directly without a token and reach it by a
 non-loopback name, read the Host-header entry before upgrading** — that
 configuration now answers `400` until you list the name in
 `CONTROLLER_ALLOWED_HOSTS`.
+
+**If you integrate over MCP or use CLI-authenticated providers, read
+*Changed*.** Four defaults changed:
+- MCP results are compact (`detail="full"` returns the old payload).
+- The default tool profile lists 20 tools (`MCP_TOOL_PROFILE=full` for the
+  rest).
+- `browser.get_html` returns at most 20,000 characters per call (page with
+  `offset`).
+- The controller image leaves out the provider CLIs unless built with
+  `INSTALL_AGENT_CLIS=true`.
 
 ### Security
 
@@ -95,7 +109,73 @@ configuration now answers `400` until you list the name in
   on isolated session containers, and noVNC prompts for it. It is a second
   layer, not a gateway: the VNC protocol uses only the first 8 characters.
 
+- **Observations named form fields by what was typed into them.** The
+  interactables, active-element and form-outline scripts named a field by
+  `aria-label`, placeholder, text and then its **value**. A login form's
+  fields read `you@example.com`, `pw` and `on` instead of Email, Password and
+  Remember me. A password typed into a field without a placeholder became that
+  field's name in every later observation, reaching model prompts, MCP clients
+  and logs, even though the type action had redacted it. Fields are now named
+  the way a person reads them: `aria-labelledby`, `aria-label`, their
+  `<label>`, button captions and image `alt`. A field's value is never its
+  name. Interactables also report ARIA roles (textbox, checkbox, combobox, …)
+  and checked state. The three scripts share one naming helper, checked under
+  Node and in a real Chromium.
+
+- **Approving a governed tool call approved any arguments.** The stand-in
+  decision an approval is matched against carried only the tool name, and
+  matching ignores the reason. An operator approving `browser.eval_js`
+  approved code they never saw, and the approval covered whatever expression
+  came next. The canonical arguments are now hashed into the decision, so an
+  approval covers exactly one call. The operator reads a preview of the
+  arguments, with cookie and storage values and other credential fields
+  redacted.
+
 ### Fixed
+
+- **An omitted `session_id` could target a closed session.** Resolution
+  counted persisted records of closed and interrupted sessions, so after one
+  close it picked the dead session or reported the call "ambiguous". With
+  `MAX_SESSIONS=1`, every create → close → create cycle broke the
+  convenience. Only live sessions are candidates now.
+
+- **An unusable session id was its own error message.** A lookup raised
+  `KeyError(session_id)`, which MCP surfaced as `{"error": "ec7fba8336ac"}`.
+  The error now says why: the session is closed, interrupted (its browser is
+  gone), or unknown. It carries a code (`session_closed`,
+  `session_interrupted`, `unknown_session`) over MCP and REST. It is still a
+  `KeyError`, so existing 404 handling is unchanged.
+
+- **`browser.eval_js` could only fail.** It required
+  `workflow_profile=governed`, a parameter its schema never advertised. Every
+  call now goes through approval: the first returns `approval_required` with an
+  `approval_id`, and the retry carries it.
+
+- **The accessibility outline has been empty since Playwright removed
+  `page.accessibility`.** Every observation reported `available: false`. The
+  documented accessibility tree was missing from every preset, the OCR skip for
+  pages with extracted text never applied, and the `accessibility_focus_changed`
+  verification signal could not fire. The unit tests faked the removed API, so
+  the bump passed.
+  The outline is rebuilt from `page.aria_snapshot()`. That snapshot includes
+  what each field holds (a filled password field reads
+  `textbox "Secret": hunter2`), and the old outline copied a `value` for every
+  node, so the new one keeps roles, accessible names and states only. A test
+  now asserts that the pinned Playwright has the API.
+
+- **Policy refusals reached MCP agents as "Tool execution failed".** Some
+  refusals raise `PermissionError`: a host outside `ALLOWED_HOSTS`, a retry
+  with an approval that is not granted yet, a path outside its root. The
+  gateway did not surface those, so a blocked navigation looked like a crash.
+  They now return their reason with code `not_permitted`. OS-level permission
+  errors, which can name server paths, stay opaque. The `approval_required`
+  payload also gains a top-level `approval_id`, which the tool descriptions
+  tell callers to send back.
+
+- **Page text lost its structure.** The observation's `text_excerpt` squashed
+  every run of whitespace, so a table's cells, a list's items and separate
+  paragraphs ran together into one line. Line breaks and innerText's tab
+  between table cells are kept now.
 
 - **Share links did not work for the people they were handed to.** With a
   bearer token configured, `/share/{token}` answered `401` to anyone without
@@ -133,11 +213,95 @@ configuration now answers `400` until you list the name in
 - The Python client's `stream_events` disabled the connect timeout along with
   the read timeout, so an unreachable controller hung it forever.
 
+### Added
+
+- **Screenshots as MCP image content.** `browser.screenshot` and observe's
+  `fast` preset return the screenshot as an image block after the JSON text.
+  Before, they returned only a path on the controller's disk and a URL on the
+  controller, and a model behind an MCP client can open neither. The file is
+  read back only from inside `ARTIFACT_ROOT`, up to 4 MiB.
+
+- **`browser.read_download`.** Reads a captured download as text, paged: the
+  latest one, or one by `download_id`. Files are read only from the session's
+  own downloads directory. Binaries (PDF, XLSX, images) are refused with their
+  artifact URL. UTF-8 and BOM-marked UTF-16 decode exactly, and other text is
+  flagged `lossy`. As with page text from observe and `get_html`, contents are
+  not PII-scrubbed.
+
+- **A pending-approvals queue on the dashboard.** It shows the action and
+  reason, with Approve and Reject buttons. Before, approvals appeared only
+  inside a finished job's replay. Reasons are rendered as text, a sensitive
+  action's typed text is never shown, and a governed tool call reads as the
+  tool rather than as its stand-in digest.
+
+### Changed
+
+- **MCP results are compact.** Every session reference in a tool result was
+  the full session record, about 1.9k characters. An action result also
+  carried the page before and after the action, each with its own copy of
+  that record.
+  - Nested session summaries are now references (id, name, status, live,
+    current URL, title, takeover URL), and `browser.list_sessions` returns
+    references too.
+  - `execute_action` drops the pre-action snapshot, which its `verification`
+    already summarises.
+  - observe drops per-observation remote-access diagnostics.
+  - Interactables drop keys that are null for that element.
+
+  Measured on a login form at the end of this pass, counting both result
+  copies. The "after" figures include the restored accessibility outline,
+  about 600 characters of real content that the "before" figures lacked.
+  - `execute_action`: 19.6k → 9.4k characters
+  - observe: 12.9k → 8.6k
+  - screenshot text: 4.8k → 1.3k
+  - `list_sessions`: 13k for 6 sessions → 1.6k for 7
+
+  A compact result is a subset of the full one. `detail="full"` on observe,
+  `execute_action` and `execute_approval` returns the full payload.
+  `browser.get_session`, `browser.create_session` and REST responses are
+  unchanged. The built-in providers' prompts use the same session reference.
+
+- **The curated MCP profile lists the 20 tools a browsing agent needs.** It
+  listed 37 tools, about 41k characters of `tools/list` carried on every
+  request. Harness inspection, Witness verification and export, the readiness
+  check, memory profiles, traces, the network log, the console, page-error and
+  request-failure tails (observe carries the last ten), auth-profile
+  inspection, drag-and-drop and viewport sizing are now in the `full` profile.
+  The curated list is 25.0k characters. Calling a full-profile tool on a
+  curated controller names `MCP_TOOL_PROFILE=full` instead of answering
+  "Unknown tool".
+
+- **`browser.get_html` is bounded and paged.** It returned the whole
+  serialized DOM or page text in one result, routinely megabytes. It now
+  returns up to `max_chars` (default 20,000, at most 1,000,000) from `offset`,
+  with `total_chars`, `truncated` and `next_offset`. With `text_only=true` it
+  uses the same line-preserving text as the observation.
+
+- **The controller image leaves out the provider CLIs by default.** Node.js
+  and the codex, claude and gemini CLIs (about 750 MB) are needed only for
+  `*_AUTH_MODE=cli`. Build with `INSTALL_AGENT_CLIS=true` (read from `.env` by
+  compose) to include them. `docker-compose.host-subscriptions.yml` sets it,
+  and `bootstrap_cli_auth.sh` stops with instructions when it is missing. A
+  missing CLI binary now names the setting in the production startup error and
+  in `GET /agent/providers`.
+
+- Host-side developer scripts require Python 3.11, the floor every package
+  declares. They accepted 3.10.
+
 ### Documentation
 
 - `docs/llm-adapters.md` now covers the OpenAI-compatible provider family,
   shows how to point `openai_compatible` at any gateway or self-hosted server,
   and states when a provider gets a named profile.
+
+- `docs/mcp-clients.md` shows direct HTTP setup for Claude Code, Cursor and
+  VS Code, with bearer and operator headers. It also covers pairing Auto
+  Browser with a web-search MCP server, including the `ALLOWED_HOSTS` change
+  that search results need.
+
+- The README's release highlights were for v1.5.0 and sat above the
+  quickstart. A short "Recent Changes" section now follows the first demo.
+  ROADMAP reflects 1.7.0.
 
 ## [1.7.0] — 2026-08-08
 
