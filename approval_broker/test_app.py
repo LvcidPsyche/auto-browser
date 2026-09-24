@@ -102,6 +102,45 @@ def test_agent_uses_only_open_owner_session_no_totp_or_creation(tmp_path: Path, 
         assert not any(method == "DELETE" for method, _, _ in calls)
 
 
+def test_agent_can_list_and_switch_tabs_but_not_close_them(tmp_path: Path, clock: list[float]) -> None:
+    active, calls = False, []
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal active
+        payload = json.loads(request.content) if request.content else None; calls.append((request.method, request.url.path, payload))
+        if request.method == "GET" and request.url.path == "/sessions": return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
+        if request.method == "POST" and request.url.path == "/sessions": active = True; return httpx.Response(200, json={"id": "owner-1"})
+        if request.method == "GET" and request.url.path == "/sessions/owner-1/tabs":
+            return httpx.Response(200, json=[{"index": 0, "active": True, "url": "https://a"}, {"index": 1, "active": False, "url": "https://b"}])
+        if request.method == "POST" and request.url.path == "/sessions/owner-1/tabs/activate":
+            return httpx.Response(200, json={"index": payload["index"]})
+        return httpx.Response(200, json={"ok": True})
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        secret = enroll(client, clock)
+        client.post("/owner/sessions", headers=auth(OWNER), json={"start_url": "https://example.com", "totp_code": fresh(secret, clock)})
+        request_id = client.post("/requests", headers=auth(AGENT), json={"purpose": "orders"}).json()["id"]
+        tabs = client.post(f"/requests/{request_id}/actions/list_tabs", headers=auth(AGENT), json={"arguments": {}})
+        assert tabs.status_code == 200 and len(tabs.json()) == 2
+        assert ("GET", "/sessions/owner-1/tabs", None) in calls
+        switched = client.post(f"/requests/{request_id}/actions/activate_tab", headers=auth(AGENT), json={"arguments": {"index": 1}})
+        assert switched.status_code == 200 and switched.json() == {"index": 1}
+        assert ("POST", "/sessions/owner-1/tabs/activate", {"index": 1}) in calls
+        # list_tabs takes no arguments; activate_tab needs exactly a real (non-bool) integer index.
+        assert client.post(f"/requests/{request_id}/actions/list_tabs", headers=auth(AGENT), json={"arguments": {"index": 1}}).status_code == 400
+        assert client.post(f"/requests/{request_id}/actions/activate_tab", headers=auth(AGENT), json={"arguments": {}}).status_code == 400
+        assert client.post(f"/requests/{request_id}/actions/activate_tab", headers=auth(AGENT), json={"arguments": {"index": "1"}}).status_code == 400
+        assert client.post(f"/requests/{request_id}/actions/activate_tab", headers=auth(AGENT), json={"arguments": {"index": True}}).status_code == 400
+        # Closing a tab is deliberately not exposed to agents -- only the owner manages that.
+        assert client.post(f"/requests/{request_id}/actions/close_tab", headers=auth(AGENT), json={"arguments": {"index": 0}}).status_code == 404
+        # Same routing through the /mcp/tools/call shape callers actually use.
+        assert client.post("/mcp/tools/call", headers=auth(AGENT), json={"name": "browser.list_tabs", "arguments": {"request_id": request_id}}).status_code == 200
+        assert client.get("/mcp/tools", headers=auth(AGENT)).json() == [
+            {"name": f"browser.{name}"} for name in (
+                "session_status", "request_access", "get_request", "complete", "observe",
+                "activate_tab", "list_tabs", "click", "navigate", "press", "scroll", "type", "wait",
+            )
+        ]
+
+
 def test_closure_and_restart_cannot_be_adopted_or_resurrected(tmp_path: Path, clock: list[float]) -> None:
     active = False
     def upstream(request: httpx.Request) -> httpx.Response:

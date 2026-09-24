@@ -34,6 +34,13 @@ from starlette.websockets import WebSocketDisconnect, WebSocketState
 from websockets.asyncio.client import connect as ws_connect
 
 ALLOWED_ACTIONS = frozenset({"click", "type", "press", "scroll", "navigate", "wait"})
+# Tab visibility/switching lives at the controller's own REST paths (/tabs,
+# /tabs/activate), not the generic /sessions/{id}/actions/{operation} used by
+# ALLOWED_ACTIONS, so `operate()` special-cases them the same way it does "observe".
+# Without these an agent can only ever see/act on whichever single tab the controller
+# happens to be tracking -- including a tab it never opened and the owner may have
+# switched away from -- with no way to find or reach any other open tab.
+TAB_OPERATIONS = frozenset({"list_tabs", "activate_tab"})
 TOTP_PERIOD = 30
 TOTP_FAILURE_LIMIT = 5
 TOTP_BLOCK_SECONDS = 300
@@ -738,6 +745,15 @@ def create_app(
                     if arguments:
                         raise HTTPException(400, "Observation options are not exposed")
                     return await upstream("GET", f"/sessions/{grant.session_id}/observe")
+                if operation == "list_tabs":
+                    if arguments:
+                        raise HTTPException(400, "list_tabs takes no arguments")
+                    return await upstream("GET", f"/sessions/{grant.session_id}/tabs")
+                if operation == "activate_tab":
+                    index = arguments.get("index")
+                    if set(arguments) != {"index"} or not isinstance(index, int) or isinstance(index, bool):
+                        raise HTTPException(400, "activate_tab requires an integer 'index'")
+                    return await upstream("POST", f"/sessions/{grant.session_id}/tabs/activate", arguments)
                 if operation in ALLOWED_ACTIONS:
                     if "approval_id" in arguments:
                         raise HTTPException(400, "Built-in sensitive approvals are owner-only")
@@ -852,7 +868,7 @@ def create_app(
     @app.get("/mcp/tools")
     async def list_tools(authorization: str | None = Header(default=None)):
         require_role(authorization, "agent")
-        return [{"name": f"browser.{name}"} for name in ("session_status", "request_access", "get_request", "complete", "observe", *sorted(ALLOWED_ACTIONS))]
+        return [{"name": f"browser.{name}"} for name in ("session_status", "request_access", "get_request", "complete", "observe", *sorted(TAB_OPERATIONS), *sorted(ALLOWED_ACTIONS))]
 
     async def session_status() -> dict[str, str]:
         """Safe agent setup signal; deliberately unrelated to TOTP state."""
@@ -917,7 +933,7 @@ def create_app(
                 },
             }
         if payload.method == "tools/list":
-            names = ("session_status", "request_access", "get_request", "complete", "observe", *sorted(ALLOWED_ACTIONS))
+            names = ("session_status", "request_access", "get_request", "complete", "observe", *sorted(TAB_OPERATIONS), *sorted(ALLOWED_ACTIONS))
             return {
                 "jsonrpc": "2.0", "id": payload.id,
                 "result": {"tools": [
