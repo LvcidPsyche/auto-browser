@@ -71,6 +71,7 @@ def _count_invocations(key: str) -> int:
 # any depth: browser.execute_action carries its navigation target at
 # action.url, and set_cookies at cookies[].url.
 _URL_ARGUMENT_KEYS = frozenset({"url", "start_url", "urls", "cdp_url"})
+_LITERAL_BRACKETS = str.maketrans({"[": "[[]", "]": "[]]"})
 
 
 def _url_arguments(arguments: Any) -> list[str]:
@@ -117,7 +118,9 @@ def _url_matches(url: str, pattern: str) -> bool:
 
     pattern_scheme, _, pattern_rest = pattern.partition("://")
     pattern_authority, slash, pattern_path = pattern_rest.partition("/")
-    authority = host if port is None else f"{host}:{port}"
+    authority = f"[{host}]" if ":" in host else host  # IPv6 literals keep their brackets
+    if port is not None:
+        authority = f"{authority}:{port}"
     path = parts.path or "/"
     if parts.query:
         path += f"?{parts.query}"
@@ -125,7 +128,8 @@ def _url_matches(url: str, pattern: str) -> bool:
         path += f"#{parts.fragment}"
     return (
         fnmatch.fnmatchcase(parts.scheme.lower(), pattern_scheme.lower())
-        and fnmatch.fnmatchcase(authority, pattern_authority.lower())
+        # Brackets in an authority are IPv6 delimiters, not fnmatch classes.
+        and fnmatch.fnmatchcase(authority, pattern_authority.lower().translate(_LITERAL_BRACKETS))
         and fnmatch.fnmatchcase(path, f"/{pattern_path}" if slash else "/")
     )
 

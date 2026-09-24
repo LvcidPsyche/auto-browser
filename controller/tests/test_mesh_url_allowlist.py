@@ -75,6 +75,11 @@ class PatternMatchingTests(unittest.TestCase):
         self.assertTrue(self._permits("https://example.com:*/*", "https://example.com:8443/"))
         self.assertTrue(self._permits("https://example.com/*", "HTTPS://Example.COM/x"))
 
+    def test_ipv6_literals_keep_their_brackets(self) -> None:
+        self.assertTrue(self._permits("http://[::1]:*/*", "http://[::1]:8000/x"))
+        self.assertTrue(self._permits("http://[::1]/*", "http://[::1]/"))
+        self.assertFalse(self._permits("http://[::1]/*", "http://[::2]/"))
+
     def test_a_pattern_without_a_path_matches_the_site_root_only(self) -> None:
         self.assertTrue(self._permits("https://example.com", "https://example.com"))
         self.assertTrue(self._permits("https://example.com", "https://example.com/"))
