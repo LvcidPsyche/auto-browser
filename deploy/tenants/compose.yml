@@ -15,6 +15,7 @@ services:
     shm_size: 1g
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE, SETUID, SETGID]
     networks: [tenant]
     healthcheck:
       test: [CMD-SHELL, 'test -s /data/browser-profile/browser-ws-endpoint.txt && curl -s --max-time 3 -o /dev/null http://127.0.0.1:9223/ && curl -fsS --max-time 3 http://127.0.0.1:6080/ >/dev/null']
