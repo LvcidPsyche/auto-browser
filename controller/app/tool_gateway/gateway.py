@@ -308,6 +308,23 @@ class McpToolGateway:
             # collapsing them into the opaque catch-all below.
             message = str(exc.args[0]) if exc.args else exc.__class__.__name__
             return self._error_response(message)
+        except PermissionError as exc:
+            # Policy refusals raise PermissionError with a reason for the caller:
+            # a host outside ALLOWED_HOSTS, an approval not yet granted or not
+            # matching the action, a path outside its root. They reached agents
+            # as "Tool execution failed", so a blocked navigation and a retry
+            # before the operator approved looked like crashes. An OS-level
+            # PermissionError carries an errno and can name a server path; that
+            # one stays opaque.
+            if exc.errno is not None:
+                logger.exception("tool %s failed", payload.name)
+                return self._error_response("Tool execution failed")
+            message = str(exc.args[0]) if exc.args else "Not permitted"
+            return McpToolCallResponse(
+                content=[McpToolCallContent(text=message)],
+                structuredContent={"error": message, "code": "not_permitted"},
+                isError=True,
+            )
         except Exception:
             logger.exception("tool %s failed", payload.name)
             return self._error_response("Tool execution failed")

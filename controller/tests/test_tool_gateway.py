@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -1201,6 +1202,47 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no-such-profile", response.content[0].text)
         self.assertNotIn("Tool execution failed", response.content[0].text)
 
+    async def test_policy_refusals_reach_the_caller(self) -> None:
+        # A host outside ALLOWED_HOSTS, and a retry with an approval that is not
+        # granted yet, were both "Tool execution failed" to an MCP agent.
+        refusals = (
+            "Host 'news.example.org' is not allowlisted",
+            "approval approval-1 is not approved",
+        )
+        for message in refusals:
+            with self.subTest(message=message):
+                self.manager.execute_decision = AsyncMock(side_effect=PermissionError(message))
+                response = await self.gateway.call_tool(
+                    McpToolCallRequest(
+                        name="browser.execute_action",
+                        arguments={
+                            "session_id": "session-1",
+                            "action": {"action": "navigate", "url": "https://news.example.org/", "reason": "read"},
+                        },
+                    )
+                )
+                self.assertTrue(response.isError)
+                self.assertEqual(response.content[0].text, message)
+                self.assertEqual(response.structuredContent, {"error": message, "code": "not_permitted"})
+
+    async def test_os_permission_errors_stay_opaque(self) -> None:
+        # An OS-level PermissionError carries an errno and can name a server path.
+        self.manager.execute_decision = AsyncMock(
+            side_effect=PermissionError(13, "Permission denied", "/data/artifacts/session-1/secret")
+        )
+
+        with self.assertLogs("app.tool_gateway.gateway", level="ERROR"):
+            response = await self.gateway.call_tool(
+                McpToolCallRequest(
+                    name="browser.execute_action",
+                    arguments={"session_id": "session-1", "action": {"action": "reload", "reason": "r"}},
+                )
+            )
+
+        self.assertTrue(response.isError)
+        self.assertEqual(response.content[0].text, "Tool execution failed")
+        self.assertNotIn("/data/artifacts", json.dumps(response.structuredContent))
+
     async def test_approval_required_bubbles_back_as_tool_error(self) -> None:
         approval = ApprovalRecord(
             id="approval-1",
@@ -1237,6 +1279,8 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.isError)
         self.assertEqual(response.structuredContent["status"], "approval_required")
         self.assertEqual(response.structuredContent["approval"]["id"], "approval-1")
+        # The key the tool descriptions tell the caller to pass back.
+        self.assertEqual(response.structuredContent["approval_id"], "approval-1")
 
     async def test_browser_action_error_bubbles_back_as_structured_tool_error(self) -> None:
         self.manager.execute_decision = AsyncMock(

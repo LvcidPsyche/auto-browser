@@ -21,9 +21,13 @@ logger = logging.getLogger(__name__)
 class ApprovalRequiredError(HTTPException):
     def __init__(self, approval: ApprovalRecord, message: str | None = None):
         self.approval = approval
+        # approval_id is what the caller passes back once an operator approves;
+        # tool descriptions promise it, so it is a top-level key rather than
+        # only a field of the nested record.
         self.payload = {
             "status": "approval_required",
             "message": message or f"{approval.kind} actions require human approval",
+            "approval_id": approval.id,
             "approval": approval.model_dump(),
         }
         super().__init__(status_code=409, detail=self.payload)
