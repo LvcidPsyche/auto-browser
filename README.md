@@ -146,7 +146,7 @@ Auto Browser exposes:
 - convenience endpoints at `http://127.0.0.1:8000/mcp/tools` and `http://127.0.0.1:8000/mcp/tools/call`
 - a stdio bridge: `uvx auto-browser-mcp` from PyPI, or [`scripts/mcp_stdio_bridge.py`](./scripts/mcp_stdio_bridge.py) in a repo checkout
 
-The default MCP tool profile is `curated`, which keeps the browser surface compact for better tool selection. If you want the full internal tool surface, set:
+The default MCP tool profile is `curated`: the 20 tools a browsing agent needs (sessions, observe and screenshot, `execute_action`, page and download reading, tabs, auth profiles, human takeover). Every listed tool costs the model context on every request, so the diagnostics, audit, harness, and admin tools are in the full profile. To expose them, set:
 
 ```bash
 MCP_TOOL_PROFILE=full
@@ -181,7 +181,7 @@ see [`docs/mcp-clients.md#resources-and-subscriptions`](./docs/mcp-clients.md#re
 
 Auto Browser ships a Stage 0 convergence harness for Agent Skill Induction. It runs a structured task contract, records tamper-checked traces, verifies completion, and writes a staged skill candidate carrying provenance. With a mesh identity configured that provenance is signed, and the registry verifies the signature before serving a candidate — a candidate that fails the check, or that was dropped into the staging directory unsigned, is refused. Candidates induced from a mock run are marked `simulated` so they cannot pass as converged. Generated skills are staged only — promotion stays explicit and reviewed.
 
-Read-only inspection tools (`harness.list_runs`, `harness.get_status`, `harness.get_trace`) are exposed in the default `curated` MCP tool profile so agents can introspect harness state without elevated access. Convergence runs, drift checks, candidate management, and graduation require `MCP_TOOL_PROFILE=full`, or can be invoked directly over REST.
+The harness tools — convergence runs, run status and traces, drift checks, candidate management, and graduation — are in the `full` MCP tool profile (`MCP_TOOL_PROFILE=full`), or can be invoked directly over REST.
 
 Start with [`docs/convergence-harness.md`](./docs/convergence-harness.md). A deterministic local smoke is:
 

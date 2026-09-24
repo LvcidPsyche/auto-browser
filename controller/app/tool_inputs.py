@@ -149,10 +149,8 @@ class SessionIdInput(StrictInputModel):
         min_length=1,
         max_length=120,
         description=(
-            "ID of the target browser session, as returned by browser.create_session "
-            "or listed by browser.list_sessions. May be omitted: with exactly one "
-            "live session that session is used, and observe/act tools create one on "
-            "demand when none are live."
+            "Target session id, from browser.create_session or browser.list_sessions. Optional "
+            "when exactly one session is live; observe and act tools create one when none is."
         ),
     )
 

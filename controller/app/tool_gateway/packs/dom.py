@@ -70,6 +70,7 @@ def register(registry, gateway):
             ),
             input_model=DragDropInput,
             handler=gateway._drag_drop,
+            profiles=("full",),
             governed_kind="write",
         ),
         ToolSpec(
@@ -77,6 +78,7 @@ def register(registry, gateway):
             description="Resize the browser viewport to the specified width and height.",
             input_model=SetViewportInput,
             handler=gateway._set_viewport,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.find_by_vision",

@@ -48,6 +48,7 @@ def register(registry, gateway):
             ),
             input_model=SaveMemoryProfileInput,
             handler=gateway._save_memory_profile,
+            profiles=("full",),
             governed_kind="write",
         ),
         ToolSpec(
@@ -55,12 +56,14 @@ def register(registry, gateway):
             description="Retrieve a saved memory profile by name.",
             input_model=GetMemoryProfileInput,
             handler=gateway._get_memory_profile,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.list_memory_profiles",
             description="List all saved memory profiles.",
             input_model=EmptyInput,
             handler=gateway._list_memory_profiles,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.delete_memory_profile",
@@ -118,24 +121,28 @@ def register(registry, gateway):
             description="Read recent browser console messages for an active session.",
             input_model=SessionTailInput,
             handler=gateway._get_console,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.get_page_errors",
             description="Read recent uncaught page errors for an active session.",
             input_model=SessionTailInput,
             handler=gateway._get_page_errors,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.get_request_failures",
             description="Read recent failed network requests for an active session.",
             input_model=SessionTailInput,
             handler=gateway._get_request_failures,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.stop_trace",
             description="Finalize the current Playwright trace for an active session and return its artifact path.",
             input_model=SessionIdInput,
             handler=gateway._stop_trace,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.list_auth_profiles",
@@ -154,6 +161,7 @@ def register(registry, gateway):
             ),
             input_model=AuthProfileNameInput,
             handler=gateway._get_auth_profile,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.list_downloads",

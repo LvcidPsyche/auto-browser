@@ -149,10 +149,14 @@ class ToolRegistry:
         self.tool_profile = "full" if tool_profile == "full" else "curated"
         self._experimental_enabled = experimental_enabled
         self._tools: dict[str, ToolSpec] = {}
+        # Tools that exist but not in this profile, so a call to one can say
+        # how to enable it instead of claiming the tool does not exist.
+        self._other_profile_tools: dict[str, tuple[str, ...]] = {}
         self._descriptor_cache_json: str | None = None
 
     def register(self, spec: ToolSpec) -> None:
         if self.tool_profile not in spec.profiles:
+            self._other_profile_tools[spec.name] = spec.profiles
             return
         if not self._experimental_enabled(spec.experimental):
             return
@@ -170,6 +174,10 @@ class ToolRegistry:
 
     def get(self, name: str) -> ToolSpec | None:
         return self._tools.get(name)
+
+    def profiles_offering(self, name: str) -> tuple[str, ...]:
+        """The profiles a tool missing from this one belongs to; empty for an unknown name."""
+        return self._other_profile_tools.get(name, ())
 
     def list_tools(self) -> list[dict[str, Any]]:
         if self._descriptor_cache_json is None:

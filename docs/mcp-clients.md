@@ -169,18 +169,33 @@ named `notifications/resources/updated` with the updated `uri`.
 
 ## Curated vs full MCP tool profile
 
-The default MCP tool profile is `curated`.
+The default MCP tool profile is `curated`: the 20 tools a browsing agent
+needs.
 
-That hides:
-- approval admin tools
-- built-in agent queue tools
-- provider introspection tools
-- remote-access admin tools
+- sessions: `create_session`, `list_sessions`, `get_session`, `close_session`, `fork_session`
+- seeing the page: `observe`, `screenshot`
+- acting: `execute_action`, `wait_for_selector`, `eval_js` (every call needs approval)
+- reading: `get_html` (with `text_only=true` for the page text), `find_elements`, `read_download`, `list_downloads`
+- tabs: `list_tabs`, `activate_tab`, `close_tab`
+- logins and people: `list_auth_profiles`, `save_auth_profile`, `request_human_takeover`
+
+The full profile adds:
+- diagnostics: console, page errors and request failures beyond observe's last ten,
+  the network log, traces, and the readiness check
+- Witness verification and bundle export
+- memory profiles
+- drag-and-drop and viewport sizing
+- cookies and storage, cron jobs, proxy personas, CDP attach, and session sharing
+- approval admin, the built-in agent queue, provider introspection, and remote-access admin
+- the convergence harness
 
 Why:
-- smaller tool surface
-- better tool selection quality for LLMs
+- every listed tool costs the model context on every request
+- a smaller surface improves tool selection
 - clearer product identity: MCP server first, optional agent runner second
+
+Calling a full-profile tool on a curated controller returns an error that names
+`MCP_TOOL_PROFILE=full`, not "unknown tool".
 
 If you really want the whole surface:
 

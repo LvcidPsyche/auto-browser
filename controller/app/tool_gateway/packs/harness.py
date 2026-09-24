@@ -30,14 +30,14 @@ def register(registry, gateway):
             description="Read one convergence run record and current status.",
             input_model=HarnessGetStatusInput,
             handler=gateway._harness_get_status,
-            profiles=("curated", "full"),
+            profiles=("full",),
         ),
         ToolSpec(
             name="harness.get_trace",
             description="Read the latest or selected trace for one convergence run.",
             input_model=HarnessGetTraceInput,
             handler=gateway._harness_get_trace,
-            profiles=("curated", "full"),
+            profiles=("full",),
         ),
         ToolSpec(
             name="harness.list_runs",
@@ -50,7 +50,7 @@ def register(registry, gateway):
             ),
             input_model=HarnessListRunsInput,
             handler=gateway._harness_list_runs,
-            profiles=("curated", "full"),
+            profiles=("full",),
         ),
         ToolSpec(
             name="harness.list_candidates",

@@ -150,44 +150,76 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         tools = self.gateway.list_tools()
         names = {tool["name"] for tool in tools}
 
-        self.assertIn("browser.create_session", names)
-        self.assertIn("browser.screenshot", names)
-        self.assertIn("browser.get_console", names)
-        self.assertIn("browser.get_page_errors", names)
-        self.assertIn("browser.get_request_failures", names)
-        self.assertIn("browser.stop_trace", names)
-        self.assertIn("browser.save_memory_profile", names)
-        self.assertIn("browser.get_memory_profile", names)
-        self.assertIn("browser.list_memory_profiles", names)
-        self.assertIn("browser.readiness_check", names)
-        self.assertIn("browser.verify_witness", names)
-        self.assertIn("browser.list_auth_profiles", names)
-        self.assertIn("browser.get_auth_profile", names)
-        self.assertIn("browser.list_tabs", names)
-        self.assertIn("browser.list_downloads", names)
-        self.assertIn("browser.execute_action", names)
-        self.assertIn("browser.save_auth_profile", names)
-        self.assertNotIn("browser.list_agent_jobs", names)
-        self.assertNotIn("browser.resume_agent_job", names)
-        self.assertNotIn("browser.list_providers", names)
-        self.assertNotIn("browser.get_remote_access", names)
-        self.assertNotIn("browser.list_approvals", names)
-        self.assertNotIn("social.post", names)
-        self.assertNotIn("social.comment", names)
-        self.assertNotIn("social.like", names)
-        self.assertNotIn("social.follow", names)
-        self.assertNotIn("social.unfollow", names)
-        self.assertNotIn("social.repost", names)
-        self.assertNotIn("social.dm", names)
-        self.assertNotIn("social.login", names)
-        self.assertNotIn("social.search", names)
-        self.assertNotIn("browser.find_by_vision", names)
+        # The curated profile is what a browsing agent needs. Every tool costs
+        # context on every request, so a change to this set should be deliberate.
+        self.assertEqual(
+            names,
+            {
+                "browser.create_session",
+                "browser.list_sessions",
+                "browser.get_session",
+                "browser.close_session",
+                "browser.fork_session",
+                "browser.observe",
+                "browser.screenshot",
+                "browser.execute_action",
+                "browser.get_html",
+                "browser.find_elements",
+                "browser.wait_for_selector",
+                "browser.eval_js",
+                "browser.list_tabs",
+                "browser.activate_tab",
+                "browser.close_tab",
+                "browser.list_downloads",
+                "browser.read_download",
+                "browser.list_auth_profiles",
+                "browser.save_auth_profile",
+                "browser.request_human_takeover",
+            },
+        )
         self.assertEqual(len(names), len(tools))
-        self.assertNotIn("browser.discard_agent_job", names)
-        self.assertNotIn("browser.cancel_agent_job", names)
+
+    async def test_tools_moved_out_of_curated_remain_in_full(self) -> None:
+        curated = {tool["name"] for tool in self.gateway.list_tools()}
+        full = {tool["name"] for tool in self.full_gateway.list_tools()}
+
+        for name in (
+            "browser.get_console",
+            "browser.get_page_errors",
+            "browser.get_request_failures",
+            "browser.stop_trace",
+            "browser.get_network_log",
+            "browser.save_memory_profile",
+            "browser.get_memory_profile",
+            "browser.list_memory_profiles",
+            "browser.get_auth_profile",
+            "browser.readiness_check",
+            "browser.verify_witness",
+            "browser.export_witness_bundle",
+            "browser.drag_drop",
+            "browser.set_viewport",
+            "harness.get_status",
+            "harness.get_trace",
+            "harness.list_runs",
+        ):
+            with self.subTest(name=name):
+                self.assertNotIn(name, curated)
+                self.assertIn(name, full)
+        self.assertLessEqual(curated, full)
+
+    async def test_a_full_profile_tool_called_on_curated_says_how_to_enable_it(self) -> None:
+        response = await self.gateway.call_tool(
+            McpToolCallRequest(name="browser.get_console", arguments={"session_id": "session-1"})
+        )
+        unknown = await self.gateway.call_tool(McpToolCallRequest(name="browser.no_such_tool", arguments={}))
+
+        self.assertTrue(response.isError)
+        self.assertIn("MCP_TOOL_PROFILE=full", response.content[0].text)
+        self.manager.get_console_messages.assert_not_awaited()
+        self.assertEqual(unknown.content[0].text, "Unknown tool: browser.no_such_tool")
 
     async def test_verify_witness_tool_dispatches_to_manager(self) -> None:
-        response = await self.gateway.call_tool(
+        response = await self.full_gateway.call_tool(
             McpToolCallRequest(name="browser.verify_witness", arguments={"session_id": "session-1"})
         )
 
@@ -197,7 +229,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.manager.verify_witness_chain.assert_awaited_once_with("session-1")
 
     async def test_list_tools_include_mcp_hints(self) -> None:
-        tools = {tool["name"]: tool for tool in self.gateway.list_tools()}
+        tools = {tool["name"]: tool for tool in self.full_gateway.list_tools()}
         console_hints = tools["browser.get_console"]["annotations"]
         action_hints = tools["browser.execute_action"]["annotations"]
 
@@ -551,7 +583,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("browser.find_by_vision", names)
 
     async def test_readiness_tool_returns_report(self) -> None:
-        response = await self.gateway.call_tool(
+        response = await self.full_gateway.call_tool(
             McpToolCallRequest(name="browser.readiness_check", arguments={"mode": "confidential"})
         )
 
@@ -560,7 +592,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(response.structuredContent["overall"], {"warn", "fail"})
 
     async def test_memory_profile_tools_forward_arguments(self) -> None:
-        save_response = await self.gateway.call_tool(
+        save_response = await self.full_gateway.call_tool(
             McpToolCallRequest(
                 name="browser.save_memory_profile",
                 arguments={
@@ -573,10 +605,10 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
         )
-        get_response = await self.gateway.call_tool(
+        get_response = await self.full_gateway.call_tool(
             McpToolCallRequest(name="browser.get_memory_profile", arguments={"profile_name": "checkout"})
         )
-        list_response = await self.gateway.call_tool(
+        list_response = await self.full_gateway.call_tool(
             McpToolCallRequest(name="browser.list_memory_profiles", arguments={})
         )
         delete_response = await self.full_gateway.call_tool(
@@ -696,7 +728,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         list_response = await self.gateway.call_tool(
             McpToolCallRequest(name="browser.list_auth_profiles", arguments={})
         )
-        get_response = await self.gateway.call_tool(
+        get_response = await self.full_gateway.call_tool(
             McpToolCallRequest(name="browser.get_auth_profile", arguments={"profile_name": "outlook-default"})
         )
         save_response = await self.gateway.call_tool(
@@ -725,25 +757,25 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.manager.capture_screenshot.assert_awaited_once_with("session-1", label="checkpoint")
 
     async def test_debug_tools_forward_arguments(self) -> None:
-        console_response = await self.gateway.call_tool(
+        console_response = await self.full_gateway.call_tool(
             McpToolCallRequest(
                 name="browser.get_console",
                 arguments={"session_id": "session-1", "limit": 5},
             )
         )
-        page_error_response = await self.gateway.call_tool(
+        page_error_response = await self.full_gateway.call_tool(
             McpToolCallRequest(
                 name="browser.get_page_errors",
                 arguments={"session_id": "session-1", "limit": 7},
             )
         )
-        request_failure_response = await self.gateway.call_tool(
+        request_failure_response = await self.full_gateway.call_tool(
             McpToolCallRequest(
                 name="browser.get_request_failures",
                 arguments={"session_id": "session-1", "limit": 9},
             )
         )
-        trace_response = await self.gateway.call_tool(
+        trace_response = await self.full_gateway.call_tool(
             McpToolCallRequest(
                 name="browser.stop_trace",
                 arguments={"session_id": "session-1"},
