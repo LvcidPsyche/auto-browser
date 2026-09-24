@@ -190,6 +190,7 @@ class StreamEventsTests(unittest.TestCase):
             captured["method"] = method
             captured["url"] = url
             captured["headers"] = kwargs.get("headers")
+            captured["timeout"] = kwargs.get("timeout")
             return FakeStream()
 
         client = AutoBrowserClient("http://auto-browser.test", token="sekret")
@@ -200,6 +201,10 @@ class StreamEventsTests(unittest.TestCase):
         self.assertEqual(captured["method"], "GET")
         self.assertEqual(captured["url"], "http://auto-browser.test/sessions/s-1/events")
         self.assertEqual(captured["headers"]["Authorization"], "Bearer sekret")
+        # Open-ended reads, bounded connect: timeout=None hung forever on an
+        # unreachable controller.
+        self.assertIsNone(captured["timeout"].read)
+        self.assertEqual(captured["timeout"].connect, 60.0)
 
     def test_stream_events_error_raises_autobrowser_error_not_response_not_read(self) -> None:
         # Regression: a streaming response is unread until .read() is called, so
