@@ -24,6 +24,53 @@ That means:
 - MCP clients with HTTP transport support can talk to it directly
 - stdio-first clients can use the bridge with zero setup beyond `uvx`
 
+## Connect directly over HTTP
+
+Clients that speak MCP's HTTP transport need no bridge: point them at
+`http://127.0.0.1:8000/mcp`.
+
+**Claude Code**
+
+```bash
+claude mcp add --transport http auto-browser http://127.0.0.1:8000/mcp
+claude mcp list   # auto-browser: http://127.0.0.1:8000/mcp (HTTP) - ✓ Connected
+```
+
+**Cursor**: `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project:
+
+```json
+{
+  "mcpServers": {
+    "auto-browser": {
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+**VS Code**: `.vscode/mcp.json` in the workspace:
+
+```json
+{
+  "servers": {
+    "auto-browser": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+If the controller has an `API_BEARER_TOKEN`, send it as a header. With Claude
+Code, add `--header "Authorization: Bearer $API_BEARER_TOKEN"`. With Cursor and
+VS Code, add `"headers": {"Authorization": "Bearer <token>"}` next to `url`.
+Without the header, the client reports a 401 "Missing or invalid bearer token".
+With `REQUIRE_OPERATOR_ID=true`, also send `X-Operator-Id` (or whatever
+`OPERATOR_ID_HEADER` names) the same way.
+
+Claude Desktop's config file only launches local (stdio) servers, so it uses
+the bridge below.
+
 ## Why this matters
 
 Most browser automation projects are just scripts or raw APIs.
@@ -75,6 +122,42 @@ Working from a repo checkout without uv? Point `command` at `python3` with
 `args: ["/ABSOLUTE/PATH/TO/auto-browser/scripts/mcp_stdio_bridge.py"]` instead.
 
 If your API is protected, set `AUTO_BROWSER_BEARER_TOKEN`.
+
+## Pairing with other MCP servers
+
+Auto Browser drives a browser. It does not search the web, and it does not need
+to: MCP clients run several servers side by side, and the model picks tools
+from all of them. To have an agent research something, add a web-search MCP
+server next to Auto Browser in the same client, following that server's own
+setup instructions. The agent then searches with one and opens and works the
+results with the other.
+
+With Claude Code, for example:
+
+```bash
+claude mcp add --transport http auto-browser http://127.0.0.1:8000/mcp
+claude mcp add ...   # your search server, as its docs describe
+```
+
+Or in a JSON client config, one entry per server:
+
+```json
+{
+  "mcpServers": {
+    "auto-browser": { "url": "http://127.0.0.1:8000/mcp" },
+    "search": { "...": "your search server's entry" }
+  }
+}
+```
+
+Search results point anywhere, and navigation is limited to `ALLOWED_HOSTS`,
+which defaults to `example.com` and localhost. List the domains the agent may
+open, or set `ALLOWED_HOSTS=*` on a deployment where open browsing is
+acceptable. A refused navigation names the host that was blocked.
+
+Keeping search as a separate server, not a tool inside Auto Browser, lets you
+choose the search provider and its API key independently, and keeps Auto
+Browser's tool list, which every request carries, short.
 
 ## Recommended first demo
 

@@ -21,8 +21,8 @@ Auto Browser is an MCP-native browser control plane for authorized workflows. It
 
 Works with:
 
-- Claude Desktop
-- Cursor
+- Claude Code, Cursor, and VS Code, connected directly over HTTP
+- Claude Desktop, through the bundled stdio bridge
 - any MCP client that can talk HTTP or stdio
 - direct REST callers when you want curl-first control
 
@@ -36,24 +36,6 @@ Works with:
 - **Evidence you can hand to someone else.** Witness receipt chains are Ed25519-signed, and an exported bundle verifies with [`scripts/verify_witness_bundle.py`](./scripts/verify_witness_bundle.py) — which imports nothing from this project, so a recipient need not run or trust this controller to check it.
 - **We audit ourselves in public.** [`docs/audits/2026-08-execution-audit.md`](./docs/audits/2026-08-execution-audit.md) documents an adversarial audit of this repo that found safety controls which reported success while doing nothing, with reproductions, the fixes, and the gates that close the class.
 - **Governed skill induction.** Verified browser traces can become staged skill candidates with provenance that is signed when a mesh identity is configured — and checked on read, not just produced — plus verifier adapters and review-only graduation — agents that prove they can repeat themselves correctly, not just act once.
-
-## Release Highlights (v1.5.0)
-
-- **Observe a page without paying for pixels.** The new `text` observation preset returns the accessibility outline, the first 2,000 characters of page text, and interactables with no screenshot and no OCR — the observation for text-only models. Set `PERCEPTION_PRESET_DEFAULT=text` to make it a deployment-wide default. To read a whole page, `browser.get_html` with `text_only=true` returns its visible text, paged.
-- **Find a string on the page in one call.** `browser.find_elements` now takes a `query` (plain text or regex, case-insensitive) instead of a CSS selector and returns each match with surrounding context — no full observe needed to check one value.
-- **Errors agents can act on.** Invalid tool arguments report field-level details, handler messages pass through instead of a generic failure, and the MCP bridge's cold-start error now says exactly how to start the controller.
-- **Any OpenAI-compatible model can drive the browser.** A single generic adapter serves every model reachable over an OpenAI `/chat/completions` endpoint. New providers: `openrouter` (one key → ~every frontier model), `xai` (Grok), `deepseek`, `minimax`, and `openai_compatible` (custom base URL for self-hosted Ollama / vLLM / LM Studio, Azure, Together, Groq, Fireworks, …). Vision + function-calling with a content-parse fallback for endpoints that ignore `tool_choice`.
-- **`browser://audit/events` MCP resource.** List and read recent audit events across sessions directly over MCP.
-- **Playwright pin parity enforced in CI.** The controller (pip) and browser-node (npm) Playwright versions must match exactly — a single-side bump can no longer merge and crash-loop compose deployments.
-- **On PyPI.** `pip install auto-browser-client` for the SDK, `pip install auto-browser-langchain` for the LangChain/LangGraph/CrewAI adapters, and `uvx auto-browser-mcp` to run the MCP stdio bridge with zero setup. Releases publish via PyPI trusted publishing (OIDC) on tag push.
-
-### Since v1.3.0
-- **`browser_manager.py` is now a pure facade + composition root** (1,284 → 769 lines), with domain logic extracted into `app/browser/services/`.
-- **Fork state exports are encrypted at rest** and shadow-browse state never touches disk.
-- **Download capture tasks can no longer be garbage-collected mid-flight**, shadow-browse failures roll back cleanly, and page listeners survive object-id reuse.
-- **Release gates in CI** enforce dependency audits, fixture evals, client tests, Python wheel builds, and the 80% controller coverage gate on Python 3.11 and 3.14.
-
-See [CHANGELOG.md](./CHANGELOG.md) for the full release history.
 
 ## Good Fits
 
@@ -138,6 +120,21 @@ Minimal observation:
 curl -s http://127.0.0.1:8000/sessions/<session-id>/observe | jq
 ```
 
+## Recent Changes
+
+**Unreleased**
+
+- **Smaller results for agents.** MCP results refer to sessions instead of repeating the full session record, and `execute_action` no longer returns the pre-action snapshot (`detail="full"` restores both). An action result is less than half its old size. The default tool list carries the 20 tools a browsing agent needs, and the rest are one `MCP_TOOL_PROFILE=full` away.
+- **Agents can see and read.** `browser.screenshot` and observe's `fast` preset return the screenshot as MCP image content. `browser.read_download` reads a downloaded CSV, JSON or text file. `browser.get_html(text_only=true)` is paged and keeps line breaks and table cells.
+- **Approvals you can find and trust.** The dashboard has a pending-approvals queue with Approve and Reject. A governed tool call such as `browser.eval_js` is approved for its exact arguments, which the operator sees.
+- **Observations name things as a person reads them.** Fields are labelled from their `<label>`, never from what was typed into them. The accessibility outline works again on current Playwright.
+- **A security pass.** The navigation allowlist now matches how Chromium parses URLs. A tokenless controller refuses DNS-rebinding Host headers, downloaded artifacts are served sandboxed, share links are scoped, and the browser runs as an unprivileged user.
+- **A leaner image.** The controller leaves out the provider CLIs (about 750 MB) unless built with `INSTALL_AGENT_CLIS=true`.
+
+**1.7.0** closed the fail-open design issues from GHSA-xmh3-cw7j-9gp5. A reachable API now needs a token (`API_BIND_SCOPE`), operator identity can be proven by a named credential, auth profiles belong to the operator who saved them, and staged skills are signature-checked on read.
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full release history.
+
 ## MCP Clients
 
 Auto Browser exposes:
@@ -145,6 +142,15 @@ Auto Browser exposes:
 - an HTTP MCP endpoint at `http://127.0.0.1:8000/mcp`
 - convenience endpoints at `http://127.0.0.1:8000/mcp/tools` and `http://127.0.0.1:8000/mcp/tools/call`
 - a stdio bridge: `uvx auto-browser-mcp` from PyPI, or [`scripts/mcp_stdio_bridge.py`](./scripts/mcp_stdio_bridge.py) in a repo checkout
+
+Clients that speak MCP over HTTP connect directly. With Claude Code:
+
+```bash
+claude mcp add --transport http auto-browser http://127.0.0.1:8000/mcp
+```
+
+Cursor, VS Code, bearer tokens, and pairing Auto Browser with a web-search MCP
+server are covered in [`docs/mcp-clients.md`](./docs/mcp-clients.md).
 
 The default MCP tool profile is `curated`: the 20 tools a browsing agent needs (sessions, observe and screenshot, `execute_action`, page and download reading, tabs, auth profiles, human takeover). Every listed tool costs the model context on every request, so the diagnostics, audit, harness, and admin tools are in the full profile. To expose them, set:
 
@@ -283,7 +289,7 @@ Core components:
 | `make help` | list available repo commands |
 | `make lint` | run Ruff checks on app, tests, and helper scripts |
 | `make test` | run controller tests in Docker |
-| `make test-local` | run controller tests on host Python 3.10+ |
+| `make test-local` | run controller tests on host Python 3.11+ |
 | `make eval` | run deterministic provider/profile eval scoring |
 | `make doctor` | run the local readiness smoke |
 | `make release-audit` | run the fuller release-validation pass |

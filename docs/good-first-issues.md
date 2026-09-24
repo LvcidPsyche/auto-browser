@@ -1,6 +1,6 @@
 # Good first issues
 
-Use these as public contributor tickets that match the current v1.4.x product surface.
+Use these as public contributor tickets that match the current product surface.
 (Earlier seeds from this file shipped: the auth profile setup wizard, the run replay
 view, and live fixture execution all landed in v1.3.0.)
 

@@ -2,7 +2,7 @@
 
 This is the near-term direction for Auto Browser.
 
-## Now (current in v1.6.0)
+## Now (current in v1.7.0)
 
 - Ed25519-signed Witness receipt chains — each receipt attests to itself and its whole history, and an exported bundle verifies anywhere via `scripts/verify_witness_bundle.py`, which imports nothing from this project
 - `text` observation preset — accessibility outline, extracted text, and interactables with no screenshot and no OCR
@@ -40,6 +40,8 @@ This is the near-term direction for Auto Browser.
 
 ## Recently Shipped
 
+- v1.7.0 fail-closed authentication: a reachable API needs a token (`API_BIND_SCOPE`), operator identity can be proven by a named credential, auth profiles belong to the operator who saved them, staged skills are signature-checked on read, and Codex keeps its sandbox
+- v1.6.1 fixes from a privately reported disclosure, including code execution and cookie theft through the raw-CDP allowlist
 - v1.6.0 Ed25519-signed Witness chains and exportable, independently verifiable evidence bundles
 - v1.5.1–v1.5.3 an adversarial execution audit of this repo and its fixes — several safety controls were asserted but never verified end to end, and three silently did nothing while reporting success. Findings, reproductions and the gates that close the class are in [`docs/audits/2026-08-execution-audit.md`](./docs/audits/2026-08-execution-audit.md)
 - v1.5.0 `text` observation preset, `find_elements` query mode, actionable MCP tool errors, and an MCP stdio bridge cold-start fix that names the endpoint and the remedy
