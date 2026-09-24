@@ -153,7 +153,11 @@ def create_operations_router(
     async def trigger_cron_job_via_webhook(job_id: str, request: Request) -> dict[str, Any]:
         try:
             body = await request.json()
-            payload = TriggerCronJobInput.model_validate({"job_id": job_id, **body})
+            if not isinstance(body, dict):
+                raise ValueError("trigger body must be a JSON object")
+            # The path names the job; a job_id in the body must not redirect the
+            # trigger to a different one.
+            payload = TriggerCronJobInput.model_validate({**body, "job_id": job_id})
             return await cron_service.trigger_via_webhook(payload.job_id, payload.webhook_key or "")
         except KeyError:
             raise HTTPException(status_code=404, detail="Not found") from None

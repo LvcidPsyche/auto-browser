@@ -467,6 +467,11 @@ class AgentHttpTests(unittest.TestCase):
             missing_proxy = self.client.delete("/proxy-personas/missing")
             missing_cron = self.client.delete("/crons/missing")
             forbidden_cron = self.client.post("/crons/cron-1/trigger", json={"webhook_key": "bad"})
+            non_object_cron = self.client.post("/crons/cron-1/trigger", json=["bad"])
+            redirected_cron = self.client.post(
+                "/crons/cron-1/trigger", json={"job_id": "cron-2", "webhook_key": "bad"}
+            )
+            triggered_job_ids = [call.args[0] for call in main_module.cron_service.trigger_via_webhook.await_args_list]
 
         self.assertEqual(replay.status_code, 200)
         self.assertIn("Session Replay", replay.text)
@@ -477,6 +482,11 @@ class AgentHttpTests(unittest.TestCase):
         self.assertEqual(missing_proxy.status_code, 404)
         self.assertEqual(missing_cron.status_code, 404)
         self.assertEqual(forbidden_cron.status_code, 403)
+        # A JSON array made the route raise TypeError (500); a body job_id
+        # redirected the trigger away from the job the path names.
+        self.assertEqual(non_object_cron.status_code, 400)
+        self.assertEqual(redirected_cron.status_code, 403)
+        self.assertEqual(triggered_job_ids, ["cron-1", "cron-1"])
 
     def test_http_error_mappings_are_stable(self) -> None:
         cases = [
