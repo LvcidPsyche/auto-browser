@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from ..action_errors import BrowserActionError
+from ..action_errors import BrowserActionError, SessionNotFoundError
 from ..approvals import ApprovalRequiredError
 from ..models import (
     BrowserActionDecision,
@@ -230,6 +230,12 @@ class McpToolGateway:
                 for err in exc.errors()
             )
             return self._error_response(f"Invalid arguments for {payload.name}: {details}")
+        except SessionNotFoundError as exc:
+            return McpToolCallResponse(
+                content=[McpToolCallContent(text=exc.message)],
+                structuredContent={"error": exc.message, "code": exc.code, "session_id": exc.session_id},
+                isError=True,
+            )
         except (ValueError, KeyError, RuntimeError) as exc:
             # Handlers raise these with operator-facing messages ("Provide
             # source_selector or source_x/source_y", "Memory profile not found").
