@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import unittest
 
 from app.cdp import passthrough as cdp_passthrough
@@ -86,6 +88,33 @@ class CDPPassthroughTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["computed_styles"], {"display": "block", "width": "640px"})
         self.assertEqual(result["event_listener_types"], ["click"])
         self.assertEqual(result["assets"], {"src": "https://cdn.example.com/hero.png"})
+
+    async def test_selector_is_embedded_as_an_exact_js_string_literal(self) -> None:
+        # repr() wrote "\U000e0001" for this tag character — not a JavaScript
+        # escape — so the in-page query used a different selector. A JSON string
+        # is valid JavaScript string-literal syntax, so decoding the embedded
+        # literal as JSON must give back exactly the selector.
+        selectors = ["[data-x='a\"b']", "[title='\U000e0001']", "a b", "[x='\\\\']"]
+        for selector in selectors:
+            fake = _FakeCDPSession(
+                {
+                    "DOM.getDocument": {"root": {"nodeId": 11}},
+                    "DOM.querySelector": {"nodeId": 22},
+                    "DOM.getAttributes": {"attributes": []},
+                    "DOM.getBoxModel": {"model": {}},
+                    "CSS.getComputedStyleForNode": {"computedStyle": []},
+                    "Runtime.evaluate": {"result": {"value": []}},
+                }
+            )
+
+            await CDPPassthrough(fake).get_element_intelligence(selector)
+
+            expressions = [params["expression"] for method, params in fake.calls if method == "Runtime.evaluate"]
+            self.assertEqual(len(expressions), 2)
+            for expression in expressions:
+                with self.subTest(selector=selector):
+                    literal = re.search(r"document\.querySelector\((.*)\);", expression).group(1)
+                    self.assertEqual(json.loads(literal), selector)
 
     async def test_get_element_intelligence_returns_not_found_error(self) -> None:
         fake = _FakeCDPSession(
