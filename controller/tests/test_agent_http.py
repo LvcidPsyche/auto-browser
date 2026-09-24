@@ -556,6 +556,15 @@ class AgentHttpTests(unittest.TestCase):
             ),
             (
                 main_module.manager,
+                "open_tab",
+                PermissionError("no"),
+                "post",
+                "/sessions/s/tabs/open",
+                {"url": "https://example.com"},
+                403,
+            ),
+            (
+                main_module.manager,
                 "navigate",
                 PermissionError("no"),
                 "post",
