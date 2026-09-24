@@ -340,7 +340,20 @@ class PortalStore:
             if row is None or row["revoked_at"] is not None:
                 db.commit()
                 return None
-            if row["absolute_expires_at"] <= now or row["idle_expires_at"] <= now:
+            # An explicitly opened browser is the owner's durable session boundary.  While
+            # that same identity still owns a recorded broker session, a dropped VNC socket,
+            # a sleeping phone, or an idle portal tab must not expire the cookie and lock the
+            # owner out of reconnecting.  The close route removes ownership and revokes this
+            # cookie; sessions without an open browser keep the normal idle/absolute limits.
+            browser_open = db.execute(
+                "SELECT 1 FROM browser_ownership_v2 WHERE user_id=? AND tenant_id=? "
+                "AND broker_session_id IS NOT NULL",
+                (row["user_id"], row["tenant_id"]),
+            ).fetchone() is not None
+            if (
+                not browser_open
+                and (row["absolute_expires_at"] <= now or row["idle_expires_at"] <= now)
+            ):
                 db.execute(
                     """UPDATE portal_sessions
                        SET revoked_at=?, authenticated_at=0 WHERE token_hash=?""",
@@ -348,10 +361,21 @@ class PortalStore:
                 )
                 db.commit()
                 return None
+            absolute_expires_at = (
+                max(float(row["absolute_expires_at"]), now + idle_ttl)
+                if browser_open
+                else float(row["absolute_expires_at"])
+            )
             db.execute(
-                """UPDATE portal_sessions SET last_seen_at=?, idle_expires_at=?
+                """UPDATE portal_sessions
+                   SET last_seen_at=?, idle_expires_at=?, absolute_expires_at=?
                    WHERE token_hash=?""",
-                (now, min(row["absolute_expires_at"], now + idle_ttl), _digest(token)),
+                (
+                    now,
+                    now + idle_ttl if browser_open else min(absolute_expires_at, now + idle_ttl),
+                    absolute_expires_at,
+                    _digest(token),
+                ),
             )
             db.commit()
             return row
@@ -1024,6 +1048,39 @@ def create_app(
             f"<input type=hidden name=csrf_token value='{csrf}'><button>Close server session</button></form>"
         )
 
+    def browser_open_response(request: Request, session_id: str):
+        """Return the same successful result for a new or already-open browser.
+
+        Opening is idempotent for one authenticated owner: a repeated form submit or a
+        retry after a lost response must rejoin the live session, not surface a conflict.
+        """
+        if "text/html" in (request.headers.get("accept") or ""):
+            return RedirectResponse("/browser", status_code=303)
+        return {"status": "open", "session_id": session_id}
+
+    async def await_browser_open(row: Mapping[str, Any], *, timeout_seconds: float = 5.0) -> str | None:
+        """Wait briefly for an identical in-flight Open request to finish.
+
+        The ownership row is created before the broker call and receives its session id
+        after the broker succeeds.  A second tap that sees the row in that short NULL state
+        waits for the first request instead of issuing a competing broker Open.
+        """
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while asyncio.get_running_loop().time() < deadline:
+            with closing(store.connect()) as db:
+                owner = db.execute(
+                    "SELECT broker_session_id FROM browser_ownership_v2 "
+                    "WHERE user_id=? AND tenant_id=?",
+                    (row["user_id"], row["tenant_id"]),
+                ).fetchone()
+            if owner is None:
+                return None
+            session_id = owner["broker_session_id"]
+            if session_id and await viewer_session_id(row) == session_id:
+                return session_id
+            await asyncio.sleep(0.05)
+        return None
+
     def safe_site_request(value: Any, row: Mapping[str, Any]) -> dict[str, Any] | None:
         if not isinstance(value, Mapping):
             return None
@@ -1266,9 +1323,8 @@ def create_app(
         now = clock()
         code = None
         requires_code = not authentication_is_fresh(row, now=now)
-        if requires_code:
-            code = _totp(data)
         newly_claimed = False
+        opening_in_progress = False
         with closing(store.connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             owner = db.execute(
@@ -1284,7 +1340,7 @@ def create_app(
                 # database fix. Verify against the broker and clear a dead record instead of
                 # trusting the local row blindly.
                 if await viewer_session_id(row) is not None:
-                    raise HTTPException(409, "Browser session is already open")
+                    return browser_open_response(request, owner["broker_session_id"])
                 with closing(store.connect()) as cleanup_db:
                     cleanup_db.execute(
                         """UPDATE browser_ownership_v2 SET broker_session_id=NULL
@@ -1304,9 +1360,20 @@ def create_app(
                     (row["user_id"], row["tenant_id"], clock()),
                 )
                 newly_claimed = True
+            else:
+                # Another request from this same authenticated owner has already claimed the
+                # row and is between broker Open and recording the returned session id.  Do
+                # not race it with a second broker Open; wait outside the SQLite transaction.
+                opening_in_progress = True
             db.commit()
+        if opening_in_progress:
+            existing_session_id = await await_browser_open(row)
+            if existing_session_id is not None:
+                return browser_open_response(request, existing_session_id)
+            raise HTTPException(409, "Browser session is still opening; try again")
         try:
             if requires_code:
+                code = _totp(data)
                 verified = await identity_http.post(
                     IDENTITY_VERIFY_PATH, headers=internal_headers(identity_internal_token),
                     json={"account": row["account"], "totp_code": code, "purpose": "browser_open"},
@@ -1402,9 +1469,7 @@ def create_app(
                 if active is None:
                     raise HTTPException(502, "Browser ownership could not be activated")
                 raise _upstream_error(active, "Browser ownership could not be activated")
-            if "text/html" in (request.headers.get("accept") or ""):
-                return RedirectResponse("/browser", status_code=303)
-            return {"status": "open", "session_id": session_id}
+            return browser_open_response(request, session_id)
         except httpx.HTTPError:
             raise HTTPException(502, "Browser service unavailable") from None
         finally:
@@ -1422,9 +1487,17 @@ def create_app(
     async def close_browser(request: Request):
         row = await mutation(request)
         await close_owned_browser(row)
-        if "text/html" in (request.headers.get("accept") or ""):
-            return RedirectResponse("/browser", status_code=303)
-        return {"status": "closed"}
+        token = request.cookies.get(SESSION_COOKIE)
+        if token:
+            store.revoke(token, now=clock())
+        result = (
+            RedirectResponse("/signin", status_code=303)
+            if "text/html" in (request.headers.get("accept") or "")
+            else JSONResponse({"status": "closed"})
+        )
+        result.delete_cookie(SESSION_COOKIE, secure=True, httponly=True, samesite="lax", path="/")
+        result.delete_cookie(CSRF_COOKIE, secure=True, samesite="lax", path="/")
+        return result
 
     @app.post("/api/browser/type")
     async def type_into_browser(request: Request):
@@ -1582,6 +1655,12 @@ def create_app(
             return
         selected_broker, selected_owner_token = broker_for(row["user_id"], row["tenant_id"])
         ws_url = "ws" + str(selected_broker.base_url).removeprefix("http") + "/owner/vnc/websockify"
+        # The VNC socket is real owner activity, but it does not make ordinary HTTP requests.
+        # Refresh the portal idle lease while this authenticated, ownership-bound viewer is
+        # alive so a harmless network drop can reconnect instead of being rejected as an
+        # idle session.  The absolute session lifetime is still enforced by store.session.
+        heartbeat_seconds = min(30.0, max(1.0, idle_session_ttl / 3))
+        next_session_heartbeat = clock() + heartbeat_seconds
         try:
             async with ws_connect(
                 ws_url, additional_headers={"Authorization": f"Bearer {selected_owner_token}"},
@@ -1623,8 +1702,14 @@ def create_app(
                             await websocket.send_text(message)
 
                 async def periodic_guard() -> None:
+                    nonlocal next_session_heartbeat
                     while True:
                         await asyncio.sleep(1)
+                        now = clock()
+                        if now >= next_session_heartbeat:
+                            if store.session(token, now=now, idle_ttl=idle_session_ttl) is None:
+                                break
+                            next_session_heartbeat = now + heartbeat_seconds
                         if await viewer_session_id(row) != session_id:
                             break
 

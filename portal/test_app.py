@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -305,6 +307,69 @@ def test_open_inside_freshness_window_needs_no_second_human_code(tmp_path, clock
         assert upstreams.broker_calls[-1][3] == f"Bearer {BROKER_TOKEN}"
 
 
+def test_repeated_open_rejoins_live_browser_without_second_broker_open(tmp_path, clock, upstreams):
+    with TestClient(app_at(tmp_path, clock, upstreams), base_url=ORIGIN) as client:
+        csrf = login(client)
+        first = client.post("/api/browser/open", headers=mutate(csrf), json={})
+        repeated = client.post("/api/browser/open", headers=mutate(csrf), json={})
+
+        assert first.status_code == 200
+        assert repeated.status_code == 200
+        assert repeated.json() == first.json() == {"status": "open", "session_id": "browser-1"}
+        opens = [call for call in upstreams.broker_calls if call[:2] == ("POST", BROKER_OPEN_PATH)]
+        assert len(opens) == 1
+
+
+def test_second_open_waits_for_identical_inflight_request(tmp_path, clock, upstreams):
+    app = app_at(tmp_path, clock, upstreams)
+    with TestClient(app, base_url=ORIGIN) as client:
+        csrf = login(client)
+        with app.state.portal_store.connect() as db:
+            db.execute(
+                "INSERT INTO browser_ownership_v2"
+                "(user_id,tenant_id,broker_session_id,claimed_at) VALUES(?,?,NULL,?)",
+                ("user-1", "tenant-1", clock[0]),
+            )
+
+        def finish_first_open() -> None:
+            time.sleep(0.1)
+            upstreams.active = True
+            with app.state.portal_store.connect() as db:
+                db.execute(
+                    "UPDATE browser_ownership_v2 SET broker_session_id=? "
+                    "WHERE user_id=? AND tenant_id=?",
+                    ("browser-1", "user-1", "tenant-1"),
+                )
+
+        finisher = threading.Thread(target=finish_first_open)
+        finisher.start()
+        repeated = client.post("/api/browser/open", headers=mutate(csrf), json={})
+        finisher.join(timeout=2)
+
+        assert not finisher.is_alive()
+        assert repeated.status_code == 200
+        assert repeated.json() == {"status": "open", "session_id": "browser-1"}
+        assert not [call for call in upstreams.broker_calls if call[:2] == ("POST", BROKER_OPEN_PATH)]
+
+
+def test_open_browser_keeps_portal_session_alive_until_manual_close(tmp_path, clock, upstreams):
+    app = app_at(tmp_path, clock, upstreams, idle_session_ttl=10, absolute_session_ttl=20)
+    with TestClient(app, base_url=ORIGIN) as client:
+        csrf = login(client)
+        opened = client.post("/api/browser/open", headers=mutate(csrf), json={})
+        assert opened.status_code == 200
+
+        # Both normal limits are long past, but this identity still owns the live browser.
+        clock[0] += 1_000
+        state = client.get("/api/session")
+        assert state.status_code == 200
+        assert state.json()["browser"] == "open"
+
+        closed = client.post("/api/browser/close", headers=mutate(csrf), json={})
+        assert closed.status_code == 200
+        assert client.get("/api/session").status_code == 401
+
+
 def test_open_outside_freshness_window_requires_code_and_refreshes_it(tmp_path, clock, upstreams):
     with TestClient(
         app_at(tmp_path, clock, upstreams, authentication_freshness_ttl=120), base_url=ORIGIN,
@@ -348,7 +413,7 @@ def test_client_input_cannot_forge_or_extend_freshness(tmp_path, clock, upstream
         assert unchanged == authenticated_at
 
 
-def test_login_code_cannot_be_reused_to_open(tmp_path, clock, upstreams):
+def test_manual_close_ends_portal_session_and_login_code_cannot_be_reused(tmp_path, clock, upstreams):
     with TestClient(app_at(tmp_path, clock, upstreams), base_url=ORIGIN) as client:
         csrf = login(client)
         opened = client.post(
@@ -362,7 +427,13 @@ def test_login_code_cannot_be_reused_to_open(tmp_path, clock, upstreams):
         denied = client.post(
             "/api/browser/open", headers=mutate(csrf), json={"totp_code": "111111"},
         )
-        assert denied.status_code == 403
+        assert denied.status_code == 401
+        replayed_login = client.post(
+            "/signin",
+            headers={"Origin": ORIGIN},
+            json={"account": "owner@example.com", "totp_code": "111111"},
+        )
+        assert replayed_login.status_code == 403
         assert not upstreams.broker_calls
 
 
@@ -810,6 +881,54 @@ def test_viewer_websocket_denies_without_session_and_rechecks_each_frame(tmp_pat
             with pytest.raises(Exception):
                 socket.receive_bytes()
         assert b"second-frame" not in sent
+
+
+def test_live_viewer_renews_idle_session_and_can_reconnect(tmp_path, clock, upstreams, monkeypatch):
+    import portal.app as portal_app
+
+    class FakeUpstream:
+        async def send(self, _frame):
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.sleep(30)
+
+    @asynccontextmanager
+    async def fake_connect(*_args, **_kwargs):
+        yield FakeUpstream()
+
+    monkeypatch.setattr(portal_app, "ws_connect", fake_connect)
+    app = app_at(tmp_path, clock, upstreams, idle_session_ttl=6, absolute_session_ttl=60)
+    with TestClient(app, base_url=ORIGIN) as client:
+        csrf = login(client)
+        client.post("/api/browser/open", headers=mutate(csrf), json={})
+
+        def connect():
+            cookie_header = "; ".join(f"{key}={value}" for key, value in client.cookies.items())
+            return client.websocket_connect("/vnc/websockify", headers={"Cookie": cookie_header})
+
+        with app.state.portal_store.connect() as db:
+            before = db.execute(
+                "SELECT idle_expires_at FROM portal_sessions WHERE revoked_at IS NULL"
+            ).fetchone()["idle_expires_at"]
+
+        with connect():
+            clock[0] += 3
+            time.sleep(2.2)
+
+        with app.state.portal_store.connect() as db:
+            after = db.execute(
+                "SELECT idle_expires_at FROM portal_sessions WHERE revoked_at IS NULL"
+            ).fetchone()["idle_expires_at"]
+        assert after > before
+
+        # Past the original idle deadline, but still inside the heartbeat-renewed lease.
+        clock[0] = before + 1
+        with connect():
+            pass
 
 
 def test_auth_profiles_save_list_rename_delete_round_trip(tmp_path, clock, upstreams):
