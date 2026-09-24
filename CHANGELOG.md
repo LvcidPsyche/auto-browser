@@ -80,7 +80,33 @@ configuration now answers `400` until you list the name in
   `*.example.com`) now matches the host only, and a URL with userinfo never
   matches. Mesh is opt-in (`MESH_ENABLED`).
 
+- **Chromium and the display stack no longer run as root.** Chromium runs
+  without its own sandbox in the container (Docker's default seccomp profile
+  leaves it no user namespace to build one in), so root inside the container
+  was the whole of what a renderer exploit started with. Chromium, Xvfb,
+  x11vnc and noVNC now run as the unprivileged `browser` user (uid 10001); the
+  entrypoint uses root only to take ownership of the mounted data directories.
+  **Upgrading:** `./data/browser-profile` and `./data/downloads` become owned
+  by uid 10001 on the host.
+
+- **Optional VNC authentication.** noVNC (6080) and raw VNC (5900) had no
+  authentication at all, which is safe only while both stay on loopback.
+  `VNC_PASSWORD` now enables VNC authentication on the shared browser-node and
+  on isolated session containers, and noVNC prompts for it. It is a second
+  layer, not a gateway: the VNC protocol uses only the first 8 characters.
+
 ### Fixed
+
+- **Share links did not work for the people they were handed to.** With a
+  bearer token configured, `/share/{token}` answered `401` to anyone without
+  the API token, and the screenshot the viewer renders came from `/artifacts`,
+  which needs the token too. The signed share token is now the credential for
+  the `/share/{token}/...` routes. Because those routes are unauthenticated,
+  they return only what the viewer renders. **Behaviour change:**
+  `/share/{token}/observe` returns the session id, URL, title and a screenshot
+  URL instead of the full observation, and screenshots are served through
+  `/share/{token}/screenshots/{name}` for that session only. A non-ASCII token
+  also produced a `500`; it is a `403`.
 
 - **Cron webhook triggers were unusable over the API.** `POST /crons`
   generated a `webhook_key` and then masked it in the response, so the key the
@@ -106,6 +132,12 @@ configuration now answers `400` until you list the name in
 
 - The Python client's `stream_events` disabled the connect timeout along with
   the read timeout, so an unreachable controller hung it forever.
+
+### Documentation
+
+- `docs/llm-adapters.md` now covers the OpenAI-compatible provider family,
+  shows how to point `openai_compatible` at any gateway or self-hosted server,
+  and states when a provider gets a named profile.
 
 ## [1.7.0] — 2026-08-08
 

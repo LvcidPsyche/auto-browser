@@ -104,6 +104,9 @@ class Settings(BaseSettings):
         alias="ISOLATED_BROWSER_KEEP_CONTAINERS",
     )
     isolated_browser_bind_host: str = Field("127.0.0.1", alias="ISOLATED_BROWSER_BIND_HOST")
+    # Handed to each isolated browser container, whose noVNC and raw VNC ports
+    # are published on ISOLATED_BROWSER_BIND_HOST. See browser-node/entrypoint.sh.
+    vnc_password: str | None = Field(None, alias="VNC_PASSWORD", repr=False)
     isolated_browser_mem_limit: str = Field("4g", alias="ISOLATED_BROWSER_MEM_LIMIT")
     isolated_browser_pids_limit: int = Field(2048, alias="ISOLATED_BROWSER_PIDS_LIMIT")
     isolated_browser_cpus: float = Field(0.0, alias="ISOLATED_BROWSER_CPUS")

@@ -237,6 +237,17 @@ Use **one** of:
 
 Do **not** expose raw controller or noVNC ports directly to the public internet.
 
+`VNC_PASSWORD` adds VNC authentication to noVNC (6080) and raw VNC (5900), on the
+shared browser-node and on isolated session containers; noVNC prompts for it. Set it
+whenever those ports are reachable beyond loopback — but treat it as a second layer,
+not the gateway: the VNC protocol uses only the first 8 characters and a
+DES-based challenge.
+
+Inside the browser container, Chromium, Xvfb, x11vnc and noVNC run as the
+unprivileged `browser` user (uid 10001). The entrypoint starts as root only to take
+ownership of the mounted `/data/profile` and `/data/downloads`, so on the host
+`./data/browser-profile` and `./data/downloads` end up owned by uid 10001.
+
 ## Backups
 
 Back up at least:
