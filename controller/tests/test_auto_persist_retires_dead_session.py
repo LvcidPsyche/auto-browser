@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import tempfile
 import unittest
 from datetime import datetime
@@ -30,6 +31,21 @@ class ClosedPage:
         raise PlaywrightError("Target page, context or browser has been closed")
 
 
+class OpenPage:
+    """A second tab in the same context/session that is still alive when the
+    tracked page dies -- e.g. the owner had it open all along, or the site's
+    own re-auth flow opened it and closed the old tab."""
+
+    def __init__(self, url: str = "https://example.com/other-tab") -> None:
+        self.url = url
+
+    def is_closed(self) -> bool:
+        return False
+
+    async def title(self) -> str:
+        return "other tab"
+
+
 def _settings(root: Path) -> Settings:
     return Settings(
         _env_file=None,
@@ -54,6 +70,9 @@ def _make_session(manager: BrowserManager, session_id: str = "zombie-1") -> Brow
     upload_dir.mkdir(parents=True, exist_ok=True)
     context = AsyncMock()
     context.close = AsyncMock()
+    # Real Playwright exposes `context.pages` as a plain list property (not a coroutine);
+    # tests that care about other open tabs overwrite this with a real list.
+    context.pages = []
     session = BrowserSession(
         id=session_id,
         name=session_id,
@@ -113,6 +132,36 @@ class AutoPersistRetiresDeadSessionTests(unittest.IsolatedAsyncioTestCase):
 
         await self.manager.session_lifecycle._retire_dead_session(session, reason="test")
 
+        session.context.close.assert_not_awaited()
+
+    async def test_dead_tracked_page_with_another_tab_open_adopts_it_instead_of_retiring(
+        self,
+    ) -> None:
+        """The bug the owner hit: he had more than one tab open, the tracked tab closed
+        (e.g. a re-auth flow replaced it), and the WHOLE session -- every other open tab
+        included -- was torn down instead of just moving tracking to a surviving tab."""
+        session = _make_session(self.manager)
+        other_tab = OpenPage()
+        # Real Playwright exposes `context.pages` as a plain list property, not a coroutine.
+        session.context.pages = [session.page, other_tab]
+        self.manager.auth_profiles.save_auto_persist = AsyncMock(
+            side_effect=PlaywrightError("Target page, context or browser has been closed")
+        )
+
+        task = asyncio.create_task(
+            self.manager.session_lifecycle._auto_persist_loop(session, "owner-default")
+        )
+        try:
+            await asyncio.sleep(0.05)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        # The session survives, still occupying its slot, but now tracking the tab that
+        # was still open -- not retired, and not left pointed at the dead one.
+        self.assertIn(session.id, self.manager.sessions)
+        self.assertIs(session.page, other_tab)
         session.context.close.assert_not_awaited()
 
 

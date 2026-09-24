@@ -457,11 +457,39 @@ class BrowserSessionService:
                     # way out except restarting the controller. Detected here, since
                     # this loop already probes the page every interval, retire the
                     # session the same way an explicit close does.
+                    #
+                    # But the tracked page closing is NOT the same as the session dying:
+                    # the owner (or the site itself, e.g. a re-auth flow that opens a
+                    # fresh tab and closes the old one) may still have other tabs open in
+                    # this same context. Retiring unconditionally used to tear down the
+                    # WHOLE session -- every other open tab included -- the instant only
+                    # the one tab we happened to be tracking closed. Adopt the most
+                    # recently opened surviving tab instead, and only retire the session
+                    # when none remain.
                     if session.page.is_closed():
-                        await self._retire_dead_session(
-                            session, reason="its tracked browser page has closed"
-                        )
-                        return
+                        try:
+                            candidates = self.manager.tabs.pages(session)
+                        except Exception:
+                            candidates = []
+                        remaining = [
+                            p for p in candidates if p is not session.page and not p.is_closed()
+                        ]
+                        if remaining:
+                            adopted = remaining[-1]
+                            session.page = adopted
+                            self.manager._attach_page_listeners(adopted, session)
+                            logger.warning(
+                                "session %s: its tracked page closed but %d other tab(s) "
+                                "are still open -- adopted the most recent one instead of "
+                                "retiring the whole session",
+                                session.id, len(remaining),
+                            )
+                        else:
+                            await self._retire_dead_session(
+                                session,
+                                reason="its tracked browser page has closed and no other tabs remain",
+                            )
+                            return
 
     async def _retire_dead_session(self, session: "BrowserSession", *, reason: str) -> None:
         """End a session whose underlying page died without an explicit close.
