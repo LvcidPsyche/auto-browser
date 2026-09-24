@@ -42,6 +42,12 @@ Keep `ALLOWED_HOSTS` for browser navigation targets, and set `CONTROLLER_ALLOWED
 to the hostnames operators use to reach the controller, such as `browser.example.com`
 or `localhost,127.0.0.1,::1` for a local-only install.
 
+When it is unset and the controller runs without a bearer credential (a loopback
+deployment), only loopback Host names — `localhost`, `127.0.0.1`, `[::1]` — are
+answered. An unauthenticated API that accepts any Host header can be driven by a web
+page through DNS rebinding, so this default holds until you either list the names
+clients use or configure `API_BEARER_TOKEN`. `/healthz` is exempt.
+
 ## Auth profiles
 
 Auto Browser now supports reusable named auth profiles under:

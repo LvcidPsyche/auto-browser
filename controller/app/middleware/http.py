@@ -12,6 +12,7 @@ from ..auth_policy import (
     AuthPolicy,
     Credential,
     credentials_for,
+    is_loopback_host,
     match_credential,
     policy_for_scope,
     resolve_bind_scope,
@@ -183,6 +184,37 @@ def install_controller_http_middleware(
         route = request.scope.get("route")
         template = getattr(route, "path", None)
         return template or "__unmatched__"
+
+    # An API that answers without a credential is safe on loopback only while it
+    # also refuses requests addressed to any other name. Otherwise DNS rebinding
+    # turns a web page into a same-origin client: the attacker's hostname
+    # re-resolves to 127.0.0.1, the browser sends Host: attacker.example, and —
+    # with no token to present — the page drives sessions and exports stored
+    # logins. The MCP Origin check cannot catch it either, because it accepts the
+    # origin the Host header claims. Compose sets CONTROLLER_ALLOWED_HOSTS;
+    # running the controller directly left it empty, and empty meant any Host.
+    # Evaluated per request against the same policy as the auth gate, so a
+    # deployment with a bearer credential is unaffected.
+    configured_hosts = list(getattr(settings, "controller_allowed_host_patterns", None) or [])
+
+    @application.middleware("http")
+    async def require_loopback_host_when_unauthenticated(request: Request, call_next):
+        if configured_hosts or _auth_policy().required or _request_path(request) == "/healthz":
+            return await call_next(request)
+        host = request.headers.get("host", "")
+        if is_loopback_host(host):
+            return await call_next(request)
+        logger.warning("refused unauthenticated request for non-loopback Host %r", host)
+        return JSONResponse(
+            status_code=400,
+            content={
+                "detail": (
+                    "Invalid host header: this controller runs without an API credential, so it only answers "
+                    "to loopback host names. Set CONTROLLER_ALLOWED_HOSTS to the names clients use, or "
+                    "configure API_BEARER_TOKEN."
+                )
+            },
+        )
 
     @application.middleware("http")
     async def record_http_metrics(request: Request, call_next):
