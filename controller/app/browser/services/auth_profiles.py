@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import tarfile
+import tempfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -472,35 +473,58 @@ class BrowserAuthProfileService:
                         raise FileExistsError(f"profile '{profile_name}' already exists; pass overwrite=true")
                     # Overwriting is a write to somebody's stored logins.
                     self.require_access(profile_name, action="overwriting an auth profile")
-                if dest_dir.exists():
-                    shutil.rmtree(dest_dir)
 
-                for member, safe_path in safe_members:
-                    relative = Path(*safe_path.parts)
-                    target = self.resolve_contained_path(profile_root, relative)
-                    if member.isdir():
-                        target.mkdir(parents=True, exist_ok=True)
-                        continue
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    source = tar.extractfile(member)
-                    if source is None:
-                        raise ValueError("archive member could not be read")
-                    # Bounded copy. A tar header's declared size is attacker
-                    # controlled, so the pre-scan above is a cheap early reject,
-                    # not a guarantee — this is what actually stops a gzip bomb
-                    # from filling the disk mid-extraction.
-                    with source, target.open("wb") as output:
-                        written = 0
-                        while True:
-                            chunk = source.read(_COPY_CHUNK_BYTES)
-                            if not chunk:
-                                break
-                            written += len(chunk)
-                            if written > MAX_ARCHIVE_MEMBER_BYTES:
-                                raise ValueError(
-                                    f"archive member '{member.name}' exceeds the {MAX_ARCHIVE_MEMBER_BYTES} byte limit"
-                                )
-                            output.write(chunk)
+                # Extract into a staging directory and swap it in only once every
+                # member is written. The old profile used to be deleted first, so
+                # an archive that failed part-way — a member over the size cap, a
+                # truncated gzip — destroyed a working login and left a partial
+                # one in its place. Staging sits beside profiles/, on the same
+                # filesystem so the swap is a rename, and outside it so list()
+                # never sees it.
+                staging_root = Path(tempfile.mkdtemp(prefix=".import-", dir=auth_root_str))
+                try:
+                    for member, safe_path in safe_members:
+                        relative = Path(*safe_path.parts)
+                        target = self.resolve_contained_path(staging_root, relative)
+                        if member.isdir():
+                            target.mkdir(parents=True, exist_ok=True)
+                            continue
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        source = tar.extractfile(member)
+                        if source is None:
+                            raise ValueError("archive member could not be read")
+                        # Bounded copy. A tar header's declared size is attacker
+                        # controlled, so the pre-scan above is a cheap early reject,
+                        # not a guarantee — this is what actually stops a gzip bomb
+                        # from filling the disk mid-extraction.
+                        with source, target.open("wb") as output:
+                            written = 0
+                            while True:
+                                chunk = source.read(_COPY_CHUNK_BYTES)
+                                if not chunk:
+                                    break
+                                written += len(chunk)
+                                if written > MAX_ARCHIVE_MEMBER_BYTES:
+                                    raise ValueError(
+                                        f"archive member '{member.name}' exceeds the "
+                                        f"{MAX_ARCHIVE_MEMBER_BYTES} byte limit"
+                                    )
+                                output.write(chunk)
+
+                    staged = staging_root / top_level
+                    staged.mkdir(exist_ok=True)
+                    if dest_dir.exists():
+                        retired = staging_root / ".replaced"
+                        os.replace(dest_dir, retired)
+                        try:
+                            os.replace(staged, dest_dir)
+                        except OSError:
+                            os.replace(retired, dest_dir)
+                            raise
+                    else:
+                        os.replace(staged, dest_dir)
+                finally:
+                    shutil.rmtree(staging_root, ignore_errors=True)
 
                 return profile_name
 

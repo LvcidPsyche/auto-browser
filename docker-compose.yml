@@ -34,6 +34,10 @@ services:
       PLAYWRIGHT_SERVER_HOST: 0.0.0.0
       PLAYWRIGHT_SERVER_PORT: 9223
       PLAYWRIGHT_SERVER_ADVERTISED_HOST: browser-node
+      # Optional VNC authentication for noVNC (6080) and raw VNC (5900); only the
+      # first 8 characters count. Both ports are loopback-only here — set this
+      # when you publish them anywhere else. See browser-node/entrypoint.sh.
+      VNC_PASSWORD: ${VNC_PASSWORD:-}
     volumes:
       - ./data/browser-profile:/data/profile
       - ./data/downloads:/data/downloads

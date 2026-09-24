@@ -119,6 +119,8 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
     async def open_tab(session_id: str, payload: OpenTabRequest) -> dict[str, Any]:
         try:
             return await manager.open_tab(session_id, payload.url, payload.activate)
+        except PermissionError:
+            raise HTTPException(status_code=403, detail="Not permitted") from None
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid request") from None
 

@@ -47,6 +47,7 @@ from .pii_scrub import PiiScrubber
 from .session_isolation import DockerBrowserNodeProvisioner, IsolatedBrowserRuntime
 from .session_store import DurableSessionStore
 from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
+from .url_safety import browser_equivalent_url
 from .witness import (
     WitnessActionContext,
     WitnessApproval,
@@ -647,7 +648,9 @@ class BrowserManager:
     # ── URL policy ───────────────────────────────────────────────────────────
 
     def _assert_url_allowed(self, url: str) -> None:
-        host = urlparse(url).hostname
+        # Parsed as the browser will parse it, not as urllib does — see
+        # app/url_safety.py for the backslash host confusion this closes.
+        host = urlparse(browser_equivalent_url(url)).hostname
         if not host:
             raise PermissionError(f"Could not determine hostname for URL: {url}")
         if host_is_allowed(host, self.settings.allowed_host_patterns):

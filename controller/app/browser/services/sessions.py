@@ -100,7 +100,6 @@ class BrowserSessionService:
         # stale/corrupt one, or a permission quirk must open a fresh browser
         # instead of failing Open outright.
         auto_persist_name = self.manager.settings.auto_persist_profile_name
-        auto_loaded_profile = False
         if source_path is None and self.manager.settings.auto_persist_login_enabled:
             try:
                 self.manager.auth_profiles.require_access(
@@ -111,7 +110,6 @@ class BrowserSessionService:
                 context_kwargs["storage_state"] = str(prepared_candidate.path)
                 prepared_auth_state = prepared_candidate
                 source_path = candidate_path
-                auto_loaded_profile = True
             except Exception as exc:
                 logger.info(
                     "auto-persist: no remembered login to load yet ('%s'): %s", auto_persist_name, exc

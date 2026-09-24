@@ -1,5 +1,8 @@
 [build-system]
-requires = ["setuptools>=68"]
+# >=77 is required by the PEP 639 SPDX `license` string below, not incidental:
+# the deprecated `license = { text = "MIT" }` table stops building after
+# 2027-02-18, and SPDX expressions are only understood from 77.0.0 on.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,14 +10,16 @@ name = "auto-browser-client"
 version = "1.7.0"
 description = "Python client SDK and MCP stdio bridge for Auto Browser"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = ["httpx>=0.27"]
 keywords = ["auto-browser", "mcp", "browser-automation", "playwright"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    # No "License ::" classifier: PEP 639 requires backends to reject a License
+    # classifier alongside an SPDX `license` expression. The expression is the
+    # single source of truth.
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",

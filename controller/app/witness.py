@@ -14,7 +14,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from .models import OperatorIdentity, ProtectionMode
-from .utils import utc_now
+from .utils import record_path, utc_now
 from .witness_anchor import compare_to_anchor, exclusive_lock, read_anchor, read_tail_line, write_anchor
 from .witness_signing import SIGNATURE_ALGORITHM
 
@@ -544,7 +544,7 @@ class WitnessRecorder:
         return result
 
     def _path(self, scope: str) -> Path:
-        return self.root / f"{scope}.jsonl"
+        return record_path(self.root, scope, ".jsonl")
 
     @staticmethod
     def _append_text(path: Path, text: str) -> None:

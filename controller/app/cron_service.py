@@ -140,7 +140,13 @@ class CronService:
             if enabled and schedule and self._scheduler is not None:
                 self._register_job(job)
 
-            return self._safe_job(job)
+            created = self._safe_job(job)
+            if webhook_key:
+                # The one time the full key is disclosed. Every later read masks
+                # it, so before this the key existed only in the store file: the
+                # webhook trigger demanded a secret no API caller could obtain.
+                created["webhook_key"] = webhook_key
+            return created
 
     async def list_jobs(self) -> list[dict[str, Any]]:
         return [self._safe_job(j) for j in self._load().values()]
@@ -210,7 +216,9 @@ class CronService:
         stored_key = job.get("webhook_key")
         if not stored_key:
             raise PermissionError("This job does not have webhook triggering enabled")
-        if not hmac.compare_digest(webhook_key, stored_key):
+        # Compared as bytes: compare_digest raises TypeError for a str with
+        # non-ASCII characters, which surfaced as a 500 instead of a refusal.
+        if not hmac.compare_digest(webhook_key.encode("utf-8"), str(stored_key).encode("utf-8")):
             raise PermissionError("Invalid webhook key")
         return await self._run_job_now(job)
 

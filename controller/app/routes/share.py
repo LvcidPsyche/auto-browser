@@ -1,19 +1,26 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 from ..models import ShareSessionRequest
-from ._utils import internal_error
+from ._utils import internal_error, require_safe_segment
 
 logger = logging.getLogger(__name__)
 
 
-def create_share_router(*, manager: Any, share_manager: Any) -> APIRouter:
+def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> APIRouter:
     router = APIRouter()
+
+    def _shared_session_id(token: str) -> str:
+        info = share_manager.token_info(token)
+        if not info.get("valid"):
+            raise HTTPException(status_code=403, detail="Invalid token")
+        return require_safe_segment(str(info["session_id"]), field="session_id")
 
     @router.post("/sessions/{session_id}/share")
     async def share_session(session_id: str, payload: ShareSessionRequest | None = None) -> dict[str, Any]:
@@ -28,25 +35,52 @@ def create_share_router(*, manager: Any, share_manager: Any) -> APIRouter:
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid request") from None
 
+    # The /share/{token}/... routes are exempt from the bearer token
+    # (app/middleware/http.py): the signed, expiring share token *is* the
+    # credential, and the people a link is handed to do not hold the API token.
+    # Before, every one of them got a 401, and the screenshot the page renders
+    # came from /artifacts, which needs the API token too — so a share link only
+    # ever worked for someone who did not need it. Because these routes are
+    # unauthenticated, they return only what the viewer renders: not the full
+    # observation (DOM text, interactables, console), and screenshots from this
+    # session only, through the token rather than /artifacts.
+
     @router.get("/share/{token}/observe")
     async def shared_observe(token: str) -> dict[str, Any]:
-        info = share_manager.token_info(token)
-        if not info.get("valid"):
-            raise HTTPException(status_code=403, detail="Invalid token")
+        session_id = _shared_session_id(token)
         try:
-            return await manager.observe(info["session_id"])
+            observation = await manager.observe(session_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Unknown session") from None
         except Exception:
             raise internal_error(logger, "shared observe failed") from None
+        screenshot_path = observation.get("screenshot_path")
+        return {
+            "session": {"id": session_id},
+            "url": observation.get("url"),
+            "title": observation.get("title"),
+            "screenshot_url": (
+                f"/share/{token}/screenshots/{Path(str(screenshot_path)).name}" if screenshot_path else None
+            ),
+        }
+
+    @router.get("/share/{token}/screenshots/{name}")
+    async def shared_screenshot(token: str, name: str) -> FileResponse:
+        session_id = _shared_session_id(token)
+        safe_name = require_safe_segment(name, field="name")
+        if not safe_name.endswith(".png"):
+            raise HTTPException(status_code=404, detail="Not found")
+        session_dir = (Path(settings.artifact_root) / session_id).resolve()
+        candidate = (session_dir / safe_name).resolve()
+        if candidate.parent != session_dir or not candidate.is_file():
+            raise HTTPException(status_code=404, detail="Not found")
+        return FileResponse(path=str(candidate), media_type="image/png", headers={"Cache-Control": "no-store"})
 
     @router.get("/share/{token}", response_class=HTMLResponse)
     async def shared_session_view(token: str) -> HTMLResponse:
-        info = share_manager.token_info(token)
-        if not info.get("valid"):
-            raise HTTPException(status_code=403, detail="Invalid token")
+        session_id = _shared_session_id(token)
         try:
-            await manager.get_session(info["session_id"])
+            await manager.get_session(session_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Unknown session") from None
 

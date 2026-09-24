@@ -12,9 +12,11 @@
 #
 #   export API_BEARER_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 #
-# Raw VNC (5900) is deliberately no longer published here: x11vnc runs `-nopw`,
-# so that port is unauthenticated by design and is only safe behind a loopback
-# bind. noVNC (6080) stays published so human takeover still works.
+# Raw VNC (5900) is deliberately no longer published here: without a password
+# it is unauthenticated, and only safe behind a loopback bind. noVNC (6080)
+# stays published so human takeover still works. Codespaces forwards ports
+# privately by default; if you make 6080 public, also set VNC_PASSWORD (noVNC
+# then prompts for it; only the first 8 characters count).
 #
 # `!override` replaces the base service's `ports` list instead of merging with it.
 # Without it, Compose appends these entries to the base 127.0.0.1 bindings, so both

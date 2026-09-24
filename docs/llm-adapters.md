@@ -34,7 +34,8 @@ The LLM does **not** talk to Playwright directly.
 ## Current implementation
 
 The controller now includes:
-- `ProviderRegistry` for `openai`, `claude`, and `gemini`
+- `ProviderRegistry` for `openai`, `claude`, `gemini`, and the OpenAI-compatible
+  family (`openrouter`, `xai`, `deepseek`, `minimax`, `openai_compatible`)
 - provider adapters under `controller/app/providers/`
 - `BrowserOrchestrator` for one-step or multi-step loops
 - provider discovery endpoint: `GET /agent/providers`
@@ -68,6 +69,36 @@ Uses the Gemini `generateContent` API with:
 - image input
 - `responseMimeType: application/json`
 - `responseJsonSchema`
+
+### OpenAI-compatible providers
+One shared adapter (`controller/app/providers/openai_compatible.py`) drives every
+provider that speaks the OpenAI Chat Completions dialect: same request shape as
+the OpenAI API path — screenshot input and a required `browser_action` tool —
+with a fallback that parses the decision from message content for endpoints
+that ignore `tool_choice`.
+
+Named profiles exist for `openrouter`, `xai`, `deepseek` and `minimax`. Anything
+else — a hosted gateway or router, a self-hosted Ollama / vLLM / LM Studio server,
+Azure OpenAI, Together, Groq, Fireworks — uses the `openai_compatible` slot with
+no code change:
+
+```env
+OPENAI_COMPATIBLE_BASE_URL=https://gateway.example.com/v1   # the URL that /chat/completions hangs off
+OPENAI_COMPATIBLE_API_KEY=...                               # sent as Authorization: Bearer
+OPENAI_COMPATIBLE_MODEL=provider/model-id
+```
+
+then pass `"provider": "openai_compatible"` in agent requests.
+`GET /agent/providers` reports whether the slot is ready and what is missing.
+
+**Adding a named profile.** The named list is kept short and vendor-neutral on
+purpose: every entry adds three settings, three compose variables and a default
+model that goes stale and has to be kept current (the compose-vs-config parity
+test exists because it once did). A profile is worth that when the provider needs
+something the generic slot cannot express — a text-only model family, as with
+`deepseek` — or when a large share of users already run it. A gateway that works
+through `openai_compatible` unchanged is documented rather than given its own
+profile; that is a statement about maintenance cost, not about the gateway.
 
 ## Example step request
 

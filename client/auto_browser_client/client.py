@@ -398,7 +398,11 @@ class AutoBrowserClient:
         import json as _json
 
         url = f"{self.base_url}/sessions/{session_id}/events"
-        with httpx.stream("GET", url, headers=self._headers, timeout=None) as r:
+        # No read timeout — the stream is meant to stay open — but a bounded
+        # connect. `timeout=None` disabled both, so an unreachable controller
+        # hung this generator forever instead of raising.
+        timeout = httpx.Timeout(None, connect=self._timeout)
+        with httpx.stream("GET", url, headers=self._headers, timeout=timeout) as r:
             if r.status_code >= 400:
                 r.read()
             self._raise(r)

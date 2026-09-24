@@ -12,8 +12,10 @@ import logging
 import time
 from collections import defaultdict
 from threading import Lock
-from typing import Optional
+from typing import Any, Optional
+from urllib.parse import urlsplit
 
+from ..url_safety import browser_equivalent_url
 from .models import CapabilityGrant, DelegationRequest, PeerRecord
 
 logger = logging.getLogger(__name__)
@@ -65,27 +67,90 @@ def _count_invocations(key: str) -> int:
 # ---------------------------------------------------------------------------
 
 
+# Argument keys whose values are URLs the delegated tool will load. Collected at
+# any depth: browser.execute_action carries its navigation target at
+# action.url, and set_cookies at cookies[].url.
+_URL_ARGUMENT_KEYS = frozenset({"url", "start_url", "urls", "cdp_url"})
+_LITERAL_BRACKETS = str.maketrans({"[": "[[]", "]": "[]]"})
+
+
+def _url_arguments(arguments: Any) -> list[str]:
+    found: list[str] = []
+
+    def walk(node: Any, key: str | None) -> None:
+        if isinstance(node, dict):
+            for child_key, child in node.items():
+                walk(child, str(child_key))
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                walk(item, key)
+        elif key in _URL_ARGUMENT_KEYS and node is not None:
+            found.append(str(node))
+
+    walk(arguments, None)
+    return found
+
+
+def _url_matches(url: str, pattern: str) -> bool:
+    """Match one URL against one allowlist pattern, component by component.
+
+    Patterns were fnmatch'd against the whole URL, where `*` also matches "/",
+    "?", "#" and "@": `https://*.example.com/*` admitted
+    `https://evil.com/.example.com/`, and `*example.com*` admitted
+    `https://evil.com/?example.com`. Now a pattern with a scheme
+    (`https://*.example.com/*`) matches scheme, authority and path separately,
+    so no wildcard reaches across them; a pattern without one
+    (`*.example.com`) matches the host alone. A URL carrying userinfo never
+    matches — `https://example.com@evil.com/` is how a host is disguised.
+    """
+    try:
+        parts = urlsplit(browser_equivalent_url(url))
+        port = parts.port
+    except ValueError:
+        return False
+    host = (parts.hostname or "").lower()
+    if not host or parts.username is not None or parts.password is not None:
+        return False
+
+    pattern = pattern.strip()
+    if "://" not in pattern:
+        return fnmatch.fnmatchcase(host, pattern.lower())
+
+    pattern_scheme, _, pattern_rest = pattern.partition("://")
+    pattern_authority, slash, pattern_path = pattern_rest.partition("/")
+    authority = f"[{host}]" if ":" in host else host  # IPv6 literals keep their brackets
+    if port is not None:
+        authority = f"{authority}:{port}"
+    path = parts.path or "/"
+    if parts.query:
+        path += f"?{parts.query}"
+    if parts.fragment:
+        path += f"#{parts.fragment}"
+    return (
+        fnmatch.fnmatchcase(parts.scheme.lower(), pattern_scheme.lower())
+        # Brackets in an authority are IPv6 delimiters, not fnmatch classes.
+        and fnmatch.fnmatchcase(authority, pattern_authority.lower().translate(_LITERAL_BRACKETS))
+        and fnmatch.fnmatchcase(path, f"/{pattern_path}" if slash else "/")
+    )
+
+
 def _check_url_allowlist(grant: CapabilityGrant, request: DelegationRequest) -> None:
     """
     Enforce url_allowlist constraint.
 
-    If the grant has an allowlist, the request's 'url' argument (if present)
-    must match at least one pattern via fnmatch. Empty allowlist = unrestricted.
+    If the grant has an allowlist, every URL the request carries — `url`,
+    `start_url`, `urls` or `cdp_url`, at any depth — must match at least one
+    pattern (see _url_matches). Empty allowlist = unrestricted.
     """
     if not grant.url_allowlist:
         return  # unrestricted
 
-    url = request.arguments.get("url") or request.arguments.get("start_url") or ""
-    if not url:
-        return  # no URL argument in request, nothing to check
-
-    for pattern in grant.url_allowlist:
-        if fnmatch.fnmatch(url, pattern):
-            return  # matched
-
-    raise PolicyDenied(
-        f"URL {url!r} not in allowlist for capability {grant.capability!r}. Allowed patterns: {grant.url_allowlist}"
-    )
+    for url in _url_arguments(request.arguments):
+        if not any(_url_matches(url, pattern) for pattern in grant.url_allowlist):
+            raise PolicyDenied(
+                f"URL {url!r} not in allowlist for capability {grant.capability!r}. "
+                f"Allowed patterns: {grant.url_allowlist}"
+            )
 
 
 def _check_expires_at(grant: CapabilityGrant) -> None:

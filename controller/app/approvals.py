@@ -13,7 +13,7 @@ from fastapi import HTTPException
 
 from .models import ApprovalKind, ApprovalRecord, ApprovalStatus, BrowserActionDecision
 from .sqlite_utils import connect_sqlite
-from .utils import UTC, utc_now
+from .utils import UTC, record_path, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ class FileApprovalStore:
         tmp_path.replace(path)
 
     def _path(self, approval_id: str) -> Path:
-        return self.root / f"{approval_id}.json"
+        return record_path(self.root, approval_id, ".json")
 
 
 class SQLiteApprovalStore:
