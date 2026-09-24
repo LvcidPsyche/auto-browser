@@ -136,9 +136,86 @@ def test_agent_can_list_and_switch_tabs_but_not_close_them(tmp_path: Path, clock
         assert client.get("/mcp/tools", headers=auth(AGENT)).json() == [
             {"name": f"browser.{name}"} for name in (
                 "session_status", "request_access", "get_request", "complete", "observe",
-                "activate_tab", "list_tabs", "click", "navigate", "press", "scroll", "type", "wait",
+                "activate_tab", "list_tabs", "open_tab",
+                "click", "go_back", "go_forward", "hover", "navigate", "press", "reload",
+                "scroll", "select_option", "type", "upload", "wait",
             )
         ]
+
+
+def test_agent_can_open_a_new_tab_but_not_close_one(tmp_path: Path, clock: list[float]) -> None:
+    active, calls = False, []
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal active
+        payload = json.loads(request.content) if request.content else None; calls.append((request.method, request.url.path, payload))
+        if request.method == "GET" and request.url.path == "/sessions": return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
+        if request.method == "POST" and request.url.path == "/sessions": active = True; return httpx.Response(200, json={"id": "owner-1"})
+        if request.method == "POST" and request.url.path == "/sessions/owner-1/tabs/open":
+            return httpx.Response(200, json={"index": 1, "url": payload.get("url")})
+        return httpx.Response(200, json={"ok": True})
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        secret = enroll(client, clock)
+        client.post("/owner/sessions", headers=auth(OWNER), json={"start_url": "https://example.com", "totp_code": fresh(secret, clock)})
+        request_id = client.post("/requests", headers=auth(AGENT), json={"purpose": "orders"}).json()["id"]
+        opened = client.post(f"/requests/{request_id}/actions/open_tab", headers=auth(AGENT), json={"arguments": {"url": "https://example.com/x"}})
+        assert opened.status_code == 200 and opened.json() == {"index": 1, "url": "https://example.com/x"}
+        assert ("POST", "/sessions/owner-1/tabs/open", {"url": "https://example.com/x", "activate": True}) in calls
+        # Omitting url opens a blank tab; activate can be turned off.
+        assert client.post(f"/requests/{request_id}/actions/open_tab", headers=auth(AGENT), json={"arguments": {"activate": False}}).status_code == 200
+        assert ("POST", "/sessions/owner-1/tabs/open", {"url": None, "activate": False}) in calls
+        assert client.post(f"/requests/{request_id}/actions/open_tab", headers=auth(AGENT), json={"arguments": {"url": 1}}).status_code == 400
+        assert client.post(f"/requests/{request_id}/actions/open_tab", headers=auth(AGENT), json={"arguments": {"activate": "yes"}}).status_code == 400
+        # Closing a tab is still never exposed to an agent.
+        assert client.post(f"/requests/{request_id}/actions/close_tab", headers=auth(AGENT), json={"arguments": {"index": 0}}).status_code == 404
+
+
+def test_agent_can_use_the_newly_forwarded_actions(tmp_path: Path, clock: list[float]) -> None:
+    """hover / select_option / reload / go_back / go_forward / upload now forward through the
+    broker like the original click/type/press/scroll/navigate/wait set -- select_option and
+    the two history actions land on the controller's dash-spelled routes."""
+    active, calls = False, []
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal active
+        payload = json.loads(request.content) if request.content else None; calls.append((request.method, request.url.path, payload))
+        if request.method == "GET" and request.url.path == "/sessions": return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
+        if request.method == "POST" and request.url.path == "/sessions": active = True; return httpx.Response(200, json={"id": "owner-1"})
+        return httpx.Response(200, json={"ok": True})
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        secret = enroll(client, clock)
+        client.post("/owner/sessions", headers=auth(OWNER), json={"start_url": "https://example.com", "totp_code": fresh(secret, clock)})
+        request_id = client.post("/requests", headers=auth(AGENT), json={"purpose": "orders"}).json()["id"]
+        assert client.post(f"/requests/{request_id}/actions/hover", headers=auth(AGENT), json={"arguments": {"x": 1, "y": 2}}).status_code == 200
+        assert ("POST", "/sessions/owner-1/actions/hover", {"x": 1, "y": 2}) in calls
+        assert client.post(f"/requests/{request_id}/actions/select_option", headers=auth(AGENT), json={"arguments": {"element_id": "op-1", "value": "v"}}).status_code == 200
+        assert ("POST", "/sessions/owner-1/actions/select-option", {"element_id": "op-1", "value": "v"}) in calls
+        assert client.post(f"/requests/{request_id}/actions/reload", headers=auth(AGENT), json={"arguments": {}}).status_code == 200
+        assert ("POST", "/sessions/owner-1/actions/reload", {}) in calls
+        assert client.post(f"/requests/{request_id}/actions/go_back", headers=auth(AGENT), json={"arguments": {}}).status_code == 200
+        assert ("POST", "/sessions/owner-1/actions/go-back", {}) in calls
+        assert client.post(f"/requests/{request_id}/actions/go_forward", headers=auth(AGENT), json={"arguments": {}}).status_code == 200
+        assert ("POST", "/sessions/owner-1/actions/go-forward", {}) in calls
+        assert client.post(f"/requests/{request_id}/actions/upload", headers=auth(AGENT), json={"arguments": {"element_id": "op-2", "file_path": "photo.jpg"}}).status_code == 200
+        assert ("POST", "/sessions/owner-1/actions/upload", {"element_id": "op-2", "file_path": "photo.jpg"}) in calls
+        # Agent-supplied approval_id stays forbidden on every one of these too, not just the original set.
+        assert client.post(f"/requests/{request_id}/actions/upload", headers=auth(AGENT), json={"arguments": {"element_id": "op-2", "file_path": "photo.jpg", "approval_id": "x"}}).status_code == 400
+
+
+def test_click_type_scroll_hover_accept_a_pace_argument(tmp_path: Path, clock: list[float]) -> None:
+    """The broker itself does not interpret `pace` -- it is just forwarded like any other
+    argument, and the controller-side tests cover its actual effect (human vs fast)."""
+    active, calls = False, []
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal active
+        payload = json.loads(request.content) if request.content else None; calls.append((request.method, request.url.path, payload))
+        if request.method == "GET" and request.url.path == "/sessions": return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
+        if request.method == "POST" and request.url.path == "/sessions": active = True; return httpx.Response(200, json={"id": "owner-1"})
+        return httpx.Response(200, json={"ok": True})
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        secret = enroll(client, clock)
+        client.post("/owner/sessions", headers=auth(OWNER), json={"start_url": "https://example.com", "totp_code": fresh(secret, clock)})
+        request_id = client.post("/requests", headers=auth(AGENT), json={"purpose": "orders"}).json()["id"]
+        assert client.post(f"/requests/{request_id}/actions/type", headers=auth(AGENT), json={"arguments": {"element_id": "op-1", "text": "hi", "pace": "fast"}}).status_code == 200
+        assert ("POST", "/sessions/owner-1/actions/type", {"element_id": "op-1", "text": "hi", "pace": "fast"}) in calls
 
 
 def test_closure_and_restart_cannot_be_adopted_or_resurrected(tmp_path: Path, clock: list[float]) -> None:

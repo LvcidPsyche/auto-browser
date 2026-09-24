@@ -66,13 +66,15 @@ class BrowserActionService:
         element_id: str | None = None,
         x: float | None = None,
         y: float | None = None,
+        pace: str = "human",
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         target = self.resolve_target(selector=selector, element_id=element_id, x=x, y=y)
+        fast = pace == "fast"
 
         async def operation() -> None:
             if target["mode"] == "coordinates":
-                await self.click_human_like(session, float(x), float(y))
+                await self.click_human_like(session, float(x), float(y), fast=fast)
             else:
                 locator = session.page.locator(target["selector"]).first
                 await locator.scroll_into_view_if_needed()
@@ -81,8 +83,9 @@ class BrowserActionService:
                     await locator.click()
                 else:
                     target["x"], target["y"] = coords
-                    await self.click_human_like(session, coords[0], coords[1])
+                    await self.click_human_like(session, coords[0], coords[1], fast=fast)
             await self.manager._settle(session.page)
+            await self.pace_delay(pace)
 
         return await self.manager._run_action(session, "click", target, operation)
 
@@ -94,13 +97,15 @@ class BrowserActionService:
         element_id: str | None = None,
         x: float | None = None,
         y: float | None = None,
+        pace: str = "human",
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         target = self.resolve_target(selector=selector, element_id=element_id, x=x, y=y)
+        fast = pace == "fast"
 
         async def operation() -> None:
             if target["mode"] == "coordinates":
-                await self.move_mouse_human_like(session, float(x), float(y))
+                await self.move_mouse_human_like(session, float(x), float(y), fast=fast)
             else:
                 locator = session.page.locator(target["selector"]).first
                 await locator.scroll_into_view_if_needed()
@@ -109,8 +114,9 @@ class BrowserActionService:
                     await locator.hover()
                 else:
                     target["x"], target["y"] = coords
-                    await self.move_mouse_human_like(session, coords[0], coords[1])
+                    await self.move_mouse_human_like(session, coords[0], coords[1], fast=fast)
             await self.manager._settle(session.page)
+            await self.pace_delay(pace)
 
         return await self.manager._run_action(session, "hover", target, operation)
 
@@ -154,6 +160,7 @@ class BrowserActionService:
         element_id: str | None = None,
         clear_first: bool = True,
         sensitive: bool = False,
+        pace: str = "human",
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         target = self.resolve_target(selector=selector, element_id=element_id)
@@ -164,6 +171,7 @@ class BrowserActionService:
             sensitive=sensitive,
             preview_chars=80,
         )
+        fast = pace == "fast"
 
         async def operation() -> None:
             locator = session.page.locator(target["selector"]).first
@@ -171,14 +179,17 @@ class BrowserActionService:
                 payload.pop("text_preview", None)
                 payload["text_redacted"] = True
             await locator.scroll_into_view_if_needed()
-            await self.focus_locator(session, locator)
+            await self.focus_locator(session, locator, fast=fast)
             if clear_first:
                 await session.page.keyboard.press("Control+a")
-                await asyncio.sleep(0.03)
+                if not fast:
+                    await asyncio.sleep(0.03)
                 await session.page.keyboard.press("Delete")
-                await asyncio.sleep(0.05)
-            await self.type_text_human_like(session.page, text)
+                if not fast:
+                    await asyncio.sleep(0.05)
+            await self.type_text_human_like(session.page, text, fast=fast)
             await self.manager._settle(session.page)
+            await self.pace_delay(pace)
 
         return await self.manager._run_action(session, "type", payload, operation)
 
@@ -212,12 +223,32 @@ class BrowserActionService:
 
         return await self.manager._run_action(session, "press", {"key": key}, operation)
 
-    async def scroll(self, session_id: str, delta_x: float, delta_y: float) -> dict[str, Any]:
+    async def scroll(
+        self, session_id: str, delta_x: float, delta_y: float, *, pace: str = "human",
+    ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
 
         async def operation() -> None:
-            await session.page.mouse.wheel(delta_x, delta_y)
+            if pace == "fast":
+                await session.page.mouse.wheel(delta_x, delta_y)
+            else:
+                # Natural scroll: a real trackpad/wheel arrives as several small
+                # ticks, not one jump -- split the requested delta into a handful
+                # of uneven chunks with a brief pause between them.
+                steps = random.randint(3, 6)
+                remaining_x, remaining_y = delta_x, delta_y
+                for step in range(steps):
+                    if step == steps - 1:
+                        chunk_x, chunk_y = remaining_x, remaining_y
+                    else:
+                        fraction = random.uniform(0.15, 0.35)
+                        chunk_x, chunk_y = remaining_x * fraction, remaining_y * fraction
+                        remaining_x -= chunk_x
+                        remaining_y -= chunk_y
+                    await session.page.mouse.wheel(chunk_x, chunk_y)
+                    await asyncio.sleep(random.uniform(0.02, 0.09))
             await self.manager._settle(session.page)
+            await self.pace_delay(pace)
 
         return await self.manager._run_action(
             session,
@@ -516,7 +547,22 @@ class BrowserActionService:
             return None
         return (float(box["x"] + box["width"] / 2), float(box["y"] + box["height"] / 2))
 
-    async def move_mouse_human_like(self, session: "BrowserSession", x: float, y: float) -> None:
+    async def pace_delay(self, pace: str) -> None:
+        """A short pause between one action and the next, mimicking the beat a real
+        person takes to look at the page before their next move. Skipped entirely
+        for `pace="fast"`, which the owner reserves for when he explicitly asks to
+        hurry (see the `pace` argument on click/type/hover/scroll)."""
+        if pace == "fast":
+            return
+        await asyncio.sleep(random.uniform(0.4, 1.5))
+
+    async def move_mouse_human_like(
+        self, session: "BrowserSession", x: float, y: float, *, fast: bool = False,
+    ) -> None:
+        if fast:
+            await session.page.mouse.move(x, y)
+            session.mouse_position = (x, y)
+            return
         start = session.mouse_position
         if start is None:
             start = (
@@ -545,7 +591,15 @@ class BrowserActionService:
             await asyncio.sleep(random.uniform(0.004, 0.018))
         session.mouse_position = (x, y)
 
-    async def click_human_like(self, session: "BrowserSession", x: float, y: float) -> None:
+    async def click_human_like(
+        self, session: "BrowserSession", x: float, y: float, *, fast: bool = False,
+    ) -> None:
+        if fast:
+            await self.move_mouse_human_like(session, x, y, fast=True)
+            await session.page.mouse.down()
+            await session.page.mouse.up()
+            session.mouse_position = (x, y)
+            return
         jitter_x = x + random.uniform(-2.5, 2.5)
         jitter_y = y + random.uniform(-2.5, 2.5)
         await self.move_mouse_human_like(session, jitter_x, jitter_y)
@@ -555,15 +609,19 @@ class BrowserActionService:
         await session.page.mouse.up()
         session.mouse_position = (jitter_x, jitter_y)
 
-    async def focus_locator(self, session: "BrowserSession", locator: Any) -> None:
+    async def focus_locator(self, session: "BrowserSession", locator: Any, *, fast: bool = False) -> None:
         coords = await self.locator_center(locator)
         if coords is None:
             await locator.click()
         else:
-            await self.click_human_like(session, coords[0], coords[1])
-        await asyncio.sleep(0.05 + random.random() * 0.1)
+            await self.click_human_like(session, coords[0], coords[1], fast=fast)
+        if not fast:
+            await asyncio.sleep(0.05 + random.random() * 0.1)
 
-    async def type_text_human_like(self, page: "Page", text: str) -> None:
+    async def type_text_human_like(self, page: "Page", text: str, *, fast: bool = False) -> None:
+        if fast:
+            await page.keyboard.type(text)
+            return
         for index, char in enumerate(text):
             await page.keyboard.type(char)
             delay_ms = random.randint(

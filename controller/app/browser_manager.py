@@ -133,6 +133,13 @@ class BrowserSession:
     # set when the caller explicitly named a saved profile.
     auto_persist_profile_name: str | None = None
     auto_persist_task: "asyncio.Task[None] | None" = None
+    # Whether the remembered ("remember me") login actually loaded into this
+    # session's context, so the calling app can tell the owner "your saved
+    # login did not load" instead of silently showing a logged-out browser --
+    # and so auto-persist can refuse to overwrite a saved profile it never
+    # actually loaded (see BrowserSessionService.create / save_auto_persist).
+    remembered_login_loaded: bool = False
+    remembered_login_error: str | None = None
 
 
 SessionCreatedHook = Callable[[str, Page], Awaitable[None]]
@@ -206,6 +213,7 @@ class BrowserManager:
             encryption_key=self.settings.auth_state_encryption_key,
             require_encryption=self.settings.require_auth_state_encryption,
             max_age_hours=self.settings.auth_state_max_age_hours,
+            history_keep=self.settings.auth_state_history_keep,
         )
         self.ocr = OCRExtractor(
             enabled=self.settings.ocr_enabled,
@@ -320,6 +328,7 @@ class BrowserManager:
         user_agent: str | None = None,
         protection_mode: str | None = None,
         totp_secret: str | None = None,
+        unattended: bool = False,
     ) -> dict[str, Any]:
         return await self.session_lifecycle.create(
             name=name,
@@ -334,6 +343,7 @@ class BrowserManager:
             user_agent=user_agent,
             protection_mode=protection_mode,
             totp_secret=totp_secret,
+            unattended=unattended,
         )
 
     async def get_session(self, session_id: str) -> BrowserSession:
@@ -513,8 +523,11 @@ class BrowserManager:
         element_id: str | None = None,
         x: float | None = None,
         y: float | None = None,
+        pace: str = "human",
     ) -> dict[str, Any]:
-        return await self.actions.click(session_id, selector=selector, element_id=element_id, x=x, y=y)
+        return await self.actions.click(
+            session_id, selector=selector, element_id=element_id, x=x, y=y, pace=pace,
+        )
 
     async def hover(
         self,
@@ -524,8 +537,11 @@ class BrowserManager:
         element_id: str | None = None,
         x: float | None = None,
         y: float | None = None,
+        pace: str = "human",
     ) -> dict[str, Any]:
-        return await self.actions.hover(session_id, selector=selector, element_id=element_id, x=x, y=y)
+        return await self.actions.hover(
+            session_id, selector=selector, element_id=element_id, x=x, y=y, pace=pace,
+        )
 
     async def select_option(
         self,
@@ -555,6 +571,7 @@ class BrowserManager:
         element_id: str | None = None,
         clear_first: bool = True,
         sensitive: bool = False,
+        pace: str = "human",
     ) -> dict[str, Any]:
         return await self.actions.type(
             session_id,
@@ -563,6 +580,7 @@ class BrowserManager:
             element_id=element_id,
             clear_first=clear_first,
             sensitive=sensitive,
+            pace=pace,
         )
 
     async def type_focused(self, session_id: str, *, text: str) -> dict[str, Any]:
@@ -571,8 +589,10 @@ class BrowserManager:
     async def press(self, session_id: str, key: str) -> dict[str, Any]:
         return await self.actions.press(session_id, key)
 
-    async def scroll(self, session_id: str, delta_x: float, delta_y: float) -> dict[str, Any]:
-        return await self.actions.scroll(session_id, delta_x, delta_y)
+    async def scroll(
+        self, session_id: str, delta_x: float, delta_y: float, *, pace: str = "human",
+    ) -> dict[str, Any]:
+        return await self.actions.scroll(session_id, delta_x, delta_y, pace=pace)
 
     async def wait(self, session_id: str, wait_ms: int) -> dict[str, Any]:
         return await self.actions.wait(session_id, wait_ms)

@@ -144,6 +144,7 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                 element_id=payload.element_id,
                 x=payload.x,
                 y=payload.y,
+                pace=payload.pace,
             )
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid request") from None
@@ -164,6 +165,7 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                 text=payload.text,
                 clear_first=payload.clear_first,
                 sensitive=payload.sensitive,
+                pace=payload.pace,
             )
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid request") from None
@@ -201,7 +203,7 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
     @router.post("/sessions/{session_id}/actions/scroll")
     async def scroll(session_id: str, payload: ScrollRequest) -> dict[str, Any]:
         try:
-            return await manager.scroll(session_id, payload.delta_x, payload.delta_y)
+            return await manager.scroll(session_id, payload.delta_x, payload.delta_y, pace=payload.pace)
         except PermissionError:
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except Exception:
@@ -255,6 +257,7 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                 element_id=payload.element_id,
                 x=payload.x,
                 y=payload.y,
+                pace=payload.pace,
             )
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid request") from None

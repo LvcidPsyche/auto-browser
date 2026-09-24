@@ -200,6 +200,32 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(back_result["action"], "go_back")
         self.assertEqual(forward_result["action"], "go_forward")
 
+    async def test_pace_fast_skips_artificial_delays_and_human_is_the_default(self) -> None:
+        """`pace="fast"` (the owner explicitly asking to hurry) must add no artificial sleep and
+        type the whole string in one shot; the default `pace="human"` keeps the per-character
+        typing delay, the mouse-move curve, and adds one short pause per action -- see
+        BrowserActionService.pace_delay."""
+        with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            await self.manager.click("session-1", selector="#submit", pace="fast")
+            await self.manager.hover("session-1", selector="#menu", pace="fast")
+            await self.manager.scroll("session-1", 0, 300, pace="fast")
+        self.assertEqual(sleep_mock.await_count, 0)
+        self.session.page.keyboard.type.reset_mock()
+        with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):
+            await self.manager.type("session-1", selector="#name", text="hello", pace="fast")
+        self.session.page.keyboard.type.assert_awaited_once_with("hello")
+
+        with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            await self.manager.click("session-1", selector="#submit")
+            await self.manager.hover("session-1", selector="#menu")
+            await self.manager.scroll("session-1", 0, 300)
+        self.assertGreater(sleep_mock.await_count, 0)
+        self.session.page.keyboard.type.reset_mock()
+        with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):
+            await self.manager.type("session-1", selector="#name", text="hi")
+        # Human pace types character by character, not the whole string in one call.
+        self.assertEqual(self.session.page.keyboard.type.await_count, 2)
+
     async def test_type_focused_inserts_text_without_a_target(self) -> None:
         with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):
             result = await self.manager.type_focused("session-1", text="مرحبا")

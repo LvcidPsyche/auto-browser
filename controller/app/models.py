@@ -89,11 +89,15 @@ class CreateSessionRequest(StrictInputModel):
         return self
 
 
+Pace = Literal["human", "fast"]
+
+
 class ClickRequest(StrictInputModel):
     selector: str | None = Field(default=None, min_length=1, max_length=2000)
     element_id: str | None = Field(default=None, min_length=1, max_length=500)
     x: float | None = None
     y: float | None = None
+    pace: Pace = "human"
 
     @model_validator(mode="after")
     def validate_target(self) -> "ClickRequest":
@@ -109,6 +113,7 @@ class TypeRequest(StrictInputModel):
     text: str = Field(min_length=1, max_length=5000)
     clear_first: bool = True
     sensitive: bool = False
+    pace: Pace = "human"
 
     @model_validator(mode="after")
     def validate_target(self) -> "TypeRequest":
@@ -128,6 +133,7 @@ class PressRequest(StrictInputModel):
 class ScrollRequest(StrictInputModel):
     delta_x: float = 0
     delta_y: float = 600
+    pace: Pace = "human"
 
 
 class SelectOptionRequest(StrictInputModel):
@@ -151,6 +157,7 @@ class HoverRequest(StrictInputModel):
     element_id: str | None = Field(default=None, min_length=1, max_length=500)
     x: float | None = None
     y: float | None = None
+    pace: Pace = "human"
 
     @model_validator(mode="after")
     def validate_target(self) -> "HoverRequest":
@@ -540,6 +547,8 @@ class SessionRecord(BaseModel):
     proxy_persona: str | None = None
     protection_mode: ProtectionMode = "normal"
     witness_remote: WitnessRemoteState = Field(default_factory=WitnessRemoteState)
+    remembered_login_loaded: bool = False
+    remembered_login_error: str | None = None
 
 
 class AgentJobRecord(BaseModel):

@@ -33,14 +33,26 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 from websockets.asyncio.client import connect as ws_connect
 
-ALLOWED_ACTIONS = frozenset({"click", "type", "press", "scroll", "navigate", "wait"})
-# Tab visibility/switching lives at the controller's own REST paths (/tabs,
-# /tabs/activate), not the generic /sessions/{id}/actions/{operation} used by
+ALLOWED_ACTIONS = frozenset({
+    "click", "type", "press", "scroll", "navigate", "wait",
+    "hover", "select_option", "reload", "go_back", "go_forward", "upload",
+})
+# The controller's REST paths use a dash for a couple of these operations while every
+# tool-facing name in this broker (and the MCP tool list) uses an underscore -- translate
+# here so ALLOWED_ACTIONS can keep the MCP-friendly spelling everywhere else.
+_ACTION_PATH_OVERRIDES = {
+    "select_option": "select-option",
+    "go_back": "go-back",
+    "go_forward": "go-forward",
+}
+# Tab visibility/switching/opening lives at the controller's own REST paths (/tabs,
+# /tabs/activate, /tabs/open), not the generic /sessions/{id}/actions/{operation} used by
 # ALLOWED_ACTIONS, so `operate()` special-cases them the same way it does "observe".
 # Without these an agent can only ever see/act on whichever single tab the controller
 # happens to be tracking -- including a tab it never opened and the owner may have
-# switched away from -- with no way to find or reach any other open tab.
-TAB_OPERATIONS = frozenset({"list_tabs", "activate_tab"})
+# switched away from -- with no way to find or reach any other open tab, or to open a link
+# in a new one. Closing a tab is deliberately NOT here -- only the owner manages that.
+TAB_OPERATIONS = frozenset({"list_tabs", "activate_tab", "open_tab"})
 TOTP_PERIOD = 30
 TOTP_FAILURE_LIMIT = 5
 TOTP_BLOCK_SECONDS = 300
@@ -754,10 +766,24 @@ def create_app(
                     if set(arguments) != {"index"} or not isinstance(index, int) or isinstance(index, bool):
                         raise HTTPException(400, "activate_tab requires an integer 'index'")
                     return await upstream("POST", f"/sessions/{grant.session_id}/tabs/activate", arguments)
+                if operation == "open_tab":
+                    if set(arguments) - {"url", "activate"}:
+                        raise HTTPException(400, "open_tab takes only 'url' and 'activate'")
+                    url = arguments.get("url")
+                    activate = arguments.get("activate", True)
+                    if url is not None and not isinstance(url, str):
+                        raise HTTPException(400, "open_tab 'url' must be a string")
+                    if not isinstance(activate, bool):
+                        raise HTTPException(400, "open_tab 'activate' must be a boolean")
+                    return await upstream(
+                        "POST", f"/sessions/{grant.session_id}/tabs/open",
+                        {"url": url, "activate": activate},
+                    )
                 if operation in ALLOWED_ACTIONS:
                     if "approval_id" in arguments:
                         raise HTTPException(400, "Built-in sensitive approvals are owner-only")
-                    return await upstream("POST", f"/sessions/{grant.session_id}/actions/{operation}", arguments)
+                    path = _ACTION_PATH_OVERRIDES.get(operation, operation)
+                    return await upstream("POST", f"/sessions/{grant.session_id}/actions/{path}", arguments)
                 raise HTTPException(404, "Tool unavailable")
 
     async def revoke_locked(
