@@ -244,6 +244,37 @@ def install_controller_http_middleware(
         )
         return response
 
+    # Installed last, so it is outermost and also covers the 400/401/429
+    # responses the middleware above short-circuits with.
+    install_security_headers(application)
+
+
+_BASELINE_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+}
+
+# /artifacts serves files the *browser* produced, including downloads whose
+# name and bytes a visited site chooses. Served from the controller's origin, a
+# downloaded .html or .svg ran script there — and on a tokenless loopback
+# controller that script could call the whole API, auth-profile export
+# included. `sandbox` without allow-scripts gives the document an opaque origin
+# and no script; images and media still render when opened directly.
+_ARTIFACT_CSP = "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+
+
+def install_security_headers(application: FastAPI) -> None:
+    @application.middleware("http")
+    async def apply_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        for name, value in _BASELINE_SECURITY_HEADERS.items():
+            response.headers.setdefault(name, value)
+        path = _request_path(request)
+        if path == "/artifacts" or path.startswith("/artifacts/"):
+            response.headers["Content-Security-Policy"] = _ARTIFACT_CSP
+        return response
+
 
 def _request_path(request: Request) -> str:
     return str(request.scope.get("path") or "")
