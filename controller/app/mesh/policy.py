@@ -15,6 +15,7 @@ from threading import Lock
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
+from ..url_safety import browser_equivalent_url
 from .models import CapabilityGrant, DelegationRequest, PeerRecord
 
 logger = logging.getLogger(__name__)
@@ -102,7 +103,7 @@ def _url_matches(url: str, pattern: str) -> bool:
     matches — `https://example.com@evil.com/` is how a host is disguised.
     """
     try:
-        parts = urlsplit(url.strip())
+        parts = urlsplit(browser_equivalent_url(url))
         port = parts.port
     except ValueError:
         return False
