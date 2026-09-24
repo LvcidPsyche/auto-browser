@@ -945,13 +945,40 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.isError)
 
     async def test_omitted_session_id_resolves_to_single_live_session(self) -> None:
-        self.manager.list_sessions = AsyncMock(return_value=[{"id": "session-42"}])
+        self.manager.list_sessions = AsyncMock(return_value=[{"id": "session-42", "live": True}])
 
         response = await self.full_gateway.call_tool(McpToolCallRequest(name="browser.observe", arguments={}))
 
         self.assertFalse(response.isError)
         self.manager.observe.assert_awaited_once()
         self.assertEqual(self.manager.observe.await_args.args[0], "session-42")
+
+    async def test_omitted_session_id_ignores_closed_and_interrupted_records(self) -> None:
+        # list_sessions() merges persisted records with live sessions. A closed
+        # record used to be targeted (or make the call "ambiguous"), so after
+        # one create -> close cycle the omitted-session convenience broke.
+        self.manager.list_sessions = AsyncMock(
+            return_value=[
+                {"id": "session-new", "status": "active", "live": True},
+                {"id": "session-old", "status": "closed", "live": False},
+                {"id": "session-crashed", "status": "interrupted", "live": False},
+            ]
+        )
+
+        response = await self.full_gateway.call_tool(McpToolCallRequest(name="browser.observe", arguments={}))
+
+        self.assertFalse(response.isError)
+        self.assertEqual(self.manager.observe.await_args.args[0], "session-new")
+
+    async def test_only_closed_records_count_as_no_live_session(self) -> None:
+        self.manager.list_sessions = AsyncMock(return_value=[{"id": "session-old", "status": "closed", "live": False}])
+        self.manager.create_session = AsyncMock(return_value={"id": "session-new"})
+
+        response = await self.full_gateway.call_tool(McpToolCallRequest(name="browser.observe", arguments={}))
+
+        self.assertFalse(response.isError)
+        self.manager.create_session.assert_awaited_once()
+        self.assertEqual(self.manager.observe.await_args.args[0], "session-new")
 
     async def test_omitted_session_id_creates_session_for_observe_when_none_live(self) -> None:
         self.manager.list_sessions = AsyncMock(return_value=[])
@@ -974,7 +1001,13 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.manager.create_session.assert_not_awaited()
 
     async def test_omitted_session_id_errors_when_multiple_sessions_live(self) -> None:
-        self.manager.list_sessions = AsyncMock(return_value=[{"id": "session-a"}, {"id": "session-b"}])
+        self.manager.list_sessions = AsyncMock(
+            return_value=[
+                {"id": "session-a", "live": True},
+                {"id": "session-b", "live": True},
+                {"id": "session-closed", "live": False},
+            ]
+        )
 
         response = await self.full_gateway.call_tool(McpToolCallRequest(name="browser.observe", arguments={}))
 
@@ -982,6 +1015,8 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.structuredContent.get("code"), "ambiguous_session")
         self.assertIn("session-a", response.content[0].text)
         self.assertIn("session-b", response.content[0].text)
+        # The message says "live"; a closed session must not be listed as one.
+        self.assertNotIn("session-closed", response.content[0].text)
 
     async def test_explicit_session_id_skips_implicit_resolution(self) -> None:
         self.manager.list_sessions = AsyncMock(return_value=[])

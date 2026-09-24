@@ -258,7 +258,13 @@ class McpToolGateway:
         """
         if not isinstance(arguments, SessionIdInput) or arguments.session_id:
             return arguments
-        sessions = await self.manager.list_sessions()
+        # list_sessions() also returns persisted records of closed and
+        # interrupted sessions. Counting those meant that after one session was
+        # closed, an omitted session_id either targeted the closed session or
+        # was reported "ambiguous" — with MAX_SESSIONS=1, every create → close →
+        # create cycle broke the convenience for good. Only a live session can
+        # be acted on, so only live sessions are candidates.
+        sessions = [item for item in await self.manager.list_sessions() if item.get("live") is True]
         if len(sessions) == 1:
             return arguments.model_copy(update={"session_id": sessions[0]["id"]})
         if not sessions:
