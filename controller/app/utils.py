@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Coroutine
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -15,6 +17,22 @@ UTC = timezone.utc
 # garbage-collected before it finishes ("Task was destroyed but it is pending").
 # Tasks remove themselves from this set on completion.
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+
+
+_RECORD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def record_path(root: Path, record_id: str, suffix: str) -> Path:
+    """The file a file-backed store keeps ``record_id`` in, for one plain name only.
+
+    Record ids reach the stores from MCP tool arguments, which — unlike REST path
+    segments — may contain "/" and "..". Joined into the store root unchecked, an
+    id such as "../audit/events" read a file outside it. Raised as KeyError
+    because, to every caller, an id that cannot name a record names no record.
+    """
+    if not isinstance(record_id, str) or not _RECORD_ID.fullmatch(record_id):
+        raise KeyError(record_id)
+    return root / f"{record_id}{suffix}"
 
 
 def utc_now() -> str:
