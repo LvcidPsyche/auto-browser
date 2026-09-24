@@ -283,12 +283,33 @@ ACTIVE_ELEMENT_SCRIPT = _with_element_naming(
 """
 )
 
+# Page text as a model should read it: line breaks kept, and innerText's tab
+# between table cells, with runs of spaces and blank lines collapsed. Squashing
+# every run of whitespace to one space ran a table's cells, a list's items and
+# separate paragraphs together into one line. Shared by the observation's
+# text_excerpt and browser.get_html(text_only=true) so both read the same.
+_READABLE_TEXT_JS = r"""
+  const readable = (value) =>
+    String(value || '')
+      .replace(/\r\n?/g, '\n')
+      .replace(/[^\S\n\t]+/g, ' ')
+      .replace(/ *([\n\t]) */g, '$1')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+"""
+
+PAGE_TEXT_SCRIPT = (
+    "() => {\n" + _READABLE_TEXT_JS + "  return readable(document.body ? document.body.innerText : '');\n}"
+)
+
 PAGE_SUMMARY_SCRIPT = _with_element_naming(
     r"""
 (textLimit) => {
 /*__ELEMENT_NAMING__*/
   const squash = (value, maxLength = textLimit) =>
     String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
+
+/*__READABLE_TEXT__*/
 
   const headings = Array.from(document.querySelectorAll('h1,h2,h3'))
     .slice(0, 8)
@@ -315,7 +336,7 @@ PAGE_SUMMARY_SCRIPT = _with_element_naming(
     }));
 
   return {
-    text_excerpt: squash(document.body?.innerText || '', textLimit),
+    text_excerpt: readable(document.body?.innerText).slice(0, textLimit),
     dom_outline: {
       headings,
       forms,
@@ -329,7 +350,7 @@ PAGE_SUMMARY_SCRIPT = _with_element_naming(
   };
 }
 """
-)
+).replace("/*__READABLE_TEXT__*/", _READABLE_TEXT_JS)
 
 # Feed/profile extraction helpers
 EXTRACT_POSTS_SCRIPT = r"""

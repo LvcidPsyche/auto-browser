@@ -39,9 +39,10 @@ def register(registry, gateway):
         ToolSpec(
             name="browser.get_html",
             description=(
-                "Get the HTML source of the current page. Returns the full "
-                "serialized DOM, not just the visible viewport. "
-                "Set text_only=true to strip tags and return plain text instead. "
+                "Read the current page: its serialized DOM (the whole document, not just the "
+                "viewport), or with text_only=true its visible text — the cheapest way to read "
+                "a page's content. Returns up to max_chars (default 20,000) from offset; when "
+                "truncated is true, call again with offset=next_offset for the rest. "
                 "(full_page is deprecated and ignored.)"
             ),
             input_model=GetPageHtmlInput,

@@ -13,6 +13,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..action_errors import BrowserActionError, SessionNotFoundError
 from ..approvals import ApprovalRequiredError
+from ..browser_scripts import PAGE_TEXT_SCRIPT
 from ..models import (
     BrowserActionDecision,
     McpImageContent,
@@ -681,12 +682,26 @@ class McpToolGateway:
         return {"session_id": payload.session_id, "selector": payload.selector, "state": payload.state}
 
     async def _get_html(self, payload: GetPageHtmlInput) -> dict[str, Any]:
+        # Bounded and paged: a page's serialized DOM is routinely megabytes, and
+        # returned whole it overran the context of the model that asked for it.
         session = await self.manager.get_session(payload.session_id)
         if payload.text_only:
-            text = await session.page.evaluate("() => document.body ? document.body.innerText : ''")
-            return {"session_id": payload.session_id, "content": text, "type": "text"}
-        html = await session.page.content()
-        return {"session_id": payload.session_id, "content": html, "type": "html"}
+            content = await session.page.evaluate(PAGE_TEXT_SCRIPT)
+            kind = "text"
+        else:
+            content = await session.page.content()
+            kind = "html"
+        end = payload.offset + payload.max_chars
+        truncated = end < len(content)
+        return {
+            "session_id": payload.session_id,
+            "type": kind,
+            "content": content[payload.offset : end],
+            "offset": payload.offset,
+            "total_chars": len(content),
+            "truncated": truncated,
+            "next_offset": end if truncated else None,
+        }
 
     async def _find_elements(self, payload: FindElementsInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)

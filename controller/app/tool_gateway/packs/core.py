@@ -93,11 +93,12 @@ def register(registry, gateway):
             name="browser.observe",
             description=(
                 "Capture the current browser observation: interactables, tabs, console, and a "
-                "perception summary. Presets: 'text' — no screenshot, no OCR, just the "
-                "accessibility tree and extracted text; the cheapest choice for reading a page's "
-                "content. 'fast' — screenshot only, returned as an image, no text/accessibility "
-                "extraction; for vision models. 'normal' (default) — screenshot + OCR + "
-                "accessibility tree. 'rich' — normal with extended text and DOM outline."
+                "perception summary. Presets: 'text' — no screenshot or OCR: interactables, "
+                "accessibility tree and the first 2,000 characters of page text; for text-only "
+                "models. 'fast' — screenshot only, returned as an image, no text/accessibility "
+                "extraction; for vision models. 'normal' (default) — text plus a screenshot URL "
+                "and OCR. 'rich' — normal with twice the interactables and 4,000 characters of "
+                "text. To read a whole page, use browser.get_html with text_only=true."
             ),
             input_model=ObserveInput,
             handler=gateway._observe,

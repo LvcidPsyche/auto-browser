@@ -39,7 +39,7 @@ Works with:
 
 ## Release Highlights (v1.5.0)
 
-- **Read a page without paying for pixels.** The new `text` observation preset returns the accessibility outline, extracted text, and interactables with no screenshot and no OCR — the cheapest way for an agent to read a page. Set `PERCEPTION_PRESET_DEFAULT=text` to make it a deployment-wide default.
+- **Observe a page without paying for pixels.** The new `text` observation preset returns the accessibility outline, the first 2,000 characters of page text, and interactables with no screenshot and no OCR — the observation for text-only models. Set `PERCEPTION_PRESET_DEFAULT=text` to make it a deployment-wide default. To read a whole page, `browser.get_html` with `text_only=true` returns its visible text, paged.
 - **Find a string on the page in one call.** `browser.find_elements` now takes a `query` (plain text or regex, case-insensitive) instead of a CSS selector and returns each match with surrounding context — no full observe needed to check one value.
 - **Errors agents can act on.** Invalid tool arguments report field-level details, handler messages pass through instead of a generic failure, and the MCP bridge's cold-start error now says exactly how to start the controller.
 - **Any OpenAI-compatible model can drive the browser.** A single generic adapter serves every model reachable over an OpenAI `/chat/completions` endpoint. New providers: `openrouter` (one key → ~every frontier model), `xai` (Grok), `deepseek`, `minimax`, and `openai_compatible` (custom base URL for self-hosted Ollama / vLLM / LM Studio, Azure, Together, Groq, Fireworks, …). Vision + function-calling with a content-parse fallback for endpoints that ignore `tool_choice`.

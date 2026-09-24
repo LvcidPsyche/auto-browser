@@ -575,4 +575,13 @@ class GetPageHtmlInput(SessionIdInput):
         description="Deprecated and ignored — get_html always returns the full page.",
         deprecated=True,
     )
-    text_only: bool = False
+    text_only: bool = Field(
+        default=False,
+        description="Return the page's visible text instead of HTML: line breaks kept, table cells tab-separated.",
+    )
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="Character to start from. A result with truncated=true gives the next_offset to continue from.",
+    )
+    max_chars: int = Field(default=20_000, ge=1_000, le=1_000_000, description="Most characters to return.")
