@@ -316,6 +316,15 @@ class ForkSessionInput(SessionIdInput):
 
 class EvalJsInput(SessionIdInput):
     expression: str = Field(min_length=1, max_length=50000)
+    approval_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=120,
+        description=(
+            "ID of the approval granted for exactly this expression. The first call returns "
+            "status approval_required with an approval_id; call again with it once an operator approves."
+        ),
+    )
 
 
 class WaitForSelectorInput(SessionIdInput):

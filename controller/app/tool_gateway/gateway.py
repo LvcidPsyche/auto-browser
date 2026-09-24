@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -101,6 +102,24 @@ IMPLICIT_SESSION_CREATE_TOOLS = frozenset(
 )
 
 
+# Characters of a governed tool call's arguments shown to the approving operator.
+_APPROVAL_PREVIEW_CHARS = 600
+# Argument names whose values are credentials (cookie and storage values, and
+# the usual suspects) — never copied into an approval's human-readable reason.
+_PREVIEW_REDACTED_KEYS = frozenset({"value", "cookies", "password", "token", "secret"})
+
+
+def _redact_for_preview(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: "<redacted>" if key in _PREVIEW_REDACTED_KEYS else _redact_for_preview(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_for_preview(item) for item in value]
+    return value
+
+
 class McpToolGateway:
     def __init__(
         self,
@@ -177,8 +196,13 @@ class McpToolGateway:
             raw_arguments = dict(payload.arguments or {})
             policy_profile = self._pop_policy_profile(spec, raw_arguments)
             policy_approval_id = self._pop_policy_approval_id(spec, raw_arguments)
-            if spec.name == "browser.eval_js" and policy_profile != "governed":
-                return self._error_response("browser.eval_js requires workflow_profile=governed")
+            if spec.name == "browser.eval_js":
+                # Arbitrary JavaScript in an authenticated page is never ungoverned.
+                # This used to be an error unless the caller passed
+                # workflow_profile=governed — a parameter the tool's schema never
+                # advertised — so the tool in the default set could only fail.
+                # The server now routes every call through approval itself.
+                policy_profile = "governed"
             if (
                 spec.name == "harness.start_convergence"
                 and raw_arguments.get("session_id")
@@ -334,17 +358,43 @@ class McpToolGateway:
         if not session_id:
             return None
         decision = getattr(arguments, "action", None)
+        reason = None
         if not isinstance(decision, BrowserActionDecision):
-            decision = BrowserActionDecision(
-                action="request_human_takeover",
-                reason=f"Approve governed MCP tool call {spec.name}",
-                risk_category=spec.governed_kind if spec.governed_kind != "dynamic" else "write",
-            )
+            decision, reason = self._governed_call_decision(spec, arguments)
         return await self.manager.require_governed_approval(
             session_id,
             decision,
             approval_id=approval_id,
+            reason=reason,
         )
+
+    @staticmethod
+    def _governed_call_decision(spec: ToolSpec, arguments: BaseModel) -> tuple[BrowserActionDecision, str]:
+        """Stand-in decision for approving a governed tool call that is not a browser action.
+
+        An approval has to be for *this* call. The stand-in used to carry only the
+        tool name, and approval matching ignores the reason, so one approval
+        authorised any arguments: an operator approving browser.eval_js approved
+        code they never saw, and it covered whatever expression came next. The
+        canonical arguments are now hashed into ``text``, which matching compares,
+        and previewed in the reason the operator reads. Credential-bearing fields
+        are left out of the preview (approvals are stored and sent to webhooks);
+        the hash still covers them.
+        """
+        args = arguments.model_dump(mode="json", exclude={"session_id", "approval_id"}, exclude_none=True)
+        canonical = json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        preview = json.dumps(_redact_for_preview(args), sort_keys=True, ensure_ascii=False)
+        if len(preview) > _APPROVAL_PREVIEW_CHARS:
+            preview = preview[:_APPROVAL_PREVIEW_CHARS] + "…"
+        reason = f"Approve {spec.name} with {preview}"
+        decision = BrowserActionDecision(
+            action="request_human_takeover",
+            reason=reason[:1000],
+            risk_category=spec.governed_kind if spec.governed_kind != "dynamic" else "write",
+            text=f"{spec.name} sha256:{digest}",
+        )
+        return decision, reason
 
     async def _create_session(self, payload: CreateSessionRequest) -> dict[str, Any]:
         return await self.manager.create_session(

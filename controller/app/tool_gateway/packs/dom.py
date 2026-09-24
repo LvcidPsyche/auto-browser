@@ -17,9 +17,10 @@ def register(registry, gateway):
         ToolSpec(
             name="browser.eval_js",
             description=(
-                "Execute a JavaScript expression in the current page context "
-                "and return the result. Use for DOM queries, value extraction, "
-                "or lightweight scripting that has no dedicated tool."
+                "Execute a JavaScript expression in the current page context and return the result. "
+                "Every call needs operator approval for that exact expression: the first call returns "
+                "status approval_required with an approval_id; retry with approval_id once it is approved. "
+                "Prefer find_elements, get_html or observe for reading the page — they need no approval."
             ),
             input_model=EvalJsInput,
             handler=gateway._eval_js,

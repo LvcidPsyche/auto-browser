@@ -421,16 +421,82 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("harness service unavailable", response.structuredContent["error"])
         self.assertIn("HARNESS_*", response.structuredContent["error"])
 
-    async def test_eval_js_requires_governed_profile(self) -> None:
+    def _pending_approval(self, approval_id: str) -> ApprovalRecord:
+        return ApprovalRecord(
+            id=approval_id,
+            session_id="session-1",
+            kind="write",
+            status="pending",
+            created_at="2026-05-07T00:00:00Z",
+            updated_at="2026-05-07T00:00:00Z",
+            reason="pending",
+            action=BrowserActionDecision(action="request_human_takeover", reason="pending", risk_category="write"),
+        )
+
+    async def test_eval_js_always_goes_through_approval(self) -> None:
+        # It used to fail unless the caller passed workflow_profile=governed, a
+        # parameter its schema never advertised. The server now governs it itself.
+        self.manager.require_governed_approval = AsyncMock(
+            side_effect=ApprovalRequiredError(self._pending_approval("approval-js-1"))
+        )
+
         response = await self.full_gateway.call_tool(
             McpToolCallRequest(
                 name="browser.eval_js",
-                arguments={"session_id": "session-1", "expression": "() => 1"},
+                arguments={"session_id": "session-1", "expression": "() => document.title"},
             )
         )
 
         self.assertTrue(response.isError)
-        self.assertIn("requires workflow_profile=governed", response.structuredContent["error"])
+        self.assertEqual(response.structuredContent["status"], "approval_required")
+        self.manager.require_governed_approval.assert_awaited_once()
+        decision = self.manager.require_governed_approval.await_args.args[1]
+        reason = self.manager.require_governed_approval.await_args.kwargs["reason"]
+        # The operator sees the code they are approving.
+        self.assertIn("document.title", reason)
+        self.assertIn("browser.eval_js", reason)
+        self.assertTrue(decision.text.startswith("browser.eval_js sha256:"))
+
+    async def test_an_approval_is_bound_to_the_exact_arguments(self) -> None:
+        # Approval matching compares the decision but not its reason. With only
+        # the tool name in it, one approval authorised any expression.
+        self.manager.require_governed_approval = AsyncMock(
+            side_effect=ApprovalRequiredError(self._pending_approval("approval-js-2"))
+        )
+        decisions = []
+        for expression in ("() => 1", "() => 1", "() => document.cookie"):
+            await self.full_gateway.call_tool(
+                McpToolCallRequest(
+                    name="browser.eval_js", arguments={"session_id": "session-1", "expression": expression}
+                )
+            )
+            decisions.append(self.manager.require_governed_approval.await_args.args[1])
+
+        exclude = {"reason", "confidence"}
+        self.assertEqual(decisions[0].model_dump(exclude=exclude), decisions[1].model_dump(exclude=exclude))
+        self.assertNotEqual(decisions[0].model_dump(exclude=exclude), decisions[2].model_dump(exclude=exclude))
+
+    async def test_credential_values_stay_out_of_the_approval_preview(self) -> None:
+        self.manager.require_governed_approval = AsyncMock(
+            side_effect=ApprovalRequiredError(self._pending_approval("approval-cookie-1"))
+        )
+
+        await self.full_gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.set_cookies",
+                arguments={
+                    "session_id": "session-1",
+                    "workflow_profile": "governed",
+                    "cookies": [{"name": "sid", "value": "super-secret-session", "url": "https://example.com"}],
+                },
+            )
+        )
+
+        reason = self.manager.require_governed_approval.await_args.kwargs["reason"]
+        decision = self.manager.require_governed_approval.await_args.args[1]
+        self.assertIn("browser.set_cookies", reason)
+        self.assertNotIn("super-secret-session", reason)
+        self.assertNotIn("super-secret-session", decision.model_dump_json())
 
     async def test_live_harness_start_requires_governed_profile(self) -> None:
         response = await self.full_gateway.call_tool(

@@ -417,8 +417,11 @@ class BrowserManager:
         decision: BrowserActionDecision,
         *,
         approval_id: str | None,
+        reason: str | None = None,
     ):
-        return await self.actions.require_governed_approval(session_id, decision, approval_id=approval_id)
+        return await self.actions.require_governed_approval(
+            session_id, decision, approval_id=approval_id, reason=reason
+        )
 
     # ── Observation ──────────────────────────────────────────────────────────
 

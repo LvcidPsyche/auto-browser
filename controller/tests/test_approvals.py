@@ -208,3 +208,49 @@ class ApprovalStoreSQLiteTests(unittest.IsolatedAsyncioTestCase):
 
             with self.assertRaises(PermissionError):
                 await store.mark_executed(approval.id)
+
+
+class GovernedToolCallBindingTests(unittest.IsolatedAsyncioTestCase):
+    """An approval for one governed tool call must not authorise a different one.
+
+    The gateway's stand-in decision for tool calls carried only the tool name,
+    and approval matching ignores the reason, so an approval granted for one
+    browser.eval_js expression was accepted for any other.
+    """
+
+    async def test_an_approved_expression_does_not_authorise_another(self) -> None:
+        from app.tool_gateway.gateway import McpToolGateway
+        from app.tool_gateway.registry import ToolSpec
+        from app.tool_inputs import EvalJsInput
+
+        spec = ToolSpec(
+            name="browser.eval_js",
+            description="",
+            input_model=EvalJsInput,
+            handler=AsyncMock(),
+            governed_kind="write",
+        )
+        approved, _ = McpToolGateway._governed_call_decision(
+            spec, EvalJsInput(session_id="session-1", expression="() => document.title")
+        )
+        other, _ = McpToolGateway._governed_call_decision(
+            spec, EvalJsInput(session_id="session-1", expression="() => document.cookie")
+        )
+        same, _ = McpToolGateway._governed_call_decision(
+            spec, EvalJsInput(session_id="session-1", expression="() => document.title", approval_id="x")
+        )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = ApprovalStore(Path(tempdir))
+            await store.startup()
+            approval = await store.create_or_reuse_pending(
+                session_id="session-1", kind="write", reason=approved.reason, action=approved
+            )
+            await store.approve(approval.id)
+
+            with self.assertRaises(PermissionError):
+                await store.require_approved(
+                    approval_id=approval.id, session_id="session-1", kind="write", action=other
+                )
+            # The same call (the approval_id itself is not part of its identity) is accepted.
+            await store.require_approved(approval_id=approval.id, session_id="session-1", kind="write", action=same)

@@ -394,11 +394,15 @@ class BrowserActionService:
         decision: BrowserActionDecision,
         *,
         approval_id: str | None,
+        reason: str | None = None,
     ):
         kind = self.governed_approval_kind_for_decision(decision)
         if kind is None:
             return None
-        reason = (
+        # A caller that knows what is being approved (the MCP gateway, for tool
+        # calls that are not browser actions) supplies the reason the operator
+        # reads; the generic sentence named the stand-in action instead.
+        reason = reason or (
             "Governed workflow requires operator approval before executing "
             f"{decision.risk_category or 'write'} action {decision.action!r}."
         )
