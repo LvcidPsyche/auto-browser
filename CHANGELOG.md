@@ -4,6 +4,109 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+Findings from a scan-and-review pass over the controller, client and deployment
+files. The automated scanners (bandit, semgrep, pip-audit, npm audit,
+shellcheck) turned up nothing that survived triage; everything below came from
+reading the code and was confirmed with a reproduction before it was fixed.
+
+**If you run the controller directly without a token and reach it by a
+non-loopback name, read the Host-header entry before upgrading** — that
+configuration now answers `400` until you list the name in
+`CONTROLLER_ALLOWED_HOSTS`.
+
+### Security
+
+- **The navigation allowlist judged a different host than the browser loaded.**
+  `ALLOWED_HOSTS` checks parsed URLs with Python's urllib, but Chromium parses
+  them per the WHATWG URL standard, and for http(s) the two disagree on
+  backslashes. For `http://evil.com\@example.com/` urllib reports
+  `example.com` (everything before the last `@` is userinfo to it) while
+  Chromium loads `evil.com` with path `/@example.com/`. Appending
+  `\@<allowlisted-host>` to any URL got it past the allowlist on navigate,
+  `create_session`'s `start_url` and tab open — cloud metadata addresses
+  included. Checks now parse the URL in the form both parsers agree on
+  (`app/url_safety.py`). A differential fuzz of 31,174 generated URLs against
+  Chromium's own `new URL()` found 28 such bypasses before the change and none
+  after.
+
+- **Opening a tab skipped the navigation allowlist entirely.**
+  `POST /sessions/{id}/tabs/open` called `page.goto()` directly, so it reached
+  any http(s) host that `navigate` refuses. The URL is now checked before a page
+  is created, and a refusal is a `403`.
+
+- **A tokenless controller accepted any Host header — DNS rebinding.** A
+  controller without a bearer credential is permitted only on loopback, but
+  nothing checked the Host header unless `CONTROLLER_ALLOWED_HOSTS` was set.
+  Compose sets it; running the controller directly left it empty, and empty
+  meant any Host. A web page whose hostname re-resolves to `127.0.0.1` then
+  becomes a same-origin client of an API that asks for no credential, and the
+  MCP Origin check does not stop it because it accepts the origin the Host
+  header claims. Reproduced on a live server: a request with Host and Origin set
+  to `attacker.example` completed an MCP `initialize` and listed
+  `/auth-profiles`. With `CONTROLLER_ALLOWED_HOSTS` unset and no credential
+  configured, only loopback Host names are now answered (`/healthz` exempt);
+  deployments with a token are unaffected.
+
+  `CONTROLLER_ALLOWED_HOSTS` matching also moved off Starlette's
+  `TrustedHostMiddleware`, which took everything before the first colon as the
+  host — `[::1]:8000` became `[` — so the `::1` entry shipped in compose and
+  `.env.example` never matched and IPv6 loopback clients were refused.
+
+- **Browser downloads could run script as the controller.** `/artifacts`
+  serves files the browser produced, including downloads whose name and bytes a
+  visited site chooses, from the controller's own origin. A downloaded `.html`
+  or `.svg` therefore ran as the controller; on a tokenless loopback
+  deployment, opening one let it call every route, auth-profile export
+  included. Reproduced in Chromium: the downloaded page's
+  `fetch('/auth-profiles')` succeeded. `/artifacts` responses now carry a
+  `sandbox` Content-Security-Policy (opaque origin, no script; images still
+  render), and every response gets `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`.
+
+- **Record ids from MCP arguments could name files outside their store.** The
+  session, agent-job and approval file stores and the witness recorder built
+  paths as `root / f"{id}.json"`. REST path parameters cannot carry `/`, but MCP
+  tool arguments can, so ids like `../planted` read a file next to the store
+  root and returned it as the store's own. Ids must now be one plain name; any
+  other id is simply not found.
+
+- **A mesh grant's `url_allowlist` was bypassable two ways.** Only top-level
+  `url`/`start_url` arguments were checked, so `browser.execute_action` — whose
+  target sits at `action.url` — was never checked; and patterns were matched
+  with `fnmatch` over the whole URL, where `*` also matches `/`, `?`, `#` and
+  `@`, so `https://*.example.com/*` admitted `https://evil.com/.example.com/`.
+  URL arguments are now collected at any depth, and patterns match
+  component-wise. **Behaviour change:** a pattern without a scheme (such as
+  `*.example.com`) now matches the host only, and a URL with userinfo never
+  matches. Mesh is opt-in (`MESH_ENABLED`).
+
+### Fixed
+
+- **Cron webhook triggers were unusable over the API.** `POST /crons`
+  generated a `webhook_key` and then masked it in the response, so the key the
+  trigger endpoint demands existed only in the store file. It is now returned
+  once, on creation. The trigger route also answered a non-object JSON body with
+  a `500`, let a body `job_id` override the job in the path, and turned a
+  non-ASCII key into a `500` instead of a `403`.
+
+- **A failed auth-profile import with `overwrite=true` destroyed the existing
+  login.** The old profile was deleted before extraction began, so an archive
+  that failed part-way left a partial profile in its place. Imports now extract
+  into a staging directory and swap it in only once every member is written.
+
+- **The Glama inspection image has not started since 1.7.0.** Its entrypoint
+  binds uvicorn with `--host 127.0.0.1`, which the controller cannot see, so it
+  assumed the fail-safe `exposed` scope and refused to start without a token.
+  The entrypoint now declares `API_BIND_SCOPE=loopback`.
+
+- CDP element intelligence embedded the caller's selector in JavaScript with
+  Python's `repr()`, which mis-encodes some characters (no string break-out was
+  found by fuzzing, but the in-page query could target a different selector).
+  It now uses a real JSON/JS string literal.
+
+- The Python client's `stream_events` disabled the connect timeout along with
+  the read timeout, so an unreachable controller hung it forever.
+
 ## [1.7.0] — 2026-08-08
 
 Closes the design issues raised in
