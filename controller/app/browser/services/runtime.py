@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from playwright.async_api import Browser
+from playwright.async_api import Browser, BrowserContext
 
+from ...persistent_profiles import PersistentProfileHandle
 from ...session_isolation import IsolatedBrowserRuntime
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PersistentProfileAttachment:
+    browser: Browser
+    context: BrowserContext
+    handle: PersistentProfileHandle
 
 
 class BrowserRuntimeService:
@@ -111,3 +120,48 @@ class BrowserRuntimeService:
         except Exception:
             await manager.runtime_provisioner.release(runtime)
             raise
+
+    async def acquire_persistent_context(
+        self,
+        *,
+        profile_name: str,
+        context_kwargs: dict[str, Any],
+        storage_state: dict[str, Any] | None,
+    ) -> PersistentProfileAttachment:
+        """Attach to (launching if needed) a named profile's persistent Chromium.
+
+        browser-node owns the actual Chromium process -- it is the container
+        with the X display the owner's noVNC view renders -- so this asks it
+        to open (or reuse) the profile over its internal control API, then
+        connects to the returned CDP endpoint. `connect_over_cdp` on an
+        already-running persistent context exposes it as the browser's sole
+        `contexts[0]`. The real teardown decision (refcounted across however
+        many sessions hold this profile open) belongs to
+        PersistentProfileClient.close, called explicitly before this Browser
+        is closed -- whether closing this CDP-connected Browser object also
+        happens to end the remote process or merely disconnects this client
+        does not matter either way: browser-node's own `context.on('close')`
+        handler reconciles its bookkeeping regardless of which side triggered
+        the shutdown.
+        """
+        manager = self.manager
+        if manager.playwright is None:
+            raise RuntimeError("Playwright not started")
+        handle = await manager.persistent_profiles.open(
+            profile_name,
+            context_kwargs=context_kwargs,
+            storage_state=storage_state,
+        )
+        try:
+            browser = await manager.playwright.chromium.connect_over_cdp(handle.cdp_endpoint)
+        except Exception:
+            # We told browser-node to open/hold this profile; if attaching to
+            # it fails, release our hold rather than leaking a live Chromium
+            # process nothing will ever use.
+            await manager.persistent_profiles.close(profile_name)
+            raise
+        if not browser.contexts:
+            await manager.persistent_profiles.close(profile_name)
+            raise RuntimeError(f"persistent profile '{profile_name}' exposed no browser context over CDP")
+        context = browser.contexts[0]
+        return PersistentProfileAttachment(browser=browser, context=context, handle=handle)

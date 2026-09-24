@@ -88,6 +88,37 @@ class Settings(BaseSettings):
     auto_persist_login_enabled: bool = Field(True, alias="AUTO_PERSIST_LOGIN_ENABLED")
     auto_persist_profile_name: str = Field("owner-default", alias="AUTO_PERSIST_PROFILE_NAME")
     auto_persist_interval_seconds: float = Field(180.0, alias="AUTO_PERSIST_INTERVAL_SECONDS")
+
+    # Persistent Chromium profiles: instead of replaying a storage_state export
+    # into a brand-new context on every Open (cookies + localStorage only), a
+    # named profile (auth_profile, or the auto-persist default when none is
+    # given) gets its own on-disk Chromium user-data-dir in browser-node,
+    # driven via CDP -- so IndexedDB, service workers, cache and history
+    # survive across Opens, controller restarts and image rebuilds. Defaults
+    # to False in code on purpose (rollback safety): a tenant compose file
+    # that is not redeployed with this flag keeps today's fresh-context
+    # behaviour exactly, even after the code ships. Only wired for
+    # session_isolation_mode="shared_browser_node" -- docker_ephemeral keeps
+    # its existing per-session container/profile lifecycle unchanged.
+    persistent_profiles_enabled: bool = Field(False, alias="PERSISTENT_PROFILES_ENABLED")
+    # Host/port of browser-node's small profile-control HTTP API (see
+    # browser-node/server.mjs), reachable only on the internal tenant network.
+    browser_node_host: str = Field("browser-node", alias="BROWSER_NODE_HOST")
+    profile_control_port: int = Field(9224, alias="PROFILE_CONTROL_PORT")
+    profile_control_timeout_seconds: float = Field(30.0, alias="PROFILE_CONTROL_TIMEOUT_SECONDS")
+    # Same shared /data volume browser-node writes profiles into -- used only
+    # for the read-only disk-size report (see BrowserAuthProfileService), not
+    # for launching anything.
+    browser_profiles_root: str = Field("/data/browser-profiles", alias="BROWSER_PROFILES_ROOT")
+    # Pinned per the incident report: a real device does not change its
+    # language/timezone between logins, and the container's own default
+    # (en-US/UTC) is a bigger tell than an unset user agent. Left as an empty
+    # string, user agent is NOT overridden -- letting a real, headed Chromium
+    # present its own genuine UA is more convincing than a spoofed one.
+    persistent_profile_locale: str = Field("ar-EG", alias="PERSISTENT_PROFILE_LOCALE")
+    persistent_profile_timezone: str = Field("Africa/Cairo", alias="PERSISTENT_PROFILE_TIMEZONE")
+    persistent_profile_user_agent: str = Field("", alias="PERSISTENT_PROFILE_USER_AGENT")
+
     harness_root: str = Field("/data/harness", alias="HARNESS_ROOT")
     harness_verifier: str = Field("programmatic", alias="HARNESS_VERIFIER")
     harness_uv_command: str = Field("", alias="HARNESS_UV_COMMAND")

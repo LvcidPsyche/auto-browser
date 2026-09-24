@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +11,7 @@ from uuid import uuid4
 
 from playwright.async_api import Error as PlaywrightError
 
-from ...browser_scripts import apply_stealth
+from ...browser_scripts import apply_persistent_stealth, apply_stealth
 from ...models import SessionRecord, SessionStatus
 from ...network_inspector import NetworkInspector
 from ...utils import UTC
@@ -168,22 +169,99 @@ class BrowserSessionService:
             )
             context_kwargs["storage_state"] = str(prepared_auth_state.path)
 
+        # Persistent Chromium profiles (see persistent_profiles.py): a named
+        # identity/profile -- an explicit auth_profile, or the auto-persist
+        # default ("owner-default") when the caller names none -- gets its
+        # own on-disk user-data-dir in browser-node instead of a brand-new
+        # context every Open. Only wired for shared_browser_node; the
+        # docker_ephemeral runtime keeps its existing per-session container
+        # lifecycle unchanged. Any storage_state resolved above is popped out
+        # of context_kwargs here: it is only ever consulted by browser-node,
+        # and only to seed a profile whose user-data-dir is still empty (see
+        # server.mjs) -- never to overwrite a profile that already exists.
+        # An explicit storage_state_path (fork()'s "clone this session" path,
+        # or a direct API caller) is left out of persistent-profile mode on
+        # purpose: a fork exists to run an independent, parallel clone, and
+        # collapsing it onto the same named profile's already-running
+        # persistent context would hand it the SAME tab instead of one of
+        # its own.
+        persistent_profile_name: str | None = None
+        persistent_storage_state: dict[str, Any] | None = None
+        if (
+            self.manager.settings.persistent_profiles_enabled
+            and self.manager.settings.session_isolation_mode == "shared_browser_node"
+            and storage_state_path is None
+        ):
+            persistent_profile_name = (
+                self.manager.auth_profiles.normalize_name(auth_profile) if auth_profile else auto_persist_name
+            )
+            resolved_storage_state_path = context_kwargs.pop("storage_state", None)
+            if resolved_storage_state_path:
+                persistent_storage_state = json.loads(Path(resolved_storage_state_path).read_text(encoding="utf-8"))
+            # A real device's locale/timezone/UA do not change between logins.
+            # Override whatever build_context_kwargs picked for a one-off
+            # ephemeral context (it defaults to en-US/America-New_York when
+            # stealth is on, and a fresh random UA every time) with this
+            # profile's pinned, env-configurable identity instead.
+            context_kwargs["locale"] = self.manager.settings.persistent_profile_locale
+            context_kwargs["timezone_id"] = self.manager.settings.persistent_profile_timezone
+            # Let Playwright derive Accept-Language from locale rather than
+            # keeping a hardcoded "en-US,en;q=0.9" that would contradict it.
+            context_kwargs.pop("extra_http_headers", None)
+            if self.manager.settings.persistent_profile_user_agent:
+                context_kwargs["user_agent"] = self.manager.settings.persistent_profile_user_agent
+            else:
+                # A real, headed Chromium's own UA is more convincing than a
+                # spoofed one -- see PERSISTENT_STEALTH_INIT_SCRIPT.
+                context_kwargs.pop("user_agent", None)
+
         context: BrowserContext | None = None
         session: BrowserSession | None = None
         browser: Browser | None = None
         runtime: IsolatedBrowserRuntime | None = None
+        persistent_handle = None
         try:
             from ...browser_manager import BrowserSession
 
-            browser, runtime = await self.manager._acquire_session_browser(session_id)
-            context = await browser.new_context(**context_kwargs)
-            if self.manager.settings.enable_tracing:
-                await context.tracing.start(screenshots=True, snapshots=True, sources=False)
+            if persistent_profile_name is not None:
+                attachment = await self.manager.runtime.acquire_persistent_context(
+                    profile_name=persistent_profile_name,
+                    context_kwargs=context_kwargs,
+                    storage_state=persistent_storage_state,
+                )
+                browser = attachment.browser
+                context = attachment.context
+                persistent_handle = attachment.handle
+                # The on-disk profile already had content (most opens, after
+                # the first) or this call just seeded it from the saved
+                # storage_state -- either way, this session did not start
+                # logged out. A truly fresh, never-seeded profile leaves
+                # these at their defaults (a real "first login" case).
+                if persistent_handle.seeded or not persistent_handle.was_empty:
+                    remembered_login_loaded = True
+            else:
+                browser, runtime = await self.manager._acquire_session_browser(session_id)
+                context = await browser.new_context(**context_kwargs)
 
-            page = await context.new_page()
+            # A reused, already-running profile may already be tracing from
+            # its current open; starting it again would raise. A reused
+            # profile also normally still has its tab(s) open -- adopt the
+            # most recently opened one instead of piling on a redundant tab.
+            if persistent_handle is None or not persistent_handle.already_open:
+                if self.manager.settings.enable_tracing:
+                    await context.tracing.start(screenshots=True, snapshots=True, sources=False)
+                page = await context.new_page()
+            elif context.pages:
+                page = context.pages[-1]
+            else:
+                page = await context.new_page()
+
             page.set_default_timeout(self.manager.settings.action_timeout_ms)
             if self.manager.settings.stealth_enabled:
-                await apply_stealth(page)
+                if persistent_handle is not None:
+                    await apply_persistent_stealth(page)
+                else:
+                    await apply_stealth(page)
             session = BrowserSession(
                 id=session_id,
                 name=name or f"session-{session_id}",
@@ -206,6 +284,7 @@ class BrowserSessionService:
                 proxy_persona=proxy_persona,
                 last_auth_state_path=source_path if storage_state_path else None,
                 auth_profile_name=self.manager.auth_profiles.normalize_name(auth_profile) if auth_profile else None,
+                persistent_profile_name=persistent_profile_name,
                 mouse_position=(
                     self.manager.settings.default_viewport_width / 2,
                     self.manager.settings.default_viewport_height / 2,
@@ -311,6 +390,7 @@ class BrowserSessionService:
                 context=context,
                 browser=browser,
                 runtime=runtime,
+                persistent_profile_name=persistent_profile_name,
             )
             raise
         finally:
@@ -379,8 +459,11 @@ class BrowserSessionService:
         context: "BrowserContext | None",
         browser: "Browser | None",
         runtime: "IsolatedBrowserRuntime | None",
+        persistent_profile_name: str | None = None,
     ) -> None:
         self.manager.sessions.pop(session_id, None)
+        if persistent_profile_name is not None:
+            await self.manager.persistent_profiles.close(persistent_profile_name)
         if session is not None and session.auto_persist_task is not None:
             session.auto_persist_task.cancel()
         if session is not None and session.tunnel is not None:
@@ -447,8 +530,26 @@ class BrowserSessionService:
                         session_id,
                         exc,
                     )
+            if session.persistent_profile_name:
+                # browser-node owns the actual Chromium process behind a
+                # persistent profile and tracks it by refcount (a second live
+                # session on the same profile must not tear it down under the
+                # first) -- release our hold there before touching the local
+                # CDP client. Best-effort; never blocks the rest of close().
+                await self.manager.persistent_profiles.close(session.persistent_profile_name)
             try:
                 await session.context.close()
+            except Exception as exc:
+                if session.persistent_profile_name is None:
+                    raise
+                # Expected once the profile above already tore down the
+                # underlying Chromium process (refcount reached zero).
+                logger.debug(
+                    "context.close() after releasing persistent profile '%s' for session %s: %s",
+                    session.persistent_profile_name,
+                    session_id,
+                    exc,
+                )
             finally:
                 if session.browser is not None and session.browser is not self.manager.browser:
                     try:
@@ -580,6 +681,8 @@ class BrowserSessionService:
         if session.network_inspector is not None:
             session.network_inspector.detach()
             session.network_inspector = None
+        if session.persistent_profile_name:
+            await self.manager.persistent_profiles.close(session.persistent_profile_name)
         try:
             await session.context.close()
         except Exception as exc:
@@ -822,6 +925,15 @@ class BrowserSessionService:
                 "ws_endpoint_file": str(session.runtime.ws_endpoint_file),
                 "novnc_port": session.runtime.novnc_port,
                 "vnc_port": session.runtime.vnc_port,
+            }
+        if session.persistent_profile_name:
+            payload["persistent_profile"] = {
+                "name": session.persistent_profile_name,
+                # Manual cleanup only -- see PersistentProfileClient and the
+                # deploy notes; nothing here ever deletes a profile directory.
+                "disk_usage_bytes": self.manager.persistent_profiles.profile_disk_usage_bytes(
+                    session.persistent_profile_name
+                ),
             }
         return payload
 

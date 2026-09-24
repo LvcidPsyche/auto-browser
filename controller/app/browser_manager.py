@@ -43,6 +43,7 @@ from .models import (
 )
 from .network_inspector import NetworkInspector
 from .ocr import OCRExtractor
+from .persistent_profiles import PersistentProfileClient
 from .pii_scrub import PiiScrubber
 from .session_isolation import DockerBrowserNodeProvisioner, IsolatedBrowserRuntime
 from .session_store import DurableSessionStore
@@ -144,6 +145,13 @@ class BrowserSession:
     # actually loaded (see BrowserSessionService.create / save_auto_persist).
     remembered_login_loaded: bool = False
     remembered_login_error: str | None = None
+    # Set when this session's context is a persistent Chromium profile (see
+    # PersistentProfileClient / browser-node's /profiles control API) rather
+    # than a fresh per-session context. Drives the release call on close --
+    # browser-node owns the actual process lifecycle via its own refcount, so
+    # a repeat Open of the same profile reuses the running one instead of
+    # launching a second Chromium against the same user-data-dir.
+    persistent_profile_name: str | None = None
 
 
 SessionCreatedHook = Callable[[str, Page], Awaitable[None]]
@@ -242,6 +250,7 @@ class BrowserManager:
         self.witness_policy = WitnessPolicyEngine()
         self.runtime_provisioner = DockerBrowserNodeProvisioner(self.settings)
         self.tunnel_broker = IsolatedSessionTunnelBroker(self.settings)
+        self.persistent_profiles = PersistentProfileClient(self.settings)
         self._session_created_hook: SessionCreatedHook | None = None
         self._session_closed_hook: SessionClosedHook | None = None
 
@@ -270,7 +279,11 @@ class BrowserManager:
         self.playwright = await async_playwright().start()
         await self.tunnel_broker.startup()
         await self.runtime_provisioner.startup()
-        if self.settings.session_isolation_mode == "shared_browser_node":
+        # In persistent-profile mode, browser-node no longer boots a shared
+        # launchServer() process to eagerly connect to -- every session
+        # instead acquires its own named profile's persistent context on
+        # demand (see session_lifecycle.create / persistent_profiles.py).
+        if self.settings.session_isolation_mode == "shared_browser_node" and not self.settings.persistent_profiles_enabled:
             await self.ensure_browser()
 
     async def shutdown(self) -> None:

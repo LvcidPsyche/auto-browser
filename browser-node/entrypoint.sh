@@ -17,7 +17,7 @@ export BROWSER_WIDTH="$WIDTH" \
 
 BROWSER_USER="${BROWSER_USER:-browser}"
 
-mkdir -p /data/profile /data/downloads /tmp/runtime
+mkdir -p /data/profile /data/downloads /data/browser-profiles /tmp/runtime
 rm -f "$WS_ENDPOINT_FILE"
 DISPLAY_NUM="${DISPLAY#:}"
 rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
@@ -35,7 +35,7 @@ run_as_browser() {
   fi
 }
 if [[ "$(id -u)" -eq 0 ]] && id "$BROWSER_USER" >/dev/null 2>&1; then
-  chown -R "$BROWSER_USER:$BROWSER_USER" /data/profile /data/downloads /tmp/runtime \
+  chown -R "$BROWSER_USER:$BROWSER_USER" /data/profile /data/downloads /data/browser-profiles /tmp/runtime \
     || echo "warning: could not chown browser data directories; continuing" >&2
   mkdir -p /tmp/.X11-unix
   chmod 1777 /tmp/.X11-unix

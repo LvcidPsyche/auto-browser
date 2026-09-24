@@ -18,7 +18,15 @@ services:
     cap_add: [CHOWN, FOWNER, DAC_OVERRIDE, SETUID, SETGID]
     networks: [tenant]
     healthcheck:
-      test: [CMD-SHELL, 'test -s /data/browser-profile/browser-ws-endpoint.txt && curl -s --max-time 3 -o /dev/null http://127.0.0.1:9223/ && curl -fsS --max-time 3 http://127.0.0.1:6080/ >/dev/null']
+      # PERSISTENT_PROFILES_ENABLED=true skips the shared launchServer() boot
+      # (and the ws-endpoint file it used to write) entirely -- browser-node
+      # launches each named profile's own Chromium lazily, on the first
+      # session that asks for it. The profile-control API's /healthz is up
+      # unconditionally in both modes, so it is what proves this container is
+      # actually ready; the legacy ws-endpoint-file check only applies when
+      # persistent profiles are off (PERSISTENT_PROFILES_ENABLED=false
+      # restores the exact original healthcheck).
+      test: [CMD-SHELL, 'if [ "$$PERSISTENT_PROFILES_ENABLED" = "true" ]; then curl -fsS --max-time 3 http://127.0.0.1:9224/healthz >/dev/null; else test -s /data/browser-profile/browser-ws-endpoint.txt && curl -s --max-time 3 -o /dev/null http://127.0.0.1:9223/; fi && curl -fsS --max-time 3 http://127.0.0.1:6080/ >/dev/null']
       interval: 10s
       timeout: 5s
       retries: 12
@@ -30,6 +38,13 @@ services:
       PLAYWRIGHT_SERVER_HOST: 0.0.0.0
       PLAYWRIGHT_SERVER_PORT: "9223"
       PLAYWRIGHT_SERVER_ADVERTISED_HOST: browser-node
+      PROFILE_CONTROL_PORT: "9224"
+      # Rollback: set to "false" (or delete the line) to get today's
+      # fresh-context-per-Open behaviour back exactly -- see
+      # controller/app/persistent_profiles.py and browser-node/server.mjs.
+      PERSISTENT_PROFILES_ENABLED: "true"
+      PERSISTENT_PROFILE_LOCALE: ar-EG
+      PERSISTENT_PROFILE_TIMEZONE: Africa/Cairo
     volumes:
       - type: volume
         source: data
@@ -91,7 +106,20 @@ services:
       BROWSER_WS_ENDPOINT_FILE: /data/browser-profile/browser-ws-endpoint.txt
       TAKEOVER_URL: http://127.0.0.1:6080/vnc.html
       METRICS_ENABLED: "false"
-      STEALTH_ENABLED: "false"
+      # A persistent, headed Chromium profile is a real, consistent device --
+      # STEALTH_ENABLED here only ever applies the safe subset
+      # (PERSISTENT_STEALTH_INIT_SCRIPT: navigator.webdriver removal, nothing
+      # that fights the profile's genuine fingerprint) whenever a session
+      # opened one, which is the normal case below.
+      STEALTH_ENABLED: "true"
+      # Rollback: "false" (or delete the line) restores today's fresh-context-
+      # per-Open behaviour exactly -- must match browser-node's own flag.
+      PERSISTENT_PROFILES_ENABLED: "true"
+      BROWSER_NODE_HOST: browser-node
+      PROFILE_CONTROL_PORT: "9224"
+      BROWSER_PROFILES_ROOT: /data/browser-profiles
+      PERSISTENT_PROFILE_LOCALE: ar-EG
+      PERSISTENT_PROFILE_TIMEZONE: Africa/Cairo
       OPENAI_API_KEY: ""
       ANTHROPIC_API_KEY: ""
       GEMINI_API_KEY: ""

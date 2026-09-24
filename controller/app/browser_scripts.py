@@ -616,3 +616,32 @@ async def apply_stealth(page: object) -> None:
     add_init_script = getattr(page, "add_init_script", None)
     if callable(add_init_script):
         await add_init_script(STEALTH_INIT_SCRIPT)
+
+
+# Safe subset of STEALTH_INIT_SCRIPT for a persistent, headed Chromium profile
+# (headless:false already, see browser-node/server.mjs). The full script was
+# written for a fresh headless context that genuinely lacks plugins/webgl/a
+# matching canvas -- here that context is real, so overriding
+# navigator.languages to a hardcoded 'en-US' (fighting the profile's actual
+# ar-EG locale), faking a plugin list, adding canvas noise, or spoofing the
+# WebGL vendor would replace an authentic, consistent fingerprint with a
+# scripted, inconsistent one on an identity meant to look like the SAME
+# device every time -- exactly the kind of tell this feature exists to
+# remove. Only the automation flag itself (which real Chrome never sets) is
+# still worth removing.
+PERSISTENT_STEALTH_INIT_SCRIPT = r"""
+() => {
+  try {
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined, configurable: true,
+    });
+  } catch (_) {}
+}
+"""
+
+
+async def apply_persistent_stealth(page: object) -> None:
+    """Inject the minimal, safe-for-a-real-profile stealth init script."""
+    add_init_script = getattr(page, "add_init_script", None)
+    if callable(add_init_script):
+        await add_init_script(PERSISTENT_STEALTH_INIT_SCRIPT)
