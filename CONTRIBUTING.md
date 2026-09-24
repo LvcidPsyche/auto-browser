@@ -38,7 +38,7 @@ make test
 make test-local
 ```
 
-Host-side tests require Python 3.10+. Install the editable controller package with:
+Host-side tests require Python 3.11+. Install the editable controller package with:
 
 ```bash
 python3 -m pip install -e ./controller[dev]
