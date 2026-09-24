@@ -129,8 +129,12 @@ class BrowserSession:
     metadata: dict[str, Any] = field(default_factory=dict)
     # "Remember me": which profile this session's login state is silently kept
     # in sync with (see Settings.auto_persist_*), and the background task doing
-    # the periodic re-save. Independent of auth_profile_name, which is only
-    # set when the caller explicitly named a saved profile.
+    # the periodic re-save. Seeded from auth_profile_name at session creation
+    # when the caller opened a named profile (so that profile stays fresh
+    # instead of the "remember me" default); otherwise falls back to the
+    # default auto-persist profile. Not re-derived from auth_profile_name
+    # afterwards, so an explicit later save to a different profile does not
+    # retarget the background writer.
     auto_persist_profile_name: str | None = None
     auto_persist_task: "asyncio.Task[None] | None" = None
     # Whether the remembered ("remember me") login actually loaded into this

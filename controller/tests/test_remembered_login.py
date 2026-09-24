@@ -204,6 +204,42 @@ class RememberedLoginCreateSessionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError):
             await self.manager.create_session(name="interactive", auth_profile="nihad-google")
 
+    async def test_named_profile_session_auto_persists_into_that_profile_not_owner_default(self) -> None:
+        """The proven incident: opening 'nihad-google' still only ever refreshed
+        'owner-default', so a named profile that is loaded but never re-saved goes
+        dead once the site rotates its session cookies. Auto-persist must target
+        the profile the session was actually opened from."""
+        self._patch_browser()
+        _write_profile_state(Path(self.settings.auth_root), "nihad-google", age_hours=1)
+
+        result = await self.manager.create_session(name="fixture", auth_profile="nihad-google")
+
+        session = self.manager.sessions[result["id"]]
+        self.assertEqual(session.auth_profile_name, "nihad-google")
+        self.assertEqual(session.auto_persist_profile_name, "nihad-google")
+
+    async def test_named_profile_session_close_saves_into_that_profile_not_owner_default(self) -> None:
+        self._patch_browser()
+        _write_profile_state(Path(self.settings.auth_root), "nihad-google", age_hours=1)
+
+        result = await self.manager.create_session(name="fixture", auth_profile="nihad-google")
+        session = self.manager.sessions[result["id"]]
+
+        self.manager.auth_profiles.save_auto_persist = AsyncMock()
+        await self.manager.close_session(session.id)
+
+        self.manager.auth_profiles.save_auto_persist.assert_awaited_once_with(session, "nihad-google")
+
+    async def test_no_profile_session_still_auto_persists_into_owner_default(self) -> None:
+        """Sessions opened with no named profile keep today's behaviour."""
+        self._patch_browser()
+
+        result = await self.manager.create_session(name="fixture")
+
+        session = self.manager.sessions[result["id"]]
+        self.assertIsNone(session.auth_profile_name)
+        self.assertEqual(session.auto_persist_profile_name, "owner-default")
+
 
 if __name__ == "__main__":
     unittest.main()

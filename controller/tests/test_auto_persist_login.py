@@ -162,7 +162,12 @@ class AutoPersistLoginTests(unittest.IsolatedAsyncioTestCase):
 
         await self._cancel(session)
 
-    async def test_explicit_named_profile_is_not_overridden_by_auto_persist(self) -> None:
+    async def test_explicit_named_profile_auto_persists_into_itself_not_the_default(self) -> None:
+        """Regression: a session opened from a named profile ('nihad-google')
+        must keep that profile's cookies fresh, not silently refresh
+        'owner-default' instead -- that mismatch is exactly what let
+        'nihad-google' go stale after 2026-09-23 while 'owner-default' kept
+        getting rewritten underneath it."""
         manager = self._manager()
         await manager.auth_profiles.save_for_session(
             SimpleNamespace(id="earlier", context=FakeContext(FakePage()), page=FakePage()),
@@ -174,9 +179,7 @@ class AutoPersistLoginTests(unittest.IsolatedAsyncioTestCase):
 
         session = manager.sessions[result["id"]]
         self.assertEqual(session.auth_profile_name, "nihad-google")
-        # The background writer still keeps the *default* profile warm too,
-        # independently of the explicitly named one.
-        self.assertEqual(session.auto_persist_profile_name, "owner-default")
+        self.assertEqual(session.auto_persist_profile_name, "nihad-google")
 
         await self._cancel(session)
 

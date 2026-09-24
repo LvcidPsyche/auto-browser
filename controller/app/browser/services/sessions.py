@@ -250,9 +250,20 @@ class BrowserSessionService:
                 and self.manager.settings.auto_persist_interval_seconds > 0
                 and not remembered_load_failed_over_existing_profile
             ):
-                session.auto_persist_profile_name = auto_persist_name
+                # A session opened from an explicitly named auth_profile must
+                # keep THAT profile's cookies fresh, not the "remember me"
+                # default -- otherwise a named profile that is loaded but
+                # never re-saved goes dead the moment the site rotates its
+                # session cookies (the incident this responds to: opening
+                # 'nihad-google' still only ever refreshed 'owner-default').
+                # Access to the named profile was already checked above
+                # (require_access at session-open); save_for_session/
+                # save_auto_persist re-check it on every write regardless.
+                # A session with no named profile keeps today's behaviour.
+                persist_profile_name = session.auth_profile_name or auto_persist_name
+                session.auto_persist_profile_name = persist_profile_name
                 session.auto_persist_task = asyncio.create_task(
-                    self._auto_persist_loop(session, auto_persist_name)
+                    self._auto_persist_loop(session, persist_profile_name)
                 )
             if memory_profile and self.manager.memory is not None:
                 memory = await self.manager.memory.get(memory_profile)
