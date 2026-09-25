@@ -50,9 +50,9 @@ class AutoBrowserClient:
     ):
         """
         token:       the controller's API_BEARER_TOKEN (or a named credential).
-        operator_id: sent as X-Operator-Id; a controller with REQUIRE_OPERATOR_ID=true
-                     rejects requests without it. For a renamed OPERATOR_ID_HEADER,
-                     pass the header in ``headers`` instead.
+        operator_id: sent as X-Operator-Id. A controller with REQUIRE_OPERATOR_ID=true
+                     needs it unless the token is a named credential. For a renamed
+                     OPERATOR_ID_HEADER, pass the header in ``headers`` instead.
         headers:     extra headers sent with every request.
         """
         self.base_url = base_url.rstrip("/")

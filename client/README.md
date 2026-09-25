@@ -18,7 +18,8 @@ client works as a sync or async context manager. HTTP errors raise
 `AutoBrowserError`, which carries `status_code` and the controller's `detail`.
 
 A controller with `REQUIRE_OPERATOR_ID=true` rejects requests that don't name an
-operator. Pass one with `operator_id`, and any other headers with `headers`:
+operator. A named credential (`API_BEARER_TOKENS`) names one through the token;
+with the shared token, pass `operator_id`. Any other headers go in `headers`:
 
 ```python
 from auto_browser_client import AutoBrowserClient, AutoBrowserError
