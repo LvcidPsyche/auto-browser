@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import unquote
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 
 from ..action_errors import BrowserActionError
 from ..approvals import ApprovalRequiredError
 from ..models import (
+    AttachFileRequest,
     ClickRequest,
     CreateSessionRequest,
     DialogRequest,
+    DownloadFileRequest,
     ExecuteActionRequest,
     HoverRequest,
     HumanTakeoverRequest,
@@ -281,6 +285,85 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             raise HTTPException(status_code=400, detail="Invalid request") from None
         except Exception:
             raise internal_error(logger, "upload failed for session %s", session_id) from None
+
+    # --- file transfer (app/file_transfer.py) -------------------------------
+    # Only images, video, audio and PDF, typed by their bytes; handed out as
+    # attachments, never rendered. The approval broker is the only caller in a
+    # tenant stack and binds every transfer to the grant that made it.
+
+    @router.post("/sessions/{session_id}/files/download")
+    async def download_file(session_id: str, payload: DownloadFileRequest) -> dict[str, Any]:
+        try:
+            return await manager.file_transfers.download(
+                session_id,
+                mode=payload.mode,
+                selector=payload.selector,
+                element_id=payload.element_id,
+                url=payload.url,
+                media_kind=payload.media_kind,
+                timeout_seconds=payload.timeout_seconds,
+                pace=payload.pace,
+            )
+        except (BrowserActionError, ApprovalRequiredError, HTTPException):
+            raise
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Unknown session") from None
+        except PermissionError:
+            raise HTTPException(status_code=403, detail="Not permitted") from None
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid request") from None
+        except Exception:
+            raise internal_error(logger, "download_file failed for session %s", session_id) from None
+
+    @router.put("/sessions/{session_id}/files")
+    async def receive_file(session_id: str, request: Request) -> dict[str, Any]:
+        raw_name = request.headers.get("x-file-name") or ""
+        length = request.headers.get("content-length")
+        try:
+            return await manager.file_transfers.receive_upload(
+                session_id,
+                filename=unquote(raw_name)[:300] or None,
+                chunks=request.stream(),
+                declared_length=int(length) if length and length.isdigit() else None,
+            )
+        except (BrowserActionError, HTTPException):
+            raise
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Unknown session") from None
+        except Exception:
+            raise internal_error(logger, "receive_file failed for session %s", session_id) from None
+
+    @router.get("/sessions/{session_id}/files/{transfer_id}")
+    async def send_file(session_id: str, transfer_id: str) -> FileResponse:
+        record = manager.file_transfers.get(session_id, transfer_id)
+        return FileResponse(
+            record["path"],
+            media_type=record["mime_type"],
+            filename=record["filename"],
+            content_disposition_type="attachment",
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Security-Policy": "sandbox; default-src 'none'",
+                "X-Transfer-Sha256": record["sha256"],
+            },
+        )
+
+    @router.post("/sessions/{session_id}/files/{transfer_id}/attach")
+    async def attach_file(session_id: str, transfer_id: str, payload: AttachFileRequest) -> dict[str, Any]:
+        try:
+            return await manager.file_transfers.attach(
+                session_id, transfer_id, selector=payload.selector, element_id=payload.element_id,
+            )
+        except (BrowserActionError, ApprovalRequiredError, HTTPException):
+            raise
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Unknown session") from None
+        except Exception:
+            raise internal_error(logger, "attach_file failed for session %s", session_id) from None
+
+    @router.delete("/sessions/{session_id}/files/{transfer_id}")
+    async def delete_file(session_id: str, transfer_id: str) -> dict[str, Any]:
+        return await manager.file_transfers.delete(session_id, transfer_id)
 
     @router.post("/sessions/{session_id}/actions/hover")
     async def hover(session_id: str, payload: HoverRequest) -> dict[str, Any]:

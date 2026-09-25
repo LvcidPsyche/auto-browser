@@ -36,6 +36,7 @@ from .browser.services import (
 from .browser.services.connection_health import driver_exit_error, playwright_driver_alive
 from .config import Settings
 from .downloads import DownloadCaptureService
+from .file_transfer import FileTransferService
 from .host_policy import host_is_allowed
 from .memory_manager import MemoryManager
 from .models import (
@@ -288,6 +289,7 @@ class BrowserManager:
         self.runtime_provisioner = DockerBrowserNodeProvisioner(self.settings)
         self.tunnel_broker = IsolatedSessionTunnelBroker(self.settings)
         self.persistent_profiles = PersistentProfileClient(self.settings)
+        self.file_transfers = FileTransferService(self)
         # Session ids that passed the session-limit check but are not in
         # `self.sessions` yet (their Open is still in flight). Counted by the
         # limit check so two concurrent Opens cannot both squeeze past it.

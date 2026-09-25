@@ -137,6 +137,7 @@ def test_agent_can_list_and_switch_tabs_but_not_close_them(tmp_path: Path, clock
             {"name": f"browser.{name}"} for name in (
                 "session_status", "request_access", "get_request", "complete", "observe",
                 "activate_tab", "list_tabs", "open_tab",
+                "download_file", "upload_file",
                 "click", "dialog", "go_back", "go_forward", "hover", "navigate", "press", "reload",
                 "scroll", "select_option", "type", "upload", "wait",
             )
@@ -713,3 +714,150 @@ def test_agent_answers_a_dialog_and_learns_why_an_action_was_blocked(tmp_path: P
         answered = client.post(f"/requests/{request_id}/actions/dialog", headers=auth(AGENT), json={"arguments": {"accept": True}})
         assert answered.status_code == 200
         assert ("POST", "/sessions/owner-1/actions/dialog", {"accept": True}) in calls
+
+
+# --- file transfer (download_file / upload_file and the byte routes) ----------
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"x" * 100
+
+
+def _file_upstream(calls: list, *, active: list, served: bytes = PNG_BYTES, served_type: str = "image/png"):
+    def upstream(request: httpx.Request) -> httpx.Response:
+        body = request.content if request.method != "GET" else b""
+        calls.append((request.method, request.url.path, body, dict(request.headers)))
+        path = request.url.path
+        if request.method == "GET" and path == "/sessions":
+            return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active[0] else [])
+        if request.method == "POST" and path == "/sessions":
+            active[0] = True
+            return httpx.Response(200, json={"id": "owner-1"})
+        if request.method == "POST" and path == "/sessions/owner-1/files/download":
+            return httpx.Response(200, json={"id": "d" * 24, "mime_type": served_type, "size_bytes": len(served)})
+        if request.method == "PUT" and path == "/sessions/owner-1/files":
+            return httpx.Response(200, json={"id": "e" * 24, "filename": "x.png", "size_bytes": len(body)})
+        if request.method == "GET" and path == "/sessions/owner-1/files/" + "d" * 24:
+            return httpx.Response(200, content=served, headers={"Content-Type": served_type, "X-Transfer-Sha256": "a" * 64})
+        if request.method == "POST" and path == "/sessions/owner-1/files/" + "e" * 24 + "/attach":
+            return httpx.Response(200, json={"ok": True, "via": "input"})
+        if request.method == "DELETE" and path.startswith("/sessions/owner-1/files/"):
+            return httpx.Response(200, json={"deleted": True})
+        return httpx.Response(200, json={"ok": True})
+    return upstream
+
+
+def _open_with_grants(client: TestClient, clock: list[float]) -> tuple[str, str]:
+    secret = enroll(client, clock)
+    client.post("/owner/sessions", headers=auth(OWNER), json={"start_url": "https://example.com", "totp_code": fresh(secret, clock)})
+    mine = client.post("/requests", headers=auth(AGENT), json={"purpose": "files"}).json()["id"]
+    theirs = client.post("/requests", headers=auth(OTHER), json={"purpose": "files"}).json()["id"]
+    return mine, theirs
+
+
+def test_file_download_is_streamed_only_to_the_agent_that_made_it(tmp_path: Path, clock: list[float]) -> None:
+    calls: list = []
+    active = [False]
+    with TestClient(app_at(tmp_path, _file_upstream(calls, active=active), agent_tokens=f"other:{OTHER}")) as client:
+        mine, theirs = _open_with_grants(client, clock)
+        made = client.post(f"/requests/{mine}/actions/download_file", headers=auth(AGENT),
+                           json={"arguments": {"mode": "media", "media_kind": "image"}})
+        assert made.status_code == 200, made.text
+        transfer = made.json()["id"]
+        assert ("POST", "/sessions/owner-1/files/download") in [(m, p) for m, p, _, _ in calls]
+        pulled = client.get(f"/requests/{mine}/files/{transfer}", headers=auth(AGENT))
+        assert pulled.status_code == 200 and pulled.content == PNG_BYTES
+        assert pulled.headers["content-type"] == "image/png"
+        assert pulled.headers["x-content-type-options"] == "nosniff"
+        assert pulled.headers["content-disposition"] == "attachment"
+        assert pulled.headers["x-transfer-sha256"] == "a" * 64
+        # another agent -- with its own grant or with this one's -- never sees it
+        assert client.get(f"/requests/{theirs}/files/{transfer}", headers=auth(OTHER)).status_code == 404
+        assert client.get(f"/requests/{mine}/files/{transfer}", headers=auth(OTHER)).status_code == 404
+        assert client.get(f"/requests/{mine}/files/{transfer}").status_code == 401
+        assert client.get(f"/requests/{mine}/files/{'f' * 24}", headers=auth(AGENT)).status_code == 404
+        assert client.get(f"/requests/{mine}/files/..%2Fsecrets", headers=auth(AGENT)).status_code == 404
+        # unknown keys never reach the controller
+        assert client.post(f"/requests/{mine}/actions/download_file", headers=auth(AGENT),
+                           json={"arguments": {"mode": "url", "file_path": "/etc/passwd"}}).status_code == 400
+        assert client.delete(f"/requests/{mine}/files/{transfer}", headers=auth(AGENT)).status_code == 200
+        assert client.get(f"/requests/{mine}/files/{transfer}", headers=auth(AGENT)).status_code == 404
+
+
+def test_file_download_refuses_what_the_controller_should_never_serve(tmp_path: Path, clock: list[float]) -> None:
+    calls: list = []
+    active = [False]
+    upstream = _file_upstream(calls, active=active, served=b"<html>hi</html>", served_type="text/html")
+    with TestClient(app_at(tmp_path, upstream, agent_tokens=f"other:{OTHER}")) as client:
+        mine, _ = _open_with_grants(client, clock)
+        transfer = client.post(f"/requests/{mine}/actions/download_file", headers=auth(AGENT),
+                               json={"arguments": {"mode": "latest"}}).json()["id"]
+        assert client.get(f"/requests/{mine}/files/{transfer}", headers=auth(AGENT)).status_code == 502
+    calls = []
+    active = [False]
+    big = b"\x89PNG\r\n\x1a\n" + b"x" * 5000
+    (tmp_path / "b").mkdir()
+    with TestClient(app_at(tmp_path / "b", _file_upstream(calls, active=active, served=big),
+                           agent_tokens=f"other:{OTHER}", transfer_max_bytes=1000)) as client:
+        mine, _ = _open_with_grants(client, clock)
+        transfer = client.post(f"/requests/{mine}/actions/download_file", headers=auth(AGENT),
+                               json={"arguments": {"mode": "latest"}}).json()["id"]
+        assert client.get(f"/requests/{mine}/files/{transfer}", headers=auth(AGENT)).status_code == 502
+
+
+def test_file_upload_is_typed_capped_and_bound_to_its_agent(tmp_path: Path, clock: list[float]) -> None:
+    calls: list = []
+    active = [False]
+    with TestClient(app_at(tmp_path, _file_upstream(calls, active=active),
+                           agent_tokens=f"other:{OTHER}", transfer_max_bytes=1000)) as client:
+        mine, theirs = _open_with_grants(client, clock)
+        headers = {**auth(AGENT), "Content-Type": "image/png", "X-File-Name": "%D8%B5%D9%88%D8%B1%D8%A9.png"}
+        pushed = client.put(f"/requests/{mine}/files", headers=headers, content=PNG_BYTES)
+        assert pushed.status_code == 200, pushed.text
+        forwarded = [c for c in calls if c[0] == "PUT"][-1]
+        assert forwarded[2] == PNG_BYTES and forwarded[3]["x-file-name"] == "%D8%B5%D9%88%D8%B1%D8%A9.png"
+        transfer = pushed.json()["id"]
+        # refused before anything is forwarded: wrong type, too big, bad name, no bearer, foreign grant
+        before = len(calls)
+        assert client.put(f"/requests/{mine}/files", headers={**headers, "Content-Type": "text/html"}, content=b"<p>").status_code == 415
+        assert client.put(f"/requests/{mine}/files", headers={**headers, "Content-Type": "application/x-msdownload"}, content=b"MZ").status_code == 415
+        assert client.put(f"/requests/{mine}/files", headers=headers, content=b"x" * 2000).status_code == 413
+        assert client.put(f"/requests/{mine}/files", headers={**headers, "X-File-Name": "../../etc/passwd x"}, content=PNG_BYTES).status_code == 400
+        assert client.put(f"/requests/{mine}/files", headers={"Content-Type": "image/png"}, content=PNG_BYTES).status_code == 401
+        assert client.put(f"/requests/{theirs}/files", headers=headers, content=PNG_BYTES).status_code == 404
+        assert not [c for c in calls[before:] if c[0] == "PUT"]
+        # only the agent that pushed it may put it on the page
+        assert client.post(f"/requests/{theirs}/actions/upload_file", headers=auth(OTHER),
+                           json={"arguments": {"transfer_id": transfer}}).status_code == 404
+        assert client.post(f"/requests/{mine}/actions/upload_file", headers=auth(AGENT),
+                           json={"arguments": {"transfer_id": transfer, "file_path": "/etc/passwd"}}).status_code == 400
+        attached = client.post("/mcp/tools/call", headers=auth(AGENT), json={
+            "name": "browser.upload_file", "arguments": {"request_id": mine, "transfer_id": transfer, "element_id": "op-abcd"},
+        })
+        assert attached.status_code == 200 and attached.json()["via"] == "input"
+        assert ("POST", f"/sessions/owner-1/files/{transfer}/attach", b'{"element_id":"op-abcd"}') in [
+            (m, p, b) for m, p, b, _ in calls
+        ]
+        # a revoked agent cannot move files any more
+        client.post(f"/requests/{mine}/revoke", headers=auth(OWNER))
+        assert client.put(f"/requests/{mine}/files", headers=headers, content=PNG_BYTES).status_code == 403
+        assert client.post(f"/requests/{mine}/actions/upload_file", headers=auth(AGENT),
+                           json={"arguments": {"transfer_id": transfer}}).status_code == 403
+
+
+def test_file_errors_relay_only_their_code_and_bounded_facts(tmp_path: Path, clock: list[float]) -> None:
+    active = [False]
+    def upstream(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/sessions":
+            return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active[0] else [])
+        if request.method == "POST" and request.url.path == "/sessions":
+            active[0] = True
+            return httpx.Response(200, json={"id": "owner-1"})
+        return httpx.Response(413, json={"ok": False, "code": "file_too_large", "max_bytes": 5, "kind": "video",
+                                         "error": "internal path /data/x", "url": "https://secret"})
+    with TestClient(app_at(tmp_path, upstream, agent_tokens=f"other:{OTHER}")) as client:
+        mine, _ = _open_with_grants(client, clock)
+        refused = client.post(f"/requests/{mine}/actions/download_file", headers=auth(AGENT),
+                              json={"arguments": {"mode": "latest"}})
+        assert refused.status_code == 413
+        assert refused.json()["detail"] == {
+            "message": "Browser controller rejected request", "code": "file_too_large", "max_bytes": 5, "kind": "video",
+        }

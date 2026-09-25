@@ -148,6 +148,57 @@ class PersistentProfileClient:
             generation=generation,
         )
 
+    # --- downloads a persistent profile produced (browser-node owns them) ---
+    #
+    # browser-node's own Playwright launched the persistent context, so it is
+    # the one that receives the profile's download events and holds the files
+    # (the controller only attaches over CDP with no_defaults and never sees
+    # them). These three calls are how the controller lists, pulls and clears
+    # them -- over the tenant-private control API, never the shared volume, so
+    # file ownership inside /data/downloads never matters.
+
+    async def list_downloads(self, name: str, *, after_seq: int = 0) -> list[dict[str, Any]]:
+        name = normalize_profile_name(name)
+        data = await self._post("/downloads/list", {"name": name, "after_seq": int(after_seq)})
+        items = data.get("downloads")
+        return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+    async def fetch_download(self, download_id: str, destination: Any, *, max_bytes: int) -> int:
+        """Stream one finished download into `destination`; returns its size.
+
+        Raises PersistentProfileError (status 413) past `max_bytes` -- the
+        partial file is removed by the caller."""
+        if not re.fullmatch(r"[0-9a-f]{16,64}", download_id or ""):
+            raise PersistentProfileError("invalid download id", status_code=400)
+        headers = self.auth_headers()
+        timeout = httpx.Timeout(max(self.settings.profile_control_timeout_seconds, 60.0), connect=10.0)
+        total = 0
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "GET", f"{self.base_url}/downloads/file", params={"id": download_id}, headers=headers
+            ) as response:
+                if response.status_code >= 400:
+                    raise PersistentProfileError(
+                        f"browser-node refused download {download_id}: {response.status_code}",
+                        status_code=response.status_code,
+                    )
+                declared = response.headers.get("content-length")
+                if declared and declared.isdigit() and int(declared) > max_bytes:
+                    raise PersistentProfileError("download too large", status_code=413)
+                with open(destination, "wb") as handle:
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise PersistentProfileError("download too large", status_code=413)
+                        handle.write(chunk)
+        return total
+
+    async def delete_download(self, download_id: str) -> None:
+        try:
+            await self._post("/downloads/delete", {"id": download_id})
+        except Exception as exc:  # best effort: browser-node also drops old ones itself
+            logger.debug("could not delete browser-node download %s: %s", download_id, exc)
+
     async def ping(self) -> None:
         """Raise unless browser-node's profile-control API is reachable.
 

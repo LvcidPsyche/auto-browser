@@ -295,6 +295,19 @@ class Settings(BaseSettings):
     artifact_retention_hours: float = Field(168.0, alias="ARTIFACT_RETENTION_HOURS")
     upload_retention_hours: float = Field(168.0, alias="UPLOAD_RETENTION_HOURS")
     auth_retention_hours: float = Field(168.0, alias="AUTH_RETENTION_HOURS")
+    # File transfer between the browser and the caller (app/file_transfer.py):
+    # a download the page produced, pulled out to the caller, or a file the
+    # caller pushed in, set on the page's file input. Hard ceiling for any one
+    # file; per-type ceilings below it live in app/file_transfer.py.
+    file_transfer_max_bytes: int = Field(200 * 1024 * 1024, alias="FILE_TRANSFER_MAX_BYTES", ge=1)
+    # How long a click/element download may take to start and finish.
+    file_transfer_download_timeout_seconds: float = Field(
+        120.0, alias="FILE_TRANSFER_DOWNLOAD_TIMEOUT_SECONDS", gt=0, le=600
+    )
+    # Transferred files are only needed for minutes (the caller pulls a
+    # download at once; a pushed upload must survive until the site's own
+    # submit reads it). Swept from the session's transfer folders after this.
+    file_transfer_retention_hours: float = Field(6.0, alias="FILE_TRANSFER_RETENTION_HOURS", gt=0)
 
     openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
     openai_base_url: str = Field("https://api.openai.com/v1", alias="OPENAI_BASE_URL")

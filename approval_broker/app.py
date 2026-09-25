@@ -28,7 +28,7 @@ import httpx
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import FastAPI, Header, HTTPException, Request, Response, WebSocket
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 from websockets.asyncio.client import connect as ws_connect
@@ -43,7 +43,17 @@ ALLOWED_ACTIONS = frozenset({
 # Controller error codes whose meaning an agent needs to act on (answer the
 # dialog, hand a captcha to the owner). Only the code and the dialog's own
 # type/text are relayed -- never the rest of the controller's error body.
-RELAYED_ERROR_CODES = frozenset({"dialog_open", "captcha_detected"})
+RELAYED_ERROR_CODES = frozenset({
+    "dialog_open", "captcha_detected",
+    # File transfer (controller app/file_transfer.py): what went wrong with a
+    # download/upload is something the agent must act on (point at another
+    # element, try another site, pick a smaller file).
+    "file_bad_request", "file_unsupported_type", "file_too_large", "file_empty", "file_no_download",
+    "file_download_failed", "file_download_timeout", "file_source_not_found", "file_fetch_blocked",
+    "file_no_input", "file_unknown_transfer", "file_transfer_failed",
+})
+# Safe, bounded facts a file-transfer refusal may carry back to the agent.
+_RELAYED_FILE_FIELDS = {"max_bytes": int, "size_bytes": int, "kind": str, "reason": str}
 # The controller's REST paths use a dash for a couple of these operations while every
 # tool-facing name in this broker (and the MCP tool list) uses an underscore -- translate
 # here so ALLOWED_ACTIONS can keep the MCP-friendly spelling everywhere else.
@@ -60,6 +70,19 @@ _ACTION_PATH_OVERRIDES = {
 # switched away from -- with no way to find or reach any other open tab, or to open a link
 # in a new one. Closing a tab is deliberately NOT here -- only the owner manages that.
 TAB_OPERATIONS = frozenset({"list_tabs", "activate_tab", "open_tab"})
+# Moving files between the owner's browser and an agent (controller
+# app/file_transfer.py). download_file / upload_file are ordinary grant-bound
+# operations; the bytes themselves travel over the streaming REST routes
+# GET/PUT/DELETE /requests/{grant}/files[/{transfer}] -- never through JSON.
+FILE_OPERATIONS = frozenset({"download_file", "upload_file"})
+TRANSFER_MIME_TYPES = frozenset({
+    "image/jpeg", "image/png", "image/gif", "image/webp", "image/heic", "image/avif",
+    "video/mp4", "video/quicktime", "video/webm",
+    "audio/mpeg", "audio/aac", "audio/mp4", "audio/wav", "audio/ogg", "audio/flac",
+    "application/pdf",
+})
+DEFAULT_TRANSFER_MAX_BYTES = 200 * 1024 * 1024
+_TRANSFER_ID_RE = re.compile(r"[0-9a-f]{24}")
 TOTP_PERIOD = 30
 TOTP_FAILURE_LIMIT = 5
 TOTP_BLOCK_SECONDS = 300
@@ -74,6 +97,10 @@ def _relayed_error_detail(response: httpx.Response) -> Any:
     if not isinstance(body, dict) or body.get("code") not in RELAYED_ERROR_CODES:
         return generic
     detail: dict[str, Any] = {"message": generic, "code": body["code"]}
+    for key, kind in _RELAYED_FILE_FIELDS.items():
+        value = body.get(key)
+        if isinstance(value, kind) and not isinstance(value, bool):
+            detail[key] = value[:60] if isinstance(value, str) else value
     dialog = body.get("dialog")
     if isinstance(dialog, dict):
         detail["dialog"] = {
@@ -268,6 +295,7 @@ def create_app(
     expected_user_id: str | None = None,
     expected_tenant_id: str | None = None,
     assertion_clock_skew_seconds: int = 5,
+    transfer_max_bytes: int = DEFAULT_TRANSFER_MAX_BYTES,
 ) -> FastAPI:
     if totp_db_path is None:
         raise ValueError("BROKER_TOTP_DB is required")
@@ -327,7 +355,13 @@ def create_app(
         host = parsed_portal.hostname.lower()
         portal_url = f"https://{'[' + host + ']' if ':' in host else host}" + (f":{port}" if port is not None else "")
 
+    if not 1 <= transfer_max_bytes <= 2 * 1024 * 1024 * 1024:
+        raise ValueError("Transfer size cap must be between 1 byte and 2 GiB")
     grants: dict[str, Grant] = {}
+    # (session id, session generation, transfer id) -> agent that created it.
+    # A transfer is only ever readable/attachable by the agent whose grant made
+    # it, and only while that owner session is still the live one.
+    transfer_owners: dict[tuple[str, int, str], str] = {}
     # An owner revocation is an agent-wide decision for this one browser
     # lifetime, not merely a state change on the request id they clicked.
     blocked_agents: set[tuple[str, int]] = set()
@@ -821,12 +855,74 @@ def create_app(
                         "POST", f"/sessions/{grant.session_id}/tabs/open",
                         {"url": url, "activate": activate},
                     )
+                if operation in FILE_OPERATIONS:
+                    raise HTTPException(500, "File operations are not session-locked")
                 if operation in ALLOWED_ACTIONS:
                     if "approval_id" in arguments:
                         raise HTTPException(400, "Built-in sensitive approvals are owner-only")
                     path = _ACTION_PATH_OVERRIDES.get(operation, operation)
                     return await upstream("POST", f"/sessions/{grant.session_id}/actions/{path}", arguments)
                 raise HTTPException(404, "Tool unavailable")
+
+    _DOWNLOAD_KEYS = {"mode", "element_id", "selector", "url", "media_kind", "timeout_seconds", "pace"}
+    _ATTACH_KEYS = {"transfer_id", "element_id", "selector"}
+
+    def owned_transfer(grant: Grant, transfer_id: Any) -> str:
+        if not isinstance(transfer_id, str) or not _TRANSFER_ID_RE.fullmatch(transfer_id):
+            raise HTTPException(404, "Unknown transfer")
+        if transfer_owners.get((grant.session_id, grant.session_generation, transfer_id)) != grant.agent_id:
+            raise HTTPException(404, "Unknown transfer")
+        return transfer_id
+
+    def remember_transfer(grant: Grant, result: Any) -> None:
+        transfer_id = result.get("id") if isinstance(result, dict) else None
+        if not isinstance(transfer_id, str) or not _TRANSFER_ID_RE.fullmatch(transfer_id):
+            raise HTTPException(502, "Invalid browser controller response")
+        transfer_owners[(grant.session_id, grant.session_generation, transfer_id)] = grant.agent_id
+        while len(transfer_owners) > 500:
+            transfer_owners.pop(next(iter(transfer_owners)))
+
+    async def live_file_grant(grant: Grant) -> None:
+        # Checked under the state lock like every other operation, but the
+        # transfer itself runs outside it: a download may wait minutes for a
+        # site to render a video, and nothing else -- the owner closing his
+        # browser included -- may queue behind that.
+        async with session_state_lock:
+            async with grant.lock:
+                await ensure_live(grant)
+
+    async def file_operation(grant: Grant, operation: str, arguments: dict[str, Any]) -> Any:
+        await live_file_grant(grant)
+        if operation == "download_file":
+            if set(arguments) - _DOWNLOAD_KEYS or not isinstance(arguments.get("mode"), str):
+                raise HTTPException(400, "download_file takes mode and element_id/selector/url/media_kind/timeout_seconds/pace")
+            wait = arguments.get("timeout_seconds", 120)
+            if not isinstance(wait, (int, float)) or isinstance(wait, bool) or not 0 < wait <= 600:
+                raise HTTPException(400, "timeout_seconds must be a number up to 600")
+            async with grant.lock:
+                try:
+                    response = await client.post(
+                        f"/sessions/{grant.session_id}/files/download", json=arguments,
+                        timeout=httpx.Timeout(float(wait) + 40, connect=10),
+                    )
+                except httpx.HTTPError:
+                    raise HTTPException(502, "Browser controller unavailable") from None
+            if response.status_code >= 400:
+                raise HTTPException(response.status_code, _relayed_error_detail(response))
+            try:
+                result = response.json()
+            except ValueError:
+                raise HTTPException(502, "Invalid browser controller response") from None
+            remember_transfer(grant, result)
+            return result
+        if operation == "upload_file":
+            if set(arguments) - _ATTACH_KEYS:
+                raise HTTPException(400, "upload_file takes transfer_id and element_id/selector")
+            transfer_id = owned_transfer(grant, arguments.get("transfer_id"))
+            body = {key: arguments[key] for key in ("element_id", "selector") if key in arguments}
+            async with grant.lock:
+                return await upstream("POST", f"/sessions/{grant.session_id}/files/{transfer_id}/attach", body)
+        raise HTTPException(404, "Tool unavailable")
 
     async def revoke_locked(
         grant: Grant,
@@ -931,12 +1027,124 @@ def create_app(
 
     @app.post("/requests/{grant_id}/actions/{action_name}")
     async def action(grant_id: str, action_name: str, payload: Action, authorization: str | None = Header(default=None)):
-        return await operate(agent_grant(grant_id, authorization), action_name, payload.arguments)
+        grant = agent_grant(grant_id, authorization)
+        if action_name in FILE_OPERATIONS:
+            return await file_operation(grant, action_name, payload.arguments)
+        return await operate(grant, action_name, payload.arguments)
+
+    @app.get("/requests/{grant_id}/files/{transfer_id}")
+    async def pull_file(grant_id: str, transfer_id: str, authorization: str | None = Header(default=None)):
+        """Stream a transfer this agent created (download_file) back to it."""
+        grant = agent_grant(grant_id, authorization)
+        await live_file_grant(grant)
+        owned_transfer(grant, transfer_id)
+        request = client.build_request(
+            "GET", f"/sessions/{grant.session_id}/files/{transfer_id}", timeout=httpx.Timeout(120, connect=10),
+        )
+        try:
+            response = await client.send(request, stream=True)
+        except httpx.HTTPError:
+            raise HTTPException(502, "Browser controller unavailable") from None
+        if response.status_code >= 400:
+            await response.aread()
+            await response.aclose()
+            raise HTTPException(response.status_code, _relayed_error_detail(response))
+        media_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+        length = response.headers.get("content-length") or ""
+        if media_type not in TRANSFER_MIME_TYPES or not length.isdigit() or int(length) > transfer_max_bytes:
+            await response.aclose()
+            raise HTTPException(502, "Browser controller returned an unexpected file")
+        expected = int(length)
+
+        async def relay():
+            sent = 0
+            try:
+                async for chunk in response.aiter_bytes():
+                    sent += len(chunk)
+                    if sent > expected:
+                        break
+                    yield chunk
+            finally:
+                await response.aclose()
+
+        headers = {
+            "Content-Length": length,
+            "Content-Disposition": "attachment",
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+        }
+        digest = response.headers.get("x-transfer-sha256") or ""
+        if re.fullmatch(r"[0-9a-f]{64}", digest):
+            headers["X-Transfer-Sha256"] = digest
+        return StreamingResponse(relay(), media_type=media_type, headers=headers)
+
+    class _PushTooLarge(Exception):
+        pass
+
+    @app.put("/requests/{grant_id}/files")
+    async def push_file(grant_id: str, request: Request, authorization: str | None = Header(default=None)):
+        """Receive one file from the agent (streamed, never buffered) and park
+        it in the owner session for upload_file to set on the page."""
+        grant = agent_grant(grant_id, authorization)
+        media_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if media_type not in TRANSFER_MIME_TYPES:
+            raise HTTPException(415, "Only images, video, audio and PDF files can be uploaded")
+        length = request.headers.get("content-length") or ""
+        if not length.isdigit():
+            raise HTTPException(411, "Content-Length required")
+        declared = int(length)
+        if declared == 0:
+            raise HTTPException(400, "Empty file")
+        if declared > transfer_max_bytes:
+            raise HTTPException(413, {"message": "File too large", "code": "file_too_large",
+                                      "max_bytes": transfer_max_bytes})
+        raw_name = request.headers.get("x-file-name") or ""
+        if len(raw_name) > 600 or not re.fullmatch(r"[A-Za-z0-9%._~!$&'()*+,;=@-]*", raw_name):
+            raise HTTPException(400, "X-File-Name must be percent-encoded")
+        await live_file_grant(grant)
+
+        async def forward():
+            received = 0
+            async for chunk in request.stream():
+                received += len(chunk)
+                if received > declared:
+                    raise _PushTooLarge()
+                yield chunk
+
+        async with grant.lock:
+            try:
+                response = await client.put(
+                    f"/sessions/{grant.session_id}/files", content=forward(),
+                    headers={"Content-Type": media_type, "Content-Length": length, "X-File-Name": raw_name},
+                    timeout=httpx.Timeout(180, connect=10),
+                )
+            except _PushTooLarge:
+                raise HTTPException(413, "Body larger than its Content-Length") from None
+            except httpx.HTTPError:
+                raise HTTPException(502, "Browser controller unavailable") from None
+        if response.status_code >= 400:
+            raise HTTPException(response.status_code, _relayed_error_detail(response))
+        try:
+            result = response.json()
+        except ValueError:
+            raise HTTPException(502, "Invalid browser controller response") from None
+        remember_transfer(grant, result)
+        return result
+
+    @app.delete("/requests/{grant_id}/files/{transfer_id}")
+    async def drop_file(grant_id: str, transfer_id: str, authorization: str | None = Header(default=None)):
+        grant = agent_grant(grant_id, authorization)
+        await live_file_grant(grant)
+        owned_transfer(grant, transfer_id)
+        result = await upstream("DELETE", f"/sessions/{grant.session_id}/files/{transfer_id}")
+        transfer_owners.pop((grant.session_id, grant.session_generation, transfer_id), None)
+        return result
 
     @app.get("/mcp/tools")
     async def list_tools(authorization: str | None = Header(default=None)):
         require_role(authorization, "agent")
-        return [{"name": f"browser.{name}"} for name in ("session_status", "request_access", "get_request", "complete", "observe", *sorted(TAB_OPERATIONS), *sorted(ALLOWED_ACTIONS))]
+        return [{"name": f"browser.{name}"} for name in ("session_status", "request_access", "get_request", "complete", "observe", *sorted(TAB_OPERATIONS), *sorted(FILE_OPERATIONS), *sorted(ALLOWED_ACTIONS))]
 
     async def session_status() -> dict[str, str]:
         """Safe agent setup signal; deliberately unrelated to TOTP state."""
@@ -982,7 +1190,10 @@ def create_app(
             if arguments:
                 raise HTTPException(400, "Completion options are not exposed")
             return await revoke(agent_grant(grant_id, authorization), status="completed", only_if_approved=True)
-        return await operate(agent_grant(grant_id, authorization), payload.name.removeprefix("browser."), arguments)
+        operation = payload.name.removeprefix("browser.")
+        if operation in FILE_OPERATIONS:
+            return await file_operation(agent_grant(grant_id, authorization), operation, arguments)
+        return await operate(agent_grant(grant_id, authorization), operation, arguments)
 
     @app.post("/mcp")
     async def mcp(payload: McpRequest, authorization: str | None = Header(default=None)):
@@ -1001,7 +1212,7 @@ def create_app(
                 },
             }
         if payload.method == "tools/list":
-            names = ("session_status", "request_access", "get_request", "complete", "observe", *sorted(TAB_OPERATIONS), *sorted(ALLOWED_ACTIONS))
+            names = ("session_status", "request_access", "get_request", "complete", "observe", *sorted(TAB_OPERATIONS), *sorted(FILE_OPERATIONS), *sorted(ALLOWED_ACTIONS))
             return {
                 "jsonrpc": "2.0", "id": payload.id,
                 "result": {"tools": [
@@ -1056,7 +1267,11 @@ def create_app(
                     raise HTTPException(400, "request_id and arguments required")
                 if not name.startswith("browser."):
                     raise HTTPException(404, "Tool unavailable")
-                result = await operate(agent_grant(request_id, authorization), name.removeprefix("browser."), action_arguments)
+                operation = name.removeprefix("browser.")
+                if operation in FILE_OPERATIONS:
+                    result = await file_operation(agent_grant(request_id, authorization), operation, action_arguments)
+                else:
+                    result = await operate(agent_grant(request_id, authorization), operation, action_arguments)
             import json
 
             return {
@@ -1081,6 +1296,7 @@ def app_from_environment() -> FastAPI:
         portal_assertion_public_key=os.environ.get("BROKER_PORTAL_ASSERTION_PUBLIC_KEY"),
         expected_user_id=os.environ.get("BROKER_USER_ID"),
         expected_tenant_id=os.environ.get("BROKER_TENANT_ID"),
+        transfer_max_bytes=int(os.environ.get("BROKER_TRANSFER_MAX_BYTES") or DEFAULT_TRANSFER_MAX_BYTES),
     )
 
 

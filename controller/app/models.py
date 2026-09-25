@@ -202,6 +202,41 @@ class UploadRequest(_WithApproval):
         return self
 
 
+class DownloadFileRequest(StrictInputModel):
+    """Capture a file the page produces as a transfer (app/file_transfer.py).
+
+    click   -- click element_id/selector and take the download it starts
+    element -- the image/video/audio/link element_id/selector shows
+    media   -- the page's main picture/video (largest visible; media_kind narrows it)
+    url     -- a direct http(s) link, fetched as this page would
+    latest  -- the newest finished download of this session
+    """
+
+    mode: Literal["click", "element", "media", "url", "latest"]
+    selector: str | None = Field(default=None, min_length=1, max_length=2000)
+    element_id: str | None = Field(default=None, min_length=1, max_length=500)
+    url: str | None = Field(default=None, min_length=1, max_length=4000)
+    media_kind: Literal["any", "image", "video", "audio"] = "any"
+    timeout_seconds: float | None = Field(default=None, gt=0, le=600)
+    pace: Pace = "human"
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> "DownloadFileRequest":
+        if self.mode in {"click", "element"} and not (self.selector or self.element_id):
+            raise ValueError(f"{self.mode} mode requires element_id or selector")
+        if self.mode == "url" and not self.url:
+            raise ValueError("url mode requires url")
+        return self
+
+
+class AttachFileRequest(StrictInputModel):
+    """Set a pushed transfer on the page's file input; no target = the page's
+    only (or only matching) file input."""
+
+    selector: str | None = Field(default=None, min_length=1, max_length=2000)
+    element_id: str | None = Field(default=None, min_length=1, max_length=500)
+
+
 class SaveStorageStateRequest(StrictInputModel):
     path: str = Field(min_length=1, max_length=500, description="Relative path inside /data/auth")
 

@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync } from "node:fs";
-import { lstat, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { createReadStream, existsSync } from "node:fs";
+import { lstat, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest } from "node:http";
 import { connect as netConnect } from "node:net";
 import { hostname } from "node:os";
@@ -622,6 +622,7 @@ async function launchProfile(name, opts, owner) {
   };
   profiles.set(name, entry);
   relayTargets.set(name, discovered.localPort);
+  trackDownloads(name, context);
   context.on("close", () => {
     if (profiles.get(name) === entry) {
       profiles.delete(name);
@@ -891,6 +892,150 @@ function requireName(value, field = "name") {
   return name;
 }
 
+// ---------------------------------------------------------------------------
+// Downloads a persistent profile produces.
+//
+// This process launched the persistent context, so its Playwright is the one
+// that receives the profile's download events and holds the files (in
+// downloadsDir, named by Chromium's download GUID). The controller attaches
+// over CDP with no_defaults and never sees them, so it lists and pulls them
+// here: POST /downloads/list, GET /downloads/file?id=, POST /downloads/delete.
+// A download past BROWSER_DOWNLOAD_MAX_BYTES is cancelled while it runs.
+
+const downloadMaxBytes = Number.parseInt(process.env.BROWSER_DOWNLOAD_MAX_BYTES || String(200 * 1024 * 1024), 10);
+const DOWNLOADS_KEPT_PER_PROFILE = 30;
+const DOWNLOAD_ID_RE = /^[0-9a-f]{24}$/;
+const downloadsByProfile = new Map(); // profile name -> [record, ...] oldest first
+const downloadsById = new Map();
+let downloadSeq = 0;
+
+function publicDownload(record) {
+  const { path: _path, download: _download, ...rest } = record;
+  return rest;
+}
+
+function forgetDownload(record) {
+  downloadsById.delete(record.id);
+  if (record.path) unlink(record.path).catch(() => {});
+  record.path = null;
+}
+
+function rememberDownload(profile, record) {
+  const list = downloadsByProfile.get(profile) || [];
+  list.push(record);
+  while (list.length > DOWNLOADS_KEPT_PER_PROFILE) forgetDownload(list.shift());
+  downloadsByProfile.set(profile, list);
+  downloadsById.set(record.id, record);
+}
+
+function safeDownloadUrl(value) {
+  try {
+    const url = new URL(value);
+    // Hosts only: a signed CDN link's query string is a credential.
+    return url.protocol === "blob:" || url.protocol === "data:" ? `${url.protocol}` : `${url.protocol}//${url.host}${url.pathname}`.slice(0, 500);
+  } catch {
+    return null;
+  }
+}
+
+async function oversizedPartialFile(sinceMs) {
+  // Chromium writes the in-progress file into downloadsDir; Playwright gives
+  // no progress events, so look for any file touched since this download
+  // began that is already past the cap.
+  let names;
+  try {
+    names = await readdir(downloadsDir);
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    try {
+      const info = await stat(join(downloadsDir, name));
+      if (info.isFile() && info.mtimeMs >= sinceMs - 2000 && info.size > downloadMaxBytes) return true;
+    } catch {
+      /* gone meanwhile */
+    }
+  }
+  return false;
+}
+
+async function onDownload(profile, download) {
+  const record = {
+    id: randomBytes(12).toString("hex"),
+    seq: ++downloadSeq,
+    profile,
+    url: safeDownloadUrl(download.url()),
+    suggested_filename: String(download.suggestedFilename() || "").slice(0, 200),
+    state: "in_progress",
+    size_bytes: null,
+    started_at: Date.now() / 1000,
+    finished_at: null,
+    failure: null,
+    path: null,
+  };
+  rememberDownload(profile, record);
+  const startedMs = Date.now();
+  const guard = setInterval(async () => {
+    if (record.state === "in_progress" && (await oversizedPartialFile(startedMs))) {
+      record.state = "too_large";
+      download.cancel().catch(() => {});
+    }
+  }, 1000);
+  try {
+    const failure = await download.failure();
+    if (record.state === "too_large") {
+      record.failure = "too_large";
+    } else if (failure) {
+      record.state = "failed";
+      record.failure = String(failure).slice(0, 120);
+    } else {
+      const path = await download.path();
+      const info = await stat(path);
+      if (info.size > downloadMaxBytes) {
+        record.state = "too_large";
+        record.failure = "too_large";
+        await unlink(path).catch(() => {});
+      } else {
+        record.path = path;
+        record.size_bytes = info.size;
+        record.state = "completed";
+      }
+    }
+  } catch (err) {
+    record.state = "failed";
+    record.failure = String((err && err.message) || err).slice(0, 120);
+  } finally {
+    clearInterval(guard);
+    record.finished_at = Date.now() / 1000;
+  }
+}
+
+function trackDownloads(profile, context) {
+  const attach = (page) => page.on("download", (download) => {
+    onDownload(profile, download).catch((err) => console.error("download tracking failed:", err));
+  });
+  for (const page of context.pages()) attach(page);
+  context.on("page", attach);
+}
+
+async function sendDownloadFile(res, id) {
+  if (!DOWNLOAD_ID_RE.test(id || "")) return sendJson(res, 400, { error: "invalid download id" });
+  const record = downloadsById.get(id);
+  if (!record || record.state !== "completed" || !record.path) return sendJson(res, 404, { error: "no such download" });
+  let info;
+  try {
+    info = await stat(record.path);
+  } catch {
+    return sendJson(res, 404, { error: "download file is gone" });
+  }
+  res.writeHead(200, {
+    "Content-Type": "application/octet-stream",
+    "Content-Length": info.size,
+    "Cache-Control": "no-store",
+  });
+  createReadStream(record.path).on("error", () => res.destroy()).pipe(res);
+}
+
 // Control API, reachable only on the internal tenant network (never
 // published). /healthz is unauthenticated and reveals nothing; everything
 // else requires the bearer token.
@@ -918,8 +1063,23 @@ const controlServer = createServer(async (req, res) => {
       const result = await deepHealthcheck();
       return sendJson(res, result.ok ? 200 : 503, { ...result, pids: (await checkPidsBudget()) || pidsState });
     }
+    if (req.method === "GET" && path === "/downloads/file") {
+      const id = new URL(req.url || "", "http://browser-node").searchParams.get("id") || "";
+      return await sendDownloadFile(res, id);
+    }
     if (req.method !== "POST") return sendJson(res, 404, { error: "not found" });
     const body = await readJsonBody(req);
+    if (path === "/downloads/list") {
+      const name = requireName(body.name);
+      const after = Number.isInteger(body.after_seq) ? body.after_seq : 0;
+      const list = (downloadsByProfile.get(name) || []).filter((record) => record.seq > after);
+      return sendJson(res, 200, { downloads: list.map(publicDownload) });
+    }
+    if (path === "/downloads/delete") {
+      const record = downloadsById.get(String(body.id || ""));
+      if (record) forgetDownload(record);
+      return sendJson(res, 200, { deleted: Boolean(record) });
+    }
     if (path === "/profiles/open") {
       const name = requireName(body.name);
       const result = await withLifecycleLock(() => openProfile(name, body));
