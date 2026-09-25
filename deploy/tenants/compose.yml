@@ -13,7 +13,7 @@ services:
     mem_limit: 6g
     memswap_limit: 6g
     cpus: 4.0
-    pids_limit: 256
+    pids_limit: 4096
     shm_size: 1g
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
