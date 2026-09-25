@@ -299,6 +299,27 @@ class RealBrowserNodeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(again["id"], session.id)
         await manager.close_session(session.id)
 
+    async def test_chromium_crash_relaunches_the_profile_under_the_same_session(self) -> None:
+        """The owner's Chromium itself dies (2026-09-25 03:18:57: SIGSEGV in
+        the browser process). The CDP link drops; the watchdog must re-open
+        the profile from disk and keep the same session id."""
+        manager = self.manager
+        url = f"http://{LAN}:{CONTROL_PORT}/healthz"
+        opened = await manager.create_session(name="owner", start_url=url)
+        session = manager.sessions[opened["id"]]
+        [browser_pid] = await self._process_ids(session.browser, "browser")
+        started = time.monotonic()
+        self._kill(browser_pid)
+        await self._wait_for_reattach(manager, session, 1, timeout=45)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 30, f"re-attach took {elapsed:.1f}s")
+        self.assertNotEqual(await self._process_ids(session.browser, "browser"), [browser_pid])
+        await session.page.goto(url)
+        self.assertIn("persistent_profiles_enabled", await session.page.content())
+        listed = await manager.list_sessions()
+        self.assertEqual([item["status"] for item in listed if item["id"] == session.id], ["active"])
+        await manager.close_session(session.id)
+
     @unittest.skipUnless(os.environ.get("REAL_BROWSER_NODE_LONGRUN_SECONDS"), "long run disabled")
     async def test_long_run_auto_persist_healthcheck_navigation_and_recovery(self) -> None:
         """Production cadence for REAL_BROWSER_NODE_LONGRUN_SECONDS (>= 1800).
@@ -318,6 +339,16 @@ class RealBrowserNodeTests(unittest.IsolatedAsyncioTestCase):
             if log_file:
                 log_file.write(line + "\n")
                 log_file.flush()
+
+        import logging
+
+        app_log = logging.getLogger("app")
+        handler = logging.FileHandler(log_path, encoding="utf-8") if log_path else logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", "%H:%M:%S"))
+        handler.setLevel(logging.INFO)
+        app_log.addHandler(handler)
+        app_log.setLevel(logging.INFO)
+        self.addCleanup(app_log.removeHandler, handler)
 
         await self.manager.shutdown()
         manager = self.manager = self._make_manager(
