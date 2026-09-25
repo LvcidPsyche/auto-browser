@@ -953,8 +953,17 @@ def create_app(
             if (next_path or wants_html)
             else JSONResponse({"status": "signed_in", "user_id": user_id, "tenant_id": tenant_id})
         )
-        result.set_cookie(SESSION_COOKIE, token, httponly=True, secure=True, samesite="lax", path="/")
-        result.set_cookie(CSRF_COOKIE, csrf, httponly=False, secure=True, samesite="lax", path="/")
+        # max_age keeps the sign-in across a closed phone browser for as long as the
+        # server-side session itself lives (absolute_session_ttl); without it the
+        # cookie died with the tab and the owner had to sign in with a code again.
+        result.set_cookie(
+            SESSION_COOKIE, token, httponly=True, secure=True, samesite="lax", path="/",
+            max_age=absolute_session_ttl,
+        )
+        result.set_cookie(
+            CSRF_COOKIE, csrf, httponly=False, secure=True, samesite="lax", path="/",
+            max_age=absolute_session_ttl,
+        )
         return result
 
     @app.post("/logout")
@@ -2151,6 +2160,10 @@ def app_from_environment() -> FastAPI:
         authentication_freshness_ttl=int(
             os.environ.get("PORTAL_AUTHENTICATION_FRESHNESS_SECONDS", "120")
         ),
+        # Single-owner deployments can keep a sign-in (and its authenticator
+        # freshness) for days instead of re-asking for a code every few minutes.
+        absolute_session_ttl=int(os.environ.get("PORTAL_ABSOLUTE_SESSION_SECONDS", str(12 * 60 * 60))),
+        idle_session_ttl=int(os.environ.get("PORTAL_IDLE_SESSION_SECONDS", str(30 * 60))),
     )
 
 
