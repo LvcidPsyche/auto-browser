@@ -356,24 +356,24 @@ class BrowserSessionService:
     async def close(self, session_id: str) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         async with session.lock:
-            if session.tunnel is not None:
-                await self.manager.tunnel_broker.release(session.tunnel)
-            summary = await self.manager._session_summary(session, status="closed", live=False)
-            await self.manager.observation.stop_trace_recording(session)
-            if session.network_inspector is not None:
-                session.network_inspector.detach()
-                session.network_inspector = None
+            if self.manager.sessions.get(session_id) is not session:
+                # Closed by a concurrent call while this one waited for the
+                # lock. Carrying on released the tunnel and runtime twice and
+                # wrote a second close to the audit log and witness chain.
+                raise SessionNotFoundError(session_id, status="closed")
             try:
-                await session.context.close()
+                if session.tunnel is not None:
+                    await self._teardown_step(
+                        session, "release session tunnel", lambda: self.manager.tunnel_broker.release(session.tunnel)
+                    )
+                summary = await self.manager._session_summary(session, status="closed", live=False)
+                await self._release_resources(session)
             finally:
-                if session.browser is not None and session.browser is not self.manager.browser:
-                    try:
-                        await session.browser.close()
-                    except Exception as exc:  # pragma: no cover - best effort isolated cleanup
-                        logger.warning("failed to close isolated browser for session %s: %s", session_id, exc)
-                if session.runtime is not None:
-                    await self.manager.runtime_provisioner.release(session.runtime)
-            self.manager.sessions.pop(session_id, None)
+                # Whatever teardown step failed, the session is gone. It used to
+                # stay registered when context.close() or the runtime release
+                # raised (a crashed browser, a docker error), every retry failed
+                # the same way, and it held a MAX_SESSIONS slot until restart.
+                self.manager.sessions.pop(session_id, None)
             if self.manager._session_closed_hook is not None:
                 try:
                     await self.manager._session_closed_hook(session_id)
@@ -405,6 +405,33 @@ class BrowserSessionService:
             summary["witness_remote"] = session.witness_remote_state.model_dump()
             await self.manager.session_store.upsert(SessionRecord.model_validate(summary))
             return {"closed": True, "trace_path": str(session.trace_path), "session": summary}
+
+    async def _release_resources(self, session: "BrowserSession") -> None:
+        """Tear down everything a live session holds, each step independently.
+
+        A failing step is logged and the rest still run, so one broken resource
+        does not strand the others (the runtime container, the tunnel process).
+        """
+        await self._teardown_step(
+            session, "stop trace recording", lambda: self.manager.observation.stop_trace_recording(session)
+        )
+        if session.network_inspector is not None:
+            session.network_inspector.detach()
+            session.network_inspector = None
+        await self._teardown_step(session, "close browser context", session.context.close)
+        if session.browser is not None and session.browser is not self.manager.browser:
+            await self._teardown_step(session, "close isolated browser", session.browser.close)
+        if session.runtime is not None:
+            await self._teardown_step(
+                session, "release isolated runtime", lambda: self.manager.runtime_provisioner.release(session.runtime)
+            )
+
+    @staticmethod
+    async def _teardown_step(session: "BrowserSession", label: str, step: Any) -> None:
+        try:
+            await step()
+        except Exception as exc:
+            logger.warning("failed to %s for session %s: %s", label, session.id, exc)
 
     async def fork(
         self,

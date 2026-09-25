@@ -386,3 +386,83 @@ async def test_concurrent_creates_cannot_exceed_max_sessions(tmp_path: Path) -> 
 
     # A failed create gives its slot back.
     manager._check_session_limit()
+
+
+def _manager_with_live_session(tmp_path: Path, *, context_close):
+    from datetime import datetime, timezone
+
+    from app.browser_manager import BrowserManager, BrowserSession
+    from app.config import Settings
+
+    settings = Settings(_env_file=None)
+    settings.artifact_root = str(tmp_path / "artifacts")
+    settings.upload_root = str(tmp_path / "uploads")
+    settings.auth_root = str(tmp_path / "auth")
+    settings.session_store_root = str(tmp_path / "sessions")
+    settings.audit_root = str(tmp_path / "audit")
+    settings.witness_root = str(tmp_path / "witness")
+    manager = BrowserManager(settings)
+
+    class _Page:
+        url = "https://example.com"
+
+        def is_closed(self) -> bool:
+            return False
+
+        async def title(self) -> str:
+            return "Example"
+
+    artifact_dir = tmp_path / "artifacts" / "session-1"
+    artifact_dir.mkdir(parents=True)
+    session = BrowserSession(
+        id="session-1",
+        name="session-1",
+        created_at=datetime.now(timezone.utc),
+        context=SimpleNamespace(close=context_close),  # type: ignore[arg-type]
+        page=_Page(),  # type: ignore[arg-type]
+        artifact_dir=artifact_dir,
+        auth_dir=tmp_path / "auth" / "session-1",
+        upload_dir=tmp_path / "uploads" / "session-1",
+        takeover_url="http://127.0.0.1:6080/vnc.html",
+        trace_path=artifact_dir / "trace.zip",
+    )
+    manager.sessions[session.id] = session
+    return manager
+
+
+@pytest.mark.asyncio
+async def test_close_frees_the_slot_even_when_teardown_fails(tmp_path: Path) -> None:
+    """Regression: a crashed browser made context.close() raise before the
+    session was unregistered, every retry failed the same way, and the session
+    held its MAX_SESSIONS slot until restart."""
+
+    async def broken_close() -> None:
+        raise RuntimeError("Target page, context or browser has been closed")
+
+    manager = _manager_with_live_session(tmp_path, context_close=broken_close)
+
+    result = await manager.close_session("session-1")
+
+    assert result["closed"] is True
+    assert "session-1" not in manager.sessions
+
+
+@pytest.mark.asyncio
+async def test_concurrent_closes_tear_down_once(tmp_path: Path) -> None:
+    closes = []
+
+    async def slow_close() -> None:
+        closes.append(1)
+        await asyncio.sleep(0.01)
+
+    manager = _manager_with_live_session(tmp_path, context_close=slow_close)
+
+    results = await asyncio.gather(
+        manager.close_session("session-1"),
+        manager.close_session("session-1"),
+        return_exceptions=True,
+    )
+
+    assert len(closes) == 1
+    assert sum(isinstance(r, dict) for r in results) == 1
+    assert sum(isinstance(r, KeyError) for r in results) == 1
