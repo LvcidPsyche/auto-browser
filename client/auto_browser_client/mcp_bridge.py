@@ -215,8 +215,8 @@ class StdioMcpBridge:
             message += " (set --bearer-token or AUTO_BROWSER_BEARER_TOKEN to the controller's API token)"
         elif response.status_code == 400 and "operator" in str(detail).lower():
             message += (
-                " (this controller requires an operator id on every request: give the bridge one if it"
-                " supports it, or turn off REQUIRE_OPERATOR_ID on the controller)"
+                " (this controller requires an operator id on every request: pass --operator-id or set"
+                " AUTO_BROWSER_OPERATOR_ID, or turn off REQUIRE_OPERATOR_ID on the controller)"
             )
         elif response.status_code == 429:
             retry_after = response.headers.get("retry-after")
