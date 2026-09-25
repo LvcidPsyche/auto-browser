@@ -4,6 +4,29 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Actions and observations are faster (#161).** A selector click on a
+  300-row page went from about 1,440 ms to 1,250 ms against local Chromium.
+  An observation's page summary now makes two concurrent browser calls instead
+  of four in a row. The screenshot is taken while the DOM is read. The
+  post-action bot-challenge probe makes one call instead of three. Tab titles
+  are fetched together. The accessibility outline no longer builds nodes past
+  its 30-node cap, which halves its parse time on large pages (85 ms to 47 ms
+  on a 3,000-row page). Observation payloads keep the same shape.
+- **Human-like mouse moves keep their intended 4–18 ms pacing (#161).** Each
+  step used to sleep its full gap on top of the ~17 ms Chromium takes to
+  dispatch a move. Moves now arrive at about the browser's dispatch rate, and
+  the path keeps its shape and step count.
+- **Listing audit events stops at the limit (#161).** The file-backed store
+  read and validated every stored event (up to 10,000) to return the newest
+  100. It now reads newest first and stops once it has enough: 67 ms to 6 ms.
+  A `limit` of zero or less now returns nothing.
+- **The controller image leaves out the test tooling (#161).** pytest, ruff,
+  pip-audit and the rest of `requirements-dev.txt` (about 58 MB) install only
+  when the image is built with `INSTALL_DEV_DEPS=true`, which `make test` and
+  CI set. Anything else that runs pytest inside the image needs that build arg.
+
 ## [1.8.0] — 2026-09-25
 
 Two passes since 1.7.0.
