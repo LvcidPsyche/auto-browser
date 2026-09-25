@@ -34,7 +34,7 @@ NODE = shutil.which("node")
 _FAKE_DOM = r"""
 const byId = {};
 const document = { getElementById: (id) => byId[id] || null };
-function el(tag, { attrs = {}, text = '', value = '', labels = [], checked = false, children = [] } = {}) {
+function el(tag, { attrs = {}, text = '', value = '', labels = [], checked = false, children = [], editable = false } = {}) {
   return {
     tagName: tag.toUpperCase(),
     innerText: text,
@@ -43,7 +43,7 @@ function el(tag, { attrs = {}, text = '', value = '', labels = [], checked = fal
     checked,
     multiple: false,
     size: 0,
-    isContentEditable: false,
+    isContentEditable: editable,
     labels,
     getAttribute: (name) => (name in attrs ? attrs[name] : null),
     hasAttribute: (name) => name in attrs,
@@ -64,6 +64,10 @@ const cases = {
   icon_button: el('button', { children: [el('img', { attrs: { alt: 'Settings' } })] }),
   link: el('a', { attrs: { href: '/help' }, text: 'Need help?' }),
   switch_widget: el('div', { attrs: { role: 'switch', 'aria-checked': 'false' }, text: 'Dark mode' }),
+  labelled_editor: el('div', { attrs: { contenteditable: 'true', 'aria-label': 'Message body' }, text: 'draft one', editable: true }),
+  unlabelled_editor: el('div', { attrs: { contenteditable: 'true' }, text: 'draft two', editable: true }),
+  aria_textbox: el('div', { attrs: { role: 'textbox' }, text: 'typed words' }),
+  custom_combobox: el('div', { attrs: { role: 'combobox', 'aria-label': 'Country' }, text: 'United Kingdom' }),
 };
 const out = {};
 for (const [key, node] of Object.entries(cases)) {
@@ -110,6 +114,19 @@ def test_a_typed_value_is_never_a_name() -> None:
     assert "private note" not in json.dumps(named)
 
 
+@pytest.mark.skipif(NODE is None, reason="node not available")
+def test_editors_and_textbox_widgets_are_not_named_by_their_content() -> None:
+    # A contenteditable editor's text, or an ARIA textbox's, is what was typed.
+    named = _run_naming_under_node()
+
+    assert named["labelled_editor"]["name"] == "Message body"
+    assert named["unlabelled_editor"]["name"] == ""
+    assert named["aria_textbox"] == {"name": "", "role": "textbox", "checked": None}
+    assert named["custom_combobox"]["name"] == "Country"
+    for typed in ("draft one", "draft two", "typed words", "United Kingdom"):
+        assert typed not in json.dumps(named), typed
+
+
 def test_the_three_observation_scripts_share_the_helper() -> None:
     for name in ("INTERACTABLES_SCRIPT", "ACTIVE_ELEMENT_SCRIPT", "PAGE_SUMMARY_SCRIPT"):
         source = getattr(browser_scripts, name)
@@ -139,7 +156,8 @@ def test_real_chromium_names_a_login_form_and_leaks_nothing_typed() -> None:
       <input id=bare type=password name=secret>
       <label><input type=checkbox id=rem> Remember me</label>
       <label>Country <select><option>US</option><option>UK</option></select></label>
-      <button type=submit>Sign in</button></form>"""
+      <button type=submit>Sign in</button></form>
+      <div id=editor contenteditable=true></div>"""
 
     async def run() -> tuple[list, dict, dict]:
         async with async_playwright() as playwright:
@@ -149,17 +167,27 @@ def test_real_chromium_names_a_login_form_and_leaks_nothing_typed() -> None:
                 await page.set_content(html)
                 await page.fill("#pw", "hunter2")
                 await page.fill("#bare", "s3cr3t-typed")
+                await page.fill("#editor", "draft-typed")
+                editor_items = await page.evaluate(browser_scripts.INTERACTABLES_SCRIPT, 40)
+                editor_active = await page.evaluate(browser_scripts.ACTIVE_ELEMENT_SCRIPT)
                 await page.focus("#bare")
                 items = await page.evaluate(browser_scripts.INTERACTABLES_SCRIPT, 40)
                 active = await page.evaluate(browser_scripts.ACTIVE_ELEMENT_SCRIPT)
                 summary = await page.evaluate(browser_scripts.PAGE_SUMMARY_SCRIPT, 500)
-                return items, active, summary
+                return items, active, summary, editor_items, editor_active
             finally:
                 await browser.close()
 
-    items, active, summary = asyncio.run(run())
+    items, active, summary, editor_items, editor_active = asyncio.run(run())
 
     labels = [item["label"] for item in items]
     assert labels[:5] == ["Email", "Password", "secret", "Remember me", "Country"]
     blob = json.dumps([items, active, summary])
     assert "hunter2" not in blob and "s3cr3t-typed" not in blob
+    # An unlabelled rich-text editor holding typed text falls back to its id,
+    # never to that text (which is page content, so it does appear in the
+    # page's text excerpt).
+    editor = next(item for item in editor_items if item["role"] == "textbox" and item["tag"] == "div")
+    assert editor["label"] == "editor"
+    assert editor_active["label"] == "editor"
+    assert "draft-typed" not in json.dumps([editor_items, editor_active, summary["dom_outline"]])

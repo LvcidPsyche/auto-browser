@@ -110,6 +110,8 @@ STEALTH_INIT_SCRIPT = r"""
 # and the form outline — and from there reached model prompts, MCP clients and
 # logs, even though the type action itself had redacted the text. Captions of
 # submit/button/reset inputs are the one exception: that value is visible text.
+# The same holds for contenteditable editors and textbox-like ARIA widgets,
+# whose text content is what was typed into them.
 _ELEMENT_NAMING_JS = r"""
   function abClean(value) {
     return String(value || '').replace(/\s+/g, ' ').trim();
@@ -147,7 +149,14 @@ _ELEMENT_NAMING_JS = r"""
       const alt = abClean(el.getAttribute('alt'));
       if (alt) return alt;
     }
-    const isField = tag === 'input' || tag === 'textarea' || tag === 'select';
+    // What a field holds is its value, not its name. That covers rich-text
+    // editors (contenteditable) and ARIA widgets whose content is their value
+    // as well as native inputs: typed text into any of them must not come back
+    // as the element's label.
+    const explicitRole = abClean(el.getAttribute('role')).split(' ')[0];
+    const isField = tag === 'input' || tag === 'textarea' || tag === 'select'
+      || el.isContentEditable
+      || ['textbox', 'searchbox', 'combobox', 'spinbutton', 'slider'].includes(explicitRole);
     if (!isField) {
       const text = abClean(el.innerText);
       if (text) return text;
