@@ -118,9 +118,11 @@ configuration now answers `400` until you list the name in
   and logs, even though the type action had redacted it. Fields are now named
   the way a person reads them: `aria-labelledby`, `aria-label`, their
   `<label>`, button captions and image `alt`. A field's value is never its
-  name. Interactables also report ARIA roles (textbox, checkbox, combobox, …)
-  and checked state. The three scripts share one naming helper, checked under
-  Node and in a real Chromium.
+  name. The same holds for rich-text editors (`contenteditable`) and
+  textbox-like ARIA widgets, whose text content is what was typed into them.
+  Interactables also report ARIA roles (textbox, checkbox, combobox, …) and
+  checked state. The three scripts share one naming helper, checked under Node
+  and in a real Chromium.
 
 - **Approving a governed tool call approved any arguments.** The stand-in
   decision an approval is matched against carried only the tool name, and
@@ -162,8 +164,16 @@ configuration now answers `400` until you list the name in
   The outline is rebuilt from `page.aria_snapshot()`. That snapshot includes
   what each field holds (a filled password field reads
   `textbox "Secret": hunter2`), and the old outline copied a `value` for every
-  node, so the new one keeps roles, accessible names and states only. A test
+  node, so the new one keeps roles, accessible names and states only. A large
+  page's snapshot (3 MB for 20,000 links) is parsed off the event loop. A test
   now asserts that the pinned Playwright has the API.
+
+- **`scripts/fixture_live.py` has not worked since the DNS-rebinding guard.**
+  Its TestClient sent `Host: testserver`, which a tokenless controller now
+  refuses unless `CONTROLLER_ALLOWED_HOSTS` lists it. The script reported the
+  resulting 400 as "SKIP: live browser stack unavailable". It now uses a
+  loopback base URL, and a 4xx from the controller is a failure rather than a
+  skip. All six fixtures pass live.
 
 - **Policy refusals reached MCP agents as "Tool execution failed".** Some
   refusals raise `PermissionError`: a host outside `ALLOWED_HOSTS`, a retry
@@ -311,6 +321,9 @@ configuration now answers `400` until you list the name in
 
 - Host-side developer scripts require Python 3.11, the floor every package
   declares. They accepted 3.10.
+
+- The unserved legacy dashboard page, `controller/app/ui/index.html`, is
+  removed. `/ui` still redirects to `/dashboard`.
 
 ### Documentation
 
