@@ -469,6 +469,27 @@ async def test_concurrent_closes_tear_down_once(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_close_tells_live_event_streams_the_session_ended(tmp_path: Path) -> None:
+    """Nothing emitted a session event on close, so /sessions/{id}/events
+    streams stayed open on keepalives after the session was gone."""
+    from app import events
+
+    async def close() -> None:
+        return None
+
+    manager = _manager_with_live_session(tmp_path, context_close=close)
+    queue = events.subscribe("session-1")
+    try:
+        await manager.close_session("session-1")
+        payloads = []
+        while not queue.empty():
+            payloads.append(queue.get_nowait())
+        assert any(events.is_session_closed_event(p, "session-1") for p in payloads)
+    finally:
+        events.unsubscribe("session-1", queue)
+
+
+@pytest.mark.asyncio
 async def test_cancelled_create_releases_what_it_acquired(tmp_path: Path) -> None:
     """Rollback ran on Exception only, so a cancelled create kept its context
     open and its isolated runtime (a docker container) running."""

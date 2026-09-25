@@ -37,6 +37,10 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
                             timeout=settings.sse_keepalive_seconds,
                         )
                         yield f"data: {payload}\n\n"
+                        if _events.is_session_closed_event(payload, session_id):
+                            # Nothing more will arrive; the stream used to stay
+                            # open on keepalives until the client hung up.
+                            break
                     except asyncio.TimeoutError:
                         yield ": keepalive\n\n"
             finally:

@@ -36,6 +36,26 @@ class EventsTests(unittest.TestCase):
         self.assertNotIn("session-1", events._SESSION_QUEUES)
         self.assertEqual(events._GLOBAL_QUEUES, [])
 
+    def test_a_new_subscriber_does_not_inherit_a_departed_ones_drops(self) -> None:
+        before = events.dropped_event_count()
+        queue = events.subscribe("session-1")
+        for _ in range(queue.maxsize + 3):
+            events.emit_action("session-1", "click", "ok")
+        self.assertEqual(events.dropped_event_count() - before, 3)
+
+        events.unsubscribe("session-1", queue)
+        self.assertNotIn(id(queue), events._DROPPED_EVENTS)
+        # The process-wide total keeps counting what was dropped.
+        self.assertEqual(events.dropped_event_count() - before, 3)
+
+    def test_session_closed_event_is_recognised_for_its_own_session_only(self) -> None:
+        queue = events.subscribe("session-1")
+        events.emit_session("session-1", "closed")
+        payload = queue.get_nowait()
+        self.assertTrue(events.is_session_closed_event(payload, "session-1"))
+        self.assertFalse(events.is_session_closed_event(payload, "session-2"))
+        self.assertFalse(events.is_session_closed_event("not json", "session-1"))
+
 
 class WebhookTests(unittest.IsolatedAsyncioTestCase):
     async def test_dispatch_posts_signed_approval_event_and_ignores_failures(self) -> None:

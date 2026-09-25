@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from playwright.async_api import Error as PlaywrightError
 
+from ... import events as _events
 from ...action_errors import SessionNotFoundError
 from ...browser_scripts import apply_stealth
 from ...models import SessionRecord, SessionStatus
@@ -376,6 +377,7 @@ class BrowserSessionService:
                 # raised (a crashed browser, a docker error), every retry failed
                 # the same way, and it held a MAX_SESSIONS slot until restart.
                 self.manager.sessions.pop(session_id, None)
+                _events.emit_session(session_id, "closed")
             if self.manager._session_closed_hook is not None:
                 try:
                     await self.manager._session_closed_hook(session_id)
