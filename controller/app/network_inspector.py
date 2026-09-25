@@ -234,6 +234,16 @@ class NetworkInspector:
                 logger.debug("could not tag request object for %s: %s", url, exc)
 
             async with self._lock:
+                # Requests that never finish (long polls, streams a page keeps
+                # opening) stayed here for the life of the session. Past the
+                # log's size the oldest is logged as untracked instead.
+                while len(self._pending) >= self.max_entries:
+                    stale = self._pending.pop(next(iter(self._pending)))
+                    stale["failed"] = True
+                    stale["failure_text"] = "no longer tracked: too many requests in flight"
+                    stale["duration_ms"] = _elapsed_ms(stale)
+                    stale.pop("_started_at", None)
+                    self._log.append(stale)
                 self._pending[req_id] = entry
 
         except Exception as exc:
@@ -246,14 +256,20 @@ class NetworkInspector:
             if req_id is None:
                 return
 
+            status = response.status
+            resp_headers = dict(response.headers or {})
+            content_type = resp_headers.get("content-type", "")
+
             async with self._lock:
                 entry = self._pending.get(req_id)
                 if entry is None:
                     return
-
-            status = response.status
-            resp_headers = dict(response.headers or {})
-            content_type = resp_headers.get("content-type", "")
+                # Recorded before the body is awaited: requestfinished can log
+                # the entry and fire hooks while the body is still being read,
+                # and they saw status None.
+                entry["status"] = status
+                entry["content_type"] = content_type
+                entry["response_headers"] = _mask_sensitive_headers(resp_headers)
 
             # Capture response body (text/json only, size limited)
             resp_body: str | None = None
@@ -275,9 +291,6 @@ class NetworkInspector:
                     logger.debug("could not read response body for %s: %s", entry.get("url", "?"), exc)
 
             async with self._lock:
-                entry["status"] = status
-                entry["content_type"] = content_type
-                entry["response_headers"] = _mask_sensitive_headers(resp_headers)
                 entry["response_body"] = resp_body
                 entry["pii_redacted"] = pii_hit
 
