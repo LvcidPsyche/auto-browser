@@ -468,9 +468,7 @@ class AgentHttpTests(unittest.TestCase):
             missing_cron = self.client.delete("/crons/missing")
             forbidden_cron = self.client.post("/crons/cron-1/trigger", json={"webhook_key": "bad"})
             non_object_cron = self.client.post("/crons/cron-1/trigger", json=["bad"])
-            redirected_cron = self.client.post(
-                "/crons/cron-1/trigger", json={"job_id": "cron-2", "webhook_key": "bad"}
-            )
+            redirected_cron = self.client.post("/crons/cron-1/trigger", json={"job_id": "cron-2", "webhook_key": "bad"})
             triggered_job_ids = [call.args[0] for call in main_module.cron_service.trigger_via_webhook.await_args_list]
 
         self.assertEqual(replay.status_code, 200)

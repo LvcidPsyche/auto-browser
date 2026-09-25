@@ -105,9 +105,7 @@ class AuthPolicyTests(unittest.TestCase):
 
 class RuntimePolicyAuthTests(unittest.TestCase):
     def test_exposed_and_tokenless_is_a_startup_error_in_development(self) -> None:
-        report = validate_runtime_policy(
-            settings(APP_ENV="development", API_BIND_SCOPE=BIND_SCOPE_EXPOSED)
-        )
+        report = validate_runtime_policy(settings(APP_ENV="development", API_BIND_SCOPE=BIND_SCOPE_EXPOSED))
         self.assertFalse(report.ok)
         self.assertTrue(any("API_BEARER_TOKEN is required" in error for error in report.errors))
 
@@ -125,23 +123,17 @@ class RuntimePolicyAuthTests(unittest.TestCase):
         self.assertEqual([e for e in report.errors if "API_BEARER_TOKEN" in e], [])
 
     def test_loopback_without_a_token_warns_but_starts(self) -> None:
-        report = validate_runtime_policy(
-            settings(APP_ENV="development", API_BIND_SCOPE=BIND_SCOPE_LOOPBACK)
-        )
+        report = validate_runtime_policy(settings(APP_ENV="development", API_BIND_SCOPE=BIND_SCOPE_LOOPBACK))
         self.assertTrue(report.ok)
         self.assertTrue(any("API_BEARER_TOKEN is unset" in warning for warning in report.warnings))
 
     def test_production_still_requires_a_token_on_a_loopback_bind(self) -> None:
         """APP_ENV=production keeps its own floor; bind scope only widens it."""
-        report = validate_runtime_policy(
-            settings(APP_ENV="production", API_BIND_SCOPE=BIND_SCOPE_LOOPBACK)
-        )
+        report = validate_runtime_policy(settings(APP_ENV="production", API_BIND_SCOPE=BIND_SCOPE_LOOPBACK))
         self.assertTrue(any("API_BEARER_TOKEN is required" in error for error in report.errors))
 
     def test_the_auth_error_is_reported_once_not_twice(self) -> None:
-        report = validate_runtime_policy(
-            settings(APP_ENV="production", API_BIND_SCOPE=BIND_SCOPE_EXPOSED)
-        )
+        report = validate_runtime_policy(settings(APP_ENV="production", API_BIND_SCOPE=BIND_SCOPE_EXPOSED))
         matching = [error for error in report.errors if "API_BEARER_TOKEN is required" in error]
         self.assertEqual(len(matching), 1)
 
