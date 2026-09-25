@@ -199,6 +199,27 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(back_result["action"], "go_back")
         self.assertEqual(forward_result["action"], "go_forward")
 
+    async def test_an_upload_of_a_missing_file_fails_before_asking_for_approval(self) -> None:
+        # execute_action asked the operator to approve the upload first, so the
+        # approval was for an upload that could only fail once granted.
+        from app.approvals import ApprovalRequiredError
+        from app.models import BrowserActionDecision
+
+        await self.manager.approvals.startup()
+        decision = BrowserActionDecision(
+            action="upload", element_id="op-file", file_path="nope.pdf", reason="attach", risk_category="upload"
+        )
+
+        with self.assertRaisesRegex(FileNotFoundError, "'nope.pdf'"):
+            await self.manager.execute_decision("session-1", decision)
+
+        self.assertEqual(await self.manager.approvals.list(), [])
+
+        # A file that exists still goes to approval as before.
+        (self.root / "uploads" / "receipt.txt").write_text("bytes", encoding="utf-8")
+        with self.assertRaises(ApprovalRequiredError):
+            await self.manager.execute_decision("session-1", decision.model_copy(update={"file_path": "receipt.txt"}))
+
     async def test_tabs_diagnostics_takeover_and_trace_use_session_state(self) -> None:
         self.session.console_messages = [{"type": "log", "text": "ready", "location": {}}]
         self.session.page_errors = ["boom"]

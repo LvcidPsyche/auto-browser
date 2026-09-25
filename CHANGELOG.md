@@ -174,7 +174,9 @@ configuration now answers `400` until you list the name in
   `create_session` now says "No saved auth profile 'shop'", and an upload
   names the file missing from the upload directory. Before, both said "Tool
   execution failed". Those messages name what the caller asked for instead of
-  the resolved path under a data root. OS-level permission and file errors,
+  the resolved path under a data root. An upload through `execute_action` now
+  checks the file before asking for approval, so an operator is no longer asked
+  to approve an upload that could only fail. OS-level permission and file errors,
   which can name server paths, stay opaque. The browser's own errors come back
   with their reason too, code `timeout` or `browser_error`: a
   `wait_for_selector` timeout, an invalid selector, or an exception thrown by

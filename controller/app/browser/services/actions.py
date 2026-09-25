@@ -248,6 +248,12 @@ class BrowserActionService:
         approval_id: str | None = None,
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
+        if decision.action == "upload":
+            # Check the file before asking anyone to approve the upload: an
+            # operator should not be asked to approve an upload of a file that
+            # is not there, only for it to fail once they have. The direct
+            # upload path already checks in this order.
+            self.manager.uploads.safe_path(decision.file_path or "", session=session)
         approval = await self.require_decision_approval(
             session_id,
             decision,
