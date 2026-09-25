@@ -27,7 +27,7 @@ test-local: ## Run controller tests on the host with Python 3.11+
 	./scripts/test_local.sh
 
 coverage: ## Run controller tests with coverage on the host
-	cd controller && python -m pytest tests/ --cov=app --cov-report=html --cov-report=term-missing
+	./scripts/test_local.sh --cov=app --cov-report=html --cov-report=term-missing
 
 eval: ## Run the deterministic agent eval matrix without live providers
 	python scripts/agent_eval.py --mock
