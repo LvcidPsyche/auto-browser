@@ -14,6 +14,7 @@ from pydantic.json_schema import SkipJsonSchema
 
 from .harness.contracts import TaskContract
 from .models import (
+    AGENT_RUN_MAX_STEPS,
     CDP_URL_SCHEMES,
     HTTP_URL_SCHEMES,
     PROXY_URL_SCHEMES,
@@ -560,13 +561,15 @@ class CronJobIdInput(StrictInputModel):
 
 class CreateCronJobInput(StrictInputModel):
     name: str = Field(min_length=1, max_length=200)
-    goal: str = Field(min_length=1, max_length=5000)
+    # Limits match AgentRunRequest, which every fire builds from these values;
+    # wider ones were accepted here and then failed on every run.
+    goal: str = Field(min_length=1, max_length=4000)
     provider: ProviderName = "openai"
     schedule: str | None = Field(default=None, max_length=100)
     start_url: str | None = Field(default=None, max_length=2000)
     auth_profile: str | None = Field(default=None, max_length=200)
     proxy_persona: str | None = Field(default=None, max_length=200)
-    max_steps: int = Field(default=20, ge=1, le=100)
+    max_steps: int = Field(default=20, ge=1, le=AGENT_RUN_MAX_STEPS)
     enabled: bool = True
     webhook_enabled: bool = False
 

@@ -402,8 +402,11 @@ class AgentStepRequest(StrictInputModel):
     approval_id: str | None = Field(default=None, min_length=1, max_length=120)
 
 
+AGENT_RUN_MAX_STEPS = 20
+
+
 class AgentRunRequest(AgentStepRequest):
-    max_steps: int = Field(default=6, ge=1, le=20)
+    max_steps: int = Field(default=6, ge=1, le=AGENT_RUN_MAX_STEPS)
 
 
 class AgentResumeRequest(StrictInputModel):
