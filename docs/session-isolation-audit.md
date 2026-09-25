@@ -32,7 +32,7 @@ The default `shared_browser_node` runs one Chromium with one X display and one n
 
 **Mitigation already in repo:** `docker_ephemeral` mode gives each session its own browser container with its own noVNC port pair. The session record built in `BrowserSessionService.create()` carries `takeover_url`, `shared_takeover_surface`, and `shared_browser_process` per session so operators can see which mode they're in.
 
-**Recommendation:** Document this explicitly in `README.md` near the takeover section, not just in `architecture.md`. Many users will skim the README and miss the POC caveat.
+**Recommendation:** Document this explicitly in `README.md` near the takeover section, not just in `architecture.md`. Many users will skim the README and miss the POC caveat. *(Done: the README's Security and Compliance section now says when to choose `docker_ephemeral`.)*
 
 ### 2. Browser process kernel state (low risk, worth documenting)
 
@@ -49,7 +49,7 @@ In `shared_browser_node`, sessions share Chromium's process: DNS cache, font cac
 
 ## Recommendations (in order of leverage)
 
-1. **README clarity, not code change.** Add a short "Choosing isolation" paragraph in the README near the deployment section. Two-mode table from this audit + one-sentence guidance: "Use `docker_ephemeral` when sessions belong to different identities or trust domains."
+1. **README clarity, not code change.** *(Done.)* Add a short "Choosing isolation" paragraph in the README near the deployment section. Two-mode table from this audit + one-sentence guidance: "Use `docker_ephemeral` when sessions belong to different identities or trust domains."
 2. **No behavioral change required for the externally-raised concern.** Browser-level state isolation is already correct. Publishing this audit *is* the win — it converts a perception risk ("they don't really isolate") into a documented, defensible posture.
 3. **Long-term:** consider making `docker_ephemeral` the default once the per-session reverse-SSH path has a few weeks of soak. The POC-era default of `shared_browser_node` is a memory/CPU optimization for solo developers; production users almost always want the stronger boundary.
 

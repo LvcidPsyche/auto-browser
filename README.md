@@ -213,6 +213,8 @@ METRICS_ENABLED=true
 STEALTH_ENABLED=false
 ```
 
+By default every session shares one Chromium process and one noVNC desktop (`SESSION_ISOLATION_MODE=shared_browser_node`). Cookies and storage stay separate per session, but a human taking over one session can see the others' windows. When sessions belong to different people, accounts or trust domains, start with `make up-isolation` to give each session its own browser container and takeover surface (`docker_ephemeral`). [`docs/session-isolation-audit.md`](./docs/session-isolation-audit.md) has the details.
+
 `COMPLIANCE_TEMPLATE` can apply a preconfigured posture at startup:
 
 | Preset | Auth Encryption | Operator ID | PII Scrub | Isolation | Max Session Age |
