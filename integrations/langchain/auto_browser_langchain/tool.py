@@ -31,9 +31,10 @@ class AutoBrowserTool(BaseTool):
     name: str = "auto_browser"
     description: str = (
         "Control a real browser via auto-browser. "
-        "Use 'action' for the MCP tool name (e.g. 'browser.navigate', 'browser.observe', "
-        "'browser.click') and 'arguments' for its parameters. "
-        "Call browser.create_session first to get a session_id."
+        "Use 'action' for the MCP tool name and 'arguments' for its parameters. "
+        "Start with 'browser.observe' to see the page (it opens a session when none is live). "
+        "Navigate, click, type and scroll through 'browser.execute_action', e.g. "
+        '{"action": {"action": "navigate", "url": "https://example.com", "reason": "open the site"}}.'
     )
     if _LANGCHAIN_AVAILABLE:
         args_schema: Type[AutoBrowserInput] = AutoBrowserInput
