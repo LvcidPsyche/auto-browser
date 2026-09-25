@@ -4,6 +4,16 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Security
+
+- Hardened session creation, the TOTP autofill, approvals, the noVNC takeover
+  socket and witness receipts. Advisories will follow with details.
+- **New:** `totp_hosts` on `browser.create_session` names the hosts where
+  one-time codes may be typed; it defaults to the `start_url` host, and a
+  `totp_secret` with neither is now refused.
+- **New:** `NOVNC_ALLOWED_ORIGINS` for deployments whose proxy in front of the
+  noVNC port rewrites the `Host` header.
+
 ### Changed
 
 - **Actions and observations are faster (#161).** A selector click on a
