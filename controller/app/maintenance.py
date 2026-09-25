@@ -126,6 +126,11 @@ class MaintenanceService:
             return stats
 
         cutoff = datetime.now(UTC).timestamp() - (retention_hours * 3600)
+        # Only directories already stale when the sweep began may be removed.
+        # The second pass used to remove any empty directory, however new: a
+        # session being created (not yet in session_provider) lost its fresh,
+        # still-empty artifact or upload directory, and its later writes failed.
+        stale_dirs: set[Path] = set()
         for path in sorted(root.rglob("*"), key=lambda item: (item.is_file(), len(item.parts))):
             if path.name == ".gitkeep":
                 continue
@@ -142,7 +147,9 @@ class MaintenanceService:
             if mtime >= cutoff:
                 stats.skipped_recent += 1
                 continue
-            if path.is_file():
+            if path.is_dir():
+                stale_dirs.add(path)
+            elif path.is_file():
                 # Same FileNotFoundError race the mtime stat above already
                 # guards: a concurrent writer or another sweep can remove the
                 # file between the two stats. Unguarded, this propagated out of
@@ -158,16 +165,19 @@ class MaintenanceService:
         for path in sorted(
             (item for item in root.rglob("*") if item.is_dir()), key=lambda item: len(item.parts), reverse=True
         ):
+            if path not in stale_dirs:
+                continue
             resolved = path.resolve()
             if self._protected_match(resolved, protected_roots) is not None:
                 continue
             try:
-                next(path.iterdir())
-            except StopIteration:
+                # rmdir refuses a non-empty directory, so a file written since
+                # the first pass keeps it. (rmdir used to run inside the
+                # StopIteration handler, where its OSError escaped the sweep.)
                 path.rmdir()
-                stats.deleted_dirs += 1
-            except (FileNotFoundError, OSError):
+            except OSError:
                 continue
+            stats.deleted_dirs += 1
         return stats
 
     @staticmethod

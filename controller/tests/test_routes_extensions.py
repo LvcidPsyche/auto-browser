@@ -146,6 +146,15 @@ class RoutesExtensionsTests(unittest.TestCase):
         self.assertEqual(client.get("/workflows/runs?workflow_id=fixture").json()["runs"][0]["run_id"], "run-1")
         self.assertEqual(client.get("/workflows/runs/run-1").json()["run_id"], "run-1")
         self.assertEqual(client.get("/workflows/runs/missing").status_code, 404)
+        for bad_steps in (
+            [{"id": "a", "action": "x", "retries": 3}],
+            [{"action": "x"}],
+            [{"id": "a", "action": "x", "retry_max": 1000}],
+            [{"id": "a", "action": "x"}, {"id": "a", "action": "y"}],
+            [{"id": "a", "action": "x", "depends_on": ["missing"]}],
+        ):
+            response = client.post("/workflows/run", json={"workflow_id": "fixture", "steps": bad_steps})
+            self.assertEqual(response.status_code, 422, bad_steps)
 
         dashboard = client.get("/dashboard")
         self.assertEqual(dashboard.status_code, 200)

@@ -156,6 +156,53 @@ class BrowserTabManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(opened, ["https://example.com/next"])
         self.assertEqual(result["tabs"][result["index"]]["url"], "https://example.com/next")
 
+    async def test_open_tab_that_fails_to_load_is_closed_and_reported(self) -> None:
+        from playwright.async_api import Error as PlaywrightError
+
+        from app.action_errors import BrowserActionError
+
+        pages_before = list(self.session.context.pages)
+
+        async def fake_new_page() -> FakeTabPage:
+            page = FakeTabPage(self.session.context, "about:blank", "New Tab")
+
+            async def goto(url: str, **_kwargs) -> None:
+                raise PlaywrightError("net::ERR_NAME_NOT_RESOLVED")
+
+            page.goto = goto  # type: ignore[attr-defined]
+            self.session.context.pages.append(page)
+            return page
+
+        self.session.context.new_page = fake_new_page  # type: ignore[method-assign]
+
+        with self.assertRaises(BrowserActionError) as raised:
+            await self.manager.open_tab(self.session.id, url="https://example.com/missing", activate=True)
+
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(self.session.context.pages, pages_before)
+        self.assertIs(self.session.page, pages_before[0])
+
+    async def test_open_tab_redirected_off_the_allowlist_is_closed(self) -> None:
+        self.manager.settings.allowed_hosts = "example.com"
+        pages_before = list(self.session.context.pages)
+
+        async def fake_new_page() -> FakeTabPage:
+            page = FakeTabPage(self.session.context, "about:blank", "New Tab")
+
+            async def goto(url: str, **_kwargs) -> None:
+                page.url = "http://169.254.169.254/latest/meta-data/"
+
+            page.goto = goto  # type: ignore[attr-defined]
+            self.session.context.pages.append(page)
+            return page
+
+        self.session.context.new_page = fake_new_page  # type: ignore[method-assign]
+
+        with self.assertRaises(PermissionError):
+            await self.manager.open_tab(self.session.id, url="https://example.com/redirect", activate=True)
+
+        self.assertEqual(self.session.context.pages, pages_before)
+
     async def test_close_active_tab_recovers_to_a_usable_tab(self) -> None:
         # Regression for closed-tab recovery: closing the ACTIVE tab must leave the
         # session pointing at a live, usable tab — never at the page we just closed.

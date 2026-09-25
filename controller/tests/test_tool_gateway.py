@@ -5,7 +5,7 @@ import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from app.action_errors import BrowserActionError
 from app.approvals import ApprovalRequiredError
@@ -98,7 +98,11 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 list=AsyncMock(return_value=[{"name": "checkout", "step_count": 0}]),
                 delete=AsyncMock(return_value=True),
             ),
-            approvals=SimpleNamespace(mark_executed=AsyncMock()),
+            approvals=SimpleNamespace(
+                mark_executed=AsyncMock(),
+                claim_execution=AsyncMock(),
+                release_execution=Mock(),
+            ),
         )
         self.orchestrator = SimpleNamespace(
             list_providers=lambda: [ProviderInfo(provider="openai", configured=True, model="gpt-4.1-mini")]
@@ -769,7 +773,9 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(response.isError)
         self.manager.require_governed_approval.assert_awaited_once()
         page.evaluate.assert_awaited_once()
+        self.manager.approvals.claim_execution.assert_awaited_once_with("approval-governed-storage-1")
         self.manager.approvals.mark_executed.assert_awaited_once_with("approval-governed-storage-1")
+        self.manager.approvals.release_execution.assert_called_once_with("approval-governed-storage-1")
 
     async def test_auth_profile_tools_forward_arguments(self) -> None:
         list_response = await self.gateway.call_tool(

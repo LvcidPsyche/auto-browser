@@ -145,6 +145,18 @@ class AuthProfileOwnershipTests(unittest.TestCase):
         listed = {entry["profile_name"] for entry in asyncio.run(self.service.list())}
         self.assertEqual(listed, {"bob-login", "legacy"})
 
+    def test_damaged_metadata_does_not_read_as_unowned(self) -> None:
+        """{} from a torn or corrupt profile.json meant "no owner": open to all."""
+        self.as_operator("alice")
+        self.save("alice-login")
+        (self.root / "profiles" / "alice-login" / "profile.json").write_text('{"owner": "al', encoding="utf-8")
+
+        self.as_operator("bob")
+        with self.assertRaises(PermissionError):
+            self.service.require_access("alice-login", action="reading")
+        with self.assertRaises(PermissionError):
+            self.save("alice-login")
+
 
 if __name__ == "__main__":
     unittest.main()

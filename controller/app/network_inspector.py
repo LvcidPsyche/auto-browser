@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from playwright.async_api import Page, Request, Response
+    from playwright.async_api import BrowserContext, Page, Request, Response
 
     from .pii_scrub import PiiScrubber
 from .utils import UTC, spawn_background_task
@@ -74,12 +74,12 @@ class NetworkInspector:
 
         self._log: deque[dict[str, Any]] = deque(maxlen=max_entries)
         self._pending: dict[str, dict[str, Any]] = {}  # request_id → partial entry
-        self._page: "Page | None" = None
+        self._page: "Page | BrowserContext | None" = None
         self._lock = asyncio.Lock()
         self._hooks: dict[str, HookFn] = {}
 
-    def attach(self, page: "Page") -> None:
-        """Register listeners on a Playwright Page."""
+    def attach(self, page: "Page | BrowserContext") -> None:
+        """Register listeners on a Playwright Page, or a BrowserContext for all its pages."""
         self._page = page
         page.on("request", self._on_request)
         page.on("response", self._on_response)
@@ -234,6 +234,16 @@ class NetworkInspector:
                 logger.debug("could not tag request object for %s: %s", url, exc)
 
             async with self._lock:
+                # Requests that never finish (long polls, streams a page keeps
+                # opening) stayed here for the life of the session. Past the
+                # log's size the oldest is logged as untracked instead.
+                while len(self._pending) >= self.max_entries:
+                    stale = self._pending.pop(next(iter(self._pending)))
+                    stale["failed"] = True
+                    stale["failure_text"] = "no longer tracked: too many requests in flight"
+                    stale["duration_ms"] = _elapsed_ms(stale)
+                    stale.pop("_started_at", None)
+                    self._log.append(stale)
                 self._pending[req_id] = entry
 
         except Exception as exc:
@@ -246,14 +256,20 @@ class NetworkInspector:
             if req_id is None:
                 return
 
+            status = response.status
+            resp_headers = dict(response.headers or {})
+            content_type = resp_headers.get("content-type", "")
+
             async with self._lock:
                 entry = self._pending.get(req_id)
                 if entry is None:
                     return
-
-            status = response.status
-            resp_headers = dict(response.headers or {})
-            content_type = resp_headers.get("content-type", "")
+                # Recorded before the body is awaited: requestfinished can log
+                # the entry and fire hooks while the body is still being read,
+                # and they saw status None.
+                entry["status"] = status
+                entry["content_type"] = content_type
+                entry["response_headers"] = _mask_sensitive_headers(resp_headers)
 
             # Capture response body (text/json only, size limited)
             resp_body: str | None = None
@@ -275,9 +291,6 @@ class NetworkInspector:
                     logger.debug("could not read response body for %s: %s", entry.get("url", "?"), exc)
 
             async with self._lock:
-                entry["status"] = status
-                entry["content_type"] = content_type
-                entry["response_headers"] = _mask_sensitive_headers(resp_headers)
                 entry["response_body"] = resp_body
                 entry["pii_redacted"] = pii_hit
 

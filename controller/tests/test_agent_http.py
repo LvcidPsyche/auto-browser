@@ -912,6 +912,22 @@ class AgentHttpTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["detail"]["error"], "Provider unavailable")
 
+    def test_session_trace_points_at_a_viewer_that_can_load_it(self) -> None:
+        artifact_dir = Path(main_module.settings.artifact_root) / "session-1"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        trace_path = artifact_dir / "trace.zip"
+        trace_path.write_bytes(b"zip")
+        session = SimpleNamespace(page=SimpleNamespace(url="https://example.com"), trace_path=trace_path)
+
+        with patch.object(main_module.manager, "get_session", AsyncMock(return_value=session)):
+            payload = self.client.get("/sessions/session-1/trace").json()
+
+        self.assertEqual(payload["trace_url"], "/artifacts/session-1/trace.zip")
+        # A relative ?trace= made the hosted viewer fetch its own origin's
+        # /artifacts/... (a 404); it cannot reach the controller's anyway.
+        self.assertEqual(payload["viewer_url"], "https://trace.playwright.dev/")
+        self.assertEqual(payload["viewer_command"], "npx playwright show-trace trace.zip")
+
     def test_session_witness_returns_receipts(self) -> None:
         list_witness = AsyncMock(
             return_value=[

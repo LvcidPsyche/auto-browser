@@ -71,6 +71,58 @@ class McpBridgeTests(unittest.TestCase):
         self.assertEqual(client.posts[1]["protocol_version"], "2025-11-25")
         self.assertEqual(client.deleted_session_ids, ["mcp-session-1"])
 
+    def test_bridge_reinitializes_when_the_controller_forgets_the_session(self) -> None:
+        class ForgetfulClient(FakeHttpMcpClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.sessions = 0
+                self.live: set[str] = set()
+
+            def post_json(self, payload, *, session_id=None, protocol_version=None):
+                self.posts.append({"payload": payload, "session_id": session_id, "protocol_version": protocol_version})
+                if payload.get("method") == "initialize":
+                    self.sessions += 1
+                    new_id = f"mcp-session-{self.sessions}"
+                    self.live = {new_id}
+                    return HttpMcpResponse(
+                        status_code=200,
+                        headers={MCP_SESSION_HEADER.lower(): new_id, MCP_PROTOCOL_HEADER.lower(): "2025-11-25"},
+                        body={"jsonrpc": "2.0", "id": payload.get("id"), "result": {}},
+                    )
+                if session_id not in self.live:
+                    return HttpMcpResponse(
+                        status_code=404,
+                        headers={},
+                        body={"jsonrpc": "2.0", "id": payload.get("id"), "error": {"code": -32001}},
+                    )
+                if payload.get("id") is None:
+                    return HttpMcpResponse(status_code=202, headers={}, body=None)
+                return HttpMcpResponse(
+                    status_code=200, headers={}, body={"jsonrpc": "2.0", "id": payload.get("id"), "result": {"ok": 1}}
+                )
+
+        client = ForgetfulClient()
+        bridge = StdioMcpBridge(client=client, stderr=io.StringIO())
+        lines = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "desk"}}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        ]
+        stdout = io.StringIO()
+        bridge.run(stdin=io.StringIO("".join(json.dumps(line) + "\n" for line in lines)), stdout=stdout)
+        client.live = set()  # controller restarted without its session store
+        stdout = io.StringIO()
+        bridge.run(
+            stdin=io.StringIO(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}) + "\n"), stdout=stdout
+        )
+
+        self.assertEqual(json.loads(stdout.getvalue())["result"], {"ok": 1})
+        replayed = [post for post in client.posts if post["payload"].get("method") == "initialize"][-1]
+        self.assertEqual(replayed["payload"]["params"], {"clientInfo": {"name": "desk"}})
+        methods_after_forget = [post["payload"].get("method") for post in client.posts[-4:]]
+        self.assertEqual(methods_after_forget, ["tools/list", "initialize", "notifications/initialized", "tools/list"])
+        self.assertEqual(client.posts[-1]["session_id"], "mcp-session-2")
+
     def test_invalid_json_maps_to_parse_error(self) -> None:
         bridge = StdioMcpBridge(client=FakeHttpMcpClient())
         stdout = io.StringIO()

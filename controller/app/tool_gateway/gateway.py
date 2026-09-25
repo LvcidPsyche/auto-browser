@@ -273,9 +273,15 @@ class McpToolGateway:
                 workflow_profile=policy_profile,
                 approval_id=policy_approval_id,
             )
-            result = await spec.handler(arguments)
-            if approval is not None:
-                await self.manager.approvals.mark_executed(approval.id)
+            if approval is None:
+                result = await spec.handler(arguments)
+            else:
+                await self.manager.approvals.claim_execution(approval.id)
+                try:
+                    result = await spec.handler(arguments)
+                    await self.manager.approvals.mark_executed(approval.id)
+                finally:
+                    self.manager.approvals.release_execution(approval.id)
             result = shape_mcp_result(spec.name, result, detail=getattr(arguments, "detail", "compact"))
             # The JSON stays the first block: clients (and the LangChain
             # adapter) read content[0].text as the result.
