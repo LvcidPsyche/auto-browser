@@ -226,6 +226,41 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         # Human pace types character by character, not the whole string in one call.
         self.assertEqual(self.session.page.keyboard.type.await_count, 2)
 
+    async def test_human_mouse_path_collapses_when_the_tab_is_not_painting(self) -> None:
+        """An employee's own background tab acks each mousemove only on the next animation
+        frame (~1 s): a 18-34 step human path made one click take 28-44 s (2026-09-25).
+        Once a step is slow, the rest of the path is one move straight onto the target."""
+        import time as _time
+
+        def slow_move(*_args, **_kwargs):
+            _time.sleep(0.3)
+
+        self.session.mouse_position = (10.0, 10.0)
+        self.session.page.mouse.move = AsyncMock(side_effect=slow_move)
+        await self.manager.actions.move_mouse_human_like(self.session, 400.0, 300.0)
+        self.assertEqual(self.session.page.mouse.move.await_count, 2)
+        self.assertEqual(self.session.page.mouse.move.await_args_list[-1].args, (400.0, 300.0))
+        self.assertEqual(self.session.mouse_position, (400.0, 300.0))
+
+        # A painting (foreground) tab keeps the full human curve.
+        self.session.mouse_position = (10.0, 10.0)
+        self.session.page.mouse.move = AsyncMock()
+        await self.manager.actions.move_mouse_human_like(self.session, 400.0, 300.0)
+        self.assertGreaterEqual(self.session.page.mouse.move.await_count, 18)
+
+    async def test_human_scroll_sends_the_rest_at_once_when_the_tab_is_not_painting(self) -> None:
+        import time as _time
+
+        def slow_wheel(*_args, **_kwargs):
+            _time.sleep(0.3)
+
+        self.session.page.mouse.wheel = AsyncMock(side_effect=slow_wheel)
+        with patch("random.randint", return_value=5):
+            await self.manager.actions.scroll("session-1", 0, 300)
+        self.assertEqual(self.session.page.mouse.wheel.await_count, 2)
+        total = sum(call.args[1] for call in self.session.page.mouse.wheel.await_args_list)
+        self.assertAlmostEqual(total, 300.0)
+
     async def test_type_focused_inserts_text_without_a_target(self) -> None:
         self.session.page.evaluate = AsyncMock(return_value={"type": "text", "name": "message"})
         with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):

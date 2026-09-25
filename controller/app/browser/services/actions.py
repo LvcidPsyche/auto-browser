@@ -28,6 +28,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# A human-paced mouse path / scroll is many small input events. On a tab the
+# renderer is not painting (an employee's own background tab -- the owner's
+# screen shows another tab), Chrome aligns every mousemove/wheel with an
+# animation frame that never comes on time, so each event's ack takes ~1 s and
+# a 18-34 step path turned one click into 28-44 s (2026-09-25, AI Studio in
+# Emad's tab). Once one step is this slow, or the whole gesture has used its
+# budget, the rest of the gesture goes out as a single event.
+SLOW_INPUT_STEP_SECONDS = 0.25
+HUMAN_GESTURE_BUDGET_SECONDS = 1.5
+
 
 # document.activeElement's identifying attributes, for type_focused's redaction check.
 FOCUSED_INPUT_ATTRIBUTES_SCRIPT = """() => {
@@ -267,15 +277,26 @@ class BrowserActionService:
                 # of uneven chunks with a brief pause between them.
                 steps = random.randint(3, 6)
                 remaining_x, remaining_y = delta_x, delta_y
+                loop = asyncio.get_running_loop()
+                started = loop.time()
                 for step in range(steps):
                     if step == steps - 1:
                         chunk_x, chunk_y = remaining_x, remaining_y
                     else:
                         fraction = random.uniform(0.15, 0.35)
                         chunk_x, chunk_y = remaining_x * fraction, remaining_y * fraction
-                        remaining_x -= chunk_x
-                        remaining_y -= chunk_y
+                    step_started = loop.time()
                     await session.page.mouse.wheel(chunk_x, chunk_y)
+                    remaining_x -= chunk_x
+                    remaining_y -= chunk_y
+                    now = loop.time()
+                    if step < steps - 1 and (
+                        now - step_started > SLOW_INPUT_STEP_SECONDS
+                        or now - started > HUMAN_GESTURE_BUDGET_SECONDS
+                    ):
+                        # Background tab: the rest in one wheel event.
+                        await session.page.mouse.wheel(remaining_x, remaining_y)
+                        break
                     await asyncio.sleep(random.uniform(0.02, 0.09))
             await self.manager._settle(session.page)
             await self.pace_delay(pace)
@@ -615,12 +636,24 @@ class BrowserActionService:
             start_y + (y - start_y) * random.uniform(0.5, 0.9) + random.randint(-60, 60),
         )
         steps = random.randint(18, 34)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
         for step in range(1, steps + 1):
             t = step / steps
             inv = 1 - t
             px = inv**3 * start_x + 3 * inv * inv * t * control_1[0] + 3 * inv * t * t * control_2[0] + t**3 * x
             py = inv**3 * start_y + 3 * inv * inv * t * control_1[1] + 3 * inv * t * t * control_2[1] + t**3 * y
+            step_started = loop.time()
             await session.page.mouse.move(px, py)
+            now = loop.time()
+            if step < steps and (
+                now - step_started > SLOW_INPUT_STEP_SECONDS
+                or now - started > HUMAN_GESTURE_BUDGET_SECONDS
+            ):
+                # The tab is not painting (see SLOW_INPUT_STEP_SECONDS): land on
+                # the target in one move instead of paying ~1 s per step.
+                await session.page.mouse.move(x, y)
+                break
             await asyncio.sleep(random.uniform(0.004, 0.018))
         session.mouse_position = (x, y)
 
