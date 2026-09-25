@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -170,6 +171,35 @@ class OcrGatingTests(unittest.IsolatedAsyncioTestCase):
         await service.observation_payload(_make_session(text_excerpt="Hello world"), preset="normal")
 
         manager.ocr.extract_from_image.assert_awaited_once()
+
+
+class OverlappedCaptureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_failed_screenshot_waits_for_the_dom_reads_to_finish(self) -> None:
+        # The error must not surface while a page call is still in flight: the
+        # caller releases the session lock as soon as it does.
+        finished: list[str] = []
+
+        class SlowPage(FakePage):
+            async def evaluate(self, script: str, *args: object) -> object:
+                await asyncio.sleep(0.05)
+                result = await super().evaluate(script, *args)
+                finished.append("evaluate")
+                return result
+
+        manager = _make_manager()
+        manager._capture_screenshot = AsyncMock(side_effect=RuntimeError("screenshot failed"))
+        session = _make_session()
+        session.page = SlowPage()
+        service = BrowserObservationService(manager=manager)
+
+        with self.assertRaisesRegex(RuntimeError, "screenshot failed"):
+            await service.observation_payload(session, preset="normal")
+        self.assertEqual(finished, ["evaluate", "evaluate"])
+
+        finished.clear()
+        with self.assertRaisesRegex(RuntimeError, "screenshot failed"):
+            await service.light_snapshot(session, label="before-click")
+        self.assertEqual(finished, ["evaluate"])
 
 
 if __name__ == "__main__":
