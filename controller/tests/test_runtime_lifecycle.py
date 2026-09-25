@@ -466,3 +466,58 @@ async def test_concurrent_closes_tear_down_once(tmp_path: Path) -> None:
     assert len(closes) == 1
     assert sum(isinstance(r, dict) for r in results) == 1
     assert sum(isinstance(r, KeyError) for r in results) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_create_releases_what_it_acquired(tmp_path: Path) -> None:
+    """Rollback ran on Exception only, so a cancelled create kept its context
+    open and its isolated runtime (a docker container) running."""
+    from app.browser_manager import BrowserManager
+    from app.config import Settings
+
+    settings = Settings(_env_file=None)
+    settings.artifact_root = str(tmp_path / "artifacts")
+    settings.upload_root = str(tmp_path / "uploads")
+    settings.auth_root = str(tmp_path / "auth")
+    settings.enable_tracing = False
+    manager = BrowserManager(settings)
+
+    released = []
+    closed = []
+    started = asyncio.Event()
+
+    class _Context:
+        async def new_page(self):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def close(self) -> None:
+            closed.append(True)
+
+    class _Browser:
+        async def new_context(self, **_kwargs):
+            return _Context()
+
+        async def close(self) -> None:
+            pass
+
+    runtime = SimpleNamespace(tunnel=None)
+
+    async def acquire(_session_id):
+        return _Browser(), runtime
+
+    async def release(item) -> None:
+        released.append(item)
+
+    manager._acquire_session_browser = acquire  # type: ignore[method-assign]
+    manager.runtime_provisioner = SimpleNamespace(release=release)
+
+    task = asyncio.create_task(manager.create_session(name="cancel-me"))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert closed == [True]
+    assert released == [runtime]
+    manager._check_session_limit()

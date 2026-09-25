@@ -222,7 +222,9 @@ class BrowserSessionService:
                 },
             )
             return summary
-        except Exception:
+        except BaseException:
+            # BaseException so a cancelled create (the caller gave up, shutdown)
+            # also closes the context and releases the isolated runtime.
             await self.cleanup_failed(
                 session_id,
                 session=session,
