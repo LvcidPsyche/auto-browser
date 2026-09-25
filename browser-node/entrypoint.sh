@@ -64,12 +64,13 @@ run_as_browser x11vnc -display "$DISPLAY" -forever -shared -rfbport 5900 "${VNC_
 # websockify serves noVNC directly, rather than through its wrapper script, so it can take an
 # auth plugin. Chromium shares this network namespace, so without an Origin
 # check any page it loads could open ws://127.0.0.1:6080 and read and drive the
-# desktop; novnc_origin.py admits only the noVNC page's own origin, plus any
-# listed in NOVNC_ALLOWED_ORIGINS for proxies that rewrite Host.
+# desktop; novnc_origin.py admits only the noVNC page's own origin, on a
+# loopback name or one listed in NOVNC_ALLOWED_HOSTS (a DNS-rebinding guard),
+# plus origins in NOVNC_ALLOWED_ORIGINS for proxies that rewrite Host.
 run_as_browser env PYTHONPATH=/opt/browser-node websockify \
   --web /usr/share/novnc \
   --auth-plugin novnc_origin.SameOriginOnly \
-  --auth-source "${NOVNC_ALLOWED_ORIGINS:-}" \
+  --auth-source "${NOVNC_ALLOWED_ORIGINS:-} ${NOVNC_ALLOWED_HOSTS:-}" \
   6080 localhost:5900 >/tmp/novnc.log 2>&1 &
 
 cleanup() {

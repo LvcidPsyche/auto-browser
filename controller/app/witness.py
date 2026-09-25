@@ -601,7 +601,13 @@ class WitnessRecorder:
         # the entire receipt chain dumped into a response instead of an empty page.
         if limit <= 0:
             return []
-        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        if lines and not text.endswith("\n"):
+            # An append cut short; the next append sets it aside (see
+            # _set_aside_torn_tail). Listing skips it rather than failing.
+            lines.pop()
+        lines = [line for line in lines if line.strip()]
         items = [WitnessReceipt.model_validate_json(line) for line in lines[-limit:]]
         items.reverse()
         return items

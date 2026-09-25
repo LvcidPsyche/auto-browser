@@ -48,8 +48,15 @@ class NoVncOriginTests(unittest.TestCase):
     def test_the_novnc_page_itself_connects(self) -> None:
         self.assertTrue(self.check("http://127.0.0.1:6080", "127.0.0.1:6080"))
         self.assertTrue(self.check("http://localhost:6080", "localhost:6080"))
-        self.assertTrue(self.check("https://takeover.example.com", "takeover.example.com"))
-        self.assertTrue(self.check("http://Test-Bastion:16080/", "test-bastion:16080"))
+        self.assertTrue(self.check("http://[::1]:6080", "[::1]:6080"))
+        self.assertTrue(self.check("https://takeover.example.com", "takeover.example.com", "takeover.example.com"))
+        self.assertTrue(self.check("http://Test-Bastion:16080/", "test-bastion:16080", "test-bastion"))
+
+    def test_dns_rebinding_to_loopback_is_refused(self) -> None:
+        """Origin and Host agree on a rebound name; the name is not one we serve."""
+        self.assertFalse(self.check("http://attacker.example:6080", "attacker.example:6080"))
+        self.assertFalse(self.check("http://attacker.example:6080", "attacker.example:6080", "vnc.example.com"))
+        self.assertFalse(self.check("http://localhost.attacker.example:6080", "localhost.attacker.example:6080"))
 
     def test_a_page_the_browser_visited_is_refused(self) -> None:
         self.assertFalse(self.check("https://evil.example", "127.0.0.1:6080"))
@@ -66,6 +73,8 @@ class NoVncOriginTests(unittest.TestCase):
         self.assertTrue(self.check("https://x-6080.app.github.dev", "localhost:6080", source))
         self.assertTrue(self.check("https://vnc.example.com", "localhost:6080", source))
         self.assertFalse(self.check("https://evil.example", "localhost:6080", source))
+        # A listed origin's host is also a host the page may be opened on.
+        self.assertTrue(self.check("https://vnc.example.com", "vnc.example.com", source))
 
     def test_the_image_runs_websockify_with_the_plugin(self) -> None:
         entrypoint = ENTRYPOINT.read_text(encoding="utf-8")

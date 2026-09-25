@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.approvals import SENSITIVE_TEXT_PREFIX, ApprovalStore
+from app.approvals import SENSITIVE_TEXT_PREFIX, SENSITIVE_TEXT_RETENTION, ApprovalStore
 from app.models import BrowserActionDecision
 
 SECRET = "hunter2-correct-horse"
@@ -82,6 +82,14 @@ class SensitiveApprovalTextTests(unittest.IsolatedAsyncioTestCase):
             await restarted.require_approved(
                 approval_id=approval.id, session_id="session-1", kind="payment", action=typing(SECRET)
             )
+
+    async def test_undecided_text_is_dropped_after_the_retention_window(self) -> None:
+        approval = await self.store.approve((await self.request(typing(SECRET))).id)
+        text, kept_at = self.store._sensitive_texts[approval.id]
+        self.store._sensitive_texts[approval.id] = (text, kept_at - SENSITIVE_TEXT_RETENTION.total_seconds() - 1)
+        with self.assertRaises(PermissionError):
+            self.store.executable_action(approval)
+        self.assertNotIn(approval.id, self.store._sensitive_texts)
 
     async def test_non_sensitive_text_is_kept_for_the_approver_to_read(self) -> None:
         approval = await self.request(typing("Hello team", sensitive=False))

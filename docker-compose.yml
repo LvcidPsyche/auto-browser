@@ -38,9 +38,12 @@ services:
       # first 8 characters count. Both ports are loopback-only here — set this
       # when you publish them anywhere else. See browser-node/entrypoint.sh.
       VNC_PASSWORD: ${VNC_PASSWORD:-}
-      # noVNC accepts a WebSocket only from its own page, so sites the browser
-      # visits cannot drive the desktop. List origins here only when a proxy in
-      # front of 6080 rewrites the Host header (space- or comma-separated).
+      # noVNC accepts a WebSocket only from its own page, opened on a loopback
+      # name, so sites the browser visits cannot drive the desktop. When the
+      # takeover URL uses another host name (a LAN IP, a bastion, a domain),
+      # list it in NOVNC_ALLOWED_HOSTS; list full origins in
+      # NOVNC_ALLOWED_ORIGINS when a proxy in front of 6080 rewrites Host.
+      NOVNC_ALLOWED_HOSTS: ${NOVNC_ALLOWED_HOSTS:-}
       NOVNC_ALLOWED_ORIGINS: ${NOVNC_ALLOWED_ORIGINS:-}
     volumes:
       - ./data/browser-profile:/data/profile
