@@ -72,6 +72,8 @@ class RealBrowserNodeTests(unittest.IsolatedAsyncioTestCase):
             "BROWSER_WS_ENDPOINT_FILE": str(cls.endpoint_file),
             "BROWSER_PROFILES_ROOT": str(cls.tmp / "browser-profiles"),
             "BROWSER_DOWNLOADS_DIR": str(cls.tmp / "downloads"),
+            # Never open windows on the desktop running the tests.
+            "PERSISTENT_PROFILE_HEADLESS": "0" if os.environ.get("REAL_BROWSER_TESTS_HEADED") == "1" else "1",
         }
         cls.server = subprocess.Popen(
             ["node", str(SERVER)], cwd=str(SERVER.parent), env=env,
@@ -299,26 +301,32 @@ class RealBrowserNodeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(again["id"], session.id)
         await manager.close_session(session.id)
 
-    async def test_chromium_crash_relaunches_the_profile_under_the_same_session(self) -> None:
-        """The owner's Chromium itself dies (2026-09-25 03:18:57: SIGSEGV in
-        the browser process). The CDP link drops; the watchdog must re-open
-        the profile from disk and keep the same session id."""
+    async def test_a_gone_chromium_is_retired_not_relaunched_and_open_brings_it_back(self) -> None:
+        """The owner's Chromium itself is gone (2026-09-25 03:18:57: SIGSEGV
+        in the browser process -- or the owner closed its last window). No
+        window may reappear on its own: the session is retired promptly (the
+        broker/portal see it gone), and the next Open relaunches the profile
+        from disk with its state."""
         manager = self.manager
         url = f"http://{LAN}:{CONTROL_PORT}/healthz"
         opened = await manager.create_session(name="owner", start_url=url)
         session = manager.sessions[opened["id"]]
+        await session.page.evaluate("() => localStorage.setItem('survives', 'yes')")
+        await asyncio.sleep(5)  # let Chromium commit localStorage to disk
         [browser_pid] = await self._process_ids(session.browser, "browser")
         started = time.monotonic()
         self._kill(browser_pid)
-        await self._wait_for_reattach(manager, session, 1, timeout=45)
-        elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 30, f"re-attach took {elapsed:.1f}s")
-        self.assertNotEqual(await self._process_ids(session.browser, "browser"), [browser_pid])
-        await session.page.goto(url)
-        self.assertIn("persistent_profiles_enabled", await session.page.content())
+        while session.id in manager.sessions and time.monotonic() - started < 30:
+            await asyncio.sleep(0.25)
+        self.assertNotIn(session.id, manager.sessions, "the dead session must be retired")
+        self.assertEqual(session.reattach_count, 0, "nothing relaunched behind the owner's back")
         listed = await manager.list_sessions()
-        self.assertEqual([item["status"] for item in listed if item["id"] == session.id], ["active"])
-        await manager.close_session(session.id)
+        self.assertEqual([item["status"] for item in listed if item["id"] == session.id], ["interrupted"])
+        reopened = await manager.create_session(name="owner-again", start_url=url)
+        self.assertNotEqual(reopened["id"], session.id)
+        new_session = manager.sessions[reopened["id"]]
+        self.assertEqual(await new_session.page.evaluate("() => localStorage.getItem('survives')"), "yes")
+        await manager.close_session(reopened["id"])
 
     @unittest.skipUnless(os.environ.get("REAL_BROWSER_NODE_LONGRUN_SECONDS"), "long run disabled")
     async def test_long_run_auto_persist_healthcheck_navigation_and_recovery(self) -> None:

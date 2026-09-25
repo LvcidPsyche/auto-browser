@@ -109,6 +109,7 @@ class PersistentProfileClient:
         adopt_unmarked: bool = False,
         context_kwargs: dict[str, Any] | None = None,
         storage_state: dict[str, Any] | None = None,
+        reattach_only: bool = False,
     ) -> PersistentProfileHandle:
         name = normalize_profile_name(name)
         context_kwargs = context_kwargs or {}
@@ -124,6 +125,9 @@ class PersistentProfileClient:
             "proxy": context_kwargs.get("proxy"),
             "storage_state": storage_state,
         }
+        if reattach_only:
+            # Hand back the running browser or fail -- never launch one.
+            body["reattach_only"] = True
         user_agent = context_kwargs.get("user_agent") or self.settings.persistent_profile_user_agent
         if user_agent:
             body["user_agent"] = user_agent

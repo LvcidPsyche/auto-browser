@@ -56,6 +56,10 @@ const nodeLeaseStaleMs = Number.parseFloat(process.env.PROFILE_NODE_LEASE_STALE_
 // the lease at startup regardless of its age. Never set it while another
 // browser-node may really be running on the same volume.
 const nodeLeaseForce = (process.env.PROFILE_NODE_LEASE_FORCE || "").toLowerCase() === "true";
+// Test/CI only: run the "headed" browsers headless so a test run on a
+// developer's desktop never opens (or re-opens) windows in front of them.
+// Production leaves this unset -- the owner's live view needs real windows.
+const forceHeadless = process.env.PERSISTENT_PROFILE_HEADLESS === "1";
 const deepHealthTtlMs = Number.parseFloat(process.env.PROFILE_DEEP_HEALTH_TTL_SECONDS || "300") * 1000;
 // A FAILED deep check is cached too. The container healthcheck polls every
 // 10s; without this, a failing check launched a fresh disposable Chromium on
@@ -560,7 +564,7 @@ async function launchProfile(name, opts, owner) {
   const wasEmpty = !existsSync(join(userDataDir, "Default"));
 
   const launchOptions = {
-    headless: false,
+    headless: forceHeadless,
     chromiumSandbox: false,
     // Playwright 1.62 no longer passes --enable-automation, but pin it off
     // explicitly so an upgrade cannot quietly bring the infobar/flag back.
@@ -572,6 +576,7 @@ async function launchProfile(name, opts, owner) {
     timezoneId: opts.timezone_id || defaultTimezoneId,
     args: persistentLaunchArgs(),
   };
+  if (forceHeadless) launchOptions.channel = "chromium"; // full Chromium, new headless
   if (opts.user_agent) launchOptions.userAgent = opts.user_agent;
   if (opts.extra_http_headers) launchOptions.extraHTTPHeaders = opts.extra_http_headers;
   if (opts.proxy && opts.proxy.server) launchOptions.proxy = opts.proxy;
@@ -641,6 +646,12 @@ async function openProfile(name, opts) {
     }
     existing.generation = nextGeneration();
     return { entry: existing, alreadyOpen: true, seeded: false, wasEmpty: false };
+  }
+  if (opts.reattach_only) {
+    // The controller lost its link and wants the RUNNING browser back. If it
+    // is gone -- crashed, or the owner closed its last window -- nothing may
+    // pop a new window into the owner's view on its own; the next Open does.
+    throw new HttpError(409, "profile is not running (reattach_only)");
   }
   const launched = await launchProfile(name, opts, owner);
   return { entry: launched.entry, alreadyOpen: false, seeded: launched.seeded, wasEmpty: launched.wasEmpty };
@@ -1100,7 +1111,8 @@ if (persistentProfilesEnabled) {
 // remembered login (a plain fresh context, exactly the pre-profile
 // behaviour). Idle, it has no window (Playwright passes --no-startup-window).
 const legacyBrowserServer = await chromium.launchServer({
-  headless: false,
+  headless: forceHeadless,
+  ...(forceHeadless ? { channel: "chromium" } : {}),
   chromiumSandbox: false,
   host,
   port,

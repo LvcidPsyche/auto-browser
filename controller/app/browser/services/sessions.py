@@ -963,10 +963,11 @@ class BrowserSessionService:
         profile -- tabs, live logins -- is still running. Re-opening it hands
         back the same process (`already_open`) under a new lease generation,
         and the session keeps its id, so the broker's grant and the portal's
-        viewer never notice. If the Chromium itself is gone browser-node
-        relaunches the profile from disk (logins are on disk). Anything that
-        cannot be re-attached is retired as "interrupted" -- never left as a
-        zombie "active" session. Returns True when re-attached.
+        viewer never notice. If the Chromium itself is gone (crashed, or the
+        owner closed its last window) nothing is relaunched behind his back:
+        the session is retired as "interrupted" -- never left as a zombie
+        "active" session -- and his next Open relaunches the profile from
+        disk, logins included. Returns True when re-attached.
         """
         manager = self.manager
         async with session.lock, self.teardown_lock(session):
@@ -1026,6 +1027,12 @@ class BrowserSessionService:
             owner=options.get("owner"),
             adopt_unmarked=bool(options.get("adopt_unmarked")),
             context_kwargs=options.get("context_kwargs"),
+            # Only the still-running browser. A Chromium that is gone (crash,
+            # or the owner closed its last window) is NOT relaunched on its
+            # own -- that popped a window back into the owner's view every
+            # time he closed it. The session is retired; his next Open
+            # relaunches the profile from disk with its logins.
+            reattach_only=True,
         )
         try:
             attachment = await manager.runtime.attach_persistent_context(handle)

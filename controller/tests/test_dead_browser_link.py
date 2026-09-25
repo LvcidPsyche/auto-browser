@@ -214,7 +214,11 @@ class DeadLinkRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.reattach_count, 1)
         self.assertFalse(session.persistent_profile_released)
         self.manager.persistent_profiles.open.assert_awaited_once_with(
-            "owner-default", owner="tenant", adopt_unmarked=True, context_kwargs={"locale": "ar-EG"}
+            "owner-default",
+            owner="tenant",
+            adopt_unmarked=True,
+            context_kwargs={"locale": "ar-EG"},
+            reattach_only=True,
         )
         # The owner's profile was never closed in browser-node.
         self.manager.persistent_profiles.close.assert_not_awaited()

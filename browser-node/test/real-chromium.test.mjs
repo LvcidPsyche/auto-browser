@@ -133,6 +133,9 @@ before(async () => {
       PROFILE_DEEP_HEALTH_FAILURE_TTL_SECONDS: "0",
       PIDS_CGROUP_ROOT: fakeCgroup,
       PIDS_WATCH_SECONDS: "0.5",
+      // Never open windows on the desktop running the tests (set
+      // REAL_BROWSER_TESTS_HEADED=1 to watch them).
+      PERSISTENT_PROFILE_HEADLESS: process.env.REAL_BROWSER_TESTS_HEADED === "1" ? "0" : "1",
       PROFILE_NODE_LEASE_HEARTBEAT_SECONDS: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -393,6 +396,20 @@ test("a new profile is really seeded from the saved login (cookies incl. __Host-
   assert.equal(sid.value, "s1");
   await browser.close();
   await closeLatest("seedy");
+});
+
+test("reattach_only hands back the running browser and never launches one", async () => {
+  const none = await control("/profiles/open", { name: "kappa", owner: "op1", reattach_only: true });
+  assert.equal(none.status, 409);
+  assert.equal(existsSync(join(profilesRoot, "kappa")), false, "nothing launched, nothing created");
+  const opened = await control("/profiles/open", { name: "kappa", owner: "op1" });
+  const again = await control("/profiles/open", { name: "kappa", owner: "op1", reattach_only: true });
+  assert.equal(again.status, 200);
+  assert.equal(again.body.already_open, true);
+  assert.equal(again.body.cdp_endpoint, opened.body.cdp_endpoint);
+  await closeLatest("kappa");
+  const gone = await control("/profiles/open", { name: "kappa", owner: "op1", reattach_only: true });
+  assert.equal(gone.status, 409, "a closed profile is not relaunched behind the owner's back");
 });
 
 test("a close carrying an older generation cannot kill a newer open (Open/Close interleaving)", async () => {
