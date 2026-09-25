@@ -33,6 +33,22 @@ CURRENT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 INITIALIZATION_REQUIRED_ERROR = -32005
 logger = logging.getLogger(__name__)
 
+# Clients put this in the model's context when they connect, so it is the one
+# place to say how the tools fit together. Every tool it names is in both the
+# curated and the full profile.
+SERVER_INSTRUCTIONS = (
+    "Auto Browser drives a real, supervised Chromium session. Typical loop: browser.observe "
+    "(it creates a session when none is live) to get interactables and their element_id values, "
+    "then browser.execute_action with an element_id; its result reports what changed and the page "
+    "after the action. Without vision, use observe preset='text'; to look at the page, "
+    "browser.screenshot returns an image. To read content, use browser.get_html with "
+    "text_only=true (paged), browser.find_elements with a query, and browser.read_download for "
+    "downloaded files. Navigation is limited to the hosts the operator allows. Some actions return "
+    "status approval_required with an approval_id: ask the operator to approve it (their dashboard "
+    "is at /dashboard on this controller), then retry with approval_id. For logins, CAPTCHAs or "
+    "anything a person should do, call browser.request_human_takeover."
+)
+
 
 @dataclass
 class McpSession:
@@ -527,10 +543,7 @@ class McpHttpTransport:
                 "title": self.server_title,
                 "version": self.server_version,
             },
-            "instructions": (
-                "Use these tools for supervised browser automation. Sensitive actions may require approvals "
-                "or human takeover before execution."
-            ),
+            "instructions": SERVER_INSTRUCTIONS,
         }
         return self._json_result_response(
             request_id,

@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from .harness.contracts import TaskContract
 from .models import (
@@ -588,15 +589,11 @@ class TriggerCronJobInput(CronJobIdInput):
 
 
 class GetPageHtmlInput(SessionIdInput):
-    # Deprecated and ignored. page.content() always returns the full serialized
-    # DOM, so this never had anything to switch on — the handler has never read
-    # it. Still accepted so existing callers do not start getting 422s in a
-    # patch release; remove in 1.6.0.
-    full_page: bool = Field(
-        default=False,
-        description="Deprecated and ignored — get_html always returns the full page.",
-        deprecated=True,
-    )
+    # Deprecated and ignored: page.content() always returns the whole document,
+    # so this never switched anything. Still accepted, so callers that send it
+    # do not start failing validation, but no longer advertised in the tool
+    # schema that every request carries.
+    full_page: SkipJsonSchema[bool] = False
     text_only: bool = Field(
         default=False,
         description="Return the page's visible text instead of HTML: line breaks kept, table cells tab-separated.",

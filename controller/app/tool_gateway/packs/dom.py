@@ -42,8 +42,7 @@ def register(registry, gateway):
                 "Read the current page: its serialized DOM (the whole document, not just the "
                 "viewport), or with text_only=true its visible text — the cheapest way to read "
                 "a page's content. Returns up to max_chars (default 20,000) from offset; when "
-                "truncated is true, call again with offset=next_offset for the rest. "
-                "(full_page is deprecated and ignored.)"
+                "truncated is true, call again with offset=next_offset for the rest."
             ),
             input_model=GetPageHtmlInput,
             handler=gateway._get_html,

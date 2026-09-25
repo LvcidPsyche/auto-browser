@@ -162,6 +162,16 @@ class GetHtmlPagingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page["content"], "")
         self.assertFalse(page["truncated"])
 
+    async def test_deprecated_full_page_is_accepted_but_not_advertised(self) -> None:
+        # It never did anything; callers that still send it keep working, but
+        # the schema every tools/list carries no longer spends space on it.
+        page = await self._get_html(full_page=True, max_chars=1_000)
+        schema = next(tool for tool in self.gateway.list_tools() if tool["name"] == "browser.get_html")
+
+        self.assertEqual(page["type"], "html")
+        self.assertNotIn("full_page", schema["inputSchema"]["properties"])
+        self.assertNotIn("full_page", schema["description"])
+
     async def test_bounds_are_validated(self) -> None:
         for arguments in ({"max_chars": 10}, {"max_chars": 2_000_000}, {"offset": -1}):
             with self.subTest(**arguments):

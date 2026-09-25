@@ -208,6 +208,19 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(name, full)
         self.assertLessEqual(curated, full)
 
+    async def test_server_instructions_name_only_curated_tools(self) -> None:
+        # Clients put the instructions in the model's context; a tool they name
+        # that the default profile does not list would send agents nowhere.
+        import re
+
+        from app.mcp_transport import SERVER_INSTRUCTIONS
+
+        named = set(re.findall(r"browser\.[a-z_]+", SERVER_INSTRUCTIONS))
+        curated = {tool["name"] for tool in self.gateway.list_tools()}
+
+        self.assertGreaterEqual(len(named), 6)
+        self.assertLessEqual(named, curated)
+
     async def test_a_full_profile_tool_called_on_curated_says_how_to_enable_it(self) -> None:
         response = await self.gateway.call_tool(
             McpToolCallRequest(name="browser.get_console", arguments={"session_id": "session-1"})

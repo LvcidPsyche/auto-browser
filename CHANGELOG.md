@@ -271,13 +271,24 @@ configuration now answers `400` until you list the name in
   inspection, drag-and-drop and viewport sizing are now in the `full` profile.
   The curated list is 25.0k characters. Calling a full-profile tool on a
   curated controller names `MCP_TOOL_PROFILE=full` instead of answering
-  "Unknown tool".
+  "Unknown tool". `/mcp/tools/call` and mesh delegation serve tools through the
+  same profile, so a peer delegating one of the moved tools needs the full
+  profile too.
+
+- **The MCP server's instructions describe how the tools fit together.**
+  Clients put these in the model's context on connect, and they were one
+  generic sentence. They now cover the observe → execute_action loop, reading
+  with `get_html(text_only=true)`, `find_elements` and `read_download`, the
+  `approval_required` → `approval_id` retry, and human takeover. A test keeps
+  every tool they name in the curated profile.
 
 - **`browser.get_html` is bounded and paged.** It returned the whole
   serialized DOM or page text in one result, routinely megabytes. It now
   returns up to `max_chars` (default 20,000, at most 1,000,000) from `offset`,
   with `total_chars`, `truncated` and `next_offset`. With `text_only=true` it
-  uses the same line-preserving text as the observation.
+  uses the same line-preserving text as the observation. Its deprecated
+  `full_page` argument, which never did anything, is still accepted but no
+  longer advertised in the schema.
 
 - **The controller image leaves out the provider CLIs by default.** Node.js
   and the codex, claude and gemini CLIs (about 750 MB) are needed only for
