@@ -50,21 +50,44 @@ class _WithApproval(StrictInputModel):
 class CreateSessionRequest(StrictInputModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     start_url: str | None = Field(default=None, min_length=1, max_length=2000)
-    storage_state_path: str | None = Field(default=None, min_length=1, max_length=500)
-    auth_profile: str | None = Field(default=None, min_length=1, max_length=120)
+    storage_state_path: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=500,
+        description="Playwright storage-state file, relative to the auth directory. Not with auth_profile.",
+    )
+    auth_profile: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=120,
+        description="Start signed in from a saved auth profile (browser.list_auth_profiles).",
+    )
     memory_profile: str | None = Field(
         default=None,
         min_length=1,
         max_length=120,
         description="Load a named memory profile into this session.",
     )
-    proxy_persona: str | None = Field(default=None, min_length=1, max_length=200)
+    proxy_persona: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description="Named proxy configuration to route through. Not with proxy_server.",
+    )
     proxy_server: str | None = Field(default=None, min_length=1, max_length=500)
     proxy_username: str | None = Field(default=None, max_length=200)
     proxy_password: str | None = Field(default=None, max_length=500, repr=False)
     user_agent: str | None = Field(default=None, min_length=1, max_length=2000)
-    protection_mode: ProtectionMode | None = None
-    totp_secret: str | None = Field(default=None, max_length=500, repr=False)
+    protection_mode: ProtectionMode | None = Field(
+        default=None,
+        description="Witness evidence mode; 'confidential' is stricter. Omitted: the deployment default.",
+    )
+    totp_secret: str | None = Field(
+        default=None,
+        max_length=500,
+        repr=False,
+        description="Base32 TOTP secret. Actions fill a visible one-time-code field with the current code.",
+    )
 
     @model_validator(mode="after")
     def validate_auth_source(self) -> "CreateSessionRequest":
