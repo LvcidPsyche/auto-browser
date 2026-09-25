@@ -96,6 +96,10 @@ class StdioMcpBridge:
         self.stderr = stderr or sys.stderr
         self.session_id: str | None = None
         self.protocol_version: str | None = None
+        # The client's initialize request, replayed if the controller forgets
+        # the session (restart without a session store, or eviction).
+        self._initialize_payload: dict[str, Any] | None = None
+        self._initialized_sent = False
 
     def run(self, *, stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
         input_stream = stdin or sys.stdin
@@ -125,12 +129,27 @@ class StdioMcpBridge:
             return self._jsonrpc_error(None, -32600, "JSON-RPC body must be an object")
 
         request_id = payload.get("id")
+        method = payload.get("method")
+        if method == "initialize":
+            self._initialize_payload = payload
+            self._initialized_sent = False
         try:
             response = self.client.post_json(
                 payload,
-                session_id=None if payload.get("method") == "initialize" else self.session_id,
+                session_id=None if method == "initialize" else self.session_id,
                 protocol_version=self.protocol_version,
             )
+            if response.status_code == 404 and method != "initialize" and self._reinitialize():
+                # A stdio client never sees the 404 as "re-initialize": to it the
+                # server process is alive, so every later call failed with
+                # "Unknown MCP session" until the client itself was restarted.
+                response = self.client.post_json(
+                    payload,
+                    session_id=self.session_id,
+                    protocol_version=self.protocol_version,
+                )
+            if method == "notifications/initialized":
+                self._initialized_sent = True
         except URLError as exc:
             return self._jsonrpc_error(
                 request_id,
@@ -164,6 +183,30 @@ class StdioMcpBridge:
                 request_id, -32000, f"Empty response from Auto Browser MCP endpoint ({response.status_code})"
             )
         return response.body
+
+    def _reinitialize(self) -> bool:
+        """Open a fresh controller session with the client's own initialize.
+
+        Returns whether the session was re-established; if not, the caller
+        relays the original 404.
+        """
+        if self._initialize_payload is None or self.session_id is None:
+            return False
+        replay = {**self._initialize_payload, "id": "auto-browser-bridge-reinitialize"}
+        response = self.client.post_json(replay, session_id=None, protocol_version=None)
+        next_session_id = response.headers.get(MCP_SESSION_HEADER.lower())
+        if response.status_code != 200 or not next_session_id:
+            return False
+        print("stdio bridge: controller forgot the MCP session; re-initialized", file=self.stderr)
+        self.session_id = next_session_id
+        self.protocol_version = response.headers.get(MCP_PROTOCOL_HEADER.lower()) or self.protocol_version
+        if self._initialized_sent:
+            self.client.post_json(
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                session_id=self.session_id,
+                protocol_version=self.protocol_version,
+            )
+        return True
 
     @staticmethod
     def _jsonrpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:

@@ -53,6 +53,20 @@ class BridgeProtocolEdgeTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], -32600)
         self.assertIn("batches", payload["error"]["message"])
 
+    def test_unknown_session_is_relayed_when_reinitialize_fails(self) -> None:
+        not_found = HttpMcpResponse(
+            status_code=404, headers={}, body={"jsonrpc": "2.0", "id": 2, "error": {"code": -32001}}
+        )
+        client = RecordingHttpMcpClient(not_found)
+        bridge = StdioMcpBridge(client=client, stderr=io.StringIO())
+        bridge.session_id = "gone"
+        bridge._initialize_payload = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+
+        payload = _run_line(bridge, json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))
+
+        self.assertEqual(payload["error"]["code"], -32001)
+        self.assertEqual([post["payload"]["method"] for post in client.posts], ["tools/list", "initialize"])
+
     def test_non_object_payload_rejected(self) -> None:
         bridge = StdioMcpBridge(client=RecordingHttpMcpClient(self._ok_response()))
         payload = _run_line(bridge, '"just a string"')
