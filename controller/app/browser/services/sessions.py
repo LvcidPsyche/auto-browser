@@ -91,7 +91,7 @@ class BrowserSessionService:
             self.manager.auth_profiles.require_access(auth_profile, action="opening a session from an auth profile")
             source_path = self.manager.auth_profiles.resolve_state_path(auth_profile, must_exist=True)
         elif storage_state_path:
-            source_path = self.manager.auth_profiles.safe_auth_path(storage_state_path, must_exist=True)
+            source_path = self.manager.auth_profiles.storage_state_source(storage_state_path)
         if source_path is not None:
             prepared_auth_state = self.manager.auth_state.prepare_for_context(source_path)
             context_kwargs["storage_state"] = str(prepared_auth_state.path)
