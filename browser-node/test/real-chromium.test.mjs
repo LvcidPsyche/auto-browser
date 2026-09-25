@@ -9,7 +9,17 @@
 // Needs a display for the headed profile browsers (any desktop, or Xvfb).
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { connect as netConnect } from "node:net";
 import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,6 +58,20 @@ async function control(path, body, { token = TOKEN, method = "POST" } = {}) {
   const result = { status: response.status, body: await response.json() };
   if (path === "/profiles/open" && result.status === 200) lastGeneration.set(body.name, result.body.generation);
   return result;
+}
+
+// Plant a foreign lease file. Written twice: the server heart-beats every
+// second here, and a heartbeat already past its read could otherwise
+// overwrite the first write (inherent to a file lease; the next heartbeat
+// after that sees the foreign lease and backs off).
+async function plantLease(content, mtime = null) {
+  const leaseFile = join(profilesRoot, ".node-lease.json");
+  for (let i = 0; i < 2; i += 1) {
+    writeFileSync(leaseFile, content);
+    if (mtime) utimesSync(leaseFile, mtime, mtime);
+    if (i === 0) await new Promise((r) => setTimeout(r, 500));
+  }
+  return leaseFile;
 }
 
 // Latest lease generation handed out per profile name.
@@ -99,6 +123,7 @@ before(async () => {
       BROWSER_PROFILES_ROOT: profilesRoot,
       BROWSER_DOWNLOADS_DIR: join(root, "downloads"),
       PROFILE_DEEP_HEALTH_TTL_SECONDS: "0",
+      PROFILE_NODE_LEASE_HEARTBEAT_SECONDS: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -191,6 +216,12 @@ test("open twice reuses the running profile; close once ends it; state survives"
   assert.ok(again.body.generation > first.body.generation);
 
   assert.equal((await control("/profiles/close", { name: "alpha" })).status, 400, "close needs a generation");
+  assert.equal((await control("/profiles/close", { name: "alpha", generation: 1 })).status, 400);
+  // Unique per process: `<random boot id>-<n>`. A close minted by another
+  // (e.g. pre-restart) browser-node process never matches.
+  assert.match(again.body.generation, /^[0-9a-f]{16}-\d+$/);
+  const foreign = await control("/profiles/close", { name: "alpha", generation: "0123456789abcdef-2" });
+  assert.equal(foreign.body.stale_generation, true);
   const closed = await closeLatest("alpha");
   assert.deepEqual(closed.body, { closed: true, existed: true });
   const closedAgain = await closeLatest("alpha");
@@ -375,13 +406,96 @@ test("node lease: a second browser-node on the same volume refuses to launch (fa
 });
 
 test("node lease: a fresh foreign lease blocks; a stale one is taken over", async () => {
-  const leaseFile = join(profilesRoot, ".node-lease.json");
-  writeFileSync(leaseFile, JSON.stringify({ node_id: "other-container:1:abcd", heartbeat_at: Date.now() }));
+  const leaseFile = await plantLease(JSON.stringify({ node_id: "other-container:1:abcd", heartbeat_at: Date.now() }));
   const blocked = await control("/profiles/open", { name: "iota", owner: "op1" });
   assert.equal(blocked.status, 503, JSON.stringify(blocked.body));
-  writeFileSync(leaseFile, JSON.stringify({ node_id: "other-container:1:abcd", heartbeat_at: Date.now() - 120_000 }));
+  await plantLease(JSON.stringify({ node_id: "other-container:1:abcd", heartbeat_at: Date.now() - 120_000 }), new Date(Date.now() - 120_000));
   const taken = await control("/profiles/open", { name: "iota", owner: "op1" });
   assert.equal(taken.status, 200, JSON.stringify(taken.body));
   assert.notEqual(JSON.parse(readFileSync(leaseFile, "utf-8")).node_id, "other-container:1:abcd");
   await closeLatest("iota");
+});
+
+test("node lease: a malformed lease is timed by the file's mtime and goes stale", async () => {
+  const old = new Date(Date.now() - 120_000);
+  for (const content of ['{"node_id":"no-heartbeat"}', '{"node_id":"x","heartbeat_at":"soon"}', "garbage{"]) {
+    await plantLease(content);
+    const blocked = await control("/profiles/open", { name: "lambda", owner: "op1" });
+    assert.equal(blocked.status, 503, `fresh malformed lease must block: ${content}`);
+    await plantLease(content, old);
+    const taken = await control("/profiles/open", { name: "lambda", owner: "op1" });
+    assert.equal(taken.status, 200, `stale malformed lease must be taken over: ${content} ${JSON.stringify(taken.body)}`);
+    await closeLatest("lambda");
+  }
+  // A far-future heartbeat_at cannot pin the lease either (mtime caps it).
+  await plantLease(JSON.stringify({ node_id: "future", heartbeat_at: Date.now() + 10 ** 9 }), old);
+  assert.equal((await control("/profiles/open", { name: "lambda", owner: "op1" })).status, 200);
+  await closeLatest("lambda");
+});
+
+// Must stay last: it leaves the main test server fenced.
+test("fencing: when another node takes the lease, this node closes its browsers and refuses relay/opens", async () => {
+  const opened = await control("/profiles/open", { name: "kappa", owner: "op1" });
+  assert.equal(opened.status, 200);
+  const b1 = await attach(opened.body.cdp_endpoint);
+  const p1 = b1.contexts()[0].pages()[0] || (await b1.contexts()[0].newPage());
+  await p1.goto(`http://${LAN}:${CONTROL_PORT}/healthz`);
+  await p1.evaluate(() => localStorage.setItem("fenced", "flushed"));
+
+  const serverPath = fileURLToPath(new URL("../server.mjs", import.meta.url));
+  const second = spawn(process.execPath, [serverPath], {
+    env: {
+      ...process.env,
+      PERSISTENT_PROFILES_ENABLED: "true",
+      PROFILE_CONTROL_TOKEN: TOKEN,
+      PROFILE_CONTROL_PORT: String(CONTROL_PORT + 200),
+      PROFILE_CDP_RELAY_PORT: String(RELAY_PORT + 200),
+      PROFILE_CDP_RELAY_ADVERTISED_HOST: LAN,
+      PLAYWRIGHT_SERVER_HOST: "127.0.0.1",
+      PLAYWRIGHT_SERVER_PORT: String(LEGACY_PORT + 200),
+      BROWSER_WS_ENDPOINT_FILE: join(root, "profile3", "ws.txt"),
+      BROWSER_PROFILES_ROOT: profilesRoot,
+      BROWSER_DOWNLOADS_DIR: join(root, "downloads3"),
+      // Stands in for "the first node stopped heart-beating and its lease
+      // went stale": the second node takes the lease over.
+      PROFILE_NODE_LEASE_FORCE: "true",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  try {
+    for (let i = 0; i < 120 && !existsSync(join(root, "profile3", "ws.txt")); i += 1) {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    // First node notices on its next heartbeat (1s in this test).
+    let refused = null;
+    for (let i = 0; i < 40; i += 1) {
+      refused = await control("/profiles/open", { name: "kappa", owner: "op1" });
+      if (refused.status === 503) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    assert.equal(refused.status, 503, JSON.stringify(refused.body));
+    for (let i = 0; i < 20 && b1.isConnected(); i += 1) await new Promise((r) => setTimeout(r, 250));
+    assert.equal(b1.isConnected(), false, "fenced node must cut the relayed CDP connection");
+    await assert.rejects(attach(opened.body.cdp_endpoint), "fenced node must refuse relay upgrades");
+    const version = await fetch(`http://${LAN}:${RELAY_PORT}/cdp/kappa/json/version`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    assert.notEqual(version.status, 200);
+    assert.match(serverLog, /node lease lost .*fencing -- closing 1 profile/);
+
+    // The new lease holder can open the same profile; the fenced node's
+    // browser was really closed (profile unlocked, data flushed).
+    const reopened = await fetch(`http://${LAN}:${CONTROL_PORT + 200}/profiles/open`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "kappa", owner: "op1" }),
+    }).then(async (r) => ({ status: r.status, body: await r.json() }));
+    assert.equal(reopened.status, 200, JSON.stringify(reopened.body));
+    const b2 = await attach(reopened.body.cdp_endpoint);
+    const p2 = b2.contexts()[0].pages()[0] || (await b2.contexts()[0].newPage());
+    await p2.goto(`http://${LAN}:${CONTROL_PORT + 200}/healthz`);
+    await b2.close();
+  } finally {
+    second.kill();
+  }
 });

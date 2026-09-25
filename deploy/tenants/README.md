@@ -66,7 +66,9 @@ inside browser-node, so Google/Facebook see the same device every Open.
   hands the lease over at once, a crash makes the next container wait up to
   the stale window. If a lease is stuck and you are certain no other
   browser-node uses the volume, start browser-node once with
-  `PROFILE_NODE_LEASE_FORCE=true`, then remove it again.
+  `PROFILE_NODE_LEASE_FORCE=true`, then remove it again. A node that finds
+  another node now holds the lease fences itself: it closes every profile
+  browser it runs and refuses opens and relay connections (503).
 - A profile directory whose owner marker is unreadable, or (for any name other
   than the remembered-login default) that has data but no marker, is moved to
   `.trash` with reason `bad-marker` / `unmarked` and a fresh profile is started.

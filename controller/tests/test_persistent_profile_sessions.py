@@ -87,7 +87,7 @@ def _handle(name: str = "owner-default", *, already_open=False, seeded=False, wa
         already_open=already_open,
         seeded=seeded,
         was_empty=was_empty,
-        generation=next(_GENERATION),
+        generation=f"boot-{next(_GENERATION)}",
     )
 
 
@@ -435,6 +435,24 @@ class OpenCloseRaceTests(_Base):
         self.assertEqual(events[:2], [f"close-start:{first_generation}", f"close-end:{first_generation}"])
         self.assertTrue(events[2].startswith("open:"))
         self.assertIn(second["id"], self.manager.sessions)
+
+    async def test_explicit_auth_profile_named_owner_default_never_adopts(self) -> None:
+        """Round-3 finding 4: adoption is tied to the auto-load path, not the name."""
+        self._write_profile("owner-default")
+        await self.manager.create_session(name="explicit", auth_profile="owner-default")
+        call = self.manager.persistent_profiles.open.await_args
+        self.assertEqual(call.args[0], "owner-default")
+        self.assertFalse(call.kwargs["adopt_unmarked"])
+
+    async def test_denied_auto_load_never_adopts(self) -> None:
+        self._write_profile("owner-default", owner="alice")
+        self._fresh_context_browser()
+        token = set_current_operator("mallory", source="token")
+        try:
+            await self.manager.create_session(name="denied")
+        finally:
+            reset_current_operator(token)
+        self.manager.persistent_profiles.open.assert_not_awaited()
 
     async def test_only_the_remember_me_default_may_adopt_unmarked_data(self) -> None:
         self._write_profile("nihad-google")

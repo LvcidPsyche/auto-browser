@@ -60,8 +60,9 @@ class PersistentProfileHandle:
     already_open: bool
     seeded: bool
     was_empty: bool
-    # Lease generation for this open; /profiles/close must carry it.
-    generation: int | None = None
+    # Opaque lease token for this open (unique across browser-node restarts);
+    # /profiles/close must carry it.
+    generation: str | None = None
 
 
 class PersistentProfileClient:
@@ -132,7 +133,7 @@ class PersistentProfileClient:
         if not cdp_endpoint:
             raise PersistentProfileError(f"browser-node did not return a CDP endpoint for persistent profile '{name}'")
         generation = data.get("generation")
-        if not isinstance(generation, int) or isinstance(generation, bool):
+        if not isinstance(generation, str) or not generation:
             raise PersistentProfileError(f"browser-node did not return a lease generation for profile '{name}'")
         return PersistentProfileHandle(
             name=name,
@@ -154,7 +155,7 @@ class PersistentProfileClient:
             response = await client.get(f"{self.base_url}/healthz")
         response.raise_for_status()
 
-    async def close(self, name: str, *, generation: int | None) -> bool:
+    async def close(self, name: str, *, generation: str | None) -> bool:
         """Close the profile's Chromium process in browser-node.
 
         The controller holds at most one live session per profile (see

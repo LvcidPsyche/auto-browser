@@ -158,7 +158,7 @@ class BrowserSession:
     persistent_profile_released: bool = False
     # The lease generation browser-node handed out for this session's open;
     # its /profiles/close ignores a close carrying an older generation.
-    persistent_profile_generation: int | None = None
+    persistent_profile_generation: str | None = None
 
 
 SessionCreatedHook = Callable[[str, Page], Awaitable[None]]

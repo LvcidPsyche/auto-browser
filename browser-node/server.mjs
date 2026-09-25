@@ -49,7 +49,7 @@ const healthcheckRoot = join(profilesRoot, ".healthcheck");
 // alive until it is PROFILE_NODE_LEASE_STALE_SECONDS old.
 const nodeLeaseFile = join(profilesRoot, ".node-lease.json");
 const nodeId = `${hostname()}:${process.pid}:${randomBytes(4).toString("hex")}`;
-const nodeLeaseHeartbeatMs = 10_000;
+const nodeLeaseHeartbeatMs = Number.parseFloat(process.env.PROFILE_NODE_LEASE_HEARTBEAT_SECONDS || "10") * 1000;
 const nodeLeaseStaleMs = Number.parseFloat(process.env.PROFILE_NODE_LEASE_STALE_SECONDS || "45") * 1000;
 // Manual override for a lease left by a node that is known to be gone (for
 // example a crashed container whose volume is now mounted elsewhere). Takes
@@ -85,7 +85,14 @@ const profiles = new Map();
 // must name the generation it was given; a close for an older generation --
 // e.g. a slow close from a session that was replaced by a newer Open of the
 // same profile -- is a no-op instead of killing the newer session's browser.
+// `${bootId}-${n}`: unique across restarts too, so a close sent to a
+// previous browser-node process can never match an open of this one.
+const bootId = randomBytes(8).toString("hex");
 let generationCounter = 0;
+function nextGeneration() {
+  generationCounter += 1;
+  return `${bootId}-${generationCounter}`;
+}
 // relay id -> loopback CDP port. Profile names map to themselves; the deep
 // healthcheck registers a temporary id that no profile name can collide with.
 const relayTargets = new Map();
@@ -185,8 +192,10 @@ async function profileHolderPids(dir) {
     try {
       const cmdline = await readFile(`/proc/${entry}/cmdline`, "utf-8");
       if (cmdline.split("\0").includes(needle)) holders.push(Number(entry));
-    } catch {
-      // process exited while we looked -- not a holder
+    } catch (err) {
+      // Gone while we looked: not a holder. Anything else (EACCES, EIO...)
+      // proves nothing, so it counts as a possible holder (fail closed).
+      if (!err || (err.code !== "ENOENT" && err.code !== "ESRCH")) holders.push(Number(entry));
     }
   }
   return holders;
@@ -195,22 +204,31 @@ async function profileHolderPids(dir) {
 let nodeLeaseHeld = false;
 let nodeLeaseBlockedBy = null;
 
+/**
+ * The lease's age comes from the file's mtime (every heartbeat rewrites the
+ * file), capped by a valid heartbeat_at inside it. So a malformed, garbled or
+ * future-dated lease is still treated as foreign and fresh at first (fail
+ * closed) but goes stale like any other once nobody rewrites it -- it can
+ * never lock the owner out for good.
+ */
 async function readNodeLease() {
+  let mtimeMs;
   try {
-    const parsed = JSON.parse(await readFile(nodeLeaseFile, "utf-8"));
-    if (parsed && typeof parsed.node_id === "string" && Number.isFinite(parsed.heartbeat_at)) return parsed;
-    return { node_id: "<malformed>", heartbeat_at: Date.now() };
+    mtimeMs = (await lstat(nodeLeaseFile)).mtimeMs;
   } catch (err) {
     if (err && err.code === "ENOENT") return null;
-    // Unreadable/malformed: treat as a FRESH foreign lease (fail closed); it
-    // goes stale on its own only if nobody rewrites it, so use the file time.
-    try {
-      const info = await lstat(nodeLeaseFile);
-      return { node_id: "<unreadable>", heartbeat_at: info.mtimeMs };
-    } catch {
-      return { node_id: "<unreadable>", heartbeat_at: Date.now() };
-    }
+    return { node_id: "<unreadable>", heartbeat_at: Date.now() };
   }
+  let parsed = null;
+  try {
+    parsed = JSON.parse(await readFile(nodeLeaseFile, "utf-8"));
+  } catch (err) {
+    if (err && err.code === "ENOENT") return null;
+  }
+  const nodeIdValue = parsed && typeof parsed.node_id === "string" && parsed.node_id ? parsed.node_id : "<malformed>";
+  const heartbeat =
+    parsed && Number.isFinite(parsed.heartbeat_at) ? Math.min(parsed.heartbeat_at, mtimeMs) : mtimeMs;
+  return { node_id: nodeIdValue, heartbeat_at: heartbeat };
 }
 
 async function writeNodeLease() {
@@ -230,6 +248,10 @@ async function refreshNodeLease({ force = false } = {}) {
   const foreignAndFresh =
     current && current.node_id !== nodeId && Date.now() - current.heartbeat_at < nodeLeaseStaleMs;
   if (foreignAndFresh && !force) {
+    if (nodeLeaseHeld || profiles.size) {
+      // We lost the volume to another node: stop touching it at once.
+      await fenceSelf(`another browser-node (${current.node_id}) now holds the lease`);
+    }
     if (nodeLeaseHeld || nodeLeaseBlockedBy !== current.node_id) {
       console.error(
         `node lease: another browser-node (${current.node_id}) heart-beat ` +
@@ -255,6 +277,37 @@ async function refreshNodeLease({ force = false } = {}) {
   return held;
 }
 
+// relay id -> live relayed sockets, so fencing can cut every connection.
+const relaySockets = new Map();
+
+/**
+ * Called when another node holds the lease: close every persistent profile
+ * this node runs and cut every relayed CDP connection. Opens and relay
+ * connections are refused afterwards because each one re-checks the lease.
+ */
+async function fenceSelf(reason) {
+  console.error(`node lease lost (${reason}): fencing -- closing ${profiles.size} profile(s), cutting relay connections`);
+  nodeLeaseHeld = false;
+  for (const [id, sockets] of relaySockets) {
+    for (const sock of sockets) sock.destroy();
+    relaySockets.delete(id);
+  }
+  const entries = [...profiles.entries()];
+  profiles.clear();
+  for (const [name] of entries) relayTargets.delete(name);
+  await Promise.all(
+    entries.map(([name, entry]) =>
+      entry.context.close().catch((err) => console.error(`fencing: close of '${name}' failed: ${err.message}`)),
+    ),
+  );
+}
+
+/** Cheap read-only check for the relay: does the lease file still name us? */
+async function leaseStillOurs() {
+  const current = await readNodeLease().catch(() => null);
+  return Boolean(current && current.node_id === nodeId);
+}
+
 async function requireNodeLease() {
   // Re-read on every use: another node taking the lease (e.g. a forced
   // takeover) must stop this one immediately, not at the next heartbeat.
@@ -267,6 +320,20 @@ async function requireNodeLease() {
       `another browser-node (${nodeLeaseBlockedBy || "unknown"}) holds this volume's profile lease; refusing (fail closed)`,
     );
   }
+}
+
+// Heartbeat / out-of-band lease check. Runs under the lifecycle lock, since
+// losing the lease closes profiles (fencing) and must not interleave with an
+// open, close, trash or rename.
+let leaseRefreshQueued = false;
+function scheduleLeaseRefresh() {
+  if (leaseRefreshQueued) return;
+  leaseRefreshQueued = true;
+  withLifecycleLock(() => refreshNodeLease())
+    .catch((err) => console.error(`node lease heartbeat failed: ${err.message}`))
+    .finally(() => {
+      leaseRefreshQueued = false;
+    });
 }
 
 async function releaseNodeLease() {
@@ -470,7 +537,7 @@ async function launchProfile(name, opts, owner) {
     wsPath: discovered.wsPath,
     cdpEndpoint: relayEndpoint(name, discovered.wsPath),
     owner,
-    generation: ++generationCounter,
+    generation: nextGeneration(),
   };
   profiles.set(name, entry);
   relayTargets.set(name, discovered.localPort);
@@ -486,6 +553,7 @@ async function launchProfile(name, opts, owner) {
 
 async function openProfile(name, opts) {
   const owner = normalizeOwner(opts.owner);
+  await requireNodeLease();
   const existing = profiles.get(name);
   if (existing) {
     if (existing.owner !== null && existing.owner !== owner) {
@@ -495,7 +563,7 @@ async function openProfile(name, opts) {
       existing.owner = owner;
       await writeOwnerMarker(profileDir(name), owner).catch(() => {});
     }
-    existing.generation = ++generationCounter;
+    existing.generation = nextGeneration();
     return { entry: existing, alreadyOpen: true, seeded: false, wasEmpty: false };
   }
   const launched = await launchProfile(name, opts, owner);
@@ -723,7 +791,9 @@ const controlServer = createServer(async (req, res) => {
     }
     if (path === "/profiles/close") {
       const name = requireName(body.name);
-      if (!Number.isInteger(body.generation)) throw new HttpError(400, "generation is required");
+      if (typeof body.generation !== "string" || !body.generation) {
+        throw new HttpError(400, "generation is required");
+      }
       return sendJson(res, 200, await withLifecycleLock(() => closeProfile(name, body.generation)));
     }
     if (path === "/profiles/trash") {
@@ -770,13 +840,17 @@ function rejectUpgrade(socket, status, reason) {
   socket.end(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
 }
 
-const relayServer = createServer((req, res) => {
+const relayServer = createServer(async (req, res) => {
   if (!profileControlToken || !tokenMatches(req.headers.authorization)) {
     return sendJson(res, 401, { error: "unauthorized" });
   }
   const target = parseRelayPath(req.url);
   if (!target || req.method !== "GET" || target.upstreamPath !== "/json/version") {
     return sendJson(res, 404, { error: "not found" });
+  }
+  if (!(await leaseStillOurs())) {
+    scheduleLeaseRefresh();
+    return sendJson(res, 503, { error: "this browser-node no longer holds the profile lease" });
   }
   const upstream = httpRequest(
     {
@@ -811,15 +885,25 @@ const relayServer = createServer((req, res) => {
   upstream.end();
 });
 
-relayServer.on("upgrade", (req, socket, head) => {
+relayServer.on("upgrade", async (req, socket, head) => {
   socket.on("error", () => socket.destroy());
   if (!profileControlToken || !tokenMatches(req.headers.authorization)) {
     return rejectUpgrade(socket, 401, "Unauthorized");
   }
+  if (!parseRelayPath(req.url)) return rejectUpgrade(socket, 404, "Not Found");
+  if (!(await leaseStillOurs())) {
+    scheduleLeaseRefresh();
+    return rejectUpgrade(socket, 503, "Service Unavailable");
+  }
+  // Re-resolved after the await: fencing may have removed the target.
   const target = parseRelayPath(req.url);
   if (!target || !target.upstreamPath.startsWith("/devtools/")) {
     return rejectUpgrade(socket, 404, "Not Found");
   }
+  let tracked = relaySockets.get(target.id);
+  if (!tracked) relaySockets.set(target.id, (tracked = new Set()));
+  tracked.add(socket);
+  socket.on("close", () => tracked.delete(socket));
   const upstream = netConnect({ host: "127.0.0.1", port: target.localPort });
   const teardown = () => {
     socket.destroy();
@@ -865,9 +949,7 @@ if (persistentProfilesEnabled) {
   if (await refreshNodeLease({ force: nodeLeaseForce })) {
     await sweepAllStaleLocks();
   }
-  setInterval(() => {
-    refreshNodeLease().catch((err) => console.error(`node lease heartbeat failed: ${err.message}`));
-  }, nodeLeaseHeartbeatMs).unref();
+  setInterval(scheduleLeaseRefresh, nodeLeaseHeartbeatMs).unref();
   await listen(relayServer, cdpRelayPort, cdpRelayHost);
   console.log(`CDP relay listening on ${cdpRelayHost}:${cdpRelayPort}`);
   if (!profileControlToken) {

@@ -254,6 +254,9 @@ class BrowserSessionService:
                         auto_persist_name=auto_persist_name,
                         persistent_profile_name=persistent_profile_name,
                         persistent_owner=persistent_owner,
+                        persistent_adopt_unmarked=(
+                            persistent_profile_name is not None and not auth_profile and auto_persist_allowed
+                        ),
                         persistent_storage_state=persistent_storage_state,
                     )
                 finally:
@@ -349,6 +352,7 @@ class BrowserSessionService:
         persistent_profile_name: str | None,
         persistent_owner: str | None,
         persistent_storage_state: dict[str, Any] | None,
+        persistent_adopt_unmarked: bool = False,
     ) -> dict[str, Any]:
         artifact_dir, auth_dir, upload_dir = self.prepare_dirs(session_id)
         context: BrowserContext | None = None
@@ -367,11 +371,12 @@ class BrowserSessionService:
                     persistent_profile_name,
                     owner=persistent_owner,
                     # Data from before owner markers existed may only be
-                    # adopted by the remembered-login default, whose access
-                    # require_access has just verified; any other name with
-                    # unmarked data starts fresh (browser-node trashes it).
-                    adopt_unmarked=persistent_profile_name
-                    == self.manager.auth_profiles.normalize_name(auto_persist_name),
+                    # adopted on the remembered-login auto-load path (no
+                    # auth_profile named, require_access passed) -- never for
+                    # an explicit auth_profile, even one that happens to be
+                    # called "owner-default". Otherwise browser-node trashes
+                    # unmarked data and starts fresh.
+                    adopt_unmarked=persistent_adopt_unmarked,
                     context_kwargs=context_kwargs,
                     storage_state=persistent_storage_state,
                 )
@@ -631,7 +636,7 @@ class BrowserSessionService:
         browser: "Browser | None",
         runtime: "IsolatedBrowserRuntime | None",
         persistent_profile_name: str | None = None,
-        persistent_profile_generation: int | None = None,
+        persistent_profile_generation: str | None = None,
     ) -> None:
         """Roll back a failed Open.
 
