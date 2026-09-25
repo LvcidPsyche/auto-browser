@@ -115,7 +115,7 @@ Why:
 
 ### POC constraint
 
-This scaffold intentionally limits the node to **one active session**. The browser node exposes one X display and one noVNC surface, so human takeover is global to that desktop. In production, move to one browser node per session or per account.
+The shared browser node defaults to **one active session** (`MAX_SESSIONS=1`). It exposes one X display and one noVNC surface, so human takeover is global to that desktop. Raise `MAX_SESSIONS` only when every session belongs to the same person; otherwise use the `docker_ephemeral` mode below, which gives each session its own browser node.
 
 Within that limitation, the controller now still scopes working state per session:
 - per-session artifact directory
@@ -260,18 +260,18 @@ That is the minimal reliable operator loop.
 - remove public raw debugging ports
 
 ### Phase 3 — multi-session isolation
-- one container or VM per account
-- Redis / Postgres for session registry
-- per-session CPU/memory quotas
+- one container or VM per account (shipped as `docker_ephemeral`)
+- Redis / Postgres for session registry (Redis shipped)
+- per-session CPU/memory quotas (shipped: `ISOLATED_BROWSER_MEM_LIMIT`, `_PIDS_LIMIT`, `_CPUS`)
 
 ### Phase 4 — better model ergonomics
 - built-in retry semantics
 - optional OCR / accessibility snapshots
 - route selection between DOM-click and coordinate-click
-- add streaming/SSE on top of the current MCP transport when clients need server-pushed events
+- server-pushed events over the MCP transport (shipped: `resources/subscribe` with `notifications/resources/updated`)
 
 ### Phase 5 — enterprise hardening
-- approval workflows backed by a database + operator identity
+- approval workflows backed by a database + operator identity (shipped: SQLite approvals, named credentials)
 - audit log export and retention controls
 - secret rotation
 - SSO and operator identity

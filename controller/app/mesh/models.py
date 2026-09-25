@@ -35,7 +35,7 @@ class CapabilityKind(str, Enum):
 class CapabilityGrant(BaseModel):
     """A single permission entry: what this peer may ask us to do."""
 
-    capability: str = Field(..., description="e.g. 'tool:browser.click' or 'session:observe'")
+    capability: str = Field(..., description="e.g. 'tool:browser.observe' or 'session:observe'")
     url_allowlist: list[str] = Field(
         default_factory=list,
         description=(
@@ -97,7 +97,7 @@ class DelegationRequest(BaseModel):
     """Sent by an orchestrator to ask a peer to execute a capability."""
 
     request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    capability: str = Field(..., description="e.g. 'tool:browser.click'")
+    capability: str = Field(..., description="e.g. 'tool:browser.execute_action'")
     arguments: dict[str, Any] = Field(default_factory=dict)
     session_id: str = ""
     require_approval_advisory: bool = False  # hint from policy evaluator

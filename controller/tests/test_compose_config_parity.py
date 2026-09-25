@@ -77,3 +77,24 @@ def test_compose_model_default_matches_settings(key: str, attr: str) -> None:
         f"{attr}={settings_value!r}. Docker deployments would silently run a "
         f"different model than pip installs and than CI tests."
     )
+
+
+ENV_EXAMPLE = REPO_ROOT / ".env.example"
+
+
+@pytest.mark.parametrize("key,attr", sorted(MODEL_KEYS.items()))
+def test_env_example_model_matches_settings(key: str, attr: str) -> None:
+    """The same drift, one file over.
+
+    The quickstart says `cp .env.example .env`, and a value in .env overrides
+    both compose and config.py — so a stale model id here downgraded every
+    deployment that followed the docs, after compose itself was fixed.
+    """
+    match = re.search(rf"^{re.escape(key)}=(.*)$", ENV_EXAMPLE.read_text(encoding="utf-8"), re.MULTILINE)
+    if match is None or not match.group(1).strip():
+        return
+
+    settings_value = getattr(Settings(_env_file=None), attr)
+    assert match.group(1).strip() == settings_value, (
+        f".env.example sets {key}={match.group(1).strip()!r} but config.py defaults {attr}={settings_value!r}."
+    )

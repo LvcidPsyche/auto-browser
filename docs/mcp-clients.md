@@ -121,7 +121,9 @@ Minimal shape (requires [uv](https://docs.astral.sh/uv/)):
 Working from a repo checkout without uv? Point `command` at `python3` with
 `args: ["/ABSOLUTE/PATH/TO/auto-browser/scripts/mcp_stdio_bridge.py"]` instead.
 
-If your API is protected, set `AUTO_BROWSER_BEARER_TOKEN`.
+If your API is protected, set `AUTO_BROWSER_BEARER_TOKEN`. If it sets
+`REQUIRE_OPERATOR_ID=true`, also set `AUTO_BROWSER_OPERATOR_ID`, unless the token is a
+named credential from `API_BEARER_TOKENS`.
 
 ## Pairing with other MCP servers
 

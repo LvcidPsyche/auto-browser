@@ -33,10 +33,26 @@ class HttpMcpResponse:
 
 
 class HttpMcpClient:
-    def __init__(self, *, base_url: str, bearer_token: str | None = None, timeout_seconds: float = 60.0):
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        bearer_token: str | None = None,
+        timeout_seconds: float = 60.0,
+        operator_id: str | None = None,
+    ):
         self.base_url = base_url
         self.bearer_token = bearer_token
         self.timeout_seconds = timeout_seconds
+        self.operator_id = operator_id
+
+    def _auth_headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        if self.bearer_token:
+            headers["Authorization"] = f"Bearer {self.bearer_token}"
+        if self.operator_id:
+            headers["X-Operator-Id"] = self.operator_id
+        return headers
 
     def post_json(
         self,
@@ -50,16 +66,13 @@ class HttpMcpClient:
             headers[MCP_SESSION_HEADER] = session_id
         if protocol_version:
             headers[MCP_PROTOCOL_HEADER] = protocol_version
-        if self.bearer_token:
-            headers["Authorization"] = f"Bearer {self.bearer_token}"
+        headers.update(self._auth_headers())
         return self._request("POST", headers=headers, body=payload)
 
     def delete_session(self, *, session_id: str | None) -> None:
         if not session_id:
             return
-        headers = {MCP_SESSION_HEADER: session_id}
-        if self.bearer_token:
-            headers["Authorization"] = f"Bearer {self.bearer_token}"
+        headers = {MCP_SESSION_HEADER: session_id, **self._auth_headers()}
         try:
             self._request("DELETE", headers=headers, body=None)
         except Exception:
@@ -251,18 +264,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--base-url",
         default=os.environ.get("AUTO_BROWSER_BASE_URL", "http://127.0.0.1:8000/mcp"),
-        help="HTTP MCP endpoint to proxy to (default: %(default)s)",
+        help="HTTP MCP endpoint to proxy to; env AUTO_BROWSER_BASE_URL (default: %(default)s)",
     )
     parser.add_argument(
         "--bearer-token",
         default=os.environ.get("AUTO_BROWSER_BEARER_TOKEN"),
-        help="Optional API bearer token for the Auto Browser HTTP server.",
+        help="API bearer token for a protected controller; env AUTO_BROWSER_BEARER_TOKEN.",
     )
     parser.add_argument(
         "--timeout-seconds",
         type=float,
         default=float(os.environ.get("AUTO_BROWSER_HTTP_TIMEOUT_SECONDS", "60")),
-        help="Per-request timeout when talking to the HTTP MCP endpoint.",
+        help="Per-request timeout in seconds; env AUTO_BROWSER_HTTP_TIMEOUT_SECONDS (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--operator-id",
+        default=os.environ.get("AUTO_BROWSER_OPERATOR_ID"),
+        help="Sent as X-Operator-Id, for a controller with REQUIRE_OPERATOR_ID=true; env AUTO_BROWSER_OPERATOR_ID.",
     )
     return parser
 
@@ -274,6 +292,7 @@ def main() -> int:
             base_url=args.base_url,
             bearer_token=args.bearer_token,
             timeout_seconds=args.timeout_seconds,
+            operator_id=args.operator_id,
         )
     )
     return bridge.run()

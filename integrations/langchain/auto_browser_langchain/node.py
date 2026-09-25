@@ -21,15 +21,19 @@ class AutoBrowserNode:
         base_url: str = "http://localhost:8000",
         bearer_token: str | None = None,
         timeout: float = 60.0,
+        operator_id: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.bearer_token = bearer_token
         self.timeout = timeout
+        self.operator_id = operator_id
 
     def _headers(self) -> dict[str, str]:
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if self.bearer_token:
             headers["Authorization"] = f"Bearer {self.bearer_token}"
+        if self.operator_id:
+            headers["X-Operator-Id"] = self.operator_id
         return headers
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:

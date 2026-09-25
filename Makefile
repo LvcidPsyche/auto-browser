@@ -1,7 +1,7 @@
 .PHONY: help lint up up-isolation up-reverse-ssh test test-local coverage eval fixture-eval doctor release-audit stdio-bridge smoke-isolation smoke-isolation-tunnel smoke-reverse-ssh bootstrap-codex-auth bootstrap-claude-auth bootstrap-gemini-auth bootstrap-all-auth down config config-isolation config-reverse-ssh
 
 help: ## Show available commands
-	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | sed 's/:.*## /\t/' | sort
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "%-24s %s\n", $$1, $$2}' | sort
 
 lint: ## Run Ruff checks across the whole repo
 	# Repo-wide, not a path list: the previous scope (controller/app, controller/tests,
@@ -27,7 +27,7 @@ test-local: ## Run controller tests on the host with Python 3.11+
 	./scripts/test_local.sh
 
 coverage: ## Run controller tests with coverage on the host
-	cd controller && python -m pytest tests/ --cov=app --cov-report=html --cov-report=term-missing
+	./scripts/test_local.sh --cov=app --cov-report=html --cov-report=term-missing
 
 eval: ## Run the deterministic agent eval matrix without live providers
 	python scripts/agent_eval.py --mock

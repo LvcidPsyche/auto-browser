@@ -108,6 +108,17 @@ class RoutePresenceTests(unittest.TestCase):
             "A silent include_router regression leaves only FastAPI's default doc routes.",
         )
 
+    def test_every_operation_is_tagged(self) -> None:
+        # Untagged operations land in one "default" group on /docs; before the
+        # routers were tagged that group held 89 of 104 endpoints.
+        untagged = [
+            f"{method.upper()} {path}"
+            for path, operations in main_module.app.openapi()["paths"].items()
+            for method, operation in operations.items()
+            if not operation.get("tags")
+        ]
+        self.assertEqual(untagged, [], "pass tags= when including a new router")
+
 
 class RouteDispatchTests(unittest.TestCase):
     """Layer 3: the routes must dispatch, not merely appear in the schema."""

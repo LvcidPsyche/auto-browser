@@ -150,7 +150,8 @@ def create_controller_app(
             maintenance=services.maintenance,
             orchestrator=services.orchestrator,
             version=version,
-        )
+        ),
+        tags=["system"],
     )
 
     from .routes.extensions import register_all_routers
