@@ -83,6 +83,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             return await manager.observe(session_id, limit=limit, preset=preset)
         except KeyError:
             raise HTTPException(status_code=404, detail="Unknown session") from None
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 410 tab_gone, 423 dialog_open).
+            raise
         except Exception:
             raise internal_error(logger, "observe failed for session %s", session_id) from None
 
@@ -92,6 +95,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             return await manager.observe(session_id, limit=payload.limit, preset=payload.preset)
         except KeyError:
             raise HTTPException(status_code=404, detail="Unknown session") from None
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 410 tab_gone, 423 dialog_open).
+            raise
         except Exception:
             raise internal_error(logger, "observe failed for session %s", session_id) from None
 
@@ -124,7 +130,7 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
     @router.post("/sessions/{session_id}/tabs/open")
     async def open_tab(session_id: str, payload: OpenTabRequest) -> dict[str, Any]:
         try:
-            return await manager.open_tab(session_id, payload.url, payload.activate)
+            return await manager.open_tab(session_id, payload.url, payload.activate, owner=payload.owner)
         except PermissionError:
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except ValueError:
@@ -229,6 +235,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             )
         except KeyError:
             raise HTTPException(status_code=404, detail="Unknown session") from None
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 410 tab_gone, 423 dialog_open).
+            raise
         except Exception:
             raise internal_error(logger, "dialog failed for session %s", session_id) from None
 
@@ -283,6 +292,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             raise
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid request") from None
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 410 tab_gone, 423 dialog_open).
+            raise
         except Exception:
             raise internal_error(logger, "upload failed for session %s", session_id) from None
 
@@ -417,6 +429,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             return await manager.wait(session_id, payload.wait_ms)
         except KeyError:
             raise HTTPException(status_code=404, detail="Unknown session") from None
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 410 tab_gone, 423 dialog_open).
+            raise
         except Exception:
             raise internal_error(logger, "wait failed for session %s", session_id) from None
 

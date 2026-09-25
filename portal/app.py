@@ -50,6 +50,7 @@ IDENTITY_RECOVERY_CODES_PATH = "/internal/auth/recovery-codes"
 BROKER_OPEN_PATH = "/owner/sessions"
 BROKER_CLOSE_PREFIX = "/owner/sessions/"
 BROKER_VISUAL_ACCESS_PATH = "/owner/visual-access"
+BROKER_TABS_PREFIX = "/owner/sessions/"
 BROKER_AUTH_PROFILE_SAVE_PREFIX = "/owner/sessions/"
 BROKER_AUTH_PROFILE_PREFIX = "/owner/auth-profiles/"
 PROFILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
@@ -71,6 +72,56 @@ VIEWER_CONTENT_SECURITY_POLICY = (
     "media-src 'self' blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; "
     "form-action 'self'"
 )
+
+# The /browser page's tab strip is one same-origin script polling one
+# same-origin JSON endpoint; nothing else is loosened.
+BROWSER_PAGE_CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; "
+    "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+)
+# Who opened each tab, as the owner reads it. Unknown labels are shown as-is.
+TAB_OWNER_NAMES_AR = {"emad": "عماد", "ziad": "زياد", "nihad": "نهاد"}
+TAB_OWNER_SELF_AR = "أنت"
+TAB_STRIP_SCRIPT = """(function () {
+  var box = document.getElementById('tab-strip');
+  if (!box) { return; }
+  var csrf = box.getAttribute('data-csrf') || '';
+  var list = box.querySelector('ol');
+  var note = box.querySelector('p');
+  function render(tabs) {
+    list.textContent = '';
+    tabs.forEach(function (tab) {
+      var item = document.createElement('li');
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.dir = 'auto';
+      button.setAttribute('aria-pressed', tab.active ? 'true' : 'false');
+      button.style.fontWeight = tab.active ? 'bold' : 'normal';
+      var shown = tab.active ? '\u25CF ' : '';
+      button.textContent = shown + tab.owner_label + ' \u2014 ' + (tab.title || tab.host || '\u2026');
+      button.title = tab.host || '';
+      button.addEventListener('click', function () { show(tab.index); });
+      item.appendChild(button);
+      list.appendChild(item);
+    });
+  }
+  function poll() {
+    fetch('/api/browser/tabs', {credentials: 'same-origin', headers: {'Accept': 'application/json'}})
+      .then(function (r) { if (!r.ok) { throw new Error(String(r.status)); } return r.json(); })
+      .then(function (data) { render(data.tabs || []); note.textContent = ''; })
+      .catch(function () { note.textContent = '\u062A\u0639\u0630\u0651\u0631 \u062A\u062D\u062F\u064A\u062B \u0627\u0644\u062A\u0628\u0648\u064A\u0628\u0627\u062A'; });
+  }
+  function show(index) {
+    fetch('/api/browser/tabs/activate', {
+      method: 'POST', credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
+      body: JSON.stringify({index: index})
+    }).then(poll, poll);
+  }
+  poll();
+  setInterval(poll, 3000);
+})();
+"""
 
 SECURITY_HEADERS = {
     "Cache-Control": "no-store, max-age=0",
@@ -585,6 +636,8 @@ def create_app(
         # viewer paths get a policy that is still same-origin-only but lets the app run.
         if request.url.path == "/vnc" or request.url.path.startswith("/vnc/"):
             response.headers["Content-Security-Policy"] = VIEWER_CONTENT_SECURITY_POLICY
+        elif request.url.path in {"/browser", "/browser/tabs.js"}:
+            response.headers["Content-Security-Policy"] = BROWSER_PAGE_CONTENT_SECURITY_POLICY
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
 
@@ -1041,12 +1094,21 @@ def create_app(
             "<button>ابعت (Send)</button></form>"
             if state == "open" else ""
         )
+        # Which tab each employee is working in, and which one the live view
+        # shows. Polled by /browser/tabs.js; a tap asks to show that tab.
+        tab_strip = (
+            f"<section id=tab-strip data-csrf='{csrf}'>"
+            "<h2>التبويبات</h2><ol></ol><p></p></section>"
+            "<script src=/browser/tabs.js></script>"
+            if state == "open" else ""
+        )
         return HTMLResponse(
             "<!doctype html><meta charset=utf-8><title>Secure Browser</title>"
             f"<h1>Secure Browser</h1><p>Signed in as {account}</p><p>Browser: {state}</p>"
             "<p><a href='/sites'>Manage allowed sites and assistant requests</a></p>"
             "<p><a href='/profiles'>احفظ الدخول (saved logins)</a></p>"
             f"{viewer_link}"
+            f"{tab_strip}"
             f"{type_bridge}"
             "<h2>Open browser</h2><form method=post action=/api/browser/open>"
             f"<input type=hidden name=csrf_token value='{csrf}'>"
@@ -1539,6 +1601,88 @@ def create_app(
         if "text/html" in (request.headers.get("accept") or ""):
             return RedirectResponse("/browser", status_code=303)
         return {"status": "sent"}
+
+    @app.get("/browser/tabs.js")
+    async def tab_strip_script(request: Request):
+        session_for(request)
+        return Response(TAB_STRIP_SCRIPT, media_type="text/javascript")
+
+    def safe_tab(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            return None
+        index = value.get("index")
+        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index <= 500:
+            return None
+        owner = value.get("owner")
+        owner = owner if isinstance(owner, str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", owner) else None
+        title = value.get("title")
+        url = value.get("url")
+        host = ""
+        if isinstance(url, str):
+            try:
+                host = (urlsplit(url).hostname or "")[:253]
+            except ValueError:
+                host = ""
+        return {
+            "index": index,
+            "active": value.get("active") is True,
+            "owner": owner,
+            "owner_label": TAB_OWNER_SELF_AR if owner is None else TAB_OWNER_NAMES_AR.get(owner, owner),
+            "title": title[:120] if isinstance(title, str) else "",
+            "host": host,
+        }
+
+    @app.get("/api/browser/tabs")
+    async def browser_tabs(request: Request):
+        """The live session's tabs: who opened each one and which one is shown."""
+        row = session_for(request)
+        require_sole_new_surface_owner(row)
+        session_id = await viewer_session_id_cached(row)
+        if session_id is None:
+            raise HTTPException(403, VIEWER_DENIAL_AR)
+        selected_broker, selected_owner_token = broker_for(row["user_id"], row["tenant_id"])
+        try:
+            response = await selected_broker.get(
+                f"{BROKER_TABS_PREFIX}{quote(session_id, safe='')}/tabs",
+                headers=internal_headers(selected_owner_token), timeout=10,
+            )
+        except httpx.HTTPError:
+            raise HTTPException(502, "Browser service unavailable") from None
+        if response.status_code != 200:
+            raise _upstream_error(response, "Tabs could not be listed")
+        try:
+            raw = response.json()
+        except ValueError:
+            raise HTTPException(502, "Browser service unavailable") from None
+        if not isinstance(raw, list):
+            raise HTTPException(502, "Browser service unavailable")
+        return {"tabs": [tab for tab in map(safe_tab, raw[:50]) if tab is not None]}
+
+    @app.post("/api/browser/tabs/activate")
+    async def browser_tabs_activate(request: Request):
+        """Show one tab in the live view -- the owner's own tap, nothing else."""
+        row = await mutation(request)
+        require_sole_new_surface_owner(row)
+        data = await _payload(request)
+        index = data.get("index")
+        if isinstance(index, str) and index.isdigit():
+            index = int(index)
+        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index <= 500:
+            raise HTTPException(422, "Invalid index")
+        session_id = await viewer_session_id(row)
+        if session_id is None:
+            raise HTTPException(403, VIEWER_DENIAL_AR)
+        selected_broker, selected_owner_token = broker_for(row["user_id"], row["tenant_id"])
+        try:
+            response = await selected_broker.post(
+                f"{BROKER_TABS_PREFIX}{quote(session_id, safe='')}/tabs/activate",
+                headers=internal_headers(selected_owner_token), json={"index": index}, timeout=100,
+            )
+        except httpx.HTTPError:
+            raise HTTPException(502, "Browser service unavailable") from None
+        if response.status_code != 200:
+            raise _upstream_error(response, "Tab could not be shown")
+        return {"status": "shown", "index": index}
 
     _viewer_session_cache: dict[tuple[str, str], tuple[float, str | None]] = {}
     _VIEWER_SESSION_CACHE_SECONDS = 1.0

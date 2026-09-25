@@ -75,6 +75,10 @@ def decide(dialog_type: str, message: str, *, agent_flow: bool) -> str:
     return "leave_open"  # prompt: the agent must supply the text itself
 
 
+def _tab_scoped(session: Any) -> bool:
+    return getattr(session, "tab_scoped", False) is True
+
+
 def in_agent_flow(session: "BrowserSession") -> bool:
     return session.agent_action_depth > 0 or time.monotonic() < session.agent_dialog_grace_until
 
@@ -234,7 +238,8 @@ class BrowserDialogService:
         replacement = None
         if opener is not None and opener in candidates:
             replacement = opener
-        elif candidates:
+        elif candidates and not _tab_scoped(session):
+            # One employee's tab never jumps into somebody else's tab.
             replacement = candidates[-1]
         if replacement is None:
             return False
@@ -243,8 +248,21 @@ class BrowserDialogService:
         return True
 
     async def follow_popup(self, session: "BrowserSession") -> dict[str, Any] | None:
-        """Make the popup an agent action just opened the active tab."""
+        """Make the popup an agent action just opened the active tab.
+
+        Through a tab view (X-Tab-Id) only a popup this tab opened is followed
+        -- it becomes this tab, the owner's active tab is untouched, and
+        nothing is brought to the front of his screen.
+        """
         popup = session.pending_popup
+        tab_scoped = _tab_scoped(session)
+        if popup is not None and tab_scoped:
+            try:
+                opener = session.popup_openers.get(popup)
+            except TypeError:
+                opener = None
+            if opener is not None and opener is not session.page:
+                return None  # another tab's popup: leave it for that tab's action
         session.pending_popup = None
         if popup is None or popup is session.page:
             return None
@@ -257,7 +275,7 @@ class BrowserDialogService:
             except Exception as exc:
                 logger.debug("popup did not finish loading: %s", exc)
             session.page = popup
-            if hasattr(popup, "bring_to_front"):
+            if not tab_scoped and hasattr(popup, "bring_to_front"):
                 await popup.bring_to_front()
         except Exception as exc:
             logger.debug("could not follow popup: %s", exc)

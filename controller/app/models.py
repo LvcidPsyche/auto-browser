@@ -273,6 +273,8 @@ class TabIndexRequest(StrictInputModel):
 class OpenTabRequest(StrictInputModel):
     url: str | None = Field(default=None, min_length=1, max_length=2000)
     activate: bool = True
+    # Who this tab belongs to (an employee label such as "emad"); None = the owner.
+    owner: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]{0,31}$")
 
     @field_validator("url")
     @classmethod

@@ -861,3 +861,239 @@ def test_file_errors_relay_only_their_code_and_bounded_facts(tmp_path: Path, clo
         assert refused.json()["detail"] == {
             "message": "Browser controller rejected request", "code": "file_too_large", "max_bytes": 5, "kind": "video",
         }
+# --- per-tab work: agents run side by side, owner state changes stay exclusive ---------------
+
+
+def _tab_upstream(calls: list, *, slow_seconds: float = 0.0, stats: dict | None = None):
+    """Async fake controller; actions/wait and actions/click sleep ``slow_seconds``."""
+    state = {"active": False}
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content) if request.content else None
+        calls.append((request.method, request.url.path, payload, request.headers.get("x-tab-id")))
+        if request.method == "GET" and request.url.path == "/sessions":
+            return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if state["active"] else [])
+        if request.method == "POST" and request.url.path == "/sessions":
+            state["active"] = True
+            return httpx.Response(200, json={"id": "owner-1"})
+        if request.url.path.endswith(("/actions/wait", "/actions/click")) and slow_seconds:
+            loop = asyncio.get_running_loop()
+            if stats is not None:
+                stats["running"] = stats.get("running", 0) + 1
+                stats["max"] = max(stats.get("max", 0), stats["running"])
+                stats.setdefault("events", []).append(("start", request.url.path, loop.time()))
+            await asyncio.sleep(slow_seconds)
+            if stats is not None:
+                stats["running"] -= 1
+                stats["events"].append(("end", request.url.path, loop.time()))
+        if request.url.path == "/sessions/owner-1/tabs":
+            return httpx.Response(200, json=[
+                {"index": 0, "active": True, "url": "https://a", "title": "A", "tab_id": "t-aaaaaaaaaaaa", "owner": None},
+                {"index": 1, "active": False, "url": "https://b", "title": "B", "tab_id": "t-bbbbbbbbbbbb", "owner": "emad"},
+            ])
+        return httpx.Response(200, json={"ok": True})
+
+    return upstream
+
+
+def _open_owner_session(client: TestClient, clock: list[float]) -> None:
+    secret = enroll(client, clock)
+    assert client.post("/owner/sessions", headers=auth(OWNER), json={
+        "start_url": "https://example.com", "totp_code": fresh(secret, clock),
+    }).status_code == 200
+
+
+def test_two_agents_operations_overlap_instead_of_queueing(tmp_path: Path, clock: list[float]) -> None:
+    calls: list = []
+    stats: dict = {}
+    upstream = _tab_upstream(calls, slow_seconds=0.6, stats=stats)
+    with TestClient(app_at(tmp_path, upstream, agent_tokens=f"ziad:{OTHER}")) as client:
+        _open_owner_session(client, clock)
+        first = client.post("/requests", headers=auth(AGENT), json={"purpose": "a"}).json()["id"]
+        second = client.post("/requests", headers=auth(OTHER), json={"purpose": "b"}).json()["id"]
+        results: list = []
+
+        def act(token: str, grant: str, tab: str) -> None:
+            results.append(client.post(f"/requests/{grant}/actions/wait", headers=auth(token),
+                                       json={"arguments": {"wait_ms": 600, "tab_id": tab}}).status_code)
+
+        threads = [threading.Thread(target=act, args=(AGENT, first, "t-aaaaaaaaaaaa")),
+                   threading.Thread(target=act, args=(OTHER, second, "t-bbbbbbbbbbbb"))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5)
+        assert results == [200, 200]
+        assert stats["max"] == 2, "both controller calls were in flight at the same time"
+
+
+def test_revoke_waits_for_inflight_call_and_blocks_later_ones(tmp_path: Path, clock: list[float]) -> None:
+    import time as real_time
+
+    calls: list = []
+    stats: dict = {}
+    upstream = _tab_upstream(calls, slow_seconds=0.6, stats=stats)
+    with TestClient(app_at(tmp_path, upstream, agent_tokens=f"ziad:{OTHER}")) as client:
+        _open_owner_session(client, clock)
+        grant = client.post("/requests", headers=auth(AGENT), json={"purpose": "a"}).json()["id"]
+        other = client.post("/requests", headers=auth(OTHER), json={"purpose": "b"}).json()["id"]
+        done: dict = {}
+
+        def action() -> None:
+            done["action"] = client.post(f"/requests/{grant}/actions/click", headers=auth(AGENT), json={"arguments": {}})
+
+        def revoke() -> None:
+            done["revoke"] = client.post(f"/requests/{grant}/revoke", headers=auth(OWNER))
+
+        def later() -> None:
+            done["later"] = client.post(f"/requests/{other}/actions/wait", headers=auth(OTHER), json={"arguments": {}})
+
+        first = threading.Thread(target=action)
+        first.start()
+        deadline = real_time.monotonic() + 2
+        while not stats.get("events") and real_time.monotonic() < deadline:
+            real_time.sleep(0.01)
+        assert stats.get("events"), "the first action reached the controller"
+        revoker = threading.Thread(target=revoke)
+        revoker.start()
+        real_time.sleep(0.1)
+        assert "revoke" not in done, "revoke waits for the in-flight action"
+        # Queued behind the waiting revoke: must not start before it (writer preference).
+        follower = threading.Thread(target=later)
+        follower.start()
+        real_time.sleep(0.1)
+        assert stats["running"] == 1, "no new action starts while a revoke is waiting"
+        for thread in (first, revoker, follower):
+            thread.join(5)
+        assert done["action"].status_code == 200
+        assert done["revoke"].status_code == 200
+        assert done["later"].status_code == 200
+        starts = [event for event in stats["events"] if event[0] == "start"]
+        ends = [event for event in stats["events"] if event[0] == "end"]
+        assert starts[1][2] >= ends[0][2], "the later action started only after the first one ended"
+        # The revoked agent is now refused.
+        assert client.post(f"/requests/{grant}/actions/click", headers=auth(AGENT), json={"arguments": {}}).status_code == 403
+
+
+def test_tab_id_becomes_the_x_tab_id_header_and_is_validated(tmp_path: Path, clock: list[float]) -> None:
+    calls: list = []
+    with TestClient(app_at(tmp_path, _tab_upstream(calls))) as client:
+        _open_owner_session(client, clock)
+        grant = client.post("/requests", headers=auth(AGENT), json={"purpose": "a"}).json()["id"]
+        ok = client.post(f"/requests/{grant}/actions/click", headers=auth(AGENT),
+                         json={"arguments": {"x": 1, "y": 2, "tab_id": "t-0123456789ab"}})
+        assert ok.status_code == 200
+        assert ("POST", "/sessions/owner-1/actions/click", {"x": 1, "y": 2}, "t-0123456789ab") in calls
+        # Without tab_id nothing changes: no header.
+        client.post(f"/requests/{grant}/actions/press", headers=auth(AGENT), json={"arguments": {"key": "Enter"}})
+        assert ("POST", "/sessions/owner-1/actions/press", {"key": "Enter"}, None) in calls
+        # Invalid tab ids never reach the controller.
+        before = len(calls)
+        for bad in ("t-XYZ", "t-0123456789abc", "0123456789ab", 5, None, "t-0123456789AB"):
+            response = client.post(f"/requests/{grant}/actions/click", headers=auth(AGENT),
+                                   json={"arguments": {"x": 1, "tab_id": bad}})
+            assert response.status_code == 400, bad
+        assert not [call for call in calls[before:] if "/actions/" in call[1]]
+        # observe: exactly {} or {"tab_id"}.
+        assert client.post("/mcp/tools/call", headers=auth(AGENT), json={
+            "name": "browser.observe", "arguments": {"request_id": grant, "tab_id": "t-0123456789ab"},
+        }).status_code == 200
+        assert ("GET", "/sessions/owner-1/observe", None, "t-0123456789ab") in calls
+        assert client.get(f"/requests/{grant}/observe", headers=auth(AGENT)).status_code == 200
+        assert client.post("/mcp/tools/call", headers=auth(AGENT), json={
+            "name": "browser.observe", "arguments": {"request_id": grant, "limit": 5},
+        }).status_code == 400
+        assert client.post("/mcp/tools/call", headers=auth(AGENT), json={
+            "name": "browser.observe", "arguments": {"request_id": grant, "tab_id": "bad"},
+        }).status_code == 400
+        # open_tab forwards a valid owner label only.
+        assert client.post(f"/requests/{grant}/actions/open_tab", headers=auth(AGENT), json={
+            "arguments": {"url": "https://example.com", "activate": False, "owner": "emad"},
+        }).status_code == 200
+        assert ("POST", "/sessions/owner-1/tabs/open",
+                {"url": "https://example.com", "activate": False, "owner": "emad"}, None) in calls
+        assert client.post(f"/requests/{grant}/actions/open_tab", headers=auth(AGENT),
+                           json={"arguments": {"owner": "Emad!"}}).status_code == 400
+
+
+def test_tab_gone_is_relayed_to_the_agent(tmp_path: Path, clock: list[float]) -> None:
+    active = False
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal active
+        if request.method == "GET" and request.url.path == "/sessions":
+            return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
+        if request.method == "POST" and request.url.path == "/sessions":
+            active = True
+            return httpx.Response(200, json={"id": "owner-1"})
+        return httpx.Response(410, json={"ok": False, "code": "tab_gone", "error": "gone",
+                                         "tab_id": "t-0123456789ab", "internal": "never relayed"})
+
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        _open_owner_session(client, clock)
+        grant = client.post("/requests", headers=auth(AGENT), json={"purpose": "a"}).json()["id"]
+        response = client.post(f"/requests/{grant}/actions/click", headers=auth(AGENT),
+                               json={"arguments": {"x": 1, "tab_id": "t-0123456789ab"}})
+        assert response.status_code == 410
+        assert response.json()["detail"] == {"message": "Browser controller rejected request", "code": "tab_gone"}
+
+
+def test_owner_tab_endpoints_are_owner_only_and_bound_to_the_owner_session(
+    tmp_path: Path, clock: list[float],
+) -> None:
+    calls: list = []
+    with TestClient(app_at(tmp_path, _tab_upstream(calls))) as client:
+        # No verified owner session yet.
+        assert client.get("/owner/sessions/owner-1/tabs", headers=auth(OWNER)).status_code == 403
+        _open_owner_session(client, clock)
+        assert client.get("/owner/sessions/owner-1/tabs", headers=auth(AGENT)).status_code == 403
+        assert client.post("/owner/sessions/owner-1/tabs/activate", headers=auth(AGENT),
+                           json={"index": 1}).status_code == 403
+        assert client.get("/owner/sessions/owner-1/tabs").status_code == 401
+        tabs = client.get("/owner/sessions/owner-1/tabs", headers=auth(OWNER))
+        assert tabs.status_code == 200 and [tab["owner"] for tab in tabs.json()] == [None, "emad"]
+        # Another session id, or a malformed one, is refused.
+        assert client.get("/owner/sessions/other-9/tabs", headers=auth(OWNER)).status_code == 403
+        assert client.get("/owner/sessions/bad..id/tabs", headers=auth(OWNER)).status_code == 400
+        shown = client.post("/owner/sessions/owner-1/tabs/activate", headers=auth(OWNER), json={"index": 1})
+        assert shown.status_code == 200
+        assert ("POST", "/sessions/owner-1/tabs/activate", {"index": 1}, None) in calls
+        assert client.post("/owner/sessions/owner-1/tabs/activate", headers=auth(OWNER),
+                           json={"index": -1}).status_code == 422
+        assert client.post("/owner/sessions/owner-1/tabs/activate", headers=auth(OWNER),
+                           json={"index": 1, "x": 1}).status_code == 422
+
+
+def test_session_lock_writer_preference_and_cancellation() -> None:
+    from approval_broker.app import SessionLock
+
+    async def scenario() -> None:
+        lock = SessionLock()
+        await lock.acquire_shared()
+        writer = asyncio.ensure_future(lock.acquire())
+        await asyncio.sleep(0)
+        reader = asyncio.ensure_future(lock.acquire_shared())
+        await asyncio.sleep(0)
+        assert not writer.done() and not reader.done()
+        lock.release_shared()
+        await asyncio.sleep(0)
+        assert writer.done() and not reader.done()
+        lock.release()
+        await asyncio.sleep(0)
+        assert reader.done()
+        lock.release_shared()
+        # A cancelled exclusive waiter lets the readers queued behind it through.
+        await lock.acquire_shared()
+        writer = asyncio.ensure_future(lock.acquire())
+        await asyncio.sleep(0)
+        reader = asyncio.ensure_future(lock.acquire_shared())
+        await asyncio.sleep(0)
+        writer.cancel()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert reader.done() and lock._readers == 2 and not lock._writer
+        lock.release_shared()
+        lock.release_shared()
+        assert not lock.locked()
+
+    asyncio.run(scenario())

@@ -15,6 +15,8 @@ from ...models import SessionRecord, SessionStatus
 from ...navigation_policy import await_public_dns_check
 from ...network_inspector import NetworkInspector
 from ...utils import UTC
+from ..tab_scope import current_tab_id, detached_context
+from ..tab_view import TabView, page_for_tab, unwrap_session
 from .connection_health import (
     DRIVER_EXITED,
     is_driver_dead_error,
@@ -717,6 +719,11 @@ class BrowserSessionService:
         session = self.manager.sessions.get(session_id)
         if session is None:
             raise KeyError(session_id)
+        tab_id = current_tab_id.get()
+        if tab_id is not None:
+            # A tab-scoped request (X-Tab-Id): hand back that one tab. The
+            # owner's active tab is not healed or touched from here.
+            return self.tab_view(session, tab_id)
         # The active tab may have closed on its own (an OAuth popup closing
         # after sign-in): go back to the tab that opened it before anyone acts.
         dialogs = getattr(self.manager, "dialogs", None)
@@ -726,6 +733,24 @@ class BrowserSessionService:
             except Exception as exc:  # never block a lookup on this
                 logger.debug("session %s: active-tab heal failed: %s", session_id, exc)
         return session
+
+    def tab_view(self, session: "BrowserSession", tab_id: str) -> TabView:
+        """``session`` seen through tab ``tab_id``; 410 ``tab_gone`` if it closed."""
+        try:
+            pages = self.manager.tabs.pages(session)
+        except Exception:
+            pages = []
+        page = page_for_tab(session, tab_id, pages)
+        if page is None:
+            raise BrowserActionError(
+                "That tab is no longer open. List the tabs or open a new one.",
+                code="tab_gone",
+                status_code=410,
+                retryable=True,
+                details={"tab_id": tab_id},
+            )
+        self.manager._attach_page_listeners(page, session)
+        return TabView(session, page, tab_id)
 
     async def get_record(self, session_id: str) -> dict[str, Any]:
         session = self.manager.sessions.get(session_id)
@@ -956,7 +981,8 @@ class BrowserSessionService:
     def schedule_reap(self) -> None:
         """Run a recovery pass soon, without the caller waiting for it."""
         tasks = self.manager.__dict__.setdefault("_background_reaps", set())
-        task = asyncio.create_task(self.reap_dead_sessions())
+        # Never inherit a tab scope from the request that scheduled it.
+        task = asyncio.create_task(self.reap_dead_sessions(), context=detached_context())
         tasks.add(task)
         task.add_done_callback(tasks.discard)
 
@@ -975,7 +1001,7 @@ class BrowserSessionService:
             return
         task = getattr(manager, "_reap_task", None)
         if not isinstance(task, asyncio.Task) or task.done():
-            task = asyncio.create_task(self._reap_dead_sessions_once())
+            task = asyncio.create_task(self._reap_dead_sessions_once(), context=detached_context())
             manager._reap_task = task
         # shield: a caller's cancellation (a dropped HTTP request) must not
         # abort a re-attach half way.
@@ -1365,6 +1391,8 @@ class BrowserSessionService:
         return await self.manager._session_summary(session)
 
     async def persist(self, session: "BrowserSession", *, status: SessionStatus) -> None:
+        # The record describes the session (its active tab), never one tab view.
+        session = unwrap_session(session)
         summary = await self.manager._session_summary(
             session,
             status=status,

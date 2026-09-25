@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import hashlib
 import hmac
 import json
@@ -45,6 +46,8 @@ ALLOWED_ACTIONS = frozenset({
 # type/text are relayed -- never the rest of the controller's error body.
 RELAYED_ERROR_CODES = frozenset({
     "dialog_open", "captcha_detected",
+    # A tab-scoped call (X-Tab-Id) whose tab has closed: list/open tabs again.
+    "tab_gone",
     # File transfer (controller app/file_transfer.py): what went wrong with a
     # download/upload is something the agent must act on (point at another
     # element, try another site, pick a smaller file).
@@ -54,6 +57,11 @@ RELAYED_ERROR_CODES = frozenset({
 })
 # Safe, bounded facts a file-transfer refusal may carry back to the agent.
 _RELAYED_FILE_FIELDS = {"max_bytes": int, "size_bytes": int, "kind": str, "reason": str}
+# A tab id the controller hands out (list_tabs / open_tab). Sent upstream as
+# the X-Tab-Id header so the call runs in that tab only -- see SessionLock.
+TAB_ID_PATTERN = re.compile(r"^t-[0-9a-f]{12}$")
+# Who a tab belongs to (an employee label such as "emad").
+TAB_OWNER_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 # The controller's REST paths use a dash for a couple of these operations while every
 # tool-facing name in this broker (and the MCP tool list) uses an underscore -- translate
 # here so ALLOWED_ACTIONS can keep the MCP-friendly spelling everywhere else.
@@ -108,6 +116,117 @@ def _relayed_error_detail(response: httpx.Response) -> Any:
             "message": str(dialog.get("message") or "")[:500],
         }
     return detail
+
+
+class SessionLock:
+    """Reader/writer lock; ``async with lock:`` is exclusive (asyncio.Lock
+    compatible), ``async with lock.shared():`` may be held by many at once.
+
+    Writer preference: once an exclusive acquirer is queued, new shared
+    acquirers wait behind it, so an owner close/revoke is never starved by
+    a stream of agent calls. Waiters are served in arrival order, and a
+    cancelled waiter leaves the counters exact. (A copy of the controller's
+    app/browser/session_lock.py -- the broker is a separate container.)
+    """
+
+    def __init__(self) -> None:
+        self._readers = 0
+        self._writer = False
+        self._waiters: collections.deque[tuple[bool, asyncio.Future[bool]]] = collections.deque()
+
+    def locked(self) -> bool:
+        return self._writer or self._readers > 0
+
+    async def acquire(self) -> bool:
+        if not self._writer and self._readers == 0 and not self._pending():
+            self._writer = True
+            return True
+        await self._wait(exclusive=True)
+        return True
+
+    def release(self) -> None:
+        if not self._writer:
+            raise RuntimeError("SessionLock is not held exclusively")
+        self._writer = False
+        self._wake()
+
+    async def __aenter__(self) -> None:
+        await self.acquire()
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        self.release()
+
+    async def acquire_shared(self) -> None:
+        if not self._writer and not self._pending():
+            self._readers += 1
+            return
+        await self._wait(exclusive=False)
+
+    def release_shared(self) -> None:
+        if self._readers <= 0:
+            raise RuntimeError("SessionLock is not held shared")
+        self._readers -= 1
+        self._wake()
+
+    @asynccontextmanager
+    async def shared(self):
+        await self.acquire_shared()
+        try:
+            yield
+        finally:
+            self.release_shared()
+
+    def _pending(self) -> bool:
+        return any(not fut.done() for _exclusive, fut in self._waiters)
+
+    async def _wait(self, *, exclusive: bool) -> None:
+        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        entry = (exclusive, fut)
+        self._waiters.append(entry)
+        try:
+            await fut
+        except BaseException:
+            try:
+                self._waiters.remove(entry)
+            except ValueError:
+                pass
+            if fut.done() and not fut.cancelled():
+                # Granted, then cancelled before resuming: give it back.
+                if exclusive:
+                    self._writer = False
+                else:
+                    self._readers -= 1
+            self._wake()
+            raise
+
+    def _wake(self) -> None:
+        while self._waiters:
+            exclusive, fut = self._waiters[0]
+            if fut.done():
+                self._waiters.popleft()
+                continue
+            if exclusive:
+                if self._writer or self._readers:
+                    return
+                self._waiters.popleft()
+                self._writer = True
+                fut.set_result(True)
+                return
+            if self._writer:
+                return
+            self._waiters.popleft()
+            self._readers += 1
+            fut.set_result(True)
+
+
+def _pop_tab_id(arguments: dict[str, Any]) -> dict[str, str]:
+    """Take an optional ``tab_id`` out of the tool arguments -> upstream headers."""
+    if "tab_id" not in arguments:
+        return {}
+    tab_id = arguments.pop("tab_id")
+    if not isinstance(tab_id, str) or not TAB_ID_PATTERN.fullmatch(tab_id):
+        raise HTTPException(400, "Invalid tab_id")
+    return {"X-Tab-Id": tab_id}
 
 
 def totp_code(secret: str, step: int) -> str:
@@ -237,6 +356,10 @@ class OwnerRenameProfileRequest(StrictModel):
 
 class OwnerTypeRequest(StrictModel):
     text: str = Field(min_length=1, max_length=2000)
+
+
+class OwnerActivateTabRequest(StrictModel):
+    index: int = Field(ge=0, le=500)
 
 
 class Action(StrictModel):
@@ -372,7 +495,9 @@ def create_app(
     owner_session_generation = 0
     session_opening = False
     session_creation_lock = asyncio.Lock()
-    session_state_lock = asyncio.Lock()
+    # Exclusive (``async with session_state_lock``) for every change to the
+    # owner-session / grant state; SHARED for agent operations -- see operate().
+    session_state_lock = SessionLock()
     client = httpx.AsyncClient(
         base_url=upstream_url,
         transport=transport,
@@ -526,9 +651,12 @@ def create_app(
             grant.status = "revoked"
             raise HTTPException(403, "Owner browser session is closed")
 
-    async def upstream(method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
+    async def upstream(
+        method: str, path: str, payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
         try:
-            response = await client.request(method, path, json=payload)
+            response = await client.request(method, path, json=payload, headers=headers)
         except httpx.HTTPError:
             raise HTTPException(502, "Browser controller unavailable") from None
         if response.status_code >= 400:
@@ -609,7 +737,9 @@ def create_app(
     async def owner_visual_access(authorization: str | None = Header(default=None)):
         """Private gateway guard: noVNC is usable only for the TOTP-opened session."""
         require_role(authorization, "owner")
-        async with session_state_lock:
+        # Shared side: a read-only check the portal runs for every view poll;
+        # it must not queue behind (or hold up) the employees' calls.
+        async with session_state_lock.shared():
             return {"session_id": await trusted_owner_session()}
 
     _NOVNC_DROP_REQUEST_HEADERS = {
@@ -626,7 +756,7 @@ def create_app(
         serve them onward, and only once a TOTP-opened owner session exists.
         """
         require_role(authorization, "owner")
-        async with session_state_lock:
+        async with session_state_lock.shared():
             await trusted_owner_session()
         if ".." in path or path.startswith("/") or not re.fullmatch(r"[A-Za-z0-9._/-]*", path):
             raise HTTPException(404, "Not found")
@@ -652,7 +782,7 @@ def create_app(
         if not supplied or not secrets.compare_digest(supplied, owner_token):
             await websocket.close(code=1008)
             return
-        async with session_state_lock:
+        async with session_state_lock.shared():
             try:
                 session_id = await trusted_owner_session()
             except HTTPException:
@@ -665,8 +795,8 @@ def create_app(
             # cached owner_session_id would miss the owner's session ending
             # for any reason other than an explicit close through this broker.
             #
-            # Deliberately NOT under session_state_lock: operate() holds that
-            # lock for the whole of an employee's controller call, so every
+            # Deliberately NOT under session_state_lock: operate() holds (the
+            # shared side of) that lock for a whole controller call, so every
             # frame of the owner's live view used to wait behind it -- one slow
             # or hung browser call froze the view and dropped the noVNC socket
             # (2026-09-25 04:01:51). Reading owner_session_id needs no lock.
@@ -811,6 +941,35 @@ def create_app(
         session_id = safe_session_id(session_id)
         return await upstream("POST", f"/sessions/{session_id}/actions/type-focused", {"text": payload.text})
 
+    async def owner_trusted_session(session_id: str) -> str:
+        session_id = safe_session_id(session_id)
+        # Shared side: the owner's tab strip polls this every few seconds and
+        # must never queue behind (or hold up) the employees' calls.
+        async with session_state_lock.shared():
+            trusted = await trusted_owner_session()
+        if session_id != trusted:
+            raise HTTPException(403, "Not the verified owner browser session")
+        return session_id
+
+    @app.get("/owner/sessions/{session_id}/tabs")
+    async def owner_list_tabs(session_id: str, authorization: str | None = Header(default=None)):
+        """Every tab of the owner's session: who opened it and which one is shown."""
+        require_role(authorization, "owner")
+        session_id = await owner_trusted_session(session_id)
+        tabs = await upstream("GET", f"/sessions/{session_id}/tabs")
+        if not isinstance(tabs, list):
+            raise HTTPException(502, "Invalid browser controller response")
+        return tabs
+
+    @app.post("/owner/sessions/{session_id}/tabs/activate")
+    async def owner_activate_tab(
+        session_id: str, payload: OwnerActivateTabRequest, authorization: str | None = Header(default=None),
+    ):
+        """Show that tab in the owner's live view -- owner-initiated only."""
+        require_role(authorization, "owner")
+        session_id = await owner_trusted_session(session_id)
+        return await upstream("POST", f"/sessions/{session_id}/tabs/activate", {"index": payload.index})
+
     @app.delete("/owner/sessions/{session_id}")
     async def owner_close_session(session_id: str, authorization: str | None = Header(default=None)):
         nonlocal owner_session_id
@@ -824,45 +983,63 @@ def create_app(
         return result
 
     async def operate(grant: Grant, operation: str, arguments: dict[str, Any]) -> Any:
-        # Keep the state lock through controller I/O.  Owner close/revoke then
-        # waits for this action and no later action can start first.
-        async with session_state_lock:
+        # Agents no longer queue behind each other: every operation holds the
+        # SHARED side of session_state_lock for its whole controller call, so
+        # several employees' calls (each in its own tab) run at once. Every
+        # state change -- owner close/open, revoke, deny, complete,
+        # request_access, session_status -- takes the EXCLUSIVE side, so it
+        # still waits for every in-flight action and no later action can start
+        # first (writer preference): the guarantee "owner close/revoke waits
+        # for this action and nothing starts after it" is unchanged.
+        # grant.lock guards only this grant's status check, not the I/O.
+        async with session_state_lock.shared():
             async with grant.lock:
                 await ensure_live(grant)
-                if operation == "observe":
-                    if arguments:
-                        raise HTTPException(400, "Observation options are not exposed")
-                    return await upstream("GET", f"/sessions/{grant.session_id}/observe")
-                if operation == "list_tabs":
-                    if arguments:
-                        raise HTTPException(400, "list_tabs takes no arguments")
-                    return await upstream("GET", f"/sessions/{grant.session_id}/tabs")
-                if operation == "activate_tab":
-                    index = arguments.get("index")
-                    if set(arguments) != {"index"} or not isinstance(index, int) or isinstance(index, bool):
-                        raise HTTPException(400, "activate_tab requires an integer 'index'")
-                    return await upstream("POST", f"/sessions/{grant.session_id}/tabs/activate", arguments)
-                if operation == "open_tab":
-                    if set(arguments) - {"url", "activate"}:
-                        raise HTTPException(400, "open_tab takes only 'url' and 'activate'")
-                    url = arguments.get("url")
-                    activate = arguments.get("activate", True)
-                    if url is not None and not isinstance(url, str):
-                        raise HTTPException(400, "open_tab 'url' must be a string")
-                    if not isinstance(activate, bool):
-                        raise HTTPException(400, "open_tab 'activate' must be a boolean")
-                    return await upstream(
-                        "POST", f"/sessions/{grant.session_id}/tabs/open",
-                        {"url": url, "activate": activate},
-                    )
-                if operation in FILE_OPERATIONS:
-                    raise HTTPException(500, "File operations are not session-locked")
-                if operation in ALLOWED_ACTIONS:
-                    if "approval_id" in arguments:
-                        raise HTTPException(400, "Built-in sensitive approvals are owner-only")
-                    path = _ACTION_PATH_OVERRIDES.get(operation, operation)
-                    return await upstream("POST", f"/sessions/{grant.session_id}/actions/{path}", arguments)
-                raise HTTPException(404, "Tool unavailable")
+            method, path, body, headers = operation_request(grant.session_id, operation, dict(arguments))
+            return await upstream(method, path, body, headers=headers or None)
+
+    def operation_request(
+        session_id: str, operation: str, arguments: dict[str, Any],
+    ) -> tuple[str, str, dict[str, Any] | None, dict[str, str]]:
+        if operation == "observe":
+            headers = _pop_tab_id(arguments)
+            if arguments:
+                raise HTTPException(400, "Observation options are not exposed")
+            return "GET", f"/sessions/{session_id}/observe", None, headers
+        if operation == "list_tabs":
+            if arguments:
+                raise HTTPException(400, "list_tabs takes no arguments")
+            return "GET", f"/sessions/{session_id}/tabs", None, {}
+        if operation == "activate_tab":
+            index = arguments.get("index")
+            if set(arguments) != {"index"} or not isinstance(index, int) or isinstance(index, bool):
+                raise HTTPException(400, "activate_tab requires an integer 'index'")
+            return "POST", f"/sessions/{session_id}/tabs/activate", arguments, {}
+        if operation == "open_tab":
+            if set(arguments) - {"url", "activate", "owner"}:
+                raise HTTPException(400, "open_tab takes only 'url', 'activate' and 'owner'")
+            url = arguments.get("url")
+            activate = arguments.get("activate", True)
+            owner = arguments.get("owner")
+            if url is not None and not isinstance(url, str):
+                raise HTTPException(400, "open_tab 'url' must be a string")
+            if not isinstance(activate, bool):
+                raise HTTPException(400, "open_tab 'activate' must be a boolean")
+            body: dict[str, Any] = {"url": url, "activate": activate}
+            if owner is not None:
+                if not isinstance(owner, str) or not TAB_OWNER_PATTERN.fullmatch(owner):
+                    raise HTTPException(400, "open_tab 'owner' must be a short lowercase label")
+                body["owner"] = owner
+            return "POST", f"/sessions/{session_id}/tabs/open", body, {}
+        if operation in FILE_OPERATIONS:
+            raise HTTPException(500, "File operations are not session-locked")
+        if operation in ALLOWED_ACTIONS:
+            headers = _pop_tab_id(arguments)
+            if "approval_id" in arguments:
+                raise HTTPException(400, "Built-in sensitive approvals are owner-only")
+            path = _ACTION_PATH_OVERRIDES.get(operation, operation)
+            return "POST", f"/sessions/{session_id}/actions/{path}", arguments, headers
+        raise HTTPException(404, "Tool unavailable")
 
     _DOWNLOAD_KEYS = {"mode", "element_id", "selector", "url", "media_kind", "timeout_seconds", "pace"}
     _ATTACH_KEYS = {"transfer_id", "element_id", "selector"}
@@ -887,12 +1064,17 @@ def create_app(
         # transfer itself runs outside it: a download may wait minutes for a
         # site to render a video, and nothing else -- the owner closing his
         # browser included -- may queue behind that.
-        async with session_state_lock:
+        # The SHARED side, like operate(): a check must not queue behind (or
+        # hold up) the other employees' in-flight calls.
+        async with session_state_lock.shared():
             async with grant.lock:
                 await ensure_live(grant)
 
     async def file_operation(grant: Grant, operation: str, arguments: dict[str, Any]) -> Any:
         await live_file_grant(grant)
+        arguments = dict(arguments)
+        # Optional tab_id: the download/attach acts on that employee's tab.
+        tab_headers = _pop_tab_id(arguments)
         if operation == "download_file":
             if set(arguments) - _DOWNLOAD_KEYS or not isinstance(arguments.get("mode"), str):
                 raise HTTPException(400, "download_file takes mode and element_id/selector/url/media_kind/timeout_seconds/pace")
@@ -903,6 +1085,7 @@ def create_app(
                 try:
                     response = await client.post(
                         f"/sessions/{grant.session_id}/files/download", json=arguments,
+                        headers=tab_headers or None,
                         timeout=httpx.Timeout(float(wait) + 40, connect=10),
                     )
                 except httpx.HTTPError:
@@ -921,7 +1104,10 @@ def create_app(
             transfer_id = owned_transfer(grant, arguments.get("transfer_id"))
             body = {key: arguments[key] for key in ("element_id", "selector") if key in arguments}
             async with grant.lock:
-                return await upstream("POST", f"/sessions/{grant.session_id}/files/{transfer_id}/attach", body)
+                return await upstream(
+                    "POST", f"/sessions/{grant.session_id}/files/{transfer_id}/attach", body,
+                    headers=tab_headers or None,
+                )
         raise HTTPException(404, "Tool unavailable")
 
     async def revoke_locked(

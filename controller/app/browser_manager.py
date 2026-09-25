@@ -34,6 +34,7 @@ from .browser.services import (
     BrowserWitnessService,
 )
 from .browser.services.connection_health import driver_exit_error, playwright_driver_alive
+from .browser.session_lock import SessionLock
 from .config import Settings
 from .downloads import DownloadCaptureService
 from .file_transfer import FileTransferService
@@ -110,7 +111,9 @@ class BrowserSession:
     shared_takeover_surface: bool = True
     shared_browser_process: bool = True
     max_live_sessions_per_browser_node: int = 1
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Exclusive by default (``async with session.lock``), plus a shared side
+    # for tab-scoped calls -- see app/browser/session_lock.py.
+    lock: SessionLock = field(default_factory=SessionLock)
     console_messages: list[dict[str, Any]] = field(default_factory=list)
     page_errors: list[str] = field(default_factory=list)
     request_failures: list[dict[str, Any]] = field(default_factory=list)
@@ -142,6 +145,13 @@ class BrowserSession:
     dialog_log: list[dict[str, Any]] = field(default_factory=list)
     popup_openers: "weakref.WeakKeyDictionary[Any, Any]" = field(default_factory=weakref.WeakKeyDictionary)
     pending_popup: Any = None
+    # Tabs as units of work (see app/browser/tab_view.py): a stable id per
+    # page, who opened it (an employee label, None = the owner / unowned),
+    # a lock per page for tab-scoped calls, and a mouse position per page.
+    tab_ids: "weakref.WeakKeyDictionary[Any, str]" = field(default_factory=weakref.WeakKeyDictionary)
+    tab_owners: dict[str, str] = field(default_factory=dict)
+    page_locks: "weakref.WeakKeyDictionary[Any, asyncio.Lock]" = field(default_factory=weakref.WeakKeyDictionary)
+    page_mouse_positions: "weakref.WeakKeyDictionary[Any, Any]" = field(default_factory=weakref.WeakKeyDictionary)
     # "Remember me": which profile this session's login state is silently kept
     # in sync with (see Settings.auto_persist_*), and the background task doing
     # the periodic re-save. Seeded from auth_profile_name at session creation
@@ -847,8 +857,10 @@ class BrowserManager:
     async def list_tabs(self, session_id: str) -> list[dict[str, Any]]:
         return await self.tabs.list(session_id)
 
-    async def open_tab(self, session_id: str, url: str | None, activate: bool) -> dict[str, Any]:
-        return await self.tabs.open(session_id, url, activate)
+    async def open_tab(
+        self, session_id: str, url: str | None, activate: bool, *, owner: str | None = None
+    ) -> dict[str, Any]:
+        return await self.tabs.open(session_id, url, activate, owner=owner)
 
     async def activate_tab(self, session_id: str, index: int) -> dict[str, Any]:
         return await self.tabs.activate(session_id, index)

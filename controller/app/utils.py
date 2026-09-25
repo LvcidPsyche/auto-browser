@@ -46,7 +46,11 @@ def spawn_background_task(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
     Use instead of a bare ``asyncio.ensure_future``/``create_task`` whenever the
     result is not awaited, so the task cannot be collected mid-execution.
     """
-    task = asyncio.ensure_future(coro)
+    # A tab-scoped request's scope (X-Tab-Id) must not leak into work that
+    # outlives it -- see app/browser/tab_scope.py.
+    from .browser.tab_scope import detached_context
+
+    task = asyncio.get_running_loop().create_task(coro, context=detached_context())
     _BACKGROUND_TASKS.add(task)
     task.add_done_callback(_BACKGROUND_TASKS.discard)
     task.add_done_callback(_log_background_task_exception)

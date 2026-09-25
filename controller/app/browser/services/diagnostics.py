@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from ...downloads import DownloadCaptureService
 from ...pii_scrub import PiiScrubber
 from ...utils import UTC, spawn_background_task
+from ..tab_view import unwrap_session
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,9 @@ class BrowserDiagnosticsService:
     def attach_page_listeners(self, page: "Page", session: "BrowserSession") -> None:
         if not hasattr(page, "on"):
             return
+        # Listeners outlive the request: bind them to the real session, never
+        # to a per-request tab view.
+        session = unwrap_session(session)
         if page in session.attached_pages:
             return
         session.attached_pages.add(page)

@@ -15,6 +15,7 @@ from .maintenance import MaintenanceService
 from .mcp_transport import McpHttpTransport
 from .metrics import MetricsRecorder
 from .middleware.hosts import ControllerHostMiddleware
+from .middleware.tab_scope import TabScopeMiddleware
 from .orchestrator import BrowserOrchestrator
 from .provider_registry import ProviderRegistry
 from .proxy_personas import ProxyPersonaStore
@@ -135,6 +136,9 @@ def create_controller_app(
         lifespan=lifespan,
         summary="Visual Auto Browser control plane for LLM workflows.",
     )
+    # Added first = innermost: the X-Tab-Id scope is applied after the host,
+    # auth and rate-limit layers have accepted the request.
+    application.add_middleware(TabScopeMiddleware)
     install_controller_host_middleware(application, services.settings.controller_allowed_host_patterns)
 
     application.state.browser_manager = services.manager

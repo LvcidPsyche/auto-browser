@@ -16,6 +16,7 @@ from .app_factory import (
     install_controller_host_middleware,
 )
 from .browser.services.connection_health import is_driver_dead_error
+from .browser.tab_scope import detached_context
 from .compliance import apply_compliance_template, write_compliance_manifest
 from .config import get_settings
 from .middleware import install_controller_http_middleware
@@ -143,7 +144,7 @@ async def handle_unexpected_error(_: Request, exc: Exception) -> Response:
     recovery at once so the next call finds a re-attached session.
     """
     if is_driver_dead_error(exc):
-        task = asyncio.create_task(manager.session_lifecycle.reap_dead_sessions())
+        task = asyncio.create_task(manager.session_lifecycle.reap_dead_sessions(), context=detached_context())
         _reap_background_tasks.add(task)
         task.add_done_callback(_reap_background_tasks.discard)
         return JSONResponse(

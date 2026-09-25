@@ -43,6 +43,7 @@ class Upstreams:
         self.saved_profiles: set[str] = set()
         self.novnc_calls: list[str] = []
         self.typed_text: list[str] = []
+        self.activated_tabs: list[int] = []
 
     def identity(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else {}
@@ -116,6 +117,21 @@ class Upstreams:
             self.profile_calls.append(("delete", name))
             self.saved_profiles.discard(name)
             return httpx.Response(200, json={"profile_name": name, "deleted": True})
+        if request.method == "GET" and request.url.path == "/owner/sessions/browser-1/tabs":
+            if not self.active:
+                return httpx.Response(403, json={"detail": "Owner must open a verified browser session first"})
+            return httpx.Response(200, json=[
+                {"index": 0, "active": True, "url": "https://www.google.com/search?q=x", "title": "Google",
+                 "tab_id": "t-aaaaaaaaaaaa", "owner": None},
+                {"index": 1, "active": False, "url": "https://business.facebook.com/x", "title": "<b>Meta</b>",
+                 "tab_id": "t-bbbbbbbbbbbb", "owner": "emad"},
+                {"index": 2, "active": False, "url": "about:blank", "title": "",
+                 "tab_id": "t-cccccccccccc", "owner": "helper"},
+                {"index": "bad"},
+            ])
+        if request.method == "POST" and request.url.path == "/owner/sessions/browser-1/tabs/activate":
+            self.activated_tabs.append(body["index"])
+            return httpx.Response(200, json={"index": body["index"]})
         if request.method in ("GET", "HEAD") and request.url.path.startswith("/owner/vnc/"):
             self.novnc_calls.append(request.url.path.removeprefix("/owner/vnc"))
             if not self.active:
@@ -980,3 +996,49 @@ def test_auth_profiles_are_denied_to_a_second_identity(tmp_path, clock, upstream
         assert client.post(
             "/api/browser/open", headers=mutate(csrf2), json={"totp_code": "555555"},
         ).status_code == 200
+
+
+def test_tab_strip_lists_who_works_where_and_shows_a_tab_on_the_owners_tap(tmp_path, clock, upstreams):
+    app = app_at(tmp_path, clock, upstreams)
+    with TestClient(app, base_url=ORIGIN) as client:
+        assert client.get("/api/browser/tabs").status_code == 401
+        csrf = login(client)
+        closed = client.get("/api/browser/tabs")
+        assert closed.status_code == 403
+        page = client.get("/browser")
+        assert "tab-strip" not in page.text, "no strip while the browser is closed"
+
+        assert client.post("/api/browser/open", headers=mutate(csrf), json={"totp_code": "333333"}).status_code == 200
+        page = client.get("/browser")
+        assert "id=tab-strip" in page.text and "<script src=/browser/tabs.js></script>" in page.text
+        assert "script-src 'self'" in page.headers["content-security-policy"]
+        script = client.get("/browser/tabs.js")
+        assert script.status_code == 200 and script.headers["content-type"].startswith("text/javascript")
+        assert "innerHTML" not in script.text
+
+        tabs = client.get("/api/browser/tabs")
+        assert tabs.status_code == 200
+        assert tabs.json() == {"tabs": [
+            {"index": 0, "active": True, "owner": None, "owner_label": "أنت", "title": "Google", "host": "www.google.com"},
+            {"index": 1, "active": False, "owner": "emad", "owner_label": "عماد", "title": "<b>Meta</b>",
+             "host": "business.facebook.com"},
+            {"index": 2, "active": False, "owner": "helper", "owner_label": "helper", "title": "", "host": ""},
+        ]}
+
+        # Showing a tab is a same-origin, CSRF-checked mutation.
+        assert client.post("/api/browser/tabs/activate", headers={"Origin": ORIGIN}, json={"index": 1}).status_code == 403
+        assert client.post("/api/browser/tabs/activate", headers={"Origin": "https://evil.example", "X-CSRF-Token": csrf},
+                           json={"index": 1}).status_code == 403
+        assert client.post("/api/browser/tabs/activate", headers=mutate(csrf), json={"index": -1}).status_code == 422
+        assert client.post("/api/browser/tabs/activate", headers=mutate(csrf), json={"index": True}).status_code == 422
+        assert upstreams.activated_tabs == []
+        shown = client.post("/api/browser/tabs/activate", headers=mutate(csrf), json={"index": 1})
+        assert shown.status_code == 200 and shown.json() == {"status": "shown", "index": 1}
+        assert upstreams.activated_tabs == [1]
+
+        # Another identity never sees or switches this owner's tabs.
+        client.cookies.clear()
+        second_csrf = login(client, "second@example.com", "222222")
+        assert client.get("/api/browser/tabs").status_code == 403
+        assert client.post("/api/browser/tabs/activate", headers=mutate(second_csrf), json={"index": 0}).status_code == 403
+        assert upstreams.activated_tabs == [1]
