@@ -227,7 +227,7 @@ class BrowserActionPipeline:
     ) -> dict[str, Any]:
         manager = context.manager
         session = context.session
-        after = await manager._observation_payload(session, limit=20, screenshot_label=f"after-{context.action_name}")
+        after = await self._after_observation(context)
         session.last_action = context.action_name
         verification = manager._action_verification(context.action_name, context.target, witness_state.before, after)
         action_class = manager._action_class(context.action_name)
@@ -277,6 +277,34 @@ class BrowserActionPipeline:
             "target": context.target,
             "verification": verification,
         }
+
+    @staticmethod
+    async def _after_observation(context: ActionRunContext) -> dict[str, Any]:
+        """Observe the page after an action that has already happened.
+
+        A page that navigates late (a click whose handler redirects after the
+        settle window) destroys the execution context mid-observation. That
+        PlaywrightError escaped as a failed action, with no audit record or
+        witness receipt, and callers retried an action that had run: a second
+        submit. Retry once after settling, then report the action with a
+        minimal observation rather than as a failure.
+        """
+        manager = context.manager
+        session = context.session
+        label = f"after-{context.action_name}"
+        try:
+            return await manager._observation_payload(session, limit=20, screenshot_label=label)
+        except PlaywrightError as exc:
+            logger.info("post-action observation failed for session %s, retrying: %s", session.id, exc)
+        try:
+            await manager._settle(session.page)
+            return await manager._observation_payload(session, limit=20, screenshot_label=label)
+        except PlaywrightError as exc:
+            logger.warning("post-action observation failed for session %s: %s", session.id, exc)
+            return {
+                "url": session.page.url,
+                "observation_error": f"Page changed while it was being observed; observe again. ({exc})"[:300],
+            }
 
     def _approval(
         self,

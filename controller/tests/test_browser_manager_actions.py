@@ -321,6 +321,37 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed_error.exception.code, "browser_action_failed")
         self.assertGreaterEqual(self.manager.audit.append.await_count, 3)
 
+    async def test_action_that_ran_is_not_reported_failed_when_the_page_navigates_mid_observation(self) -> None:
+        before = {"url": "https://example.com", "title": "Before"}
+        allowed = SimpleNamespace(should_block=False, block_reason=None, require_approval=False)
+        self.manager.witness_policy.evaluate_action = Mock(return_value=allowed)
+        self.manager._light_snapshot = AsyncMock(return_value=before)
+        self.manager._settle = AsyncMock()  # type: ignore[method-assign]
+        self.manager._ensure_witness_remote_ready = AsyncMock()  # type: ignore[method-assign]
+        self.manager._check_bot_challenge = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        destroyed = PlaywrightError("Execution context was destroyed, most likely because of a navigation")
+        clicks = []
+
+        async def click() -> None:
+            clicks.append(1)
+            self.session.page.url = "https://example.com/next"
+
+        for observations, expect_error in (
+            ([destroyed, {**before, "url": "https://example.com/next", "title": "Next"}], False),
+            ([destroyed, destroyed], True),
+        ):
+            with self.subTest(expect_error=expect_error):
+                self.manager._observation_payload = AsyncMock(side_effect=observations)  # type: ignore[method-assign]
+
+                result = await BrowserManager._run_action(
+                    self.manager, self.session, "click", {"selector": "#go"}, click
+                )
+
+                self.assertEqual(result["action"], "click")
+                self.assertEqual(result["after"]["url"], "https://example.com/next")
+                self.assertEqual("observation_error" in result["after"], expect_error)
+        self.assertEqual(len(clicks), 2)
+
     async def test_remote_access_metadata_and_isolated_takeover_resolution(self) -> None:
         info_path = Path(self.manager.settings.remote_access_info_path)
         info_path.parent.mkdir(parents=True, exist_ok=True)
