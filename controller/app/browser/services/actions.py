@@ -658,9 +658,15 @@ class BrowserActionService:
             return decision.risk_category
         return None
 
-    @staticmethod
-    def governed_approval_kind_for_decision(decision: BrowserActionDecision) -> ApprovalKind | None:
-        if decision.risk_category == "read":
+    @classmethod
+    def governed_approval_kind_for_decision(cls, decision: BrowserActionDecision) -> ApprovalKind | None:
+        # risk_category is chosen by whoever wrote the decision, often a model
+        # reading the page it is acting on. Only an action that cannot change
+        # anything may skip governed approval by calling itself "read"; a
+        # click, type, press, select or upload labelled "read" is still a write.
+        if decision.risk_category == "read" and (
+            decision.action == "done" or cls.action_class(decision.action) == "read"
+        ):
             return None
         if decision.action == "upload" or decision.risk_category == "upload":
             return "upload"
