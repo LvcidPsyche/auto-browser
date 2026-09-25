@@ -57,6 +57,16 @@ class SessionNotFoundError(KeyError):
                 f"Session {session_id} is {status}: its browser is gone (for example after a controller "
                 "restart) and it cannot be resumed. Create a new session."
             )
+        elif status is not None:
+            # Recorded as active but not running here: with a shared session
+            # store it belongs to another controller instance, otherwise it
+            # stopped without being recorded as closed.
+            self.code = "session_not_live"
+            message = (
+                f"Session {session_id} is recorded as {status} but is not running on this controller "
+                "(it may belong to another controller instance). Create a new session, or list sessions "
+                "to find a live one."
+            )
         else:
             self.code = "unknown_session"
             message = f"No session with id {session_id}. List sessions to find a live one, or create a new session."

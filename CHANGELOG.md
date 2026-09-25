@@ -142,9 +142,11 @@ configuration now answers `400` until you list the name in
 - **An unusable session id was its own error message.** A lookup raised
   `KeyError(session_id)`, which MCP surfaced as `{"error": "ec7fba8336ac"}`.
   The error now says why: the session is closed, interrupted (its browser is
-  gone), or unknown. It carries a code (`session_closed`,
-  `session_interrupted`, `unknown_session`) over MCP and REST. It is still a
-  `KeyError`, so existing 404 handling is unchanged.
+  gone), recorded as active but not running on this controller (with a shared
+  session store, another instance may own it), or unknown. It carries a code
+  (`session_closed`, `session_interrupted`, `session_not_live`,
+  `unknown_session`) over MCP and REST. It is still a `KeyError`, so existing
+  404 handling is unchanged.
 
 - **`browser.eval_js` could only fail.** It required
   `workflow_profile=governed`, a parameter its schema never advertised. Every

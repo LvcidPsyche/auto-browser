@@ -61,10 +61,13 @@ class SessionLookupTests(unittest.IsolatedAsyncioTestCase):
     async def test_each_reason_gets_its_own_code_and_message(self) -> None:
         await self.manager.session_store.upsert(_record("sess-closed", "closed"))
         await self.manager.session_store.upsert(_record("sess-lost", "interrupted"))
+        await self.manager.session_store.upsert(_record("sess-elsewhere", "active"))
 
         cases = {
             "sess-closed": ("session_closed", "is closed"),
             "sess-lost": ("session_interrupted", "cannot be resumed"),
+            # e.g. owned by another controller sharing a Redis session store
+            "sess-elsewhere": ("session_not_live", "not running on this controller"),
             "sess-never": ("unknown_session", "No session with id sess-never"),
         }
         for session_id, (code, phrase) in cases.items():
