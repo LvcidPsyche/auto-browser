@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from .harness.contracts import TaskContract
 from .models import (
@@ -28,6 +29,7 @@ from .models import (
     validate_coordinate_pair,
     validate_url,
 )
+from .result_shaping import ResultDetail
 
 __all__ = [
     "AgentJobIdInput",
@@ -45,6 +47,7 @@ __all__ = [
     "EmptyInput",
     "EvalJsInput",
     "ExecuteActionInput",
+    "ExecuteApprovalInput",
     "ExportScriptInput",
     "FindElementsInput",
     "ForkCdpInput",
@@ -69,6 +72,7 @@ __all__ = [
     "ProxyPersonaNameInput",
     "QueueAgentRunInput",
     "QueueAgentStepInput",
+    "ReadDownloadInput",
     "ReadinessCheckInput",
     "ResumeAgentJobInput",
     "SaveMemoryProfileInput",
@@ -146,10 +150,8 @@ class SessionIdInput(StrictInputModel):
         min_length=1,
         max_length=120,
         description=(
-            "ID of the target browser session, as returned by browser.create_session "
-            "or listed by browser.list_sessions. May be omitted: with exactly one "
-            "live session that session is used, and observe/act tools create one on "
-            "demand when none are live."
+            "Target session id, from browser.create_session or browser.list_sessions. Optional "
+            "when exactly one session is live; observe and act tools create one when none is."
         ),
     )
 
@@ -158,10 +160,22 @@ class VerifyWitnessInput(SessionIdInput):
     """Verify the Witness receipt hash chain for one session scope."""
 
 
+def _result_detail_field() -> Any:
+    return Field(
+        default="compact",
+        description=(
+            "'compact' (default) leaves out what choosing the next step does not need: the full "
+            "session record (see browser.get_session), remote-access diagnostics and, for actions, "
+            "the pre-action snapshot. 'full' returns the complete payload."
+        ),
+    )
+
+
 class ObserveInput(SessionIdInput):
     # None → the deployment default (PERCEPTION_PRESET_DEFAULT, normally "normal")
     preset: PerceptionPreset | None = None
     limit: int = Field(default=40, ge=1, le=200)
+    detail: ResultDetail = _result_detail_field()
 
 
 class SessionTailInput(SessionIdInput):
@@ -187,6 +201,7 @@ class ExecuteActionInput(SessionIdInput):
             "URL for navigate or an element selector/index for click and type."
         ),
     )
+    detail: ResultDetail = _result_detail_field()
 
 
 class SaveAuthStateInput(SessionIdInput):
@@ -211,6 +226,29 @@ class TakeoverInput(SessionIdInput):
 
 class ListDownloadsInput(SessionIdInput):
     pass
+
+
+def _offset_field() -> Any:
+    return Field(
+        default=0,
+        ge=0,
+        description="Character to start from. A result with truncated=true gives the next_offset to continue from.",
+    )
+
+
+def _max_chars_field() -> Any:
+    return Field(default=20_000, ge=1_000, le=1_000_000, description="Most characters to return.")
+
+
+class ReadDownloadInput(SessionIdInput):
+    download_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description="id from browser.list_downloads. Omit to read the most recent completed download.",
+    )
+    offset: int = _offset_field()
+    max_chars: int = _max_chars_field()
 
 
 class AuthProfileNameInput(StrictInputModel):
@@ -250,6 +288,10 @@ class ApprovalIdInput(StrictInputModel):
 
 class ApprovalDecisionInput(ApprovalIdInput):
     comment: str | None = Field(default=None, max_length=2000)
+
+
+class ExecuteApprovalInput(ApprovalIdInput):
+    detail: ResultDetail = _result_detail_field()
 
 
 class ListApprovalsInput(StrictInputModel):
@@ -316,6 +358,15 @@ class ForkSessionInput(SessionIdInput):
 
 class EvalJsInput(SessionIdInput):
     expression: str = Field(min_length=1, max_length=50000)
+    approval_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=120,
+        description=(
+            "ID of the approval granted for exactly this expression. The first call returns "
+            "status approval_required with an approval_id; call again with it once an operator approves."
+        ),
+    )
 
 
 class WaitForSelectorInput(SessionIdInput):
@@ -538,13 +589,14 @@ class TriggerCronJobInput(CronJobIdInput):
 
 
 class GetPageHtmlInput(SessionIdInput):
-    # Deprecated and ignored. page.content() always returns the full serialized
-    # DOM, so this never had anything to switch on — the handler has never read
-    # it. Still accepted so existing callers do not start getting 422s in a
-    # patch release; remove in 1.6.0.
-    full_page: bool = Field(
+    # Deprecated and ignored: page.content() always returns the whole document,
+    # so this never switched anything. Still accepted, so callers that send it
+    # do not start failing validation, but no longer advertised in the tool
+    # schema that every request carries.
+    full_page: SkipJsonSchema[bool] = False
+    text_only: bool = Field(
         default=False,
-        description="Deprecated and ignored — get_html always returns the full page.",
-        deprecated=True,
+        description="Return the page's visible text instead of HTML: line breaks kept, table cells tab-separated.",
     )
-    text_only: bool = False
+    offset: int = _offset_field()
+    max_chars: int = _max_chars_field()

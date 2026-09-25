@@ -1,26 +1,33 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from pydantic import BaseModel, ValidationError
 
-from ..action_errors import BrowserActionError
+from ..action_errors import BrowserActionError, SessionNotFoundError
 from ..approvals import ApprovalRequiredError
+from ..browser_scripts import PAGE_TEXT_SCRIPT
 from ..models import (
     BrowserActionDecision,
+    McpImageContent,
     McpToolCallContent,
     McpToolCallRequest,
     McpToolCallResponse,
 )
 from ..readiness import run_readiness_checks
+from ..result_shaping import inline_screenshot_path, shape_mcp_result
 from ..tool_inputs import (
     AgentJobIdInput,
     ApprovalDecisionInput,
-    ApprovalIdInput,
     AuthProfileNameInput,
     CdpAttachInput,
     CreateCronJobInput,
@@ -32,6 +39,7 @@ from ..tool_inputs import (
     EmptyInput,
     EvalJsInput,
     ExecuteActionInput,
+    ExecuteApprovalInput,
     ExportScriptInput,
     FindElementsInput,
     ForkSessionInput,
@@ -56,6 +64,7 @@ from ..tool_inputs import (
     ProxyPersonaNameInput,
     QueueAgentRunInput,
     QueueAgentStepInput,
+    ReadDownloadInput,
     ReadinessCheckInput,
     ResumeAgentJobInput,
     SaveAuthProfileInput,
@@ -99,6 +108,49 @@ IMPLICIT_SESSION_CREATE_TOOLS = frozenset(
         "browser.wait_for_selector",
     }
 )
+
+
+# Characters of a governed tool call's arguments shown to the approving operator.
+_APPROVAL_PREVIEW_CHARS = 600
+# Argument names whose values are credentials (cookie and storage values, and
+# the usual suspects) — never copied into an approval's human-readable reason.
+_PREVIEW_REDACTED_KEYS = frozenset({"value", "cookies", "password", "token", "secret"})
+
+
+def _redact_for_preview(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: "<redacted>" if key in _PREVIEW_REDACTED_KEYS else _redact_for_preview(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_for_preview(item) for item in value]
+    return value
+
+
+# A viewport PNG is typically well under 1 MB. Anything past this is not worth
+# putting in a model's context; the text result still carries its URL.
+_INLINE_IMAGE_MAX_BYTES = 4 * 1024 * 1024
+_INLINE_IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+
+
+def _page_of(content: str, *, offset: int, max_chars: int) -> dict[str, Any]:
+    """One page of a long text result, and where the next one starts."""
+    end = offset + max_chars
+    truncated = end < len(content)
+    return {
+        "content": content[offset:end],
+        "offset": offset,
+        "total_chars": len(content),
+        "truncated": truncated,
+        "next_offset": end if truncated else None,
+    }
+
+
+def _read_inline_image(path: Path) -> bytes | None:
+    if path.stat().st_size > _INLINE_IMAGE_MAX_BYTES:
+        return None
+    return path.read_bytes()
 
 
 class McpToolGateway:
@@ -171,14 +223,24 @@ class McpToolGateway:
     async def _call_tool(self, payload: McpToolCallRequest) -> McpToolCallResponse:
         spec = self._registry.get(payload.name)
         if spec is None:
+            if "full" in self._registry.profiles_offering(payload.name):
+                return self._error_response(
+                    f"{payload.name} is in the full MCP tool profile, and this controller serves the "
+                    f"{self.tool_profile} profile. Set MCP_TOOL_PROFILE=full on the controller to use it."
+                )
             return self._error_response(f"Unknown tool: {payload.name}")
 
         try:
             raw_arguments = dict(payload.arguments or {})
             policy_profile = self._pop_policy_profile(spec, raw_arguments)
             policy_approval_id = self._pop_policy_approval_id(spec, raw_arguments)
-            if spec.name == "browser.eval_js" and policy_profile != "governed":
-                return self._error_response("browser.eval_js requires workflow_profile=governed")
+            if spec.name == "browser.eval_js":
+                # Arbitrary JavaScript in an authenticated page is never ungoverned.
+                # This used to be an error unless the caller passed
+                # workflow_profile=governed — a parameter the tool's schema never
+                # advertised — so the tool in the default set could only fail.
+                # The server now routes every call through approval itself.
+                policy_profile = "governed"
             if (
                 spec.name == "harness.start_convergence"
                 and raw_arguments.get("session_id")
@@ -203,11 +265,16 @@ class McpToolGateway:
             result = await spec.handler(arguments)
             if approval is not None:
                 await self.manager.approvals.mark_executed(approval.id)
-            return McpToolCallResponse(
-                content=[McpToolCallContent(text=json.dumps(result, ensure_ascii=False))],
-                structuredContent=result,
-                isError=False,
-            )
+            result = shape_mcp_result(spec.name, result, detail=getattr(arguments, "detail", "compact"))
+            # The JSON stays the first block: clients (and the LangChain
+            # adapter) read content[0].text as the result.
+            content: list[McpToolCallContent | McpImageContent] = [
+                McpToolCallContent(text=json.dumps(result, ensure_ascii=False))
+            ]
+            image = await self._inline_image(spec.name, result)
+            if image is not None:
+                content.append(image)
+            return McpToolCallResponse(content=content, structuredContent=result, isError=False)
         except ApprovalRequiredError as exc:
             detail = exc.payload
             return McpToolCallResponse(
@@ -230,6 +297,12 @@ class McpToolGateway:
                 for err in exc.errors()
             )
             return self._error_response(f"Invalid arguments for {payload.name}: {details}")
+        except SessionNotFoundError as exc:
+            return McpToolCallResponse(
+                content=[McpToolCallContent(text=exc.message)],
+                structuredContent={"error": exc.message, "code": exc.code, "session_id": exc.session_id},
+                isError=True,
+            )
         except (ValueError, KeyError, RuntimeError) as exc:
             # Handlers raise these with operator-facing messages ("Provide
             # source_selector or source_x/source_y", "Memory profile not found").
@@ -237,9 +310,82 @@ class McpToolGateway:
             # collapsing them into the opaque catch-all below.
             message = str(exc.args[0]) if exc.args else exc.__class__.__name__
             return self._error_response(message)
+        except FileNotFoundError as exc:
+            # Lookups that miss raise FileNotFoundError with a message naming
+            # what the caller asked for: an auth profile, an upload file. A
+            # mistyped profile name reached agents as "Tool execution failed".
+            # One raised by the OS carries an errno and a server path, so it
+            # stays opaque, as with PermissionError below.
+            if exc.errno is not None:
+                logger.exception("tool %s failed", payload.name)
+                return self._error_response("Tool execution failed")
+            message = str(exc.args[0]) if exc.args else "Not found"
+            return McpToolCallResponse(
+                content=[McpToolCallContent(text=message)],
+                structuredContent={"error": message, "code": "not_found"},
+                isError=True,
+            )
+        except PermissionError as exc:
+            # Policy refusals raise PermissionError with a reason for the caller:
+            # a host outside ALLOWED_HOSTS, an approval not yet granted or not
+            # matching the action, a path outside its root. They reached agents
+            # as "Tool execution failed", so a blocked navigation and a retry
+            # before the operator approved looked like crashes. An OS-level
+            # PermissionError carries an errno and can name a server path; that
+            # one stays opaque.
+            if exc.errno is not None:
+                logger.exception("tool %s failed", payload.name)
+                return self._error_response("Tool execution failed")
+            message = str(exc.args[0]) if exc.args else "Not permitted"
+            return McpToolCallResponse(
+                content=[McpToolCallContent(text=message)],
+                structuredContent={"error": message, "code": "not_permitted"},
+                isError=True,
+            )
+        except PlaywrightError as exc:
+            # The browser's answer about the caller's own page: a selector that
+            # never appeared, an invalid selector, a script that threw. These
+            # reached agents as "Tool execution failed", so a timeout looked
+            # like a crash and an eval_js error could not be debugged.
+            # Keep the reason; drop Playwright's call log and the stack frames of
+            # its own evaluation wrapper, which say nothing about the page.
+            message = (getattr(exc, "message", None) or str(exc)).split("\nCall log:")[0]
+            message = message.split("\n    at ")[0].strip()
+            code = "timeout" if isinstance(exc, PlaywrightTimeoutError) else "browser_error"
+            return McpToolCallResponse(
+                content=[McpToolCallContent(text=message[:2000])],
+                structuredContent={"error": message[:2000], "code": code},
+                isError=True,
+            )
         except Exception:
             logger.exception("tool %s failed", payload.name)
             return self._error_response("Tool execution failed")
+
+    async def _inline_image(self, tool_name: str, result: Any) -> McpImageContent | None:
+        """The result's screenshot as MCP image content, when the tool's job is to show the page."""
+        path_value = inline_screenshot_path(tool_name, result)
+        if path_value is None:
+            return None
+        artifact_root = getattr(getattr(self.manager, "settings", None), "artifact_root", None)
+        if not artifact_root:
+            return None
+        path = Path(path_value).resolve()
+        # The path comes from the manager, but it is read back and sent to the
+        # client, so it has to be a screenshot artifact and nothing else.
+        if not path.is_relative_to(Path(artifact_root).resolve()):
+            logger.warning("not inlining %s: outside the artifact root", path)
+            return None
+        mime_type = _INLINE_IMAGE_TYPES.get(path.suffix.lower())
+        if mime_type is None:
+            return None
+        try:
+            data = await asyncio.to_thread(_read_inline_image, path)
+        except OSError as exc:
+            logger.debug("could not inline screenshot %s: %s", path, exc)
+            return None
+        if data is None:
+            return None
+        return McpImageContent(data=base64.b64encode(data).decode("ascii"), mimeType=mime_type)
 
     @staticmethod
     def _error_response(message: str) -> McpToolCallResponse:
@@ -258,7 +404,13 @@ class McpToolGateway:
         """
         if not isinstance(arguments, SessionIdInput) or arguments.session_id:
             return arguments
-        sessions = await self.manager.list_sessions()
+        # list_sessions() also returns persisted records of closed and
+        # interrupted sessions. Counting those meant that after one session was
+        # closed, an omitted session_id either targeted the closed session or
+        # was reported "ambiguous" — with MAX_SESSIONS=1, every create → close →
+        # create cycle broke the convenience for good. Only a live session can
+        # be acted on, so only live sessions are candidates.
+        sessions = [item for item in await self.manager.list_sessions() if item.get("live") is True]
         if len(sessions) == 1:
             return arguments.model_copy(update={"session_id": sessions[0]["id"]})
         if not sessions:
@@ -322,17 +474,43 @@ class McpToolGateway:
         if not session_id:
             return None
         decision = getattr(arguments, "action", None)
+        reason = None
         if not isinstance(decision, BrowserActionDecision):
-            decision = BrowserActionDecision(
-                action="request_human_takeover",
-                reason=f"Approve governed MCP tool call {spec.name}",
-                risk_category=spec.governed_kind if spec.governed_kind != "dynamic" else "write",
-            )
+            decision, reason = self._governed_call_decision(spec, arguments)
         return await self.manager.require_governed_approval(
             session_id,
             decision,
             approval_id=approval_id,
+            reason=reason,
         )
+
+    @staticmethod
+    def _governed_call_decision(spec: ToolSpec, arguments: BaseModel) -> tuple[BrowserActionDecision, str]:
+        """Stand-in decision for approving a governed tool call that is not a browser action.
+
+        An approval has to be for *this* call. The stand-in used to carry only the
+        tool name, and approval matching ignores the reason, so one approval
+        authorised any arguments: an operator approving browser.eval_js approved
+        code they never saw, and it covered whatever expression came next. The
+        canonical arguments are now hashed into ``text``, which matching compares,
+        and previewed in the reason the operator reads. Credential-bearing fields
+        are left out of the preview (approvals are stored and sent to webhooks);
+        the hash still covers them.
+        """
+        args = arguments.model_dump(mode="json", exclude={"session_id", "approval_id"}, exclude_none=True)
+        canonical = json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        preview = json.dumps(_redact_for_preview(args), sort_keys=True, ensure_ascii=False)
+        if len(preview) > _APPROVAL_PREVIEW_CHARS:
+            preview = preview[:_APPROVAL_PREVIEW_CHARS] + "…"
+        reason = f"Approve {spec.name} with {preview}"
+        decision = BrowserActionDecision(
+            action="request_human_takeover",
+            reason=reason[:1000],
+            risk_category=spec.governed_kind if spec.governed_kind != "dynamic" else "write",
+            text=f"{spec.name} sha256:{digest}",
+        )
+        return decision, reason
 
     async def _create_session(self, payload: CreateSessionRequest) -> dict[str, Any]:
         return await self.manager.create_session(
@@ -416,6 +594,15 @@ class McpToolGateway:
     async def _list_downloads(self, payload: ListDownloadsInput) -> list[dict[str, Any]]:
         return await self.manager.list_downloads(payload.session_id)
 
+    async def _read_download(self, payload: ReadDownloadInput) -> dict[str, Any]:
+        download = await self.manager.read_download_text(payload.session_id, payload.download_id)
+        text = download.pop("text")
+        return {
+            "session_id": payload.session_id,
+            **download,
+            **_page_of(text, offset=payload.offset, max_chars=payload.max_chars),
+        }
+
     async def _list_tabs(self, payload: ListTabsInput) -> list[dict[str, Any]]:
         return await self.manager.list_tabs(payload.session_id)
 
@@ -453,7 +640,7 @@ class McpToolGateway:
     async def _reject_approval(self, payload: ApprovalDecisionInput) -> dict[str, Any]:
         return await self.manager.reject(payload.approval_id, comment=payload.comment)
 
-    async def _execute_approval(self, payload: ApprovalIdInput) -> dict[str, Any]:
+    async def _execute_approval(self, payload: ExecuteApprovalInput) -> dict[str, Any]:
         return await self.manager.execute_approval(payload.approval_id)
 
     async def _list_agent_jobs(self, payload: ListAgentJobsInput) -> list[dict[str, Any]]:
@@ -572,12 +759,20 @@ class McpToolGateway:
         return {"session_id": payload.session_id, "selector": payload.selector, "state": payload.state}
 
     async def _get_html(self, payload: GetPageHtmlInput) -> dict[str, Any]:
+        # Bounded and paged: a page's serialized DOM is routinely megabytes, and
+        # returned whole it overran the context of the model that asked for it.
         session = await self.manager.get_session(payload.session_id)
         if payload.text_only:
-            text = await session.page.evaluate("() => document.body ? document.body.innerText : ''")
-            return {"session_id": payload.session_id, "content": text, "type": "text"}
-        html = await session.page.content()
-        return {"session_id": payload.session_id, "content": html, "type": "html"}
+            content = await session.page.evaluate(PAGE_TEXT_SCRIPT)
+            kind = "text"
+        else:
+            content = await session.page.content()
+            kind = "html"
+        return {
+            "session_id": payload.session_id,
+            "type": kind,
+            **_page_of(content, offset=payload.offset, max_chars=payload.max_chars),
+        }
 
     async def _find_elements(self, payload: FindElementsInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)

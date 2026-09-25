@@ -21,9 +21,9 @@ up-reverse-ssh: ## Start with the reverse-SSH sidecar profile
 
 test: ## Run controller tests in Docker
 	./scripts/compose_local.sh build controller
-	./scripts/compose_local.sh run --no-deps --rm controller python -m unittest discover -s tests -v
+	./scripts/compose_local.sh run --no-deps --rm controller python -m pytest tests/ -q
 
-test-local: ## Run controller tests on the host with Python 3.10+
+test-local: ## Run controller tests on the host with Python 3.11+
 	./scripts/test_local.sh
 
 coverage: ## Run controller tests with coverage on the host

@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 
-# Default acceptance probe: Python 3.10+. Callers may pass a stricter probe
+# Default acceptance probe: Python 3.11+, the floor every package here declares. Callers may pass a stricter probe
 # (e.g. version + required packages) as $1 to the resolve/require functions;
 # a candidate is accepted when the probe snippet exits 0.
 AUTO_BROWSER_DEFAULT_PROBE='import sys
-raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'
 
-resolve_python310_bin() {
+resolve_python_bin() {
   local probe="${1:-${AUTO_BROWSER_DEFAULT_PROBE}}"
   local candidate
   local -a candidates=()
   if [[ -n "${AUTO_BROWSER_PYTHON_BIN:-}" ]]; then
     candidates+=("${AUTO_BROWSER_PYTHON_BIN}")
   fi
-  candidates+=(python3 python3.13 python3.12 python3.11 python3.10)
+  candidates+=(python3 python3.14 python3.13 python3.12 python3.11)
 
   for candidate in "${candidates[@]}"; do
     [[ -n "${candidate}" ]] || continue
@@ -31,7 +31,7 @@ resolve_python310_bin() {
   # callers get a plain quoted-safe path.
   if command -v py >/dev/null 2>&1; then
     local version_flag resolved
-    for version_flag in -3.13 -3.12 -3.11 -3.10 -3; do
+    for version_flag in -3.14 -3.13 -3.12 -3.11 -3; do
       resolved="$(py "${version_flag}" -c 'import sys; print(sys.executable)' 2>/dev/null)" || continue
       [[ -n "${resolved}" ]] || continue
       if "${resolved}" -c "${probe}" >/dev/null 2>&1; then
@@ -44,12 +44,12 @@ resolve_python310_bin() {
   return 1
 }
 
-require_python310_bin() {
+require_python_bin() {
   local probe="${1:-}"
   local python_bin=""
   local detected_version=""
 
-  if python_bin="$(resolve_python310_bin "${probe:-${AUTO_BROWSER_DEFAULT_PROBE}}")"; then
+  if python_bin="$(resolve_python_bin "${probe:-${AUTO_BROWSER_DEFAULT_PROBE}}")"; then
     printf '%s\n' "${python_bin}"
     return 0
   fi
@@ -66,10 +66,10 @@ PY
   fi
 
   cat >&2 <<EOF
-Python 3.10+ is required for local auto-browser developer scripts.
+Python 3.11+ is required for local auto-browser developer scripts.
 Detected: ${detected_version}
 
-Install Python 3.10+ or set AUTO_BROWSER_PYTHON_BIN to a compatible interpreter.
+Install Python 3.11+ or set AUTO_BROWSER_PYTHON_BIN to a compatible interpreter.
 If you only need the containerized path, use \`make test\`.
 EOF
   exit 1

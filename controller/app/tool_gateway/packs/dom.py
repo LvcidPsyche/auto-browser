@@ -17,9 +17,10 @@ def register(registry, gateway):
         ToolSpec(
             name="browser.eval_js",
             description=(
-                "Execute a JavaScript expression in the current page context "
-                "and return the result. Use for DOM queries, value extraction, "
-                "or lightweight scripting that has no dedicated tool."
+                "Execute a JavaScript expression in the current page context and return the result. "
+                "Every call needs operator approval for that exact expression: the first call returns "
+                "status approval_required with an approval_id; retry with approval_id once it is approved. "
+                "Prefer find_elements, get_html or observe for reading the page — they need no approval."
             ),
             input_model=EvalJsInput,
             handler=gateway._eval_js,
@@ -38,10 +39,10 @@ def register(registry, gateway):
         ToolSpec(
             name="browser.get_html",
             description=(
-                "Get the HTML source of the current page. Returns the full "
-                "serialized DOM, not just the visible viewport. "
-                "Set text_only=true to strip tags and return plain text instead. "
-                "(full_page is deprecated and ignored.)"
+                "Read the current page: its serialized DOM (the whole document, not just the "
+                "viewport), or with text_only=true its visible text — the cheapest way to read "
+                "a page's content. Returns up to max_chars (default 20,000) from offset; when "
+                "truncated is true, call again with offset=next_offset for the rest."
             ),
             input_model=GetPageHtmlInput,
             handler=gateway._get_html,
@@ -68,6 +69,7 @@ def register(registry, gateway):
             ),
             input_model=DragDropInput,
             handler=gateway._drag_drop,
+            profiles=("full",),
             governed_kind="write",
         ),
         ToolSpec(
@@ -75,6 +77,7 @@ def register(registry, gateway):
             description="Resize the browser viewport to the specified width and height.",
             input_model=SetViewportInput,
             handler=gateway._set_viewport,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.find_by_vision",

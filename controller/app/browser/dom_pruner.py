@@ -34,6 +34,17 @@ _TYPE_PRIORITY: dict[str, float] = {
     "file": 4.0,
     "combobox": 6.0,
     "listbox": 5.0,
+    # ARIA roles the interactables script reports (browser_scripts.abRole);
+    # the entries above cover older observations and callers that pass tag or
+    # input-type names.
+    "textbox": 8.0,
+    "searchbox": 7.0,
+    "spinbutton": 6.0,
+    "switch": 5.0,
+    "tab": 6.0,
+    "menuitem": 6.0,
+    "option": 5.0,
+    "slider": 4.0,
 }
 
 _DEFAULT_TYPE_SCORE = 3.0

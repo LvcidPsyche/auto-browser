@@ -30,6 +30,7 @@ def register(registry, gateway):
             ),
             input_model=ReadinessCheckInput,
             handler=gateway._readiness_check,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.get_network_log",
@@ -40,6 +41,7 @@ def register(registry, gateway):
             ),
             input_model=GetNetworkLogInput,
             handler=gateway._get_network_log,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.verify_witness",
@@ -53,6 +55,7 @@ def register(registry, gateway):
             ),
             input_model=VerifyWitnessInput,
             handler=gateway._verify_witness,
+            profiles=("full",),
             read_only_hint=True,
         ),
         ToolSpec(
@@ -67,6 +70,7 @@ def register(registry, gateway):
             ),
             input_model=VerifyWitnessInput,
             handler=gateway._export_witness_bundle,
+            profiles=("full",),
             read_only_hint=True,
         ),
         ToolSpec(

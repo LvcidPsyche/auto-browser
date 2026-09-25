@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from ..config import Settings
 from ..models import BROWSER_ACTION_SCHEMA, BrowserActionDecision, ProviderName
+from ..result_shaping import compact_session
 
 # Parse strategies fall through on malformed input only. model_validate* raise
 # ValidationError; json.loads / raw_decode raise JSONDecodeError (a ValueError).
@@ -189,7 +190,7 @@ class BaseProviderAdapter(ABC):
                 }
             )
         return {
-            "session": observation.get("session"),
+            "session": compact_session(observation.get("session")),
             "url": observation.get("url"),
             "title": observation.get("title"),
             "active_element": observation.get("active_element"),
@@ -345,7 +346,10 @@ class BaseProviderAdapter(ABC):
         resolved_cli = which(cli_path) if cli_path else None
         if not resolved_cli:
             expected_path = cli_path or cli_label
-            return False, f"{self.provider} CLI binary was not found: {expected_path}"
+            return False, (
+                f"{self.provider} CLI binary was not found: {expected_path}. The controller image includes "
+                "the provider CLIs only when built with INSTALL_AGENT_CLIS=true."
+            )
 
         cli_home = (self.settings.cli_home or "").strip()
         if not cli_home:

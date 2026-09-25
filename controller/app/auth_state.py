@@ -80,7 +80,7 @@ class AuthStateManager:
     def prepare_for_context(self, source_path: Path) -> PreparedAuthState:
         info = self.inspect(source_path)
         if not info["exists"]:
-            raise FileNotFoundError(source_path)
+            raise FileNotFoundError(f"Auth state file not found: {source_path.name}")
         if info["stale"]:
             raise PermissionError(
                 f"Auth state is stale ({info['age_hours']}h old, max {info['max_age_hours']}h): {source_path}"

@@ -12,7 +12,23 @@ In Cursor: **Settings → MCP** (or open `~/.cursor/mcp.json` directly).
 
 ## 3. Add this config block
 
-With [uv](https://docs.astral.sh/uv/) installed (recommended — no clone needed):
+Cursor speaks MCP's HTTP transport, so it can connect straight to the controller:
+
+```json
+{
+  "mcpServers": {
+    "auto-browser": {
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+If the controller has an `API_BEARER_TOKEN`, add
+`"headers": {"Authorization": "Bearer <token>"}` next to `url`.
+
+To go through the stdio bridge instead, with [uv](https://docs.astral.sh/uv/)
+installed (no clone needed):
 
 ```json
 {

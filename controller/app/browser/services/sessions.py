@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from playwright.async_api import Error as PlaywrightError
 
+from ...action_errors import SessionNotFoundError
 from ...browser_scripts import apply_stealth
 from ...models import SessionRecord, SessionStatus
 from ...network_inspector import NetworkInspector
@@ -310,15 +311,31 @@ class BrowserSessionService:
     async def get(self, session_id: str) -> "BrowserSession":
         session = self.manager.sessions.get(session_id)
         if session is None:
-            raise KeyError(session_id)
+            raise SessionNotFoundError(session_id, status=await self._recorded_status(session_id))
         return session
 
     async def get_record(self, session_id: str) -> dict[str, Any]:
         session = self.manager.sessions.get(session_id)
         if session is not None:
             return await self.manager._session_summary(session)
-        record = await self.manager.session_store.get(session_id)
+        try:
+            record = await self.manager.session_store.get(session_id)
+        except KeyError:
+            raise SessionNotFoundError(session_id) from None
         return record.model_dump()
+
+    async def _recorded_status(self, session_id: str) -> str | None:
+        """Status of a session that is not live, from its persisted record, if any.
+
+        Only consulted on the failure path, to tell a caller *why* the id does
+        not work: closed, interrupted, or never existed.
+        """
+        try:
+            record = await self.manager.session_store.get(session_id)
+        except Exception:  # message enrichment only; any store failure means "unknown"
+            logger.debug("no readable record for session %s", session_id, exc_info=True)
+            return None
+        return record.status
 
     async def close(self, session_id: str) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)

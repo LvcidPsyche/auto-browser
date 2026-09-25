@@ -599,7 +599,11 @@ class BrowserAuthProfileService:
             existing.sort(key=lambda candidate: candidate.stat().st_mtime, reverse=True)
             return existing[0]
         if must_exist:
-            raise FileNotFoundError(base_path)
+            # Named for the caller, not by the path under AUTH_ROOT: this is
+            # what an agent sees after a mistyped auth_profile.
+            raise FileNotFoundError(
+                f"No saved auth profile {profile_name!r}. browser.list_auth_profiles lists the saved ones."
+            )
         return base_path
 
     def read_metadata(self, profile_name: str) -> dict[str, Any]:
@@ -635,7 +639,7 @@ class BrowserAuthProfileService:
         os.makedirs(os.path.dirname(candidate_str), exist_ok=True)
 
         if must_exist and not os.path.exists(candidate_str):
-            raise FileNotFoundError(candidate_str)
+            raise FileNotFoundError(f"No file {os.fspath(relative_path)!r} in this session's auth directory")
         return Path(candidate_str)
 
     def safe_auth_path(self, relative_path: str, must_exist: bool = False) -> Path:
@@ -648,7 +652,7 @@ class BrowserAuthProfileService:
         os.makedirs(os.path.dirname(candidate_str), exist_ok=True)
 
         if must_exist and not os.path.exists(candidate_str):
-            raise FileNotFoundError(candidate_str)
+            raise FileNotFoundError(f"No file {os.fspath(relative_path)!r} in the auth directory")
         return Path(candidate_str)
 
     @staticmethod

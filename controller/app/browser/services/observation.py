@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from ... import events as _events
 from ...browser_scripts import ACTIVE_ELEMENT_SCRIPT, INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
+from ..aria_outline import outline_from_aria_snapshot, unavailable_outline
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -15,7 +16,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ACCESSIBILITY_NODE_LIMIT = 30
+# An outline is a nicety; an observation must not wait long on one.
+ARIA_SNAPSHOT_TIMEOUT_MS = 5000
 
 
 class BrowserObservationService:
@@ -236,84 +238,14 @@ class BrowserObservationService:
         }
 
     async def accessibility_outline(self, page: "Page") -> dict[str, Any]:
-        accessibility = getattr(page, "accessibility", None)
-        if accessibility is None or not hasattr(accessibility, "snapshot"):
-            return {
-                "available": False,
-                "root_role": None,
-                "root_name": None,
-                "focused": None,
-                "role_counts": {},
-                "nodes": [],
-            }
-
         try:
-            snapshot = await accessibility.snapshot(interesting_only=True)
+            snapshot = await page.aria_snapshot(mode="ai", timeout=ARIA_SNAPSHOT_TIMEOUT_MS)
         except Exception as exc:
             logger.debug("failed to capture accessibility snapshot: %s", exc)
-            return {
-                "available": False,
-                "root_role": None,
-                "root_name": None,
-                "focused": None,
-                "role_counts": {},
-                "nodes": [],
-                "error": "accessibility_snapshot_unavailable",
-            }
-
-        if not snapshot:
-            return {
-                "available": True,
-                "root_role": None,
-                "root_name": None,
-                "focused": None,
-                "role_counts": {},
-                "nodes": [],
-            }
-
-        nodes: list[dict[str, Any]] = []
-        role_counts: dict[str, int] = {}
-        focused: dict[str, Any] | None = None
-
-        def walk(node: dict[str, Any], depth: int) -> None:
-            nonlocal focused
-            if len(nodes) >= ACCESSIBILITY_NODE_LIMIT:
-                return
-            role = node.get("role")
-            if isinstance(role, str) and role:
-                role_counts[role] = role_counts.get(role, 0) + 1
-            compact = {
-                "role": role,
-                "name": node.get("name"),
-                "value": node.get("valueString") or node.get("value"),
-                "description": node.get("description"),
-                "focused": bool(node.get("focused")),
-                "disabled": bool(node.get("disabled")),
-                "selected": bool(node.get("selected")),
-                "checked": node.get("checked"),
-                "expanded": node.get("expanded"),
-                "pressed": node.get("pressed"),
-                "depth": depth,
-            }
-            nodes.append(compact)
-            if compact["focused"] and focused is None:
-                focused = compact
-            for child in node.get("children") or []:
-                if not isinstance(child, dict):
-                    continue
-                walk(child, depth + 1)
-                if len(nodes) >= ACCESSIBILITY_NODE_LIMIT:
-                    return
-
-        walk(snapshot, 0)
-        return {
-            "available": True,
-            "root_role": snapshot.get("role"),
-            "root_name": snapshot.get("name"),
-            "focused": focused,
-            "role_counts": role_counts,
-            "nodes": nodes,
-        }
+            return unavailable_outline("accessibility_snapshot_unavailable")
+        # A large page's snapshot runs to megabytes (3 MB, ~0.25 s to parse, for
+        # 20,000 links), so it is parsed off the event loop other sessions share.
+        return await asyncio.to_thread(outline_from_aria_snapshot, snapshot or "")
 
     async def _scrub_screenshot_if_needed(
         self,

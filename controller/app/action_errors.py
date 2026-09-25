@@ -35,3 +35,43 @@ class BrowserActionError(Exception):
             "url": self.url,
             **self.details,
         }
+
+
+class SessionNotFoundError(KeyError):
+    """A session id that names no live session, with a reason a caller can act on.
+
+    Subclasses KeyError so every existing ``except KeyError`` (REST 404s, the
+    share routes, the MCP gateway) keeps working. The plain ``KeyError(id)`` it
+    replaces surfaced to agents as an error whose entire text was the id.
+    """
+
+    def __init__(self, session_id: str, *, status: str | None = None) -> None:
+        self.session_id = session_id
+        self.status = status
+        if status == "closed":
+            self.code = "session_closed"
+            message = f"Session {session_id} is closed. Create a new session, or list sessions to find a live one."
+        elif status in {"interrupted", "failed"}:
+            self.code = "session_interrupted"
+            message = (
+                f"Session {session_id} is {status}: its browser is gone (for example after a controller "
+                "restart) and it cannot be resumed. Create a new session."
+            )
+        elif status is not None:
+            # Recorded as active but not running here: with a shared session
+            # store it belongs to another controller instance, otherwise it
+            # stopped without being recorded as closed.
+            self.code = "session_not_live"
+            message = (
+                f"Session {session_id} is recorded as {status} but is not running on this controller "
+                "(it may belong to another controller instance). Create a new session, or list sessions "
+                "to find a live one."
+            )
+        else:
+            self.code = "unknown_session"
+            message = f"No session with id {session_id}. List sessions to find a live one, or create a new session."
+        super().__init__(message)
+        self.message = message
+
+    def __str__(self) -> str:  # KeyError.__str__ would wrap the message in quotes
+        return self.message

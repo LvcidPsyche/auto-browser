@@ -52,13 +52,21 @@ def _run_live(base_url: str, fixture: str, expect: str) -> int:
     # Any failure in the browser-backed stack (missing chromium, lifespan teardown,
     # etc.) is a SKIP, not a failure — the live path is opt-in infrastructure.
     try:
-        with TestClient(app) as client:
+        # A loopback base URL: TestClient's default Host, "testserver", is refused
+        # by a tokenless controller's DNS-rebinding guard unless
+        # CONTROLLER_ALLOWED_HOSTS lists it, which only compose sets.
+        with TestClient(app, base_url="http://127.0.0.1") as client:
             created = client.post("/sessions", json={"name": "fixture-live"})
             if created.status_code >= 500:
                 print(
                     f"[fixture-live] SKIP: session creation returned {created.status_code} (browser stack unavailable)."
                 )
                 return SKIPPED
+            if created.status_code >= 400:
+                # The controller refused the request itself: a configuration or
+                # API problem, not a missing browser, so it is not a skip.
+                print(f"[fixture-live] FAIL: session creation returned {created.status_code}: {created.text[:300]}")
+                return FAILED
             created.raise_for_status()
             session_id = created.json().get("id") or created.json().get("session_id")
             try:

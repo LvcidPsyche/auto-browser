@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from .action_errors import BrowserActionError
+from .action_errors import BrowserActionError, SessionNotFoundError
 from .app_factory import (
     build_controller_services,
     create_controller_app,
@@ -119,6 +119,8 @@ async def legacy_ui_redirect(_: Request, rest_of_path: str = "") -> RedirectResp
 
 @app.exception_handler(KeyError)
 async def handle_key_not_found(_: Request, exc: KeyError) -> JSONResponse:
+    if isinstance(exc, SessionNotFoundError):
+        return JSONResponse(status_code=404, content={"detail": exc.message, "code": exc.code})
     key = exc.args[0] if exc.args else "unknown"
     return JSONResponse(status_code=404, content={"detail": f"Not found: {key}"})
 

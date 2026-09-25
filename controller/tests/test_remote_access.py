@@ -15,18 +15,13 @@ from app.utils import UTC
 class FakePage:
     def __init__(self, url: str = "https://example.com"):
         self.url = url
-        self.accessibility = self.FakeAccessibility()
 
-    class FakeAccessibility:
-        async def snapshot(self, interesting_only: bool = True):
-            return {
-                "role": "WebArea",
-                "name": "Example Domain",
-                "children": [
-                    {"role": "heading", "name": "Example Domain"},
-                    {"role": "link", "name": "More information", "focused": True},
-                ],
-            }
+    async def aria_snapshot(self, **_: object) -> str:
+        return (
+            '- heading "Example Domain" [level=1] [ref=e1]\n'
+            '- link "More information" [active] [ref=e2] [cursor=pointer]:\n'
+            "  - /url: https://www.iana.org/domains/example\n"
+        )
 
     async def title(self) -> str:
         return "Example Domain"

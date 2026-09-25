@@ -331,7 +331,11 @@ class ShareLinkRecipientTests(unittest.TestCase):
 
     def test_bad_tokens_are_refused_not_crashed_on(self) -> None:
         payload_b64 = self.token.split(".")[0]
-        for token in ("garbage", f"{payload_b64}.é" + "0" * 31, self.token[:-1] + "0"):
+        # Flip the signature's last hex digit. Always writing "0" left the token
+        # unchanged, and valid, whenever the signature already ended in 0.
+        tampered = self.token[:-1] + ("1" if self.token.endswith("0") else "0")
+        self.assertNotEqual(tampered, self.token)
+        for token in ("garbage", f"{payload_b64}.é" + "0" * 31, tampered):
             with self.subTest(token=token):
                 self.assertEqual(self.client.get(f"/share/{token}/observe").status_code, 403)
                 self.assertEqual(self.client.get(f"/share/{token}/screenshots/{self.shot.name}").status_code, 403)

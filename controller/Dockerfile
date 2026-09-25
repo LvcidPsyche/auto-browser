@@ -3,6 +3,12 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+# The codex, claude and gemini CLIs back the *_AUTH_MODE=cli providers
+# (subscription logins) and need Node.js; together they are about 750 MB that
+# an MCP-only or API-key deployment never runs. Build with
+# INSTALL_AGENT_CLIS=true to include them (docker-compose reads it from .env;
+# docker-compose.host-subscriptions.yml sets it).
+ARG INSTALL_AGENT_CLIS=false
 ARG CODEX_CLI_VERSION=0.114.0
 ARG CLAUDE_CLI_VERSION=2.1.72
 ARG GEMINI_CLI_VERSION=0.32.1
@@ -10,11 +16,17 @@ ARG GEMINI_CLI_VERSION=0.32.1
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends autossh openssh-client nodejs npm tesseract-ocr tesseract-ocr-eng \
-    && npm install -g \
-        @openai/codex@${CODEX_CLI_VERSION} \
-        @anthropic-ai/claude-code@${CLAUDE_CLI_VERSION} \
-        @google/gemini-cli@${GEMINI_CLI_VERSION} \
+    && apt-get install -y --no-install-recommends autossh openssh-client tesseract-ocr tesseract-ocr-eng \
+    && if [ "$INSTALL_AGENT_CLIS" = "true" ]; then \
+        apt-get install -y --no-install-recommends nodejs npm \
+        && npm install -g \
+            @openai/codex@${CODEX_CLI_VERSION} \
+            @anthropic-ai/claude-code@${CLAUDE_CLI_VERSION} \
+            @google/gemini-cli@${GEMINI_CLI_VERSION} \
+        && npm cache clean --force; \
+    elif [ "$INSTALL_AGENT_CLIS" != "false" ]; then \
+        echo "INSTALL_AGENT_CLIS must be true or false, got '$INSTALL_AGENT_CLIS'" >&2; exit 1; \
+    fi \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt requirements-dev.txt ./

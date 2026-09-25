@@ -64,9 +64,7 @@ class TokenParsingTests(unittest.TestCase):
         self.assertEqual(parse_operator_tokens("  ,  , :,  x: "), ())
 
     def test_the_shared_token_carries_no_identity(self) -> None:
-        (credential,) = credentials_for(
-            Settings(_env_file=None, API_BEARER_TOKEN=SHARED_TOKEN, API_BEARER_TOKENS="")
-        )
+        (credential,) = credentials_for(Settings(_env_file=None, API_BEARER_TOKEN=SHARED_TOKEN, API_BEARER_TOKENS=""))
         self.assertIsNone(credential.operator_id)
         self.assertFalse(credential.verifies_identity)
 
@@ -91,10 +89,14 @@ class VerifiedIdentityTests(unittest.TestCase):
         self.assertEqual(body["asserted_id"], "bob", "the false claim must survive into the audit trail")
 
     def test_an_agreeing_header_records_no_conflict(self) -> None:
-        body = client_for(API_BEARER_TOKENS=NAMED).get(
-            "/whoami",
-            headers={"Authorization": f"Bearer {ALICE_TOKEN}", "X-Operator-Id": "alice"},
-        ).json()
+        body = (
+            client_for(API_BEARER_TOKENS=NAMED)
+            .get(
+                "/whoami",
+                headers={"Authorization": f"Bearer {ALICE_TOKEN}", "X-Operator-Id": "alice"},
+            )
+            .json()
+        )
         self.assertEqual(body["id"], "alice")
         self.assertIsNone(body["asserted_id"])
 
@@ -114,17 +116,19 @@ class VerifiedIdentityTests(unittest.TestCase):
 
 class UnverifiedIdentityTests(unittest.TestCase):
     def test_the_shared_token_leaves_identity_self_asserted(self) -> None:
-        body = client_for(API_BEARER_TOKEN=SHARED_TOKEN).get(
-            "/whoami",
-            headers={"Authorization": f"Bearer {SHARED_TOKEN}", "X-Operator-Id": "whoever"},
-        ).json()
+        body = (
+            client_for(API_BEARER_TOKEN=SHARED_TOKEN)
+            .get(
+                "/whoami",
+                headers={"Authorization": f"Bearer {SHARED_TOKEN}", "X-Operator-Id": "whoever"},
+            )
+            .json()
+        )
         self.assertEqual(body["id"], "whoever")
         self.assertEqual(body["source"], "header", "one shared credential cannot distinguish operators")
 
     def test_an_unauthenticated_loopback_request_is_still_attributed_by_header(self) -> None:
-        body = client_for(API_BIND_SCOPE="loopback").get(
-            "/whoami", headers={"X-Operator-Id": "local-dev"}
-        ).json()
+        body = client_for(API_BIND_SCOPE="loopback").get("/whoami", headers={"X-Operator-Id": "local-dev"}).json()
         self.assertEqual(body["id"], "local-dev")
         self.assertEqual(body["source"], "header")
 
@@ -143,9 +147,7 @@ class NamedTokenPolicyTests(unittest.TestCase):
         self.assertTrue(any("operator 'alice'" in error for error in report.errors), report.errors)
 
     def test_named_tokens_alone_satisfy_the_requirement(self) -> None:
-        report = validate_runtime_policy(
-            Settings(_env_file=None, API_BIND_SCOPE="exposed", API_BEARER_TOKENS=NAMED)
-        )
+        report = validate_runtime_policy(Settings(_env_file=None, API_BIND_SCOPE="exposed", API_BEARER_TOKENS=NAMED))
         self.assertEqual([e for e in report.errors if "BEARER" in e or "operator" in e], [])
 
 

@@ -1,5 +1,9 @@
 services:
   controller:
+    build:
+      args:
+        # This override exists to run the provider CLIs, so the image needs them.
+        INSTALL_AGENT_CLIS: "true"
     environment:
       CLI_HOME: ${CLI_HOST_HOME:-/home/botuser}
     volumes:

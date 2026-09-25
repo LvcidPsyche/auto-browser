@@ -3,12 +3,12 @@ from __future__ import annotations
 from ...tool_inputs import (
     AgentJobIdInput,
     ApprovalDecisionInput,
-    ApprovalIdInput,
     AuthProfileNameInput,
     CreateSessionRequest,
     DeleteMemoryProfileInput,
     EmptyInput,
     ExecuteActionInput,
+    ExecuteApprovalInput,
     GetMemoryProfileInput,
     ListAgentJobsInput,
     ListApprovalsInput,
@@ -18,6 +18,7 @@ from ...tool_inputs import (
     ObserveInput,
     QueueAgentRunInput,
     QueueAgentStepInput,
+    ReadDownloadInput,
     ResumeAgentJobInput,
     SaveAuthProfileInput,
     SaveAuthStateInput,
@@ -47,6 +48,7 @@ def register(registry, gateway):
             ),
             input_model=SaveMemoryProfileInput,
             handler=gateway._save_memory_profile,
+            profiles=("full",),
             governed_kind="write",
         ),
         ToolSpec(
@@ -54,12 +56,14 @@ def register(registry, gateway):
             description="Retrieve a saved memory profile by name.",
             input_model=GetMemoryProfileInput,
             handler=gateway._get_memory_profile,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.list_memory_profiles",
             description="List all saved memory profiles.",
             input_model=EmptyInput,
             handler=gateway._list_memory_profiles,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.delete_memory_profile",
@@ -71,7 +75,10 @@ def register(registry, gateway):
         ),
         ToolSpec(
             name="browser.list_sessions",
-            description="List live and persisted browser sessions.",
+            description=(
+                "List live and persisted browser sessions, one reference each (id, name, status, "
+                "live, current page, takeover URL). browser.get_session returns a full record."
+            ),
             input_model=EmptyInput,
             handler=gateway._list_sessions,
         ),
@@ -90,18 +97,22 @@ def register(registry, gateway):
             name="browser.observe",
             description=(
                 "Capture the current browser observation: interactables, tabs, console, and a "
-                "perception summary. Presets: 'text' — no screenshot, no OCR, just the "
-                "accessibility tree and extracted text; the cheapest choice for reading a page's "
-                "content. 'fast' — screenshot only, no text/accessibility extraction; for visual "
-                "models. 'normal' (default) — screenshot + OCR + accessibility tree. 'rich' — "
-                "normal with extended text and DOM outline."
+                "perception summary. Presets: 'text' — no screenshot or OCR: interactables, "
+                "accessibility tree and the first 2,000 characters of page text; for text-only "
+                "models. 'fast' — screenshot only, returned as an image, no text/accessibility "
+                "extraction; for vision models. 'normal' (default) — text plus a screenshot URL "
+                "and OCR. 'rich' — normal with twice the interactables and 4,000 characters of "
+                "text. To read a whole page, use browser.get_html with text_only=true."
             ),
             input_model=ObserveInput,
             handler=gateway._observe,
         ),
         ToolSpec(
             name="browser.screenshot",
-            description="Capture a lightweight screenshot for one session without the full observe payload.",
+            description=(
+                "Capture the current viewport and return it as an image (plus its artifact URL), "
+                "without the full observe payload."
+            ),
             input_model=ScreenshotInput,
             handler=gateway._screenshot,
         ),
@@ -110,24 +121,28 @@ def register(registry, gateway):
             description="Read recent browser console messages for an active session.",
             input_model=SessionTailInput,
             handler=gateway._get_console,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.get_page_errors",
             description="Read recent uncaught page errors for an active session.",
             input_model=SessionTailInput,
             handler=gateway._get_page_errors,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.get_request_failures",
             description="Read recent failed network requests for an active session.",
             input_model=SessionTailInput,
             handler=gateway._get_request_failures,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.stop_trace",
             description="Finalize the current Playwright trace for an active session and return its artifact path.",
             input_model=SessionIdInput,
             handler=gateway._stop_trace,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.list_auth_profiles",
@@ -146,12 +161,24 @@ def register(registry, gateway):
             ),
             input_model=AuthProfileNameInput,
             handler=gateway._get_auth_profile,
+            profiles=("full",),
         ),
         ToolSpec(
             name="browser.list_downloads",
             description="List files captured from browser downloads for one session.",
             input_model=ListDownloadsInput,
             handler=gateway._list_downloads,
+        ),
+        ToolSpec(
+            name="browser.read_download",
+            description=(
+                "Read a downloaded file as text (CSV, JSON, TXT, HTML, ...), by download_id "
+                "from browser.list_downloads or, if omitted, the latest completed download. "
+                "Paged like browser.get_html. Binary files (PDF, XLSX, images) are refused "
+                "with their artifact URL."
+            ),
+            input_model=ReadDownloadInput,
+            handler=gateway._read_download,
         ),
         ToolSpec(
             name="browser.list_tabs",
@@ -183,8 +210,8 @@ def register(registry, gateway):
                 "select_option, scroll, …) in a session, using the same action schema the "
                 "agent planner emits. Actions are policy-checked and audited, and governed "
                 "actions may require a granted approval_id. Call browser.observe first to "
-                "get targetable element IDs and selectors; returns the executed action's "
-                "result payload."
+                "get targetable element IDs and selectors. Returns the action's verification "
+                "(what changed) and an observation of the page after it (up to 20 interactables)."
             ),
             input_model=ExecuteActionInput,
             handler=gateway._execute_action,
@@ -243,7 +270,7 @@ def register(registry, gateway):
         ToolSpec(
             name="browser.execute_approval",
             description="Execute an already approved action.",
-            input_model=ApprovalIdInput,
+            input_model=ExecuteApprovalInput,
             handler=gateway._execute_approval,
             profiles=("full",),
         ),

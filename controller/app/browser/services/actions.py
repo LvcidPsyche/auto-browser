@@ -248,6 +248,12 @@ class BrowserActionService:
         approval_id: str | None = None,
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
+        if decision.action == "upload":
+            # Check the file before asking anyone to approve the upload: an
+            # operator should not be asked to approve an upload of a file that
+            # is not there, only for it to fail once they have. The direct
+            # upload path already checks in this order.
+            self.manager.uploads.safe_path(decision.file_path or "", session=session)
         approval = await self.require_decision_approval(
             session_id,
             decision,
@@ -394,11 +400,15 @@ class BrowserActionService:
         decision: BrowserActionDecision,
         *,
         approval_id: str | None,
+        reason: str | None = None,
     ):
         kind = self.governed_approval_kind_for_decision(decision)
         if kind is None:
             return None
-        reason = (
+        # A caller that knows what is being approved (the MCP gateway, for tool
+        # calls that are not browser actions) supplies the reason the operator
+        # reads; the generic sentence named the stand-in action instead.
+        reason = reason or (
             "Governed workflow requires operator approval before executing "
             f"{decision.risk_category or 'write'} action {decision.action!r}."
         )

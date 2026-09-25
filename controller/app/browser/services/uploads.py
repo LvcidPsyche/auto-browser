@@ -74,7 +74,7 @@ class BrowserUploadService:
             else:
                 raise PermissionError("file_path must stay inside upload root")
             if not os.path.exists(candidate_str):
-                raise FileNotFoundError(candidate_str)
+                raise FileNotFoundError(_missing_upload(file_path))
             return Path(candidate_str)
 
         preferred_roots: list[Path] = []
@@ -99,7 +99,7 @@ class BrowserUploadService:
                 raise PermissionError("file_path must stay inside upload root")
 
         if not os.path.exists(candidate_str):
-            raise FileNotFoundError(candidate_str)
+            raise FileNotFoundError(_missing_upload(file_path))
         return Path(candidate_str)
 
     @staticmethod
@@ -108,3 +108,9 @@ class BrowserUploadService:
         candidate_str = os.path.normcase(os.path.realpath(os.fspath(candidate)))
         root_prefix = root_str if root_str.endswith(os.sep) else root_str + os.sep
         return candidate_str == root_str or candidate_str.startswith(root_prefix)
+
+
+def _missing_upload(file_path: str) -> str:
+    # In the caller's terms: the resolved path under UPLOAD_ROOT means nothing
+    # to an agent, and REST answers a bare 404 either way.
+    return f"No file {os.fspath(file_path)!r} in the upload directory (UPLOAD_ROOT); put the file there first."

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -150,44 +151,89 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         tools = self.gateway.list_tools()
         names = {tool["name"] for tool in tools}
 
-        self.assertIn("browser.create_session", names)
-        self.assertIn("browser.screenshot", names)
-        self.assertIn("browser.get_console", names)
-        self.assertIn("browser.get_page_errors", names)
-        self.assertIn("browser.get_request_failures", names)
-        self.assertIn("browser.stop_trace", names)
-        self.assertIn("browser.save_memory_profile", names)
-        self.assertIn("browser.get_memory_profile", names)
-        self.assertIn("browser.list_memory_profiles", names)
-        self.assertIn("browser.readiness_check", names)
-        self.assertIn("browser.verify_witness", names)
-        self.assertIn("browser.list_auth_profiles", names)
-        self.assertIn("browser.get_auth_profile", names)
-        self.assertIn("browser.list_tabs", names)
-        self.assertIn("browser.list_downloads", names)
-        self.assertIn("browser.execute_action", names)
-        self.assertIn("browser.save_auth_profile", names)
-        self.assertNotIn("browser.list_agent_jobs", names)
-        self.assertNotIn("browser.resume_agent_job", names)
-        self.assertNotIn("browser.list_providers", names)
-        self.assertNotIn("browser.get_remote_access", names)
-        self.assertNotIn("browser.list_approvals", names)
-        self.assertNotIn("social.post", names)
-        self.assertNotIn("social.comment", names)
-        self.assertNotIn("social.like", names)
-        self.assertNotIn("social.follow", names)
-        self.assertNotIn("social.unfollow", names)
-        self.assertNotIn("social.repost", names)
-        self.assertNotIn("social.dm", names)
-        self.assertNotIn("social.login", names)
-        self.assertNotIn("social.search", names)
-        self.assertNotIn("browser.find_by_vision", names)
+        # The curated profile is what a browsing agent needs. Every tool costs
+        # context on every request, so a change to this set should be deliberate.
+        self.assertEqual(
+            names,
+            {
+                "browser.create_session",
+                "browser.list_sessions",
+                "browser.get_session",
+                "browser.close_session",
+                "browser.fork_session",
+                "browser.observe",
+                "browser.screenshot",
+                "browser.execute_action",
+                "browser.get_html",
+                "browser.find_elements",
+                "browser.wait_for_selector",
+                "browser.eval_js",
+                "browser.list_tabs",
+                "browser.activate_tab",
+                "browser.close_tab",
+                "browser.list_downloads",
+                "browser.read_download",
+                "browser.list_auth_profiles",
+                "browser.save_auth_profile",
+                "browser.request_human_takeover",
+            },
+        )
         self.assertEqual(len(names), len(tools))
-        self.assertNotIn("browser.discard_agent_job", names)
-        self.assertNotIn("browser.cancel_agent_job", names)
+
+    async def test_tools_moved_out_of_curated_remain_in_full(self) -> None:
+        curated = {tool["name"] for tool in self.gateway.list_tools()}
+        full = {tool["name"] for tool in self.full_gateway.list_tools()}
+
+        for name in (
+            "browser.get_console",
+            "browser.get_page_errors",
+            "browser.get_request_failures",
+            "browser.stop_trace",
+            "browser.get_network_log",
+            "browser.save_memory_profile",
+            "browser.get_memory_profile",
+            "browser.list_memory_profiles",
+            "browser.get_auth_profile",
+            "browser.readiness_check",
+            "browser.verify_witness",
+            "browser.export_witness_bundle",
+            "browser.drag_drop",
+            "browser.set_viewport",
+            "harness.get_status",
+            "harness.get_trace",
+            "harness.list_runs",
+        ):
+            with self.subTest(name=name):
+                self.assertNotIn(name, curated)
+                self.assertIn(name, full)
+        self.assertLessEqual(curated, full)
+
+    async def test_server_instructions_name_only_curated_tools(self) -> None:
+        # Clients put the instructions in the model's context; a tool they name
+        # that the default profile does not list would send agents nowhere.
+        import re
+
+        from app.mcp_transport import SERVER_INSTRUCTIONS
+
+        named = set(re.findall(r"browser\.[a-z_]+", SERVER_INSTRUCTIONS))
+        curated = {tool["name"] for tool in self.gateway.list_tools()}
+
+        self.assertGreaterEqual(len(named), 6)
+        self.assertLessEqual(named, curated)
+
+    async def test_a_full_profile_tool_called_on_curated_says_how_to_enable_it(self) -> None:
+        response = await self.gateway.call_tool(
+            McpToolCallRequest(name="browser.get_console", arguments={"session_id": "session-1"})
+        )
+        unknown = await self.gateway.call_tool(McpToolCallRequest(name="browser.no_such_tool", arguments={}))
+
+        self.assertTrue(response.isError)
+        self.assertIn("MCP_TOOL_PROFILE=full", response.content[0].text)
+        self.manager.get_console_messages.assert_not_awaited()
+        self.assertEqual(unknown.content[0].text, "Unknown tool: browser.no_such_tool")
 
     async def test_verify_witness_tool_dispatches_to_manager(self) -> None:
-        response = await self.gateway.call_tool(
+        response = await self.full_gateway.call_tool(
             McpToolCallRequest(name="browser.verify_witness", arguments={"session_id": "session-1"})
         )
 
@@ -197,7 +243,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.manager.verify_witness_chain.assert_awaited_once_with("session-1")
 
     async def test_list_tools_include_mcp_hints(self) -> None:
-        tools = {tool["name"]: tool for tool in self.gateway.list_tools()}
+        tools = {tool["name"]: tool for tool in self.full_gateway.list_tools()}
         console_hints = tools["browser.get_console"]["annotations"]
         action_hints = tools["browser.execute_action"]["annotations"]
 
@@ -421,16 +467,82 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("harness service unavailable", response.structuredContent["error"])
         self.assertIn("HARNESS_*", response.structuredContent["error"])
 
-    async def test_eval_js_requires_governed_profile(self) -> None:
+    def _pending_approval(self, approval_id: str) -> ApprovalRecord:
+        return ApprovalRecord(
+            id=approval_id,
+            session_id="session-1",
+            kind="write",
+            status="pending",
+            created_at="2026-05-07T00:00:00Z",
+            updated_at="2026-05-07T00:00:00Z",
+            reason="pending",
+            action=BrowserActionDecision(action="request_human_takeover", reason="pending", risk_category="write"),
+        )
+
+    async def test_eval_js_always_goes_through_approval(self) -> None:
+        # It used to fail unless the caller passed workflow_profile=governed, a
+        # parameter its schema never advertised. The server now governs it itself.
+        self.manager.require_governed_approval = AsyncMock(
+            side_effect=ApprovalRequiredError(self._pending_approval("approval-js-1"))
+        )
+
         response = await self.full_gateway.call_tool(
             McpToolCallRequest(
                 name="browser.eval_js",
-                arguments={"session_id": "session-1", "expression": "() => 1"},
+                arguments={"session_id": "session-1", "expression": "() => document.title"},
             )
         )
 
         self.assertTrue(response.isError)
-        self.assertIn("requires workflow_profile=governed", response.structuredContent["error"])
+        self.assertEqual(response.structuredContent["status"], "approval_required")
+        self.manager.require_governed_approval.assert_awaited_once()
+        decision = self.manager.require_governed_approval.await_args.args[1]
+        reason = self.manager.require_governed_approval.await_args.kwargs["reason"]
+        # The operator sees the code they are approving.
+        self.assertIn("document.title", reason)
+        self.assertIn("browser.eval_js", reason)
+        self.assertTrue(decision.text.startswith("browser.eval_js sha256:"))
+
+    async def test_an_approval_is_bound_to_the_exact_arguments(self) -> None:
+        # Approval matching compares the decision but not its reason. With only
+        # the tool name in it, one approval authorised any expression.
+        self.manager.require_governed_approval = AsyncMock(
+            side_effect=ApprovalRequiredError(self._pending_approval("approval-js-2"))
+        )
+        decisions = []
+        for expression in ("() => 1", "() => 1", "() => document.cookie"):
+            await self.full_gateway.call_tool(
+                McpToolCallRequest(
+                    name="browser.eval_js", arguments={"session_id": "session-1", "expression": expression}
+                )
+            )
+            decisions.append(self.manager.require_governed_approval.await_args.args[1])
+
+        exclude = {"reason", "confidence"}
+        self.assertEqual(decisions[0].model_dump(exclude=exclude), decisions[1].model_dump(exclude=exclude))
+        self.assertNotEqual(decisions[0].model_dump(exclude=exclude), decisions[2].model_dump(exclude=exclude))
+
+    async def test_credential_values_stay_out_of_the_approval_preview(self) -> None:
+        self.manager.require_governed_approval = AsyncMock(
+            side_effect=ApprovalRequiredError(self._pending_approval("approval-cookie-1"))
+        )
+
+        await self.full_gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.set_cookies",
+                arguments={
+                    "session_id": "session-1",
+                    "workflow_profile": "governed",
+                    "cookies": [{"name": "sid", "value": "super-secret-session", "url": "https://example.com"}],
+                },
+            )
+        )
+
+        reason = self.manager.require_governed_approval.await_args.kwargs["reason"]
+        decision = self.manager.require_governed_approval.await_args.args[1]
+        self.assertIn("browser.set_cookies", reason)
+        self.assertNotIn("super-secret-session", reason)
+        self.assertNotIn("super-secret-session", decision.model_dump_json())
 
     async def test_live_harness_start_requires_governed_profile(self) -> None:
         response = await self.full_gateway.call_tool(
@@ -485,7 +597,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("browser.find_by_vision", names)
 
     async def test_readiness_tool_returns_report(self) -> None:
-        response = await self.gateway.call_tool(
+        response = await self.full_gateway.call_tool(
             McpToolCallRequest(name="browser.readiness_check", arguments={"mode": "confidential"})
         )
 
@@ -494,7 +606,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(response.structuredContent["overall"], {"warn", "fail"})
 
     async def test_memory_profile_tools_forward_arguments(self) -> None:
-        save_response = await self.gateway.call_tool(
+        save_response = await self.full_gateway.call_tool(
             McpToolCallRequest(
                 name="browser.save_memory_profile",
                 arguments={
@@ -507,10 +619,10 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
         )
-        get_response = await self.gateway.call_tool(
+        get_response = await self.full_gateway.call_tool(
             McpToolCallRequest(name="browser.get_memory_profile", arguments={"profile_name": "checkout"})
         )
-        list_response = await self.gateway.call_tool(
+        list_response = await self.full_gateway.call_tool(
             McpToolCallRequest(name="browser.list_memory_profiles", arguments={})
         )
         delete_response = await self.full_gateway.call_tool(
@@ -630,7 +742,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         list_response = await self.gateway.call_tool(
             McpToolCallRequest(name="browser.list_auth_profiles", arguments={})
         )
-        get_response = await self.gateway.call_tool(
+        get_response = await self.full_gateway.call_tool(
             McpToolCallRequest(name="browser.get_auth_profile", arguments={"profile_name": "outlook-default"})
         )
         save_response = await self.gateway.call_tool(
@@ -659,25 +771,25 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.manager.capture_screenshot.assert_awaited_once_with("session-1", label="checkpoint")
 
     async def test_debug_tools_forward_arguments(self) -> None:
-        console_response = await self.gateway.call_tool(
+        console_response = await self.full_gateway.call_tool(
             McpToolCallRequest(
                 name="browser.get_console",
                 arguments={"session_id": "session-1", "limit": 5},
             )
         )
-        page_error_response = await self.gateway.call_tool(
+        page_error_response = await self.full_gateway.call_tool(
             McpToolCallRequest(
                 name="browser.get_page_errors",
                 arguments={"session_id": "session-1", "limit": 7},
             )
         )
-        request_failure_response = await self.gateway.call_tool(
+        request_failure_response = await self.full_gateway.call_tool(
             McpToolCallRequest(
                 name="browser.get_request_failures",
                 arguments={"session_id": "session-1", "limit": 9},
             )
         )
-        trace_response = await self.gateway.call_tool(
+        trace_response = await self.full_gateway.call_tool(
             McpToolCallRequest(
                 name="browser.stop_trace",
                 arguments={"session_id": "session-1"},
@@ -945,13 +1057,40 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.isError)
 
     async def test_omitted_session_id_resolves_to_single_live_session(self) -> None:
-        self.manager.list_sessions = AsyncMock(return_value=[{"id": "session-42"}])
+        self.manager.list_sessions = AsyncMock(return_value=[{"id": "session-42", "live": True}])
 
         response = await self.full_gateway.call_tool(McpToolCallRequest(name="browser.observe", arguments={}))
 
         self.assertFalse(response.isError)
         self.manager.observe.assert_awaited_once()
         self.assertEqual(self.manager.observe.await_args.args[0], "session-42")
+
+    async def test_omitted_session_id_ignores_closed_and_interrupted_records(self) -> None:
+        # list_sessions() merges persisted records with live sessions. A closed
+        # record used to be targeted (or make the call "ambiguous"), so after
+        # one create -> close cycle the omitted-session convenience broke.
+        self.manager.list_sessions = AsyncMock(
+            return_value=[
+                {"id": "session-new", "status": "active", "live": True},
+                {"id": "session-old", "status": "closed", "live": False},
+                {"id": "session-crashed", "status": "interrupted", "live": False},
+            ]
+        )
+
+        response = await self.full_gateway.call_tool(McpToolCallRequest(name="browser.observe", arguments={}))
+
+        self.assertFalse(response.isError)
+        self.assertEqual(self.manager.observe.await_args.args[0], "session-new")
+
+    async def test_only_closed_records_count_as_no_live_session(self) -> None:
+        self.manager.list_sessions = AsyncMock(return_value=[{"id": "session-old", "status": "closed", "live": False}])
+        self.manager.create_session = AsyncMock(return_value={"id": "session-new"})
+
+        response = await self.full_gateway.call_tool(McpToolCallRequest(name="browser.observe", arguments={}))
+
+        self.assertFalse(response.isError)
+        self.manager.create_session.assert_awaited_once()
+        self.assertEqual(self.manager.observe.await_args.args[0], "session-new")
 
     async def test_omitted_session_id_creates_session_for_observe_when_none_live(self) -> None:
         self.manager.list_sessions = AsyncMock(return_value=[])
@@ -974,7 +1113,13 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.manager.create_session.assert_not_awaited()
 
     async def test_omitted_session_id_errors_when_multiple_sessions_live(self) -> None:
-        self.manager.list_sessions = AsyncMock(return_value=[{"id": "session-a"}, {"id": "session-b"}])
+        self.manager.list_sessions = AsyncMock(
+            return_value=[
+                {"id": "session-a", "live": True},
+                {"id": "session-b", "live": True},
+                {"id": "session-closed", "live": False},
+            ]
+        )
 
         response = await self.full_gateway.call_tool(McpToolCallRequest(name="browser.observe", arguments={}))
 
@@ -982,6 +1127,8 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.structuredContent.get("code"), "ambiguous_session")
         self.assertIn("session-a", response.content[0].text)
         self.assertIn("session-b", response.content[0].text)
+        # The message says "live"; a closed session must not be listed as one.
+        self.assertNotIn("session-closed", response.content[0].text)
 
     async def test_explicit_session_id_skips_implicit_resolution(self) -> None:
         self.manager.list_sessions = AsyncMock(return_value=[])
@@ -1068,6 +1215,111 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no-such-profile", response.content[0].text)
         self.assertNotIn("Tool execution failed", response.content[0].text)
 
+    async def test_policy_refusals_reach_the_caller(self) -> None:
+        # A host outside ALLOWED_HOSTS, and a retry with an approval that is not
+        # granted yet, were both "Tool execution failed" to an MCP agent.
+        refusals = (
+            "Host 'news.example.org' is not allowlisted",
+            "approval approval-1 is not approved",
+        )
+        for message in refusals:
+            with self.subTest(message=message):
+                self.manager.execute_decision = AsyncMock(side_effect=PermissionError(message))
+                response = await self.gateway.call_tool(
+                    McpToolCallRequest(
+                        name="browser.execute_action",
+                        arguments={
+                            "session_id": "session-1",
+                            "action": {"action": "navigate", "url": "https://news.example.org/", "reason": "read"},
+                        },
+                    )
+                )
+                self.assertTrue(response.isError)
+                self.assertEqual(response.content[0].text, message)
+                self.assertEqual(response.structuredContent, {"error": message, "code": "not_permitted"})
+
+    async def test_lookups_that_miss_reach_the_caller(self) -> None:
+        # A mistyped auth_profile reached agents as "Tool execution failed".
+        message = "No saved auth profile 'shop'. browser.list_auth_profiles lists the saved ones."
+        self.manager.create_session = AsyncMock(side_effect=FileNotFoundError(message))
+
+        response = await self.gateway.call_tool(
+            McpToolCallRequest(name="browser.create_session", arguments={"auth_profile": "shop"})
+        )
+
+        self.assertTrue(response.isError)
+        self.assertEqual(response.structuredContent, {"error": message, "code": "not_found"})
+
+    async def test_os_file_not_found_errors_stay_opaque(self) -> None:
+        self.manager.create_session = AsyncMock(
+            side_effect=FileNotFoundError(2, "No such file or directory", "/data/auth/profiles/shop/state.json")
+        )
+
+        with self.assertLogs("app.tool_gateway.gateway", level="ERROR"):
+            response = await self.gateway.call_tool(
+                McpToolCallRequest(name="browser.create_session", arguments={"auth_profile": "shop"})
+            )
+
+        self.assertEqual(response.content[0].text, "Tool execution failed")
+        self.assertNotIn("/data/auth", json.dumps(response.structuredContent))
+
+    async def test_browser_errors_reach_the_caller_without_playwright_noise(self) -> None:
+        # A wait that timed out and a script that threw were "Tool execution
+        # failed"; the browser's reason is about the caller's own page.
+        from playwright.async_api import Error as PlaywrightError
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        page = SimpleNamespace(
+            wait_for_selector=AsyncMock(
+                side_effect=PlaywrightTimeoutError(
+                    "Page.wait_for_selector: Timeout 500ms exceeded.\nCall log:\n  - waiting for locator('#never')"
+                )
+            ),
+            content=AsyncMock(
+                side_effect=PlaywrightError(
+                    "Page.content: ReferenceError: notDefined is not defined\n"
+                    "    at eval (eval at evaluate (:311:30), <anonymous>:1:1)\n"
+                    "    at UtilityScript.evaluate (<anonymous>:311:30)"
+                )
+            ),
+        )
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page))
+
+        waited = await self.full_gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.wait_for_selector", arguments={"session_id": "session-1", "selector": "#never"}
+            )
+        )
+        read = await self.full_gateway.call_tool(
+            McpToolCallRequest(name="browser.get_html", arguments={"session_id": "session-1"})
+        )
+
+        self.assertEqual(
+            waited.structuredContent, {"error": "Page.wait_for_selector: Timeout 500ms exceeded.", "code": "timeout"}
+        )
+        self.assertEqual(
+            read.structuredContent,
+            {"error": "Page.content: ReferenceError: notDefined is not defined", "code": "browser_error"},
+        )
+
+    async def test_os_permission_errors_stay_opaque(self) -> None:
+        # An OS-level PermissionError carries an errno and can name a server path.
+        self.manager.execute_decision = AsyncMock(
+            side_effect=PermissionError(13, "Permission denied", "/data/artifacts/session-1/secret")
+        )
+
+        with self.assertLogs("app.tool_gateway.gateway", level="ERROR"):
+            response = await self.gateway.call_tool(
+                McpToolCallRequest(
+                    name="browser.execute_action",
+                    arguments={"session_id": "session-1", "action": {"action": "reload", "reason": "r"}},
+                )
+            )
+
+        self.assertTrue(response.isError)
+        self.assertEqual(response.content[0].text, "Tool execution failed")
+        self.assertNotIn("/data/artifacts", json.dumps(response.structuredContent))
+
     async def test_approval_required_bubbles_back_as_tool_error(self) -> None:
         approval = ApprovalRecord(
             id="approval-1",
@@ -1104,6 +1356,8 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.isError)
         self.assertEqual(response.structuredContent["status"], "approval_required")
         self.assertEqual(response.structuredContent["approval"]["id"], "approval-1")
+        # The key the tool descriptions tell the caller to pass back.
+        self.assertEqual(response.structuredContent["approval_id"], "approval-1")
 
     async def test_browser_action_error_bubbles_back_as_structured_tool_error(self) -> None:
         self.manager.execute_decision = AsyncMock(

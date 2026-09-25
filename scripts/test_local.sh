@@ -6,13 +6,13 @@ cd "${ROOT_DIR}"
 
 source "${ROOT_DIR}/scripts/python_env.sh"
 
-# Accept an interpreter only if it is 3.10+ AND has the controller's deps —
+# Accept an interpreter only if it is 3.11+ AND has the controller's deps —
 # probing both at once lets the resolver skip a bare system Python and keep
 # looking (e.g. the Windows `py` launcher) instead of failing on the first hit.
 CONTROLLER_DEPS_PROBE='import importlib.util
 import sys
 
-if sys.version_info < (3, 10):
+if sys.version_info < (3, 11):
     raise SystemExit(1)
 required = [
     "apscheduler",
@@ -26,14 +26,15 @@ required = [
     "PIL",
     "pyotp",
     "pytesseract",
+    "pytest",
     "redis",
 ]
 missing = [name for name in required if importlib.util.find_spec(name) is None]
 raise SystemExit(0 if not missing else 1)'
 
-if ! PYTHON_BIN="$(resolve_python310_bin "${CONTROLLER_DEPS_PROBE}")"; then
+if ! PYTHON_BIN="$(resolve_python_bin "${CONTROLLER_DEPS_PROBE}")"; then
   cat >&2 <<EOF
-No Python 3.10+ interpreter with the controller's dependencies was found.
+No Python 3.11+ interpreter with the controller's dependencies was found.
 
 Install them with:
   python3 -m pip install -e ./controller[dev]
@@ -50,4 +51,8 @@ export PYTHONPATH="${ROOT_DIR}/controller${PYTHONPATH:+:${PYTHONPATH}}"
 # id, rate limits) turns on auth the tests don't send — ~138 route tests then
 # fail with 400s that never happen in CI or Docker, which have no .env.
 cd "${ROOT_DIR}/controller"
-exec "${PYTHON_BIN}" -m unittest discover -s tests -v
+# pytest, as CI runs it. `unittest discover -s tests` imports the test modules
+# as top-level modules, so tests/__init__.py — the suite's environment
+# defaults — never runs, and ~145 HTTP tests fail; it also skips every
+# pytest-style test (about a third of the suite).
+exec "${PYTHON_BIN}" -m pytest tests/ -q "$@"

@@ -86,9 +86,7 @@ def fetch_advisories(repo: str) -> list[dict]:
         capture_output=True,
     )
     if result.returncode != 0:
-        raise SystemExit(
-            f"Could not list security advisories for {repo}:\n{result.stderr.strip()}"
-        )
+        raise SystemExit(f"Could not list security advisories for {repo}:\n{result.stderr.strip()}")
     return json.loads(result.stdout)
 
 

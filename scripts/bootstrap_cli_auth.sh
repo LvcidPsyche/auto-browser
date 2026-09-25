@@ -80,6 +80,16 @@ for provider in "${providers[@]}"; do
   fi
 done
 
+# The provider CLIs are in the controller image only when it was built with
+# INSTALL_AGENT_CLIS=true. Rebuilding here would not stick: the next plain
+# `docker compose up --build` would drop them again. The setting belongs in .env.
+if [[ "${INSTALL_AGENT_CLIS:-false}" != "true" ]]; then
+  echo >&2 "The controller image only includes the codex/claude/gemini CLIs when built with INSTALL_AGENT_CLIS=true."
+  echo >&2 "Add INSTALL_AGENT_CLIS=true to .env, run: docker compose build controller"
+  echo >&2 "then run this script again."
+  exit 1
+fi
+
 container_cli_home="${CLI_HOME:-/data/cli-home}"
 if [[ "$container_cli_home" != /data/* ]]; then
   echo >&2 "bootstrap_cli_auth.sh only supports CLI_HOME paths under /data/."

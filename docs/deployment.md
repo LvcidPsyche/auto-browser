@@ -92,7 +92,14 @@ OPENAI_AUTH_MODE=cli
 CLAUDE_AUTH_MODE=cli
 GEMINI_AUTH_MODE=cli
 CLI_HOME=/data/cli-home
+INSTALL_AGENT_CLIS=true
 ```
+
+`INSTALL_AGENT_CLIS=true` builds the three CLIs (and Node.js, about 750 MB) into
+the controller image, which leaves them out by default. Rebuild after setting it:
+`docker compose build controller`. When a `cli` provider's binary is missing,
+production startup fails with an error naming this setting, and
+`GET /agent/providers` shows the same hint.
 
 Then copy the signed-in CLI state into the mounted data directory:
 
@@ -114,7 +121,7 @@ If the easiest path is to sign in on the target box directly, use:
 ./scripts/bootstrap_cli_auth.sh gemini
 ```
 
-That helper is for the default writable `/data/...` auth cache flow. It opens the provider CLI inside the controller image with `HOME=$CLI_HOME` (normally `/data/cli-home`), so the resulting login state lands in the mounted `./data` directory where `*_AUTH_MODE=cli` expects it.
+That helper is for the default writable `/data/...` auth cache flow, and it needs `INSTALL_AGENT_CLIS=true` in `.env` (it says so and stops otherwise). It opens the provider CLI inside the controller image with `HOME=$CLI_HOME` (normally `/data/cli-home`), so the resulting login state lands in the mounted `./data` directory where `*_AUTH_MODE=cli` expects it.
 
 If the target machine already has those subscription logins locally, prefer the host-mount override instead of copying caches:
 
@@ -126,7 +133,7 @@ GEMINI_AUTH_MODE=cli \
 docker compose -f docker-compose.yml -f docker-compose.host-subscriptions.yml up -d --build
 ```
 
-That override mounts `~/.codex`, `~/.claude`, `~/.claude.json`, and `~/.gemini` read-only at the same home-path inside the container and sets `CLI_HOME` to that host-style home. If your login home is different, change `CLI_HOST_HOME`. Do not use `bootstrap_cli_auth.sh` in that mode; sign in on the host first and then start the override.
+That override builds the controller with the provider CLIs, mounts `~/.codex`, `~/.claude`, `~/.claude.json`, and `~/.gemini` read-only at the same home-path inside the container, and sets `CLI_HOME` to that host-style home. If your login home is different, change `CLI_HOST_HOME`. Do not use `bootstrap_cli_auth.sh` in that mode; sign in on the host first and then start the override.
 
 If Codex subscription auth still fails inside Docker, switch only OpenAI to the host bridge:
 
@@ -151,7 +158,7 @@ OPENAI_AUTH_MODE=host_bridge
 OPENAI_HOST_BRIDGE_SOCKET=/data/host-bridge/codex.sock
 ```
 
-That keeps `codex` on the host, reuses the host login state directly, and lets the container call it over a shared Unix socket.
+That keeps `codex` on the host, reuses the host login state directly, and lets the container call it over a shared Unix socket, so the controller image does not need the CLIs for OpenAI.
 The controller now health-checks that socket and the bridge kills stuck host `codex` jobs after 55 seconds by default.
 Treat the socket as a host-trust boundary: any local process that can connect to it can trigger host-side `codex exec`.
 
