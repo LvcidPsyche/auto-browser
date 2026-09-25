@@ -151,6 +151,17 @@ def test_the_node_list_is_capped_but_counts_are_not() -> None:
     assert outline["role_counts"]["link"] == 50
 
 
+def test_past_the_node_limit_counts_focus_and_depth_are_unchanged() -> None:
+    # Past the cap, lines take a cheaper path; every limit must agree with the
+    # uncapped outline on the counts, the focused node and its depth.
+    full = outline_from_aria_snapshot(FORM_SNAPSHOT, limit=10_000)
+    for limit in range(len(full["nodes"]) + 1):
+        capped = outline_from_aria_snapshot(FORM_SNAPSHOT, limit=limit)
+        assert capped["role_counts"] == full["role_counts"], limit
+        assert capped["focused"] == full["focused"], limit
+        assert capped["nodes"] == full["nodes"][:limit], limit
+
+
 def test_unknown_lines_are_ignored() -> None:
     outline = outline_from_aria_snapshot('not yaml\n- ???\n- button "Go"\n')
 
