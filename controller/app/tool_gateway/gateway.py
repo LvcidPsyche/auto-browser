@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from pydantic import BaseModel, ValidationError
 
 from ..action_errors import BrowserActionError, SessionNotFoundError
@@ -338,6 +340,21 @@ class McpToolGateway:
             return McpToolCallResponse(
                 content=[McpToolCallContent(text=message)],
                 structuredContent={"error": message, "code": "not_permitted"},
+                isError=True,
+            )
+        except PlaywrightError as exc:
+            # The browser's answer about the caller's own page: a selector that
+            # never appeared, an invalid selector, a script that threw. These
+            # reached agents as "Tool execution failed", so a timeout looked
+            # like a crash and an eval_js error could not be debugged.
+            # Keep the reason; drop Playwright's call log and the stack frames of
+            # its own evaluation wrapper, which say nothing about the page.
+            message = (getattr(exc, "message", None) or str(exc)).split("\nCall log:")[0]
+            message = message.split("\n    at ")[0].strip()
+            code = "timeout" if isinstance(exc, PlaywrightTimeoutError) else "browser_error"
+            return McpToolCallResponse(
+                content=[McpToolCallContent(text=message[:2000])],
+                structuredContent={"error": message[:2000], "code": code},
                 isError=True,
             )
         except Exception:

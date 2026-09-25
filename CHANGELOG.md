@@ -175,7 +175,11 @@ configuration now answers `400` until you list the name in
   names the file missing from the upload directory. Before, both said "Tool
   execution failed". Those messages name what the caller asked for instead of
   the resolved path under a data root. OS-level permission and file errors,
-  which can name server paths, stay opaque. The `approval_required`
+  which can name server paths, stay opaque. The browser's own errors come back
+  with their reason too, code `timeout` or `browser_error`: a
+  `wait_for_selector` timeout, an invalid selector, or an exception thrown by
+  an approved `eval_js` expression. Playwright's call log and wrapper stack
+  frames are trimmed. The `approval_required`
   payload also gains a top-level `approval_id`, which the tool descriptions
   tell callers to send back.
 

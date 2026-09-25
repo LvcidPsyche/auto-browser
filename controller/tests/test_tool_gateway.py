@@ -1263,6 +1263,45 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.content[0].text, "Tool execution failed")
         self.assertNotIn("/data/auth", json.dumps(response.structuredContent))
 
+    async def test_browser_errors_reach_the_caller_without_playwright_noise(self) -> None:
+        # A wait that timed out and a script that threw were "Tool execution
+        # failed"; the browser's reason is about the caller's own page.
+        from playwright.async_api import Error as PlaywrightError
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        page = SimpleNamespace(
+            wait_for_selector=AsyncMock(
+                side_effect=PlaywrightTimeoutError(
+                    "Page.wait_for_selector: Timeout 500ms exceeded.\nCall log:\n  - waiting for locator('#never')"
+                )
+            ),
+            content=AsyncMock(
+                side_effect=PlaywrightError(
+                    "Page.content: ReferenceError: notDefined is not defined\n"
+                    "    at eval (eval at evaluate (:311:30), <anonymous>:1:1)\n"
+                    "    at UtilityScript.evaluate (<anonymous>:311:30)"
+                )
+            ),
+        )
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page))
+
+        waited = await self.full_gateway.call_tool(
+            McpToolCallRequest(
+                name="browser.wait_for_selector", arguments={"session_id": "session-1", "selector": "#never"}
+            )
+        )
+        read = await self.full_gateway.call_tool(
+            McpToolCallRequest(name="browser.get_html", arguments={"session_id": "session-1"})
+        )
+
+        self.assertEqual(
+            waited.structuredContent, {"error": "Page.wait_for_selector: Timeout 500ms exceeded.", "code": "timeout"}
+        )
+        self.assertEqual(
+            read.structuredContent,
+            {"error": "Page.content: ReferenceError: notDefined is not defined", "code": "browser_error"},
+        )
+
     async def test_os_permission_errors_stay_opaque(self) -> None:
         # An OS-level PermissionError carries an errno and can name a server path.
         self.manager.execute_decision = AsyncMock(
