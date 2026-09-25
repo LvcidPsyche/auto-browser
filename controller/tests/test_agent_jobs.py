@@ -172,6 +172,22 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hints.count("Resuming background agent job"), 1)
         AgentRunRequest.model_validate(job["request"])
 
+    async def test_restart_settles_a_job_that_was_being_cancelled(self) -> None:
+        record = await self.queue.store.create(
+            session_id="session-4",
+            kind="agent_run",
+            request=AgentRunRequest(provider="openai", goal="stale work").model_dump(),
+        )
+        record.status = "cancelling"
+        await self.queue.store.update(record)
+
+        await self.queue.store.mark_running_interrupted()
+
+        stored = await self.queue.get_job(record.id)
+        self.assertEqual(stored["status"], "cancelled")
+        discarded = await self.queue.discard_job(record.id)
+        self.assertEqual(discarded["status"], "discarded")
+
     async def test_discard_queued_job_marks_it_discarded(self) -> None:
         record = await self.queue.store.create(
             session_id="session-3",

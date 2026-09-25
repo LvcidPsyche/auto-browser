@@ -110,6 +110,12 @@ class AgentJobStore:
                 record.status = "interrupted"
                 record.error = "agent_job_interrupted_on_restart"
                 await self.update(record)
+            elif record.status == "cancelling":
+                # The restart finished the cancellation. Left as "cancelling",
+                # the job could never be discarded and still read as live.
+                record.status = "cancelled"
+                record.error = "agent_job_cancelled"
+                await self.update(record)
 
     def _list_sync(
         self,
