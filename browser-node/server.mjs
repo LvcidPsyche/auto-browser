@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest } from "node:http";
 import { connect as netConnect } from "node:net";
+import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { chromium } from "playwright";
 
@@ -40,6 +41,21 @@ const profilesRoot = process.env.BROWSER_PROFILES_ROOT || "/data/browser-profile
 // profile here, so a login is never silently lost. Cleanup is manual.
 const trashRoot = join(profilesRoot, ".trash");
 const healthcheckRoot = join(profilesRoot, ".healthcheck");
+// Node lease: which browser-node container currently owns this volume's
+// profiles. Chromium's own profile locks name a hostname/pid that a /proc scan
+// in THIS container cannot see if another container (another PID namespace)
+// shares the volume, so lock recovery and launches are only done by the node
+// holding a fresh lease. Heartbeat every 10s; another node's lease counts as
+// alive until it is PROFILE_NODE_LEASE_STALE_SECONDS old.
+const nodeLeaseFile = join(profilesRoot, ".node-lease.json");
+const nodeId = `${hostname()}:${process.pid}:${randomBytes(4).toString("hex")}`;
+const nodeLeaseHeartbeatMs = 10_000;
+const nodeLeaseStaleMs = Number.parseFloat(process.env.PROFILE_NODE_LEASE_STALE_SECONDS || "45") * 1000;
+// Manual override for a lease left by a node that is known to be gone (for
+// example a crashed container whose volume is now mounted elsewhere). Takes
+// the lease at startup regardless of its age. Never set it while another
+// browser-node may really be running on the same volume.
+const nodeLeaseForce = (process.env.PROFILE_NODE_LEASE_FORCE || "").toLowerCase() === "true";
 const deepHealthTtlMs = Number.parseFloat(process.env.PROFILE_DEEP_HEALTH_TTL_SECONDS || "300") * 1000;
 const defaultLocale = process.env.PERSISTENT_PROFILE_LOCALE || "ar-EG";
 const defaultTimezoneId = process.env.PERSISTENT_PROFILE_TIMEZONE || "Africa/Cairo";
@@ -63,8 +79,13 @@ class HttpError extends Error {
   }
 }
 
-// name -> { context, localPort, wsPath, cdpEndpoint, owner }
+// name -> { context, localPort, wsPath, cdpEndpoint, owner, generation }
 const profiles = new Map();
+// Every successful open (launch or re-attach) gets a new generation. A close
+// must name the generation it was given; a close for an older generation --
+// e.g. a slow close from a session that was replaced by a newer Open of the
+// same profile -- is a no-op instead of killing the newer session's browser.
+let generationCounter = 0;
 // relay id -> loopback CDP port. Profile names map to themselves; the deep
 // healthcheck registers a temporary id that no profile name can collide with.
 const relayTargets = new Map();
@@ -99,12 +120,40 @@ function normalizeOwner(value) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+/**
+ * state: "missing" (no marker file), "ok" (owner read; null = unowned), or
+ * "bad" (unreadable or malformed). A bad marker is never read as "unowned":
+ * that would let anyone claim the directory's logins.
+ */
 async function readOwnerMarker(dir) {
+  let raw;
   try {
-    const parsed = JSON.parse(await readFile(join(dir, OWNER_MARKER), "utf-8"));
-    return { exists: true, owner: normalizeOwner(parsed.owner) };
+    raw = await readFile(join(dir, OWNER_MARKER), "utf-8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") return { state: "missing", owner: null };
+    return { state: "bad", owner: null, error: err.message };
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !("owner" in parsed)) {
+      return { state: "bad", owner: null, error: "marker has no owner field" };
+    }
+    if (parsed.owner !== null && typeof parsed.owner !== "string") {
+      return { state: "bad", owner: null, error: "marker owner is not a string" };
+    }
+    return { state: "ok", owner: normalizeOwner(parsed.owner) };
+  } catch (err) {
+    return { state: "bad", owner: null, error: err.message };
+  }
+}
+
+/** Whether a directory holds anything beyond our own bookkeeping files. */
+async function hasProfileData(dir) {
+  try {
+    const entries = await readdir(dir);
+    return entries.some((entry) => entry !== OWNER_MARKER && !STALE_LOCK_FILES.includes(entry));
   } catch {
-    return { exists: false, owner: null };
+    return false;
   }
 }
 
@@ -114,9 +163,12 @@ async function writeOwnerMarker(dir, owner) {
 }
 
 /**
- * PIDs of any live process whose command line names this user-data-dir.
- * Linux only (/proc); elsewhere nothing can be proven, so nothing is reported
- * and Chromium's own lock handling is left to decide.
+ * PIDs of any live process in THIS container whose command line names this
+ * user-data-dir. Linux only. A /proc we cannot read proves nothing, so it
+ * fails closed (throws) instead of reporting "no holder". Processes in other
+ * containers are invisible here by design; the node lease covers them. On
+ * non-Linux (local development) there is no /proc and only the node lease
+ * guards the profile.
  */
 async function profileHolderPids(dir) {
   if (process.platform !== "linux") return [];
@@ -125,8 +177,8 @@ async function profileHolderPids(dir) {
   let entries = [];
   try {
     entries = await readdir("/proc");
-  } catch {
-    return [];
+  } catch (err) {
+    throw new HttpError(503, `cannot read /proc to check who holds ${dir}: ${err.message}`);
   }
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) continue;
@@ -138,6 +190,116 @@ async function profileHolderPids(dir) {
     }
   }
   return holders;
+}
+
+let nodeLeaseHeld = false;
+let nodeLeaseBlockedBy = null;
+
+async function readNodeLease() {
+  try {
+    const parsed = JSON.parse(await readFile(nodeLeaseFile, "utf-8"));
+    if (parsed && typeof parsed.node_id === "string" && Number.isFinite(parsed.heartbeat_at)) return parsed;
+    return { node_id: "<malformed>", heartbeat_at: Date.now() };
+  } catch (err) {
+    if (err && err.code === "ENOENT") return null;
+    // Unreadable/malformed: treat as a FRESH foreign lease (fail closed); it
+    // goes stale on its own only if nobody rewrites it, so use the file time.
+    try {
+      const info = await lstat(nodeLeaseFile);
+      return { node_id: "<unreadable>", heartbeat_at: info.mtimeMs };
+    } catch {
+      return { node_id: "<unreadable>", heartbeat_at: Date.now() };
+    }
+  }
+}
+
+async function writeNodeLease() {
+  await mkdir(profilesRoot, { recursive: true, mode: 0o700 });
+  const tmp = `${nodeLeaseFile}.${randomBytes(4).toString("hex")}.tmp`;
+  await writeFile(tmp, JSON.stringify({ node_id: nodeId, heartbeat_at: Date.now() }), { encoding: "utf-8", mode: 0o600 });
+  await rename(tmp, nodeLeaseFile);
+}
+
+/**
+ * Take or keep the node lease. Returns true when this node holds it. Another
+ * node's lease that is younger than the stale window blocks us (fail closed)
+ * until it stops heart-beating, unless PROFILE_NODE_LEASE_FORCE=true.
+ */
+async function refreshNodeLease({ force = false } = {}) {
+  const current = await readNodeLease();
+  const foreignAndFresh =
+    current && current.node_id !== nodeId && Date.now() - current.heartbeat_at < nodeLeaseStaleMs;
+  if (foreignAndFresh && !force) {
+    if (nodeLeaseHeld || nodeLeaseBlockedBy !== current.node_id) {
+      console.error(
+        `node lease: another browser-node (${current.node_id}) heart-beat ` +
+          `${Math.round((Date.now() - current.heartbeat_at) / 1000)}s ago on this volume -- refusing to ` +
+          "launch or unlock any profile until it stops (PROFILE_NODE_LEASE_FORCE=true overrides)",
+      );
+    }
+    nodeLeaseHeld = false;
+    nodeLeaseBlockedBy = current.node_id;
+    return false;
+  }
+  await writeNodeLease();
+  // Two nodes starting together could both write; the loser sees the other's
+  // id on the re-read and backs off.
+  await sleep(200);
+  const check = await readNodeLease();
+  const held = Boolean(check && check.node_id === nodeId);
+  if (held && !nodeLeaseHeld) {
+    console.log(`node lease acquired by ${nodeId}${current && current.node_id !== nodeId ? ` (previous: ${current.node_id})` : ""}`);
+  }
+  nodeLeaseHeld = held;
+  nodeLeaseBlockedBy = held ? null : check && check.node_id;
+  return held;
+}
+
+async function requireNodeLease() {
+  // Re-read on every use: another node taking the lease (e.g. a forced
+  // takeover) must stop this one immediately, not at the next heartbeat.
+  const current = await readNodeLease();
+  if (current && current.node_id === nodeId) nodeLeaseHeld = true;
+  else await refreshNodeLease();
+  if (!nodeLeaseHeld) {
+    throw new HttpError(
+      503,
+      `another browser-node (${nodeLeaseBlockedBy || "unknown"}) holds this volume's profile lease; refusing (fail closed)`,
+    );
+  }
+}
+
+async function releaseNodeLease() {
+  if (!nodeLeaseHeld) return;
+  const current = await readNodeLease().catch(() => null);
+  if (current && current.node_id === nodeId) await unlink(nodeLeaseFile).catch(() => {});
+  nodeLeaseHeld = false;
+}
+
+/**
+ * Startup recovery: every Chromium lock on the volume was left by a process
+ * that no longer exists -- but only if no other node is alive on it. Runs
+ * once, after this node has the lease.
+ */
+async function sweepAllStaleLocks() {
+  let entries = [];
+  try {
+    entries = await readdir(profilesRoot, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+    const dir = profileDir(entry.name);
+    try {
+      await assertNotHeldElsewhere(dir);
+      const removed = await clearStaleLocks(dir);
+      if (removed.length) console.log(`startup: profile '${entry.name}': cleared stale ${removed.join(", ")}`);
+    } catch (err) {
+      console.error(`startup: left locks of profile '${entry.name}' alone: ${err.message}`);
+    }
+  }
+  await rm(healthcheckRoot, { recursive: true, force: true }).catch(() => {});
 }
 
 async function clearStaleLocks(dir) {
@@ -237,13 +399,26 @@ function persistentLaunchArgs() {
 }
 
 async function launchProfile(name, opts, owner) {
+  await requireNodeLease();
   const userDataDir = profileDir(name);
   if (existsSync(userDataDir)) {
     await assertNotHeldElsewhere(userDataDir);
     const removed = await clearStaleLocks(userDataDir);
     if (removed.length) console.log(`persistent profile '${name}': cleared stale ${removed.join(", ")}`);
     const marker = await readOwnerMarker(userDataDir);
-    if (marker.owner !== null && marker.owner !== owner) {
+    if (marker.state === "bad") {
+      // Cannot tell whose logins these are: never open them for anyone.
+      console.error(`persistent profile '${name}': owner marker unreadable (${marker.error}); moving to trash`);
+      await moveToTrash(name, "bad-marker");
+    } else if (marker.state === "missing" && (await hasProfileData(userDataDir))) {
+      // Data with no owner record (created before markers existed). Only the
+      // controller-verified "remember me" default may adopt it; any other
+      // name starts fresh and the old data is kept in trash.
+      if (!opts.adopt_unmarked) {
+        console.error(`persistent profile '${name}': unmarked existing data; moving to trash`);
+        await moveToTrash(name, "unmarked");
+      }
+    } else if (marker.state === "ok" && marker.owner !== null && marker.owner !== owner) {
       // Same name, different owner: the old identity's logins must never
       // open for the new one. Kept (in trash), never reused.
       await moveToTrash(name, "owner-changed");
@@ -252,7 +427,7 @@ async function launchProfile(name, opts, owner) {
   // 0700: this directory holds a real, logged-in browser profile.
   await mkdir(userDataDir, { recursive: true, mode: 0o700 });
   const marker = await readOwnerMarker(userDataDir);
-  if (!marker.exists || (marker.owner === null && owner !== null)) {
+  if (marker.state === "missing" || (marker.state === "ok" && marker.owner === null && owner !== null)) {
     await writeOwnerMarker(userDataDir, owner);
   }
   // Checked before launch: Chromium creates "Default" the moment it starts.
@@ -295,6 +470,7 @@ async function launchProfile(name, opts, owner) {
     wsPath: discovered.wsPath,
     cdpEndpoint: relayEndpoint(name, discovered.wsPath),
     owner,
+    generation: ++generationCounter,
   };
   profiles.set(name, entry);
   relayTargets.set(name, discovered.localPort);
@@ -319,15 +495,20 @@ async function openProfile(name, opts) {
       existing.owner = owner;
       await writeOwnerMarker(profileDir(name), owner).catch(() => {});
     }
+    existing.generation = ++generationCounter;
     return { entry: existing, alreadyOpen: true, seeded: false, wasEmpty: false };
   }
   const launched = await launchProfile(name, opts, owner);
   return { entry: launched.entry, alreadyOpen: false, seeded: launched.seeded, wasEmpty: launched.wasEmpty };
 }
 
-async function closeProfile(name) {
+async function closeProfile(name, generation = undefined) {
   const entry = profiles.get(name);
   if (!entry) return { closed: true, existed: false };
+  if (generation !== undefined && generation !== entry.generation) {
+    console.log(`persistent profile '${name}': ignored close for generation ${generation} (current ${entry.generation})`);
+    return { closed: false, existed: true, stale_generation: true };
+  }
   profiles.delete(name);
   relayTargets.delete(name);
   try {
@@ -338,8 +519,12 @@ async function closeProfile(name) {
   return { closed: true, existed: true };
 }
 
-async function assertOwnerAllows(dir, owner) {
+async function assertOwnerAllows(dir, owner, { allowBadMarker = false } = {}) {
   const marker = await readOwnerMarker(dir);
+  if (marker.state === "bad") {
+    if (allowBadMarker) return;
+    throw new HttpError(409, `profile directory has an unreadable owner marker (${marker.error})`);
+  }
   if (marker.owner !== null && marker.owner !== owner) {
     throw new HttpError(403, "profile directory belongs to a different owner");
   }
@@ -348,7 +533,10 @@ async function assertOwnerAllows(dir, owner) {
 async function trashProfile(name, reason, owner) {
   const dir = profileDir(name);
   if (!existsSync(dir)) return { trashed: false, existed: false, was_open: false };
-  await assertOwnerAllows(dir, owner);
+  await requireNodeLease();
+  // Trash is the fail-safe direction (nothing is lost), so an unreadable
+  // marker does not block it -- it only must not open or rename the data.
+  await assertOwnerAllows(dir, owner, { allowBadMarker: true });
   const wasOpen = profiles.has(name);
   if (wasOpen) await closeProfile(name);
   await assertNotHeldElsewhere(dir);
@@ -365,8 +553,9 @@ async function renameProfile(name, newName, owner) {
     const replaced = existsSync(destination) ? await trashProfile(newName, "replaced-by-rename", owner) : null;
     return { renamed: false, existed: false, replaced_destination: Boolean(replaced && replaced.trashed) };
   }
+  await requireNodeLease();
   await assertOwnerAllows(source, owner);
-  if (existsSync(destination)) await assertOwnerAllows(destination, owner);
+  if (existsSync(destination)) await assertOwnerAllows(destination, owner, { allowBadMarker: true });
   if (profiles.has(name)) await closeProfile(name);
   if (profiles.has(newName)) await closeProfile(newName);
   await assertNotHeldElsewhere(source);
@@ -399,6 +588,7 @@ async function runDeepHealthcheck() {
   let browser = null;
   const started = Date.now();
   try {
+    await requireNodeLease();
     await mkdir(dir, { recursive: true, mode: 0o700 });
     if (process.platform === "linux") {
       // Exercise the crash-recovery path every time: a lock left by a
@@ -525,6 +715,7 @@ const controlServer = createServer(async (req, res) => {
       const result = await withLifecycleLock(() => openProfile(name, body));
       return sendJson(res, 200, {
         cdp_endpoint: result.entry.cdpEndpoint,
+        generation: result.entry.generation,
         already_open: result.alreadyOpen,
         seeded: result.seeded,
         was_empty: result.wasEmpty,
@@ -532,7 +723,8 @@ const controlServer = createServer(async (req, res) => {
     }
     if (path === "/profiles/close") {
       const name = requireName(body.name);
-      return sendJson(res, 200, await withLifecycleLock(() => closeProfile(name)));
+      if (!Number.isInteger(body.generation)) throw new HttpError(400, "generation is required");
+      return sendJson(res, 200, await withLifecycleLock(() => closeProfile(name, body.generation)));
     }
     if (path === "/profiles/trash") {
       const name = requireName(body.name);
@@ -669,6 +861,13 @@ console.log(
     `(persistent profiles ${persistentProfilesEnabled ? "enabled" : "disabled"})`,
 );
 if (persistentProfilesEnabled) {
+  await mkdir(profilesRoot, { recursive: true, mode: 0o700 });
+  if (await refreshNodeLease({ force: nodeLeaseForce })) {
+    await sweepAllStaleLocks();
+  }
+  setInterval(() => {
+    refreshNodeLease().catch((err) => console.error(`node lease heartbeat failed: ${err.message}`));
+  }, nodeLeaseHeartbeatMs).unref();
   await listen(relayServer, cdpRelayPort, cdpRelayHost);
   console.log(`CDP relay listening on ${cdpRelayHost}:${cdpRelayPort}`);
   if (!profileControlToken) {
@@ -718,6 +917,9 @@ async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   await Promise.all([...profiles.values()].map((entry) => entry.context.close().catch(() => {})));
+  // Profiles are closed: hand the volume over at once instead of making the
+  // next container wait out the stale window.
+  await releaseNodeLease().catch(() => {});
   await legacyBrowserServer.close().catch(() => {});
   process.exit(0);
 }

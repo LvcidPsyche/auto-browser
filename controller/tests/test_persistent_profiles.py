@@ -56,6 +56,7 @@ class PersistentProfileClientOpenTests(unittest.IsolatedAsyncioTestCase):
             "already_open": False,
             "seeded": True,
             "was_empty": True,
+            "generation": 7,
         }
         context, mock_client = _mock_async_client(response)
 
@@ -68,6 +69,7 @@ class PersistentProfileClientOpenTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(handle.cdp_endpoint, "ws://browser-node:1234/devtools/browser/abc")
         self.assertTrue(handle.seeded)
+        self.assertEqual(handle.generation, 7)
         self.assertTrue(handle.was_empty)
         self.assertFalse(handle.already_open)
         body = mock_client.post.await_args.kwargs["json"]
@@ -82,7 +84,7 @@ class PersistentProfileClientOpenTests(unittest.IsolatedAsyncioTestCase):
         client = PersistentProfileClient(settings)
         response = MagicMock()
         response.status_code = 200
-        response.json.return_value = {"cdp_endpoint": "ws://x/y", "already_open": True}
+        response.json.return_value = {"cdp_endpoint": "ws://x/y", "already_open": True, "generation": 1}
         context, mock_client = _mock_async_client(response)
 
         with patch("app.persistent_profiles.httpx.AsyncClient", return_value=context):
@@ -129,7 +131,7 @@ class PersistentProfileClientCloseTests(unittest.IsolatedAsyncioTestCase):
         settings = _settings()
         client = PersistentProfileClient(settings)
         with patch("app.persistent_profiles.httpx.AsyncClient", side_effect=RuntimeError("network down")):
-            await client.close("owner-default")  # must not raise
+            await client.close("owner-default", generation=1)  # must not raise
 
     async def test_close_sends_the_profile_name(self) -> None:
         settings = _settings()
@@ -139,10 +141,10 @@ class PersistentProfileClientCloseTests(unittest.IsolatedAsyncioTestCase):
         context, mock_client = _mock_async_client(response)
 
         with patch("app.persistent_profiles.httpx.AsyncClient", return_value=context):
-            await client.close("owner-default")
+            await client.close("owner-default", generation=4)
 
         body = mock_client.post.await_args.kwargs["json"]
-        self.assertEqual(body, {"name": "owner-default"})
+        self.assertEqual(body, {"name": "owner-default", "generation": 4})
         self.assertEqual(
             mock_client.post.await_args.kwargs["headers"], {"Authorization": "Bearer secret-token"}
         )
@@ -151,7 +153,7 @@ class PersistentProfileClientCloseTests(unittest.IsolatedAsyncioTestCase):
         settings = _settings()
         client = PersistentProfileClient(settings)
         with patch("app.persistent_profiles.httpx.AsyncClient") as mock_ctor:
-            await client.close("bad name")
+            await client.close("bad name", generation=1)
             mock_ctor.assert_not_called()
 
 
@@ -163,7 +165,7 @@ class PersistentProfileClientAuthTests(unittest.IsolatedAsyncioTestCase):
         client = PersistentProfileClient(_settings())
         response = MagicMock()
         response.status_code = 200
-        response.json.return_value = {"cdp_endpoint": "ws://browser-node:9225/cdp/x/devtools/browser/1"}
+        response.json.return_value = {"cdp_endpoint": "ws://browser-node:9225/cdp/x/devtools/browser/1", "generation": 3}
         context, mock_client = _mock_async_client(response)
         with patch("app.persistent_profiles.httpx.AsyncClient", return_value=context):
             await client.open("owner-default", owner="tenant", context_kwargs={}, storage_state=None)
@@ -180,7 +182,7 @@ class PersistentProfileClientAuthTests(unittest.IsolatedAsyncioTestCase):
                 await client.trash("owner-default", reason="deleted", owner=None)
             with self.assertRaises(PersistentProfileError):
                 await client.rename("a", "b", owner=None)
-            self.assertFalse(await client.close("owner-default"))
+            self.assertFalse(await client.close("owner-default", generation=1))
             mock_ctor.assert_not_called()
 
     async def test_trash_and_rename_send_owner_and_surface_status(self) -> None:
@@ -206,6 +208,24 @@ class PersistentProfileClientAuthTests(unittest.IsolatedAsyncioTestCase):
             result = await client.rename("old-name", "new-name", owner=None)
         self.assertEqual(result, {"renamed": True})
         self.assertEqual(mock_client.post.await_args.args[0], "http://browser-node:9224/profiles/rename")
+
+
+class GenerationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_open_without_a_generation_is_refused(self) -> None:
+        client = PersistentProfileClient(_settings())
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"cdp_endpoint": "ws://x/y"}
+        context, _mock_client = _mock_async_client(response)
+        with patch("app.persistent_profiles.httpx.AsyncClient", return_value=context):
+            with self.assertRaises(PersistentProfileError):
+                await client.open("owner-default", context_kwargs={}, storage_state=None)
+
+    async def test_close_without_a_generation_sends_nothing(self) -> None:
+        client = PersistentProfileClient(_settings())
+        with patch("app.persistent_profiles.httpx.AsyncClient") as mock_ctor:
+            self.assertFalse(await client.close("owner-default", generation=None))
+            mock_ctor.assert_not_called()
 
 
 class RuntimeAttachTests(unittest.IsolatedAsyncioTestCase):

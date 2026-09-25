@@ -77,6 +77,9 @@ class FakeCdpBrowser:
         self.close = AsyncMock()
 
 
+_GENERATION = iter(range(1, 10_000))
+
+
 def _handle(name: str = "owner-default", *, already_open=False, seeded=False, was_empty=True):
     return PersistentProfileHandle(
         name=name,
@@ -84,6 +87,7 @@ def _handle(name: str = "owner-default", *, already_open=False, seeded=False, wa
         already_open=already_open,
         seeded=seeded,
         was_empty=was_empty,
+        generation=next(_GENERATION),
     )
 
 
@@ -113,7 +117,7 @@ class _Base(unittest.IsolatedAsyncioTestCase):
                 session.auto_persist_task.cancel()
         self.tmp.cleanup()
 
-    async def _fake_open(self, name, *, owner=None, context_kwargs=None, storage_state=None):
+    async def _fake_open(self, name, *, owner=None, adopt_unmarked=False, context_kwargs=None, storage_state=None):
         await asyncio.sleep(0.01)  # a real launch awaits; lets concurrent Opens interleave
         return _handle(name, **self.handle_kwargs)
 
@@ -301,7 +305,10 @@ class ExclusiveLeaseTests(_Base):
         session = self.manager.sessions[result["id"]]
         await self.manager.close_session(result["id"])
 
-        self.manager.persistent_profiles.close.assert_awaited_once_with("owner-default")
+        self.manager.persistent_profiles.close.assert_awaited_once_with(
+            "owner-default", generation=session.persistent_profile_generation
+        )
+        self.assertIsNotNone(session.persistent_profile_generation)
         self.browsers[0].close.assert_awaited_once()  # CDP disconnect
         self.contexts[0].close.assert_not_awaited()  # never close() the profile's own context
         # A late retirement of the same session must not release it again.
@@ -321,7 +328,8 @@ class ExclusiveLeaseTests(_Base):
         self.manager.runtime.attach_persistent_context = AsyncMock(side_effect=RuntimeError("relay down"))
         with self.assertRaises(RuntimeError):
             await self.manager.create_session(name="fixture")
-        self.manager.persistent_profiles.close.assert_awaited_once_with("owner-default")
+        self.assertEqual(self.manager.persistent_profiles.close.await_args.args, ("owner-default",))
+        self.manager.persistent_profiles.close.assert_awaited_once()
         self.assertEqual(self.manager.sessions, {})
         self.assertEqual(self.manager._session_reservations, set())
 
@@ -338,7 +346,8 @@ class ExclusiveLeaseTests(_Base):
         self.manager._maybe_provision_session_tunnel = AsyncMock(side_effect=RuntimeError("boom"))
         with self.assertRaises(RuntimeError):
             await self.manager.create_session(name="fixture")
-        self.manager.persistent_profiles.close.assert_awaited_once_with("owner-default")
+        self.assertEqual(self.manager.persistent_profiles.close.await_args.args, ("owner-default",))
+        self.manager.persistent_profiles.close.assert_awaited_once()
         self.browsers[0].close.assert_awaited_once()
         self.contexts[0].close.assert_not_awaited()
 
@@ -388,6 +397,52 @@ class LegacySessionLimitTests(_Base):
         self.assertEqual(len(errors), 1, results)
         self.assertEqual(len(self.manager.sessions), 1)
         self.manager.persistent_profiles.open.assert_not_awaited()
+
+
+class OpenCloseRaceTests(_Base):
+    """Re-review finding 1: a new Open must not slip in between a closing
+    session letting go and browser-node closing the process."""
+
+    async def test_open_during_a_slow_close_waits_and_launches_fresh(self) -> None:
+        events: list[str] = []
+        close_started = asyncio.Event()
+
+        async def slow_close(name, *, generation):
+            events.append(f"close-start:{generation}")
+            close_started.set()
+            await asyncio.sleep(0.05)
+            events.append(f"close-end:{generation}")
+            return True
+
+        async def recording_open(name, **kwargs):
+            handle = await self._fake_open(name, **kwargs)
+            events.append(f"open:{handle.generation}")
+            return handle
+
+        self.manager.persistent_profiles.close = AsyncMock(side_effect=slow_close)
+        first = await self.manager.create_session(name="one")
+        self.manager.persistent_profiles.open = AsyncMock(side_effect=recording_open)
+        first_generation = self.manager.sessions[first["id"]].persistent_profile_generation
+
+        closing = asyncio.create_task(self.manager.close_session(first["id"]))
+        await close_started.wait()
+        second = await self.manager.create_session(name="two")
+        await closing
+
+        self.assertNotEqual(second["id"], first["id"])
+        self.assertNotIn("reused_existing_session", second)
+        # The new open happened strictly after the old close finished.
+        self.assertEqual(events[:2], [f"close-start:{first_generation}", f"close-end:{first_generation}"])
+        self.assertTrue(events[2].startswith("open:"))
+        self.assertIn(second["id"], self.manager.sessions)
+
+    async def test_only_the_remember_me_default_may_adopt_unmarked_data(self) -> None:
+        self._write_profile("nihad-google")
+        await self.manager.create_session(name="default")
+        self.assertTrue(self.manager.persistent_profiles.open.await_args.kwargs["adopt_unmarked"])
+        await self.manager.close_session(next(iter(self.manager.sessions)))
+        await self.manager.create_session(name="named", auth_profile="nihad-google")
+        self.assertFalse(self.manager.persistent_profiles.open.await_args.kwargs["adopt_unmarked"])
 
 
 if __name__ == "__main__":

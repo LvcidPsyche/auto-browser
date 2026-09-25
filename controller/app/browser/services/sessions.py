@@ -295,6 +295,10 @@ class BrowserSessionService:
             return self.manager.auth_profiles.normalize_name(settings.auto_persist_profile_name), auto_persist_owner
         return None, None
 
+    def profile_lease_lock(self, profile_name: str) -> asyncio.Lock:
+        """The per-profile lock that serializes Open/close/delete/rename/import."""
+        return self._profile_lease_lock(profile_name)
+
     def _profile_lease_lock(self, profile_name: str) -> asyncio.Lock:
         locks = self.manager._profile_lease_locks
         lock = locks.get(profile_name)
@@ -362,6 +366,12 @@ class BrowserSessionService:
                 persistent_handle = await self.manager.persistent_profiles.open(
                     persistent_profile_name,
                     owner=persistent_owner,
+                    # Data from before owner markers existed may only be
+                    # adopted by the remembered-login default, whose access
+                    # require_access has just verified; any other name with
+                    # unmarked data starts fresh (browser-node trashes it).
+                    adopt_unmarked=persistent_profile_name
+                    == self.manager.auth_profiles.normalize_name(auto_persist_name),
                     context_kwargs=context_kwargs,
                     storage_state=persistent_storage_state,
                 )
@@ -430,6 +440,7 @@ class BrowserSessionService:
                 last_auth_state_path=source_path if storage_state_path else None,
                 auth_profile_name=self.manager.auth_profiles.normalize_name(auth_profile) if auth_profile else None,
                 persistent_profile_name=persistent_profile_name,
+                persistent_profile_generation=persistent_handle.generation if persistent_handle else None,
                 mouse_position=(
                     self.manager.settings.default_viewport_width / 2,
                     self.manager.settings.default_viewport_height / 2,
@@ -536,6 +547,7 @@ class BrowserSessionService:
                 browser=browser,
                 runtime=runtime,
                 persistent_profile_name=persistent_profile_name if persistent_opened else None,
+                persistent_profile_generation=persistent_handle.generation if persistent_handle else None,
             )
             raise
 
@@ -619,7 +631,14 @@ class BrowserSessionService:
         browser: "Browser | None",
         runtime: "IsolatedBrowserRuntime | None",
         persistent_profile_name: str | None = None,
+        persistent_profile_generation: int | None = None,
     ) -> None:
+        """Roll back a failed Open.
+
+        Runs inside create()'s per-profile lease lock (so it must not take it
+        again), which is what keeps a concurrent Open of the same profile out
+        until the release below has finished.
+        """
         self.manager.sessions.pop(session_id, None)
         if session is not None and session.auto_persist_task is not None:
             session.auto_persist_task.cancel()
@@ -642,7 +661,9 @@ class BrowserSessionService:
             if session is not None:
                 session.persistent_profile_released = True
             if persistent_profile_name is not None:
-                await self.manager.persistent_profiles.close(persistent_profile_name)
+                await self.manager.persistent_profiles.close(
+                    persistent_profile_name, generation=persistent_profile_generation
+                )
             return
         if context is not None:
             try:
@@ -675,7 +696,12 @@ class BrowserSessionService:
 
     async def close(self, session_id: str) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
-        async with session.lock:
+        # Lock order everywhere: session.lock, then the profile lease lock.
+        # Holding the lease lock for the WHOLE close (up to removing the
+        # session) means an Open of the same profile that arrives mid-close
+        # waits, then launches fresh -- it can neither be handed this dying
+        # session nor have its new browser killed by this close.
+        async with session.lock, self.teardown_lock(session):
             if session.tunnel is not None:
                 await self.manager.tunnel_broker.release(session.tunnel)
             summary = await self.manager._session_summary(session, status="closed", live=False)
@@ -808,10 +834,11 @@ class BrowserSessionService:
                                 session.id, len(remaining),
                             )
                         else:
-                            await self._retire_dead_session(
-                                session,
-                                reason="its tracked browser page has closed and no other tabs remain",
-                            )
+                            async with self.teardown_lock(session):
+                                await self._retire_dead_session(
+                                    session,
+                                    reason="its tracked browser page has closed and no other tabs remain",
+                                )
                             return
 
     async def release_persistent_profile(self, session: "BrowserSession") -> None:
@@ -822,8 +849,15 @@ class BrowserSessionService:
         here, since for a persistent context that would be the browser
         itself), then asks browser-node to close the profile's Chromium so
         its state is flushed to disk and the window leaves the owner's view.
-        close(), dead-session retirement and create rollback all funnel here,
-        so the release can never happen twice.
+        close() and dead-session retirement funnel here, so the release can
+        never happen twice.
+
+        The caller must hold `teardown_lock(session)` -- the profile's lease
+        lock, the same one create() holds while it looks for a live session
+        and opens one -- so a new Open cannot slip in between "this session
+        let go" and "browser-node closed the process". browser-node adds a
+        second guard: the close names the generation this session was given
+        and is a no-op if the profile has been reopened since.
         """
         if session.persistent_profile_released or not session.persistent_profile_name:
             return
@@ -833,7 +867,15 @@ class BrowserSessionService:
                 await session.browser.close()
             except Exception as exc:
                 logger.debug("CDP disconnect for session %s failed: %s", session.id, exc)
-        await self.manager.persistent_profiles.close(session.persistent_profile_name)
+        await self.manager.persistent_profiles.close(
+            session.persistent_profile_name, generation=session.persistent_profile_generation
+        )
+
+    def teardown_lock(self, session: "BrowserSession") -> Any:
+        """The lease lock for a persistent-profile session; a no-op otherwise."""
+        if session.persistent_profile_name:
+            return self._profile_lease_lock(session.persistent_profile_name)
+        return contextlib.nullcontext()
 
     async def _retire_dead_session(self, session: "BrowserSession", *, reason: str) -> None:
         """End a session whose underlying page died without an explicit close.

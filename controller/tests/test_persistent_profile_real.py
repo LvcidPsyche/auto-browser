@@ -10,6 +10,7 @@ carries the connection.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -172,6 +173,24 @@ class RealBrowserNodeTests(unittest.IsolatedAsyncioTestCase):
         await denied_session.page.goto(f"http://{LAN}:{CONTROL_PORT}/healthz")
         self.assertIsNone(await denied_session.page.evaluate("() => localStorage.getItem('k')"))
         await manager.close_session(denied["id"])
+
+    async def test_open_racing_a_close_gets_a_live_browser(self) -> None:
+        """Re-review finding 1, against the real server: Open fired while the
+        previous session's close is in flight must end with a working
+        browser, never one killed by the late close."""
+        manager = self.manager
+        url = f"http://{LAN}:{CONTROL_PORT}/healthz"
+        for _ in range(3):
+            first = await manager.create_session(name="one", start_url=url)
+            closing = asyncio.create_task(manager.close_session(first["id"]))
+            await asyncio.sleep(0)  # let close start and flip its state
+            second = await manager.create_session(name="two")
+            await closing
+            self.assertNotEqual(second["id"], first["id"])
+            page = manager.sessions[second["id"]].page
+            await page.goto(url)
+            self.assertIn("persistent_profiles_enabled", await page.content())
+            await manager.close_session(second["id"])
 
 
 if __name__ == "__main__":

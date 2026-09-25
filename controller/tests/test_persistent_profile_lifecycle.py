@@ -230,6 +230,99 @@ class ImportTests(_Base):
         self.trash.assert_not_awaited()
 
 
+class ImportAtomicityTests(_Base):
+    """Re-review finding 2: nothing is trashed until the archive is fully
+    extracted; a failure after that puts everything back."""
+
+    def write_bad_archive(self, top_level: str) -> str:
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            good = b'{"cookies": [], "origins": []}'
+            info = tarfile.TarInfo(f"{top_level}/state.json")
+            info.size = len(good)
+            tar.addfile(info, io.BytesIO(good))
+            info = tarfile.TarInfo(f"{top_level}/../escape.txt")
+            info.size = 1
+            tar.addfile(info, io.BytesIO(b"x"))
+        name = f"{top_level}-bad.tar.gz"
+        (self.root / "auth").mkdir(parents=True, exist_ok=True)
+        (self.root / "auth" / name).write_bytes(buffer.getvalue())
+        return name
+
+    async def test_a_bad_archive_never_touches_the_browser_profile(self) -> None:
+        self.write_profile("nihad-google")
+        archive = self.write_bad_archive("nihad-google")
+        with self.assertRaises(Exception):
+            await self.profiles.import_profile(archive, overwrite=True)
+        self.trash.assert_not_awaited()
+        self.assertTrue((self.export_dir("nihad-google") / "state.json").exists())
+
+    async def test_an_oversized_member_never_touches_the_browser_profile(self) -> None:
+        from app.browser.services import auth_profiles as module
+
+        self.write_profile("nihad-google")
+        archive = self.write_archive("nihad-google")
+        original = module.MAX_ARCHIVE_MEMBER_BYTES
+        module.MAX_ARCHIVE_MEMBER_BYTES = 4
+        try:
+            with self.assertRaises(ValueError):
+                await self.profiles.import_profile(archive, overwrite=True)
+        finally:
+            module.MAX_ARCHIVE_MEMBER_BYTES = original
+        self.trash.assert_not_awaited()
+
+    async def test_trash_happens_after_the_new_export_is_in_place(self) -> None:
+        self.write_profile("nihad-google")
+        (self.export_dir("nihad-google") / "old-marker").write_text("old", encoding="utf-8")
+        archive = self.write_archive("nihad-google")
+        seen: list[bool] = []
+
+        async def trash(name, *, reason, owner):
+            seen.append((self.export_dir(name) / "old-marker").exists())
+            return {"trashed": True}
+
+        self.manager.persistent_profiles.trash = AsyncMock(side_effect=trash)
+        await self.profiles.import_profile(archive, overwrite=True)
+        self.assertEqual(seen, [False])  # new export already swapped in
+        self.assertFalse((self.export_dir("nihad-google") / "old-marker").exists())
+
+    async def test_trash_failure_restores_the_previous_export(self) -> None:
+        self.write_profile("nihad-google")
+        (self.export_dir("nihad-google") / "old-marker").write_text("old", encoding="utf-8")
+        archive = self.write_archive("nihad-google")
+        self.manager.persistent_profiles.trash = AsyncMock(side_effect=PersistentProfileError("down", status_code=502))
+        with self.assertRaises(PersistentProfileError):
+            await self.profiles.import_profile(archive, overwrite=True)
+        self.assertTrue((self.export_dir("nihad-google") / "old-marker").exists())
+        leftovers = [p.name for p in (self.root / "auth").iterdir() if p.name.startswith(".import-")]
+        self.assertEqual(leftovers, [])
+
+    async def test_trash_failure_on_a_new_name_leaves_no_export_behind(self) -> None:
+        archive = self.write_archive("brand-new")
+        self.manager.persistent_profiles.trash = AsyncMock(side_effect=PersistentProfileError("down", status_code=502))
+        with self.assertRaises(PersistentProfileError):
+            await self.profiles.import_profile(archive)
+        self.assertFalse(self.export_dir("brand-new").exists())
+
+
+class LeaseLockTests(_Base):
+    """Delete/rename/import hold the same per-profile lock as Open."""
+
+    async def test_delete_waits_for_an_open_in_progress(self) -> None:
+        import asyncio
+
+        self.write_profile("nihad-google")
+        lock = self.manager.session_lifecycle.profile_lease_lock("nihad-google")
+        await lock.acquire()
+        task = asyncio.create_task(self.profiles.delete("nihad-google"))
+        await asyncio.sleep(0.05)
+        self.assertFalse(task.done())
+        self.trash.assert_not_awaited()
+        lock.release()
+        await task
+        self.trash.assert_awaited_once()
+
+
 class FeatureOffTests(_Base):
     settings_overrides = {"PERSISTENT_PROFILES_ENABLED": False}
 

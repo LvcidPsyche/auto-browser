@@ -60,6 +60,8 @@ class PersistentProfileHandle:
     already_open: bool
     seeded: bool
     was_empty: bool
+    # Lease generation for this open; /profiles/close must carry it.
+    generation: int | None = None
 
 
 class PersistentProfileClient:
@@ -103,6 +105,7 @@ class PersistentProfileClient:
         name: str,
         *,
         owner: str | None = None,
+        adopt_unmarked: bool = False,
         context_kwargs: dict[str, Any] | None = None,
         storage_state: dict[str, Any] | None = None,
     ) -> PersistentProfileHandle:
@@ -111,6 +114,7 @@ class PersistentProfileClient:
         body: dict[str, Any] = {
             "name": name,
             "owner": owner,
+            "adopt_unmarked": adopt_unmarked,
             "viewport": context_kwargs.get("viewport"),
             "accept_downloads": context_kwargs.get("accept_downloads", True),
             "locale": context_kwargs.get("locale") or self.settings.persistent_profile_locale,
@@ -127,12 +131,16 @@ class PersistentProfileClient:
         cdp_endpoint = data.get("cdp_endpoint")
         if not cdp_endpoint:
             raise PersistentProfileError(f"browser-node did not return a CDP endpoint for persistent profile '{name}'")
+        generation = data.get("generation")
+        if not isinstance(generation, int) or isinstance(generation, bool):
+            raise PersistentProfileError(f"browser-node did not return a lease generation for profile '{name}'")
         return PersistentProfileHandle(
             name=name,
             cdp_endpoint=cdp_endpoint,
             already_open=bool(data.get("already_open")),
             seeded=bool(data.get("seeded")),
             was_empty=bool(data.get("was_empty")),
+            generation=generation,
         )
 
     async def ping(self) -> None:
@@ -146,7 +154,7 @@ class PersistentProfileClient:
             response = await client.get(f"{self.base_url}/healthz")
         response.raise_for_status()
 
-    async def close(self, name: str) -> bool:
+    async def close(self, name: str, *, generation: int | None) -> bool:
         """Close the profile's Chromium process in browser-node.
 
         The controller holds at most one live session per profile (see
@@ -154,6 +162,9 @@ class PersistentProfileClient:
         Best-effort and non-fatal: a failure leaves a running profile process
         behind (the next Open simply re-attaches to it) rather than breaking
         the rest of session-close cleanup. Returns whether it succeeded.
+
+        `generation` is the one this session's open returned; browser-node
+        ignores the close if the profile was reopened under a newer one.
         """
         try:
             name = normalize_profile_name(name)
@@ -161,7 +172,10 @@ class PersistentProfileClient:
             logger.warning("persistent profile close skipped: %s", exc)
             return False
         try:
-            await self._post("/profiles/close", {"name": name})
+            if generation is None:
+                logger.warning("persistent profile close for '%s' skipped: no lease generation", name)
+                return False
+            await self._post("/profiles/close", {"name": name, "generation": generation})
             return True
         except Exception as exc:
             logger.warning("persistent profile close failed for '%s': %s", name, exc)

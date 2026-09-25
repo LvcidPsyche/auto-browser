@@ -9,7 +9,7 @@
 // Needs a display for the headed profile browsers (any desktop, or Xvfb).
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { connect as netConnect } from "node:net";
 import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,7 +45,15 @@ async function control(path, body, { token = TOKEN, method = "POST" } = {}) {
     headers,
     body: method === "POST" ? JSON.stringify(body || {}) : undefined,
   });
-  return { status: response.status, body: await response.json() };
+  const result = { status: response.status, body: await response.json() };
+  if (path === "/profiles/open" && result.status === 200) lastGeneration.set(body.name, result.body.generation);
+  return result;
+}
+
+// Latest lease generation handed out per profile name.
+const lastGeneration = new Map();
+function closeLatest(name) {
+  return control("/profiles/close", { name, generation: lastGeneration.get(name) });
 }
 
 async function attach(endpoint, token = TOKEN) {
@@ -180,10 +188,12 @@ test("open twice reuses the running profile; close once ends it; state survives"
   const again = await control("/profiles/open", { name: "alpha", owner: "op1" });
   assert.equal(again.body.already_open, true);
   assert.equal(again.body.cdp_endpoint, first.body.cdp_endpoint);
+  assert.ok(again.body.generation > first.body.generation);
 
-  const closed = await control("/profiles/close", { name: "alpha" });
+  assert.equal((await control("/profiles/close", { name: "alpha" })).status, 400, "close needs a generation");
+  const closed = await closeLatest("alpha");
   assert.deepEqual(closed.body, { closed: true, existed: true });
-  const closedAgain = await control("/profiles/close", { name: "alpha" });
+  const closedAgain = await closeLatest("alpha");
   assert.deepEqual(closedAgain.body, { closed: true, existed: false });
 
   const reopened = await control("/profiles/open", { name: "alpha", owner: "op1" });
@@ -194,7 +204,7 @@ test("open twice reuses the running profile; close once ends it; state survives"
   await p2.goto(`http://${LAN}:${CONTROL_PORT}/healthz`);
   assert.equal(await p2.evaluate(() => localStorage.getItem("persisted")), "yes");
   await b2.close();
-  await control("/profiles/close", { name: "alpha" });
+  await closeLatest("alpha");
 });
 
 test("stale SingletonLock/DevToolsActivePort from a dead container do not block launch", async () => {
@@ -208,7 +218,7 @@ test("stale SingletonLock/DevToolsActivePort from a dead container do not block 
   const browser = await attach(opened.body.cdp_endpoint);
   assert.equal(browser.contexts().length, 1);
   await browser.close();
-  await control("/profiles/close", { name: "alpha" });
+  await closeLatest("alpha");
   assert.match(serverLog, /cleared stale SingletonLock, SingletonSocket, DevToolsActivePort/);
 });
 
@@ -259,7 +269,7 @@ test("rename moves the on-disk profile and its logins to the new name", async ()
   await p2.goto(`http://${LAN}:${CONTROL_PORT}/healthz`);
   assert.equal(await p2.evaluate(() => localStorage.getItem("who")), "beta");
   await b2.close();
-  await control("/profiles/close", { name: "gamma" });
+  await closeLatest("gamma");
 });
 
 test("deep healthcheck launches, relays and attaches a disposable profile", async () => {
@@ -268,4 +278,110 @@ test("deep healthcheck launches, relays and attaches a disposable profile", asyn
   assert.equal(deep.status, 200, JSON.stringify(deep.body));
   assert.equal(deep.body.ok, true);
   assert.deepEqual(readdirSync(join(profilesRoot, ".healthcheck")), []);
+});
+
+test("a close carrying an older generation cannot kill a newer open (Open/Close interleaving)", async () => {
+  // Session A opens, starts closing; before its close reaches browser-node a
+  // new Open of the same profile re-attaches to the still-running process.
+  const a = await control("/profiles/open", { name: "delta", owner: "op1" });
+  const b = await control("/profiles/open", { name: "delta", owner: "op1" });
+  assert.equal(b.body.already_open, true);
+  const browser = await attach(b.body.cdp_endpoint);
+  const late = await control("/profiles/close", { name: "delta", generation: a.body.generation });
+  assert.deepEqual(late.body, { closed: false, existed: true, stale_generation: true });
+  // B's browser is still alive and usable.
+  const page = browser.contexts()[0].pages()[0] || (await browser.contexts()[0].newPage());
+  await page.goto(`http://${LAN}:${CONTROL_PORT}/healthz`);
+  assert.match(await page.content(), /persistent_profiles_enabled/);
+  await browser.close();
+  const own = await control("/profiles/close", { name: "delta", generation: b.body.generation });
+  assert.deepEqual(own.body, { closed: true, existed: true });
+});
+
+test("an unreadable owner marker is never opened: moved to trash, fresh profile", async () => {
+  const dir = join(profilesRoot, "epsilon");
+  mkdirSync(join(dir, "Default"), { recursive: true });
+  writeFileSync(join(dir, "Default", "secret-login"), "alice's cookies");
+  writeFileSync(join(dir, ".auto-browser-owner.json"), "{not json");
+  const opened = await control("/profiles/open", { name: "epsilon", owner: "mallory" });
+  assert.equal(opened.status, 200, JSON.stringify(opened.body));
+  assert.equal(opened.body.was_empty, true);
+  assert.equal(existsSync(join(dir, "Default", "secret-login")), false);
+  const trashed = readdirSync(join(profilesRoot, ".trash")).filter((n) => n.startsWith("epsilon--"));
+  assert.ok(trashed.some((n) => n.endsWith("--bad-marker")), trashed.join(","));
+  await closeLatest("epsilon");
+  // A bad marker also blocks rename (never moves unknown logins to a new name).
+  writeFileSync(join(dir, ".auto-browser-owner.json"), "[]");
+  assert.equal((await control("/profiles/rename", { name: "epsilon", new_name: "epsilon2", owner: "mallory" })).status, 409);
+});
+
+test("unmarked existing data: only an adopting (remember-me) open keeps it", async () => {
+  for (const name of ["zeta", "eta"]) {
+    mkdirSync(join(profilesRoot, name, "Default"), { recursive: true });
+    writeFileSync(join(profilesRoot, name, "Default", "old-data"), "x");
+  }
+  const named = await control("/profiles/open", { name: "zeta", owner: "op1" });
+  assert.equal(named.body.was_empty, true);
+  assert.ok(readdirSync(join(profilesRoot, ".trash")).some((n) => n.startsWith("zeta--") && n.endsWith("--unmarked")));
+  await closeLatest("zeta");
+
+  const adopted = await control("/profiles/open", { name: "eta", owner: "op1", adopt_unmarked: true });
+  assert.equal(adopted.body.was_empty, false);
+  assert.ok(existsSync(join(profilesRoot, "eta", "Default", "old-data")));
+  const marker = JSON.parse(readFileSync(join(profilesRoot, "eta", ".auto-browser-owner.json"), "utf-8"));
+  assert.equal(marker.owner, "op1");
+  await closeLatest("eta");
+});
+
+test("node lease: a second browser-node on the same volume refuses to launch (fail closed)", async () => {
+  const serverPath = fileURLToPath(new URL("../server.mjs", import.meta.url));
+  const second = spawn(process.execPath, [serverPath], {
+    env: {
+      ...process.env,
+      PERSISTENT_PROFILES_ENABLED: "true",
+      PROFILE_CONTROL_TOKEN: TOKEN,
+      PROFILE_CONTROL_PORT: String(CONTROL_PORT + 100),
+      PROFILE_CDP_RELAY_PORT: String(RELAY_PORT + 100),
+      PLAYWRIGHT_SERVER_HOST: "127.0.0.1",
+      PLAYWRIGHT_SERVER_PORT: String(LEGACY_PORT + 100),
+      BROWSER_WS_ENDPOINT_FILE: join(root, "profile2", "ws.txt"),
+      BROWSER_PROFILES_ROOT: profilesRoot,
+      BROWSER_DOWNLOADS_DIR: join(root, "downloads2"),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let secondLog = "";
+  second.stdout.on("data", (c) => (secondLog += c));
+  second.stderr.on("data", (c) => (secondLog += c));
+  try {
+    for (let i = 0; i < 120 && !existsSync(join(root, "profile2", "ws.txt")); i += 1) {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    const refused = await fetch(`http://${LAN}:${CONTROL_PORT + 100}/profiles/open`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "theta", owner: "op1" }),
+    });
+    assert.equal(refused.status, 503);
+    assert.match(secondLog, /refusing to launch or unlock any profile/);
+    assert.equal(existsSync(join(profilesRoot, "theta")), false);
+    // The first node is unaffected.
+    const ok = await control("/profiles/open", { name: "theta", owner: "op1" });
+    assert.equal(ok.status, 200);
+    await closeLatest("theta");
+  } finally {
+    second.kill();
+  }
+});
+
+test("node lease: a fresh foreign lease blocks; a stale one is taken over", async () => {
+  const leaseFile = join(profilesRoot, ".node-lease.json");
+  writeFileSync(leaseFile, JSON.stringify({ node_id: "other-container:1:abcd", heartbeat_at: Date.now() }));
+  const blocked = await control("/profiles/open", { name: "iota", owner: "op1" });
+  assert.equal(blocked.status, 503, JSON.stringify(blocked.body));
+  writeFileSync(leaseFile, JSON.stringify({ node_id: "other-container:1:abcd", heartbeat_at: Date.now() - 120_000 }));
+  const taken = await control("/profiles/open", { name: "iota", owner: "op1" });
+  assert.equal(taken.status, 200, JSON.stringify(taken.body));
+  assert.notEqual(JSON.parse(readFileSync(leaseFile, "utf-8")).node_id, "other-container:1:abcd");
+  await closeLatest("iota");
 });

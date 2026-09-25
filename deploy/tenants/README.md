@@ -59,6 +59,17 @@ inside browser-node, so Google/Facebook see the same device every Open.
   go to `/data/browser-profiles/.trash/<name>--<UTC time>--<reason>`; clean
   that up by hand (`du -sh /data/browser-profiles/.trash/*` inside
   browser-node shows the sizes).
+- Lock recovery is guarded by a node lease (`/data/browser-profiles/.node-lease.json`,
+  heartbeat every 10s). A browser-node that finds another node's lease fresher
+  than 45s (`PROFILE_NODE_LEASE_STALE_SECONDS`) refuses to launch or unlock any
+  profile and logs `refusing to launch or unlock any profile`; a clean stop
+  hands the lease over at once, a crash makes the next container wait up to
+  the stale window. If a lease is stuck and you are certain no other
+  browser-node uses the volume, start browser-node once with
+  `PROFILE_NODE_LEASE_FORCE=true`, then remove it again.
+- A profile directory whose owner marker is unreadable, or (for any name other
+  than the remembered-login default) that has data but no marker, is moved to
+  `.trash` with reason `bad-marker` / `unmarked` and a fresh profile is started.
 - One live session at a time in this mode (one visible browser on the shared
   display); a second Open of the same profile returns the live session.
 - Rollback: set `PERSISTENT_PROFILES_ENABLED` to `"false"` on both services and
