@@ -4,14 +4,19 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
-Findings from a scan-and-review pass over the controller, client and deployment
-files. The automated scanners (bandit, semgrep, pip-audit, npm audit,
-shellcheck) turned up nothing that survived triage; everything below came from
-reading the code and was confirmed with a reproduction before it was fixed.
+## [1.8.0] — 2026-09-25
 
-A second pass drove the controller the way an agent does, over MCP against a
-real Chromium. It measured what each call costs a model and fixed what got in
-the way. Sizes below are measured, and each fix was checked live.
+Two passes since 1.7.0.
+
+The first was a security scan-and-review of the controller, client and
+deployment files. The automated scanners (bandit, semgrep, pip-audit, npm
+audit, shellcheck) turned up nothing that survived triage. Everything under
+*Security* came from reading the code and was confirmed with a reproduction
+before it was fixed.
+
+The second drove the controller the way an agent does, over MCP against a real
+Chromium. It measured what each call costs a model and fixed what got in the
+way. Sizes below are measured, and each fix was checked live.
 
 **If you run the controller directly without a token and reach it by a
 non-loopback name, read the Host-header entry before upgrading** — that
@@ -27,6 +32,11 @@ configuration now answers `400` until you list the name in
   `offset`).
 - The controller image leaves out the provider CLIs unless built with
   `INSTALL_AGENT_CLIS=true`.
+
+Two smaller upgrade notes:
+- `./data/browser-profile` and `./data/downloads` become owned by uid 10001 on
+  the host, because the browser no longer runs as root.
+- `/share/{token}/observe` returns only what the share viewer renders.
 
 ### Security
 
@@ -331,6 +341,19 @@ configuration now answers `400` until you list the name in
   and about 145 HTTP tests failed. It also skipped every pytest-style test,
   roughly a third of the suite. `make test-local` now runs all 1,091 tests.
 
+- The three PyPI packages declare their license as the SPDX expression `MIT`
+  instead of the deprecated `license = { text = "MIT" }` table, which
+  setuptools stops building after 2027-02-18. Building them from source needs
+  setuptools 77 or later (`auto-browser-client`, `auto-browser-mcp`) or
+  hatchling 1.27 or later (`auto-browser-langchain`). pip's isolated builds
+  fetch these automatically.
+
+- Controller dependencies: starlette 1.3.1 → 1.6.0, uvicorn 0.52.0 → 0.52.4,
+  pydantic-settings 2.14.2 → 2.15.0, cryptography 50.0.0 → 50.0.1, and ruff
+  0.16.1 → 0.16.5 for development. Starlette 1.5.1 limits a `FileResponse` to
+  100 byte ranges and rejects inverted ranges, and `/artifacts` is served
+  through it.
+
 ### Documentation
 
 - `docs/llm-adapters.md` now covers the OpenAI-compatible provider family,
@@ -344,7 +367,10 @@ configuration now answers `400` until you list the name in
 
 - The README's release highlights were for v1.5.0 and sat above the
   quickstart. A short "Recent Changes" section now follows the first demo.
-  ROADMAP reflects 1.7.0.
+  ROADMAP is current again.
+
+- `AGENTS.md` gives coding agents the repo's commands and the invariants CI
+  enforces.
 
 ## [1.7.0] — 2026-08-08
 
