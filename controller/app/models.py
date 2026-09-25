@@ -97,7 +97,7 @@ class CreateSessionRequest(StrictInputModel):
         default=None,
         max_length=500,
         repr=False,
-        description="Base32 TOTP secret. Actions fill a visible one-time-code field with the current code.",
+        description="Base32 TOTP secret for this session's one-time codes.",
     )
 
     @model_validator(mode="after")
