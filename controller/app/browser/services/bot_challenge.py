@@ -22,6 +22,12 @@ BOT_CHALLENGE_SIGNALS = (
     "bot detected",
 )
 
+CHALLENGE_PROBE_SCRIPT = """() => ({
+  title: document.title,
+  text: document.body?.innerText?.slice(0, 500) || '',
+  iframes: Array.from(document.querySelectorAll('iframe')).map((el) => el.src || el.getAttribute('src') || '')
+})"""
+
 
 class BrowserBotChallengeService:
     async def check(self, session: Any) -> dict[str, Any] | None:
@@ -30,16 +36,11 @@ class BrowserBotChallengeService:
         body_text = ""
         iframe_sources: list[str] = []
         try:
-            title = (await session.page.title()).lower()
-            body_text = (await session.page.evaluate("() => document.body?.innerText?.slice(0, 500) || ''")).lower()
-            iframe_sources = [
-                item.lower()
-                for item in (
-                    await session.page.evaluate(
-                        "() => Array.from(document.querySelectorAll('iframe')).map((el) => el.src || el.getAttribute('src') || '')"
-                    )
-                )
-            ]
+            # One evaluate, not three: this probe runs after every action.
+            probe = await session.page.evaluate(CHALLENGE_PROBE_SCRIPT)
+            title = str(probe.get("title") or "").lower()
+            body_text = str(probe.get("text") or "").lower()
+            iframe_sources = [str(item).lower() for item in probe.get("iframes") or []]
         except Exception as exc:
             # Page may be mid-navigation or already closed; check with what we have.
             logger.debug("bot challenge probe could not read page content: %s", exc)
