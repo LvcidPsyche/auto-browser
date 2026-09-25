@@ -12,6 +12,10 @@ ARG INSTALL_AGENT_CLIS=false
 ARG CODEX_CLI_VERSION=0.114.0
 ARG CLAUDE_CLI_VERSION=2.1.72
 ARG GEMINI_CLI_VERSION=0.32.1
+# pytest, ruff, pip-audit and the rest of requirements-dev.txt are about 58 MB
+# that a running controller never imports. `make test` and the CI job that runs
+# the suite inside this image build with INSTALL_DEV_DEPS=true.
+ARG INSTALL_DEV_DEPS=false
 
 WORKDIR /app
 
@@ -30,7 +34,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt requirements-dev.txt ./
-RUN pip install --no-cache-dir -r requirements.txt -r requirements-dev.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && if [ "$INSTALL_DEV_DEPS" = "true" ]; then \
+        pip install --no-cache-dir -r requirements-dev.txt; \
+    elif [ "$INSTALL_DEV_DEPS" != "false" ]; then \
+        echo "INSTALL_DEV_DEPS must be true or false, got '$INSTALL_DEV_DEPS'" >&2; exit 1; \
+    fi
 
 COPY app ./app
 COPY tests ./tests
