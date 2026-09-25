@@ -40,7 +40,9 @@ def _record(session_id: str, status: str) -> SessionRecord:
     )
 
 
-class SessionLookupTests(unittest.IsolatedAsyncioTestCase):
+class _RealManagerTestCase(unittest.IsolatedAsyncioTestCase):
+    """A real BrowserManager over temporary data roots, with no browser."""
+
     async def asyncSetUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -58,6 +60,8 @@ class SessionLookupTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.manager.session_store.startup()
 
+
+class SessionLookupTests(_RealManagerTestCase):
     async def test_each_reason_gets_its_own_code_and_message(self) -> None:
         await self.manager.session_store.upsert(_record("sess-closed", "closed"))
         await self.manager.session_store.upsert(_record("sess-lost", "interrupted"))
@@ -88,6 +92,27 @@ class SessionLookupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["status"], "closed")
         with self.assertRaises(SessionNotFoundError):
             await self.manager.get_session_record("sess-never")
+
+
+class MissingFileMessageTests(_RealManagerTestCase):
+    """Lookups that miss name what the caller asked for, not a path under a data root."""
+
+    async def test_a_missing_auth_profile_is_named(self) -> None:
+        with self.assertRaises(FileNotFoundError) as caught:
+            self.manager.auth_profiles.resolve_state_path("shop", must_exist=True)
+
+        self.assertIn("No saved auth profile 'shop'", str(caught.exception))
+        self.assertIn("browser.list_auth_profiles", str(caught.exception))
+        self.assertNotIn(self.tmp.name, str(caught.exception))
+
+    async def test_a_missing_upload_is_named(self) -> None:
+        with self.assertRaises(FileNotFoundError) as caught:
+            self.manager.uploads.safe_path("receipt.pdf")
+
+        self.assertIn("'receipt.pdf'", str(caught.exception))
+        self.assertIn("UPLOAD_ROOT", str(caught.exception))
+        self.assertNotIn(self.tmp.name, str(caught.exception))
+        self.assertIsNone(caught.exception.errno)
 
 
 class GatewaySurfaceTests(unittest.IsolatedAsyncioTestCase):

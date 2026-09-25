@@ -1238,6 +1238,31 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.content[0].text, message)
                 self.assertEqual(response.structuredContent, {"error": message, "code": "not_permitted"})
 
+    async def test_lookups_that_miss_reach_the_caller(self) -> None:
+        # A mistyped auth_profile reached agents as "Tool execution failed".
+        message = "No saved auth profile 'shop'. browser.list_auth_profiles lists the saved ones."
+        self.manager.create_session = AsyncMock(side_effect=FileNotFoundError(message))
+
+        response = await self.gateway.call_tool(
+            McpToolCallRequest(name="browser.create_session", arguments={"auth_profile": "shop"})
+        )
+
+        self.assertTrue(response.isError)
+        self.assertEqual(response.structuredContent, {"error": message, "code": "not_found"})
+
+    async def test_os_file_not_found_errors_stay_opaque(self) -> None:
+        self.manager.create_session = AsyncMock(
+            side_effect=FileNotFoundError(2, "No such file or directory", "/data/auth/profiles/shop/state.json")
+        )
+
+        with self.assertLogs("app.tool_gateway.gateway", level="ERROR"):
+            response = await self.gateway.call_tool(
+                McpToolCallRequest(name="browser.create_session", arguments={"auth_profile": "shop"})
+            )
+
+        self.assertEqual(response.content[0].text, "Tool execution failed")
+        self.assertNotIn("/data/auth", json.dumps(response.structuredContent))
+
     async def test_os_permission_errors_stay_opaque(self) -> None:
         # An OS-level PermissionError carries an errno and can name a server path.
         self.manager.execute_decision = AsyncMock(

@@ -169,8 +169,13 @@ configuration now answers `400` until you list the name in
   refusals raise `PermissionError`: a host outside `ALLOWED_HOSTS`, a retry
   with an approval that is not granted yet, a path outside its root. The
   gateway did not surface those, so a blocked navigation looked like a crash.
-  They now return their reason with code `not_permitted`. OS-level permission
-  errors, which can name server paths, stay opaque. The `approval_required`
+  They now return their reason with code `not_permitted`. Lookups that miss
+  return their reason with code `not_found`: a mistyped `auth_profile` in
+  `create_session` now says "No saved auth profile 'shop'", and an upload
+  names the file missing from the upload directory. Before, both said "Tool
+  execution failed". Those messages name what the caller asked for instead of
+  the resolved path under a data root. OS-level permission and file errors,
+  which can name server paths, stay opaque. The `approval_required`
   payload also gains a top-level `approval_id`, which the tool descriptions
   tell callers to send back.
 

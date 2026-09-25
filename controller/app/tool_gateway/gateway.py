@@ -308,6 +308,21 @@ class McpToolGateway:
             # collapsing them into the opaque catch-all below.
             message = str(exc.args[0]) if exc.args else exc.__class__.__name__
             return self._error_response(message)
+        except FileNotFoundError as exc:
+            # Lookups that miss raise FileNotFoundError with a message naming
+            # what the caller asked for: an auth profile, an upload file. A
+            # mistyped profile name reached agents as "Tool execution failed".
+            # One raised by the OS carries an errno and a server path, so it
+            # stays opaque, as with PermissionError below.
+            if exc.errno is not None:
+                logger.exception("tool %s failed", payload.name)
+                return self._error_response("Tool execution failed")
+            message = str(exc.args[0]) if exc.args else "Not found"
+            return McpToolCallResponse(
+                content=[McpToolCallContent(text=message)],
+                structuredContent={"error": message, "code": "not_found"},
+                isError=True,
+            )
         except PermissionError as exc:
             # Policy refusals raise PermissionError with a reason for the caller:
             # a host outside ALLOWED_HOSTS, an approval not yet granted or not
