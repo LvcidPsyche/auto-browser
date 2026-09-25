@@ -81,3 +81,75 @@ class AuthStateManagerTests(unittest.IsolatedAsyncioTestCase):
             manager.output_path(Path("/tmp/demo.json.enc")),
             Path("/tmp/demo.json"),
         )
+
+    async def test_prepare_for_context_accepts_a_max_age_override(self) -> None:
+        # The unattended "remember me" / cron path uses a much larger limit
+        # than the interactive default so it never silently fails just
+        # because nobody happened to open the browser recently.
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            manager = AuthStateManager(encryption_key=None, require_encryption=False, max_age_hours=1)
+            state_path = root / "state.json"
+            state_path.write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
+            import os
+
+            old_timestamp = state_path.stat().st_mtime - 5 * 3600  # 5h old
+            os.utime(state_path, (old_timestamp, old_timestamp))
+
+            with self.assertRaises(PermissionError):
+                manager.prepare_for_context(state_path)  # default 1h limit: stale
+
+            prepared = manager.prepare_for_context(state_path, max_age_hours=24)
+            try:
+                self.assertTrue(prepared.path.exists())
+            finally:
+                prepared.cleanup()
+
+    async def test_write_storage_state_rotates_previous_file_into_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            manager = AuthStateManager(encryption_key=None, require_encryption=False, max_age_hours=72)
+            destination = root / "state.json"
+
+            await manager.write_storage_state(FakeContext(), destination)
+            history_before = list(root.glob("state.json.*"))
+            self.assertEqual(history_before, [])  # nothing to rotate on the first write
+
+            await manager.write_storage_state(FakeContext(), destination)
+            history_after = list(root.glob("state.json.*"))
+            self.assertEqual(len(history_after), 1)
+            # The rotated copy holds what was live *before* this write, and the
+            # live file is never mistaken for a history file.
+            rotated = json.loads(history_after[0].read_text(encoding="utf-8"))
+            self.assertEqual(rotated["cookies"][0]["name"], "sid")
+            self.assertTrue(destination.exists())
+
+    async def test_write_storage_state_prunes_history_beyond_the_keep_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            manager = AuthStateManager(
+                encryption_key=None, require_encryption=False, max_age_hours=72, history_keep=2
+            )
+            destination = root / "state.json"
+
+            for _ in range(5):
+                await manager.write_storage_state(FakeContext(), destination)
+
+            # Every write prunes down to the keep limit immediately, so the
+            # count is deterministic regardless of same-second collisions.
+            history_files = [p for p in root.glob("state.json.*")]
+            self.assertEqual(len(history_files), 2)
+
+    async def test_history_files_are_never_mistaken_for_the_live_state_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            manager = AuthStateManager(encryption_key=None, require_encryption=False, max_age_hours=72)
+            destination = root / "state.json"
+
+            await manager.write_storage_state(FakeContext(), destination)
+            await manager.write_storage_state(FakeContext(), destination)
+
+            # inspect() on the live path must still see exactly the live file.
+            info = manager.inspect(destination)
+            self.assertTrue(info["exists"])
+            self.assertEqual(info["path"], str(destination))

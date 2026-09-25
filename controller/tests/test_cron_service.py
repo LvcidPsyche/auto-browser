@@ -85,6 +85,7 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
             start_url="https://example.com",
             auth_profile="ops",
             proxy_persona="us-east",
+            unattended=True,
         )
         queue.enqueue_run.assert_awaited_once()
         stored = service._load()[created["id"]]

@@ -1,0 +1,202 @@
+# One stack per enrolled immutable user/tenant pair. The provisioner supplies
+# only opaque deterministic names and private generated credentials. No service
+# has a published port. browser-node and controller never join control.
+services:
+  browser-node:
+    profiles: [tenant]
+    build:
+      context: ../../browser-node
+    init: true
+    # unless-stopped: comes back after a crash or a host reboot, but a stack
+    # the idle reaper stopped (`compose stop`) stays stopped.
+    restart: unless-stopped
+    mem_limit: 6g
+    memswap_limit: 6g
+    cpus: 4.0
+    # pids counts THREADS. The shared launchServer() Chromium alone is ~100,
+    # the owner's headed persistent profile ~150-250 (one renderer of ~15 per
+    # site it has open), and every new site or tab adds more. At 256 the cap
+    # was hit hundreds of times in the first hours of persistent profiles:
+    # Chromium could not create threads (glib g_thread_new abort / SIGTRAP),
+    # renderers and then the owner's own browser process crashed, websockify
+    # could not fork a noVNC connection, and the controller's Playwright
+    # driver died on the fallout (2026-09-25). browser-node now reports
+    # pids.current/max/events in /healthz/deep and warns above 80%.
+    pids_limit: 4096
+    shm_size: 1g
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE, SETUID, SETGID]
+    networks: [tenant]
+    healthcheck:
+      # The shared launchServer() browser (ws-endpoint file + 9223) and noVNC
+      # are up in both modes. With persistent profiles on, /healthz/deep also
+      # launches a disposable headless profile, clears a planted stale
+      # SingletonLock, and attaches to it through the authenticated CDP relay
+      # -- the exact path every Open takes. Its result is cached for 5 min
+      # inside browser-node (a failure for 1 min), so this runs a real
+      # Chromium launch at most that often -- and never while a real profile
+      # is open: then it probes that profile's CDP endpoint through the relay
+      # instead of launching a second Chromium beside the owner's.
+      test: [CMD-SHELL, 'test -s /data/browser-profile/browser-ws-endpoint.txt && curl -s --max-time 3 -o /dev/null http://127.0.0.1:9223/ && curl -fsS --max-time 3 http://127.0.0.1:6080/ >/dev/null && if [ "$$PERSISTENT_PROFILES_ENABLED" = "true" ]; then curl -fsS --max-time 45 -H "Authorization: Bearer $$PROFILE_CONTROL_TOKEN" http://127.0.0.1:9224/healthz/deep >/dev/null; fi']
+      interval: 10s
+      timeout: 50s
+      retries: 12
+      start_period: 30s
+    environment:
+      BROWSER_WIDTH: "1280"
+      BROWSER_HEIGHT: "800"
+      BROWSER_WS_ENDPOINT_FILE: /data/browser-profile/browser-ws-endpoint.txt
+      PLAYWRIGHT_SERVER_HOST: 0.0.0.0
+      PLAYWRIGHT_SERVER_PORT: "9223"
+      PLAYWRIGHT_SERVER_ADVERTISED_HOST: browser-node
+      PROFILE_CONTROL_PORT: "9224"
+      # Authenticated relay to each profile's loopback-only CDP port.
+      PROFILE_CDP_RELAY_PORT: "9225"
+      # Shared secret for /profiles/* and the CDP relay (controller sends it).
+      PROFILE_CONTROL_TOKEN: ${TENANT_PROFILE_CONTROL_TOKEN:?Missing profile control credential}
+      # Rollback: set to "false" (or delete the line) to get today's
+      # fresh-context-per-Open behaviour back exactly -- see
+      # controller/app/persistent_profiles.py and browser-node/server.mjs.
+      PERSISTENT_PROFILES_ENABLED: "true"
+      PERSISTENT_PROFILE_LOCALE: ar-EG
+      PERSISTENT_PROFILE_TIMEZONE: Africa/Cairo
+    volumes:
+      - type: volume
+        source: data
+        target: /data
+
+  controller:
+    profiles: [tenant]
+    build:
+      context: ../../controller
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 60s
+    mem_limit: 1g
+    memswap_limit: 1g
+    cpus: 2.0
+    pids_limit: 128
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    networks: [tenant]
+    depends_on:
+      browser-node:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).read()"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 10s
+    environment:
+      APP_ENV: production
+      API_BIND_SCOPE: exposed
+      API_BEARER_TOKEN: ""
+      API_BEARER_TOKENS: ${TENANT_OPERATOR_ID:?Missing operator}:${TENANT_CONTROLLER_TOKEN:?Missing controller credential}
+      SHARE_TOKEN_SECRET: ${TENANT_SHARE_SECRET:?Missing share secret}
+      AUTH_STATE_ENCRYPTION_KEY: ${TENANT_FERNET_KEY:?Missing encryption key}
+      REQUIRE_AUTH_STATE_ENCRYPTION: "true"
+      REQUIRE_OPERATOR_ID: "true"
+      # Screenshot capture through the virtual display costs ~33s per call here, while a
+      # text observation costs ~0.4s -- and the owner watches the live noVNC view anyway,
+      # so employees read pages as text by default.
+      PERCEPTION_PRESET_DEFAULT: text
+      # Every action takes a before/after screenshot, and with PII_SCRUB_SCREENSHOT on
+      # each one is OCR'd before it lands: ~30s per screenshot, ~60s per click on this
+      # host. The artifacts live in the single owner's private volume and he watches the
+      # same pixels live in noVNC, so the scrub buys nothing here and costs everything.
+      PII_SCRUB_SCREENSHOT: "false"
+      OCR_ENABLED: "false"
+      REQUEST_RATE_LIMIT_ENABLED: "true"
+      # One stack serves exactly one owner, and opening the noVNC viewer alone pulls ~50
+      # assets, each of which runs a guard call through here. The shipped 120/min budget
+      # is a public-API default and just made the viewer fail to connect.
+      REQUEST_RATE_LIMIT_REQUESTS: "20000"
+      CONTROLLER_ALLOWED_HOSTS: controller,localhost,127.0.0.1
+      ALLOWED_HOSTS: ${TENANT_ALLOWED_HOSTS:?Choose permitted websites}
+      # "allowlist" (default) = only ALLOWED_HOSTS. "public_internet" = any public
+      # http(s) site; private/internal addresses and TENANT_NAVIGATION_DENY_HOSTS
+      # stay blocked (controller/app/navigation_policy.py). Set per tenant in its .env.
+      NAVIGATION_POLICY: ${TENANT_NAVIGATION_POLICY:-allowlist}
+      NAVIGATION_DENY_HOSTS: ${TENANT_NAVIGATION_DENY_HOSTS:-}
+      MCP_ALLOWED_ORIGINS: ""
+      SESSION_ISOLATION_MODE: shared_browser_node
+      # One visible browser on the shared X display. Enforced in code too
+      # whenever PERSISTENT_PROFILES_ENABLED is on.
+      MAX_SESSIONS: "1"
+      STATE_DB_PATH: /data/db/operator.db
+      BROWSER_WS_ENDPOINT_FILE: /data/browser-profile/browser-ws-endpoint.txt
+      TAKEOVER_URL: http://127.0.0.1:6080/vnc.html
+      METRICS_ENABLED: "false"
+      # A persistent, headed Chromium profile is a real, consistent device:
+      # STEALTH_ENABLED injects nothing into it (navigator.webdriver is kept
+      # false by a launch switch in browser-node instead). The full stealth
+      # script still applies to fresh, non-profile contexts.
+      STEALTH_ENABLED: "true"
+      # Rollback: "false" (or delete the line) restores today's fresh-context-
+      # per-Open behaviour exactly -- must match browser-node's own flag.
+      PERSISTENT_PROFILES_ENABLED: "true"
+      BROWSER_NODE_HOST: browser-node
+      PROFILE_CONTROL_PORT: "9224"
+      PROFILE_CONTROL_TOKEN: ${TENANT_PROFILE_CONTROL_TOKEN:?Missing profile control credential}
+      BROWSER_PROFILES_ROOT: /data/browser-profiles
+      PERSISTENT_PROFILE_LOCALE: ar-EG
+      PERSISTENT_PROFILE_TIMEZONE: Africa/Cairo
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+      GEMINI_API_KEY: ""
+    volumes:
+      - type: volume
+        source: data
+        target: /data
+
+  approval-broker:
+    profiles: [tenant]
+    build:
+      context: ../..
+      dockerfile: approval_broker/Dockerfile
+    init: true
+    restart: "no"
+    mem_limit: 384m
+    memswap_limit: 384m
+    cpus: 0.5
+    pids_limit: 128
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    depends_on:
+      controller:
+        condition: service_started
+    environment:
+      BROKER_OWNER_TOKEN: ${BROKER_OWNER_TOKEN:?Missing portal owner credential}
+      BROKER_AGENT_TOKENS: ${BROKER_AGENT_TOKENS:?Missing gateway agent credential}
+      API_BEARER_TOKEN: ${TENANT_CONTROLLER_TOKEN:?Missing controller credential}
+      BROKER_UPSTREAM_URL: http://controller:8000
+      BROKER_TOTP_DB: /broker-state/totp.sqlite3
+      BROKER_PORTAL_ASSERTION_PUBLIC_KEY: ${BROKER_PORTAL_ASSERTION_PUBLIC_KEY:?Missing portal assertion public key}
+      BROKER_USER_ID: ${BROKER_USER_ID:?Missing immutable user identity}
+      BROKER_TENANT_ID: ${BROKER_TENANT_ID:?Missing immutable tenant identity}
+    volumes:
+      - type: volume
+        source: broker-state
+        target: /broker-state
+    networks:
+      tenant: {}
+      control:
+        aliases: ["${TENANT_BROKER_ALIAS:?Missing broker control alias}"]
+
+networks:
+  tenant:
+    external: true
+    name: ${TENANT_PRIVATE_NETWORK:?Provision an isolated private network}
+  control:
+    external: true
+    name: ${TENANT_CONTROL_NETWORK:?Provision the private control network}
+
+volumes:
+  data:
+    external: true
+    name: ${TENANT_DATA_VOLUME:?Provision an isolated data volume}
+  broker-state:
+    external: true
+    name: ${TENANT_BROKER_VOLUME:?Provision an isolated broker volume}

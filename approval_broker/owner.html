@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>موافقات المتصفح</title>
+</head>
+<body>
+  <h1>موافقات المتصفح</h1>
+  <p>افتح هذه الصفحة عبر الاتصال الخاص فقط. رمز المالك ورمز الهاتف لا يُحفظان في المتصفح.</p>
+  <button id="unlock" type="button">إدخال رمز المالك</button>
+  <button id="refresh" type="button">تحديث</button>
+  <p id="status" role="status"></p>
+  <h2>تفعيل تطبيق المصادقة</h2>
+  <p>من هاتفك، افتح تطبيق المصادقة وأضف حساباً جديداً يدوياً. انسخ المفتاح المعروض بعد البدء، ثم أدخل أول رمز يظهر في التطبيق لتفعيل الحماية. لا تشارك المفتاح مع المساعدين. إذا كان التطبيق مفعلاً بالفعل، لن يظهر المفتاح مرة أخرى.</p>
+  <p id="totp-state"></p>
+  <button id="setup-totp" type="button">بدء إعداد تطبيق المصادقة</button>
+  <div id="totp-secret" hidden>
+    <p>مفتاح الإعداد، يظهر هنا مؤقتاً فقط:</p>
+    <code id="totp-key" dir="ltr"></code>
+    <p>نوع الرمز: ستة أرقام، يتغير كل ثلاثين ثانية.</p>
+  </div>
+  <button id="activate-totp" type="button">تفعيل بالرمز الأول</button>
+  <h2>تسجيل الدخول بنفسك</h2>
+  <p>المتصفح يعمل على السيرفر. كل جلسة جديدة تحتاج رمزاً واحداً من هاتفك؛ بعدها يعمل المساعد داخل الجلسة المفتوحة دون رموز إضافية. إغلاق الجلسة يمنع المساعد من استخدامها حتى تفتح جلسة جديدة برمز جديد.</p>
+  <label for="login-url">رابط صفحة الدخول</label>
+  <input id="login-url" type="url" placeholder="https://example.com/login" size="48">
+  <label for="login-profile">الملف المحفوظ</label>
+  <select id="login-profile"><option value="">جلسة جديدة بلا ملف محفوظ</option></select>
+  <button id="start-login" type="button">فتح المتصفح برمز الهاتف</button>
+  <div id="sessions"></div>
+  <h2>الملفات المحفوظة</h2>
+  <div id="profiles"></div>
+  <h2>نشاط المساعدين</h2>
+  <p>المساعد يستخدم الجلسة المفتوحة فقط برمزه الخاص، دون رمز هاتف أو موافقة لكل طلب. يمكنك إيقاف وصوله أو إغلاق الجلسة في أي وقت.</p>
+  <div id="requests"></div>
+  <script src="/owner.js" defer></script>
+</body>
+</html>

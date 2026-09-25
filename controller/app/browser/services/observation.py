@@ -27,7 +27,12 @@ class BrowserObservationService:
     async def observe(self, session_id: str, limit: int = 40, preset: str | None = None) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         async with session.lock:
-            result = await self.observation_payload(session, limit=limit, preset=preset)
+            result = await self.manager.session_lifecycle.guarded(
+                session,
+                self.observation_payload(session, limit=limit, preset=preset),
+                what="observe",
+                timeout=self.manager.settings.browser_call_timeout_seconds,
+            )
             _events.emit_observe(
                 session_id,
                 result.get("url", ""),
@@ -39,7 +44,12 @@ class BrowserObservationService:
     async def capture_screenshot(self, session_id: str, *, label: str = "manual") -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         async with session.lock:
-            screenshot = await self._capture_screenshot_redacted(session, label)
+            screenshot = await self.manager.session_lifecycle.guarded(
+                session,
+                self._capture_screenshot_redacted(session, label),
+                what="screenshot",
+                timeout=self.manager.settings.browser_action_timeout_seconds,
+            )
             return {
                 "session": await self.manager._session_summary(session),
                 "url": session.page.url,
@@ -58,6 +68,56 @@ class BrowserObservationService:
             }
 
     async def observation_payload(
+        self,
+        session: "BrowserSession",
+        *,
+        limit: int = 40,
+        screenshot_label: str = "observe",
+        preset: str | None = None,
+    ) -> dict[str, Any]:
+        from .dialogs import BrowserDialogService
+
+        dialogs = getattr(self.manager, "dialogs", None)
+        if not isinstance(dialogs, BrowserDialogService):
+            return await self._observation_payload(
+                session, limit=limit, screenshot_label=screenshot_label, preset=preset
+            )
+        dialogs.heal_active_page(session)
+        open_dialog = await dialogs.open_dialog(session)
+        if open_dialog is not None:
+            # The tab is blocked by a JavaScript dialog: every page read would
+            # hang until it is answered, so report the dialog itself instead.
+            return {
+                "session": await self.manager._session_summary(session),
+                "url": session.page.url,
+                "title": "",
+                "active_element": None,
+                "text_excerpt": f"[{open_dialog.get('type')} dialog] {open_dialog.get('message', '')}",
+                "dom_outline": {},
+                "accessibility_outline": {"available": False, "nodes": []},
+                "ocr": None,
+                "interactables": [],
+                "screenshot_path": None,
+                "screenshot_url": None,
+                "console_messages": session.console_messages[-10:],
+                "page_errors": session.page_errors[-10:],
+                "request_failures": session.request_failures[-10:],
+                "tabs": [],
+                "recent_downloads": session.downloads[-10:],
+                "takeover_url": self.manager._current_takeover_url(session),
+                "remote_access": self.manager.remote_access.session_info(session),
+                "preset": preset or self.manager.settings.perception_preset_default,
+                "open_dialog": open_dialog,
+                "recent_dialogs": session.dialog_log[-5:],
+            }
+        payload = await self._observation_payload(
+            session, limit=limit, screenshot_label=screenshot_label, preset=preset
+        )
+        payload["open_dialog"] = None
+        payload["recent_dialogs"] = session.dialog_log[-5:]
+        return payload
+
+    async def _observation_payload(
         self,
         session: "BrowserSession",
         *,

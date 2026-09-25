@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import fnmatch
 import logging
 import weakref
 from dataclasses import dataclass, field
@@ -24,6 +23,7 @@ from .browser.services import (
     BrowserAuthProfileService,
     BrowserBotChallengeService,
     BrowserDiagnosticsService,
+    BrowserDialogService,
     BrowserObservationService,
     BrowserRemoteAccessService,
     BrowserRuntimeService,
@@ -33,16 +33,21 @@ from .browser.services import (
     BrowserUploadService,
     BrowserWitnessService,
 )
+from .browser.services.connection_health import driver_exit_error, playwright_driver_alive
 from .config import Settings
 from .downloads import DownloadCaptureService
+from .file_transfer import FileTransferService
+from .host_policy import host_is_allowed
 from .memory_manager import MemoryManager
 from .models import (
     BrowserActionDecision,
     SessionStatus,
     WitnessRemoteState,
 )
+from .navigation_policy import assert_resolves_public, check_public_url
 from .network_inspector import NetworkInspector
 from .ocr import OCRExtractor
+from .persistent_profiles import PersistentProfileClient
 from .pii_scrub import PiiScrubber
 from .session_isolation import DockerBrowserNodeProvisioner, IsolatedBrowserRuntime
 from .session_store import DurableSessionStore
@@ -127,6 +132,63 @@ class BrowserSession:
     pending_witness_context: dict[str, Any] | None = None
     witness_remote_state: WitnessRemoteState = field(default_factory=WitnessRemoteState)
     metadata: dict[str, Any] = field(default_factory=dict)
+    # JavaScript dialogs and popups -- see app/browser/services/dialogs.py.
+    # agent_action_depth > 0 while an agent action runs; a dialog then (or
+    # within agent_dialog_grace_until) belongs to that action. Any other
+    # dialog is the owner's and is left open on his screen.
+    agent_action_depth: int = 0
+    agent_dialog_grace_until: float = 0.0
+    open_dialogs: "weakref.WeakKeyDictionary[Any, Any]" = field(default_factory=weakref.WeakKeyDictionary)
+    dialog_log: list[dict[str, Any]] = field(default_factory=list)
+    popup_openers: "weakref.WeakKeyDictionary[Any, Any]" = field(default_factory=weakref.WeakKeyDictionary)
+    pending_popup: Any = None
+    # "Remember me": which profile this session's login state is silently kept
+    # in sync with (see Settings.auto_persist_*), and the background task doing
+    # the periodic re-save. Seeded from auth_profile_name at session creation
+    # when the caller opened a named profile (so that profile stays fresh
+    # instead of the "remember me" default); otherwise falls back to the
+    # default auto-persist profile. Not re-derived from auth_profile_name
+    # afterwards, so an explicit later save to a different profile does not
+    # retarget the background writer.
+    auto_persist_profile_name: str | None = None
+    auto_persist_task: "asyncio.Task[None] | None" = None
+    # Whether the remembered ("remember me") login actually loaded into this
+    # session's context, so the calling app can tell the owner "your saved
+    # login did not load" instead of silently showing a logged-out browser --
+    # and so auto-persist can refuse to overwrite a saved profile it never
+    # actually loaded (see BrowserSessionService.create / save_auto_persist).
+    remembered_login_loaded: bool = False
+    remembered_login_error: str | None = None
+    # Set when this session's context is a persistent Chromium profile (see
+    # PersistentProfileClient / browser-node's /profiles control API) rather
+    # than a fresh per-session context. Drives the release call on close --
+    # browser-node owns the actual process lifecycle via its own refcount, so
+    # a repeat Open of the same profile reuses the running one instead of
+    # launching a second Chromium against the same user-data-dir.
+    persistent_profile_name: str | None = None
+    # Set once this session's hold on its persistent profile has been given
+    # back (CDP client disconnected + browser-node told to close it), so
+    # close / retire / create-rollback can never release it twice.
+    persistent_profile_released: bool = False
+    # The lease generation browser-node handed out for this session's open;
+    # its /profiles/close ignores a close carrying an older generation.
+    persistent_profile_generation: str | None = None
+    # What this session's persistent Open asked browser-node for (owner,
+    # adopt_unmarked, context_kwargs) -- replayed verbatim when the
+    # controller's link to the profile dies and the session re-attaches in
+    # place to the still-running Chromium.
+    persistent_open_options: dict[str, Any] | None = None
+    # How many times this session has been re-attached after its browser
+    # connection died (driver exit, CDP drop).
+    reattach_count: int = 0
+    # Which Playwright driver instance (BrowserManager._driver_epoch) this
+    # session's browser/context/page handles belong to. Handles from an
+    # earlier (dead) driver are unusable even after a new driver starts.
+    driver_epoch: int = 0
+    # Set when a browser call on this session hit its hard timeout: the
+    # controller's Playwright view of the page is wedged even though the
+    # browser may be fine. The watchdog re-attaches the session in place.
+    unresponsive_reason: str | None = None
 
 
 SessionCreatedHook = Callable[[str, Page], Awaitable[None]]
@@ -155,6 +217,7 @@ class BrowserManager:
         self.auth_profiles = BrowserAuthProfileService(self)
         self.bot_challenge = BrowserBotChallengeService()
         self.tabs = BrowserTabService(self)
+        self.dialogs = BrowserDialogService(self)
         self.uploads = BrowserUploadService(self)
         self.observation = BrowserObservationService(self)
         self.session_lifecycle = BrowserSessionService(self)
@@ -200,6 +263,7 @@ class BrowserManager:
             encryption_key=self.settings.auth_state_encryption_key,
             require_encryption=self.settings.require_auth_state_encryption,
             max_age_hours=self.settings.auth_state_max_age_hours,
+            history_keep=self.settings.auth_state_history_keep,
         )
         self.ocr = OCRExtractor(
             enabled=self.settings.ocr_enabled,
@@ -224,8 +288,24 @@ class BrowserManager:
         self.witness_policy = WitnessPolicyEngine()
         self.runtime_provisioner = DockerBrowserNodeProvisioner(self.settings)
         self.tunnel_broker = IsolatedSessionTunnelBroker(self.settings)
+        self.persistent_profiles = PersistentProfileClient(self.settings)
+        self.file_transfers = FileTransferService(self)
+        # Session ids that passed the session-limit check but are not in
+        # `self.sessions` yet (their Open is still in flight). Counted by the
+        # limit check so two concurrent Opens cannot both squeeze past it.
+        self._session_reservations: set[str] = set()
+        # One lock per persistent profile name: at most one live session may
+        # hold a profile, and a second Open of it waits for the first to
+        # finish and then gets that same session back.
+        self._profile_lease_locks: dict[str, asyncio.Lock] = {}
         self._session_created_hook: SessionCreatedHook | None = None
         self._session_closed_hook: SessionClosedHook | None = None
+        # Serializes Playwright driver restarts (see restart_playwright_driver).
+        self._driver_lock = asyncio.Lock()
+        # Bumped on every driver restart; see BrowserSession.driver_epoch.
+        self._driver_epoch = 0
+        self._reap_task: asyncio.Task[None] | None = None
+        self._session_watchdog_task: asyncio.Task[None] | None = None
 
     def register_extension_hooks(
         self,
@@ -252,11 +332,77 @@ class BrowserManager:
         self.playwright = await async_playwright().start()
         await self.tunnel_broker.startup()
         await self.runtime_provisioner.startup()
-        if self.settings.session_isolation_mode == "shared_browser_node":
+        # In persistent-profile mode, browser-node no longer boots a shared
+        # launchServer() process to eagerly connect to -- every session
+        # instead acquires its own named profile's persistent context on
+        # demand (see session_lifecycle.create / persistent_profiles.py).
+        if self.settings.session_isolation_mode == "shared_browser_node" and not self.settings.persistent_profiles_enabled:
             await self.ensure_browser()
+        if self.settings.session_watchdog_interval_seconds > 0:
+            self._session_watchdog_task = asyncio.create_task(self._session_watchdog_loop())
+
+    async def _session_watchdog_loop(self) -> None:
+        """Find sessions whose browser link died and recover them promptly.
+
+        Without this a dead link is only noticed when somebody next touches
+        the session; the broker/portal meanwhile keep seeing it "active" and
+        the owner's Connect waits on a browser nobody can reach.
+        """
+        interval = self.settings.session_watchdog_interval_seconds
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.session_lifecycle.reap_dead_sessions()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - must never kill the watchdog
+                logger.warning("session watchdog pass failed: %s", exc)
+
+    async def restart_playwright_driver(self, *, reason: str) -> bool:
+        """Start a fresh Playwright driver if the current one has exited.
+
+        Every Browser/Context/Page handle from the dead driver is unusable, so
+        the shared-browser handle is dropped too (ensure_browser reconnects on
+        demand). Returns True when a restart actually happened.
+        """
+        async with self._driver_lock:
+            if self.playwright is not None and playwright_driver_alive(self.playwright):
+                return False
+            old = self.playwright
+            exit_error = driver_exit_error(old)
+            if exit_error:
+                reason = f"{reason}: {exit_error}"
+            self.playwright = None
+            self.browser = None
+            if old is not None:
+                try:
+                    await asyncio.wait_for(old.stop(), timeout=5)
+                except Exception as exc:
+                    logger.debug("stopping the dead Playwright driver failed (expected): %s", exc)
+            self.playwright = await async_playwright().start()
+            self._driver_epoch += 1
+            logger.error("Playwright driver had exited (%s); started a new one", reason)
+            try:
+                await self.audit.append(
+                    event_type="playwright_driver_restarted",
+                    status="ok",
+                    action="restart_playwright_driver",
+                    session_id=None,
+                    details={"reason": reason},
+                )
+            except Exception as exc:  # pragma: no cover - audit is best effort here
+                logger.warning("audit append failed after driver restart: %s", exc)
+            return True
 
     async def shutdown(self) -> None:
         logger.info("shutting down browser manager")
+        if self._session_watchdog_task is not None:
+            self._session_watchdog_task.cancel()
+            try:
+                await self._session_watchdog_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._session_watchdog_task = None
         session_ids = list(self.sessions.keys())
         for session_id in session_ids:
             try:
@@ -314,6 +460,7 @@ class BrowserManager:
         user_agent: str | None = None,
         protection_mode: str | None = None,
         totp_secret: str | None = None,
+        unattended: bool = False,
     ) -> dict[str, Any]:
         return await self.session_lifecycle.create(
             name=name,
@@ -328,6 +475,7 @@ class BrowserManager:
             user_agent=user_agent,
             protection_mode=protection_mode,
             totp_secret=totp_secret,
+            unattended=unattended,
         )
 
     async def get_session(self, session_id: str) -> BrowserSession:
@@ -491,6 +639,11 @@ class BrowserManager:
     def _attach_page_listeners(self, page: Page, session: BrowserSession) -> None:
         self.diagnostics.attach_page_listeners(page, session)
 
+    async def handle_dialog(
+        self, session_id: str, *, accept: bool, prompt_text: str | None = None
+    ) -> dict[str, Any]:
+        return await self.dialogs.handle(session_id, accept=accept, prompt_text=prompt_text)
+
     async def _handle_download(self, session: BrowserSession, download: Any) -> None:
         return await self.diagnostics.handle_download(session, download)
 
@@ -507,8 +660,11 @@ class BrowserManager:
         element_id: str | None = None,
         x: float | None = None,
         y: float | None = None,
+        pace: str = "human",
     ) -> dict[str, Any]:
-        return await self.actions.click(session_id, selector=selector, element_id=element_id, x=x, y=y)
+        return await self.actions.click(
+            session_id, selector=selector, element_id=element_id, x=x, y=y, pace=pace,
+        )
 
     async def hover(
         self,
@@ -518,8 +674,11 @@ class BrowserManager:
         element_id: str | None = None,
         x: float | None = None,
         y: float | None = None,
+        pace: str = "human",
     ) -> dict[str, Any]:
-        return await self.actions.hover(session_id, selector=selector, element_id=element_id, x=x, y=y)
+        return await self.actions.hover(
+            session_id, selector=selector, element_id=element_id, x=x, y=y, pace=pace,
+        )
 
     async def select_option(
         self,
@@ -549,6 +708,7 @@ class BrowserManager:
         element_id: str | None = None,
         clear_first: bool = True,
         sensitive: bool = False,
+        pace: str = "human",
     ) -> dict[str, Any]:
         return await self.actions.type(
             session_id,
@@ -557,13 +717,19 @@ class BrowserManager:
             element_id=element_id,
             clear_first=clear_first,
             sensitive=sensitive,
+            pace=pace,
         )
+
+    async def type_focused(self, session_id: str, *, text: str) -> dict[str, Any]:
+        return await self.actions.type_focused(session_id, text=text)
 
     async def press(self, session_id: str, key: str) -> dict[str, Any]:
         return await self.actions.press(session_id, key)
 
-    async def scroll(self, session_id: str, delta_x: float, delta_y: float) -> dict[str, Any]:
-        return await self.actions.scroll(session_id, delta_x, delta_y)
+    async def scroll(
+        self, session_id: str, delta_x: float, delta_y: float, *, pace: str = "human",
+    ) -> dict[str, Any]:
+        return await self.actions.scroll(session_id, delta_x, delta_y, pace=pace)
 
     async def wait(self, session_id: str, wait_ms: int) -> dict[str, Any]:
         return await self.actions.wait(session_id, wait_ms)
@@ -641,24 +807,40 @@ class BrowserManager:
     def _assert_url_allowed(self, url: str) -> None:
         # Parsed as the browser will parse it, not as urllib does — see
         # app/url_safety.py for the backslash host confusion this closes.
+        # NAVIGATION_POLICY picks allowlist vs any-public-site; both refuse
+        # what they refuse with a PermissionError (see app/navigation_policy.py).
+        if getattr(self.settings, "public_internet_navigation", False):
+            check_public_url(url, deny_hosts=self.settings.navigation_deny_host_list)
+            return
         host = urlparse(browser_equivalent_url(url)).hostname
         if not host:
             raise PermissionError(f"Could not determine hostname for URL: {url}")
-        patterns = self.settings.allowed_host_patterns
-        if not patterns or "*" in patterns:
+        if host_is_allowed(host, self.settings.allowed_host_patterns):
             return
-        for pattern in patterns:
-            pattern = pattern.lower()
-            normalized = pattern.removeprefix("*.")
-            if fnmatch.fnmatch(host, pattern) or host == normalized or host.endswith(f".{normalized}"):
-                return
         raise PermissionError(f"Host {host!r} is not allowlisted")
+
+    async def _assert_url_resolves_public(self, url: str) -> None:
+        """DNS-rebinding guard for the public-internet mode: a name that
+        resolves to a private/reserved address is refused. A no-op in
+        allowlist mode (the owner named every host himself)."""
+        if not getattr(self.settings, "public_internet_navigation", False):
+            return
+        await assert_resolves_public(url, deny_hosts=self.settings.navigation_deny_host_list)
 
     def _assert_runtime_url_allowed(self, url: str) -> None:
         parsed = urlparse(url)
         if parsed.scheme in {"about", "data", "blob", ""}:
             return
+        if parsed.scheme == "chrome-error" and getattr(self.settings, "public_internet_navigation", False):
+            # Chromium's own "this site can't be reached" page -- nothing loaded.
+            return
         self._assert_url_allowed(url)
+
+    async def _assert_runtime_url_resolves_public(self, url: str) -> None:
+        parsed = urlparse(url)
+        if parsed.scheme in {"about", "data", "blob", "", "chrome-error"}:
+            return
+        await self._assert_url_resolves_public(url)
 
     # ── Tabs ─────────────────────────────────────────────────────────────────
 
@@ -695,6 +877,12 @@ class BrowserManager:
     async def import_auth_profile(self, archive_path: str, *, overwrite: bool = False) -> dict[str, Any]:
         """Extract a .tar.gz archive into the reusable auth profile root."""
         return await self.auth_profiles.import_profile(archive_path, overwrite=overwrite)
+
+    async def delete_auth_profile(self, profile_name: str) -> dict[str, Any]:
+        return await self.auth_profiles.delete(profile_name)
+
+    async def rename_auth_profile(self, profile_name: str, new_name: str) -> dict[str, Any]:
+        return await self.auth_profiles.rename(profile_name, new_name)
 
     async def get_auth_state_info(self, session_id: str) -> dict[str, Any]:
         return await self.auth_profiles.auth_state_info(session_id)

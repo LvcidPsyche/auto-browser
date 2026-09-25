@@ -11,7 +11,16 @@ from pydantic import ValidationError
 from app.browser.services import BrowserActionService
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
-from app.models import BrowserActionDecision, CreateSessionRequest, HoverRequest, SelectOptionRequest, WaitRequest
+from app.models import (
+    BrowserActionDecision,
+    ClickRequest,
+    CreateSessionRequest,
+    HoverRequest,
+    ScrollRequest,
+    SelectOptionRequest,
+    TypeRequest,
+    WaitRequest,
+)
 from app.utils import UTC
 
 
@@ -53,6 +62,17 @@ class RequestModelTests(unittest.TestCase):
     def test_select_option_request_index_non_negative(self) -> None:
         with self.assertRaises(Exception):
             SelectOptionRequest(selector="select", index=-1)
+
+    def test_pace_defaults_to_human_on_every_acting_request(self) -> None:
+        self.assertEqual(ClickRequest(selector="#go").pace, "human")
+        self.assertEqual(TypeRequest(selector="#go", text="hi").pace, "human")
+        self.assertEqual(HoverRequest(selector="#go").pace, "human")
+        self.assertEqual(ScrollRequest().pace, "human")
+
+    def test_pace_accepts_fast_and_rejects_anything_else(self) -> None:
+        self.assertEqual(ClickRequest(selector="#go", pace="fast").pace, "fast")
+        with self.assertRaises(ValidationError):
+            ClickRequest(selector="#go", pace="turbo")
 
 
 class BrowserActionDecisionExtendedTests(unittest.TestCase):

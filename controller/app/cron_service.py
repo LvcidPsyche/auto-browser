@@ -282,6 +282,11 @@ class CronService:
             start_url=job.get("start_url"),
             auth_profile=job.get("auth_profile"),
             proxy_persona=job.get("proxy_persona"),
+            # Nobody is watching a scheduled run to notice or retry a stale-
+            # profile refusal, so it gets the same relaxed staleness limit as
+            # the default "remember me" profile (see Settings.auth_state_
+            # unattended_max_age_hours).
+            unattended=True,
         )
         session_id = session_result["id"]
         self._active_runs[job_id] = session_id

@@ -17,8 +17,21 @@ export BROWSER_WIDTH="$WIDTH" \
 
 BROWSER_USER="${BROWSER_USER:-browser}"
 
-mkdir -p /data/profile /data/downloads /tmp/runtime
+# The endpoint file's own directory is created and chowned too: a fresh data
+# volume has only a root-owned /data, so the unprivileged browser user could
+# not create it (EACCES, crash loop on every new tenant).
+WS_ENDPOINT_DIR="$(dirname "$WS_ENDPOINT_FILE")"
+case "$WS_ENDPOINT_DIR" in
+  /data/?*) ;;
+  *) echo "BROWSER_WS_ENDPOINT_FILE must live in a subdirectory of /data: $WS_ENDPOINT_FILE" >&2; exit 1 ;;
+esac
+mkdir -p /data/profile /data/downloads /data/browser-profiles "$WS_ENDPOINT_DIR" /tmp/runtime
 rm -f "$WS_ENDPOINT_FILE"
+
+# Crash recovery for persistent profiles (stale Chromium SingletonLock etc.
+# left by a killed container) is done by server.mjs, not here: only after it
+# holds the volume's node lease, so a lock that belongs to another live
+# browser-node sharing this volume is never removed.
 DISPLAY_NUM="${DISPLAY#:}"
 rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
 
@@ -35,7 +48,7 @@ run_as_browser() {
   fi
 }
 if [[ "$(id -u)" -eq 0 ]] && id "$BROWSER_USER" >/dev/null 2>&1; then
-  chown -R "$BROWSER_USER:$BROWSER_USER" /data/profile /data/downloads /tmp/runtime \
+  chown -R "$BROWSER_USER:$BROWSER_USER" /data/profile /data/downloads /data/browser-profiles "$WS_ENDPOINT_DIR" /tmp/runtime \
     || echo "warning: could not chown browser data directories; continuing" >&2
   mkdir -p /tmp/.X11-unix
   chmod 1777 /tmp/.X11-unix
@@ -60,7 +73,9 @@ unset VNC_PASSWORD
 
 run_as_browser Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" -ac +extension RANDR >/tmp/xvfb.log 2>&1 &
 run_as_browser fluxbox >/tmp/fluxbox.log 2>&1 &
-run_as_browser x11vnc -display "$DISPLAY" -forever -shared -rfbport 5900 "${VNC_AUTH_ARGS[@]}" -xkb >/tmp/x11vnc.log 2>&1 &
+# -add_keysyms teaches the X keymap Arabic and other non-Latin keysyms while
+# preserving the VNC authentication and non-root process boundary.
+run_as_browser x11vnc -display "$DISPLAY" -forever -shared -rfbport 5900 "${VNC_AUTH_ARGS[@]}" -xkb -add_keysyms >/tmp/x11vnc.log 2>&1 &
 run_as_browser /usr/share/novnc/utils/novnc_proxy --vnc localhost:5900 --listen 6080 >/tmp/novnc.log 2>&1 &
 
 cleanup() {

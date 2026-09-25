@@ -89,11 +89,15 @@ class CreateSessionRequest(StrictInputModel):
         return self
 
 
+Pace = Literal["human", "fast"]
+
+
 class ClickRequest(StrictInputModel):
     selector: str | None = Field(default=None, min_length=1, max_length=2000)
     element_id: str | None = Field(default=None, min_length=1, max_length=500)
     x: float | None = None
     y: float | None = None
+    pace: Pace = "human"
 
     @model_validator(mode="after")
     def validate_target(self) -> "ClickRequest":
@@ -109,6 +113,7 @@ class TypeRequest(StrictInputModel):
     text: str = Field(min_length=1, max_length=5000)
     clear_first: bool = True
     sensitive: bool = False
+    pace: Pace = "human"
 
     @model_validator(mode="after")
     def validate_target(self) -> "TypeRequest":
@@ -117,13 +122,27 @@ class TypeRequest(StrictInputModel):
         return self
 
 
+class TypeFocusedRequest(StrictInputModel):
+    text: str = Field(min_length=1, max_length=5000)
+
+
 class PressRequest(StrictInputModel):
     key: str = Field(min_length=1, max_length=120)
+
+
+class DialogRequest(StrictInputModel):
+    """Answer the JavaScript dialog open on the active tab (see
+    app/browser/services/dialogs.py): accept (OK / leave page) or dismiss
+    (Cancel / stay). prompt_text only applies to a prompt() dialog."""
+
+    accept: bool = True
+    prompt_text: str | None = Field(default=None, max_length=2000)
 
 
 class ScrollRequest(StrictInputModel):
     delta_x: float = 0
     delta_y: float = 600
+    pace: Pace = "human"
 
 
 class SelectOptionRequest(StrictInputModel):
@@ -147,6 +166,7 @@ class HoverRequest(StrictInputModel):
     element_id: str | None = Field(default=None, min_length=1, max_length=500)
     x: float | None = None
     y: float | None = None
+    pace: Pace = "human"
 
     @model_validator(mode="after")
     def validate_target(self) -> "HoverRequest":
@@ -182,12 +202,51 @@ class UploadRequest(_WithApproval):
         return self
 
 
+class DownloadFileRequest(StrictInputModel):
+    """Capture a file the page produces as a transfer (app/file_transfer.py).
+
+    click   -- click element_id/selector and take the download it starts
+    element -- the image/video/audio/link element_id/selector shows
+    media   -- the page's main picture/video (largest visible; media_kind narrows it)
+    url     -- a direct http(s) link, fetched as this page would
+    latest  -- the newest finished download of this session
+    """
+
+    mode: Literal["click", "element", "media", "url", "latest"]
+    selector: str | None = Field(default=None, min_length=1, max_length=2000)
+    element_id: str | None = Field(default=None, min_length=1, max_length=500)
+    url: str | None = Field(default=None, min_length=1, max_length=4000)
+    media_kind: Literal["any", "image", "video", "audio"] = "any"
+    timeout_seconds: float | None = Field(default=None, gt=0, le=600)
+    pace: Pace = "human"
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> "DownloadFileRequest":
+        if self.mode in {"click", "element"} and not (self.selector or self.element_id):
+            raise ValueError(f"{self.mode} mode requires element_id or selector")
+        if self.mode == "url" and not self.url:
+            raise ValueError("url mode requires url")
+        return self
+
+
+class AttachFileRequest(StrictInputModel):
+    """Set a pushed transfer on the page's file input; no target = the page's
+    only (or only matching) file input."""
+
+    selector: str | None = Field(default=None, min_length=1, max_length=2000)
+    element_id: str | None = Field(default=None, min_length=1, max_length=500)
+
+
 class SaveStorageStateRequest(StrictInputModel):
     path: str = Field(min_length=1, max_length=500, description="Relative path inside /data/auth")
 
 
 class SaveAuthProfileRequest(StrictInputModel):
     profile_name: str = Field(min_length=1, max_length=120)
+
+
+class RenameAuthProfileRequest(StrictInputModel):
+    new_name: str = Field(min_length=1, max_length=120)
 
 
 class HumanTakeoverRequest(StrictInputModel):
@@ -532,6 +591,8 @@ class SessionRecord(BaseModel):
     proxy_persona: str | None = None
     protection_mode: ProtectionMode = "normal"
     witness_remote: WitnessRemoteState = Field(default_factory=WitnessRemoteState)
+    remembered_login_loaded: bool = False
+    remembered_login_error: str | None = None
 
 
 class AgentJobRecord(BaseModel):

@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from playwright.async_api import Browser
+from playwright.async_api import Browser, BrowserContext
 
+from ...persistent_profiles import PersistentProfileHandle
 from ...session_isolation import IsolatedBrowserRuntime
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PersistentProfileAttachment:
+    browser: Browser
+    context: BrowserContext
+    handle: PersistentProfileHandle
 
 
 class BrowserRuntimeService:
@@ -111,3 +120,36 @@ class BrowserRuntimeService:
         except Exception:
             await manager.runtime_provisioner.release(runtime)
             raise
+
+    async def attach_persistent_context(self, handle: PersistentProfileHandle) -> PersistentProfileAttachment:
+        """Attach over CDP to a persistent profile browser-node already opened.
+
+        browser-node owns the Chromium process (it is the container with the
+        X display the owner's noVNC view renders). Chromium only listens on
+        loopback there, so `handle.cdp_endpoint` points at browser-node's
+        authenticated CDP relay, and the bearer token goes with the
+        connection. `no_defaults=True` keeps this client from re-applying its
+        own defaults (download behaviour, focus emulation, ...) onto the
+        persistent context browser-node launched with the profile's real
+        settings. The attached Browser is only a client connection:
+        `browser.close()` disconnects, it does not end the profile.
+
+        Releasing the profile (browser-node's /profiles/close) is NOT done
+        here on failure -- the session service that opened the profile owns
+        that, exactly once, so a failed attach can never double-release.
+        """
+        manager = self.manager
+        if manager.playwright is None:
+            raise RuntimeError("Playwright not started")
+        browser = await manager.playwright.chromium.connect_over_cdp(
+            handle.cdp_endpoint,
+            headers=manager.persistent_profiles.auth_headers(),
+            no_defaults=True,
+        )
+        if not browser.contexts:
+            try:
+                await browser.close()
+            except Exception as exc:  # pragma: no cover - best effort disconnect
+                logger.debug("disconnect after empty persistent attach failed: %s", exc)
+            raise RuntimeError(f"persistent profile '{handle.name}' exposed no browser context over CDP")
+        return PersistentProfileAttachment(browser=browser, context=browser.contexts[0], handle=handle)

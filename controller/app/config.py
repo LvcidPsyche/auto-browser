@@ -67,6 +67,76 @@ class Settings(BaseSettings):
     auth_state_encryption_key: str | None = Field(None, alias="AUTH_STATE_ENCRYPTION_KEY")
     require_auth_state_encryption: bool = Field(False, alias="REQUIRE_AUTH_STATE_ENCRYPTION")
     auth_state_max_age_hours: float = Field(72.0, alias="AUTH_STATE_MAX_AGE_HOURS")
+    # An auto-load that happens with nobody watching -- the default "remember
+    # me" profile, or a named profile opened by an unattended cron job -- must
+    # not be refused just because nobody happened to open the browser in the
+    # last 72h; the sites themselves expire their own cookies. Interactive,
+    # operator-initiated opens of a named auth_profile keep the tighter
+    # auth_state_max_age_hours check above, since a human is there to notice
+    # and re-authenticate.
+    auth_state_unattended_max_age_hours: float = Field(2160.0, alias="AUTH_STATE_UNATTENDED_MAX_AGE_HOURS")
+    # How many rotated copies of a profile's state file to keep (state.json.enc.<ts>)
+    # every time it is overwritten, so an auto-persist write that turns out to have
+    # been a mistake is never the last surviving copy.
+    auth_state_history_keep: int = Field(20, alias="AUTH_STATE_HISTORY_KEEP")
+    # Automatic "remember me": on Open, when the caller does not name a saved
+    # profile, silently load this default profile if one exists; while a
+    # session is live, periodically re-save into it; on Close, save into it
+    # one last time. This never touches a profile the caller explicitly named
+    # (auth_profile=...), so the manual saved-login feature is unaffected —
+    # it just means an owner who never picks a profile still gets one.
+    auto_persist_login_enabled: bool = Field(True, alias="AUTO_PERSIST_LOGIN_ENABLED")
+    auto_persist_profile_name: str = Field("owner-default", alias="AUTO_PERSIST_PROFILE_NAME")
+    auto_persist_interval_seconds: float = Field(180.0, alias="AUTO_PERSIST_INTERVAL_SECONDS")
+    # How often live sessions are checked for a dead browser link (Playwright
+    # driver exited, CDP connection closed). A dead persistent-profile session
+    # is re-attached in place to the still-running Chromium; anything else is
+    # retired so the broker/portal stop seeing a zombie "active" session.
+    # 0 disables the watchdog (GET /sessions and Open still check).
+    session_watchdog_interval_seconds: float = Field(5.0, alias="SESSION_WATCHDOG_INTERVAL_SECONDS")
+    # Hard ceilings on one browser call made while holding a session's lock.
+    # Without them one call that never returns (2026-09-25 04:01: an
+    # employee's observe on the owner's persistent profile) held the lock
+    # forever and every later employee call queued behind it. On expiry the
+    # caller gets a retryable 504 and the session's CDP client is re-attached
+    # in place (a fresh Playwright view of the same running browser).
+    browser_call_timeout_seconds: float = Field(30.0, alias="BROWSER_CALL_TIMEOUT_SECONDS")
+    browser_action_timeout_seconds: float = Field(90.0, alias="BROWSER_ACTION_TIMEOUT_SECONDS")
+
+    # Persistent Chromium profiles: instead of replaying a storage_state export
+    # into a brand-new context on every Open (cookies + localStorage only), a
+    # named profile (auth_profile, or the auto-persist default when none is
+    # given) gets its own on-disk Chromium user-data-dir in browser-node,
+    # driven via CDP -- so IndexedDB, service workers, cache and history
+    # survive across Opens, controller restarts and image rebuilds. Defaults
+    # to False in code on purpose (rollback safety): a tenant compose file
+    # that is not redeployed with this flag keeps today's fresh-context
+    # behaviour exactly, even after the code ships. Only wired for
+    # session_isolation_mode="shared_browser_node" -- docker_ephemeral keeps
+    # its existing per-session container/profile lifecycle unchanged.
+    persistent_profiles_enabled: bool = Field(False, alias="PERSISTENT_PROFILES_ENABLED")
+    # Host/port of browser-node's small profile-control HTTP API (see
+    # browser-node/server.mjs), reachable only on the internal tenant network.
+    browser_node_host: str = Field("browser-node", alias="BROWSER_NODE_HOST")
+    profile_control_port: int = Field(9224, alias="PROFILE_CONTROL_PORT")
+    profile_control_timeout_seconds: float = Field(30.0, alias="PROFILE_CONTROL_TIMEOUT_SECONDS")
+    # Shared secret for browser-node's /profiles/* API and its CDP relay (sent
+    # as a bearer token). Empty = every persistent-profile call is refused
+    # before any request is made (fail closed).
+    profile_control_token: str = Field("", alias="PROFILE_CONTROL_TOKEN")
+    # Same shared /data volume browser-node writes profiles into -- used only
+    # for the read-only disk-size report (see BrowserAuthProfileService), not
+    # for launching anything.
+    browser_profiles_root: str = Field("/data/browser-profiles", alias="BROWSER_PROFILES_ROOT")
+    # Pinned per the incident report: a real device does not change its
+    # language/timezone between logins, and the container's own default
+    # (en-US/UTC) is a bigger tell than an unset user agent. Left as an empty
+    # string, user agent is NOT overridden -- letting a real, headed Chromium
+    # present its own genuine UA is more convincing than a spoofed one.
+    persistent_profile_locale: str = Field("ar-EG", alias="PERSISTENT_PROFILE_LOCALE")
+    persistent_profile_timezone: str = Field("Africa/Cairo", alias="PERSISTENT_PROFILE_TIMEZONE")
+    persistent_profile_user_agent: str = Field("", alias="PERSISTENT_PROFILE_USER_AGENT")
+
     harness_root: str = Field("/data/harness", alias="HARNESS_ROOT")
     harness_verifier: str = Field("programmatic", alias="HARNESS_VERIFIER")
     harness_uv_command: str = Field("", alias="HARNESS_UV_COMMAND")
@@ -178,6 +248,15 @@ class Settings(BaseSettings):
     isolated_tunnel_local_host: str = Field("host.docker.internal", alias="ISOLATED_TUNNEL_LOCAL_HOST")
     isolated_tunnel_info_root: str = Field("/data/tunnels/sessions", alias="ISOLATED_TUNNEL_INFO_ROOT")
     allowed_hosts: str = Field("example.com,localhost,127.0.0.1,::1", alias="ALLOWED_HOSTS")
+    # "allowlist" (default): only ALLOWED_HOSTS. "public_internet": any public
+    # http(s) site, ALLOWED_HOSTS ignored, private/internal addresses and
+    # NAVIGATION_DENY_HOSTS always refused -- see app/navigation_policy.py.
+    navigation_policy: Literal["allowlist", "public_internet"] = Field("allowlist", alias="NAVIGATION_POLICY")
+    navigation_deny_hosts: str = Field("", alias="NAVIGATION_DENY_HOSTS")
+    # How long after an agent action ends a JavaScript dialog still counts as
+    # part of that action (auto-accepted when benign). Outside this window a
+    # dialog is left open for the person looking at the live browser.
+    agent_dialog_grace_seconds: float = Field(3.0, alias="AGENT_DIALOG_GRACE_SECONDS")
     default_viewport_width: int = Field(1280, alias="DEFAULT_VIEWPORT_WIDTH")
     default_viewport_height: int = Field(800, alias="DEFAULT_VIEWPORT_HEIGHT")
     connect_retries: int = Field(60, alias="CONNECT_RETRIES")
@@ -216,6 +295,19 @@ class Settings(BaseSettings):
     artifact_retention_hours: float = Field(168.0, alias="ARTIFACT_RETENTION_HOURS")
     upload_retention_hours: float = Field(168.0, alias="UPLOAD_RETENTION_HOURS")
     auth_retention_hours: float = Field(168.0, alias="AUTH_RETENTION_HOURS")
+    # File transfer between the browser and the caller (app/file_transfer.py):
+    # a download the page produced, pulled out to the caller, or a file the
+    # caller pushed in, set on the page's file input. Hard ceiling for any one
+    # file; per-type ceilings below it live in app/file_transfer.py.
+    file_transfer_max_bytes: int = Field(200 * 1024 * 1024, alias="FILE_TRANSFER_MAX_BYTES", ge=1)
+    # How long a click/element download may take to start and finish.
+    file_transfer_download_timeout_seconds: float = Field(
+        120.0, alias="FILE_TRANSFER_DOWNLOAD_TIMEOUT_SECONDS", gt=0, le=600
+    )
+    # Transferred files are only needed for minutes (the caller pulls a
+    # download at once; a pushed upload must survive until the site's own
+    # submit reads it). Swept from the session's transfer folders after this.
+    file_transfer_retention_hours: float = Field(6.0, alias="FILE_TRANSFER_RETENTION_HOURS", gt=0)
 
     openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
     openai_base_url: str = Field("https://api.openai.com/v1", alias="OPENAI_BASE_URL")
@@ -360,6 +452,14 @@ class Settings(BaseSettings):
     @property
     def allowed_host_patterns(self) -> list[str]:
         return [item.strip() for item in self.allowed_hosts.split(",") if item.strip()]
+
+    @property
+    def navigation_deny_host_list(self) -> list[str]:
+        return [item.strip().lower() for item in self.navigation_deny_hosts.split(",") if item.strip()]
+
+    @property
+    def public_internet_navigation(self) -> bool:
+        return self.navigation_policy == "public_internet"
 
     @property
     def mcp_allowed_origin_list(self) -> list[str]:

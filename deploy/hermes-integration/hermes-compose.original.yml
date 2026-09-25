@@ -1,0 +1,165 @@
+# The Hermes pilot stack, rebuilt off Railway.
+#
+# The gateway is deliberately hard-coded to reach the manager at
+# `hermes.railway.internal` and refuses any address outside RFC1918. That check
+# is a real safety property, not Railway trivia, so it is kept: the manager
+# simply carries that name as a network alias here, and Docker's overlay network
+# hands out 10.x addresses, which the existing check already accepts. No code
+# change, no weakened validation.
+services:
+  hermes:
+    build:
+      context: ./repo
+      dockerfile: hermes-runtime/Dockerfile.repo
+    container_name: hermes
+    restart: unless-stopped
+    env_file: ./env/hermes.env
+    volumes:
+      - hermes-data:/opt/data
+    networks:
+      dokploy-network:
+        aliases:
+          - hermes.railway.internal
+    labels:
+      # Published only so the provider OAuth callbacks land somewhere real:
+      # signing Hermes in to Supabase or Vercel redirects the owner's browser
+      # back to /api/mcp/oauth/callback/<provider>, which has to be reachable.
+      # The dashboard carries its own login gate - an unauthenticated request
+      # is redirected to a real sign-in form - so this is a protected surface,
+      # not an open one. Plain http is redirected rather than served: the login
+      # posts a password.
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      # The storefront claims *.fareeqk.com with a HostRegexp; the priority
+      # keeps this exact host out of its reach.
+      - traefik.http.routers.hermesdash.rule=Host(`hermes.fareeqk.com`)
+      - traefik.http.routers.hermesdash.entrypoints=websecure
+      - traefik.http.routers.hermesdash.priority=1000
+      - traefik.http.routers.hermesdash.tls.certresolver=letsencrypt-dns
+      - traefik.http.routers.hermesdash.tls.domains[0].main=fareeqk.com
+      - traefik.http.routers.hermesdash.tls.domains[0].sans=*.fareeqk.com
+      - traefik.http.services.hermesdash.loadbalancer.server.port=9119
+      - traefik.http.routers.hermesdash-http.rule=Host(`hermes.fareeqk.com`)
+      - traefik.http.routers.hermesdash-http.entrypoints=web
+      - traefik.http.routers.hermesdash-http.priority=1000
+      - traefik.http.routers.hermesdash-http.middlewares=hermesdash-tohttps
+      - traefik.http.middlewares.hermesdash-tohttps.redirectscheme.scheme=https
+      - traefik.http.middlewares.hermesdash-tohttps.redirectscheme.permanent=true
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  gateway:
+    build:
+      context: ./repo
+      dockerfile: Dockerfile
+    container_name: gateway
+    restart: unless-stopped
+    env_file: ./env/gateway.env
+    depends_on: [hermes]
+    volumes:
+      - gateway-data:/data
+      # What the host deploy watcher (deploy-watch.sh) has actually shipped, per
+      # app. Read-only: the gateway reports deployments, it never starts one.
+      - /opt/stone/deploy-status:/deploy-status:ro
+      - hermes-data:/hermes-data:ro
+    # Same reasoning as the manager above, in the other direction: the manager's
+    # app-assistant bootstrap accepts a plain-http MCP URL only for the private
+    # gateway name, and https otherwise. The name is the check, so the gateway
+    # carries it rather than the check being loosened to allow http anywhere.
+    networks:
+      dokploy-network:
+        aliases:
+          - gateway.railway.internal
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      # The storefront claims *.fareeqk.com with a HostRegexp; an explicit
+      # priority keeps this exact host from being swallowed by it.
+      # Only the provider callbacks and the health check are published. The
+      # gateway also serves /mcp/, /app-assistant-mcp/, /docs and
+      # /openapi.json; those are for the manager on this private network, and
+      # putting them on the public internet hands an attacker a complete map of
+      # 108 tools and a bearer-token endpoint to grind against. Every route the
+      # providers actually call lives under /v1 - checked against the route
+      # table, not assumed - so this rule publishes exactly what must be public.
+      - traefik.http.routers.hermesgw.rule=Host(`gateway.fareeqk.com`) && (PathPrefix(`/v1/`) || Path(`/health`))
+      - traefik.http.routers.hermesgw.entrypoints=websecure
+      - traefik.http.routers.hermesgw.priority=1000
+      - traefik.http.routers.hermesgw.tls.certresolver=letsencrypt-dns
+      - traefik.http.routers.hermesgw.tls.domains[0].main=fareeqk.com
+      - traefik.http.routers.hermesgw.tls.domains[0].sans=*.fareeqk.com
+      - traefik.http.services.hermesgw.loadbalancer.server.port=8000
+      - traefik.http.routers.hermesgw-http.rule=Host(`gateway.fareeqk.com`) && (PathPrefix(`/v1/`) || Path(`/health`))
+      - traefik.http.routers.hermesgw-http.entrypoints=web
+      - traefik.http.routers.hermesgw-http.priority=1000
+      - traefik.http.routers.hermesgw-http.middlewares=hermesgw-tohttps
+      - traefik.http.middlewares.hermesgw-tohttps.redirectscheme.scheme=https
+      - traefik.http.middlewares.hermesgw-tohttps.redirectscheme.permanent=true
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  hermes-worker:
+    build:
+      context: ./repo
+      dockerfile: hermes-worker/Dockerfile
+    container_name: hermes-worker
+    restart: unless-stopped
+    env_file: ./env/hermes-worker.env
+    depends_on: [gateway]
+    # The base image declares a VOLUME at /opt/data, so Docker attaches an
+    # anonymous persistent volume and the worker's own isolation preflight
+    # rightly refuses to start. tmpfs satisfies the guarantee the preflight is
+    # actually checking - no persistence - instead of disabling the check.
+    tmpfs:
+      - /opt/data
+    networks: [dokploy-network]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  hermes-worker-2:
+    build:
+      context: ./repo
+      dockerfile: hermes-worker/Dockerfile
+    container_name: hermes-worker-2
+    hostname: hermes-worker-2
+    restart: unless-stopped
+    env_file: ./env/hermes-worker.env
+    environment:
+      HERMES_WORKER_DISPLAY_NAME: hermes-worker-2
+    depends_on: [gateway]
+    tmpfs:
+      - /opt/data
+    networks: [dokploy-network]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  hermes-worker-3:
+    build:
+      context: ./repo
+      dockerfile: hermes-worker/Dockerfile
+    container_name: hermes-worker-3
+    hostname: hermes-worker-3
+    restart: unless-stopped
+    env_file: ./env/hermes-worker.env
+    environment:
+      HERMES_WORKER_DISPLAY_NAME: hermes-worker-3
+    depends_on: [gateway]
+    tmpfs:
+      - /opt/data
+    networks: [dokploy-network]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+networks:
+  dokploy-network:
+    external: true
+
+volumes:
+  hermes-data:
+    external: true
+  gateway-data:

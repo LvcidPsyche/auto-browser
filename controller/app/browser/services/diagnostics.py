@@ -118,6 +118,12 @@ class BrowserDiagnosticsService:
             ),
         )
         page.on("download", lambda download: spawn_background_task(self.manager._handle_download(session, download)))
+        # Dialog + popup listeners. Registering a dialog listener at all is what
+        # stops Playwright auto-dismissing every alert/confirm/prompt -- including
+        # the ones the owner sees while browsing by hand. See dialogs.py.
+        dialogs = getattr(self.manager, "dialogs", None)
+        if dialogs is not None:
+            dialogs.attach(page, session)
 
     @staticmethod
     def _bounded_append(items: list[Any], value: Any, limit: int = 50) -> None:

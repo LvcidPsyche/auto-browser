@@ -280,6 +280,7 @@ class CronServiceProxyPersonaTests(unittest.IsolatedAsyncioTestCase):
             start_url="https://example.com",
             auth_profile="default",
             proxy_persona="us-east",
+            unattended=True,
         )
         queued_request = self.job_queue.enqueue_run.await_args.args[1]
         self.assertEqual(queued_request.provider, "openai")

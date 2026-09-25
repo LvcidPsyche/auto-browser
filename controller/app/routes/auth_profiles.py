@@ -7,7 +7,14 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
-from ..models import ImportAuthProfileRequest, SaveAuthProfileRequest, SaveStorageStateRequest
+from ..browser.services.auth_profiles import ProfileInUseError
+from ..models import (
+    ImportAuthProfileRequest,
+    RenameAuthProfileRequest,
+    SaveAuthProfileRequest,
+    SaveStorageStateRequest,
+)
+from ..persistent_profiles import PersistentProfileError
 from ._utils import internal_error, require_safe_segment
 
 logger = logging.getLogger(__name__)
@@ -48,6 +55,36 @@ def create_auth_profiles_router(*, manager: Any, settings: Any) -> APIRouter:
             raise HTTPException(status_code=400, detail="Invalid request") from None
         except PermissionError:
             raise HTTPException(status_code=403, detail="Not permitted") from None
+
+    @router.delete("/auth-profiles/{profile_name}")
+    async def delete_auth_profile(profile_name: str) -> dict[str, Any]:
+        try:
+            return await manager.delete_auth_profile(profile_name)
+        except ProfileInUseError:
+            raise HTTPException(status_code=409, detail="Profile is open in a live session; close it first") from None
+        except PersistentProfileError:
+            raise HTTPException(status_code=502, detail="Browser profile service unavailable") from None
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Not found") from None
+        except PermissionError:
+            raise HTTPException(status_code=403, detail="Not permitted") from None
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid request") from None
+
+    @router.post("/auth-profiles/{profile_name}/rename")
+    async def rename_auth_profile(profile_name: str, payload: RenameAuthProfileRequest) -> dict[str, Any]:
+        try:
+            return await manager.rename_auth_profile(profile_name, payload.new_name)
+        except ProfileInUseError:
+            raise HTTPException(status_code=409, detail="Profile is open in a live session; close it first") from None
+        except PersistentProfileError:
+            raise HTTPException(status_code=502, detail="Browser profile service unavailable") from None
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Not found") from None
+        except PermissionError:
+            raise HTTPException(status_code=403, detail="Not permitted") from None
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid request") from None
 
     @router.get("/auth-profiles/{profile_name}/export")
     async def export_auth_profile(profile_name: str):
@@ -90,6 +127,12 @@ def create_auth_profiles_router(*, manager: Any, settings: Any) -> APIRouter:
             raise HTTPException(status_code=404, detail="Not found") from None
         except FileExistsError:
             raise HTTPException(status_code=409, detail="Conflict") from None
+        except ProfileInUseError:
+            raise HTTPException(status_code=409, detail="Profile is open in a live session; close it first") from None
+        except PermissionError:
+            raise HTTPException(status_code=403, detail="Not permitted") from None
+        except PersistentProfileError:
+            raise HTTPException(status_code=502, detail="Browser profile service unavailable") from None
         except Exception:
             raise internal_error(logger, "auth profile import failed") from None
 

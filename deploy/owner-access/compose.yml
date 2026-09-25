@@ -1,0 +1,21 @@
+# Overlay for the EXISTING private Hetzner stack. It deliberately publishes no
+# port and declares no Traefik labels: do not expose it before Access is ready.
+# Use with the repository's base and Hetzner compose files, not by itself.
+services:
+  owner-gateway:
+    profiles: [owner-access]
+    build:
+      context: .
+      dockerfile: owner_gateway/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - approval-broker
+      - browser-node
+    environment:
+      CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:?Set Cloudflare Access team hostname}
+      CF_ACCESS_AUD: ${CF_ACCESS_AUD:?Set Access application audience}
+      OWNER_EMAIL: ${OWNER_EMAIL:?Set allowlisted owner email}
+      BROKER_OWNER_TOKEN: ${BROKER_OWNER_TOKEN:?Set existing broker owner credential}
+      OWNER_PUBLIC_ORIGIN: https://secure-browser.fareeqk.com
+    expose:
+      - "18002"

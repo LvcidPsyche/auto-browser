@@ -59,7 +59,7 @@ class NavigationAllowlistTests(unittest.TestCase):
         self.manager = BrowserManager(
             Settings(
                 _env_file=None,
-                ALLOWED_HOSTS="example.com",
+                ALLOWED_HOSTS="example.com,app.example.com",
                 ARTIFACT_ROOT=str(root / "artifacts"),
                 UPLOAD_ROOT=str(root / "uploads"),
                 AUTH_ROOT=str(root / "auth"),

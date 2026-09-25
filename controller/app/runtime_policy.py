@@ -219,7 +219,15 @@ def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
     if not settings.controller_allowed_host_patterns:
         report.errors.append("CONTROLLER_ALLOWED_HOSTS is required when APP_ENV=production")
 
-    if "*" in settings.allowed_host_patterns:
+    if getattr(settings, "navigation_policy", "allowlist") == "public_internet":
+        # An explicit, named choice -- not a stray "*": any public site, with
+        # private/internal addresses and NAVIGATION_DENY_HOSTS always refused
+        # (app/navigation_policy.py). ALLOWED_HOSTS is not consulted.
+        report.warnings.append(
+            "NAVIGATION_POLICY=public_internet: the browser may open any public http(s) site; "
+            "private, loopback, link-local and internal hosts stay blocked"
+        )
+    elif "*" in settings.allowed_host_patterns:
         report.errors.append("ALLOWED_HOSTS=* is not permitted when APP_ENV=production")
     elif not settings.allowed_host_patterns:
         report.errors.append("ALLOWED_HOSTS must name at least one host when APP_ENV=production")
@@ -230,7 +238,10 @@ def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
         "example.com,localhost",
         "example.com,localhost,127.0.0.1,::1",
     }
-    if settings.allowed_hosts.strip() in default_allowed_hosts:
+    if (
+        getattr(settings, "navigation_policy", "allowlist") != "public_internet"
+        and settings.allowed_hosts.strip() in default_allowed_hosts
+    ):
         report.warnings.append("ALLOWED_HOSTS still contains the default placeholder values; tighten it before launch")
 
     if settings.session_isolation_mode != "docker_ephemeral":

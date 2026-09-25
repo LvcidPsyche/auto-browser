@@ -55,24 +55,33 @@ async def run_deep_health_probe(manager: "BrowserManager") -> dict[str, Any]:
         }
     )
 
-    browser = await manager.ensure_browser()
-    context = await browser.new_context(viewport={"width": 640, "height": 360})
-    try:
-        page = await context.new_page()
-        await page.set_content(
-            fixture_html,
-            wait_until="domcontentloaded",
-            timeout=_DEEP_HEALTH_TIMEOUT_MS,
-        )
-        locator = page.locator("[data-ab-deep-health]")
-        marker = await locator.get_attribute("data-ab-deep-health", timeout=_DEEP_HEALTH_TIMEOUT_MS)
-        text = await locator.inner_text(timeout=_DEEP_HEALTH_TIMEOUT_MS)
-        if marker != "ready" or "Deep health ready" not in text:
-            raise RuntimeError("deep health browser probe did not render the ready marker")
-    finally:
-        await context.close()
+    if manager.settings.persistent_profiles_enabled and manager.settings.session_isolation_mode == "shared_browser_node":
+        # No shared browser to round-trip a page through in this mode --
+        # each named profile's Chromium launches lazily, on the first session
+        # that asks for it, and this probe must not spin one up just to
+        # answer a healthcheck. browser-node's control API being reachable is
+        # the honest equivalent here.
+        await manager.persistent_profiles.ping()
+        checks.append({"name": "persistent_profile_control_api", "status": "pass"})
+    else:
+        browser = await manager.ensure_browser()
+        context = await browser.new_context(viewport={"width": 640, "height": 360})
+        try:
+            page = await context.new_page()
+            await page.set_content(
+                fixture_html,
+                wait_until="domcontentloaded",
+                timeout=_DEEP_HEALTH_TIMEOUT_MS,
+            )
+            locator = page.locator("[data-ab-deep-health]")
+            marker = await locator.get_attribute("data-ab-deep-health", timeout=_DEEP_HEALTH_TIMEOUT_MS)
+            text = await locator.inner_text(timeout=_DEEP_HEALTH_TIMEOUT_MS)
+            if marker != "ready" or "Deep health ready" not in text:
+                raise RuntimeError("deep health browser probe did not render the ready marker")
+        finally:
+            await context.close()
 
-    checks.append({"name": "browser_fixture_render", "status": "pass"})
+        checks.append({"name": "browser_fixture_render", "status": "pass"})
     return {
         "status": "ok",
         "checks": checks,
@@ -130,7 +139,13 @@ def create_system_router(
             # create_session queued behind it — the API looked dead instead of
             # reporting "not ready". A readiness probe must answer promptly;
             # cancelling releases the lock via its async context manager.
-            await asyncio.wait_for(manager.ensure_browser(), timeout=READYZ_TIMEOUT_SECONDS)
+            if settings.persistent_profiles_enabled and settings.session_isolation_mode == "shared_browser_node":
+                # Persistent profiles launch lazily, per-session -- there is
+                # no single shared browser to ensure here; readiness means
+                # browser-node's control API answers.
+                await asyncio.wait_for(manager.persistent_profiles.ping(), timeout=READYZ_TIMEOUT_SECONDS)
+            else:
+                await asyncio.wait_for(manager.ensure_browser(), timeout=READYZ_TIMEOUT_SECONDS)
             return {"status": "ready", "environment": settings.environment_name}
         except TimeoutError:
             logger.warning("readiness check timed out after %ss", READYZ_TIMEOUT_SECONDS)

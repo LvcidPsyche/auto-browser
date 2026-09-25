@@ -11,6 +11,7 @@ from ...action_errors import BrowserActionError
 from ...actions import ActionRunContext
 from ...approvals import ApprovalRequiredError
 from ...models import ApprovalKind, BrowserActionDecision
+from ...navigation_policy import await_public_dns_check
 from ...utils import spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
@@ -28,6 +29,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# document.activeElement's identifying attributes, for type_focused's redaction check.
+FOCUSED_INPUT_ATTRIBUTES_SCRIPT = """() => {
+  const el = document.activeElement;
+  // Focus inside a frame cannot be classified from here: fail closed (null -> redact).
+  if (!el || el === document.body || el.tagName === 'IFRAME' || el.tagName === 'FRAME') return null;
+  return {
+    type: el.getAttribute('type'),
+    name: el.getAttribute('name'),
+    id: el.id || null,
+    autocomplete: el.getAttribute('autocomplete'),
+    placeholder: el.getAttribute('placeholder'),
+    aria_label: el.getAttribute('aria-label'),
+  };
+}"""
+
+
 class BrowserActionService:
     """Encapsulates browser action execution and approval orchestration."""
 
@@ -36,6 +53,7 @@ class BrowserActionService:
 
     async def navigate(self, session_id: str, url: str) -> dict[str, Any]:
         self.manager._assert_url_allowed(url)
+        await await_public_dns_check(self.manager, url)
         session = await self.manager.get_session(session_id)
 
         async def operation() -> None:
@@ -66,13 +84,15 @@ class BrowserActionService:
         element_id: str | None = None,
         x: float | None = None,
         y: float | None = None,
+        pace: str = "human",
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         target = self.resolve_target(selector=selector, element_id=element_id, x=x, y=y)
+        fast = pace == "fast"
 
         async def operation() -> None:
             if target["mode"] == "coordinates":
-                await self.click_human_like(session, float(x), float(y))
+                await self.click_human_like(session, float(x), float(y), fast=fast)
             else:
                 locator = session.page.locator(target["selector"]).first
                 await locator.scroll_into_view_if_needed()
@@ -81,8 +101,9 @@ class BrowserActionService:
                     await locator.click()
                 else:
                     target["x"], target["y"] = coords
-                    await self.click_human_like(session, coords[0], coords[1])
+                    await self.click_human_like(session, coords[0], coords[1], fast=fast)
             await self.manager._settle(session.page)
+            await self.pace_delay(pace)
 
         return await self.manager._run_action(session, "click", target, operation)
 
@@ -94,13 +115,15 @@ class BrowserActionService:
         element_id: str | None = None,
         x: float | None = None,
         y: float | None = None,
+        pace: str = "human",
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         target = self.resolve_target(selector=selector, element_id=element_id, x=x, y=y)
+        fast = pace == "fast"
 
         async def operation() -> None:
             if target["mode"] == "coordinates":
-                await self.move_mouse_human_like(session, float(x), float(y))
+                await self.move_mouse_human_like(session, float(x), float(y), fast=fast)
             else:
                 locator = session.page.locator(target["selector"]).first
                 await locator.scroll_into_view_if_needed()
@@ -109,8 +132,9 @@ class BrowserActionService:
                     await locator.hover()
                 else:
                     target["x"], target["y"] = coords
-                    await self.move_mouse_human_like(session, coords[0], coords[1])
+                    await self.move_mouse_human_like(session, coords[0], coords[1], fast=fast)
             await self.manager._settle(session.page)
+            await self.pace_delay(pace)
 
         return await self.manager._run_action(session, "hover", target, operation)
 
@@ -154,6 +178,7 @@ class BrowserActionService:
         element_id: str | None = None,
         clear_first: bool = True,
         sensitive: bool = False,
+        pace: str = "human",
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         target = self.resolve_target(selector=selector, element_id=element_id)
@@ -164,6 +189,7 @@ class BrowserActionService:
             sensitive=sensitive,
             preview_chars=80,
         )
+        fast = pace == "fast"
 
         async def operation() -> None:
             locator = session.page.locator(target["selector"]).first
@@ -171,13 +197,49 @@ class BrowserActionService:
                 payload.pop("text_preview", None)
                 payload["text_redacted"] = True
             await locator.scroll_into_view_if_needed()
-            await self.focus_locator(session, locator)
+            await self.focus_locator(session, locator, fast=fast)
             if clear_first:
                 await session.page.keyboard.press("Control+a")
-                await asyncio.sleep(0.03)
+                if not fast:
+                    await asyncio.sleep(0.03)
                 await session.page.keyboard.press("Delete")
-                await asyncio.sleep(0.05)
-            await self.type_text_human_like(session.page, text)
+                if not fast:
+                    await asyncio.sleep(0.05)
+            await self.type_text_human_like(session.page, text, fast=fast)
+            await self.manager._settle(session.page)
+            await self.pace_delay(pace)
+
+        return await self.manager._run_action(session, "type", payload, operation)
+
+    async def type_focused(self, session_id: str, *, text: str) -> dict[str, Any]:
+        """Insert text into whatever element already has focus, no target needed.
+
+        This backs the owner's "type here" bridge in the noVNC viewer: the owner
+        clicks a field through the VNC mouse (real click, so real DOM focus,
+        unaffected by any VNC keyboard limitation) and this delivers the text via
+        CDP directly, bypassing X11 keysyms entirely. That is the only reliable
+        path for Arabic and other non-Latin scripts typed on a phone keyboard,
+        since a mobile IME composes such text through `input`/composition events
+        that the VNC keyboard channel never sees.
+        """
+        session = await self.manager.get_session(session_id)
+        target = {"mode": "focused"}
+        payload = self.text_target_payload(target, text, clear_first=False, sensitive=False, preview_chars=80)
+
+        async def operation() -> None:
+            # The owner types passwords through this bridge too: never keep a preview of what
+            # went into a password / one-time-code field (same check type() uses).
+            # Reads document.activeElement directly (no locator auto-wait); unreadable focus
+            # fails closed.
+            try:
+                attributes = await session.page.evaluate(FOCUSED_INPUT_ATTRIBUTES_SCRIPT)
+                sensitive_field = attributes is None or self.attributes_are_sensitive(attributes)
+            except Exception:
+                sensitive_field = True
+            if sensitive_field:
+                payload.pop("text_preview", None)
+                payload["text_redacted"] = True
+            await session.page.keyboard.insert_text(text)
             await self.manager._settle(session.page)
 
         return await self.manager._run_action(session, "type", payload, operation)
@@ -191,12 +253,32 @@ class BrowserActionService:
 
         return await self.manager._run_action(session, "press", {"key": key}, operation)
 
-    async def scroll(self, session_id: str, delta_x: float, delta_y: float) -> dict[str, Any]:
+    async def scroll(
+        self, session_id: str, delta_x: float, delta_y: float, *, pace: str = "human",
+    ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
 
         async def operation() -> None:
-            await session.page.mouse.wheel(delta_x, delta_y)
+            if pace == "fast":
+                await session.page.mouse.wheel(delta_x, delta_y)
+            else:
+                # Natural scroll: a real trackpad/wheel arrives as several small
+                # ticks, not one jump -- split the requested delta into a handful
+                # of uneven chunks with a brief pause between them.
+                steps = random.randint(3, 6)
+                remaining_x, remaining_y = delta_x, delta_y
+                for step in range(steps):
+                    if step == steps - 1:
+                        chunk_x, chunk_y = remaining_x, remaining_y
+                    else:
+                        fraction = random.uniform(0.15, 0.35)
+                        chunk_x, chunk_y = remaining_x * fraction, remaining_y * fraction
+                        remaining_x -= chunk_x
+                        remaining_y -= chunk_y
+                    await session.page.mouse.wheel(chunk_x, chunk_y)
+                    await asyncio.sleep(random.uniform(0.02, 0.09))
             await self.manager._settle(session.page)
+            await self.pace_delay(pace)
 
         return await self.manager._run_action(
             session,
@@ -474,7 +556,10 @@ class BrowserActionService:
             }
         except Exception:
             return False
+        return self.attributes_are_sensitive(attributes)
 
+    @staticmethod
+    def attributes_are_sensitive(attributes: dict[str, Any]) -> bool:
         input_type = (attributes.get("type") or "").strip().lower()
         if input_type == "password":
             return True
@@ -495,7 +580,22 @@ class BrowserActionService:
             return None
         return (float(box["x"] + box["width"] / 2), float(box["y"] + box["height"] / 2))
 
-    async def move_mouse_human_like(self, session: "BrowserSession", x: float, y: float) -> None:
+    async def pace_delay(self, pace: str) -> None:
+        """A short pause between one action and the next, mimicking the beat a real
+        person takes to look at the page before their next move. Skipped entirely
+        for `pace="fast"`, which the owner reserves for when he explicitly asks to
+        hurry (see the `pace` argument on click/type/hover/scroll)."""
+        if pace == "fast":
+            return
+        await asyncio.sleep(random.uniform(0.4, 1.5))
+
+    async def move_mouse_human_like(
+        self, session: "BrowserSession", x: float, y: float, *, fast: bool = False,
+    ) -> None:
+        if fast:
+            await session.page.mouse.move(x, y)
+            session.mouse_position = (x, y)
+            return
         start = session.mouse_position
         if start is None:
             start = (
@@ -524,7 +624,15 @@ class BrowserActionService:
             await asyncio.sleep(random.uniform(0.004, 0.018))
         session.mouse_position = (x, y)
 
-    async def click_human_like(self, session: "BrowserSession", x: float, y: float) -> None:
+    async def click_human_like(
+        self, session: "BrowserSession", x: float, y: float, *, fast: bool = False,
+    ) -> None:
+        if fast:
+            await self.move_mouse_human_like(session, x, y, fast=True)
+            await session.page.mouse.down()
+            await session.page.mouse.up()
+            session.mouse_position = (x, y)
+            return
         jitter_x = x + random.uniform(-2.5, 2.5)
         jitter_y = y + random.uniform(-2.5, 2.5)
         await self.move_mouse_human_like(session, jitter_x, jitter_y)
@@ -534,15 +642,19 @@ class BrowserActionService:
         await session.page.mouse.up()
         session.mouse_position = (jitter_x, jitter_y)
 
-    async def focus_locator(self, session: "BrowserSession", locator: Any) -> None:
+    async def focus_locator(self, session: "BrowserSession", locator: Any, *, fast: bool = False) -> None:
         coords = await self.locator_center(locator)
         if coords is None:
             await locator.click()
         else:
-            await self.click_human_like(session, coords[0], coords[1])
-        await asyncio.sleep(0.05 + random.random() * 0.1)
+            await self.click_human_like(session, coords[0], coords[1], fast=fast)
+        if not fast:
+            await asyncio.sleep(0.05 + random.random() * 0.1)
 
-    async def type_text_human_like(self, page: "Page", text: str) -> None:
+    async def type_text_human_like(self, page: "Page", text: str, *, fast: bool = False) -> None:
+        if fast:
+            await page.keyboard.type(text)
+            return
         for index, char in enumerate(text):
             await page.keyboard.type(char)
             delay_ms = random.randint(

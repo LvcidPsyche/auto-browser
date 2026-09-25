@@ -14,6 +14,27 @@ non-loopback name, read the Host-header entry before upgrading** — that
 configuration now answers `400` until you list the name in
 `CONTROLLER_ALLOWED_HOSTS`.
 
+### Added
+
+- **`NAVIGATION_POLICY=public_internet`** — an explicit mode for a single-owner
+  stack: the browser may open any public http(s) site and `ALLOWED_HOSTS` is not
+  consulted. Always refused in this mode: non-http(s) schemes, private / loopback /
+  link-local (cloud metadata) / CGNAT / reserved addresses in every spelling
+  Chromium accepts, internal and single-label names (every Docker service), names
+  whose DNS answer is private (checked before navigating and again on the final
+  URL after each action), and `NAVIGATION_DENY_HOSTS`. Tenant stacks take it from
+  `TENANT_NAVIGATION_POLICY` / `TENANT_NAVIGATION_DENY_HOSTS`.
+- **JavaScript dialogs are no longer dismissed behind the owner's back.** Nothing
+  listened for dialogs, so Playwright cancelled every alert/confirm/prompt the owner
+  saw while browsing by hand. Dialogs caused by an agent action are answered when
+  harmless (never a delete/cancel/pay confirm, never a prompt); every other dialog
+  stays open on screen. An open dialog is reported in observations (`open_dialog`),
+  blocks other agent actions with `423 dialog_open` instead of hanging, and is
+  answered with the new `dialog` action (also exposed by the approval broker).
+- **Popups follow the agent.** A window opened by an agent action ("Continue with
+  Google") becomes the active tab, and when it closes the tab that opened it
+  becomes active again.
+
 ### Security
 
 - **The navigation allowlist judged a different host than the browser loaded.**

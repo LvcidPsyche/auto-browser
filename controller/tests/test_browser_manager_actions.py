@@ -43,6 +43,7 @@ class FakeKeyboard:
     def __init__(self) -> None:
         self.press = AsyncMock()
         self.type = AsyncMock()
+        self.insert_text = AsyncMock()
 
 
 class FakeLocator:
@@ -198,6 +199,62 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reload_result["action"], "reload")
         self.assertEqual(back_result["action"], "go_back")
         self.assertEqual(forward_result["action"], "go_forward")
+
+    async def test_pace_fast_skips_artificial_delays_and_human_is_the_default(self) -> None:
+        """`pace="fast"` (the owner explicitly asking to hurry) must add no artificial sleep and
+        type the whole string in one shot; the default `pace="human"` keeps the per-character
+        typing delay, the mouse-move curve, and adds one short pause per action -- see
+        BrowserActionService.pace_delay."""
+        with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            await self.manager.click("session-1", selector="#submit", pace="fast")
+            await self.manager.hover("session-1", selector="#menu", pace="fast")
+            await self.manager.scroll("session-1", 0, 300, pace="fast")
+        self.assertEqual(sleep_mock.await_count, 0)
+        self.session.page.keyboard.type.reset_mock()
+        with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):
+            await self.manager.type("session-1", selector="#name", text="hello", pace="fast")
+        self.session.page.keyboard.type.assert_awaited_once_with("hello")
+
+        with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            await self.manager.click("session-1", selector="#submit")
+            await self.manager.hover("session-1", selector="#menu")
+            await self.manager.scroll("session-1", 0, 300)
+        self.assertGreater(sleep_mock.await_count, 0)
+        self.session.page.keyboard.type.reset_mock()
+        with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):
+            await self.manager.type("session-1", selector="#name", text="hi")
+        # Human pace types character by character, not the whole string in one call.
+        self.assertEqual(self.session.page.keyboard.type.await_count, 2)
+
+    async def test_type_focused_inserts_text_without_a_target(self) -> None:
+        self.session.page.evaluate = AsyncMock(return_value={"type": "text", "name": "message"})
+        with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):
+            result = await self.manager.type_focused("session-1", text="مرحبا")
+
+        self.session.page.keyboard.insert_text.assert_awaited_once_with("مرحبا")
+        self.assertEqual(result["action"], "type")
+        self.assertEqual(result["target"]["mode"], "focused")
+        self.assertEqual(result["target"]["text_preview"], "مرحبا")
+        self.assertNotIn("selector", result["target"])
+        self.assertNotIn("element_id", result["target"])
+
+    async def test_type_focused_never_keeps_a_preview_of_a_password_or_unknown_focus(self) -> None:
+        """The owner types passwords through the "type here" bridge too: a password field, a
+        one-time-code field, focus inside a frame (unreadable -> None) or a failing read all
+        redact, so the text never reaches actions.jsonl / audit / witness / the response."""
+        cases = [
+            AsyncMock(return_value={"type": "password"}),
+            AsyncMock(return_value={"type": "text", "autocomplete": "one-time-code"}),
+            AsyncMock(return_value=None),
+            AsyncMock(side_effect=RuntimeError("frame detached")),
+        ]
+        for evaluate in cases:
+            self.session.page.evaluate = evaluate
+            with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):
+                result = await self.manager.type_focused("session-1", text="Hunter2!")
+            self.assertNotIn("text_preview", result["target"])
+            self.assertTrue(result["target"]["text_redacted"])
+            self.assertNotIn("Hunter2!", repr(result))
 
     async def test_tabs_diagnostics_takeover_and_trace_use_session_state(self) -> None:
         self.session.console_messages = [{"type": "log", "text": "ready", "location": {}}]

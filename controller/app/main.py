@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
 from .action_errors import BrowserActionError
 from .app_factory import (
@@ -14,6 +15,7 @@ from .app_factory import (
     create_controller_app,
     install_controller_host_middleware,
 )
+from .browser.services.connection_health import is_driver_dead_error
 from .compliance import apply_compliance_template, write_compliance_manifest
 from .config import get_settings
 from .middleware import install_controller_http_middleware
@@ -126,3 +128,30 @@ async def handle_key_not_found(_: Request, exc: KeyError) -> JSONResponse:
 @app.exception_handler(BrowserActionError)
 async def handle_browser_action_error(_: Request, exc: BrowserActionError) -> JSONResponse:
     return JSONResponse(status_code=exc.status_code, content=exc.payload)
+
+
+_reap_background_tasks: set = set()
+
+
+@app.exception_handler(Exception)
+async def handle_unexpected_error(_: Request, exc: Exception) -> Response:
+    """A dead Playwright driver answers 503 + starts recovery, not a bare 500.
+
+    Every browser call made through a dead driver raises a plain
+    Exception/RuntimeError ("Connection closed while reading from the
+    driver", "... the handler is closed"). Kick the session watchdog's
+    recovery at once so the next call finds a re-attached session.
+    """
+    if is_driver_dead_error(exc):
+        task = asyncio.create_task(manager.session_lifecycle.reap_dead_sessions())
+        _reap_background_tasks.add(task)
+        task.add_done_callback(_reap_background_tasks.discard)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "The browser connection was lost and is being restored. Retry in a few seconds.",
+                "code": "browser_connection_lost",
+                "retryable": True,
+            },
+        )
+    return PlainTextResponse("Internal Server Error", status_code=500)

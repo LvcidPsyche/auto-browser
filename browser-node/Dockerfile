@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     fluxbox \
+    fonts-noto-core \
+    fonts-noto-color-emoji \
     libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
@@ -48,6 +50,6 @@ COPY entrypoint.sh /entrypoint.sh
 COPY server.mjs /opt/browser-node/server.mjs
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
-EXPOSE 5900 6080 9223
+EXPOSE 5900 6080 9223 9224 9225
 
 CMD ["/entrypoint.sh"]
