@@ -173,8 +173,14 @@ def _result_detail_field() -> Any:
 
 class ObserveInput(SessionIdInput):
     # None → the deployment default (PERCEPTION_PRESET_DEFAULT, normally "normal")
-    preset: PerceptionPreset | None = None
-    limit: int = Field(default=40, ge=1, le=200)
+    preset: PerceptionPreset | None = Field(
+        default=None,
+        description=(
+            "text: page text and interactables, no screenshot. fast: screenshot and title only. "
+            "normal: both. rich: more text and twice the interactables. Omitted: the deployment default."
+        ),
+    )
+    limit: int = Field(default=40, ge=1, le=200, description="Most interactable elements to return.")
     detail: ResultDetail = _result_detail_field()
 
 
@@ -183,7 +189,9 @@ class SessionTailInput(SessionIdInput):
 
 
 class ScreenshotInput(SessionIdInput):
-    label: str = Field(default="manual", min_length=1, max_length=120)
+    label: str = Field(
+        default="manual", min_length=1, max_length=120, description="Word added to the screenshot's file name."
+    )
 
 
 class ExecuteActionInput(SessionIdInput):
@@ -209,7 +217,11 @@ class SaveAuthStateInput(SessionIdInput):
 
 
 class SaveAuthProfileInput(SessionIdInput):
-    profile_name: str = Field(min_length=1, max_length=120)
+    profile_name: str = Field(
+        min_length=1,
+        max_length=120,
+        description="Name to save the signed-in state under; pass it to browser.create_session as auth_profile.",
+    )
 
 
 class SaveMemoryProfileInput(SessionIdInput):
@@ -221,7 +233,7 @@ class SaveMemoryProfileInput(SessionIdInput):
 
 
 class TakeoverInput(SessionIdInput):
-    reason: str = "Manual review requested"
+    reason: str = Field(default="Manual review requested", description="What the human should do, shown to them.")
 
 
 class ListDownloadsInput(SessionIdInput):
@@ -345,8 +357,10 @@ class GetNetworkLogInput(SessionIdInput):
 
 
 class ForkSessionInput(SessionIdInput):
-    name: str | None = Field(default=None, max_length=200)
-    start_url: str | None = Field(default=None, max_length=2000)
+    name: str | None = Field(default=None, max_length=200, description="Omitted: fork-of-<source name>.")
+    start_url: str | None = Field(
+        default=None, max_length=2000, description="Omitted: the source session's current URL."
+    )
 
     @field_validator("start_url")
     @classmethod
@@ -357,7 +371,11 @@ class ForkSessionInput(SessionIdInput):
 
 
 class EvalJsInput(SessionIdInput):
-    expression: str = Field(min_length=1, max_length=50000)
+    expression: str = Field(
+        min_length=1,
+        max_length=50000,
+        description="JavaScript expression or function source, evaluated in the page; returns its JSON value.",
+    )
     approval_id: str | None = Field(
         default=None,
         min_length=1,
@@ -370,9 +388,11 @@ class EvalJsInput(SessionIdInput):
 
 
 class WaitForSelectorInput(SessionIdInput):
-    selector: str = Field(min_length=1, max_length=2000)
-    timeout_ms: int = Field(default=10000, ge=100, le=60000)
-    state: Literal["visible", "hidden", "attached", "detached"] = "visible"
+    selector: str = Field(min_length=1, max_length=2000, description="CSS or Playwright selector.")
+    timeout_ms: int = Field(default=10000, ge=100, le=60000, description="How long to wait before failing.")
+    state: Literal["visible", "hidden", "attached", "detached"] = Field(
+        default="visible", description="Condition to wait for, as in Playwright's wait_for_selector."
+    )
 
 
 class GetCookiesInput(SessionIdInput):
@@ -435,7 +455,9 @@ class SetViewportInput(SessionIdInput):
 
 
 class FindElementsInput(SessionIdInput):
-    selector: str | None = Field(default=None, min_length=1, max_length=2000)
+    selector: str | None = Field(
+        default=None, min_length=1, max_length=2000, description="CSS or Playwright selector. Give this or query."
+    )
     query: str | None = Field(
         default=None,
         min_length=1,
@@ -459,7 +481,7 @@ class FindElementsInput(SessionIdInput):
         le=500,
         description="Characters of surrounding text to include around each match when query is used.",
     )
-    limit: int = Field(default=20, ge=1, le=100)
+    limit: int = Field(default=20, ge=1, le=100, description="Most matches to return.")
 
     @model_validator(mode="after")
     def validate_selector_or_query(self) -> "FindElementsInput":

@@ -147,6 +147,17 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             vision_targeter=object(),
         )
 
+    async def test_curated_tool_arguments_are_all_described(self) -> None:
+        # An agent picks arguments from the schema alone; a bare "limit" or
+        # "state" leaves it guessing what the value means.
+        undescribed = [
+            f"{tool['name']}.{name}"
+            for tool in self.gateway.list_tools()
+            for name, schema in tool["inputSchema"].get("properties", {}).items()
+            if not schema.get("description")
+        ]
+        self.assertEqual(undescribed, [], "add description= to these input fields")
+
     async def test_list_tools_includes_expected_browser_tools(self) -> None:
         tools = self.gateway.list_tools()
         names = {tool["name"] for tool in tools}

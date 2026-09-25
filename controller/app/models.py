@@ -48,8 +48,10 @@ class _WithApproval(StrictInputModel):
 
 
 class CreateSessionRequest(StrictInputModel):
-    name: str | None = Field(default=None, min_length=1, max_length=200)
-    start_url: str | None = Field(default=None, min_length=1, max_length=2000)
+    name: str | None = Field(default=None, min_length=1, max_length=200, description="Label shown in session lists.")
+    start_url: str | None = Field(
+        default=None, min_length=1, max_length=2000, description="Page to open once the session starts."
+    )
     storage_state_path: str | None = Field(
         default=None,
         min_length=1,
@@ -74,10 +76,19 @@ class CreateSessionRequest(StrictInputModel):
         max_length=200,
         description="Named proxy configuration to route through. Not with proxy_server.",
     )
-    proxy_server: str | None = Field(default=None, min_length=1, max_length=500)
-    proxy_username: str | None = Field(default=None, max_length=200)
-    proxy_password: str | None = Field(default=None, max_length=500, repr=False)
-    user_agent: str | None = Field(default=None, min_length=1, max_length=2000)
+    proxy_server: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=500,
+        description="Proxy URL such as http://host:port. Omitted: the deployment default, if any.",
+    )
+    proxy_username: str | None = Field(default=None, max_length=200, description="Username for proxy_server.")
+    proxy_password: str | None = Field(
+        default=None, max_length=500, repr=False, description="Password for proxy_server."
+    )
+    user_agent: str | None = Field(
+        default=None, min_length=1, max_length=2000, description="User-Agent header to send instead of the default."
+    )
     protection_mode: ProtectionMode | None = Field(
         default=None,
         description="Witness evidence mode; 'confidential' is stricter. Omitted: the deployment default.",
