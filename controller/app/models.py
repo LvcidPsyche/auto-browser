@@ -130,6 +130,15 @@ class PressRequest(StrictInputModel):
     key: str = Field(min_length=1, max_length=120)
 
 
+class DialogRequest(StrictInputModel):
+    """Answer the JavaScript dialog open on the active tab (see
+    app/browser/services/dialogs.py): accept (OK / leave page) or dismiss
+    (Cancel / stay). prompt_text only applies to a prompt() dialog."""
+
+    accept: bool = True
+    prompt_text: str | None = Field(default=None, max_length=2000)
+
+
 class ScrollRequest(StrictInputModel):
     delta_x: float = 0
     delta_y: float = 600

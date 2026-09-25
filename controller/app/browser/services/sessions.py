@@ -12,6 +12,7 @@ from uuid import uuid4
 from ...action_errors import BrowserActionError
 from ...browser_scripts import apply_stealth
 from ...models import SessionRecord, SessionStatus
+from ...navigation_policy import await_public_dns_check
 from ...network_inspector import NetworkInspector
 from ...utils import UTC
 from .connection_health import (
@@ -85,6 +86,7 @@ class BrowserSessionService:
             raise ValueError("Provide proxy_persona or explicit proxy_server credentials, not both")
         if start_url:
             self.manager._assert_url_allowed(start_url)
+            await await_public_dns_check(self.manager, start_url)
         resolved_protection_mode = protection_mode or self.manager.settings.witness_protection_mode_default
 
         prepared_auth_state = None
@@ -480,6 +482,10 @@ class BrowserSessionService:
             if source_path is not None:
                 session.last_auth_state_path = source_path
             self.manager._attach_page_listeners(page, session)
+            # Every tab already open in a persistent profile, not just the one we
+            # track -- otherwise a dialog on the owner's other tab is auto-dismissed.
+            for existing in _context_pages(context):
+                self.manager._attach_page_listeners(existing, session)
             if hasattr(context, "on"):
                 context.on("page", lambda popup: self.manager._attach_page_listeners(popup, session))
 
@@ -711,6 +717,14 @@ class BrowserSessionService:
         session = self.manager.sessions.get(session_id)
         if session is None:
             raise KeyError(session_id)
+        # The active tab may have closed on its own (an OAuth popup closing
+        # after sign-in): go back to the tab that opened it before anyone acts.
+        dialogs = getattr(self.manager, "dialogs", None)
+        if dialogs is not None:
+            try:
+                dialogs.heal_active_page(session)
+            except Exception as exc:  # never block a lookup on this
+                logger.debug("session %s: active-tab heal failed: %s", session_id, exc)
         return session
 
     async def get_record(self, session_id: str) -> dict[str, Any]:
@@ -1084,6 +1098,8 @@ class BrowserSessionService:
         session.unresponsive_reason = None
         session.reattach_count += 1
         manager._attach_page_listeners(page, session)
+        for existing in _context_pages(context):
+            manager._attach_page_listeners(existing, session)
         if hasattr(context, "on"):
             context.on("page", lambda popup: manager._attach_page_listeners(popup, session))
         logger.warning(
@@ -1426,3 +1442,13 @@ class BrowserSessionService:
 
     def upload_root(self, session_id: str) -> Path:
         return self.upload_root_for(self.manager.settings.upload_root, session_id)
+
+
+def _context_pages(context: Any) -> list[Any]:
+    pages = getattr(context, "pages", None)
+    if callable(pages):
+        try:
+            pages = pages()
+        except Exception:
+            return []
+    return list(pages) if isinstance(pages, list) else []

@@ -23,6 +23,7 @@ from .browser.services import (
     BrowserAuthProfileService,
     BrowserBotChallengeService,
     BrowserDiagnosticsService,
+    BrowserDialogService,
     BrowserObservationService,
     BrowserRemoteAccessService,
     BrowserRuntimeService,
@@ -42,6 +43,7 @@ from .models import (
     SessionStatus,
     WitnessRemoteState,
 )
+from .navigation_policy import assert_resolves_public, check_public_url
 from .network_inspector import NetworkInspector
 from .ocr import OCRExtractor
 from .persistent_profiles import PersistentProfileClient
@@ -129,6 +131,16 @@ class BrowserSession:
     pending_witness_context: dict[str, Any] | None = None
     witness_remote_state: WitnessRemoteState = field(default_factory=WitnessRemoteState)
     metadata: dict[str, Any] = field(default_factory=dict)
+    # JavaScript dialogs and popups -- see app/browser/services/dialogs.py.
+    # agent_action_depth > 0 while an agent action runs; a dialog then (or
+    # within agent_dialog_grace_until) belongs to that action. Any other
+    # dialog is the owner's and is left open on his screen.
+    agent_action_depth: int = 0
+    agent_dialog_grace_until: float = 0.0
+    open_dialogs: "weakref.WeakKeyDictionary[Any, Any]" = field(default_factory=weakref.WeakKeyDictionary)
+    dialog_log: list[dict[str, Any]] = field(default_factory=list)
+    popup_openers: "weakref.WeakKeyDictionary[Any, Any]" = field(default_factory=weakref.WeakKeyDictionary)
+    pending_popup: Any = None
     # "Remember me": which profile this session's login state is silently kept
     # in sync with (see Settings.auto_persist_*), and the background task doing
     # the periodic re-save. Seeded from auth_profile_name at session creation
@@ -204,6 +216,7 @@ class BrowserManager:
         self.auth_profiles = BrowserAuthProfileService(self)
         self.bot_challenge = BrowserBotChallengeService()
         self.tabs = BrowserTabService(self)
+        self.dialogs = BrowserDialogService(self)
         self.uploads = BrowserUploadService(self)
         self.observation = BrowserObservationService(self)
         self.session_lifecycle = BrowserSessionService(self)
@@ -624,6 +637,11 @@ class BrowserManager:
     def _attach_page_listeners(self, page: Page, session: BrowserSession) -> None:
         self.diagnostics.attach_page_listeners(page, session)
 
+    async def handle_dialog(
+        self, session_id: str, *, accept: bool, prompt_text: str | None = None
+    ) -> dict[str, Any]:
+        return await self.dialogs.handle(session_id, accept=accept, prompt_text=prompt_text)
+
     async def _handle_download(self, session: BrowserSession, download: Any) -> None:
         return await self.diagnostics.handle_download(session, download)
 
@@ -787,6 +805,11 @@ class BrowserManager:
     def _assert_url_allowed(self, url: str) -> None:
         # Parsed as the browser will parse it, not as urllib does — see
         # app/url_safety.py for the backslash host confusion this closes.
+        # NAVIGATION_POLICY picks allowlist vs any-public-site; both refuse
+        # what they refuse with a PermissionError (see app/navigation_policy.py).
+        if getattr(self.settings, "public_internet_navigation", False):
+            check_public_url(url, deny_hosts=self.settings.navigation_deny_host_list)
+            return
         host = urlparse(browser_equivalent_url(url)).hostname
         if not host:
             raise PermissionError(f"Could not determine hostname for URL: {url}")
@@ -794,11 +817,28 @@ class BrowserManager:
             return
         raise PermissionError(f"Host {host!r} is not allowlisted")
 
+    async def _assert_url_resolves_public(self, url: str) -> None:
+        """DNS-rebinding guard for the public-internet mode: a name that
+        resolves to a private/reserved address is refused. A no-op in
+        allowlist mode (the owner named every host himself)."""
+        if not getattr(self.settings, "public_internet_navigation", False):
+            return
+        await assert_resolves_public(url, deny_hosts=self.settings.navigation_deny_host_list)
+
     def _assert_runtime_url_allowed(self, url: str) -> None:
         parsed = urlparse(url)
         if parsed.scheme in {"about", "data", "blob", ""}:
             return
+        if parsed.scheme == "chrome-error" and getattr(self.settings, "public_internet_navigation", False):
+            # Chromium's own "this site can't be reached" page -- nothing loaded.
+            return
         self._assert_url_allowed(url)
+
+    async def _assert_runtime_url_resolves_public(self, url: str) -> None:
+        parsed = urlparse(url)
+        if parsed.scheme in {"about", "data", "blob", "", "chrome-error"}:
+            return
+        await self._assert_url_resolves_public(url)
 
     # ── Tabs ─────────────────────────────────────────────────────────────────
 

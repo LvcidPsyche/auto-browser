@@ -75,6 +75,56 @@ class BrowserObservationService:
         screenshot_label: str = "observe",
         preset: str | None = None,
     ) -> dict[str, Any]:
+        from .dialogs import BrowserDialogService
+
+        dialogs = getattr(self.manager, "dialogs", None)
+        if not isinstance(dialogs, BrowserDialogService):
+            return await self._observation_payload(
+                session, limit=limit, screenshot_label=screenshot_label, preset=preset
+            )
+        dialogs.heal_active_page(session)
+        open_dialog = await dialogs.open_dialog(session)
+        if open_dialog is not None:
+            # The tab is blocked by a JavaScript dialog: every page read would
+            # hang until it is answered, so report the dialog itself instead.
+            return {
+                "session": await self.manager._session_summary(session),
+                "url": session.page.url,
+                "title": "",
+                "active_element": None,
+                "text_excerpt": f"[{open_dialog.get('type')} dialog] {open_dialog.get('message', '')}",
+                "dom_outline": {},
+                "accessibility_outline": {"available": False, "nodes": []},
+                "ocr": None,
+                "interactables": [],
+                "screenshot_path": None,
+                "screenshot_url": None,
+                "console_messages": session.console_messages[-10:],
+                "page_errors": session.page_errors[-10:],
+                "request_failures": session.request_failures[-10:],
+                "tabs": [],
+                "recent_downloads": session.downloads[-10:],
+                "takeover_url": self.manager._current_takeover_url(session),
+                "remote_access": self.manager.remote_access.session_info(session),
+                "preset": preset or self.manager.settings.perception_preset_default,
+                "open_dialog": open_dialog,
+                "recent_dialogs": session.dialog_log[-5:],
+            }
+        payload = await self._observation_payload(
+            session, limit=limit, screenshot_label=screenshot_label, preset=preset
+        )
+        payload["open_dialog"] = None
+        payload["recent_dialogs"] = session.dialog_log[-5:]
+        return payload
+
+    async def _observation_payload(
+        self,
+        session: "BrowserSession",
+        *,
+        limit: int = 40,
+        screenshot_label: str = "observe",
+        preset: str | None = None,
+    ) -> dict[str, Any]:
         if preset is None:
             preset = self.manager.settings.perception_preset_default
         if preset not in ("text", "fast", "normal", "rich"):

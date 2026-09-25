@@ -115,6 +115,11 @@ services:
       REQUEST_RATE_LIMIT_REQUESTS: "20000"
       CONTROLLER_ALLOWED_HOSTS: controller,localhost,127.0.0.1
       ALLOWED_HOSTS: ${TENANT_ALLOWED_HOSTS:?Choose permitted websites}
+      # "allowlist" (default) = only ALLOWED_HOSTS. "public_internet" = any public
+      # http(s) site; private/internal addresses and TENANT_NAVIGATION_DENY_HOSTS
+      # stay blocked (controller/app/navigation_policy.py). Set per tenant in its .env.
+      NAVIGATION_POLICY: ${TENANT_NAVIGATION_POLICY:-allowlist}
+      NAVIGATION_DENY_HOSTS: ${TENANT_NAVIGATION_DENY_HOSTS:-}
       MCP_ALLOWED_ORIGINS: ""
       SESSION_ISOLATION_MODE: shared_browser_node
       # One visible browser on the shared X display. Enforced in code too

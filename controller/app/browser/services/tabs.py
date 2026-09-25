@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
+from ...navigation_policy import await_public_dns_check
+
 if TYPE_CHECKING:
     from playwright.async_api import Page
 
@@ -28,6 +30,7 @@ class BrowserTabService:
         # navigate to. Checked before a page exists, so a refusal leaves no tab.
         if url:
             self.manager._assert_url_allowed(url)
+            await await_public_dns_check(self.manager, url)
         session = await self.manager.get_session(session_id)
         async with session.lock:
             return await self.manager.session_lifecycle.guarded(

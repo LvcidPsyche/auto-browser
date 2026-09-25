@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -15,6 +17,22 @@ from ..witness import WitnessApproval
 logger = logging.getLogger(__name__)
 
 ActionOperation = Callable[[], Awaitable[None]]
+
+
+def _dialogs(manager: Any) -> Any:
+    from ..browser.services.dialogs import BrowserDialogService
+
+    dialogs = getattr(manager, "dialogs", None)
+    return dialogs if isinstance(dialogs, BrowserDialogService) else None
+
+
+async def _runtime_dns_check(manager: Any, url: str) -> None:
+    """Public-internet mode: the page an action landed on (after redirects) must
+    still resolve to a public address -- the DNS-rebinding half of the policy."""
+    check = getattr(type(manager), "_assert_runtime_url_resolves_public", None)
+    if check is None or not asyncio.iscoroutinefunction(check):
+        return
+    await check(manager, url)
 
 
 @dataclass(slots=True)
@@ -49,6 +67,31 @@ class BrowserActionPipeline:
             )
 
     async def _run_locked(self, context: ActionRunContext) -> dict[str, Any]:
+        # An agent action owns the dialogs/popups it causes (see
+        # app/browser/services/dialogs.py). The owner's own "type here" bridge
+        # (target mode "focused") is not an agent action.
+        session = context.session
+        agent_action = context.target.get("mode") != "focused" and isinstance(
+            getattr(session, "agent_action_depth", None), int
+        )
+        if agent_action:
+            session.agent_action_depth += 1
+        try:
+            return await self._run_marked(context)
+        finally:
+            if agent_action:
+                session.agent_action_depth = max(0, session.agent_action_depth - 1)
+                grace = getattr(getattr(context.manager, "settings", None), "agent_dialog_grace_seconds", 3.0)
+                if not isinstance(grace, (int, float)):
+                    grace = 3.0
+                session.agent_dialog_grace_until = time.monotonic() + float(grace)
+
+    async def _run_marked(self, context: ActionRunContext) -> dict[str, Any]:
+        dialogs = _dialogs(context.manager)
+        if dialogs is not None:
+            # A dialog already up on this tab blocks every page call; fail fast
+            # with its text instead of hanging until the action timeout.
+            await dialogs.raise_if_open(context.session, context.action_name)
         witness_state = await self._prepare(context)
         try:
             await self._execute(context, witness_state)
@@ -111,10 +154,24 @@ class BrowserActionPipeline:
         if witness_state.outcome.should_block:
             raise PermissionError(witness_state.outcome.block_reason or "Witness policy blocked this action")
         await context.operation()
+        dialogs = _dialogs(manager)
+        if dialogs is not None:
+            followed = await dialogs.follow_popup(session)
+            if followed is not None:
+                context.target["popup"] = followed
+            if dialogs.heal_active_page(session):
+                context.target["returned_to_opener"] = True
+            open_dialog = await dialogs.open_dialog(session)
+            if open_dialog is not None:
+                # The page is blocked until the dialog is answered: report it and
+                # stop here (every probe below would hang on it).
+                context.target["dialog"] = open_dialog
+                return
         totp_result = await manager._maybe_handle_totp(session)
         if totp_result is not None:
             context.target.setdefault("totp", totp_result)
         manager._assert_runtime_url_allowed(session.page.url)
+        await _runtime_dns_check(manager, session.page.url)
         challenge = await manager._check_bot_challenge(session)
         if challenge is not None:
             await manager.request_human_takeover(session.id, reason=f"Bot challenge detected: {challenge['signal']}")

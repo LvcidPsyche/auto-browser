@@ -158,7 +158,19 @@ def run_readiness_checks(settings: Any, mode: str = "normal") -> ReadinessReport
         )
 
     allowed_hosts = str(getattr(settings, "allowed_hosts", "*") or "*")
-    if allowed_hosts.strip() == "*":
+    if getattr(settings, "navigation_policy", "allowlist") == "public_internet":
+        checks.append(
+            ReadinessCheck(
+                name="host_allowlist",
+                status="warn" if mode == "confidential" else "pass",
+                message=(
+                    "NAVIGATION_POLICY=public_internet: any public site; private/internal "
+                    "addresses and NAVIGATION_DENY_HOSTS are refused."
+                ),
+                details={"navigation_deny_hosts": str(getattr(settings, "navigation_deny_hosts", "") or "")},
+            )
+        )
+    elif allowed_hosts.strip() == "*":
         checks.append(
             ReadinessCheck(
                 name="host_allowlist",

@@ -5,6 +5,7 @@ from .approvals import BrowserApprovalService
 from .auth_profiles import BrowserAuthProfileService
 from .bot_challenge import BrowserBotChallengeService
 from .diagnostics import BrowserDiagnosticsService
+from .dialogs import BrowserDialogService
 from .observation import BrowserObservationService
 from .remote_access import BrowserRemoteAccessService
 from .runtime import BrowserRuntimeService
@@ -20,6 +21,7 @@ __all__ = [
     "BrowserAuthProfileService",
     "BrowserBotChallengeService",
     "BrowserDiagnosticsService",
+    "BrowserDialogService",
     "BrowserObservationService",
     "BrowserRemoteAccessService",
     "BrowserRuntimeService",

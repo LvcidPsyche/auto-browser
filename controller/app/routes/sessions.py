@@ -5,10 +5,12 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+from ..action_errors import BrowserActionError
 from ..approvals import ApprovalRequiredError
 from ..models import (
     ClickRequest,
     CreateSessionRequest,
+    DialogRequest,
     ExecuteActionRequest,
     HoverRequest,
     HumanTakeoverRequest,
@@ -132,6 +134,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except ApprovalRequiredError:
             raise
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 423 dialog_open).
+            raise
         except Exception:
             raise internal_error(logger, "navigate failed for session %s", session_id) from None
 
@@ -151,6 +156,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
         except PermissionError:
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except ApprovalRequiredError:
+            raise
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 423 dialog_open).
             raise
         except Exception:
             raise internal_error(logger, "click failed for session %s", session_id) from None
@@ -173,6 +181,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except ApprovalRequiredError:
             raise
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 423 dialog_open).
+            raise
         except Exception:
             raise internal_error(logger, "type failed for session %s", session_id) from None
 
@@ -186,6 +197,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except ApprovalRequiredError:
             raise
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 423 dialog_open).
+            raise
         except Exception:
             raise internal_error(logger, "type-focused failed for session %s", session_id) from None
 
@@ -197,8 +211,22 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except ApprovalRequiredError:
             raise
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 423 dialog_open).
+            raise
         except Exception:
             raise internal_error(logger, "press failed for session %s", session_id) from None
+
+    @router.post("/sessions/{session_id}/actions/dialog")
+    async def answer_dialog(session_id: str, payload: DialogRequest) -> dict[str, Any]:
+        try:
+            return await manager.handle_dialog(
+                session_id, accept=payload.accept, prompt_text=payload.prompt_text
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Unknown session") from None
+        except Exception:
+            raise internal_error(logger, "dialog failed for session %s", session_id) from None
 
     @router.post("/sessions/{session_id}/actions/scroll")
     async def scroll(session_id: str, payload: ScrollRequest) -> dict[str, Any]:
@@ -206,6 +234,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             return await manager.scroll(session_id, payload.delta_x, payload.delta_y, pace=payload.pace)
         except PermissionError:
             raise HTTPException(status_code=403, detail="Not permitted") from None
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 423 dialog_open).
+            raise
         except Exception:
             raise internal_error(logger, "scroll failed for session %s", session_id) from None
 
@@ -222,6 +253,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
         except PermissionError:
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except ApprovalRequiredError:
+            raise
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 423 dialog_open).
             raise
         except Exception:
             raise internal_error(logger, "execute action failed for session %s", session_id) from None
@@ -265,6 +299,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except ApprovalRequiredError:
             raise
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 423 dialog_open).
+            raise
         except Exception:
             raise internal_error(logger, "hover failed for session %s", session_id) from None
 
@@ -284,6 +321,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
         except PermissionError:
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except ApprovalRequiredError:
+            raise
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 423 dialog_open).
             raise
         except Exception:
             raise internal_error(logger, "select option failed for session %s", session_id) from None
@@ -305,6 +345,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except ApprovalRequiredError:
             raise
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 423 dialog_open).
+            raise
         except Exception:
             raise internal_error(logger, "reload failed for session %s", session_id) from None
 
@@ -316,6 +359,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except ApprovalRequiredError:
             raise
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 423 dialog_open).
+            raise
         except Exception:
             raise internal_error(logger, "go back failed for session %s", session_id) from None
 
@@ -326,6 +372,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
         except PermissionError:
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except ApprovalRequiredError:
+            raise
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 423 dialog_open).
             raise
         except Exception:
             raise internal_error(logger, "go forward failed for session %s", session_id) from None

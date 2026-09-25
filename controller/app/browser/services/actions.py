@@ -11,6 +11,7 @@ from ...action_errors import BrowserActionError
 from ...actions import ActionRunContext
 from ...approvals import ApprovalRequiredError
 from ...models import ApprovalKind, BrowserActionDecision
+from ...navigation_policy import await_public_dns_check
 from ...utils import spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
@@ -36,6 +37,7 @@ class BrowserActionService:
 
     async def navigate(self, session_id: str, url: str) -> dict[str, Any]:
         self.manager._assert_url_allowed(url)
+        await await_public_dns_check(self.manager, url)
         session = await self.manager.get_session(session_id)
 
         async def operation() -> None:

@@ -137,7 +137,7 @@ def test_agent_can_list_and_switch_tabs_but_not_close_them(tmp_path: Path, clock
             {"name": f"browser.{name}"} for name in (
                 "session_status", "request_access", "get_request", "complete", "observe",
                 "activate_tab", "list_tabs", "open_tab",
-                "click", "go_back", "go_forward", "hover", "navigate", "press", "reload",
+                "click", "dialog", "go_back", "go_forward", "hover", "navigate", "press", "reload",
                 "scroll", "select_option", "type", "upload", "wait",
             )
         ]
@@ -680,3 +680,36 @@ def test_a_session_the_controller_retired_frees_open_and_a_reattached_one_keeps_
         reopened = client.post("/owner/sessions", headers=auth(OWNER), json={"start_url": "https://example.com", "totp_code": fresh(secret, clock)})
         assert reopened.status_code == 200 and reopened.json()["id"] == "owner-2"
         assert client.get("/owner/visual-access", headers=auth(OWNER)).json() == {"session_id": "owner-2"}
+
+
+def test_agent_answers_a_dialog_and_learns_why_an_action_was_blocked(tmp_path: Path, clock: list[float]) -> None:
+    """The dialog action forwards to the controller, and a controller 423 dialog_open
+    reaches the agent with only its code and the dialog's own type/text -- every other
+    controller error body stays hidden behind the generic message."""
+    active, calls = False, []
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal active
+        payload = json.loads(request.content) if request.content else None; calls.append((request.method, request.url.path, payload))
+        if request.method == "GET" and request.url.path == "/sessions": return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
+        if request.method == "POST" and request.url.path == "/sessions": active = True; return httpx.Response(200, json={"id": "owner-1"})
+        if request.url.path == "/sessions/owner-1/actions/click":
+            return httpx.Response(423, json={"ok": False, "code": "dialog_open", "error": "x", "url": "https://secret.example/token=abc",
+                                             "dialog": {"type": "confirm", "message": "Leave site?", "url": "https://secret.example"}})
+        if request.url.path == "/sessions/owner-1/actions/press":
+            return httpx.Response(400, json={"ok": False, "code": "browser_action_failed", "error": "internal detail"})
+        return httpx.Response(200, json={"handled": True})
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        secret = enroll(client, clock)
+        client.post("/owner/sessions", headers=auth(OWNER), json={"start_url": "https://example.com", "totp_code": fresh(secret, clock)})
+        request_id = client.post("/requests", headers=auth(AGENT), json={"purpose": "sign up"}).json()["id"]
+        blocked = client.post(f"/requests/{request_id}/actions/click", headers=auth(AGENT), json={"arguments": {"element_id": "op-1"}})
+        assert blocked.status_code == 423
+        assert blocked.json()["detail"] == {
+            "message": "Browser controller rejected request", "code": "dialog_open",
+            "dialog": {"type": "confirm", "message": "Leave site?"},
+        }
+        other = client.post(f"/requests/{request_id}/actions/press", headers=auth(AGENT), json={"arguments": {"key": "Enter"}})
+        assert other.status_code == 400 and other.json()["detail"] == "Browser controller rejected request"
+        answered = client.post(f"/requests/{request_id}/actions/dialog", headers=auth(AGENT), json={"arguments": {"accept": True}})
+        assert answered.status_code == 200
+        assert ("POST", "/sessions/owner-1/actions/dialog", {"accept": True}) in calls

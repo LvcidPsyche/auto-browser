@@ -36,7 +36,14 @@ from websockets.asyncio.client import connect as ws_connect
 ALLOWED_ACTIONS = frozenset({
     "click", "type", "press", "scroll", "navigate", "wait",
     "hover", "select_option", "reload", "go_back", "go_forward", "upload",
+    # Answer the JavaScript dialog (alert/confirm/prompt/leave-page) open on
+    # the active tab -- controller POST /sessions/{id}/actions/dialog.
+    "dialog",
 })
+# Controller error codes whose meaning an agent needs to act on (answer the
+# dialog, hand a captcha to the owner). Only the code and the dialog's own
+# type/text are relayed -- never the rest of the controller's error body.
+RELAYED_ERROR_CODES = frozenset({"dialog_open", "captcha_detected"})
 # The controller's REST paths use a dash for a couple of these operations while every
 # tool-facing name in this broker (and the MCP tool list) uses an underscore -- translate
 # here so ALLOWED_ACTIONS can keep the MCP-friendly spelling everywhere else.
@@ -56,6 +63,24 @@ TAB_OPERATIONS = frozenset({"list_tabs", "activate_tab", "open_tab"})
 TOTP_PERIOD = 30
 TOTP_FAILURE_LIMIT = 5
 TOTP_BLOCK_SECONDS = 300
+
+
+def _relayed_error_detail(response: httpx.Response) -> Any:
+    generic = "Browser controller rejected request"
+    try:
+        body = response.json()
+    except ValueError:
+        return generic
+    if not isinstance(body, dict) or body.get("code") not in RELAYED_ERROR_CODES:
+        return generic
+    detail: dict[str, Any] = {"message": generic, "code": body["code"]}
+    dialog = body.get("dialog")
+    if isinstance(dialog, dict):
+        detail["dialog"] = {
+            "type": str(dialog.get("type") or "")[:20],
+            "message": str(dialog.get("message") or "")[:500],
+        }
+    return detail
 
 
 def totp_code(secret: str, step: int) -> str:
@@ -473,7 +498,7 @@ def create_app(
         except httpx.HTTPError:
             raise HTTPException(502, "Browser controller unavailable") from None
         if response.status_code >= 400:
-            raise HTTPException(response.status_code, "Browser controller rejected request")
+            raise HTTPException(response.status_code, _relayed_error_detail(response))
         if not response.content:
             return {}
         try:

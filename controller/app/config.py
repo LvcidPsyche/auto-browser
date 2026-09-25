@@ -248,6 +248,15 @@ class Settings(BaseSettings):
     isolated_tunnel_local_host: str = Field("host.docker.internal", alias="ISOLATED_TUNNEL_LOCAL_HOST")
     isolated_tunnel_info_root: str = Field("/data/tunnels/sessions", alias="ISOLATED_TUNNEL_INFO_ROOT")
     allowed_hosts: str = Field("example.com,localhost,127.0.0.1,::1", alias="ALLOWED_HOSTS")
+    # "allowlist" (default): only ALLOWED_HOSTS. "public_internet": any public
+    # http(s) site, ALLOWED_HOSTS ignored, private/internal addresses and
+    # NAVIGATION_DENY_HOSTS always refused -- see app/navigation_policy.py.
+    navigation_policy: Literal["allowlist", "public_internet"] = Field("allowlist", alias="NAVIGATION_POLICY")
+    navigation_deny_hosts: str = Field("", alias="NAVIGATION_DENY_HOSTS")
+    # How long after an agent action ends a JavaScript dialog still counts as
+    # part of that action (auto-accepted when benign). Outside this window a
+    # dialog is left open for the person looking at the live browser.
+    agent_dialog_grace_seconds: float = Field(3.0, alias="AGENT_DIALOG_GRACE_SECONDS")
     default_viewport_width: int = Field(1280, alias="DEFAULT_VIEWPORT_WIDTH")
     default_viewport_height: int = Field(800, alias="DEFAULT_VIEWPORT_HEIGHT")
     connect_retries: int = Field(60, alias="CONNECT_RETRIES")
@@ -430,6 +439,14 @@ class Settings(BaseSettings):
     @property
     def allowed_host_patterns(self) -> list[str]:
         return [item.strip() for item in self.allowed_hosts.split(",") if item.strip()]
+
+    @property
+    def navigation_deny_host_list(self) -> list[str]:
+        return [item.strip().lower() for item in self.navigation_deny_hosts.split(",") if item.strip()]
+
+    @property
+    def public_internet_navigation(self) -> bool:
+        return self.navigation_policy == "public_internet"
 
     @property
     def mcp_allowed_origin_list(self) -> list[str]:

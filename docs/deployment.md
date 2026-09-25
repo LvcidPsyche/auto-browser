@@ -37,6 +37,39 @@ UPLOAD_RETENTION_HOURS=168
 AUTH_RETENTION_HOURS=168
 ```
 
+### Navigation policy: allowlist or any public site
+
+`NAVIGATION_POLICY` decides which sites the browser may be sent to:
+
+- `allowlist` (default): only the hosts in `ALLOWED_HOSTS`.
+- `public_internet`: any public `http`/`https` site, for a single-owner stack whose
+  owner wants his assistants to open whatever site he names. `ALLOWED_HOSTS` is not
+  consulted. Always refused, in this mode: every other scheme (`file:`, `chrome:`,
+  `data:`, `javascript:`...), private / loopback / link-local (cloud metadata) /
+  CGNAT / reserved addresses in any spelling Chromium accepts (decimal, hex, octal,
+  short-form IPv4, percent-encoded, full-width, IPv4-mapped IPv6), single-label and
+  internal names (`controller`, `localhost`, `*.local`, `*.internal`, ...), names
+  whose DNS answer includes a private address (checked before navigating and again
+  on the final URL after every action), and every host in `NAVIGATION_DENY_HOSTS`
+  (comma-separated; a name blocks its subdomains too).
+
+On a provisioned tenant stack set it in the tenant's own `.env`
+(`$TENANT_STACK_HOST_ROOT/<stack-key>/.env`), which `deploy/tenants/compose.yml`
+maps to the controller:
+
+```env
+TENANT_NAVIGATION_POLICY=public_internet
+TENANT_NAVIGATION_DENY_HOSTS=
+```
+
+then recreate only the controller (the same command the provisioner runs):
+
+```bash
+docker compose --project-name ab-<stack-key> --env-file <home>/.env   -f deploy/tenants/compose.yml --profile tenant   up -d --no-deps --force-recreate --wait --wait-timeout 60 controller
+```
+
+Rollback: delete the line (or set `allowlist`) and recreate the controller again.
+
 `CONTROLLER_ALLOWED_HOSTS` protects the controller itself from unexpected HTTP Host headers.
 Keep `ALLOWED_HOSTS` for browser navigation targets, and set `CONTROLLER_ALLOWED_HOSTS`
 to the hostnames operators use to reach the controller, such as `browser.example.com`
