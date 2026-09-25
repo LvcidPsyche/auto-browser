@@ -562,6 +562,7 @@ class McpToolGateway:
             user_agent=payload.user_agent,
             protection_mode=payload.protection_mode,
             totp_secret=payload.totp_secret,
+            totp_hosts=payload.totp_hosts,
         )
 
     async def _list_sessions(self, _: EmptyInput) -> list[dict[str, Any]]:

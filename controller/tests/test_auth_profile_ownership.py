@@ -145,6 +145,37 @@ class AuthProfileOwnershipTests(unittest.TestCase):
         listed = {entry["profile_name"] for entry in asyncio.run(self.service.list())}
         self.assertEqual(listed, {"bob-login", "legacy"})
 
+    def test_a_storage_state_path_into_the_profile_is_checked_like_the_profile(self) -> None:
+        """`storage_state_path` is relative to AUTH_ROOT, which holds profiles/ too.
+
+        Naming the profile's state file directly used to skip the owner check
+        that `auth_profile` gets, so Bob could open a session logged in as Alice.
+        """
+        self.as_operator("alice")
+        self.save("alice-login")
+
+        self.as_operator("bob")
+        for path in (
+            "profiles/alice-login/state.json",
+            "./profiles/../profiles/alice-login/state.json",
+            "profiles/alice-login/../alice-login/state.json",
+        ):
+            with self.subTest(path=path), self.assertRaises(PermissionError):
+                self.service.storage_state_source(path)
+
+        self.as_operator("alice")
+        self.assertEqual(
+            self.service.storage_state_source("profiles/alice-login/state.json"),
+            (self.root / "profiles" / "alice-login" / "state.json").resolve(),
+        )
+
+    def test_a_storage_state_path_outside_profiles_needs_no_owner(self) -> None:
+        state = self.root / "exports" / "state.json"
+        state.parent.mkdir(parents=True)
+        state.write_text("{}", encoding="utf-8")
+        self.as_operator("bob")
+        self.assertEqual(self.service.storage_state_source("exports/state.json"), state.resolve())
+
     def test_damaged_metadata_does_not_read_as_unowned(self) -> None:
         """{} from a torn or corrupt profile.json meant "no owner": open to all."""
         self.as_operator("alice")

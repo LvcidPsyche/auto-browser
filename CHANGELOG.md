@@ -16,6 +16,8 @@ that set `REQUIRE_OPERATOR_ID=true`.
 Upgrade notes:
 - `browser.create_session` with `totp_secret` now needs `totp_hosts` unless it also sets
   `start_url`, whose host becomes the default.
+- noVNC takeover now accepts only its own page on a loopback host name. If your takeover URL
+  uses another name (a LAN IP, a bastion, a domain), set `NOVNC_ALLOWED_HOSTS`.
 - `POST /workflows/run` validates its steps up front. Unknown keys, duplicate ids, unknown
   dependencies and unbounded retries now get a 422 before the run starts.
 - `GET /sessions/{id}/trace` returns a `viewer_url` that opens the Playwright trace viewer
@@ -31,8 +33,14 @@ Upgrade notes:
 - **New:** `totp_hosts` on `browser.create_session` names the hosts where
   one-time codes may be typed; it defaults to the `start_url` host, and a
   `totp_secret` with neither is now refused.
-- **New:** `NOVNC_ALLOWED_ORIGINS` for deployments whose proxy in front of the
-  noVNC port rewrites the `Host` header.
+- **New:** noVNC takeover accepts only its own page on a loopback host name.
+  If your takeover URL uses another name (a LAN IP, a bastion, a domain), set
+  `NOVNC_ALLOWED_HOSTS`; if a proxy in front of the noVNC port rewrites the
+  `Host` header, set `NOVNC_ALLOWED_ORIGINS`. Isolated session containers get
+  `ISOLATED_TAKEOVER_HOST` automatically.
+- An approval for text typed with `sensitive: true` can be executed only by the
+  controller process that created it (not after a restart, by another uvicorn
+  worker or replica, or after 24 hours); the action then asks for a new one.
 
 ### Fixed
 

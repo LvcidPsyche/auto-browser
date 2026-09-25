@@ -250,6 +250,18 @@ whenever those ports are reachable beyond loopback — but treat it as a second 
 not the gateway: the VNC protocol uses only the first 8 characters and a
 DES-based challenge.
 
+Chromium runs in the same container as noVNC, so every page it loads can reach
+`ws://127.0.0.1:6080`. noVNC therefore accepts a WebSocket only when its `Origin`
+is the host the client connected to (true of the noVNC page itself and of no page
+the browser visits) and that host is a loopback name or listed in
+`NOVNC_ALLOWED_HOSTS` (so DNS rebinding cannot pass as the noVNC page). If takeover
+fails with "Invalid Origin Header" in `/tmp/novnc.log`:
+
+- the takeover URL uses a non-loopback host name (a LAN IP, a bastion, a domain):
+  add it to `NOVNC_ALLOWED_HOSTS`, e.g. `vnc.example.com`;
+- a proxy in front of port 6080 rewrites the `Host` header: add the takeover
+  page's origin to `NOVNC_ALLOWED_ORIGINS`, e.g. `https://vnc.example.com`.
+
 Inside the browser container, Chromium, Xvfb, x11vnc and noVNC run as the
 unprivileged `browser` user (uid 10001). The entrypoint starts as root only to take
 ownership of the mounted `/data/profile` and `/data/downloads`, so on the host

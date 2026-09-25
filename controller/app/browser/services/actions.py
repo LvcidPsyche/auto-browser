@@ -5,12 +5,13 @@ import logging
 import random
 import re
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from ... import events as _events
 from ...action_errors import BrowserActionError
 from ...actions import ActionRunContext
 from ...approvals import ApprovalRequiredError
-from ...models import ApprovalKind, BrowserActionDecision
+from ...models import ApprovalKind, BrowserActionDecision, totp_host_allowed
 from ...utils import spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
@@ -591,6 +592,11 @@ class BrowserActionService:
     async def maybe_handle_totp(self, session: "BrowserSession") -> dict[str, Any] | None:
         if not session.totp_secret:
             return None
+        # A live code is typed into whatever "code" field is visible, so the
+        # page has to be one the caller named: otherwise any site the agent is
+        # sent to can show an input named "code" and read a valid second factor.
+        if not self._totp_host_allowed(session):
+            return None
         if pyotp is None:
             raise BrowserActionError(
                 "TOTP support is not installed in this controller runtime",
@@ -614,6 +620,9 @@ class BrowserActionService:
             return None
 
         locator, selector = located
+        # Finding the field awaited the page, which may have navigated since.
+        if not self._totp_host_allowed(session):
+            return None
         code = pyotp.TOTP(session.totp_secret).now()
         await self.focus_locator(session, locator)
         try:
@@ -642,6 +651,13 @@ class BrowserActionService:
         await self.manager._settle(session.page)
         return {"selector": selector, "code_length": len(code)}
 
+    @staticmethod
+    def _totp_host_allowed(session: "BrowserSession") -> bool:
+        parsed = urlparse(session.page.url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+        return totp_host_allowed(parsed.hostname, session.totp_hosts)
+
     def approval_kind_for_decision(self, decision: BrowserActionDecision) -> ApprovalKind | None:
         if decision.action == "upload":
             return "upload" if self.manager.settings.require_approval_for_uploads else None
@@ -649,9 +665,15 @@ class BrowserActionService:
             return decision.risk_category
         return None
 
-    @staticmethod
-    def governed_approval_kind_for_decision(decision: BrowserActionDecision) -> ApprovalKind | None:
-        if decision.risk_category == "read":
+    @classmethod
+    def governed_approval_kind_for_decision(cls, decision: BrowserActionDecision) -> ApprovalKind | None:
+        # risk_category is chosen by whoever wrote the decision, often a model
+        # reading the page it is acting on. Only an action that cannot change
+        # anything may skip governed approval by calling itself "read"; a
+        # click, type, press, select or upload labelled "read" is still a write.
+        if decision.risk_category == "read" and (
+            decision.action == "done" or cls.action_class(decision.action) == "read"
+        ):
             return None
         if decision.action == "upload" or decision.risk_category == "upload":
             return "upload"

@@ -169,6 +169,10 @@ class DockerBrowserNodeProvisioner:
         # password set for the shared browser-node has to reach these too.
         if self.settings.vnc_password:
             environment["VNC_PASSWORD"] = self.settings.vnc_password
+        # noVNC in the container only accepts its own page on a loopback name or
+        # a listed host (a DNS-rebinding guard), and the takeover URL for this
+        # container uses ISOLATED_TAKEOVER_HOST.
+        environment["NOVNC_ALLOWED_HOSTS"] = self.settings.isolated_takeover_host
 
         container = client.containers.run(
             self.settings.isolated_browser_image,
