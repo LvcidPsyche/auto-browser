@@ -244,8 +244,20 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
                 "trace_path": str(trace_path),
                 "trace_url": f"/artifacts/{session_id}/{trace_path.name}",
                 "trace_size_bytes": trace_path.stat().st_size,
-                "viewer_url": f"https://trace.playwright.dev/?trace=/artifacts/{session_id}/{trace_path.name}",
+                # The hosted viewer cannot fetch the trace itself: this used to
+                # pass ?trace=/artifacts/..., which it resolved against its own
+                # origin (a 404), and /artifacts needs the API token and sends
+                # no CORS headers anyway. Download trace_url and drop the file
+                # on the viewer, which loads it locally, or run viewer_command.
+                "viewer_url": "https://trace.playwright.dev/",
+                "viewer_command": f"npx playwright show-trace {trace_path.name}",
             }
-        return {"session_id": session_id, "trace_path": None, "trace_url": None, "viewer_url": None}
+        return {
+            "session_id": session_id,
+            "trace_path": None,
+            "trace_url": None,
+            "viewer_url": None,
+            "viewer_command": None,
+        }
 
     return router
