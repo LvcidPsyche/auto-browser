@@ -521,3 +521,46 @@ async def test_cancelled_create_releases_what_it_acquired(tmp_path: Path) -> Non
     assert closed == [True]
     assert released == [runtime]
     manager._check_session_limit()
+
+
+@pytest.mark.asyncio
+async def test_audit_trim_does_not_drop_events_appended_while_it_runs(tmp_path: Path, monkeypatch) -> None:
+    """Regression: a trim read the log, an append landed, and the trim then
+    replaced the file with its stale tail, losing the appended event."""
+    import threading
+
+    import app.audit as audit_module
+    from app.models import AuditEvent, OperatorIdentity
+
+    def _event(action: str) -> AuditEvent:
+        return AuditEvent(
+            id=f"evt-{action}",
+            timestamp="2026-08-04T00:00:00Z",
+            event_type="test_event",
+            status="ok",
+            action=action,
+            session_id="s1",
+            operator=OperatorIdentity(id="op-1"),
+        )
+
+    store = FileAuditStore(str(tmp_path), max_events=2, trim_interval=1000)
+    await store.startup()
+    for action in ("a", "b", "c"):
+        await store.append_event(_event(action))
+
+    trim_has_read = threading.Event()
+    real_write = audit_module.atomic_write_text
+
+    def slow_write(path, text):
+        trim_has_read.set()
+        threading.Event().wait(0.2)
+        real_write(path, text)
+
+    monkeypatch.setattr(audit_module, "atomic_write_text", slow_write)
+    trim = asyncio.create_task(asyncio.to_thread(store._trim_sync))
+    await asyncio.to_thread(trim_has_read.wait)
+    await store.append_event(_event("late"))
+    await trim
+
+    actions = [e.action for e in await store.list(limit=50)]
+    assert "late" in actions
