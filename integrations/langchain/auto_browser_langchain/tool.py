@@ -41,6 +41,9 @@ class AutoBrowserTool(BaseTool):
 
     base_url: str = "http://localhost:8000"
     bearer_token: Optional[str] = None
+    # Sent as X-Operator-Id: a controller with REQUIRE_OPERATOR_ID=true needs it
+    # unless bearer_token is a named credential.
+    operator_id: Optional[str] = None
     timeout: float = 60.0
 
     def _run(self, action: str, arguments: dict[str, Any] | None = None) -> str:
@@ -56,6 +59,8 @@ class AutoBrowserTool(BaseTool):
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if self.bearer_token:
             headers["Authorization"] = f"Bearer {self.bearer_token}"
+        if self.operator_id:
+            headers["X-Operator-Id"] = self.operator_id
         payload = {"name": action, "arguments": arguments or {}}
         async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout) as client:
             response = await client.post("/mcp/tools/call", json=payload, headers=headers)
@@ -72,10 +77,13 @@ class AutoBrowserTool(BaseTool):
         cls,
         base_url: str = "http://localhost:8000",
         bearer_token: str | None = None,
+        operator_id: str | None = None,
     ) -> list[dict]:
         headers: dict[str, str] = {}
         if bearer_token:
             headers["Authorization"] = f"Bearer {bearer_token}"
+        if operator_id:
+            headers["X-Operator-Id"] = operator_id
         with httpx.Client(base_url=base_url, timeout=10) as client:
             response = client.get("/mcp/tools", headers=headers)
             response.raise_for_status()
