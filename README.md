@@ -208,10 +208,15 @@ API_BEARER_TOKEN=<strong-random-secret>
 REQUIRE_OPERATOR_ID=true
 AUTH_STATE_ENCRYPTION_KEY=<44-char-fernet-key>
 REQUIRE_AUTH_STATE_ENCRYPTION=true
+SHARE_TOKEN_SECRET=<strong-random-secret>
+CONTROLLER_ALLOWED_HOSTS=<controller hostname>
+ALLOWED_HOSTS=<sites the browser may visit>
 REQUEST_RATE_LIMIT_ENABLED=true
 METRICS_ENABLED=true
 STEALTH_ENABLED=false
 ```
+
+With `APP_ENV=production` the controller refuses to start while any of these is missing, and the startup log names the missing ones.
 
 By default every session shares one Chromium process and one noVNC desktop (`SESSION_ISOLATION_MODE=shared_browser_node`). Cookies and storage stay separate per session, but a human taking over one session can see the others' windows. When sessions belong to different people, accounts or trust domains, start with `make up-isolation` to give each session its own browser container and takeover surface (`docker_ephemeral`). [`docs/session-isolation-audit.md`](./docs/session-isolation-audit.md) has the details.
 
