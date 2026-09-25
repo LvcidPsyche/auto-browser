@@ -27,7 +27,7 @@ def register_extensions(app) -> None:
         delegation_manager  — DelegationManager
         network_inspectors  — dict[session_id, NetworkInspector]
         cdp_sessions        — dict[session_id, CDPPassthrough]
-        workflow_engine     — WorkflowEngine (with all action handlers)
+        workflow_engine     — WorkflowEngine (no step actions are registered at startup)
     """
     _init_mesh(app)
     _init_harness(app)
