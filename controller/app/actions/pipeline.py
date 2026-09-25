@@ -37,35 +37,47 @@ class ActionWitnessState:
 class BrowserActionPipeline:
     async def run(self, context: ActionRunContext) -> dict[str, Any]:
         async with context.session.lock:
-            witness_state = await self._prepare(context)
-            try:
-                await self._execute(context, witness_state)
-            except PermissionError as exc:
-                failed = await self._handle_policy_block(context, witness_state)
-                raise BrowserActionError(
-                    "Action blocked by policy",
-                    code="browser_action_blocked",
-                    action=context.action_name,
-                    status_code=403,
-                    retryable=False,
-                    url=context.session.page.url,
-                    details={"snapshot": failed},
-                ) from exc
-            except BrowserActionError as exc:
-                await self._handle_browser_action_error(context, witness_state, exc)
-                raise
-            except PlaywrightError as exc:
-                failed = await self._handle_playwright_error(context, witness_state)
-                raise BrowserActionError(
-                    "Action failed. Refresh observation and retry.",
-                    code="browser_action_failed",
-                    action=context.action_name,
-                    status_code=400,
-                    retryable=True,
-                    url=context.session.page.url,
-                    details={"snapshot": failed},
-                ) from exc
-            return await self._record_success(context, witness_state)
+            lifecycle = getattr(context.manager, "session_lifecycle", None)
+            settings = getattr(context.manager, "settings", None)
+            timeout = getattr(settings, "browser_action_timeout_seconds", None)
+            if lifecycle is None or not isinstance(timeout, (int, float)):
+                return await self._run_locked(context)
+            # A hard ceiling: one call that never returns must not hold the
+            # session lock forever (see Settings.browser_action_timeout_seconds).
+            return await lifecycle.guarded(
+                context.session, self._run_locked(context), what=context.action_name, timeout=timeout
+            )
+
+    async def _run_locked(self, context: ActionRunContext) -> dict[str, Any]:
+        witness_state = await self._prepare(context)
+        try:
+            await self._execute(context, witness_state)
+        except PermissionError as exc:
+            failed = await self._handle_policy_block(context, witness_state)
+            raise BrowserActionError(
+                "Action blocked by policy",
+                code="browser_action_blocked",
+                action=context.action_name,
+                status_code=403,
+                retryable=False,
+                url=context.session.page.url,
+                details={"snapshot": failed},
+            ) from exc
+        except BrowserActionError as exc:
+            await self._handle_browser_action_error(context, witness_state, exc)
+            raise
+        except PlaywrightError as exc:
+            failed = await self._handle_playwright_error(context, witness_state)
+            raise BrowserActionError(
+                "Action failed. Refresh observation and retry.",
+                code="browser_action_failed",
+                action=context.action_name,
+                status_code=400,
+                retryable=True,
+                url=context.session.page.url,
+                details={"snapshot": failed},
+            ) from exc
+        return await self._record_success(context, witness_state)
 
     async def _prepare(self, context: ActionRunContext) -> ActionWitnessState:
         manager = context.manager

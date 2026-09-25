@@ -94,6 +94,14 @@ class Settings(BaseSettings):
     # retired so the broker/portal stop seeing a zombie "active" session.
     # 0 disables the watchdog (GET /sessions and Open still check).
     session_watchdog_interval_seconds: float = Field(5.0, alias="SESSION_WATCHDOG_INTERVAL_SECONDS")
+    # Hard ceilings on one browser call made while holding a session's lock.
+    # Without them one call that never returns (2026-09-25 04:01: an
+    # employee's observe on the owner's persistent profile) held the lock
+    # forever and every later employee call queued behind it. On expiry the
+    # caller gets a retryable 504 and the session's CDP client is re-attached
+    # in place (a fresh Playwright view of the same running browser).
+    browser_call_timeout_seconds: float = Field(30.0, alias="BROWSER_CALL_TIMEOUT_SECONDS")
+    browser_action_timeout_seconds: float = Field(90.0, alias="BROWSER_ACTION_TIMEOUT_SECONDS")
 
     # Persistent Chromium profiles: instead of replaying a storage_state export
     # into a brand-new context on every Open (cookies + localStorage only), a

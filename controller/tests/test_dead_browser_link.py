@@ -305,6 +305,59 @@ class DeadLinkRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.async_playwright.call_count, 1)
         self.manager.persistent_profiles.open.assert_awaited_once()
 
+    async def test_a_hung_observe_answers_504_frees_the_lock_and_reattaches(self) -> None:
+        """2026-09-25 04:01: an employee's observe never returned, held the
+        session lock, and every later call queued behind it forever."""
+        from app.action_errors import BrowserActionError
+
+        self.manager.playwright = self.new_driver  # type: ignore[assignment]
+        self.manager.settings.browser_call_timeout_seconds = 0.2
+        session = self._session(persistent=True)
+        new_browser, new_page = self._stub_reattach()
+
+        async def never(*_args, **_kwargs):
+            await asyncio.Event().wait()
+
+        self.manager.observation.observation_payload = never  # type: ignore[method-assign]
+        with self.assertRaises(BrowserActionError) as raised:
+            await self.manager.observe(session.id)
+        self.assertEqual(raised.exception.status_code, 504)
+        self.assertEqual(raised.exception.payload["code"], "browser_call_timeout")
+        self.assertFalse(session.lock.locked(), "the lock is released at once")
+        for _ in range(50):
+            if session.reattach_count:
+                break
+            await asyncio.sleep(0.02)
+        self.assertEqual(session.reattach_count, 1)
+        self.assertIs(session.browser, new_browser)
+        self.assertIs(session.page, new_page)
+        self.assertIsNone(session.unresponsive_reason)
+        self.manager.persistent_profiles.close.assert_not_awaited()
+
+    async def test_a_hung_action_answers_504_instead_of_holding_the_lock(self) -> None:
+        from app.action_errors import BrowserActionError
+        from app.actions.pipeline import ActionRunContext
+
+        self.manager.playwright = self.new_driver  # type: ignore[assignment]
+        self.manager.settings.browser_action_timeout_seconds = 0.2
+        session = self._session(persistent=True)
+        self._stub_reattach()
+
+        async def never() -> None:
+            await asyncio.Event().wait()
+
+        pipeline = self.manager.action_pipeline
+        pipeline._prepare = AsyncMock(return_value=MagicMock())  # type: ignore[method-assign]
+        context = ActionRunContext(manager=self.manager, session=session, action_name="click", target={}, operation=never)
+        async def execute_never(*_args) -> None:
+            await never()
+
+        pipeline._execute = execute_never  # type: ignore[method-assign]
+        with self.assertRaises(BrowserActionError) as raised:
+            await pipeline.run(context)
+        self.assertEqual(raised.exception.status_code, 504)
+        self.assertFalse(session.lock.locked())
+
 
 class TablessStorageStateTests(unittest.IsolatedAsyncioTestCase):
     async def test_reads_cookies_and_open_tabs_without_creating_a_page(self) -> None:

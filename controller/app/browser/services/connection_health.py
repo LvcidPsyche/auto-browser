@@ -90,6 +90,9 @@ def session_connection_problem(manager: Any, session: Any) -> str | None:
         # The driver was restarted since this session attached: its handles
         # belong to the dead one (and still claim is_connected()).
         return DRIVER_EXITED
+    unresponsive = getattr(session, "unresponsive_reason", None)
+    if isinstance(unresponsive, str) and unresponsive:
+        return f"the controller's view of the browser stopped answering ({unresponsive})"
     browser = getattr(session, "browser", None)
     is_connected = getattr(browser, "is_connected", None)
     if browser is not None and callable(is_connected):

@@ -27,7 +27,12 @@ class BrowserObservationService:
     async def observe(self, session_id: str, limit: int = 40, preset: str | None = None) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         async with session.lock:
-            result = await self.observation_payload(session, limit=limit, preset=preset)
+            result = await self.manager.session_lifecycle.guarded(
+                session,
+                self.observation_payload(session, limit=limit, preset=preset),
+                what="observe",
+                timeout=self.manager.settings.browser_call_timeout_seconds,
+            )
             _events.emit_observe(
                 session_id,
                 result.get("url", ""),
@@ -39,7 +44,12 @@ class BrowserObservationService:
     async def capture_screenshot(self, session_id: str, *, label: str = "manual") -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         async with session.lock:
-            screenshot = await self._capture_screenshot_redacted(session, label)
+            screenshot = await self.manager.session_lifecycle.guarded(
+                session,
+                self._capture_screenshot_redacted(session, label),
+                what="screenshot",
+                timeout=self.manager.settings.browser_action_timeout_seconds,
+            )
             return {
                 "session": await self.manager._session_summary(session),
                 "url": session.page.url,

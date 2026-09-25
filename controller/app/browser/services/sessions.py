@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from ...action_errors import BrowserActionError
 from ...browser_scripts import apply_stealth
 from ...models import SessionRecord, SessionStatus
 from ...network_inspector import NetworkInspector
@@ -409,18 +410,14 @@ class BrowserSessionService:
                 browser, runtime = await self.manager._acquire_session_browser(session_id)
                 context = await browser.new_context(**context_kwargs)
 
-            if self.manager.settings.enable_tracing:
-                if persistent_handle is None:
-                    await context.tracing.start(screenshots=True, snapshots=True, sources=False)
-                else:
-                    # A profile re-attached after a controller restart may
-                    # still carry tracing state; never fail an Open over it.
-                    try:
-                        await context.tracing.start(screenshots=True, snapshots=True, sources=False)
-                    except Exception as exc:
-                        logger.debug(
-                            "tracing not started for persistent profile '%s': %s", persistent_profile_name, exc
-                        )
+            # Never on a persistent profile: that context is the owner's own,
+            # live, headed browser. Tracing there streams a screencast of every
+            # tab he opens and DOM-snapshots every frame (Facebook, WhatsApp,
+            # bank pages...) into a trace file on disk, and does it through the
+            # CDP relay on every action -- load and privacy the owner never
+            # asked for.
+            if self.manager.settings.enable_tracing and persistent_handle is None:
+                await context.tracing.start(screenshots=True, snapshots=True, sources=False)
             if persistent_handle is not None and context.pages:
                 # A persistent launch already has its first tab (and a profile
                 # re-attached after a controller restart keeps its tabs):
@@ -447,7 +444,7 @@ class BrowserSessionService:
                 upload_dir=upload_dir,
                 takeover_url=runtime.takeover_url if runtime is not None else self.manager.settings.takeover_url,
                 trace_path=artifact_dir / "trace.zip",
-                trace_recording=self.manager.settings.enable_tracing,
+                trace_recording=self.manager.settings.enable_tracing and persistent_handle is None,
                 browser_node_name=runtime.browser_node_name if runtime is not None else "browser-node",
                 isolation_mode=self.manager.settings.session_isolation_mode,
                 browser=browser,
@@ -918,6 +915,37 @@ class BrowserSessionService:
             return self._profile_lease_lock(session.persistent_profile_name)
         return contextlib.nullcontext()
 
+    async def guarded(self, session: "BrowserSession", awaitable: Any, *, what: str, timeout: float) -> Any:
+        """Run one browser call (caller holds session.lock) under a hard timeout.
+
+        On expiry: the call is abandoned, the caller gets a retryable 504,
+        and the session is flagged so the watchdog re-attaches its CDP client
+        in place once the lock is free -- the next call finds a fresh view of
+        the same running browser instead of queueing behind a call that will
+        never return.
+        """
+        try:
+            return await asyncio.wait_for(awaitable, timeout)
+        except asyncio.TimeoutError:
+            session.unresponsive_reason = f"{what} did not answer within {timeout:.0f}s"
+            logger.error("session %s: %s -- re-attaching", session.id, session.unresponsive_reason)
+            self.schedule_reap()
+            raise BrowserActionError(
+                "The browser did not answer and is being reconnected. Retry in a few seconds.",
+                code="browser_call_timeout",
+                action=what,
+                status_code=504,
+                retryable=True,
+                url=getattr(session.page, "url", None),
+            ) from None
+
+    def schedule_reap(self) -> None:
+        """Run a recovery pass soon, without the caller waiting for it."""
+        tasks = self.manager.__dict__.setdefault("_background_reaps", set())
+        task = asyncio.create_task(self.reap_dead_sessions())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
     async def reap_dead_sessions(self) -> None:
         """Recover or retire every live session whose browser link died.
 
@@ -1053,6 +1081,7 @@ class BrowserSessionService:
         session.page = page
         session.persistent_profile_generation = handle.generation
         session.driver_epoch = manager._driver_epoch
+        session.unresponsive_reason = None
         session.reattach_count += 1
         manager._attach_page_listeners(page, session)
         if hasattr(context, "on"):

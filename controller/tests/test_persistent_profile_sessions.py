@@ -202,13 +202,16 @@ class PersistentProfileSessionCreateTests(_Base):
         result = await self.manager.create_session(name="fixture")
         self.assertIs(self.manager.sessions[result["id"]].page, existing_tab)
 
-    async def test_profile_without_tabs_gets_a_new_page_and_tracing(self) -> None:
+    async def test_profile_without_tabs_gets_a_new_page_and_is_never_traced(self) -> None:
+        # The persistent context is the owner's own live browser: no
+        # screencast/DOM-snapshot trace of it, even with ENABLE_TRACING on.
         self.manager.settings.enable_tracing = True
         self.context_pages = []
         result = await self.manager.create_session(name="fixture")
         session = self.manager.sessions[result["id"]]
         self.assertIs(session.page, self.contexts[0]._new_page)
-        self.contexts[0].tracing.start.assert_awaited_once()
+        self.contexts[0].tracing.start.assert_not_awaited()
+        self.assertFalse(session.trace_recording)
 
     async def test_stealth_injects_nothing_into_a_persistent_profile(self) -> None:
         """navigator.webdriver is kept false by launch switches in browser-node;

@@ -172,6 +172,10 @@ class BrowserSession:
     # session's browser/context/page handles belong to. Handles from an
     # earlier (dead) driver are unusable even after a new driver starts.
     driver_epoch: int = 0
+    # Set when a browser call on this session hit its hard timeout: the
+    # controller's Playwright view of the page is wedged even though the
+    # browser may be fine. The watchdog re-attaches the session in place.
+    unresponsive_reason: str | None = None
 
 
 SessionCreatedHook = Callable[[str, Page], Awaitable[None]]

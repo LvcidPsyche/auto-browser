@@ -318,7 +318,11 @@ def create_app(
         base_url=upstream_url,
         transport=transport,
         headers={"Authorization": f"Bearer {upstream_token}", "X-Operator-Id": "owner"},
-        timeout=20,
+        # Above the controller's own hard ceilings on one browser call
+        # (BROWSER_CALL_TIMEOUT_SECONDS 30 / BROWSER_ACTION_TIMEOUT_SECONDS 90),
+        # so a slow-but-legitimate navigation is not reported as a 502 while
+        # it is still running and holding the session.
+        timeout=100,
         follow_redirects=False,
     )
     # No fixed Authorization header: the noVNC static file server has no
@@ -477,6 +481,8 @@ def create_app(
         except ValueError:
             raise HTTPException(502, "Invalid browser controller response") from None
 
+    controller_request = upstream
+
     def safe_session_id(session_id: str) -> str:
         if not session_id or len(session_id) > 120 or not all(
             character.isalnum() or character in "_-" for character in session_id
@@ -599,12 +605,23 @@ def create_app(
             # exactly like an agent's ensure_live() check -- comparing only the
             # cached owner_session_id would miss the owner's session ending
             # for any reason other than an explicit close through this broker.
-            async with session_state_lock:
-                try:
-                    await trusted_owner_session()
-                except HTTPException:
-                    return False
-                return owner_session_id == session_id
+            #
+            # Deliberately NOT under session_state_lock: operate() holds that
+            # lock for the whole of an employee's controller call, so every
+            # frame of the owner's live view used to wait behind it -- one slow
+            # or hung browser call froze the view and dropped the noVNC socket
+            # (2026-09-25 04:01:51). Reading owner_session_id needs no lock.
+            if owner_session_id != session_id:
+                return False
+            try:
+                # `upstream` is shadowed below by the noVNC socket of that name.
+                sessions = await controller_request("GET", "/sessions")
+            except HTTPException:
+                return False
+            return owner_session_id == session_id and isinstance(sessions, list) and any(
+                isinstance(item, dict) and item.get("id") == session_id and item.get("status") == "active"
+                for item in sessions
+            )
 
         ws_url = "ws" + novnc_url.removeprefix("http") + "/websockify"
         try:
