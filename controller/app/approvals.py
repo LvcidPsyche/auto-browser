@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
+import secrets
 import sqlite3
+import time
 from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -16,6 +20,11 @@ from .sqlite_utils import connect_sqlite
 from .utils import UTC, atomic_write_text, record_path, utc_now
 
 logger = logging.getLogger(__name__)
+
+# What a sensitive `type` action's text is stored as in its approval.
+SENSITIVE_TEXT_PREFIX = "[sensitive text] hmac-sha256:"
+# How long the text of an undecided sensitive approval is kept in memory.
+SENSITIVE_TEXT_RETENTION = timedelta(hours=24)
 
 
 class ApprovalRequiredError(HTTPException):
@@ -205,6 +214,18 @@ class ApprovalStore:
         self.sqlite_store = SQLiteApprovalStore(db_path) if db_path else None
         self._primary: ApprovalStoreBackend = self.file_store
         self.approval_ttl = timedelta(minutes=max(1, approval_ttl_minutes))
+        # Keyed per process, so a stored digest cannot be brute-forced offline.
+        # An approval for sensitive text therefore only works in the process
+        # that created it: not after a restart, and not in another uvicorn
+        # worker or replica. The action asks again rather than matching an
+        # unverifiable record.
+        self._sensitive_text_key = secrets.token_bytes(32)
+        # The text itself stays in memory only, so an approved sensitive action
+        # can still be run through execute_approval by this process.
+        # Entries are dropped when the approval executes or is rejected, and
+        # otherwise after SENSITIVE_TEXT_RETENTION, so text for an approval
+        # nobody decides does not sit in memory until the process restarts.
+        self._sensitive_texts: dict[str, tuple[str, float]] = {}
 
     async def startup(self) -> None:
         await self.file_store.startup()
@@ -253,10 +274,13 @@ class ApprovalStore:
                 created_at=now,
                 updated_at=now,
                 reason=reason,
-                action=action,
+                action=self._stored_action(action),
                 observation=observation,
             )
             await self._persist(approval)
+            if approval.action is not action:
+                self._prune_sensitive_texts()
+                self._sensitive_texts[approval.id] = (action.text or "", time.monotonic())
             return approval
 
     async def approve(self, approval_id: str, comment: str | None = None) -> ApprovalRecord:
@@ -297,6 +321,7 @@ class ApprovalStore:
             approval.updated_at = now
             approval.executed_at = now
             await self._persist(approval)
+            self._sensitive_texts.pop(approval_id, None)
             self._executing.discard(approval_id)
             return approval
 
@@ -340,6 +365,7 @@ class ApprovalStore:
                 approval.approved_expires_at = self._expiry_timestamp(now)
             else:
                 approval.approved_expires_at = None
+                self._sensitive_texts.pop(approval_id, None)
             await self._persist(approval)
             return approval
 
@@ -360,10 +386,42 @@ class ApprovalStore:
                 return approval
         return None
 
-    @staticmethod
-    def _actions_match(left: BrowserActionDecision, right: BrowserActionDecision) -> bool:
+    def _stored_action(self, action: BrowserActionDecision) -> BrowserActionDecision:
+        """The action as an approval records it: sensitive text only as a keyed digest.
+
+        Approvals are written to APPROVAL_ROOT, listed by GET /approvals and the
+        approvals MCP tool, and shown to whoever approves. A `type` marked
+        sensitive (a password, a card number) was stored and served verbatim,
+        while the witness chain and action logs already redacted it.
+        """
+        if not (action.sensitive and action.text):
+            return action
+        digest = hmac.new(self._sensitive_text_key, action.text.encode("utf-8"), hashlib.sha256).hexdigest()
+        return action.model_copy(update={"text": f"{SENSITIVE_TEXT_PREFIX}{digest}"})
+
+    def _prune_sensitive_texts(self) -> None:
+        cutoff = time.monotonic() - SENSITIVE_TEXT_RETENTION.total_seconds()
+        for approval_id in [key for key, (_, kept_at) in self._sensitive_texts.items() if kept_at < cutoff]:
+            del self._sensitive_texts[approval_id]
+
+    def executable_action(self, approval: ApprovalRecord) -> BrowserActionDecision:
+        """The approved action with its sensitive text restored, for execute_approval."""
+        action = approval.action
+        if not (action.sensitive and action.text and action.text.startswith(SENSITIVE_TEXT_PREFIX)):
+            return action
+        self._prune_sensitive_texts()
+        entry = self._sensitive_texts.get(approval.id)
+        text = entry[0] if entry is not None else None
+        if text is None:
+            raise PermissionError(
+                f"approval {approval.id} is for sensitive text, which this controller process no longer holds "
+                "(restarted, another worker, or older than 24 hours); run the action again to request a new approval"
+            )
+        return action.model_copy(update={"text": text})
+
+    def _actions_match(self, stored: BrowserActionDecision, requested: BrowserActionDecision) -> bool:
         excluded = {"reason", "confidence"}
-        return left.model_dump(exclude=excluded) == right.model_dump(exclude=excluded)
+        return stored.model_dump(exclude=excluded) == self._stored_action(requested).model_dump(exclude=excluded)
 
     def _ensure_not_expired(self, approval: ApprovalRecord) -> None:
         if approval.approved_expires_at is None:

@@ -127,6 +127,56 @@ class WitnessVerifyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["first_invalid_index"], 1)
             self.assertIn("chain_hash", result["reason"])
 
+    async def test_a_torn_last_record_is_set_aside_and_the_chain_continues(self) -> None:
+        """A crash mid-append left a fragment every later append failed to parse."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            recorder = WitnessRecorder(Path(tempdir))
+            await recorder.startup()
+            receipts = await self._record_chain(recorder, "session-1", 2)
+
+            path = Path(tempdir) / "session-1.jsonl"
+            fragment = '{"receipt_id": "half-writ'
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(fragment)
+
+            after = await self._record_chain(recorder, "session-1", 1)
+
+            self.assertEqual(after[0].chain_prev_hash, receipts[-1].chain_hash)
+            result = await recorder.verify("session-1")
+            self.assertTrue(result["valid"], result)
+            self.assertEqual(result["receipt_count"], 3)
+            torn = list(Path(tempdir).glob("session-1.jsonl.torn-*"))
+            self.assertEqual(len(torn), 1)
+            self.assertEqual(torn[0].read_text(encoding="utf-8"), fragment)
+
+    async def test_before_the_next_append_a_torn_chain_lists_and_reports_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            recorder = WitnessRecorder(Path(tempdir))
+            await recorder.startup()
+            await self._record_chain(recorder, "session-1", 2)
+            with (Path(tempdir) / "session-1.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write('{"receipt_id": "half-writ')
+
+            listed = await recorder.list("session-1")
+            self.assertEqual([item.action for item in listed], ["action-1", "action-0"])
+            result = await recorder.verify("session-1")
+            self.assertFalse(result["valid"])
+            self.assertEqual(result["first_invalid_index"], 2)
+            self.assertEqual(result["reason"], "receipt is not parseable")
+
+    async def test_a_complete_but_unreadable_last_record_still_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            recorder = WitnessRecorder(Path(tempdir))
+            await recorder.startup()
+            await self._record_chain(recorder, "session-1", 1)
+
+            path = Path(tempdir) / "session-1.jsonl"
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write("not a receipt\n")
+
+            with self.assertRaises(Exception):
+                await self._record_chain(recorder, "session-1", 1)
+
     async def test_verify_detects_deleted_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             recorder = WitnessRecorder(Path(tempdir))

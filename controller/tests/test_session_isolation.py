@@ -279,6 +279,7 @@ class DockerBrowserNodeProvisionerTests(unittest.IsolatedAsyncioTestCase):
                 environment = client.containers.browser_containers[runtime.container_name].run_kwargs["environment"]
                 self.assertEqual(environment.get("VNC_PASSWORD"), password)
                 self.assertNotIn("s3cret", repr(settings))
+                self.assertEqual(environment["NOVNC_ALLOWED_HOSTS"], settings.isolated_takeover_host)
 
     async def test_startup_reaps_orphaned_containers(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

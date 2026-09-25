@@ -61,7 +61,17 @@ unset VNC_PASSWORD
 run_as_browser Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" -ac +extension RANDR >/tmp/xvfb.log 2>&1 &
 run_as_browser fluxbox >/tmp/fluxbox.log 2>&1 &
 run_as_browser x11vnc -display "$DISPLAY" -forever -shared -rfbport 5900 "${VNC_AUTH_ARGS[@]}" -xkb >/tmp/x11vnc.log 2>&1 &
-run_as_browser /usr/share/novnc/utils/novnc_proxy --vnc localhost:5900 --listen 6080 >/tmp/novnc.log 2>&1 &
+# websockify serves noVNC directly, rather than through its wrapper script, so it can take an
+# auth plugin. Chromium shares this network namespace, so without an Origin
+# check any page it loads could open ws://127.0.0.1:6080 and read and drive the
+# desktop; novnc_origin.py admits only the noVNC page's own origin, on a
+# loopback name or one listed in NOVNC_ALLOWED_HOSTS (a DNS-rebinding guard),
+# plus origins in NOVNC_ALLOWED_ORIGINS for proxies that rewrite Host.
+run_as_browser env PYTHONPATH=/opt/browser-node websockify \
+  --web /usr/share/novnc \
+  --auth-plugin novnc_origin.SameOriginOnly \
+  --auth-source "${NOVNC_ALLOWED_ORIGINS:-} ${NOVNC_ALLOWED_HOSTS:-}" \
+  6080 localhost:5900 >/tmp/novnc.log 2>&1 &
 
 cleanup() {
   if [[ -n "${PLAYWRIGHT_SERVER_PID:-}" ]] && kill -0 "$PLAYWRIGHT_SERVER_PID" >/dev/null 2>&1; then

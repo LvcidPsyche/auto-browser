@@ -16,7 +16,10 @@
 # it is unauthenticated, and only safe behind a loopback bind. noVNC (6080)
 # stays published so human takeover still works. Codespaces forwards ports
 # privately by default; if you make 6080 public, also set VNC_PASSWORD (noVNC
-# then prompts for it; only the first 8 characters count).
+# then prompts for it; only the first 8 characters count). noVNC only accepts
+# its own page on loopback names, so set NOVNC_ALLOWED_HOSTS to the forwarded
+# host name (<codespace>-6080.app.github.dev) if takeover reports
+# "Invalid Origin Header".
 #
 # `!override` replaces the base service's `ports` list instead of merging with it.
 # Without it, Compose appends these entries to the base 127.0.0.1 bindings, so both

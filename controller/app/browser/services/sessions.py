@@ -11,7 +11,7 @@ from playwright.async_api import Error as PlaywrightError
 from ... import events as _events
 from ...action_errors import SessionNotFoundError
 from ...browser_scripts import apply_stealth
-from ...models import SessionRecord, SessionStatus
+from ...models import SessionRecord, SessionStatus, resolve_totp_hosts
 from ...network_inspector import NetworkInspector
 from ...utils import UTC
 
@@ -62,6 +62,7 @@ class BrowserSessionService:
         user_agent: str | None = None,
         protection_mode: str | None = None,
         totp_secret: str | None = None,
+        totp_hosts: list[str] | None = None,
     ) -> dict[str, Any]:
         if storage_state_path and auth_profile:
             raise ValueError("Provide auth_profile or storage_state_path, not both")
@@ -69,6 +70,7 @@ class BrowserSessionService:
             raise ValueError("Provide proxy_persona or explicit proxy_server credentials, not both")
         if start_url:
             self.manager._assert_url_allowed(start_url)
+        resolved_totp_hosts = tuple(resolve_totp_hosts(totp_hosts, start_url)) if totp_secret else ()
         resolved_protection_mode = protection_mode or self.manager.settings.witness_protection_mode_default
         self.manager._check_session_limit()
 
@@ -98,7 +100,7 @@ class BrowserSessionService:
             self.manager.auth_profiles.require_access(auth_profile, action="opening a session from an auth profile")
             source_path = self.manager.auth_profiles.resolve_state_path(auth_profile, must_exist=True)
         elif storage_state_path:
-            source_path = self.manager.auth_profiles.safe_auth_path(storage_state_path, must_exist=True)
+            source_path = self.manager.auth_profiles.storage_state_source(storage_state_path)
         if source_path is not None:
             prepared_auth_state = self.manager.auth_state.prepare_for_context(source_path)
             context_kwargs["storage_state"] = str(prepared_auth_state.path)
@@ -150,6 +152,7 @@ class BrowserSessionService:
                 ),
                 protection_mode=resolved_protection_mode,
                 totp_secret=totp_secret,
+                totp_hosts=resolved_totp_hosts,
                 witness_remote_state=self.manager._initial_witness_remote_state(resolved_protection_mode),
             )
             if source_path is not None:
@@ -223,6 +226,7 @@ class BrowserSessionService:
                     "isolation_mode": session.isolation_mode,
                     "browser_node": session.browser_node_name,
                     "totp_enabled": bool(totp_secret),
+                    "totp_hosts": list(resolved_totp_hosts),
                 },
             )
             return summary

@@ -656,6 +656,22 @@ class BrowserAuthProfileService:
             raise FileNotFoundError(f"No file {os.fspath(relative_path)!r} in this session's auth directory")
         return Path(candidate_str)
 
+    def storage_state_source(self, relative_path: str) -> Path:
+        """Resolve a create-session `storage_state_path`, with the owner check.
+
+        The path is relative to AUTH_ROOT, and auth profiles live under
+        AUTH_ROOT/profiles, so `profiles/<name>/state.json.enc` loads a profile
+        without naming it as `auth_profile` — which skipped `require_access`
+        and opened a browser logged in as the profile's owner. A path into a
+        profile directory is authorized exactly as that profile would be.
+        """
+        source = self.safe_auth_path(relative_path, must_exist=True)
+        profile_root = Path(os.path.realpath(os.fspath(self.root())))
+        if source.is_relative_to(profile_root) and source != profile_root:
+            profile_name = source.relative_to(profile_root).parts[0]
+            self.require_access(profile_name, action="opening a session from an auth profile")
+        return source
+
     def safe_auth_path(self, relative_path: str, must_exist: bool = False) -> Path:
         root_str = os.path.realpath(os.fspath(Path(self.manager.settings.auth_root).resolve()))
         candidate_str = os.path.realpath(os.path.join(root_str, os.fspath(relative_path)))

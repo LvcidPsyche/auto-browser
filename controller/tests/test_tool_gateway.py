@@ -876,6 +876,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             user_agent="AutoBrowserTest/1.0",
             protection_mode="confidential",
             totp_secret="JBSWY3DPEHPK3PXP",
+            totp_hosts=["example.com"],
         )
 
     async def test_create_session_forwards_proxy_persona(self) -> None:
@@ -904,6 +905,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             user_agent=None,
             protection_mode=None,
             totp_secret=None,
+            totp_hosts=None,
         )
 
     async def test_create_session_forwards_memory_profile(self) -> None:
