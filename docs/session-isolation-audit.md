@@ -19,10 +19,10 @@ Two real concerns remain. One is acknowledged in `docs/architecture.md` as a POC
 
 ## What's isolated (verified)
 
-- **Cookies, localStorage, sessionStorage, IndexedDB, cache, service workers** — all per `BrowserContext`. `controller/app/browser/services/sessions.py:103` calls `browser.new_context(**context_kwargs)` for every session, which is Playwright's documented boundary for all these stores.
-- **Auth state on disk** — `controller/app/browser/services/sessions.py:92` calls `auth_state.prepare_for_context(source_path)` which creates a *copy* of the storage state for the new context. Mutations stay in the per-session copy. Source profile is not aliased.
+- **Cookies, localStorage, sessionStorage, IndexedDB, cache, service workers** — all per `BrowserContext`. `BrowserSessionService.create()` in `controller/app/browser/services/sessions.py` calls `browser.new_context(**context_kwargs)` for every session, which is Playwright's documented boundary for all these stores.
+- **Auth state on disk** — `BrowserSessionService.create()` calls `auth_state.prepare_for_context(source_path)` which creates a *copy* of the storage state for the new context. Mutations stay in the per-session copy. Source profile is not aliased.
 - **Per-session artifacts** — each session gets its own `artifact_dir`, `auth_dir`, `upload_dir` under `/data/sessions/{session_id}/`. Traces, screenshots, and uploads do not cross sessions.
-- **Network inspector state** — attached per-page (`controller/app/browser/services/sessions.py:155`), not shared across sessions.
+- **Network inspector state** — attached per-page in `BrowserSessionService.create()`, not shared across sessions.
 
 ## What's shared in the default mode (real concerns)
 
@@ -30,7 +30,7 @@ Two real concerns remain. One is acknowledged in `docs/architecture.md` as a POC
 
 The default `shared_browser_node` runs one Chromium with one X display and one noVNC. A human takeover sees every visible window on that desktop. If two sessions are live, a takeover operator looking at session A may incidentally see session B's pages.
 
-**Mitigation already in repo:** `docker_ephemeral` mode gives each session its own browser container with its own noVNC port pair. `controller/app/browser/services/sessions.py:120-127` carries `takeover_url`, `shared_takeover_surface`, and `shared_browser_process` per session so operators can see which mode they're in.
+**Mitigation already in repo:** `docker_ephemeral` mode gives each session its own browser container with its own noVNC port pair. The session record built in `BrowserSessionService.create()` carries `takeover_url`, `shared_takeover_surface`, and `shared_browser_process` per session so operators can see which mode they're in.
 
 **Recommendation:** Document this explicitly in `README.md` near the takeover section, not just in `architecture.md`. Many users will skim the README and miss the POC caveat.
 
@@ -45,7 +45,7 @@ In `shared_browser_node`, sessions share Chromium's process: DNS cache, font cac
 - **Cookies bleeding between sessions** — `new_context()` is Playwright's documented isolation boundary. Verified in code.
 - **Service workers persisting** — service workers are scoped to a context's origin storage; new contexts get fresh service-worker registries. Verified.
 - **Auth profile reuse "leaking"** — `prepare_for_context()` copies the storage state file; the source is read-only relative to the session. Mutations land in the per-session copy.
-- **Reverse-SSH tunnel sharing** — `controller/app/browser/services/sessions.py:169` calls `_maybe_provision_session_tunnel(session)` which can broker a per-session reverse-SSH for isolated takeover ports. Shared tunnels are not blindly reused for isolated sessions per the architecture doc.
+- **Reverse-SSH tunnel sharing** — `BrowserSessionService.create()` calls `_maybe_provision_session_tunnel(session)` which can broker a per-session reverse-SSH for isolated takeover ports. Shared tunnels are not blindly reused for isolated sessions per the architecture doc.
 
 ## Recommendations (in order of leverage)
 

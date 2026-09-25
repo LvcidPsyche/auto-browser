@@ -287,7 +287,7 @@ Core components:
 | Command | Purpose |
 | --- | --- |
 | `make help` | list available repo commands |
-| `make lint` | run Ruff checks on app, tests, and helper scripts |
+| `make lint` | run Ruff checks across the whole repo |
 | `make test` | run controller tests in Docker |
 | `make test-local` | run controller tests on host Python 3.11+ |
 | `make eval` | run deterministic provider/profile eval scoring |
