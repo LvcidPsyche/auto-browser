@@ -11,15 +11,20 @@ carries the connection.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
 import time
 import unittest
+import urllib.request
 from pathlib import Path
+
+from playwright.async_api import async_playwright
 
 from app.audit import reset_current_operator, set_current_operator
 from app.browser_manager import BrowserManager
@@ -88,10 +93,13 @@ class RealBrowserNodeTests(unittest.IsolatedAsyncioTestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     async def asyncSetUp(self) -> None:
+        self.manager = self._make_manager()
+        await self.manager.startup()
+
+    def _make_manager(self, **overrides) -> BrowserManager:
         root = Path(tempfile.mkdtemp(prefix="real-ctl-", dir=self.tmp))
         self.root = root
-        self.manager = BrowserManager(
-            Settings(
+        settings = dict(
                 _env_file=None,
                 ARTIFACT_ROOT=str(root / "artifacts"),
                 UPLOAD_ROOT=str(root / "uploads"),
@@ -114,9 +122,10 @@ class RealBrowserNodeTests(unittest.IsolatedAsyncioTestCase):
                 BROWSER_NODE_HOST=LAN,
                 PROFILE_CONTROL_PORT=CONTROL_PORT,
                 AUTO_PERSIST_INTERVAL_SECONDS=0,
-            )
+                SESSION_WATCHDOG_INTERVAL_SECONDS=1,
         )
-        await self.manager.startup()
+        settings.update(overrides)
+        return BrowserManager(Settings(**settings))
 
     async def asyncTearDown(self) -> None:
         await self.manager.shutdown()
@@ -191,6 +200,226 @@ class RealBrowserNodeTests(unittest.IsolatedAsyncioTestCase):
             await page.goto(url)
             self.assertIn("persistent_profiles_enabled", await page.content())
             await manager.close_session(second["id"])
+
+
+    # -- dead browser link: the 2026-09-25 incident, for real ------------------
+
+    def _relay_ws_endpoint(self, profile: str = "owner-default") -> str:
+        request = urllib.request.Request(
+            f"http://{LAN}:{RELAY_PORT}/cdp/{profile}/json/version",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.loads(response.read())["webSocketDebuggerUrl"]
+
+    @staticmethod
+    async def _process_ids(browser, kind: str) -> list[int]:
+        cdp = await browser.new_browser_cdp_session()
+        try:
+            info = await cdp.send("SystemInfo.getProcessInfo")
+        finally:
+            await cdp.detach()
+        return [item["id"] for item in info["processInfo"] if item["type"] == kind]
+
+    @staticmethod
+    def _kill(pid: int) -> None:
+        try:
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        except OSError:
+            pass
+
+    async def _crash_driver_like_production(self, session) -> None:
+        """Reproduce the exact driver death of 2026-09-25.
+
+        A command is in flight in the tab's renderer, the renderer dies (in
+        production: the pid cap), the tab is reloaded (the owner clicks Reload
+        on the sad tab) -- Chromium then answers the command Playwright had
+        already failed, and Playwright 1.62's driver dies on
+        `assert(!object.id)` in CRSession._onMessage.
+        """
+        async with async_playwright() as other_pw:
+            other = await other_pw.chromium.connect_over_cdp(
+                self._relay_ws_endpoint(), headers={"Authorization": f"Bearer {TOKEN}"}, no_defaults=True
+            )
+            try:
+                renderers = await self._process_ids(other, "renderer")
+                in_flight = asyncio.ensure_future(
+                    session.page.evaluate("() => new Promise((r) => setTimeout(() => r(1), 3000))")
+                )
+                await asyncio.sleep(0.5)
+                for pid in renderers:
+                    self._kill(pid)
+                await asyncio.sleep(1.0)
+                victim = other.contexts[0].pages[-1]
+                reloader = await other.contexts[0].new_cdp_session(victim)
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(reloader.send("Page.reload"), 10)
+                with contextlib.suppress(BaseException):
+                    await in_flight
+            finally:
+                with contextlib.suppress(Exception):
+                    await other.close()
+
+    async def _wait_for_reattach(self, manager: BrowserManager, session, count: int, timeout: float = 30) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if session.reattach_count >= count and manager.sessions.get(session.id) is session:
+                return
+            await asyncio.sleep(0.25)
+        self.fail(f"session {session.id} was not re-attached (count={session.reattach_count})")
+
+    async def test_driver_death_reattaches_to_the_still_running_profile(self) -> None:
+        manager = self.manager
+        url = f"http://{LAN}:{CONTROL_PORT}/healthz"
+        opened = await manager.create_session(name="owner", start_url=url)
+        session = manager.sessions[opened["id"]]
+        await session.page.evaluate("() => localStorage.setItem('live-login', 'kept')")
+        await session.context.add_cookies([{"name": "live", "value": "1", "url": url}])
+        browser_pids = await self._process_ids(session.browser, "browser")
+        epoch = manager._driver_epoch
+
+        # 1) The real crash path: the driver must actually die from it.
+        await self._crash_driver_like_production(session)
+        await self._wait_for_reattach(manager, session, 1)
+        self.assertEqual(manager._driver_epoch, epoch + 1, "the production crash killed the driver")
+        # 2) And a driver killed outright.
+        manager.playwright._impl_obj._connection._transport._proc.kill()
+        await self._wait_for_reattach(manager, session, 2)
+        self.assertEqual(manager._driver_epoch, epoch + 2)
+
+        listed = await manager.list_sessions()
+        self.assertEqual([item["status"] for item in listed if item["id"] == session.id], ["active"])
+        # Same Chromium process: the owner's live browser never went away.
+        self.assertEqual(await self._process_ids(session.browser, "browser"), browser_pids)
+        self.assertIn("live", [c["name"] for c in await session.context.cookies()])
+        await session.page.goto(url)
+        self.assertEqual(await session.page.evaluate("() => localStorage.getItem('live-login')"), "kept")
+        # A second Open hands back the same (live) session, not a zombie.
+        again = await manager.create_session(name="again")
+        self.assertEqual(again["id"], session.id)
+        await manager.close_session(session.id)
+
+    @unittest.skipUnless(os.environ.get("REAL_BROWSER_NODE_LONGRUN_SECONDS"), "long run disabled")
+    async def test_long_run_auto_persist_healthcheck_navigation_and_recovery(self) -> None:
+        """Production cadence for REAL_BROWSER_NODE_LONGRUN_SECONDS (>= 1800).
+
+        Auto-persist every 180s, the container's /healthz/deep poll every 10s
+        (5-min cache), a navigation or observe every 10s, and the production
+        driver crash induced twice -- the session must stay the same live
+        session on the same Chromium the whole time.
+        """
+        duration = float(os.environ["REAL_BROWSER_NODE_LONGRUN_SECONDS"])
+        log_path = os.environ.get("REAL_BROWSER_NODE_LONGRUN_LOG")
+        log_file = open(log_path, "a", encoding="utf-8") if log_path else None  # noqa: SIM115
+
+        def log(*parts) -> None:
+            line = time.strftime("%H:%M:%S ") + " ".join(str(p) for p in parts)
+            print(line, flush=True)
+            if log_file:
+                log_file.write(line + "\n")
+                log_file.flush()
+
+        await self.manager.shutdown()
+        manager = self.manager = self._make_manager(
+            AUTO_PERSIST_INTERVAL_SECONDS=180, SESSION_WATCHDOG_INTERVAL_SECONDS=5
+        )
+        await manager.startup()
+        sites = [
+            "https://www.google.com/",
+            "https://en.wikipedia.org/wiki/Main_Page",
+            "https://www.youtube.com/",
+            "https://github.com/",
+            "https://example.com/",
+            f"http://{LAN}:{CONTROL_PORT}/healthz",
+        ]
+        opened = await manager.create_session(name="owner", start_url=sites[0])
+        session = manager.sessions[opened["id"]]
+        browser_pids = await self._process_ids(session.browser, "browser")
+        state_file = Path(manager.settings.auth_root) / "profiles" / "owner-default" / "state.json.enc"
+        stats = {
+            "health_ok": 0, "health_fail": 0, "nav_ok": 0, "nav_fail": 0, "observe_ok": 0,
+            "observe_fail": 0, "persist_writes": 0, "crashes": 0, "max_pages": 0, "new_pages": 0,
+        }
+        health_modes: set[str] = set()
+        hooked: set[int] = set()
+
+        def deep_health() -> dict:
+            request = urllib.request.Request(
+                f"http://{LAN}:{CONTROL_PORT}/healthz/deep", headers={"Authorization": f"Bearer {TOKEN}"}
+            )
+            with urllib.request.urlopen(request, timeout=45) as response:
+                return json.loads(response.read())
+
+        async def health_poller() -> None:
+            while True:
+                try:
+                    body = await asyncio.to_thread(deep_health)
+                    stats["health_ok" if body.get("ok") else "health_fail"] += 1
+                    health_modes.add(str(body.get("mode")))
+                except Exception as exc:
+                    stats["health_fail"] += 1
+                    log("deep health FAILED", exc)
+                await asyncio.sleep(10)
+
+        poller = asyncio.create_task(health_poller())
+        start = time.monotonic()
+        crash_at = [duration / 3, 2 * duration / 3]
+        last_mtime = state_file.stat().st_mtime if state_file.exists() else None
+        step = 0
+        log("long run start", duration, "s; session", session.id, "browser pids", browser_pids)
+        try:
+            while time.monotonic() - start < duration:
+                elapsed = time.monotonic() - start
+                if crash_at and elapsed >= crash_at[0]:
+                    crash_at.pop(0)
+                    log("inducing the production driver crash")
+                    before = session.reattach_count
+                    await self._crash_driver_like_production(session)
+                    await self._wait_for_reattach(manager, session, before + 1, timeout=60)
+                    stats["crashes"] += 1
+                    log("recovered: reattach_count", session.reattach_count, "driver epoch", manager._driver_epoch)
+                self.assertIs(manager.sessions.get(session.id), session, "session must never be retired")
+                try:
+                    if step % 2 == 0:
+                        await manager.navigate(session.id, sites[(step // 2) % len(sites)])
+                        stats["nav_ok"] += 1
+                    else:
+                        await manager.observe(session.id)
+                        stats["observe_ok"] += 1
+                except Exception as exc:
+                    stats["nav_fail" if step % 2 == 0 else "observe_fail"] += 1
+                    log("action failed", type(exc).__name__, str(exc)[:200])
+                step += 1
+                if state_file.exists() and state_file.stat().st_mtime != last_mtime:
+                    stats["persist_writes"] += 1
+                    last_mtime = state_file.stat().st_mtime
+                stats["max_pages"] = max(stats["max_pages"], len(session.context.pages))
+                if id(session.context) not in hooked:
+                    hooked.add(id(session.context))
+                    session.context.on("page", lambda _page: stats.__setitem__("new_pages", stats["new_pages"] + 1))
+                if step % 18 == 0:
+                    log("progress", round(elapsed), stats, sorted(health_modes))
+                await asyncio.sleep(10)
+        finally:
+            poller.cancel()
+            with contextlib.suppress(BaseException):
+                await poller
+        log("final", stats, sorted(health_modes), "reattach_count", session.reattach_count)
+        if log_file:
+            log_file.close()
+        self.assertEqual(stats["crashes"], 2)
+        self.assertEqual(session.reattach_count, 2)
+        self.assertEqual(await self._process_ids(session.browser, "browser"), browser_pids)
+        self.assertGreaterEqual(stats["persist_writes"], int(duration // 180) - 1)
+        self.assertEqual(stats["health_fail"], 0)
+        self.assertEqual(health_modes, {"live-profiles"})
+        # Auto-persist no longer opens tabs in the owner's window.
+        self.assertEqual(stats["max_pages"], 1)
+        self.assertEqual(stats["new_pages"], 0)
+        self.assertLessEqual(stats["nav_fail"] + stats["observe_fail"], 2)
+        listed = await manager.list_sessions()
+        self.assertEqual([item["status"] for item in listed if item["id"] == session.id], ["active"])
+        await manager.close_session(session.id)
 
 
 if __name__ == "__main__":

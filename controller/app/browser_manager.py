@@ -32,6 +32,7 @@ from .browser.services import (
     BrowserUploadService,
     BrowserWitnessService,
 )
+from .browser.services.connection_health import driver_exit_error, playwright_driver_alive
 from .config import Settings
 from .downloads import DownloadCaptureService
 from .host_policy import host_is_allowed
@@ -159,6 +160,18 @@ class BrowserSession:
     # The lease generation browser-node handed out for this session's open;
     # its /profiles/close ignores a close carrying an older generation.
     persistent_profile_generation: str | None = None
+    # What this session's persistent Open asked browser-node for (owner,
+    # adopt_unmarked, context_kwargs) -- replayed verbatim when the
+    # controller's link to the profile dies and the session re-attaches in
+    # place to the still-running Chromium.
+    persistent_open_options: dict[str, Any] | None = None
+    # How many times this session has been re-attached after its browser
+    # connection died (driver exit, CDP drop).
+    reattach_count: int = 0
+    # Which Playwright driver instance (BrowserManager._driver_epoch) this
+    # session's browser/context/page handles belong to. Handles from an
+    # earlier (dead) driver are unusable even after a new driver starts.
+    driver_epoch: int = 0
 
 
 SessionCreatedHook = Callable[[str, Page], Awaitable[None]]
@@ -268,6 +281,12 @@ class BrowserManager:
         self._profile_lease_locks: dict[str, asyncio.Lock] = {}
         self._session_created_hook: SessionCreatedHook | None = None
         self._session_closed_hook: SessionClosedHook | None = None
+        # Serializes Playwright driver restarts (see restart_playwright_driver).
+        self._driver_lock = asyncio.Lock()
+        # Bumped on every driver restart; see BrowserSession.driver_epoch.
+        self._driver_epoch = 0
+        self._reap_task: asyncio.Task[None] | None = None
+        self._session_watchdog_task: asyncio.Task[None] | None = None
 
     def register_extension_hooks(
         self,
@@ -300,9 +319,71 @@ class BrowserManager:
         # demand (see session_lifecycle.create / persistent_profiles.py).
         if self.settings.session_isolation_mode == "shared_browser_node" and not self.settings.persistent_profiles_enabled:
             await self.ensure_browser()
+        if self.settings.session_watchdog_interval_seconds > 0:
+            self._session_watchdog_task = asyncio.create_task(self._session_watchdog_loop())
+
+    async def _session_watchdog_loop(self) -> None:
+        """Find sessions whose browser link died and recover them promptly.
+
+        Without this a dead link is only noticed when somebody next touches
+        the session; the broker/portal meanwhile keep seeing it "active" and
+        the owner's Connect waits on a browser nobody can reach.
+        """
+        interval = self.settings.session_watchdog_interval_seconds
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.session_lifecycle.reap_dead_sessions()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - must never kill the watchdog
+                logger.warning("session watchdog pass failed: %s", exc)
+
+    async def restart_playwright_driver(self, *, reason: str) -> bool:
+        """Start a fresh Playwright driver if the current one has exited.
+
+        Every Browser/Context/Page handle from the dead driver is unusable, so
+        the shared-browser handle is dropped too (ensure_browser reconnects on
+        demand). Returns True when a restart actually happened.
+        """
+        async with self._driver_lock:
+            if self.playwright is not None and playwright_driver_alive(self.playwright):
+                return False
+            old = self.playwright
+            exit_error = driver_exit_error(old)
+            if exit_error:
+                reason = f"{reason}: {exit_error}"
+            self.playwright = None
+            self.browser = None
+            if old is not None:
+                try:
+                    await asyncio.wait_for(old.stop(), timeout=5)
+                except Exception as exc:
+                    logger.debug("stopping the dead Playwright driver failed (expected): %s", exc)
+            self.playwright = await async_playwright().start()
+            self._driver_epoch += 1
+            logger.error("Playwright driver had exited (%s); started a new one", reason)
+            try:
+                await self.audit.append(
+                    event_type="playwright_driver_restarted",
+                    status="ok",
+                    action="restart_playwright_driver",
+                    session_id=None,
+                    details={"reason": reason},
+                )
+            except Exception as exc:  # pragma: no cover - audit is best effort here
+                logger.warning("audit append failed after driver restart: %s", exc)
+            return True
 
     async def shutdown(self) -> None:
         logger.info("shutting down browser manager")
+        if self._session_watchdog_task is not None:
+            self._session_watchdog_task.cancel()
+            try:
+                await self._session_watchdog_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._session_watchdog_task = None
         session_ids = list(self.sessions.keys())
         for session_id in session_ids:
             try:

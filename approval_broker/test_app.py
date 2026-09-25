@@ -647,3 +647,36 @@ def test_owner_vnc_websocket_requires_bearer_and_open_session_and_rechecks_frame
             with pytest.raises(Exception):
                 socket.receive_bytes()
         assert b"second-frame" not in sent
+
+
+def test_a_session_the_controller_retired_frees_open_and_a_reattached_one_keeps_access(
+    tmp_path: Path, clock: list[float]
+) -> None:
+    """2026-09-25: the controller's browser link died. It now either re-attaches
+    the session in place (same id, still "active") or retires it as
+    "interrupted". The broker must keep the owner's view on the first and, on
+    the second, stop treating the session as open so a new Open/Connect works."""
+    state = {"status": None, "next_id": 1}
+    def upstream(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/sessions":
+            if state["status"] is None:
+                return httpx.Response(200, json=[])
+            return httpx.Response(200, json=[{"id": f"owner-{state['next_id'] - 1}", "status": state["status"]}])
+        if request.method == "POST" and request.url.path == "/sessions":
+            session_id = f"owner-{state['next_id']}"
+            state["next_id"] += 1
+            state["status"] = "active"
+            return httpx.Response(200, json={"id": session_id})
+        return httpx.Response(200, json={"ok": True})
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        secret = enroll(client, clock)
+        assert client.post("/owner/sessions", headers=auth(OWNER), json={"start_url": "https://example.com", "totp_code": fresh(secret, clock)}).status_code == 200
+        # Re-attached in place: same id, still active -> nothing changes for the owner.
+        assert client.get("/owner/visual-access", headers=auth(OWNER)).json() == {"session_id": "owner-1"}
+        # Could not be re-attached: retired as interrupted -> gone for the broker...
+        state["status"] = "interrupted"
+        assert client.get("/owner/visual-access", headers=auth(OWNER)).status_code == 403
+        # ...and the next Open is not refused as "close the current session first".
+        reopened = client.post("/owner/sessions", headers=auth(OWNER), json={"start_url": "https://example.com", "totp_code": fresh(secret, clock)})
+        assert reopened.status_code == 200 and reopened.json()["id"] == "owner-2"
+        assert client.get("/owner/visual-access", headers=auth(OWNER)).json() == {"session_id": "owner-2"}

@@ -9,12 +9,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from playwright.async_api import Error as PlaywrightError
-
 from ...browser_scripts import apply_stealth
 from ...models import SessionRecord, SessionStatus
 from ...network_inspector import NetworkInspector
 from ...utils import UTC
+from .connection_health import (
+    DRIVER_EXITED,
+    is_driver_dead_error,
+    playwright_driver_alive,
+    session_connection_problem,
+)
+from .storage_capture import storage_state_source
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext
@@ -32,6 +37,10 @@ class BrowserSessionService:
         self.manager = manager
 
     async def list(self) -> list[dict[str, Any]]:
+        # A session whose browser link died must never be reported "active":
+        # the broker/portal trust this list to decide whether Open/Connect may
+        # proceed. Recover (re-attach) or retire such sessions first.
+        await self.reap_dead_sessions()
         session_map = {record.id: record.model_dump() for record in await self.manager.session_store.list()}
         for session in self.manager.sessions.values():
             summary = await self.manager._session_summary(session)
@@ -218,6 +227,11 @@ class BrowserSessionService:
                     # than a spoofed one.
                     context_kwargs.pop("user_agent", None)
 
+            # Before looking for a live session to hand back: a zombie (its
+            # browser link died) would otherwise be returned as "already
+            # open" forever. Must run outside the lease lock -- recovery
+            # takes it.
+            await self.reap_dead_sessions()
             lease_lock = (
                 self._profile_lease_lock(persistent_profile_name)
                 if persistent_profile_name is not None
@@ -446,6 +460,16 @@ class BrowserSessionService:
                 auth_profile_name=self.manager.auth_profiles.normalize_name(auth_profile) if auth_profile else None,
                 persistent_profile_name=persistent_profile_name,
                 persistent_profile_generation=persistent_handle.generation if persistent_handle else None,
+                driver_epoch=self.manager._driver_epoch,
+                persistent_open_options=(
+                    {
+                        "owner": persistent_owner,
+                        "adopt_unmarked": persistent_adopt_unmarked,
+                        "context_kwargs": dict(context_kwargs),
+                    }
+                    if persistent_handle is not None
+                    else None
+                ),
                 mouse_position=(
                     self.manager.settings.default_viewport_width / 2,
                     self.manager.settings.default_viewport_height / 2,
@@ -793,12 +817,20 @@ class BrowserSessionService:
         interval = self.manager.settings.auto_persist_interval_seconds
         while True:
             await asyncio.sleep(interval)
+            if self.manager.sessions.get(session.id) is not session:
+                return  # retired (or closed) while we slept
+            link_dead = False
             async with session.lock:
                 try:
                     await self.manager.auth_profiles.save_auto_persist(session, profile_name)
                 except Exception as exc:
                     logger.warning(
                         "auto-persist: periodic save failed for session %s: %s", session.id, exc
+                    )
+                    # A dead browser link is recovered below, after leaving
+                    # session.lock (recovery takes it).
+                    link_dead = is_driver_dead_error(exc) or (
+                        session_connection_problem(self.manager, session) is not None
                     )
                     # The tracked page can close out from under us — the site closed its
                     # own tab/window, the page crashed, or the owner's tab died — while
@@ -820,7 +852,7 @@ class BrowserSessionService:
                     # the one tab we happened to be tracking closed. Adopt the most
                     # recently opened surviving tab instead, and only retire the session
                     # when none remain.
-                    if session.page.is_closed():
+                    if not link_dead and session.page.is_closed():
                         try:
                             candidates = self.manager.tabs.pages(session)
                         except Exception:
@@ -845,6 +877,10 @@ class BrowserSessionService:
                                     reason="its tracked browser page has closed and no other tabs remain",
                                 )
                             return
+            if link_dead:
+                await self.reap_dead_sessions()
+                if self.manager.sessions.get(session.id) is not session:
+                    return  # could not be re-attached; it was retired
 
     async def release_persistent_profile(self, session: "BrowserSession") -> None:
         """Give back this session's persistent profile -- at most once.
@@ -882,7 +918,149 @@ class BrowserSessionService:
             return self._profile_lease_lock(session.persistent_profile_name)
         return contextlib.nullcontext()
 
-    async def _retire_dead_session(self, session: "BrowserSession", *, reason: str) -> None:
+    async def reap_dead_sessions(self) -> None:
+        """Recover or retire every live session whose browser link died.
+
+        Single-flight: concurrent callers (GET /sessions polling, Open, the
+        watchdog, a failing auto-persist) share one pass. Cheap when nothing
+        is wrong -- only synchronous checks run.
+        """
+        manager = self.manager
+        driver_dead = not playwright_driver_alive(getattr(manager, "playwright", None))
+        if not driver_dead and not any(
+            session_connection_problem(manager, session) for session in list(manager.sessions.values())
+        ):
+            return
+        task = getattr(manager, "_reap_task", None)
+        if not isinstance(task, asyncio.Task) or task.done():
+            task = asyncio.create_task(self._reap_dead_sessions_once())
+            manager._reap_task = task
+        # shield: a caller's cancellation (a dropped HTTP request) must not
+        # abort a re-attach half way.
+        await asyncio.shield(task)
+
+    async def _reap_dead_sessions_once(self) -> None:
+        manager = self.manager
+        dead = [
+            (session, problem)
+            for session in list(manager.sessions.values())
+            if (problem := session_connection_problem(manager, session))
+        ]
+        if not playwright_driver_alive(getattr(manager, "playwright", None)):
+            # Also with no session on it: the next Open needs a live driver.
+            await manager.restart_playwright_driver(reason=DRIVER_EXITED)
+        for session, problem in dead:
+            try:
+                await self.recover_dead_session(session, reason=problem)
+            except Exception as exc:  # pragma: no cover - one session must not block the rest
+                logger.warning("recovering session %s failed: %s", session.id, exc)
+
+    async def recover_dead_session(self, session: "BrowserSession", *, reason: str) -> bool:
+        """Re-attach a persistent-profile session in place, else retire it.
+
+        The owner's Chromium lives in browser-node, not here: when only the
+        controller's link to it died (driver exit, relay/CDP drop), the
+        profile -- tabs, live logins -- is still running. Re-opening it hands
+        back the same process (`already_open`) under a new lease generation,
+        and the session keeps its id, so the broker's grant and the portal's
+        viewer never notice. If the Chromium itself is gone browser-node
+        relaunches the profile from disk (logins are on disk). Anything that
+        cannot be re-attached is retired as "interrupted" -- never left as a
+        zombie "active" session. Returns True when re-attached.
+        """
+        manager = self.manager
+        async with session.lock, self.teardown_lock(session):
+            if manager.sessions.get(session.id) is not session:
+                return False  # closed or retired meanwhile
+            if session_connection_problem(manager, session) is None:
+                return True  # somebody else already recovered it
+            logger.warning("session %s: browser link lost (%s)", session.id, reason)
+            if session.persistent_profile_name and not session.persistent_profile_released:
+                try:
+                    await self._reattach_persistent_session(session)
+                except Exception as exc:
+                    logger.error(
+                        "session %s: re-attach to persistent profile '%s' failed: %s",
+                        session.id, session.persistent_profile_name, exc,
+                    )
+                else:
+                    await manager.audit.append(
+                        event_type="session_reattached",
+                        status="ok",
+                        action="reattach_dead_session",
+                        session_id=session.id,
+                        details={
+                            "reason": reason,
+                            "persistent_profile": session.persistent_profile_name,
+                            "reattach_count": session.reattach_count,
+                        },
+                    )
+                    try:
+                        await self.persist(session, status="active")
+                    except Exception as exc:  # pragma: no cover - persistence is best effort here
+                        logger.warning("persisting re-attached session %s failed: %s", session.id, exc)
+                    return True
+            await self._retire_dead_session(
+                session,
+                reason=f"its browser link died ({reason})",
+                # The profile's Chromium (if still running) holds the owner's
+                # live login: leave it open for the next Open to re-attach.
+                keep_profile_open=True,
+            )
+            return False
+
+    async def _reattach_persistent_session(self, session: "BrowserSession") -> None:
+        """Swap a fresh CDP attachment into `session`. Caller holds its locks."""
+        manager = self.manager
+        if manager.playwright is None:
+            raise RuntimeError("Playwright not started")
+        old_browser = session.browser
+        if old_browser is not None:
+            try:
+                await asyncio.wait_for(old_browser.close(), timeout=5)
+            except Exception as exc:
+                logger.debug("disconnecting the dead CDP client of session %s failed: %s", session.id, exc)
+        options = session.persistent_open_options or {}
+        handle = await manager.persistent_profiles.open(
+            session.persistent_profile_name,
+            owner=options.get("owner"),
+            adopt_unmarked=bool(options.get("adopt_unmarked")),
+            context_kwargs=options.get("context_kwargs"),
+        )
+        try:
+            attachment = await manager.runtime.attach_persistent_context(handle)
+            context = attachment.context
+            page = context.pages[-1] if context.pages else await context.new_page()
+            page.set_default_timeout(manager.settings.action_timeout_ms)
+        except Exception:
+            # browser-node now holds a lease for this generation: give it back
+            # exactly once, or the profile would stay open with nobody on it.
+            session.persistent_profile_released = True
+            await manager.persistent_profiles.close(handle.name, generation=handle.generation)
+            raise
+        if session.network_inspector is not None:
+            session.network_inspector.detach()
+            session.network_inspector.attach(page)
+        session.browser = attachment.browser
+        session.context = context
+        session.page = page
+        session.persistent_profile_generation = handle.generation
+        session.driver_epoch = manager._driver_epoch
+        session.reattach_count += 1
+        manager._attach_page_listeners(page, session)
+        if hasattr(context, "on"):
+            context.on("page", lambda popup: manager._attach_page_listeners(popup, session))
+        logger.warning(
+            "session %s: re-attached to persistent profile '%s' (%s, generation %s)",
+            session.id,
+            handle.name,
+            "same running browser" if handle.already_open else "relaunched from disk",
+            handle.generation,
+        )
+
+    async def _retire_dead_session(
+        self, session: "BrowserSession", *, reason: str, keep_profile_open: bool = False
+    ) -> None:
         """End a session whose underlying page died without an explicit close.
 
         Mirrors `close()`'s teardown, but every step is best-effort: the
@@ -907,7 +1085,17 @@ class BrowserSessionService:
         if session.network_inspector is not None:
             session.network_inspector.detach()
             session.network_inspector = None
-        if session.persistent_profile_name:
+        if session.persistent_profile_name and keep_profile_open:
+            # Only our link died. Drop the client side, and leave the profile
+            # running in browser-node: the next Open re-attaches to it
+            # (already_open) with the owner's live logins intact.
+            session.persistent_profile_released = True
+            if session.browser is not None:
+                try:
+                    await asyncio.wait_for(session.browser.close(), timeout=5)
+                except Exception as exc:
+                    logger.debug("CDP disconnect while retiring session %s failed: %s", session.id, exc)
+        elif session.persistent_profile_name:
             await self.release_persistent_profile(session)
         else:
             try:
@@ -960,7 +1148,7 @@ class BrowserSessionService:
             # Export through AuthStateManager so the state file is encrypted
             # at rest whenever an encryption key is configured.
             fork_auth_path = session.auth_dir / f"fork_{uuid4().hex[:8]}.json"
-            auth_info = await self.manager.auth_state.write_storage_state(session.context, fork_auth_path)
+            auth_info = await self.manager.auth_state.write_storage_state(storage_state_source(session), fork_auth_path)
             current_url = session.page.url
 
         # Create the new session using the forked state
@@ -1000,7 +1188,7 @@ class BrowserSessionService:
         async with session.lock:
             current_url = session.page.url
             # In-memory export: shadow state never touches disk.
-            storage_state = await session.context.storage_state()
+            storage_state = await storage_state_source(session).storage_state()
 
         from ...browser_manager import BrowserSession
 
@@ -1078,7 +1266,10 @@ class BrowserSessionService:
             return "", "", False
         try:
             return page.url, await page.title(), True
-        except PlaywrightError as exc:
+        except Exception as exc:
+            # Not only PlaywrightError: a dead driver raises a plain
+            # Exception/RuntimeError here, which used to turn every
+            # GET /sessions into a 500 while the session sat as a zombie.
             logger.debug("page snapshot failed for session %s: %s", session.id, exc)
             return "", "", False
 

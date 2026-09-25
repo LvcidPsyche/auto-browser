@@ -88,6 +88,12 @@ class Settings(BaseSettings):
     auto_persist_login_enabled: bool = Field(True, alias="AUTO_PERSIST_LOGIN_ENABLED")
     auto_persist_profile_name: str = Field("owner-default", alias="AUTO_PERSIST_PROFILE_NAME")
     auto_persist_interval_seconds: float = Field(180.0, alias="AUTO_PERSIST_INTERVAL_SECONDS")
+    # How often live sessions are checked for a dead browser link (Playwright
+    # driver exited, CDP connection closed). A dead persistent-profile session
+    # is re-attached in place to the still-running Chromium; anything else is
+    # retired so the broker/portal stop seeing a zombie "active" session.
+    # 0 disables the watchdog (GET /sessions and Open still check).
+    session_watchdog_interval_seconds: float = Field(5.0, alias="SESSION_WATCHDOG_INTERVAL_SECONDS")
 
     # Persistent Chromium profiles: instead of replaying a storage_state export
     # into a brand-new context on every Open (cookies + localStorage only), a

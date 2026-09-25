@@ -18,6 +18,7 @@ from ...audit import get_current_operator
 from ...persistent_profiles import PersistentProfileError
 from ...utils import UTC, utc_now
 from ...witness import WitnessActionContext
+from .storage_capture import storage_state_source
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +153,7 @@ class BrowserAuthProfileService:
                     metadata={"error": witness_outcome.block_reason},
                 )
                 raise PermissionError(witness_outcome.block_reason or "Witness policy blocked save_storage_state")
-            auth_info = await self.manager.auth_state.write_storage_state(session.context, safe_path)
+            auth_info = await self.manager.auth_state.write_storage_state(storage_state_source(session), safe_path)
             session.last_auth_state_path = Path(auth_info["path"]) if auth_info["path"] else None
             payload = {
                 "saved_to": auth_info["path"],
@@ -198,7 +199,7 @@ class BrowserAuthProfileService:
         # file wholesale, so the owner has to be carried across explicitly.
         owner = self.require_access(normalized, action="saving an auth profile")
         profile_state_path = self.state_base_path(normalized, create=True)
-        auth_info = await self.manager.auth_state.write_storage_state(session.context, profile_state_path)
+        auth_info = await self.manager.auth_state.write_storage_state(storage_state_source(session), profile_state_path)
         if track_on_session:
             # Only a caller-named save (the manual "save my login" feature,
             # or an explicit request) should change what this session
@@ -289,7 +290,7 @@ class BrowserAuthProfileService:
         if not old_sites:
             return None
         try:
-            new_state = await session.context.storage_state()
+            new_state = await storage_state_source(session).storage_state()
         except Exception:
             logger.warning(
                 "auto-persist: could not read live storage state for profile '%s' to compare", normalized,
