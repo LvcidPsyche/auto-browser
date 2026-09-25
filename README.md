@@ -122,6 +122,13 @@ curl -s http://127.0.0.1:8000/sessions/<session-id>/observe | jq
 
 ## Recent Changes
 
+**1.8.1**
+
+- **Sturdier sessions and stores.** Actions that ran are no longer reported as failed when the page navigates right after, an approved action runs at most once, `MAX_SESSIONS` holds under concurrent creates, and sessions, tabs, cron jobs and the JSON stores no longer leak or lose writes.
+- **The stdio MCP bridge survives a controller restart** and reports auth and rate-limit errors instead of hanging. The SDK, bridge and LangChain adapters can send an operator id for controllers with `REQUIRE_OPERATOR_ID=true`.
+- **Faster actions and observations**, fewer browser round trips per observation, and a controller image without the test tooling.
+- **Security fixes** for the noVNC socket, TOTP autofill, auth-profile paths, approvals and witness receipts. `create_session` with `totp_secret` now needs `totp_hosts` or a `start_url`.
+
 **1.8.0**
 
 - **Smaller results for agents.** MCP results refer to sessions instead of repeating the full session record, and `execute_action` no longer returns the pre-action snapshot (`detail="full"` restores both). An action result is less than half its old size. The default tool list carries the 20 tools a browsing agent needs, and the rest are one `MCP_TOOL_PROFILE=full` away.

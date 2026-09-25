@@ -4,6 +4,68 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.8.1] — 2026-09-26
+
+A reliability, speed, polish and security pass over 1.8.0.
+
+**If you use the stdio MCP bridge (`uvx auto-browser-mcp`, Claude Desktop, Cursor), upgrade.**
+It now survives a controller restart, reports auth and rate-limit errors instead of hanging,
+and can send an operator id (`--operator-id` / `AUTO_BROWSER_OPERATOR_ID`) to controllers
+that set `REQUIRE_OPERATOR_ID=true`.
+
+Upgrade notes:
+- `browser.create_session` with `totp_secret` now needs `totp_hosts` unless it also sets
+  `start_url`, whose host becomes the default.
+- `POST /workflows/run` validates its steps up front. Unknown keys, duplicate ids, unknown
+  dependencies and unbounded retries now get a 422 before the run starts.
+- `GET /sessions/{id}/trace` returns a `viewer_url` that opens the Playwright trace viewer
+  without a trace preloaded, plus a new `viewer_command`. The old `?trace=` link never loaded.
+- `GET /audit/events` with `limit <= 0` returns an empty list.
+- The controller image no longer includes the test tooling. Build with `INSTALL_DEV_DEPS=true`
+  to run pytest inside it (`make test` and CI already do).
+
+### Security
+
+- Hardened session creation, the TOTP autofill, approvals, the noVNC takeover
+  socket and witness receipts. Advisories will follow with details.
+- **New:** `totp_hosts` on `browser.create_session` names the hosts where
+  one-time codes may be typed; it defaults to the `start_url` host, and a
+  `totp_secret` with neither is now refused.
+- **New:** `NOVNC_ALLOWED_ORIGINS` for deployments whose proxy in front of the
+  noVNC port rewrites the `Host` header.
+
+### Fixed
+
+- **Actions that ran are no longer reported as failed.** A page that navigated just after a
+  successful action (a click whose handler redirects) used to turn the result into a failure,
+  so callers retried and submitted forms twice. The result now comes back with an
+  `observation_error` telling the caller to observe again. When a failed page can't be
+  snapshotted, the normalized error is kept.
+- **An approved action runs at most once**, even when two requests carry the same approval.
+- **MAX_SESSIONS counts sessions still being created**, so concurrent creates can't exceed it.
+- **Sessions tear down cleanly.** A failing teardown step no longer strands the session and its
+  slot. A cancelled create rolls back the way a failed one does.
+- **Tabs:** a session whose active tab closes itself moves to another tab. A tab that fails to
+  open is closed. The CDP routes and the network inspector follow every tab, not only the first.
+- **Stores:** every atomic JSON write gets its own temp file. Before, 16 parallel upserts lost
+  177 of 320 writes. An audit trim no longer drops events appended while it runs. Damaged
+  auth-profile metadata refuses access instead of reading as unowned. Encrypted storage state
+  never leaves a plaintext temp file behind.
+- **MCP:** sessions are evicted by last use, not creation time. The stdio bridge re-initializes
+  when the controller forgets its session, and answers HTTP-layer errors (401, 400, 429) as
+  JSON-RPC errors.
+- **Cron:** jobs no longer leak sessions or silently stop firing. An invalid schedule is
+  refused, and a webhook and a scheduled fire can't both start a run.
+- **Agent jobs:** jobs caught mid-cancellation by a restart are settled. Resumed jobs stay
+  within the context-hint limit. The orchestrator ends a run with its history when the page
+  can't be observed, instead of returning a 500.
+- **Providers:** rate-limited retries honor `Retry-After`, and a cancelled job kills its CLI
+  subprocess.
+- **Also:** session event streams end when the session closes. The network inspector bounds
+  in-flight requests. A cancelled tunnel provision stops its autossh. The cleanup sweep no
+  longer removes a new session's empty directories. Two downloads with the same name keep both
+  files.
+
 ### Changed
 
 - **Actions and observations are faster (#161).** A selector click on a
@@ -26,6 +88,30 @@ All notable changes to auto-browser are documented here.
   pip-audit and the rest of `requirements-dev.txt` (about 58 MB) install only
   when the image is built with `INSTALL_DEV_DEPS=true`, which `make test` and
   CI set. Anything else that runs pytest inside the image needs that build arg.
+- **Clearer MCP tools.** Every argument of the curated tools is described. An
+  unknown tool name points at the tool the caller meant. Validation errors drop
+  pydantic's "Value error" prefix.
+- **The OpenAPI docs are grouped by area** instead of one flat list.
+
+### Added
+
+- `auto-browser-client`: `operator_id` and `headers` arguments, and `AutoBrowserError` exported
+  from the package.
+- `auto-browser-langchain`: `operator_id` on `AutoBrowserTool`, `list_tools` and
+  `AutoBrowserNode`. The tool description no longer names tools that don't exist.
+- Stdio bridge: `--operator-id` / `AUTO_BROWSER_OPERATOR_ID`, and `--help` names each flag's
+  environment variable.
+
+### Documentation
+
+- The README's production settings now let the controller start. They were missing `SHARE_TOKEN_SECRET` and
+  `CONTROLLER_ALLOWED_HOSTS`, and a test runs the startup policy over them.
+- `.env.example` lists every setting and the current default models, and a test keeps it that
+  way.
+- Doc examples that called removed tools are fixed, and a test validates every curl MCP call in
+  the docs.
+- The README says when to choose per-session isolation, and the architecture doc marks the
+  shipped roadmap phases.
 
 ## [1.8.0] — 2026-09-25
 
