@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -117,6 +118,22 @@ class SessionStoreTests(unittest.IsolatedAsyncioTestCase):
         client.pipeline_instance.execute.assert_awaited_once()
         client.aclose.assert_awaited_once()
         self.assertEqual(missing_record.status, "closed")
+
+
+class FileSessionStoreConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_concurrent_upserts_of_one_record_all_succeed(self) -> None:
+        # Saves run in worker threads; with a shared temp file per record,
+        # one save's rename pulled the file out from under the others.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FileSessionStore(tmpdir)
+            await store.startup()
+            records = [_record("session-1").model_copy(update={"title": str(i) * 5000}) for i in range(16)]
+            for _ in range(5):
+                results = await asyncio.gather(*(store.upsert(r) for r in records), return_exceptions=True)
+                self.assertEqual([r for r in results if isinstance(r, Exception)], [])
+                stored = await store.get("session-1")
+                self.assertIn(stored.title, {r.title for r in records})
+            self.assertEqual(sorted(p.name for p in Path(tmpdir).iterdir()), ["session-1.json"])
 
 
 if __name__ == "__main__":

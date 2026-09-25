@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 from . import events as _events
 from .models import McpToolCallRequest
-from .utils import utc_now
+from .utils import atomic_write_text, utc_now
 
 JSONRPC_VERSION = "2.0"
 MCP_SESSION_HEADER = "MCP-Session-Id"
@@ -59,10 +59,15 @@ class McpSession:
     initialized: bool = False
     created_at: str = ""
     resource_subscriptions: list[str] = field(default_factory=list)
+    # Updated in memory on every request and saved with the next store write;
+    # eviction goes by this, so a busy long-lived client is not dropped.
+    last_used_at: str = ""
 
     def __post_init__(self) -> None:
         if not self.created_at:
             self.created_at = utc_now()
+        if not self.last_used_at:
+            self.last_used_at = self.created_at
 
 
 class McpHttpTransport:
@@ -522,6 +527,9 @@ class McpHttpTransport:
             client_capabilities=self._coerce_dict(params.get("capabilities")),
         )
         self._sessions[session.id] = session
+        # Here as well as in _persist_sessions: with no store path configured
+        # nothing else bounds the session table.
+        self._evict_stale_sessions()
         self._persist_sessions()
 
         result = {
@@ -568,6 +576,7 @@ class McpHttpTransport:
                 f"Unknown MCP session: {session_id}",
                 status_code=404,
             )
+        session.last_used_at = utc_now()
         return session
 
     def _validate_protocol_header(
@@ -655,6 +664,7 @@ class McpHttpTransport:
                     client_capabilities=self._coerce_dict(item.get("client_capabilities")),
                     initialized=bool(item.get("initialized", False)),
                     created_at=str(item.get("created_at") or ""),
+                    last_used_at=str(item.get("last_used_at") or ""),
                     resource_subscriptions=[
                         str(uri) for uri in item.get("resource_subscriptions", []) if isinstance(uri, str)
                     ],
@@ -668,11 +678,14 @@ class McpHttpTransport:
         if len(self._sessions) <= 500:
             return
         excess = len(self._sessions) - 500
+        # Least recently used first. Ordering by creation evicted a client that
+        # had been connected (and busy) the longest as soon as 500 newer
+        # sessions, most of them abandoned without a DELETE, piled up behind it.
         stale_keys = [
             session.id
             for session in sorted(
                 self._sessions.values(),
-                key=lambda item: (item.created_at or "", item.id),
+                key=lambda item: (item.last_used_at or item.created_at or "", item.id),
             )[:excess]
         ]
         for key in stale_keys:
@@ -683,10 +696,8 @@ class McpHttpTransport:
             return
         self._evict_stale_sessions()
         self._session_store_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._session_store_path.with_suffix(".json.tmp")
         payload = [asdict(session) for session in self._sessions.values()]
-        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp_path.replace(self._session_store_path)
+        atomic_write_text(self._session_store_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
     @staticmethod
     def _coerce_dict(value: Any) -> dict[str, Any]:

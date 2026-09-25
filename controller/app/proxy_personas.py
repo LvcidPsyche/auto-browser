@@ -36,6 +36,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from .utils import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -72,9 +74,7 @@ class ProxyPersonaStore:
         if self._path is None:
             raise RuntimeError("No PROXY_PERSONA_FILE configured — cannot save proxy personas")
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_suffix(f"{self._path.suffix}.tmp")
-        tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-        tmp_path.replace(self._path)
+        atomic_write_text(self._path, json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True))
 
     @staticmethod
     def _normalize_persona(name: Any, persona: Any) -> tuple[str, dict[str, Any]]:

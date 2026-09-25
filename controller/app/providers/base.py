@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import email.utils
 import json
 import mimetypes
 import os
@@ -9,6 +10,7 @@ import socket
 import stat
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from shutil import which
 from typing import Any
@@ -25,6 +27,8 @@ from ..result_shaping import compact_session
 # Narrowing to these lets a real bug (AttributeError, TypeError, ...) surface
 # instead of being silently swallowed as a parse miss.
 _PARSE_ERRORS = (ValidationError, ValueError)
+# Longest a provider's Retry-After may hold one retry.
+MAX_RETRY_AFTER_SECONDS = 30.0
 
 DEFAULT_PROVIDER_AUTH_MODES = {"api", "cli"}
 
@@ -146,7 +150,7 @@ class BaseProviderAdapter(ABC):
 
                 if response.status_code == 429 or response.status_code >= 500:
                     if attempt < max_attempts:
-                        await asyncio.sleep(self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1)))
+                        await asyncio.sleep(self._retry_delay(attempt, response))
                         continue
 
                 try:
@@ -164,6 +168,28 @@ class BaseProviderAdapter(ABC):
                 return response.json()
 
         raise ProviderAPIError(provider=self.provider, message="request failed without a response")
+
+    def _retry_delay(self, attempt: int, response: httpx.Response) -> float:
+        """Backoff before retrying a 429/5xx, honouring the provider's Retry-After.
+
+        The fixed 1s/2s backoff retried a rate limit long before the window the
+        provider named, so every retry was spent on another 429 and the step
+        failed anyway. Capped so one header cannot park a step for minutes.
+        """
+        delay = self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1))
+        retry_after = (response.headers.get("retry-after") or "").strip()
+        if retry_after:
+            try:
+                seconds = float(retry_after)
+            except ValueError:
+                try:
+                    when = email.utils.parsedate_to_datetime(retry_after)
+                    seconds = (when - datetime.now(when.tzinfo or timezone.utc)).total_seconds()
+                except (TypeError, ValueError):
+                    seconds = 0.0
+            if seconds == seconds:  # not NaN
+                delay = max(delay, min(seconds, MAX_RETRY_AFTER_SECONDS))
+        return delay
 
     @staticmethod
     def encode_image(path: str) -> tuple[str, str]:
@@ -423,6 +449,13 @@ class BaseProviderAdapter(ABC):
                 process.communicate(input_text.encode("utf-8") if input_text is not None else None),
                 timeout=self.settings.model_request_timeout_seconds,
             )
+        except asyncio.CancelledError:
+            # A cancelled agent job (the operator pressed cancel) left the CLI
+            # running to completion in the background, still spending tokens.
+            if process.returncode is None:
+                process.kill()
+                await asyncio.shield(process.wait())
+            raise
         except asyncio.TimeoutError as exc:
             process.kill()
             await process.communicate()

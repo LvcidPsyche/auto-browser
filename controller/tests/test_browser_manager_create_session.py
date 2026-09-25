@@ -108,6 +108,21 @@ class BrowserManagerCreateSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context_kwargs["proxy"]["username"], "alice")
         self.manager._persist_session.assert_awaited()
 
+    async def test_network_inspector_listens_to_every_tab(self) -> None:
+        """Attached to the first page, the network log missed popups and new
+        tabs, and recorded nothing once the first tab was closed."""
+        self.manager.settings.network_inspector_enabled = True
+        page = FakePage()
+        context = FakeContext(page)
+        self.manager._acquire_session_browser = AsyncMock(return_value=(FakeBrowser(context), None))  # type: ignore[method-assign]
+
+        result = await self.manager.create_session(name="fixture")
+
+        inspector = self.manager.sessions[result["id"]].network_inspector
+        self.assertIs(inspector._page, context)
+        context_events = {call.args[0] for call in context.on.call_args_list}
+        self.assertTrue({"request", "response", "requestfailed", "requestfinished"} <= context_events)
+
     async def test_create_session_rejects_conflicting_auth_and_proxy_inputs(self) -> None:
         with self.assertRaises(ValueError):
             await self.manager.create_session(storage_state_path="state.json", auth_profile="ops")

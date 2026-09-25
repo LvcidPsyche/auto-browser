@@ -345,3 +345,243 @@ def test_cron_store_roundtrips_valid_json(tmp_path: Path) -> None:
     assert service._load()["j1"]["goal"] == "do a thing"
     assert not list(tmp_path.glob("*corrupt*"))
     assert json.loads((tmp_path / "cron.json").read_text(encoding="utf-8"))["j1"]["id"] == "j1"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_creates_cannot_exceed_max_sessions(tmp_path: Path) -> None:
+    """The limit check ran before browser startup and the insert after it.
+
+    Regression: every create in flight passed the check, so two concurrent
+    create_session calls with MAX_SESSIONS=1 both got a live session.
+    """
+    from app.browser_manager import BrowserManager
+    from app.config import Settings
+
+    settings = Settings(_env_file=None)
+    settings.artifact_root = str(tmp_path / "artifacts")
+    settings.upload_root = str(tmp_path / "uploads")
+    settings.auth_root = str(tmp_path / "auth")
+    settings.max_sessions = 1
+    manager = BrowserManager(settings)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_browser(_session_id):
+        started.set()
+        await release.wait()
+        raise RuntimeError("browser node unavailable")
+
+    manager._acquire_session_browser = slow_browser  # type: ignore[method-assign]
+
+    first = asyncio.create_task(manager.create_session(name="first"))
+    await started.wait()
+    try:
+        with pytest.raises(RuntimeError, match="Session limit reached"):
+            await asyncio.wait_for(manager.create_session(name="second"), timeout=5)
+    finally:
+        release.set()
+    with pytest.raises(RuntimeError, match="browser node unavailable"):
+        await first
+
+    # A failed create gives its slot back.
+    manager._check_session_limit()
+
+
+def _manager_with_live_session(tmp_path: Path, *, context_close):
+    from datetime import datetime, timezone
+
+    from app.browser_manager import BrowserManager, BrowserSession
+    from app.config import Settings
+
+    settings = Settings(_env_file=None)
+    settings.artifact_root = str(tmp_path / "artifacts")
+    settings.upload_root = str(tmp_path / "uploads")
+    settings.auth_root = str(tmp_path / "auth")
+    settings.session_store_root = str(tmp_path / "sessions")
+    settings.audit_root = str(tmp_path / "audit")
+    settings.witness_root = str(tmp_path / "witness")
+    manager = BrowserManager(settings)
+
+    class _Page:
+        url = "https://example.com"
+
+        def is_closed(self) -> bool:
+            return False
+
+        async def title(self) -> str:
+            return "Example"
+
+    artifact_dir = tmp_path / "artifacts" / "session-1"
+    artifact_dir.mkdir(parents=True)
+    session = BrowserSession(
+        id="session-1",
+        name="session-1",
+        created_at=datetime.now(timezone.utc),
+        context=SimpleNamespace(close=context_close),  # type: ignore[arg-type]
+        page=_Page(),  # type: ignore[arg-type]
+        artifact_dir=artifact_dir,
+        auth_dir=tmp_path / "auth" / "session-1",
+        upload_dir=tmp_path / "uploads" / "session-1",
+        takeover_url="http://127.0.0.1:6080/vnc.html",
+        trace_path=artifact_dir / "trace.zip",
+    )
+    manager.sessions[session.id] = session
+    return manager
+
+
+@pytest.mark.asyncio
+async def test_close_frees_the_slot_even_when_teardown_fails(tmp_path: Path) -> None:
+    """Regression: a crashed browser made context.close() raise before the
+    session was unregistered, every retry failed the same way, and the session
+    held its MAX_SESSIONS slot until restart."""
+
+    async def broken_close() -> None:
+        raise RuntimeError("Target page, context or browser has been closed")
+
+    manager = _manager_with_live_session(tmp_path, context_close=broken_close)
+
+    result = await manager.close_session("session-1")
+
+    assert result["closed"] is True
+    assert "session-1" not in manager.sessions
+
+
+@pytest.mark.asyncio
+async def test_concurrent_closes_tear_down_once(tmp_path: Path) -> None:
+    closes = []
+
+    async def slow_close() -> None:
+        closes.append(1)
+        await asyncio.sleep(0.01)
+
+    manager = _manager_with_live_session(tmp_path, context_close=slow_close)
+
+    results = await asyncio.gather(
+        manager.close_session("session-1"),
+        manager.close_session("session-1"),
+        return_exceptions=True,
+    )
+
+    assert len(closes) == 1
+    assert sum(isinstance(r, dict) for r in results) == 1
+    assert sum(isinstance(r, KeyError) for r in results) == 1
+
+
+@pytest.mark.asyncio
+async def test_close_tells_live_event_streams_the_session_ended(tmp_path: Path) -> None:
+    """Nothing emitted a session event on close, so /sessions/{id}/events
+    streams stayed open on keepalives after the session was gone."""
+    from app import events
+
+    async def close() -> None:
+        return None
+
+    manager = _manager_with_live_session(tmp_path, context_close=close)
+    queue = events.subscribe("session-1")
+    try:
+        await manager.close_session("session-1")
+        payloads = []
+        while not queue.empty():
+            payloads.append(queue.get_nowait())
+        assert any(events.is_session_closed_event(p, "session-1") for p in payloads)
+    finally:
+        events.unsubscribe("session-1", queue)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_create_releases_what_it_acquired(tmp_path: Path) -> None:
+    """Rollback ran on Exception only, so a cancelled create kept its context
+    open and its isolated runtime (a docker container) running."""
+    from app.browser_manager import BrowserManager
+    from app.config import Settings
+
+    settings = Settings(_env_file=None)
+    settings.artifact_root = str(tmp_path / "artifacts")
+    settings.upload_root = str(tmp_path / "uploads")
+    settings.auth_root = str(tmp_path / "auth")
+    settings.enable_tracing = False
+    manager = BrowserManager(settings)
+
+    released = []
+    closed = []
+    started = asyncio.Event()
+
+    class _Context:
+        async def new_page(self):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def close(self) -> None:
+            closed.append(True)
+
+    class _Browser:
+        async def new_context(self, **_kwargs):
+            return _Context()
+
+        async def close(self) -> None:
+            pass
+
+    runtime = SimpleNamespace(tunnel=None)
+
+    async def acquire(_session_id):
+        return _Browser(), runtime
+
+    async def release(item) -> None:
+        released.append(item)
+
+    manager._acquire_session_browser = acquire  # type: ignore[method-assign]
+    manager.runtime_provisioner = SimpleNamespace(release=release)
+
+    task = asyncio.create_task(manager.create_session(name="cancel-me"))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert closed == [True]
+    assert released == [runtime]
+    manager._check_session_limit()
+
+
+@pytest.mark.asyncio
+async def test_audit_trim_does_not_drop_events_appended_while_it_runs(tmp_path: Path, monkeypatch) -> None:
+    """Regression: a trim read the log, an append landed, and the trim then
+    replaced the file with its stale tail, losing the appended event."""
+    import threading
+
+    import app.audit as audit_module
+    from app.models import AuditEvent, OperatorIdentity
+
+    def _event(action: str) -> AuditEvent:
+        return AuditEvent(
+            id=f"evt-{action}",
+            timestamp="2026-08-04T00:00:00Z",
+            event_type="test_event",
+            status="ok",
+            action=action,
+            session_id="s1",
+            operator=OperatorIdentity(id="op-1"),
+        )
+
+    store = FileAuditStore(str(tmp_path), max_events=2, trim_interval=1000)
+    await store.startup()
+    for action in ("a", "b", "c"):
+        await store.append_event(_event(action))
+
+    trim_has_read = threading.Event()
+    real_write = audit_module.atomic_write_text
+
+    def slow_write(path, text):
+        trim_has_read.set()
+        threading.Event().wait(0.2)
+        real_write(path, text)
+
+    monkeypatch.setattr(audit_module, "atomic_write_text", slow_write)
+    trim = asyncio.create_task(asyncio.to_thread(store._trim_sync))
+    await asyncio.to_thread(trim_has_read.wait)
+    await store.append_event(_event("late"))
+    await trim
+
+    actions = [e.action for e in await store.list(limit=50)]
+    assert "late" in actions

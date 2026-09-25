@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import threading
 from contextlib import closing
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -11,7 +12,7 @@ from uuid import uuid4
 
 from .models import AuditEvent, OperatorIdentity
 from .sqlite_utils import connect_sqlite
-from .utils import utc_now
+from .utils import atomic_write_text, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -81,13 +82,17 @@ class FileAuditStore:
         self.max_events = max(0, max_events)
         self.trim_interval = max(1, trim_interval)
         self._writes_since_trim = 0
+        # Appends and trims run in worker threads. A trim reads the log, then
+        # replaces it with its tail; an append landing between the two went to
+        # the file being replaced and the audit event was silently lost.
+        self._file_lock = threading.Lock()
 
     async def startup(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
 
     async def append_event(self, event: AuditEvent) -> None:
         line = event.model_dump_json()
-        await asyncio.to_thread(self._append_text, self.events_path, line + "\n")
+        await asyncio.to_thread(self._append_locked, line + "\n")
         self._writes_since_trim += 1
         if self.max_events and self._writes_since_trim >= self.trim_interval:
             await asyncio.to_thread(self._trim_sync)
@@ -157,16 +162,22 @@ class FileAuditStore:
             )
         return events
 
+    def _append_locked(self, text: str) -> None:
+        with self._file_lock:
+            self._append_text(self.events_path, text)
+
     def _trim_sync(self) -> None:
+        with self._file_lock:
+            self._trim_locked()
+
+    def _trim_locked(self) -> None:
         if not self.events_path.exists() or self.max_events <= 0:
             return
         lines = [line for line in self.events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
         if len(lines) <= self.max_events:
             return
         trimmed = "\n".join(lines[-self.max_events :]) + "\n"
-        tmp_path = self.events_path.with_suffix(".jsonl.tmp")
-        tmp_path.write_text(trimmed, encoding="utf-8")
-        tmp_path.replace(self.events_path)
+        atomic_write_text(self.events_path, trimmed)
 
     @staticmethod
     def _append_text(path: Path, text: str) -> None:

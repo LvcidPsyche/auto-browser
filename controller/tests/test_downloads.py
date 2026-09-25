@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
@@ -44,6 +45,47 @@ class DownloadCaptureServiceTests(unittest.IsolatedAsyncioTestCase):
                 json.loads(line) for line in (artifact_dir / "downloads.jsonl").read_text(encoding="utf-8").splitlines()
             ]
             self.assertEqual([record["filename"] for record in records], [first["filename"], second["filename"]])
+
+    async def test_concurrent_same_name_downloads_keep_both_files(self) -> None:
+        class SlowDownload(FakeDownload):
+            def __init__(self, body: str) -> None:
+                super().__init__("report.csv")
+                self.body = body
+
+            async def save_as(self, path: str) -> None:
+                await asyncio.sleep(0.01)
+                Path(path).write_text(self.body, encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts = SessionArtifactService(tempdir)
+            artifact_dir = artifacts.prepare_session_dir("session-1")
+            service = DownloadCaptureService(artifacts)
+            session = SimpleNamespace(id="session-1", artifact_dir=artifact_dir, downloads=[])
+
+            records = await asyncio.gather(
+                service.capture(session, SlowDownload("first")),
+                service.capture(session, SlowDownload("second")),
+            )
+
+            self.assertNotEqual(records[0]["path"], records[1]["path"])
+            self.assertEqual(
+                sorted(Path(r["path"]).read_text(encoding="utf-8") for r in records),
+                ["first", "second"],
+            )
+
+    async def test_dot_names_get_a_generated_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts = SessionArtifactService(tempdir)
+            artifact_dir = artifacts.prepare_session_dir("session-1")
+            service = DownloadCaptureService(artifacts)
+            session = SimpleNamespace(id="session-1", artifact_dir=artifact_dir, downloads=[])
+
+            for name in ("..", ".", "", "x" * 300 + ".csv"):
+                with self.subTest(name=name):
+                    record = await service.capture(session, FakeDownload(name))
+                    self.assertEqual(record["status"], "completed")
+                    self.assertEqual(Path(record["path"]).parent, artifact_dir / "downloads")
+                    self.assertTrue(record["filename"].startswith("download-"))
 
 
 if __name__ == "__main__":

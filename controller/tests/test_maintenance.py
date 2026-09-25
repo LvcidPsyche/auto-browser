@@ -51,6 +51,30 @@ class MaintenanceServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(stale_file.exists())
         self.assertEqual(report["roots"][0]["deleted_files"], 1)
 
+    async def test_cleanup_keeps_a_new_empty_directory(self) -> None:
+        """A session being created has fresh, empty directories before it is
+        registered; the sweep removed them because they were empty."""
+        new_dir = Path(self.settings.artifact_root) / "session-starting"
+        new_dir.mkdir()
+
+        await self.service.run_cleanup()
+
+        self.assertTrue(new_dir.exists())
+
+    async def test_cleanup_removes_a_stale_directory_it_emptied(self) -> None:
+        stale_dir = Path(self.settings.artifact_root) / "session-old"
+        stale_dir.mkdir()
+        stale_file = stale_dir / "trace.zip"
+        stale_file.write_text("old", encoding="utf-8")
+        ancient = 1_000_000_000
+        utime(stale_file, (ancient, ancient))
+        utime(stale_dir, (ancient, ancient))
+
+        report = await self.service.run_cleanup()
+
+        self.assertFalse(stale_dir.exists())
+        self.assertEqual(report["roots"][0]["deleted_dirs"], 1)
+
     async def test_cleanup_skips_active_session_roots(self) -> None:
         protected_dir = Path(self.settings.auth_root) / "session-1"
         protected_dir.mkdir(parents=True, exist_ok=True)

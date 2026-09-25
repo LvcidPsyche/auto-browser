@@ -301,6 +301,50 @@ class McpTransportTests(unittest.TestCase):
         self.assertNotIn("session-2", ids)
         self.assertIn("session-3", ids)
 
+    def test_eviction_keeps_a_long_lived_session_that_is_still_in_use(self) -> None:
+        transport = McpHttpTransport(
+            tool_gateway=self.gateway,
+            server_name="auto-browser",
+            server_title="Auto Browser MCP",
+            server_version="0.2.0",
+            allowed_origins=["https://allowed.example"],
+            session_store_path=None,
+            manager=self.manager,
+        )
+        transport._sessions = {
+            f"session-{index}": McpSession(
+                id=f"session-{index}",
+                protocol_version="2025-11-25",
+                client_info={},
+                client_capabilities={},
+                created_at=f"2026-04-17T00:{index // 60:02d}:{index % 60:02d}Z",
+            )
+            for index in range(500)
+        }
+        transport._sessions["session-0"].last_used_at = "2026-04-18T00:00:00Z"
+        transport._sessions["new"] = McpSession(
+            id="new", protocol_version="2025-11-25", client_info={}, client_capabilities={}
+        )
+        transport._evict_stale_sessions()
+
+        self.assertEqual(len(transport._sessions), 500)
+        self.assertIn("session-0", transport._sessions)
+        self.assertNotIn("session-1", transport._sessions)
+
+    def test_requests_refresh_a_sessions_last_use(self) -> None:
+        session_id, protocol_version = self._initialize()
+        self.transport._sessions[session_id].last_used_at = "2000-01-01T00:00:00Z"
+
+        self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version},
+            json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+        )
+
+        self.assertGreater(self.transport._sessions[session_id].last_used_at, "2000-01-01T00:00:00Z")
+        store_payload = json.loads(Path(f"{self.tempdir.name}/mcp-sessions.json").read_text(encoding="utf-8"))
+        self.assertEqual(store_payload[0]["last_used_at"], self.transport._sessions[session_id].last_used_at)
+
     def test_missing_method_returns_invalid_request_error(self) -> None:
         response = self.client.post(
             "/mcp",

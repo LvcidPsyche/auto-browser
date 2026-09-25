@@ -53,6 +53,20 @@ class BridgeProtocolEdgeTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], -32600)
         self.assertIn("batches", payload["error"]["message"])
 
+    def test_unknown_session_is_relayed_when_reinitialize_fails(self) -> None:
+        not_found = HttpMcpResponse(
+            status_code=404, headers={}, body={"jsonrpc": "2.0", "id": 2, "error": {"code": -32001}}
+        )
+        client = RecordingHttpMcpClient(not_found)
+        bridge = StdioMcpBridge(client=client, stderr=io.StringIO())
+        bridge.session_id = "gone"
+        bridge._initialize_payload = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+
+        payload = _run_line(bridge, json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))
+
+        self.assertEqual(payload["error"]["code"], -32001)
+        self.assertEqual([post["payload"]["method"] for post in client.posts], ["tools/list", "initialize"])
+
     def test_non_object_payload_rejected(self) -> None:
         bridge = StdioMcpBridge(client=RecordingHttpMcpClient(self._ok_response()))
         payload = _run_line(bridge, '"just a string"')
@@ -82,6 +96,35 @@ class BridgeProtocolEdgeTests(unittest.TestCase):
         payload = _run_line(bridge, json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}))
         self.assertEqual(payload["error"]["code"], -32000)
         self.assertIn("204", payload["error"]["message"])
+
+    def test_http_layer_errors_become_jsonrpc_errors_with_the_request_id(self) -> None:
+        """401/400/429 bodies are {"detail": ...}; relayed as-is they had no
+        id, so a stdio client never got an answer and hung."""
+        cases = [
+            (401, {}, {"detail": "Missing or invalid bearer token"}, "AUTO_BROWSER_BEARER_TOKEN"),
+            (400, {}, {"detail": "Missing required operator header: X-Operator-Id"}, "REQUIRE_OPERATOR_ID"),
+            (429, {"retry-after": "12"}, {"detail": "Rate limit exceeded"}, "retry after 12s"),
+        ]
+        for status, headers, body, hint in cases:
+            with self.subTest(status=status):
+                client = RecordingHttpMcpClient(HttpMcpResponse(status_code=status, headers=headers, body=body))
+                payload = _run_line(
+                    StdioMcpBridge(client=client), json.dumps({"jsonrpc": "2.0", "id": 9, "method": "tools/list"})
+                )
+                self.assertEqual(payload["id"], 9)
+                self.assertEqual(payload["error"]["code"], -32000)
+                self.assertIn(f"HTTP {status}", payload["error"]["message"])
+                self.assertIn(body["detail"], payload["error"]["message"])
+                self.assertIn(hint, payload["error"]["message"])
+
+    def test_non_json_error_page_is_reported_with_its_status(self) -> None:
+        self.assertIsNone(HttpMcpClient._decode_json(b"<html>502 Bad Gateway</html>"))
+        client = RecordingHttpMcpClient(HttpMcpResponse(status_code=502, headers={}, body=None))
+        payload = _run_line(
+            StdioMcpBridge(client=client), json.dumps({"jsonrpc": "2.0", "id": 4, "method": "tools/list"})
+        )
+        self.assertEqual(payload["id"], 4)
+        self.assertIn("502", payload["error"]["message"])
 
     def test_protocol_version_falls_back_to_initialize_result_body(self) -> None:
         client = RecordingHttpMcpClient(

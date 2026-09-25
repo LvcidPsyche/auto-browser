@@ -385,6 +385,9 @@ class BrowserActionDecision(StrictInputModel):
         return self
 
 
+CONTEXT_HINTS_MAX_CHARS = 4000
+
+
 class AgentStepRequest(StrictInputModel):
     provider: ProviderName
     goal: str = Field(min_length=1, max_length=4000)
@@ -397,13 +400,16 @@ class AgentStepRequest(StrictInputModel):
         ),
     )
     observation_limit: int = Field(default=40, ge=1, le=100)
-    context_hints: str | None = Field(default=None, max_length=4000)
+    context_hints: str | None = Field(default=None, max_length=CONTEXT_HINTS_MAX_CHARS)
     upload_approved: bool = False
     approval_id: str | None = Field(default=None, min_length=1, max_length=120)
 
 
+AGENT_RUN_MAX_STEPS = 20
+
+
 class AgentRunRequest(AgentStepRequest):
-    max_steps: int = Field(default=6, ge=1, le=20)
+    max_steps: int = Field(default=6, ge=1, le=AGENT_RUN_MAX_STEPS)
 
 
 class AgentResumeRequest(StrictInputModel):

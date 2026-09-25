@@ -22,6 +22,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
+from ..utils import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_WORKFLOWS_ROOT = Path("/data/workflows")
@@ -264,9 +266,7 @@ class WorkflowEngine:
         }
         # Atomic write: temp file + rename, so a crash mid-write never
         # leaves a corrupted run JSON that will break list_runs() later.
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2))
-        tmp.replace(path)
+        atomic_write_text(path, json.dumps(data, indent=2))
 
     def list_runs(self, workflow_id: str = "") -> list[dict[str, Any]]:
         runs = []

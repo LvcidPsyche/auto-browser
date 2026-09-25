@@ -108,6 +108,6 @@ class BrowserRuntimeService:
                 ),
             )
             return browser, runtime
-        except Exception:
+        except BaseException:  # cancellation included, or the container leaks
             await manager.runtime_provisioner.release(runtime)
             raise

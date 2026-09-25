@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING, Any
+
+from playwright.async_api import Error as PlaywrightError
+
+from ...action_errors import BrowserActionError
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
 
     from ...browser_manager import BrowserSession
+
+
+logger = logging.getLogger(__name__)
 
 
 class BrowserTabService:
@@ -28,10 +36,30 @@ class BrowserTabService:
         session = await self.manager.get_session(session_id)
         async with session.lock:
             new_page = await session.context.new_page()
-            self.manager._attach_page_listeners(new_page, session)
-            if url:
-                await new_page.goto(url, wait_until="domcontentloaded")
-                await self.manager._settle(new_page)
+            try:
+                self.manager._attach_page_listeners(new_page, session)
+                if url:
+                    await new_page.goto(url, wait_until="domcontentloaded")
+                    await self.manager._settle(new_page)
+                    # The check navigate() makes after the page loads: an
+                    # allowlisted URL can redirect somewhere that is not.
+                    self.manager._assert_runtime_url_allowed(new_page.url)
+            except BaseException as exc:
+                # A failed open (DNS error, timeout, refused redirect) left the
+                # blank tab behind, unreported, and answered with a raw 500.
+                try:
+                    await new_page.close()
+                except Exception as close_exc:
+                    logger.debug("could not close the failed new tab: %s", close_exc)
+                if isinstance(exc, PlaywrightError):
+                    raise BrowserActionError(
+                        "Could not open the tab. Check the URL and retry.",
+                        code="browser_action_failed",
+                        action="open_tab",
+                        retryable=True,
+                        url=url,
+                    ) from exc
+                raise
             if activate:
                 session.page = new_page
                 if hasattr(new_page, "bring_to_front"):

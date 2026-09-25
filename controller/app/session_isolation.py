@@ -113,7 +113,9 @@ class DockerBrowserNodeProvisioner:
                 tunnel_local_host=pending.container_name,
                 tunnel_local_port=6080,
             )
-        except Exception:
+        except BaseException:
+            # BaseException: a cancelled create (client gone, shutdown) left the
+            # container running with nothing tracking it until the next restart.
             await asyncio.to_thread(self._cleanup_pending_container, pending)
             raise
 

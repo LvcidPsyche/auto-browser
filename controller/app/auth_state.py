@@ -10,7 +10,7 @@ from typing import Any
 
 from cryptography.fernet import Fernet
 
-from .utils import UTC
+from .utils import UTC, atomic_write_text
 
 # Auth state is cookies plus storage state — kilobytes. Anything larger is not
 # a state file, and content-sniffing it is not worth the read.
@@ -58,22 +58,30 @@ class AuthStateManager:
 
     async def write_storage_state(self, context, destination: Path) -> dict[str, Any]:
         final_path = self.output_path(destination)
-        temp_plain = final_path.with_name(f".{final_path.name}.tmp.json")
-        await context.storage_state(path=str(temp_plain))
-
-        if self.encryption_enabled or self.require_encryption:
-            ciphertext = self._encrypt(temp_plain.read_bytes())
-            payload = {
-                "version": 1,
-                "format": "fernet-json",
-                "ciphertext": ciphertext,
-            }
-            temp_encrypted = final_path.with_suffix(f"{final_path.suffix}.tmp")
-            temp_encrypted.write_text(json.dumps(payload), encoding="utf-8")
-            temp_encrypted.replace(final_path)
+        # A fresh temp file per save, removed whatever happens. The fixed
+        # ".<name>.tmp.json" it replaces was shared by concurrent saves of one
+        # profile (from different sessions, so no session lock serializes
+        # them), and when encrypting failed it stayed behind holding the
+        # plaintext cookies; under auth profiles, which cleanup never touches,
+        # it stayed for good. mkstemp also makes it owner-only.
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(dir=final_path.parent, prefix=f".{final_path.name}.", suffix=".tmp.json")
+        os.close(fd)
+        temp_plain = Path(temp_name)
+        try:
+            await context.storage_state(path=str(temp_plain))
+            if self.encryption_enabled or self.require_encryption:
+                ciphertext = self._encrypt(temp_plain.read_bytes())
+                payload = {
+                    "version": 1,
+                    "format": "fernet-json",
+                    "ciphertext": ciphertext,
+                }
+                atomic_write_text(final_path, json.dumps(payload))
+            else:
+                os.replace(temp_plain, final_path)
+        finally:
             temp_plain.unlink(missing_ok=True)
-        else:
-            temp_plain.replace(final_path)
 
         return self.inspect(final_path)
 

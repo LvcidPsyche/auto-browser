@@ -25,6 +25,10 @@ _GLOBAL_QUEUES: list[asyncio.Queue] = []
 # queue itself because asyncio.Queue is unhashable-by-value and we only need a
 # counter, not a reference (holding one would pin dead subscribers in memory).
 _DROPPED_EVENTS: dict[int, int] = {}
+# Drops from subscribers that have gone. Their _DROPPED_EVENTS entry is folded
+# in here on unsubscribe: left in place it grew forever, and a new queue that
+# reused the id inherited the count and never logged its own first drop.
+_RETIRED_DROPS = 0
 
 
 def _now() -> str:
@@ -46,19 +50,37 @@ def subscribe_all() -> asyncio.Queue:
 
 
 def unsubscribe(session_id: str, q: asyncio.Queue) -> None:
-    try:
-        _SESSION_QUEUES[session_id].remove(q)
-    except ValueError:
-        pass
-    if not _SESSION_QUEUES[session_id]:
-        del _SESSION_QUEUES[session_id]
+    queues = _SESSION_QUEUES.get(session_id, [])
+    if q in queues:
+        queues.remove(q)
+        _retire_drops(q)
+    if not queues:
+        _SESSION_QUEUES.pop(session_id, None)
 
 
 def unsubscribe_all(q: asyncio.Queue) -> None:
-    try:
+    if q in _GLOBAL_QUEUES:
         _GLOBAL_QUEUES.remove(q)
-    except ValueError:
-        pass
+        _retire_drops(q)
+
+
+def _retire_drops(q: asyncio.Queue) -> None:
+    global _RETIRED_DROPS
+    _RETIRED_DROPS += _DROPPED_EVENTS.pop(id(q), 0)
+
+
+def is_session_closed_event(payload: str, session_id: str) -> bool:
+    """Whether *payload* is the event that ends *session_id*'s stream."""
+    try:
+        event = json.loads(payload)
+    except (TypeError, ValueError):
+        return False
+    return (
+        isinstance(event, dict)
+        and event.get("event") == "session"
+        and event.get("session_id") == session_id
+        and event.get("status") == "closed"
+    )
 
 
 def _dispatch(session_id: str, event: dict[str, Any]) -> None:
@@ -95,7 +117,7 @@ def _record_drop(queue: asyncio.Queue, who: str) -> None:
 
 def dropped_event_count() -> int:
     """Total SSE events dropped across all subscribers since process start."""
-    return sum(_DROPPED_EVENTS.values())
+    return _RETIRED_DROPS + sum(_DROPPED_EVENTS.values())
 
 
 # ── Public emit helpers ──────────────────────────────────────────────────────

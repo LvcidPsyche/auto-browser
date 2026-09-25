@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
+from playwright.async_api import Error as PlaywrightError
 
 from .approvals import ApprovalRequiredError
 from .browser_manager import BrowserManager
@@ -13,6 +15,9 @@ from .provider_registry import ProviderRegistry
 from .providers.base import ProviderAPIError, ProviderDecision
 
 logger = logging.getLogger(__name__)
+
+# How long to let a navigating page settle before observing it again.
+OBSERVE_RETRY_DELAY_SECONDS = 0.5
 
 
 class BrowserOrchestrator:
@@ -43,7 +48,29 @@ class BrowserOrchestrator:
         memory_context = getattr(session, "metadata", {}).get("memory_context")
         effective_goal = f"{memory_context}\n\n---\nCurrent goal: {goal}" if memory_context else goal
         effective_context_hints = self._context_hints_for_profile(context_hints, workflow_profile)
-        observation = await self.manager.observe(session_id, limit=observation_limit)
+        try:
+            observation = await self._observe(session_id, observation_limit)
+        except PlaywrightError as exc:
+            # A page still navigating from the last step's click (or crashed)
+            # made observe raise, which escaped run(): /agent/run returned a
+            # 500 and every completed step was lost with it.
+            logger.warning("agent step could not observe session %s: %s", session_id, exc)
+            result = AgentStepResult(
+                provider=provider_name,
+                model=model_name,
+                goal=goal,
+                workflow_profile=workflow_profile,
+                status="error",
+                observation={},
+                decision={},
+                execution=None,
+                usage=None,
+                raw_text=None,
+                error=f"Could not observe the page: {exc}"[:300],
+                error_code=None,
+            )
+            await self._append_agent_log(session_id, "agent_steps.jsonl", result.model_dump())
+            return result
         prompt_history = self._summarize_previous_steps(previous_steps or [])
 
         try:
@@ -190,6 +217,13 @@ class BrowserOrchestrator:
         )
         await self._append_agent_log(session_id, "agent_runs.jsonl", payload.model_dump())
         return payload
+
+    async def _observe(self, session_id: str, limit: int) -> dict[str, Any]:
+        try:
+            return await self.manager.observe(session_id, limit=limit)
+        except PlaywrightError:
+            await asyncio.sleep(OBSERVE_RETRY_DELAY_SECONDS)
+            return await self.manager.observe(session_id, limit=limit)
 
     async def _execute_decision(
         self,

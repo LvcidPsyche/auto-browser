@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .utils import utc_now
+from .utils import atomic_write_text, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -91,9 +91,7 @@ class MemoryManager:
                 )
 
             path = self._profile_path(name)
-            tmp_path = path.with_suffix(".json.tmp")
-            await asyncio.to_thread(tmp_path.write_text, profile.model_dump_json(indent=2), "utf-8")
-            await asyncio.to_thread(tmp_path.replace, path)
+            await asyncio.to_thread(atomic_write_text, path, profile.model_dump_json(indent=2))
             logger.info("memory profile saved: %s", name)
             return profile
 
