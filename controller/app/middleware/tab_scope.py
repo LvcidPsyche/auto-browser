@@ -40,6 +40,10 @@ _TAB_SCOPED_PATHS = (
         re.compile(rf"^/sessions/{_SEGMENT}/actions/(?:{'|'.join(re.escape(a) for a in TAB_SCOPED_ACTIONS)})/?$"),
         {"POST"},
     ),
+    # File transfer (app/file_transfer.py): taking a file from the page, and
+    # attaching a pushed file to the page, act on the employee's own tab.
+    (re.compile(rf"^/sessions/{_SEGMENT}/files/download/?$"), {"POST"}),
+    (re.compile(rf"^/sessions/{_SEGMENT}/files/{_SEGMENT}/attach/?$"), {"POST"}),
 )
 
 

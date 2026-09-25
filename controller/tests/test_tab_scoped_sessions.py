@@ -630,6 +630,8 @@ class TabScopedRouteTests(_ManagerCase):
             ("POST", "/sessions/s1/actions/click", {"x": 1, "y": 1}),
             ("POST", "/sessions/s1/actions/navigate", {"url": "https://example.com/"}),
             ("POST", "/sessions/s1/actions/reload", None),
+            ("POST", "/sessions/s1/files/download", {"mode": "media"}),
+            ("POST", "/sessions/s1/files/0123456789abcdef01234567/attach", {}),
         ]
         for method, path, body in requests:
             response = await self.http.request(method, path, headers=header, json=body)
@@ -652,7 +654,7 @@ class TabScopeMiddlewareTests(unittest.TestCase):
         app = FastAPI()
         app.add_middleware(TabScopeMiddleware)
 
-        @app.api_route("/{path:path}", methods=["GET", "POST"])
+        @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
         async def echo(path: str) -> dict:
             return {"tab": current_tab_id.get()}
 
@@ -668,6 +670,8 @@ class TabScopeMiddlewareTests(unittest.TestCase):
                 "navigate", "click", "type", "press", "dialog", "scroll", "upload", "hover",
                 "select-option", "wait", "reload", "go-back", "go-forward",
             )],
+            ("POST", "/sessions/s1/files/download"),
+            ("POST", "/sessions/s1/files/0123456789abcdef01234567/attach"),
         ]
         for method, path in scoped:
             response = self.client.request(method, path, headers=header)
@@ -681,6 +685,9 @@ class TabScopeMiddlewareTests(unittest.TestCase):
             ("GET", "/sessions/s1"),
             ("GET", "/sessions/s1/screenshot"),
             ("POST", "/sessions/s1/auth-profiles"),
+            ("PUT", "/sessions/s1/files"),
+            ("GET", "/sessions/s1/files/0123456789abcdef01234567"),
+            ("DELETE", "/sessions/s1/files/0123456789abcdef01234567"),
         ]
         for method, path in unscoped:
             response = self.client.request(method, path, headers=header)

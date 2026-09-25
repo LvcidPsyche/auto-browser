@@ -1097,3 +1097,44 @@ def test_session_lock_writer_preference_and_cancellation() -> None:
         assert not lock.locked()
 
     asyncio.run(scenario())
+
+
+def test_file_operations_forward_tab_id_as_x_tab_id(tmp_path: Path, clock: list[float]) -> None:
+    calls: list = []
+    active = False
+    transfer = "0123456789abcdef01234567"
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal active
+        payload = json.loads(request.content) if request.content else None
+        calls.append((request.method, request.url.path, payload, request.headers.get("x-tab-id")))
+        if request.method == "GET" and request.url.path == "/sessions":
+            return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
+        if request.method == "POST" and request.url.path == "/sessions":
+            active = True
+            return httpx.Response(200, json={"id": "owner-1"})
+        if request.url.path == "/sessions/owner-1/files/download":
+            return httpx.Response(200, json={"id": transfer, "filename": "a.png"})
+        return httpx.Response(200, json={"ok": True})
+
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        _open_owner_session(client, clock)
+        grant = client.post("/requests", headers=auth(AGENT), json={"purpose": "a"}).json()["id"]
+        taken = client.post(f"/requests/{grant}/actions/download_file", headers=auth(AGENT),
+                            json={"arguments": {"mode": "media", "tab_id": "t-0123456789ab"}})
+        assert taken.status_code == 200
+        assert ("POST", "/sessions/owner-1/files/download", {"mode": "media"}, "t-0123456789ab") in calls
+        attached = client.post("/mcp/tools/call", headers=auth(AGENT), json={
+            "name": "browser.upload_file",
+            "arguments": {"request_id": grant, "transfer_id": transfer, "selector": "#f", "tab_id": "t-0123456789ab"},
+        })
+        assert attached.status_code == 200
+        assert ("POST", f"/sessions/owner-1/files/{transfer}/attach", {"selector": "#f"}, "t-0123456789ab") in calls
+        # Without tab_id: no header, exactly as before.
+        client.post(f"/requests/{grant}/actions/download_file", headers=auth(AGENT), json={"arguments": {"mode": "media"}})
+        assert calls[-1] == ("POST", "/sessions/owner-1/files/download", {"mode": "media"}, None)
+        before = len(calls)
+        bad = client.post(f"/requests/{grant}/actions/download_file", headers=auth(AGENT),
+                          json={"arguments": {"mode": "media", "tab_id": "nope"}})
+        assert bad.status_code == 400
+        assert not [call for call in calls[before:] if "/files/" in call[1]]

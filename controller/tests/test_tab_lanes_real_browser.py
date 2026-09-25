@@ -3,7 +3,7 @@
 One real session with the owner's tab plus two tabs opened (not activated)
 for two employees. Tab-scoped navigations to a deliberately slow local page
 run concurrently -- the pair takes about as long as ONE of them -- while a
-second call on the same tab waits for the first. The owner's active tab is
+second call on the same tab waits for the first (the pair takes ~two). The owner's active tab is
 never touched. Skipped when Chromium cannot be launched here.
 """
 
@@ -31,7 +31,8 @@ class _SlowHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - http.server API
         if self.path.startswith("/slow"):
             time.sleep(SLOW_SECONDS)
-        body = f"<html><head><title>{self.path}</title></head><body>{self.path}</body></html>".encode()
+        extra = "<input type=file id=f>" if self.path.startswith("/upload") else ""
+        body = f"<html><head><title>{self.path}</title></head><body>{self.path}{extra}</body></html>".encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
         self.send_header("Content-Length", str(len(body)))
@@ -132,6 +133,12 @@ class RealChromiumTabLanesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(owners[ziad["tab_id"]], "ziad")
         self.assertEqual([tab["active"] for tab in tabs], [True, False, False])
 
+        # Baseline: one slow load in one tab (server delay + the action's own
+        # before/after observation overhead, which varies by machine).
+        started = time.monotonic()
+        await self._scoped(emad["tab_id"], lambda: self.manager.navigate(self.session.id, f"{self.base}/slow-0"))
+        single = time.monotonic() - started
+
         # Two employees, two tabs, each loading a slow page: ~max, not ~sum.
         started = time.monotonic()
         results = await asyncio.gather(
@@ -139,7 +146,10 @@ class RealChromiumTabLanesTests(unittest.IsolatedAsyncioTestCase):
             self._scoped(ziad["tab_id"], lambda: self.manager.navigate(self.session.id, f"{self.base}/slow-ziad")),
         )
         parallel = time.monotonic() - started
-        self.assertLess(parallel, 2 * SLOW_SECONDS - 0.3, f"ran side by side ({parallel:.2f}s)")
+        self.assertLess(
+            parallel, single + 0.5 * SLOW_SECONDS,
+            f"ran side by side (pair {parallel:.2f}s vs one {single:.2f}s)",
+        )
         self.assertEqual(results[0]["session"]["current_url"], f"{self.base}/slow-emad")
         self.assertEqual(results[1]["session"]["current_url"], f"{self.base}/slow-ziad")
 
@@ -158,6 +168,10 @@ class RealChromiumTabLanesTests(unittest.IsolatedAsyncioTestCase):
         )
         serial = time.monotonic() - started
         self.assertGreaterEqual(serial, 2 * SLOW_SECONDS - 0.1, f"same tab serialised ({serial:.2f}s)")
+        self.assertGreater(
+            serial, single + 0.9 * SLOW_SECONDS,
+            f"same tab queued (pair {serial:.2f}s vs one {single:.2f}s)",
+        )
 
         # A session-wide call waits for in-flight tab work and then runs.
         slow = asyncio.ensure_future(
@@ -174,6 +188,28 @@ class RealChromiumTabLanesTests(unittest.IsolatedAsyncioTestCase):
         # An observe through a tab reads that tab.
         observed = await self._scoped(emad["tab_id"], lambda: self.manager.observe(self.session.id, limit=5))
         self.assertEqual(observed["url"], f"{self.base}/slow-2")
+
+    async def test_a_pushed_file_is_attached_in_the_employees_own_tab(self) -> None:
+        await self.owner_page.goto(f"{self.base}/upload-owner", wait_until="domcontentloaded")
+        nihad = await self.manager.open_tab(self.session.id, f"{self.base}/upload-nihad", False, owner="nihad")
+        png = bytes.fromhex("89504e470d0a1a0a") + bytes(64)
+
+        async def chunks():
+            yield png
+
+        transfer = await self.manager.file_transfers.receive_upload(
+            self.session.id, filename="photo.png", chunks=chunks(), declared_length=len(png),
+        )
+        result = await self._scoped(
+            nihad["tab_id"],
+            lambda: self.manager.file_transfers.attach(self.session.id, transfer["id"], selector="#f"),
+        )
+        self.assertEqual(result["via"], "input")
+        pages = {page.url: page for page in self.session.context.pages}
+        in_tab = await pages[f"{self.base}/upload-nihad"].evaluate("document.getElementById('f').files.length")
+        in_owner_tab = await self.owner_page.evaluate("document.getElementById('f').files.length")
+        self.assertEqual((in_tab, in_owner_tab), (1, 0), "the file went into nihad's tab only")
+        self.assertIs(self.session.page, self.owner_page)
 
 
 if __name__ == "__main__":
