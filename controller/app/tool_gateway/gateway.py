@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import difflib
 import hashlib
 import json
 import logging
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -17,6 +18,7 @@ from ..action_errors import BrowserActionError, SessionNotFoundError
 from ..approvals import ApprovalRequiredError
 from ..browser_scripts import PAGE_TEXT_SCRIPT
 from ..models import (
+    ActionName,
     BrowserActionDecision,
     McpImageContent,
     McpToolCallContent,
@@ -153,6 +155,15 @@ def _read_inline_image(path: Path) -> bytes | None:
     return path.read_bytes()
 
 
+_ACTION_NAMES = frozenset(get_args(ActionName))
+
+
+def _error_text(err: dict[str, Any]) -> str:
+    # Pydantic prefixes a validator's own message with "Value error, ", which
+    # reads as noise to the agent that has to fix the call.
+    return str(err["msg"]).removeprefix("Value error, ")
+
+
 class McpToolGateway:
     def __init__(
         self,
@@ -228,7 +239,7 @@ class McpToolGateway:
                     f"{payload.name} is in the full MCP tool profile, and this controller serves the "
                     f"{self.tool_profile} profile. Set MCP_TOOL_PROFILE=full on the controller to use it."
                 )
-            return self._error_response(f"Unknown tool: {payload.name}")
+            return self._error_response(self._unknown_tool_message(payload.name))
 
         try:
             raw_arguments = dict(payload.arguments or {})
@@ -293,7 +304,9 @@ class McpToolGateway:
             # Invalid tool arguments — report the field errors so the calling
             # agent can fix its call, instead of "Tool execution failed".
             details = "; ".join(
-                f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}" if err.get("loc") else err["msg"]
+                f"{'.'.join(str(part) for part in err['loc'])}: {_error_text(err)}"
+                if err.get("loc")
+                else _error_text(err)
                 for err in exc.errors()
             )
             return self._error_response(f"Invalid arguments for {payload.name}: {details}")
@@ -386,6 +399,23 @@ class McpToolGateway:
         if data is None:
             return None
         return McpImageContent(data=base64.b64encode(data).decode("ascii"), mimeType=mime_type)
+
+    def _unknown_tool_message(self, name: str) -> str:
+        """Point a mistyped or guessed tool name at the tool the caller meant."""
+        message = f"Unknown tool: {name}"
+        served = list(self._registry.tools)
+        # A client that rewrote the dot, or dropped the namespace.
+        for candidate in (name.replace("_", ".", 1), f"browser.{name}"):
+            if candidate in served:
+                return f"{message}. Did you mean {candidate}?"
+        # A browser action guessed as its own tool (browser.click, navigate, ...).
+        action = name.rsplit(".", 1)[-1]
+        if action in _ACTION_NAMES and "browser.execute_action" in served:
+            return f"{message}. Actions go through browser.execute_action: action={{'action': '{action}', ...}}."
+        close = difflib.get_close_matches(name, served, n=1, cutoff=0.8)
+        if close:
+            return f"{message}. Did you mean {close[0]}?"
+        return message
 
     @staticmethod
     def _error_response(message: str) -> McpToolCallResponse:

@@ -232,6 +232,28 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.manager.get_console_messages.assert_not_awaited()
         self.assertEqual(unknown.content[0].text, "Unknown tool: browser.no_such_tool")
 
+    async def test_an_unknown_tool_names_the_tool_the_caller_meant(self) -> None:
+        async def error_for(name: str) -> str:
+            response = await self.gateway.call_tool(McpToolCallRequest(name=name, arguments={}))
+            self.assertTrue(response.isError)
+            return response.structuredContent["error"]
+
+        # A client that rewrote the dot, a dropped namespace, and a typo.
+        self.assertTrue((await error_for("browser_observe")).endswith("Did you mean browser.observe?"))
+        self.assertTrue((await error_for("observe")).endswith("Did you mean browser.observe?"))
+        self.assertTrue((await error_for("browser.list_session")).endswith("Did you mean browser.list_sessions?"))
+        # A browser action guessed as its own tool.
+        self.assertIn("browser.execute_action: action={'action': 'click'", await error_for("browser.click"))
+        self.manager.observe.assert_not_awaited()
+
+    async def test_invalid_arguments_drop_pydantics_value_error_prefix(self) -> None:
+        response = await self.gateway.call_tool(McpToolCallRequest(name="browser.find_elements", arguments={}))
+
+        self.assertEqual(
+            response.structuredContent["error"],
+            "Invalid arguments for browser.find_elements: find_elements requires either selector or query",
+        )
+
     async def test_verify_witness_tool_dispatches_to_manager(self) -> None:
         response = await self.full_gateway.call_tool(
             McpToolCallRequest(name="browser.verify_witness", arguments={"session_id": "session-1"})
