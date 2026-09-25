@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+import tempfile
+import time
 from collections.abc import Coroutine
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +22,11 @@ UTC = timezone.utc
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 
+# mkstemp creates 0600 files; atomic_write_text widens them to what a plain
+# open() would have made, so files keep the permissions they had before.
+_UMASK = os.umask(0)
+os.umask(_UMASK)
+
 _RECORD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
@@ -33,6 +41,39 @@ def record_path(root: Path, record_id: str, suffix: str) -> Path:
     if not isinstance(record_id, str) or not _RECORD_ID.fullmatch(record_id):
         raise KeyError(record_id)
     return root / f"{record_id}{suffix}"
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Replace ``path`` with ``text`` so readers only ever see a whole file.
+
+    Each call writes to its own temp file in the target directory. The stores
+    used to share one fixed ``<name>.json.tmp`` per record, so two concurrent
+    saves of the same record (they run in worker threads) raced: one writer's
+    rename moved the other's temp file away, failing it with FileNotFoundError,
+    or both wrote into the same temp file and a torn mix of the two was renamed
+    into place. The temp name keeps a ``.tmp`` suffix so ``*.json`` globs skip it.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(tmp_name, 0o666 & ~_UMASK)
+        # Windows refuses the rename while another process has the target
+        # open; that clears within milliseconds, so retry briefly.
+        for attempt in range(5):
+            try:
+                os.replace(tmp_name, path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def utc_now() -> str:

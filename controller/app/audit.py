@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from .models import AuditEvent, OperatorIdentity
 from .sqlite_utils import connect_sqlite
-from .utils import utc_now
+from .utils import atomic_write_text, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -147,9 +147,7 @@ class FileAuditStore:
         if len(lines) <= self.max_events:
             return
         trimmed = "\n".join(lines[-self.max_events :]) + "\n"
-        tmp_path = self.events_path.with_suffix(".jsonl.tmp")
-        tmp_path.write_text(trimmed, encoding="utf-8")
-        tmp_path.replace(self.events_path)
+        atomic_write_text(self.events_path, trimmed)
 
     @staticmethod
     def _append_text(path: Path, text: str) -> None:

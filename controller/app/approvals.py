@@ -13,7 +13,7 @@ from fastapi import HTTPException
 
 from .models import ApprovalKind, ApprovalRecord, ApprovalStatus, BrowserActionDecision
 from .sqlite_utils import connect_sqlite
-from .utils import UTC, record_path, utc_now
+from .utils import UTC, atomic_write_text, record_path, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -94,9 +94,7 @@ class FileApprovalStore:
 
     def _write_sync(self, approval: ApprovalRecord) -> None:
         path = self._path(approval.id)
-        tmp_path = path.with_suffix(".json.tmp")
-        tmp_path.write_text(approval.model_dump_json(indent=2), encoding="utf-8")
-        tmp_path.replace(path)
+        atomic_write_text(path, approval.model_dump_json(indent=2))
 
     def _path(self, approval_id: str) -> Path:
         return record_path(self.root, approval_id, ".json")

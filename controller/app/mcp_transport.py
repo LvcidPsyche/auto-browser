@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 from . import events as _events
 from .models import McpToolCallRequest
-from .utils import utc_now
+from .utils import atomic_write_text, utc_now
 
 JSONRPC_VERSION = "2.0"
 MCP_SESSION_HEADER = "MCP-Session-Id"
@@ -683,10 +683,8 @@ class McpHttpTransport:
             return
         self._evict_stale_sessions()
         self._session_store_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._session_store_path.with_suffix(".json.tmp")
         payload = [asdict(session) for session in self._sessions.values()]
-        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp_path.replace(self._session_store_path)
+        atomic_write_text(self._session_store_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
     @staticmethod
     def _coerce_dict(value: Any) -> dict[str, Any]:

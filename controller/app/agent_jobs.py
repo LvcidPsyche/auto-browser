@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from uuid import uuid4
@@ -17,7 +16,7 @@ from .models import (
     AgentStepRequest,
     AgentStepResult,
 )
-from .utils import record_path, utc_now
+from .utils import atomic_write_text, record_path, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -218,16 +217,7 @@ class AgentJobStore:
 
     def _write_sync(self, record: AgentJobRecord) -> None:
         path = record_path(self.root, record.id, ".json")
-        tmp_path = path.with_suffix(".json.tmp")
-        tmp_path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
-        for attempt in range(5):
-            try:
-                tmp_path.replace(path)
-                return
-            except PermissionError:
-                if attempt == 4:
-                    raise
-                time.sleep(0.01 * (attempt + 1))
+        atomic_write_text(path, record.model_dump_json(indent=2))
 
 
 class AgentJobQueue:
