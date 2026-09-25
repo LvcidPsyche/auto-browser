@@ -17,7 +17,15 @@ export BROWSER_WIDTH="$WIDTH" \
 
 BROWSER_USER="${BROWSER_USER:-browser}"
 
-mkdir -p /data/profile /data/downloads /data/browser-profiles /tmp/runtime
+# The endpoint file's own directory is created and chowned too: a fresh data
+# volume has only a root-owned /data, so the unprivileged browser user could
+# not create it (EACCES, crash loop on every new tenant).
+WS_ENDPOINT_DIR="$(dirname "$WS_ENDPOINT_FILE")"
+case "$WS_ENDPOINT_DIR" in
+  /data/?*) ;;
+  *) echo "BROWSER_WS_ENDPOINT_FILE must live in a subdirectory of /data: $WS_ENDPOINT_FILE" >&2; exit 1 ;;
+esac
+mkdir -p /data/profile /data/downloads /data/browser-profiles "$WS_ENDPOINT_DIR" /tmp/runtime
 rm -f "$WS_ENDPOINT_FILE"
 
 # Crash recovery for persistent profiles (stale Chromium SingletonLock etc.
@@ -40,7 +48,7 @@ run_as_browser() {
   fi
 }
 if [[ "$(id -u)" -eq 0 ]] && id "$BROWSER_USER" >/dev/null 2>&1; then
-  chown -R "$BROWSER_USER:$BROWSER_USER" /data/profile /data/downloads /data/browser-profiles /tmp/runtime \
+  chown -R "$BROWSER_USER:$BROWSER_USER" /data/profile /data/downloads /data/browser-profiles "$WS_ENDPOINT_DIR" /tmp/runtime \
     || echo "warning: could not chown browser data directories; continuing" >&2
   mkdir -p /tmp/.X11-unix
   chmod 1777 /tmp/.X11-unix
