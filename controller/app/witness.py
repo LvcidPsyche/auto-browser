@@ -567,18 +567,6 @@ class WitnessRecorder:
         return items
 
     @staticmethod
-    def _read_last_hash(path: Path) -> str | None:
-        if not path.exists():
-            return None
-        last = None
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                last = line
-        if last is None:
-            return None
-        return WitnessReceipt.model_validate_json(last).chain_hash
-
-    @staticmethod
     def _compute_hash(receipt: WitnessReceipt) -> str:
         canonical = json.dumps(
             receipt.chain_payload(),

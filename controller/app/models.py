@@ -223,18 +223,6 @@ class OpenTabRequest(StrictInputModel):
         return validate_url(value, field_name="url", allowed_schemes=HTTP_URL_SCHEMES)
 
 
-class SessionEnvelope(BaseModel):
-    session: dict[str, Any]
-
-
-class ActionEnvelope(BaseModel):
-    action: str
-    session: dict[str, Any]
-    before: dict[str, Any]
-    after: dict[str, Any]
-    target: dict[str, Any]
-
-
 PerceptionPreset = Literal["text", "fast", "normal", "rich"]
 
 
@@ -422,14 +410,6 @@ class ProviderInfo(BaseModel):
     auth_mode: str = "api"
     detail: str | None = None
     login_command: str | None = None
-
-
-class ProviderDecisionEnvelope(BaseModel):
-    provider: ProviderName
-    model: str
-    decision: BrowserActionDecision
-    usage: dict[str, Any] | None = None
-    raw_text: str | None = None
 
 
 class AgentStepResult(BaseModel):
