@@ -135,7 +135,7 @@ def test_agent_can_list_and_switch_tabs_but_not_close_them(tmp_path: Path, clock
         assert client.post("/mcp/tools/call", headers=auth(AGENT), json={"name": "browser.list_tabs", "arguments": {"request_id": request_id}}).status_code == 200
         assert client.get("/mcp/tools", headers=auth(AGENT)).json() == [
             {"name": f"browser.{name}"} for name in (
-                "session_status", "request_access", "get_request", "complete", "observe",
+                "session_status", "request_access", "get_request", "complete", "observe", "find_api_keys",
                 "activate_tab", "list_tabs", "open_tab",
                 "download_file", "upload_file",
                 "click", "dialog", "go_back", "go_forward", "hover", "navigate", "press", "reload",
@@ -1138,3 +1138,26 @@ def test_file_operations_forward_tab_id_as_x_tab_id(tmp_path: Path, clock: list[
                           json={"arguments": {"mode": "media", "tab_id": "nope"}})
         assert bad.status_code == 400
         assert not [call for call in calls[before:] if "/files/" in call[1]]
+
+
+def test_agent_can_ask_for_one_known_api_key_shape_only(tmp_path: Path, clock: list[float]) -> None:
+    active, calls = False, []
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal active
+        calls.append((request.method, request.url.path, dict(request.url.params), request.headers.get("x-tab-id")))
+        if request.method == "GET" and request.url.path == "/sessions": return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
+        if request.method == "POST" and request.url.path == "/sessions": active = True; return httpx.Response(200, json={"id": "owner-1"})
+        if request.url.path == "/sessions/owner-1/api-keys":
+            return httpx.Response(200, json={"provider": "google", "keys": ["AIza" + "x" * 35]})
+        return httpx.Response(200, json={"ok": True})
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        secret = enroll(client, clock)
+        client.post("/owner/sessions", headers=auth(OWNER), json={"start_url": "https://example.com", "totp_code": fresh(secret, clock)})
+        request_id = client.post("/requests", headers=auth(AGENT), json={"purpose": "keys"}).json()["id"]
+        found = client.post(f"/requests/{request_id}/actions/find_api_keys", headers=auth(AGENT),
+                            json={"arguments": {"provider": "google", "tab_id": "t-0123456789ab"}})
+        assert found.status_code == 200 and found.json()["keys"] == ["AIza" + "x" * 35]
+        assert ("GET", "/sessions/owner-1/api-keys", {"provider": "google"}, "t-0123456789ab") in calls
+        for bad in ({}, {"provider": "openai"}, {"provider": "google", "selector": "body"}):
+            assert client.post(f"/requests/{request_id}/actions/find_api_keys", headers=auth(AGENT),
+                               json={"arguments": bad}).status_code == 400

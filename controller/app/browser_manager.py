@@ -586,6 +586,9 @@ class BrowserManager:
     async def capture_screenshot(self, session_id: str, *, label: str = "manual") -> dict[str, Any]:
         return await self.observation.capture_screenshot(session_id, label=label)
 
+    async def find_api_keys(self, session_id: str, provider: str) -> dict[str, Any]:
+        return await self.observation.find_api_keys(session_id, provider)
+
     async def stop_trace(self, session_id: str) -> dict[str, Any]:
         return await self.observation.stop_trace(session_id)
 
@@ -597,15 +600,19 @@ class BrowserManager:
         screenshot_label: str = "observe",
         preset: str = "normal",
     ) -> dict[str, Any]:
-        return await self.observation.observation_payload(
+        from .browser.services.observation import redact_api_keys
+
+        return redact_api_keys(await self.observation.observation_payload(
             session,
             limit=limit,
             screenshot_label=screenshot_label,
             preset=preset,
-        )
+        ))
 
     async def _light_snapshot(self, session: BrowserSession, *, label: str) -> dict[str, Any]:
-        return await self.observation.light_snapshot(session, label=label)
+        from .browser.services.observation import redact_api_keys
+
+        return redact_api_keys(await self.observation.light_snapshot(session, label=label))
 
     async def _capture_screenshot(self, session: BrowserSession, label: str) -> dict[str, str]:
         return await self.observation.capture_session_screenshot(session, label)

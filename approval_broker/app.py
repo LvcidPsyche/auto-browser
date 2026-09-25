@@ -1006,6 +1006,12 @@ def create_app(
             if arguments:
                 raise HTTPException(400, "Observation options are not exposed")
             return "GET", f"/sessions/{session_id}/observe", None, headers
+        if operation == "find_api_keys":
+            headers = _pop_tab_id(arguments)
+            provider = arguments.get("provider")
+            if set(arguments) != {"provider"} or provider not in {"google"}:
+                raise HTTPException(400, "find_api_keys requires provider 'google'")
+            return "GET", f"/sessions/{session_id}/api-keys?provider={provider}", None, headers
         if operation == "list_tabs":
             if arguments:
                 raise HTTPException(400, "list_tabs takes no arguments")
@@ -1330,7 +1336,7 @@ def create_app(
     @app.get("/mcp/tools")
     async def list_tools(authorization: str | None = Header(default=None)):
         require_role(authorization, "agent")
-        return [{"name": f"browser.{name}"} for name in ("session_status", "request_access", "get_request", "complete", "observe", *sorted(TAB_OPERATIONS), *sorted(FILE_OPERATIONS), *sorted(ALLOWED_ACTIONS))]
+        return [{"name": f"browser.{name}"} for name in ("session_status", "request_access", "get_request", "complete", "observe", "find_api_keys", *sorted(TAB_OPERATIONS), *sorted(FILE_OPERATIONS), *sorted(ALLOWED_ACTIONS))]
 
     async def session_status() -> dict[str, str]:
         """Safe agent setup signal; deliberately unrelated to TOTP state."""
@@ -1398,7 +1404,7 @@ def create_app(
                 },
             }
         if payload.method == "tools/list":
-            names = ("session_status", "request_access", "get_request", "complete", "observe", *sorted(TAB_OPERATIONS), *sorted(FILE_OPERATIONS), *sorted(ALLOWED_ACTIONS))
+            names = ("session_status", "request_access", "get_request", "complete", "observe", "find_api_keys", *sorted(TAB_OPERATIONS), *sorted(FILE_OPERATIONS), *sorted(ALLOWED_ACTIONS))
             return {
                 "jsonrpc": "2.0", "id": payload.id,
                 "result": {"tools": [

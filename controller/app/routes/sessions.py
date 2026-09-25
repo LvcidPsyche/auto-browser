@@ -89,6 +89,19 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
         except Exception:
             raise internal_error(logger, "observe failed for session %s", session_id) from None
 
+    @router.get("/sessions/{session_id}/api-keys")
+    async def find_api_keys(session_id: str, provider: str) -> dict[str, Any]:
+        try:
+            return await manager.find_api_keys(session_id, provider)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Unknown session") from None
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Unknown provider") from None
+        except BrowserActionError:
+            raise
+        except Exception:
+            raise internal_error(logger, "find_api_keys failed for session %s", session_id) from None
+
     @router.post("/sessions/{session_id}/observe")
     async def observe_post(session_id: str, payload: ObserveRequest) -> dict[str, Any]:
         try:

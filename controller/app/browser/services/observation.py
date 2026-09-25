@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +19,52 @@ logger = logging.getLogger(__name__)
 ACCESSIBILITY_NODE_LIMIT = 30
 
 
+
+# Strict shapes only -- a match is a credential, never ordinary page text.
+API_KEY_PATTERNS: dict[str, str] = {
+    "google": r"AIza[0-9A-Za-z_\-]{35}",
+}
+
+_API_KEY_RE = re.compile("|".join(f"(?:{pattern})" for pattern in API_KEY_PATTERNS.values()))
+REDACTED_API_KEY = "[api key hidden]"
+
+
+def redact_api_keys(value: Any) -> Any:
+    """Every observation/snapshot passes through this before it leaves the controller or is
+    written to actions.jsonl / audit: a key shown on the page ("API key created" dialogs)
+    must never reach the calling agent's model or our logs. find_api_keys is the one,
+    pattern-limited way to read it."""
+    if isinstance(value, str):
+        return _API_KEY_RE.sub(REDACTED_API_KEY, value) if "AIza" in value else value
+    if isinstance(value, dict):
+        return {key: redact_api_keys(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_api_keys(item) for item in value]
+    return value
+
+
+FIND_API_KEYS_SCRIPT = """
+(pattern) => {
+  const re = new RegExp(pattern, 'g');
+  const found = new Set();
+  const scan = (value) => {
+    if (typeof value !== 'string' || value.length < 20) return;
+    for (const match of value.matchAll(re)) found.add(match[0]);
+  };
+  const visit = (root) => {
+    scan(root.body ? root.body.innerText : root.textContent);
+    for (const field of root.querySelectorAll('input, textarea')) scan(field.value);
+    for (const el of root.querySelectorAll('[value], [data-value], [aria-label], [title]')) {
+      scan(el.getAttribute('value')); scan(el.getAttribute('data-value'));
+      scan(el.getAttribute('aria-label')); scan(el.getAttribute('title'));
+    }
+    for (const el of root.querySelectorAll('*')) if (el.shadowRoot) visit(el.shadowRoot);
+  };
+  visit(document);
+  return Array.from(found).slice(0, 5);
+}
+"""
+
 class BrowserObservationService:
     """Encapsulates observation, screenshot, and trace payload helpers."""
 
@@ -33,6 +80,7 @@ class BrowserObservationService:
                 what="observe",
                 timeout=self.manager.settings.browser_call_timeout_seconds,
             )
+            result = redact_api_keys(result)
             _events.emit_observe(
                 session_id,
                 result.get("url", ""),
@@ -40,6 +88,27 @@ class BrowserObservationService:
                 result.get("screenshot_url"),
             )
             return result
+
+    async def find_api_keys(self, session_id: str, provider: str) -> dict[str, Any]:
+        """API keys of ONE known shape shown on the page (text or a field's value).
+
+        The narrowest read that lets the agent's server store a key the owner's employee just
+        created (e.g. Google AI Studio's "API key created" dialog) without the key ever going
+        through the model: only strings matching the provider's strict key pattern come back,
+        nothing else from the page. observe() keeps redacting them (see API_KEY_PATTERNS)."""
+        pattern = API_KEY_PATTERNS.get(provider)
+        if pattern is None:
+            raise ValueError("unknown provider")
+        session = await self.manager.get_session(session_id)
+        async with session.lock:
+            found = await self.manager.session_lifecycle.guarded(
+                session,
+                session.page.evaluate(FIND_API_KEYS_SCRIPT, pattern),
+                what="find_api_keys",
+                timeout=self.manager.settings.browser_call_timeout_seconds,
+            )
+        keys = [key for key in (found or []) if isinstance(key, str)]
+        return {"provider": provider, "keys": list(dict.fromkeys(keys))[:5], "url": session.page.url}
 
     async def capture_screenshot(self, session_id: str, *, label: str = "manual") -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
