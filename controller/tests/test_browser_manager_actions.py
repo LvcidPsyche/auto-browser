@@ -227,6 +227,7 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.page.keyboard.type.await_count, 2)
 
     async def test_type_focused_inserts_text_without_a_target(self) -> None:
+        self.session.page.evaluate = AsyncMock(return_value={"type": "text", "name": "message"})
         with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):
             result = await self.manager.type_focused("session-1", text="مرحبا")
 
@@ -236,6 +237,24 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["target"]["text_preview"], "مرحبا")
         self.assertNotIn("selector", result["target"])
         self.assertNotIn("element_id", result["target"])
+
+    async def test_type_focused_never_keeps_a_preview_of_a_password_or_unknown_focus(self) -> None:
+        """The owner types passwords through the "type here" bridge too: a password field, a
+        one-time-code field, focus inside a frame (unreadable -> None) or a failing read all
+        redact, so the text never reaches actions.jsonl / audit / witness / the response."""
+        cases = [
+            AsyncMock(return_value={"type": "password"}),
+            AsyncMock(return_value={"type": "text", "autocomplete": "one-time-code"}),
+            AsyncMock(return_value=None),
+            AsyncMock(side_effect=RuntimeError("frame detached")),
+        ]
+        for evaluate in cases:
+            self.session.page.evaluate = evaluate
+            with patch("app.browser_manager.asyncio.sleep", new=AsyncMock()):
+                result = await self.manager.type_focused("session-1", text="Hunter2!")
+            self.assertNotIn("text_preview", result["target"])
+            self.assertTrue(result["target"]["text_redacted"])
+            self.assertNotIn("Hunter2!", repr(result))
 
     async def test_tabs_diagnostics_takeover_and_trace_use_session_state(self) -> None:
         self.session.console_messages = [{"type": "log", "text": "ready", "location": {}}]

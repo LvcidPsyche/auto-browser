@@ -29,6 +29,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# document.activeElement's identifying attributes, for type_focused's redaction check.
+FOCUSED_INPUT_ATTRIBUTES_SCRIPT = """() => {
+  const el = document.activeElement;
+  // Focus inside a frame cannot be classified from here: fail closed (null -> redact).
+  if (!el || el === document.body || el.tagName === 'IFRAME' || el.tagName === 'FRAME') return null;
+  return {
+    type: el.getAttribute('type'),
+    name: el.getAttribute('name'),
+    id: el.id || null,
+    autocomplete: el.getAttribute('autocomplete'),
+    placeholder: el.getAttribute('placeholder'),
+    aria_label: el.getAttribute('aria-label'),
+  };
+}"""
+
+
 class BrowserActionService:
     """Encapsulates browser action execution and approval orchestration."""
 
@@ -211,6 +227,18 @@ class BrowserActionService:
         payload = self.text_target_payload(target, text, clear_first=False, sensitive=False, preview_chars=80)
 
         async def operation() -> None:
+            # The owner types passwords through this bridge too: never keep a preview of what
+            # went into a password / one-time-code field (same check type() uses).
+            # Reads document.activeElement directly (no locator auto-wait); unreadable focus
+            # fails closed.
+            try:
+                attributes = await session.page.evaluate(FOCUSED_INPUT_ATTRIBUTES_SCRIPT)
+                sensitive_field = attributes is None or self.attributes_are_sensitive(attributes)
+            except Exception:
+                sensitive_field = True
+            if sensitive_field:
+                payload.pop("text_preview", None)
+                payload["text_redacted"] = True
             await session.page.keyboard.insert_text(text)
             await self.manager._settle(session.page)
 
@@ -528,7 +556,10 @@ class BrowserActionService:
             }
         except Exception:
             return False
+        return self.attributes_are_sensitive(attributes)
 
+    @staticmethod
+    def attributes_are_sensitive(attributes: dict[str, Any]) -> bool:
         input_type = (attributes.get("type") or "").strip().lower()
         if input_type == "password":
             return True

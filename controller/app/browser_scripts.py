@@ -106,11 +106,19 @@ INTERACTABLES_SCRIPT = r"""
     return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
   }
 
+  // An input's live value is never a label: for a password / one-time-code / any text
+  // field it is exactly what the page's user typed. Only a button-like input's value is
+  // its visible caption.
+  function buttonValue(el) {
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    return el.tagName === 'INPUT' && ['button', 'submit', 'reset'].includes(type) ? el.value : '';
+  }
+
   function getLabel(el) {
     const raw = el.getAttribute('aria-label')
       || el.getAttribute('placeholder')
       || el.innerText
-      || el.value
+      || buttonValue(el)
       || el.getAttribute('name')
       || el.id
       || el.href
@@ -169,7 +177,7 @@ ACTIVE_ELEMENT_SCRIPT = r"""
     element_id: el.dataset?.operatorId || null,
     name: el.getAttribute('name'),
     id: el.id || null,
-    label: (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.innerText || el.value || '').toString().replace(/\s+/g, ' ').trim().slice(0, 120)
+    label: (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.innerText || (el.tagName === 'INPUT' && ['button', 'submit', 'reset'].includes((el.getAttribute('type') || '').toLowerCase()) ? el.value : '') || '').toString().replace(/\s+/g, ' ').trim().slice(0, 120)
   };
 }
 """
