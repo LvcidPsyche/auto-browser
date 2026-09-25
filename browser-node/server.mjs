@@ -63,6 +63,59 @@ const deepHealthTtlMs = Number.parseFloat(process.env.PROFILE_DEEP_HEALTH_TTL_SE
 // owner's live profile of threads (2026-09-25: 79 healthcheck Chromium
 // crashes in 8 minutes, then the owner's own browser process crashed).
 const deepHealthFailureTtlMs = Number.parseFloat(process.env.PROFILE_DEEP_HEALTH_FAILURE_TTL_SECONDS || "60") * 1000;
+
+// ---------------------------------------------------------------------------
+// Pid (thread) budget. The container's pids cgroup counts every THREAD, and
+// Chromium is thread-hungry: on 2026-09-25 a 256 cap refused 845 thread
+// creations, Chromium aborted (SIGTRAP), the relay dropped and the
+// controller's session died. Nothing reported it. Now: read the cgroup
+// (v2, as mounted inside the container), warn above 80% and whenever the
+// kernel refuses a creation, and show it in /healthz and /healthz/deep.
+const pidsCgroupRoot = process.env.PIDS_CGROUP_ROOT || "/sys/fs/cgroup";
+const pidsWatchMs = Number.parseFloat(process.env.PIDS_WATCH_SECONDS || "15") * 1000;
+const pidsWarnRatio = Number.parseFloat(process.env.PIDS_WARN_RATIO || "0.8");
+let pidsState = null;
+
+async function readPidsBudget() {
+  try {
+    const [current, max, events] = await Promise.all([
+      readFile(join(pidsCgroupRoot, "pids.current"), "utf-8"),
+      readFile(join(pidsCgroupRoot, "pids.max"), "utf-8"),
+      readFile(join(pidsCgroupRoot, "pids.events"), "utf-8").catch(() => ""),
+    ]);
+    const limit = max.trim() === "max" ? null : Number.parseInt(max, 10);
+    const used = Number.parseInt(current, 10);
+    const refused = /(?:^|\n)max (\d+)/.exec(events);
+    return {
+      current: used,
+      max: limit,
+      ratio: limit ? Math.round((used / limit) * 1000) / 1000 : null,
+      refused_total: refused ? Number.parseInt(refused[1], 10) : 0,
+    };
+  } catch {
+    return null; // not in a pids cgroup (dev machine) -- nothing to report
+  }
+}
+
+async function checkPidsBudget() {
+  const now = await readPidsBudget();
+  if (!now) return null;
+  const previous = pidsState;
+  if (now.ratio !== null && now.ratio >= pidsWarnRatio) {
+    console.warn(
+      `WARNING pids budget ${now.current}/${now.max} (${Math.round(now.ratio * 100)}%): ` +
+        "Chromium will crash when it cannot create threads",
+    );
+  }
+  if (previous && now.refused_total > previous.refused_total) {
+    console.warn(
+      `WARNING pids limit hit: ${now.refused_total - previous.refused_total} thread/process creation(s) ` +
+        `refused since the last check (${now.refused_total} total, ${now.current}/${now.max})`,
+    );
+  }
+  pidsState = { ...now, refused_since_start: previous ? previous.refused_since_start + Math.max(0, now.refused_total - previous.refused_total) : 0, at: Date.now() };
+  return pidsState;
+}
 const defaultLocale = process.env.PERSISTENT_PROFILE_LOCALE || "ar-EG";
 const defaultTimezoneId = process.env.PERSISTENT_PROFILE_TIMEZONE || "Africa/Cairo";
 
@@ -838,6 +891,7 @@ const controlServer = createServer(async (req, res) => {
         ok: true,
         persistent_profiles_enabled: persistentProfilesEnabled,
         control_token_configured: Boolean(profileControlToken),
+        pids: pidsState,
       });
     }
     if (!persistentProfilesEnabled) {
@@ -851,7 +905,7 @@ const controlServer = createServer(async (req, res) => {
     }
     if (req.method === "GET" && path === "/healthz/deep") {
       const result = await deepHealthcheck();
-      return sendJson(res, result.ok ? 200 : 503, result);
+      return sendJson(res, result.ok ? 200 : 503, { ...result, pids: (await checkPidsBudget()) || pidsState });
     }
     if (req.method !== "POST") return sendJson(res, 404, { error: "not found" });
     const body = await readJsonBody(req);
@@ -1015,6 +1069,11 @@ async function listen(server, portNumber, hostName) {
     server.listen(portNumber, hostName, resolve);
   });
 }
+
+await checkPidsBudget();
+setInterval(() => {
+  checkPidsBudget().catch(() => {});
+}, pidsWatchMs).unref();
 
 await listen(controlServer, profileControlPort, profileControlHost);
 console.log(

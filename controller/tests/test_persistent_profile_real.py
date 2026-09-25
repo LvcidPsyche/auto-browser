@@ -335,7 +335,14 @@ class RealBrowserNodeTests(unittest.IsolatedAsyncioTestCase):
         opened = await manager.create_session(name="owner", start_url=sites[0])
         session = manager.sessions[opened["id"]]
         browser_pids = await self._process_ids(session.browser, "browser")
-        state_file = Path(manager.settings.auth_root) / "profiles" / "owner-default" / "state.json.enc"
+        profile_dir = Path(manager.settings.auth_root) / "profiles" / "owner-default"
+
+        def state_mtime() -> float | None:
+            # Encrypted (state.json.enc) when a key is configured, else plain.
+            for name in ("state.json.enc", "state.json"):
+                if (profile_dir / name).exists():
+                    return (profile_dir / name).stat().st_mtime
+            return None
         stats = {
             "health_ok": 0, "health_fail": 0, "nav_ok": 0, "nav_fail": 0, "observe_ok": 0,
             "observe_fail": 0, "persist_writes": 0, "crashes": 0, "max_pages": 0, "new_pages": 0,
@@ -364,7 +371,7 @@ class RealBrowserNodeTests(unittest.IsolatedAsyncioTestCase):
         poller = asyncio.create_task(health_poller())
         start = time.monotonic()
         crash_at = [duration / 3, 2 * duration / 3]
-        last_mtime = state_file.stat().st_mtime if state_file.exists() else None
+        last_mtime = state_mtime()
         step = 0
         log("long run start", duration, "s; session", session.id, "browser pids", browser_pids)
         try:
@@ -390,9 +397,10 @@ class RealBrowserNodeTests(unittest.IsolatedAsyncioTestCase):
                     stats["nav_fail" if step % 2 == 0 else "observe_fail"] += 1
                     log("action failed", type(exc).__name__, str(exc)[:200])
                 step += 1
-                if state_file.exists() and state_file.stat().st_mtime != last_mtime:
+                mtime = state_mtime()
+                if mtime is not None and mtime != last_mtime:
                     stats["persist_writes"] += 1
-                    last_mtime = state_file.stat().st_mtime
+                    last_mtime = mtime
                 stats["max_pages"] = max(stats["max_pages"], len(session.context.pages))
                 if id(session.context) not in hooked:
                     hooked.add(id(session.context))

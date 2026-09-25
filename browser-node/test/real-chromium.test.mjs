@@ -44,6 +44,13 @@ function lanAddress() {
 const LAN = lanAddress();
 const root = mkdtempSync(join(tmpdir(), "bn-real-"));
 const profilesRoot = join(root, "browser-profiles");
+// A stand-in for the container's pids cgroup (v2 files), so the pid-budget
+// monitoring can be driven from the test.
+const fakeCgroup = join(root, "cgroup");
+mkdirSync(fakeCgroup, { recursive: true });
+writeFileSync(join(fakeCgroup, "pids.current"), "100\n");
+writeFileSync(join(fakeCgroup, "pids.max"), "4096\n");
+writeFileSync(join(fakeCgroup, "pids.events"), "max 0\n");
 let server;
 let serverLog = "";
 
@@ -124,6 +131,8 @@ before(async () => {
       BROWSER_DOWNLOADS_DIR: join(root, "downloads"),
       PROFILE_DEEP_HEALTH_TTL_SECONDS: "0",
       PROFILE_DEEP_HEALTH_FAILURE_TTL_SECONDS: "0",
+      PIDS_CGROUP_ROOT: fakeCgroup,
+      PIDS_WATCH_SECONDS: "0.5",
       PROFILE_NODE_LEASE_HEARTBEAT_SECONDS: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -310,6 +319,26 @@ test("deep healthcheck launches, relays and attaches a disposable profile", asyn
   assert.equal(deep.status, 200, JSON.stringify(deep.body));
   assert.equal(deep.body.ok, true);
   assert.deepEqual(readdirSync(join(profilesRoot, ".healthcheck")), []);
+});
+
+test("pid budget is reported and warned about (>80%, and every refused creation)", async () => {
+  let deep = await control("/healthz/deep", null, { method: "GET" });
+  assert.deepEqual(
+    { current: deep.body.pids.current, max: deep.body.pids.max, refused_total: deep.body.pids.refused_total },
+    { current: 100, max: 4096, refused_total: 0 },
+  );
+  writeFileSync(join(fakeCgroup, "pids.current"), "250\n");
+  writeFileSync(join(fakeCgroup, "pids.max"), "256\n");
+  writeFileSync(join(fakeCgroup, "pids.events"), "max 845\n");
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.match(serverLog, /WARNING pids budget 250\/256 \(98%\)/);
+  assert.match(serverLog, /WARNING pids limit hit: 845 thread\/process creation\(s\) refused/);
+  const health = await control("/healthz", null, { token: null, method: "GET" });
+  assert.equal(health.body.pids.refused_since_start, 845);
+  deep = await control("/healthz/deep", null, { method: "GET" });
+  assert.equal(deep.body.pids.ratio, 0.977);
+  writeFileSync(join(fakeCgroup, "pids.current"), "100\n");
+  writeFileSync(join(fakeCgroup, "pids.max"), "4096\n");
 });
 
 test("deep healthcheck never launches a second Chromium beside an open profile", async () => {
