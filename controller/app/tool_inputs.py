@@ -606,21 +606,15 @@ class CronJobIdInput(StrictInputModel):
 
 class CreateCronJobInput(StrictInputModel):
     name: str = Field(min_length=1, max_length=200)
-    goal: str = Field(min_length=1, max_length=5000, description="What the agent should do on each run.")
+    goal: str = Field(min_length=1, max_length=5000)
     provider: ProviderName = "openai"
-    schedule: str | None = Field(
-        default=None,
-        max_length=100,
-        description='Cron expression such as "0 9 * * 1-5". Omitted: runs only on trigger.',
-    )
-    start_url: str | None = Field(default=None, max_length=2000, description="Page each run starts on.")
+    schedule: str | None = Field(default=None, max_length=100)
+    start_url: str | None = Field(default=None, max_length=2000)
     auth_profile: str | None = Field(default=None, max_length=200)
     proxy_persona: str | None = Field(default=None, max_length=200)
-    max_steps: int = Field(default=20, ge=1, le=100, description="Most agent steps per run.")
+    max_steps: int = Field(default=20, ge=1, le=100)
     enabled: bool = True
-    webhook_enabled: bool = Field(
-        default=False, description="Also issue a secret key so POST /crons/{id}/trigger can start a run."
-    )
+    webhook_enabled: bool = False
 
     @field_validator("start_url")
     @classmethod
