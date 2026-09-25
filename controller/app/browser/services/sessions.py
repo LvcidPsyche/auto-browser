@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from playwright.async_api import Error as PlaywrightError
 
+from ... import events as _events
 from ...action_errors import SessionNotFoundError
 from ...browser_scripts import apply_stealth
 from ...models import SessionRecord, SessionStatus, resolve_totp_hosts
@@ -28,6 +29,12 @@ class BrowserSessionService:
 
     def __init__(self, manager: Any) -> None:
         self.manager = manager
+        # Creates past the limit check but not yet in manager.sessions. The
+        # check and the insert are separated by browser startup and page
+        # loads, so without counting these, concurrent creates all passed the
+        # check and MAX_SESSIONS was exceeded (with the default of 1, two
+        # sessions shared the one visible desktop).
+        self._creating = 0
 
     async def list(self) -> list[dict[str, Any]]:
         session_map = {record.id: record.model_dump() for record in await self.manager.session_store.list()}
@@ -102,6 +109,9 @@ class BrowserSessionService:
         session: BrowserSession | None = None
         browser: Browser | None = None
         runtime: IsolatedBrowserRuntime | None = None
+        # No await since check_limit, so nothing slipped in between.
+        self._creating += 1
+        reserved = True
         try:
             from ...browser_manager import BrowserSession
 
@@ -159,10 +169,16 @@ class BrowserSessionService:
                     body_max_bytes=self.manager.settings.network_inspector_body_max_bytes,
                     scrubber=self.manager.pii_scrubber if self.manager.settings.pii_scrub_enabled else None,
                 )
-                inspector.attach(page)
+                # The context, not the first page: attached to the page, the
+                # log missed every popup and tab opened later, and recorded
+                # nothing at all once the first tab was closed.
+                inspector.attach(context if hasattr(context, "on") else page)
                 session.network_inspector = inspector
 
             self.manager.sessions[session_id] = session
+            # Counted by manager.sessions from here on.
+            self._creating -= 1
+            reserved = False
             if self.manager._session_created_hook is not None:
                 try:
                     await self.manager._session_created_hook(session_id, page)
@@ -214,7 +230,9 @@ class BrowserSessionService:
                 },
             )
             return summary
-        except Exception:
+        except BaseException:
+            # BaseException so a cancelled create (the caller gave up, shutdown)
+            # also closes the context and releases the isolated runtime.
             await self.cleanup_failed(
                 session_id,
                 session=session,
@@ -224,16 +242,20 @@ class BrowserSessionService:
             )
             raise
         finally:
+            if reserved:
+                self._creating -= 1
             if prepared_auth_state is not None:
                 prepared_auth_state.cleanup()
 
     def check_limit(self) -> None:
-        if len(self.manager.sessions) >= self.manager.settings.max_sessions:
-            active_ids = ", ".join(sorted(self.manager.sessions.keys()))
+        if len(self.manager.sessions) + self._creating >= self.manager.settings.max_sessions:
+            active_ids = ", ".join(sorted(self.manager.sessions.keys())) or "none"
             message = (
                 f"Session limit reached: max_sessions={self.manager.settings.max_sessions}. "
                 f"Active live session(s): {active_ids}."
             )
+            if self._creating:
+                message += f" {self._creating} more still starting."
             if self.manager.settings.session_isolation_mode == "shared_browser_node":
                 message += (
                     " This scaffold uses one visible desktop and one shared browser node by default, "
@@ -344,24 +366,25 @@ class BrowserSessionService:
     async def close(self, session_id: str) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         async with session.lock:
-            if session.tunnel is not None:
-                await self.manager.tunnel_broker.release(session.tunnel)
-            summary = await self.manager._session_summary(session, status="closed", live=False)
-            await self.manager.observation.stop_trace_recording(session)
-            if session.network_inspector is not None:
-                session.network_inspector.detach()
-                session.network_inspector = None
+            if self.manager.sessions.get(session_id) is not session:
+                # Closed by a concurrent call while this one waited for the
+                # lock. Carrying on released the tunnel and runtime twice and
+                # wrote a second close to the audit log and witness chain.
+                raise SessionNotFoundError(session_id, status="closed")
             try:
-                await session.context.close()
+                if session.tunnel is not None:
+                    await self._teardown_step(
+                        session, "release session tunnel", lambda: self.manager.tunnel_broker.release(session.tunnel)
+                    )
+                summary = await self.manager._session_summary(session, status="closed", live=False)
+                await self._release_resources(session)
             finally:
-                if session.browser is not None and session.browser is not self.manager.browser:
-                    try:
-                        await session.browser.close()
-                    except Exception as exc:  # pragma: no cover - best effort isolated cleanup
-                        logger.warning("failed to close isolated browser for session %s: %s", session_id, exc)
-                if session.runtime is not None:
-                    await self.manager.runtime_provisioner.release(session.runtime)
-            self.manager.sessions.pop(session_id, None)
+                # Whatever teardown step failed, the session is gone. It used to
+                # stay registered when context.close() or the runtime release
+                # raised (a crashed browser, a docker error), every retry failed
+                # the same way, and it held a MAX_SESSIONS slot until restart.
+                self.manager.sessions.pop(session_id, None)
+                _events.emit_session(session_id, "closed")
             if self.manager._session_closed_hook is not None:
                 try:
                     await self.manager._session_closed_hook(session_id)
@@ -393,6 +416,33 @@ class BrowserSessionService:
             summary["witness_remote"] = session.witness_remote_state.model_dump()
             await self.manager.session_store.upsert(SessionRecord.model_validate(summary))
             return {"closed": True, "trace_path": str(session.trace_path), "session": summary}
+
+    async def _release_resources(self, session: "BrowserSession") -> None:
+        """Tear down everything a live session holds, each step independently.
+
+        A failing step is logged and the rest still run, so one broken resource
+        does not strand the others (the runtime container, the tunnel process).
+        """
+        await self._teardown_step(
+            session, "stop trace recording", lambda: self.manager.observation.stop_trace_recording(session)
+        )
+        if session.network_inspector is not None:
+            session.network_inspector.detach()
+            session.network_inspector = None
+        await self._teardown_step(session, "close browser context", session.context.close)
+        if session.browser is not None and session.browser is not self.manager.browser:
+            await self._teardown_step(session, "close isolated browser", session.browser.close)
+        if session.runtime is not None:
+            await self._teardown_step(
+                session, "release isolated runtime", lambda: self.manager.runtime_provisioner.release(session.runtime)
+            )
+
+    @staticmethod
+    async def _teardown_step(session: "BrowserSession", label: str, step: Any) -> None:
+        try:
+            await step()
+        except Exception as exc:
+            logger.warning("failed to %s for session %s: %s", label, session.id, exc)
 
     async def fork(
         self,

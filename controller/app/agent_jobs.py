@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from uuid import uuid4
 
 from .audit import get_current_operator
 from .models import (
+    CONTEXT_HINTS_MAX_CHARS,
     AgentJobCheckpoint,
     AgentJobRecord,
     AgentJobStatus,
@@ -17,7 +17,7 @@ from .models import (
     AgentStepRequest,
     AgentStepResult,
 )
-from .utils import record_path, utc_now
+from .utils import atomic_write_text, record_path, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,12 @@ class AgentJobStore:
             if record.status == "running":
                 record.status = "interrupted"
                 record.error = "agent_job_interrupted_on_restart"
+                await self.update(record)
+            elif record.status == "cancelling":
+                # The restart finished the cancellation. Left as "cancelling",
+                # the job could never be discarded and still read as live.
+                record.status = "cancelled"
+                record.error = "agent_job_cancelled"
                 await self.update(record)
 
     def _list_sync(
@@ -218,16 +224,11 @@ class AgentJobStore:
 
     def _write_sync(self, record: AgentJobRecord) -> None:
         path = record_path(self.root, record.id, ".json")
-        tmp_path = path.with_suffix(".json.tmp")
-        tmp_path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
-        for attempt in range(5):
-            try:
-                tmp_path.replace(path)
-                return
-            except PermissionError:
-                if attempt == 4:
-                    raise
-                time.sleep(0.01 * (attempt + 1))
+        atomic_write_text(path, record.model_dump_json(indent=2))
+
+
+RESUME_CONTEXT_PREFIX = "Resuming background agent job"
+RESUME_CONTEXT_MIN_CHARS = 1000
 
 
 class AgentJobQueue:
@@ -531,27 +532,40 @@ class AgentJobQueue:
     def _resume_context(cls, record: AgentJobRecord) -> str:
         if not record.checkpoints:
             return (
-                f"Resuming background agent job {record.id}. No completed step checkpoints were recorded; "
+                f"{RESUME_CONTEXT_PREFIX} {record.id}. No completed step checkpoints were recorded; "
                 "continue from the current browser state and avoid repeating completed work when visible."
             )
         latest = record.checkpoints[-1]
         step_lines = []
         for checkpoint in record.checkpoints[-6:]:
             action = checkpoint.action or "unknown"
-            location = checkpoint.url or checkpoint.title or "current page"
+            location = cls._truncate(checkpoint.url or checkpoint.title, 200) or "current page"
             step_lines.append(f"{checkpoint.step_index}. {checkpoint.status} {action} at {location}")
         return (
-            f"Resuming background agent job {record.id} after {len(record.checkpoints)} completed step(s). "
+            f"{RESUME_CONTEXT_PREFIX} {record.id} after {len(record.checkpoints)} completed step(s). "
             f"Latest checkpoint: status={latest.status}, action={latest.action or 'unknown'}, "
-            f"url={latest.url or 'unknown'}. Continue from the current browser state; do not repeat completed "
+            f"url={cls._truncate(latest.url, 500) or 'unknown'}. Continue from the current browser state; do not repeat completed "
             "actions unless the page state requires it.\nCompleted checkpoints:\n" + "\n".join(step_lines)
         )
 
     @staticmethod
     def _merge_context_hints(existing: str | None, resume_context: str) -> str:
-        if existing:
-            return f"{existing}\n\n{resume_context}"
-        return resume_context
+        """Operator hints plus this resume's context, within the request's limit.
+
+        The merged text is stored as the new job's request and re-validated when
+        a worker picks it up. It used to be unbounded: long checkpoint URLs, or a
+        few resumes in a row each appending another block, pushed it past
+        context_hints' limit and the resumed job failed with a ValidationError
+        before running a step. An earlier resume block is dropped, since the
+        new one describes the same run from a later point.
+        """
+        operator_hints = (existing or "").split(RESUME_CONTEXT_PREFIX, 1)[0].strip()
+        if not operator_hints:
+            return resume_context[:CONTEXT_HINTS_MAX_CHARS]
+        # Operator hints win, but always leave the resume context some room.
+        operator_hints = operator_hints[: CONTEXT_HINTS_MAX_CHARS - 2 - RESUME_CONTEXT_MIN_CHARS]
+        budget = CONTEXT_HINTS_MAX_CHARS - 2 - len(operator_hints)
+        return f"{operator_hints}\n\n{resume_context[:budget]}"
 
     @staticmethod
     def _truncate(value: object, limit: int) -> str | None:

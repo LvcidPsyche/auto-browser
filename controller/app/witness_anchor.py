@@ -28,6 +28,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any, Iterator
 
+from .utils import atomic_write_text
+
 # How much of the chain tail to read when looking for the last receipt. Reading
 # the whole file per append was O(n) in chain length; a receipt is well under
 # this, so one read finds the last line in every realistic case.
@@ -102,9 +104,7 @@ def anchor_path(chain_path: Path) -> Path:
 def write_anchor(chain_path: Path, *, head_hash: str, receipt_count: int) -> None:
     payload = {"head_hash": head_hash, "receipt_count": receipt_count}
     path = anchor_path(chain_path)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    os.replace(temporary, path)
+    atomic_write_text(path, json.dumps(payload, sort_keys=True))
 
 
 def read_anchor(chain_path: Path) -> dict[str, Any] | None:

@@ -267,7 +267,12 @@ class BrowserActionService:
             "runtime_requires_approval": approval is not None or approval_id is not None,
             "sensitive_input": bool(getattr(decision, "sensitive", False)),
         }
+        # Uploads go through manager.upload, which checks and claims the
+        # approval itself.
+        claimed = approval is not None and decision.action != "upload"
         try:
+            if claimed:
+                await self.manager.approvals.claim_execution(approval.id)
             if decision.action == "navigate":
                 result = await self.manager.navigate(session_id, decision.url or "")
             elif decision.action == "click":
@@ -334,6 +339,8 @@ class BrowserActionService:
             return result
         finally:
             session.pending_witness_context = None
+            if claimed:
+                self.manager.approvals.release_execution(approval.id)
 
     async def require_decision_approval(
         self,

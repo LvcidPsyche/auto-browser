@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from ...audit import get_current_operator
-from ...utils import UTC, utc_now
+from ...utils import UTC, atomic_write_text, utc_now
 from ...witness import WitnessActionContext
 
 logger = logging.getLogger(__name__)
@@ -215,8 +215,9 @@ class BrowserAuthProfileService:
         if not metadata_path_str.startswith(profile_root_prefix):
             raise PermissionError("auth profile metadata path must stay inside auth profile root")
 
-        with open(metadata_path_str, "w", encoding="utf-8") as handle:
-            json.dump(profile_payload, handle, indent=2, sort_keys=True)
+        # Atomic: open("w") truncated first, and a reader in that window got
+        # {} from read_metadata, which require_access took for "no owner".
+        atomic_write_text(Path(metadata_path_str), json.dumps(profile_payload, indent=2, sort_keys=True))
         return {
             "profile_name": normalized,
             "saved_to": auth_info["path"],
@@ -524,7 +525,7 @@ class BrowserAuthProfileService:
         }
 
     def owner_of(self, profile_name: str) -> str | None:
-        owner = self.read_metadata(self.normalize_name(profile_name)).get("owner")
+        owner = self.read_metadata(self.normalize_name(profile_name), strict=True).get("owner")
         return owner.strip() if isinstance(owner, str) and owner.strip() else None
 
     @staticmethod
@@ -606,7 +607,13 @@ class BrowserAuthProfileService:
             )
         return base_path
 
-    def read_metadata(self, profile_name: str) -> dict[str, Any]:
+    def read_metadata(self, profile_name: str, *, strict: bool = False) -> dict[str, Any]:
+        """The profile's metadata, {} when it has none.
+
+        With strict, an unreadable file raises PermissionError instead: for an
+        ownership check, {} means "unowned, open to anyone", so a damaged file
+        must not read as that.
+        """
         metadata_path = self.metadata_path(profile_name, create=False)
         profile_root_str = os.path.realpath(os.fspath(self.root()))
         metadata_path_str = os.path.realpath(os.fspath(metadata_path))
@@ -619,9 +626,16 @@ class BrowserAuthProfileService:
         try:
             with open(metadata_path_str, encoding="utf-8") as handle:
                 payload = json.load(handle)
-        except json.JSONDecodeError:
-            return {}
-        return payload if isinstance(payload, dict) else {}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            return payload
+        if strict:
+            raise PermissionError(
+                f"auth profile '{profile_name}' has unreadable metadata, so its owner cannot be "
+                "checked; restore or delete its profile.json"
+            )
+        return {}
 
     def safe_session_auth_path(
         self,

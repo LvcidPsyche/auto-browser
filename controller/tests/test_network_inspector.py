@@ -130,6 +130,51 @@ class NetworkInspectorTests(unittest.IsolatedAsyncioTestCase):
         inspector.clear()
         self.assertEqual(inspector.entries(), [])
 
+    async def test_requests_that_never_finish_are_bounded(self) -> None:
+        inspector = NetworkInspector("session-3", max_entries=3, capture_bodies=False)
+        requests = [FakeRequest(url=f"https://example.com/poll/{i}") for i in range(5)]
+        for request in requests:
+            await inspector._handle_request(request)
+
+        self.assertEqual(len(inspector._pending), 3)
+        untracked = inspector.entries()
+        self.assertEqual([e["url"] for e in reversed(untracked)], [r.url for r in requests[:2]])
+        self.assertTrue(all(e["failed"] for e in untracked))
+
+        # A request still tracked finishes normally.
+        await inspector._handle_request_finished(requests[-1])
+        self.assertFalse(inspector.entries()[0]["failed"])
+
+    async def test_hooks_see_the_status_while_the_body_is_still_being_read(self) -> None:
+        inspector = NetworkInspector("session-4")
+        seen: list[int | None] = []
+
+        async def hook(entry: dict) -> None:
+            seen.append(entry["status"])
+
+        inspector.register_hook("*", hook)
+        request = FakeRequest()
+        body_started = asyncio.Event()
+        release_body = asyncio.Event()
+
+        class SlowResponse(FakeResponse):
+            async def body(self) -> bytes:
+                body_started.set()
+                await release_body.wait()
+                return b"{}"
+
+        await inspector._handle_request(request)
+        response_task = asyncio.create_task(
+            inspector._handle_response(SlowResponse(request, status=204, headers={"content-type": "application/json"}))
+        )
+        await asyncio.wait_for(body_started.wait(), timeout=5)
+        await inspector._handle_request_finished(request)
+        release_body.set()
+        await response_task
+
+        self.assertEqual(seen, [204])
+        self.assertEqual(inspector.entries()[0]["response_body"], "{}")
+
 
 if __name__ == "__main__":
     unittest.main()

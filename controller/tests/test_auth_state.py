@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
@@ -46,6 +47,50 @@ class AuthStateManagerTests(unittest.IsolatedAsyncioTestCase):
                 prepared.cleanup()
 
             self.assertFalse(prepared.path.exists())
+
+    async def test_failed_encryption_leaves_no_plaintext_behind(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            manager = AuthStateManager(
+                encryption_key=Fernet.generate_key().decode("utf-8"),
+                require_encryption=True,
+                max_age_hours=72,
+            )
+            manager._fernet = None  # encryption fails after the plaintext is written
+            (root / "profile").mkdir()
+
+            with self.assertRaises(RuntimeError):
+                await manager.write_storage_state(FakeContext(), root / "profile" / "state.json")
+
+            self.assertEqual(list((root / "profile").iterdir()), [])
+
+    async def test_concurrent_saves_to_one_path_all_succeed(self) -> None:
+        class SlowContext:
+            async def storage_state(self, path: str) -> None:
+                Path(path).write_text("{", encoding="utf-8")
+                await asyncio.sleep(0.01)
+                Path(path).write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            manager = AuthStateManager(
+                encryption_key=Fernet.generate_key().decode("utf-8"),
+                require_encryption=True,
+                max_age_hours=72,
+            )
+
+            results = await asyncio.gather(
+                *(manager.write_storage_state(SlowContext(), root / "state.json") for _ in range(4)),
+                return_exceptions=True,
+            )
+
+            self.assertEqual([r for r in results if isinstance(r, Exception)], [])
+            self.assertEqual([p.name for p in root.iterdir()], ["state.json.enc"])
+            prepared = manager.prepare_for_context(root / "state.json.enc")
+            try:
+                self.assertEqual(json.loads(prepared.path.read_text(encoding="utf-8"))["cookies"], [])
+            finally:
+                prepared.cleanup()
 
     async def test_inspect_marks_stale_and_prepare_rejects_old_state(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

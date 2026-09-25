@@ -43,7 +43,7 @@ from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
-from .utils import UTC
+from .utils import UTC, atomic_write_text
 
 try:
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -109,6 +109,7 @@ class CronService:
         enabled: bool = True,
         webhook_enabled: bool = False,
     ) -> dict[str, Any]:
+        self._validate_schedule(schedule)
         async with self._lock:
             jobs = self._load()
             if len(jobs) >= self._max_jobs:
@@ -158,6 +159,8 @@ class CronService:
         return self._safe_job(jobs[job_id])
 
     async def update_job(self, job_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+        if "schedule" in updates:
+            self._validate_schedule(updates["schedule"])
         async with self._lock:
             jobs = self._load()
             if job_id not in jobs:
@@ -231,6 +234,20 @@ class CronService:
 
     # ── Internal ───────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _validate_schedule(schedule: str | None) -> None:
+        """Reject a cron expression the scheduler cannot parse.
+
+        _register_job only logs a parse failure, so an invalid schedule was
+        saved and reported as created, then silently never ran.
+        """
+        if not schedule or not _APSCHEDULER_AVAILABLE:
+            return
+        try:
+            CronTrigger.from_crontab(schedule)
+        except ValueError as exc:
+            raise ValueError(f"Invalid cron schedule {schedule!r}: {exc}") from None
+
     def _register_job(self, job: dict[str, Any]) -> None:
         if not _APSCHEDULER_AVAILABLE or self._scheduler is None:
             return
@@ -263,7 +280,7 @@ class CronService:
         if self.job_queue is None or self.manager is None:
             raise RuntimeError("CronService not fully initialized (no job_queue/manager)")
 
-        from .models import AgentRunRequest
+        from .models import AGENT_RUN_MAX_STEPS, AgentRunRequest
 
         # Refuse to start a second run while this job's previous one is still in
         # flight. Without this, a schedule faster than its own runtime stacks up
@@ -276,22 +293,32 @@ class CronService:
             )
             return {"triggered": False, "job_id": job_id, "reason": "previous_run_active"}
 
-        # Create session for the job
-        session_result = await self.manager.create_session(
-            name=f"cron-{job_id}",
-            start_url=job.get("start_url"),
-            auth_profile=job.get("auth_profile"),
-            proxy_persona=job.get("proxy_persona"),
-        )
-        session_id = session_result["id"]
-        self._active_runs[job_id] = session_id
-
-        # Enqueue agent run
+        # Built before the session exists: this used to run after
+        # create_session, so a job the request model rejects (older stores
+        # accepted max_steps up to 100) left the session open and the job
+        # marked in flight, and every later fire was skipped until restart.
         run_request = AgentRunRequest(
             provider=job.get("provider") or "openai",
             goal=job["goal"],
-            max_steps=job.get("max_steps", 20),
+            max_steps=min(job.get("max_steps") or 20, AGENT_RUN_MAX_STEPS),
         )
+
+        # Claim the slot before the first await, so a webhook and a scheduled
+        # fire arriving together cannot both pass the check above.
+        self._active_runs[job_id] = ""
+        try:
+            session_result = await self.manager.create_session(
+                name=f"cron-{job_id}",
+                start_url=job.get("start_url"),
+                auth_profile=job.get("auth_profile"),
+                proxy_persona=job.get("proxy_persona"),
+            )
+        except BaseException:
+            self._active_runs.pop(job_id, None)
+            raise
+        session_id = session_result["id"]
+        self._active_runs[job_id] = session_id
+
         try:
             queued = await self.job_queue.enqueue_run(session_id, run_request)
         except Exception:
@@ -372,9 +399,7 @@ class CronService:
 
     def _save(self, data: dict[str, Any]) -> None:
         self._store_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._store_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        tmp.replace(self._store_path)
+        atomic_write_text(self._store_path, json.dumps(data, indent=2))
 
     @staticmethod
     def _safe_job(job: dict[str, Any]) -> dict[str, Any]:

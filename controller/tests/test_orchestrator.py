@@ -4,7 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
+
+from playwright.async_api import Error as PlaywrightError
 
 from app.approvals import ApprovalRequiredError
 from app.models import ApprovalRecord, BrowserActionDecision
@@ -87,6 +89,35 @@ class BrowserOrchestratorLoopGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.steps[-1].decision["action"], "request_human_takeover")
         self.manager.request_human_takeover.assert_awaited_once()
         self.assertEqual(self.manager.execute_decision.await_count, 3)
+
+    async def test_observe_retries_once_while_the_page_navigates(self) -> None:
+        observation = await self.manager.observe("session-1")
+        self.manager.observe = AsyncMock(
+            side_effect=[PlaywrightError("Execution context was destroyed"), observation, observation]
+        )
+
+        with patch("app.orchestrator.OBSERVE_RETRY_DELAY_SECONDS", 0):
+            result = await self.orchestrator.step(session_id="session-1", provider_name="openai", goal="Click")
+
+        self.assertEqual(result.status, "acted")
+        self.assertEqual(result.observation["url"], "https://example.com")
+
+    async def test_run_keeps_its_steps_when_the_page_cannot_be_observed(self) -> None:
+        """observe raising escaped run(): /agent/run returned a 500 and the
+        steps already taken were lost."""
+        observation = await self.manager.observe("session-1")
+        self.manager.observe = AsyncMock(
+            side_effect=[observation, PlaywrightError("Target crashed"), PlaywrightError("Target crashed")]
+        )
+
+        with patch("app.orchestrator.OBSERVE_RETRY_DELAY_SECONDS", 0):
+            result = await self.orchestrator.run(
+                session_id="session-1", provider_name="openai", goal="Click", max_steps=5
+            )
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual([step.status for step in result.steps], ["acted", "error"])
+        self.assertIn("Target crashed", result.steps[-1].error)
 
     async def test_step_prefixes_goal_with_memory_context(self) -> None:
         class MemoryAwareAdapter:

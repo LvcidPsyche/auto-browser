@@ -71,8 +71,16 @@ class CDPPassthrough:
     and a safe subset of raw CDP commands.
     """
 
-    def __init__(self, cdp_session: "CDPSession") -> None:  # noqa: F821
+    def __init__(self, cdp_session: "CDPSession", page: "Page | None" = None) -> None:  # noqa: F821
         self._cdp = cdp_session
+        # The page the CDP session is attached to; CDP sessions are per page.
+        self.page = page
+
+    async def detach(self) -> None:
+        try:
+            await self._cdp.detach()
+        except Exception as exc:
+            logger.debug("cdp session detach failed (page likely closed): %s", exc)
 
     async def get_element_intelligence(self, selector: str) -> dict[str, Any]:
         """
@@ -218,4 +226,4 @@ class CDPPassthrough:
     async def from_page(cls, page: "Page") -> "CDPPassthrough":  # noqa: F821
         """Create a CDPPassthrough attached to a Playwright Page."""
         cdp_session = await page.context.new_cdp_session(page)
-        return cls(cdp_session)
+        return cls(cdp_session, page)

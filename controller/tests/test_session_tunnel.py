@@ -92,6 +92,47 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(metadata["status"], "inactive")
             self.assertTrue(tunnel.released)
 
+    async def test_cancelled_provision_stops_the_autossh_process(self) -> None:
+        import asyncio
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            ssh_root = root / "ssh"
+            ssh_root.mkdir(parents=True, exist_ok=True)
+            (ssh_root / "id_ed25519").write_text("dummy", encoding="utf-8")
+            (ssh_root / "known_hosts").write_text("dummy", encoding="utf-8")
+            settings = Settings(
+                _env_file=None,
+                ISOLATED_TUNNEL_ENABLED="true",
+                ISOLATED_TUNNEL_HOST="bastion.example.com",
+                ISOLATED_TUNNEL_USER="tunnel",
+                ISOLATED_TUNNEL_KEY_PATH=str(ssh_root / "id_ed25519"),
+                ISOLATED_TUNNEL_KNOWN_HOSTS_PATH=str(ssh_root / "known_hosts"),
+                ISOLATED_TUNNEL_INFO_ROOT=str(root / "tunnels" / "sessions"),
+                ISOLATED_TUNNEL_REMOTE_PORT_START=16181,
+                ISOLATED_TUNNEL_REMOTE_PORT_END=16182,
+                ISOLATED_TUNNEL_STARTUP_GRACE_SECONDS=30,
+            )
+            broker = IsolatedSessionTunnelBroker(settings)
+            await broker.startup()
+            processes: list[FakeProcess] = []
+
+            async def fake_exec(*args, **kwargs):
+                processes.append(FakeProcess())
+                return processes[-1]
+
+            with patch("app.session_tunnel.asyncio.create_subprocess_exec", new=fake_exec):
+                task = asyncio.create_task(broker.provision("session-1", local_port=6080))
+                while not processes:
+                    await asyncio.sleep(0)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+            self.assertTrue(processes[0].killed)
+            metadata = json.loads((root / "tunnels" / "sessions" / "session-1.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["status"], "error")
+
     async def test_broker_tries_next_port_when_first_process_exits_immediately(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

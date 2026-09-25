@@ -124,6 +124,22 @@ class BrowserDiagnosticsService:
             ),
         )
         page.on("download", lambda download: spawn_background_task(self.manager._handle_download(session, download)))
+        page.on("close", lambda _page: self._on_page_closed(session, page))
+
+    @staticmethod
+    def _on_page_closed(session: "BrowserSession", page: "Page") -> None:
+        """Move the session to another open tab when its active tab closes itself.
+
+        A page that called window.close() (a sign-in popup the agent had switched
+        to, say) left session.page pointing at a closed page: every later action
+        failed and the session read as interrupted while its other tabs were fine.
+        """
+        if session.page is not page:
+            return
+        context = getattr(session, "context", None)
+        remaining = [p for p in getattr(context, "pages", []) if p is not page and not p.is_closed()]
+        if remaining:
+            session.page = remaining[-1]
 
     @staticmethod
     def _bounded_append(items: list[Any], value: Any, limit: int = 50) -> None:
