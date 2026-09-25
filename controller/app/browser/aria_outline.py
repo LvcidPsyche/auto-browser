@@ -110,16 +110,29 @@ def outline_from_aria_snapshot(snapshot: str, *, limit: int = ACCESSIBILITY_NODE
         indent = len(match["indent"])
         while ancestors and ancestors[-1][0] >= indent:
             ancestors.pop()
-        node = _parse_entry(match["body"])
+        body = match["body"]
+        # A large page's snapshot runs to tens of thousands of lines, and past the
+        # node limit only the role count and the focused node are still wanted.
+        # Build the full node (decoded name, states) only for a line that can
+        # still become one of those; for the rest the role and whether it has a
+        # name are enough.
+        if len(nodes) < limit or (focused is None and "[active]" in body):
+            node = _parse_entry(body)
+            role = node["role"] if node is not None else None
+            has_name = node is not None and bool(node.get("name"))
+        else:
+            node = None
+            role, has_name = _entry_role(body)
         kept = False
-        if node is not None:
-            role = node["role"]
+        if role is not None:
             if role not in _UNCOUNTED_ROLES:
                 role_counts[role] = role_counts.get(role, 0) + 1
-            kept = role not in _SKIPPED_ROLES and (bool(node.get("name")) or role in _STRUCTURAL_ROLES)
-        if kept:
-            node["depth"] = sum(1 for _, ancestor_kept in ancestors if ancestor_kept)
-            if len(nodes) < limit:
+            kept = role not in _SKIPPED_ROLES and (has_name or role in _STRUCTURAL_ROLES)
+        if kept and node is not None:
+            appended = len(nodes) < limit
+            if appended or (node.get("focused") and focused is None):
+                node["depth"] = sum(1 for _, ancestor_kept in ancestors if ancestor_kept)
+            if appended:
                 nodes.append(node)
             if node.get("focused") and focused is None:
                 focused = node
@@ -135,13 +148,30 @@ def outline_from_aria_snapshot(snapshot: str, *, limit: int = ACCESSIBILITY_NODE
     }
 
 
-def _parse_entry(body: str) -> dict[str, Any] | None:
+def _match_entry(body: str) -> re.Match[str] | None:
     entry = _entry_key(body)
     if entry is None or entry.startswith("/"):
         return None  # a property such as /url or /placeholder
     match = _ENTRY.match(entry)
     if match is None or match["role"] == "text":
         return None  # a run of text, or a line this parser does not know
+    return match
+
+
+def _entry_role(body: str) -> tuple[str | None, bool]:
+    """The role of an element line and whether it has a non-empty name, without
+    building its node. An escape sequence decodes to at least one character, so
+    the raw name is empty exactly when the decoded one is."""
+    match = _match_entry(body)
+    if match is None:
+        return None, False
+    return match["role"], bool(match["name"])
+
+
+def _parse_entry(body: str) -> dict[str, Any] | None:
+    match = _match_entry(body)
+    if match is None:
+        return None
     node: dict[str, Any] = {"role": match["role"]}
     if match["name"] is not None:
         try:

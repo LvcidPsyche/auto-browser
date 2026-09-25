@@ -52,6 +52,8 @@ services:
         # The codex/claude/gemini CLIs (and Node.js, ~750 MB) are only needed for
         # *_AUTH_MODE=cli. Set INSTALL_AGENT_CLIS=true in .env to build them in.
         INSTALL_AGENT_CLIS: ${INSTALL_AGENT_CLIS:-false}
+        # The test tooling (pytest, ruff, pip-audit). `make test` turns it on.
+        INSTALL_DEV_DEPS: ${INSTALL_DEV_DEPS:-false}
     # Without this a controller OOM — a real risk on small hosts, where a
     # leaked browser container plus Chromium is enough — left the container
     # stopped forever. depends_on only gates startup ordering; nothing

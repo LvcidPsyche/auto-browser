@@ -65,6 +65,16 @@ class AuditStoreBackend(Protocol):
     async def append_event(self, event: AuditEvent) -> None: ...
 
 
+def _verbatim_in_json(value: str) -> bool:
+    """Whether ``value`` appears unchanged inside its JSON string encoding.
+
+    True for plain ASCII (ids, event types): nothing in it is escaped, so a line
+    that lacks the value as a substring cannot hold it in any field. Anything
+    else skips the raw-line shortcut rather than risk dropping a match.
+    """
+    return value.isascii() and value.isprintable() and '"' not in value and "\\" not in value
+
+
 class FileAuditStore:
     def __init__(self, root: str | Path, *, max_events: int, trim_interval: int = 500):
         self.root = Path(root)
@@ -111,39 +121,46 @@ class FileAuditStore:
         event_type: str | None,
         operator_id: str | None,
     ) -> list[AuditEvent]:
-        if not self.events_path.exists():
+        if limit <= 0 or not self.events_path.exists():
             return []
+        # Newest first, stopping at `limit`. Validating every line of a file that
+        # holds up to AUDIT_MAX_EVENTS (10,000) events took ~65 ms to return the
+        # latest 100. A filter value is also looked for in the raw line before the
+        # line is validated, which drops most non-matching lines unparsed.
+        needles = [value for value in (session_id, event_type, operator_id) if value and _verbatim_in_json(value)]
+        with self.events_path.open(encoding="utf-8") as fh:
+            lines = fh.readlines()
         events: list[AuditEvent] = []
         malformed = 0
-        with self.events_path.open(encoding="utf-8") as fh:
-            for raw in fh:
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    event = AuditEvent.model_validate_json(raw)
-                except Exception:
-                    # One torn line — a kill mid-append leaves a partial record —
-                    # used to raise here, so listing 500s'd permanently and
-                    # _trim_sync could never age the bad line out. Skip and count
-                    # instead, matching AgentJobStore._list_sync.
-                    malformed += 1
-                    continue
-                if session_id and event.session_id != session_id:
-                    continue
-                if event_type and event.event_type != event_type:
-                    continue
-                if operator_id and event.operator.id != operator_id:
-                    continue
-                events.append(event)
+        for raw in reversed(lines):
+            raw = raw.strip()
+            if not raw or any(needle not in raw for needle in needles):
+                continue
+            try:
+                event = AuditEvent.model_validate_json(raw)
+            except Exception:
+                # One torn line — a kill mid-append leaves a partial record —
+                # used to raise here, so listing 500s'd permanently and
+                # _trim_sync could never age the bad line out. Skip and count
+                # instead, matching AgentJobStore._list_sync.
+                malformed += 1
+                continue
+            if session_id and event.session_id != session_id:
+                continue
+            if event_type and event.event_type != event_type:
+                continue
+            if operator_id and event.operator.id != operator_id:
+                continue
+            events.append(event)
+            if len(events) >= limit:
+                break
         if malformed:
             logger.warning(
                 "skipped %d malformed line(s) in %s while listing audit events",
                 malformed,
                 self.events_path,
             )
-        events.reverse()
-        return events[:limit]
+        return events
 
     def _append_locked(self, text: str) -> None:
         with self._file_lock:

@@ -9,12 +9,12 @@ class BotChallengeServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_detects_bot_challenge_from_page_text(self) -> None:
         page = SimpleNamespace(
             url="https://example.com/login",
-            title=AsyncMock(return_value="Security Check"),
             evaluate=AsyncMock(
-                side_effect=[
-                    "Please verify you are human before continuing",
-                    ["https://challenge.cloudflare.com/frame"],
-                ]
+                return_value={
+                    "title": "Security Check",
+                    "text": "Please verify you are human before continuing",
+                    "iframes": ["https://challenge.cloudflare.com/frame"],
+                }
             ),
         )
         session = SimpleNamespace(page=page)
@@ -29,9 +29,28 @@ class BotChallengeServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_returns_none_for_normal_page(self) -> None:
         page = SimpleNamespace(
             url="https://example.com/dashboard",
-            title=AsyncMock(return_value="Dashboard"),
-            evaluate=AsyncMock(side_effect=["Welcome back", []]),
+            evaluate=AsyncMock(return_value={"title": "Dashboard", "text": "Welcome back", "iframes": []}),
         )
         session = SimpleNamespace(page=page)
 
         self.assertIsNone(await BrowserBotChallengeService().check(session))
+
+    async def test_detects_a_challenge_iframe_alone(self) -> None:
+        page = SimpleNamespace(
+            url="https://example.com/",
+            evaluate=AsyncMock(
+                return_value={"title": "Home", "text": "", "iframes": ["https://www.google.com/recaptcha/api2/anchor"]}
+            ),
+        )
+        result = await BrowserBotChallengeService().check(SimpleNamespace(page=page))
+        assert result is not None
+        self.assertEqual(result["signal"], "captcha")
+
+    async def test_an_unreadable_page_still_checks_the_url(self) -> None:
+        page = SimpleNamespace(
+            url="https://challenges.cloudflare.com/x",
+            evaluate=AsyncMock(side_effect=RuntimeError("navigating")),
+        )
+        result = await BrowserBotChallengeService().check(SimpleNamespace(page=page))
+        assert result is not None
+        self.assertEqual(result["signal"], "challenges.cloudflare.com")
