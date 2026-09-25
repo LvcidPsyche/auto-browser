@@ -62,7 +62,13 @@ def main() -> int:
         _run([PYTHON, "scripts/check_open_advisories.py"])
 
     print("Running lint...")
-    _run([PYTHON, "-m", "ruff", "check", "controller/app", "controller/tests", "scripts", "--select", "E9,F,I"])
+    # Repo-wide, like `make lint`: a path list here skipped client/ and
+    # integrations/, two of the three packages a release publishes.
+    _run([PYTHON, "-m", "ruff", "check", ".", "--select", "E9,F,I"])
+
+    print("Checking version, Playwright-pin and bridge parity...")
+    for check in ("check_version_parity.py", "check_playwright_pins.py", "check_bridge_parity.py"):
+        _run([PYTHON, f"scripts/{check}"])
 
     print("Running deterministic agent eval scoring...")
     _run([PYTHON, "scripts/agent_eval.py", "--mock"])

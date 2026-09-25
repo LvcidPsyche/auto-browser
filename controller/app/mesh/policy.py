@@ -235,7 +235,7 @@ class PolicyEvaluator:
         Find the first grant that matches the requested capability.
 
         Supports exact matches and wildcard suffix:
-          "tool:browser.click"   matches "tool:browser.click"
+          "tool:browser.observe" matches "tool:browser.observe"
           "tool:*"               matches any tool capability
           "session:*"            matches any session capability
         """

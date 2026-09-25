@@ -19,10 +19,11 @@ def _make_client(
     *,
     token: str | None = None,
     base_url: str = "http://auto-browser.test",
+    **kwargs: Any,
 ) -> tuple[AutoBrowserClient, list[httpx.Request]]:
     """Client wired to a MockTransport, mirroring how _client() builds the real one."""
     requests: list[httpx.Request] = []
-    client = AutoBrowserClient(base_url, token=token)
+    client = AutoBrowserClient(base_url, token=token, **kwargs)
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
@@ -50,6 +51,20 @@ class ClientConstructionTests(unittest.TestCase):
         client, requests = _make_client(_ok)
         client.health()
         self.assertNotIn("Authorization", requests[0].headers)
+
+    def test_operator_id_and_extra_headers_are_sent(self) -> None:
+        # A controller with REQUIRE_OPERATOR_ID=true rejects requests without
+        # an operator id; the SDK had no way to send one.
+        client, requests = _make_client(_ok, token="sekret", operator_id="alice", headers={"X-Operator-Name": "Alice"})
+        client.health()
+        self.assertEqual(requests[0].headers["X-Operator-Id"], "alice")
+        self.assertEqual(requests[0].headers["X-Operator-Name"], "Alice")
+        self.assertEqual(requests[0].headers["Authorization"], "Bearer sekret")
+
+    def test_error_class_is_exported_from_the_package(self) -> None:
+        import auto_browser_client
+
+        self.assertIs(auto_browser_client.AutoBrowserError, AutoBrowserError)
 
     def test_trailing_slash_stripped_from_base_url(self) -> None:
         client = AutoBrowserClient("http://auto-browser.test/")

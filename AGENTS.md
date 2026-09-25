@@ -7,7 +7,7 @@ For coding agents working in this repo. Humans: start with `README.md` and `CONT
 ```
 make help            # every target
 make lint            # ruff across the repo (config: ruff.toml)
-make test-local      # controller suite on the host (Python 3.10+ with ./controller[dev])
+make test-local      # controller suite on the host (Python 3.11+ with ./controller[dev])
 make test            # same suite in Docker
 make release-audit   # launch-prep audit; run before any release PR
 ```

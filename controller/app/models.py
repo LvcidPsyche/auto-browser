@@ -84,23 +84,57 @@ class _WithApproval(StrictInputModel):
 
 
 class CreateSessionRequest(StrictInputModel):
-    name: str | None = Field(default=None, min_length=1, max_length=200)
-    start_url: str | None = Field(default=None, min_length=1, max_length=2000)
-    storage_state_path: str | None = Field(default=None, min_length=1, max_length=500)
-    auth_profile: str | None = Field(default=None, min_length=1, max_length=120)
+    name: str | None = Field(default=None, min_length=1, max_length=200, description="Label shown in session lists.")
+    start_url: str | None = Field(
+        default=None, min_length=1, max_length=2000, description="Page to open once the session starts."
+    )
+    storage_state_path: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=500,
+        description="Playwright storage-state file, relative to the auth directory. Not with auth_profile.",
+    )
+    auth_profile: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=120,
+        description="Start signed in from a saved auth profile (browser.list_auth_profiles).",
+    )
     memory_profile: str | None = Field(
         default=None,
         min_length=1,
         max_length=120,
         description="Load a named memory profile into this session.",
     )
-    proxy_persona: str | None = Field(default=None, min_length=1, max_length=200)
-    proxy_server: str | None = Field(default=None, min_length=1, max_length=500)
-    proxy_username: str | None = Field(default=None, max_length=200)
-    proxy_password: str | None = Field(default=None, max_length=500, repr=False)
-    user_agent: str | None = Field(default=None, min_length=1, max_length=2000)
-    protection_mode: ProtectionMode | None = None
-    totp_secret: str | None = Field(default=None, max_length=500, repr=False)
+    proxy_persona: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description="Named proxy configuration to route through. Not with proxy_server.",
+    )
+    proxy_server: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=500,
+        description="Proxy URL such as http://host:port. Omitted: the deployment default, if any.",
+    )
+    proxy_username: str | None = Field(default=None, max_length=200, description="Username for proxy_server.")
+    proxy_password: str | None = Field(
+        default=None, max_length=500, repr=False, description="Password for proxy_server."
+    )
+    user_agent: str | None = Field(
+        default=None, min_length=1, max_length=2000, description="User-Agent header to send instead of the default."
+    )
+    protection_mode: ProtectionMode | None = Field(
+        default=None,
+        description="Witness evidence mode; 'confidential' is stricter. Omitted: the deployment default.",
+    )
+    totp_secret: str | None = Field(
+        default=None,
+        max_length=500,
+        repr=False,
+        description="Base32 TOTP secret for this session's one-time codes, typed only on totp_hosts.",
+    )
     totp_hosts: list[Annotated[str, Field(min_length=1, max_length=260)]] | None = Field(
         default=None,
         max_length=20,
@@ -269,18 +303,6 @@ class OpenTabRequest(StrictInputModel):
         if value is None:
             return None
         return validate_url(value, field_name="url", allowed_schemes=HTTP_URL_SCHEMES)
-
-
-class SessionEnvelope(BaseModel):
-    session: dict[str, Any]
-
-
-class ActionEnvelope(BaseModel):
-    action: str
-    session: dict[str, Any]
-    before: dict[str, Any]
-    after: dict[str, Any]
-    target: dict[str, Any]
 
 
 PerceptionPreset = Literal["text", "fast", "normal", "rich"]
@@ -476,14 +498,6 @@ class ProviderInfo(BaseModel):
     auth_mode: str = "api"
     detail: str | None = None
     login_command: str | None = None
-
-
-class ProviderDecisionEnvelope(BaseModel):
-    provider: ProviderName
-    model: str
-    decision: BrowserActionDecision
-    usage: dict[str, Any] | None = None
-    raw_text: str | None = None
 
 
 class AgentStepResult(BaseModel):

@@ -19,6 +19,7 @@ Usage (async):
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Generator
 
 import httpx
@@ -43,11 +44,23 @@ class AutoBrowserClient:
         base_url: str = "http://localhost:8000",
         token: str | None = None,
         timeout: float = 60.0,
+        *,
+        operator_id: str | None = None,
+        headers: Mapping[str, str] | None = None,
     ):
+        """
+        token:       the controller's API_BEARER_TOKEN (or a named credential).
+        operator_id: sent as X-Operator-Id. A controller with REQUIRE_OPERATOR_ID=true
+                     needs it unless the token is a named credential. For a renamed
+                     OPERATOR_ID_HEADER, pass the header in ``headers`` instead.
+        headers:     extra headers sent with every request.
+        """
         self.base_url = base_url.rstrip("/")
-        self._headers: dict[str, str] = {}
+        self._headers: dict[str, str] = dict(headers or {})
         if token:
             self._headers["Authorization"] = f"Bearer {token}"
+        if operator_id:
+            self._headers["X-Operator-Id"] = operator_id
         self._sync_client: httpx.Client | None = None
         self._async_client: httpx.AsyncClient | None = None
         self._timeout = timeout

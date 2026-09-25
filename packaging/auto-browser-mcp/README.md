@@ -19,6 +19,6 @@ With a local Auto Browser stack running (`docker compose up` in the repo):
 }
 ```
 
-Pass `--base-url` / `--bearer-token` (or set `AUTO_BROWSER_BASE_URL` / `AUTO_BROWSER_BEARER_TOKEN`) for non-default deployments.
+Pass `--base-url` / `--bearer-token` / `--operator-id` (or set `AUTO_BROWSER_BASE_URL` / `AUTO_BROWSER_BEARER_TOKEN` / `AUTO_BROWSER_OPERATOR_ID`) for non-default deployments.
 
 See the [Auto Browser repository](https://github.com/LvcidPsyche/auto-browser) for the full server, docs, and examples.

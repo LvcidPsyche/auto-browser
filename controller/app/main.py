@@ -93,18 +93,22 @@ async def lifespan(application: FastAPI):
 
 
 app = create_controller_app(services=services, version=_VERSION, lifespan=lifespan)
-app.include_router(create_mcp_router(mcp_transport=mcp_transport, tool_gateway=tool_gateway))
-app.include_router(create_agent_router(manager=manager, orchestrator=orchestrator, job_queue=job_queue))
-app.include_router(create_auth_profiles_router(manager=manager, settings=settings))
-app.include_router(create_session_diagnostics_router(manager=manager, settings=settings))
-app.include_router(create_sessions_router(manager=manager))
-app.include_router(create_share_router(manager=manager, share_manager=share_manager, settings=settings))
+# Tags group the endpoints on /docs; untagged, all ~90 landed in one "default" list.
+app.include_router(create_mcp_router(mcp_transport=mcp_transport, tool_gateway=tool_gateway), tags=["mcp"])
+app.include_router(create_agent_router(manager=manager, orchestrator=orchestrator, job_queue=job_queue), tags=["agent"])
+app.include_router(create_auth_profiles_router(manager=manager, settings=settings), tags=["auth profiles"])
+app.include_router(create_session_diagnostics_router(manager=manager, settings=settings), tags=["diagnostics"])
+app.include_router(create_sessions_router(manager=manager), tags=["sessions"])
+app.include_router(
+    create_share_router(manager=manager, share_manager=share_manager, settings=settings), tags=["sharing"]
+)
 app.include_router(
     create_operations_router(
         manager=manager,
         proxy_store=proxy_store,
         cron_service=cron_service,
-    )
+    ),
+    tags=["operations"],
 )
 install_controller_http_middleware(app, settings=settings, rate_limiter=rate_limiter, metrics=metrics)
 

@@ -1,5 +1,6 @@
 """
-startup.extensions — Initialize all 1.0 subsystems at app startup.
+startup.extensions — Initialize the optional subsystems (mesh, harness, network
+inspector, workflows, curator) at app startup.
 
 Call register_extensions(app) from main.py after app creation.
 All clients are initialized from environment variables.
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 def register_extensions(app) -> None:
     """
-    Wire all auto-browser 1.0 subsystems into app.state.
+    Wire the optional subsystems into app.state.
 
     Subsystems initialized:
         mesh_identity       — NodeIdentity
@@ -26,7 +27,7 @@ def register_extensions(app) -> None:
         delegation_manager  — DelegationManager
         network_inspectors  — dict[session_id, NetworkInspector]
         cdp_sessions        — dict[session_id, CDPPassthrough]
-        workflow_engine     — WorkflowEngine (with all action handlers)
+        workflow_engine     — WorkflowEngine (no step actions are registered at startup)
     """
     _init_mesh(app)
     _init_harness(app)
@@ -35,7 +36,7 @@ def register_extensions(app) -> None:
     _disable_extracted_social_state(app)
     _init_curator(app)
     _register_session_hooks(app)
-    logger.info("startup.extensions: all 1.0 subsystems registered")
+    logger.info("startup.extensions: optional subsystems registered")
 
 
 # ---------------------------------------------------------------------------

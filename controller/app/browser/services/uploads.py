@@ -112,12 +112,6 @@ class BrowserUploadService:
             raise FileNotFoundError(_missing_upload(file_path))
         return Path(candidate_str)
 
-    @staticmethod
-    def path_is_contained_by(candidate: Path, root: Path) -> bool:
-        root_str = os.path.normcase(os.path.realpath(os.fspath(root)))
-        candidate_str = os.path.normcase(os.path.realpath(os.fspath(candidate)))
-        root_prefix = root_str if root_str.endswith(os.sep) else root_str + os.sep
-        return candidate_str == root_str or candidate_str.startswith(root_prefix)
 
 
 def _missing_upload(file_path: str) -> str:

@@ -182,6 +182,17 @@ class HttpMcpClientTests(unittest.TestCase):
         self.assertEqual(response.headers, {"mcp-session-id": "s-9"})
         self.assertEqual(response.body, {"ok": True})
 
+    def test_operator_id_is_sent_on_post_and_delete(self) -> None:
+        # A controller with REQUIRE_OPERATOR_ID=true rejects every request
+        # without it, and a stdio client like Claude Desktop cannot add headers.
+        captured: dict = {}
+        client = HttpMcpClient(base_url="http://ctrl.test/mcp", operator_id="alice")
+        with patch("auto_browser_client.mcp_bridge.urlopen", self._fake_urlopen(captured)):
+            client.post_json({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+            self.assertEqual(captured["request"].get_header("X-operator-id"), "alice")
+            client.delete_session(session_id="s-1")
+            self.assertEqual(captured["request"].get_header("X-operator-id"), "alice")
+
     def test_http_error_is_returned_as_response_not_raised(self) -> None:
         headers = email.message.Message()
         headers["Content-Type"] = "application/json"
@@ -214,12 +225,14 @@ class ArgParserEnvTests(unittest.TestCase):
             "AUTO_BROWSER_BASE_URL": "http://remote:9000/mcp",
             "AUTO_BROWSER_BEARER_TOKEN": "tok",
             "AUTO_BROWSER_HTTP_TIMEOUT_SECONDS": "12.5",
+            "AUTO_BROWSER_OPERATOR_ID": "alice",
         }
         with patch.dict(os.environ, env):
             args = build_arg_parser().parse_args([])
         self.assertEqual(args.base_url, "http://remote:9000/mcp")
         self.assertEqual(args.bearer_token, "tok")
         self.assertEqual(args.timeout_seconds, 12.5)
+        self.assertEqual(args.operator_id, "alice")
 
     def test_cli_flags_override_env(self) -> None:
         with patch.dict(os.environ, {"AUTO_BROWSER_BASE_URL": "http://remote:9000/mcp"}):

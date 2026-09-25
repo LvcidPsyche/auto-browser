@@ -137,6 +137,14 @@ class AutoBrowserToolAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route.calls[0].request.headers["Authorization"], "Bearer s3cret")
 
     @respx.mock
+    async def test_arun_sends_operator_id_when_configured(self) -> None:
+        route = respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json=_content("ok")))
+
+        await AutoBrowserTool(base_url=BASE_URL, operator_id="alice")._arun("browser.observe", {})
+
+        self.assertEqual(route.calls[0].request.headers["X-Operator-Id"], "alice")
+
+    @respx.mock
     async def test_arun_omits_authorization_without_a_token(self) -> None:
         route = respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json=_content("ok")))
 
@@ -178,6 +186,10 @@ class AutoBrowserNodeTests(unittest.TestCase):
             AutoBrowserNode(base_url=BASE_URL, bearer_token="s3cret")._headers()["Authorization"],
             "Bearer s3cret",
         )
+
+    def test_headers_include_operator_id_when_set(self) -> None:
+        self.assertNotIn("X-Operator-Id", AutoBrowserNode(base_url=BASE_URL)._headers())
+        self.assertEqual(AutoBrowserNode(base_url=BASE_URL, operator_id="alice")._headers()["X-Operator-Id"], "alice")
 
 
 class AutoBrowserNodeAsyncTests(unittest.IsolatedAsyncioTestCase):
