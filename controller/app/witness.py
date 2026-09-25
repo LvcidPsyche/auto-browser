@@ -325,6 +325,7 @@ class WitnessRecorder:
     def _append_locked(self, path: Path, item: WitnessReceipt) -> WitnessReceipt:
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._thread_lock, open(path, "a+", encoding="utf-8") as handle, exclusive_lock(handle):
+            self._set_aside_torn_tail(path, handle)
             last_line = read_tail_line(handle)
             item.chain_prev_hash = WitnessReceipt.model_validate_json(last_line).chain_hash if last_line else None
             previous_count = self._previous_count(path, handle, item.chain_prev_hash)
@@ -346,6 +347,45 @@ class WitnessRecorder:
             os.fsync(handle.fileno())
             write_anchor(path, head_hash=item.chain_hash, receipt_count=previous_count + 1)
         return item
+
+    @staticmethod
+    def _set_aside_torn_tail(path: Path, handle: Any) -> None:
+        """Move an unfinished last record out of the chain before appending.
+
+        Every receipt is written as one line ending in a newline and fsynced, so
+        bytes after the last newline are an append that never completed (a crash
+        or a full disk mid-write). Parsing that fragment as the chain head made
+        every later append for the scope raise, so the session could record
+        nothing more. The fragment was never a receipt: nothing chained to it
+        and the anchor never named it. It is kept beside the chain for
+        inspection, not deleted, and the chain continues from the last complete
+        receipt. A complete last line that does not parse is not a torn write,
+        and still fails closed.
+        """
+        handle.flush()
+        raw = handle.buffer
+        raw.seek(0, os.SEEK_END)
+        size = raw.tell()
+        if size == 0:
+            return
+        raw.seek(size - 1)
+        if raw.read(1) == b"\n":
+            return
+        raw.seek(0)
+        data = raw.read()
+        keep = data.rfind(b"\n") + 1
+        torn = path.with_name(f"{path.name}.torn-{uuid4().hex[:12]}")
+        torn.write_bytes(data[keep:])
+        raw.truncate(keep)
+        raw.flush()
+        os.fsync(raw.fileno())
+        handle.seek(0, os.SEEK_END)
+        logger.error(
+            "witness: chain %s ended in an incomplete record (%d bytes); moved it to %s and continued",
+            path,
+            size - keep,
+            torn.name,
+        )
 
     @staticmethod
     def _previous_count(path: Path, handle: Any, previous_hash: str | None) -> int:
