@@ -199,6 +199,8 @@ class ApprovalStore:
         approval_ttl_minutes: int = 15,
     ):
         self._lock = asyncio.Lock()
+        # Approvals an action is running under right now; see claim_execution.
+        self._executing: set[str] = set()
         self.file_store = FileApprovalStore(root)
         self.sqlite_store = SQLiteApprovalStore(db_path) if db_path else None
         self._primary: ApprovalStoreBackend = self.file_store
@@ -263,6 +265,27 @@ class ApprovalStore:
     async def reject(self, approval_id: str, comment: str | None = None) -> ApprovalRecord:
         return await self._transition(approval_id, status="rejected", comment=comment)
 
+    async def claim_execution(self, approval_id: str) -> None:
+        """Reserve an approved approval for one execution, or refuse.
+
+        An approval authorizes one action, but callers check it with
+        require_approved, run the action, and only then mark_executed. Two
+        requests carrying the same approval id (a client retrying a call that
+        timed out while the first was still running) both passed the check and
+        both ran the action. Callers claim after the check and release in a
+        finally; mark_executed releases too.
+        """
+        async with self._lock:
+            approval = await self.get(approval_id)
+            if approval.status != "approved":
+                raise PermissionError(f"approval {approval_id} is not approved")
+            if approval_id in self._executing:
+                raise PermissionError(f"approval {approval_id} is already being executed")
+            self._executing.add(approval_id)
+
+    def release_execution(self, approval_id: str) -> None:
+        self._executing.discard(approval_id)
+
     async def mark_executed(self, approval_id: str) -> ApprovalRecord:
         async with self._lock:
             approval = await self.get(approval_id)
@@ -274,6 +297,7 @@ class ApprovalStore:
             approval.updated_at = now
             approval.executed_at = now
             await self._persist(approval)
+            self._executing.discard(approval_id)
             return approval
 
     async def require_approved(

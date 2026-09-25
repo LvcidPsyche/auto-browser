@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -114,6 +115,65 @@ class ApprovalQueueTests(unittest.IsolatedAsyncioTestCase):
             x=None,
             y=None,
         )
+
+    async def test_one_approval_runs_its_action_once_under_concurrent_executes(self) -> None:
+        # A client retrying an execute that timed out while the first was still
+        # running used to pass the approval check twice and pay twice.
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_click(*_args, **_kwargs):
+            started.set()
+            await release.wait()
+            return {"action": "click"}
+
+        self.manager.click = AsyncMock(side_effect=slow_click)  # type: ignore[method-assign]
+        decision = BrowserActionDecision(
+            action="click",
+            reason="This button submits a payment",
+            element_id="op-pay",
+            risk_category="payment",
+        )
+        with self.assertRaises(ApprovalRequiredError) as ctx:
+            await self.manager.execute_decision(self.session.id, decision)
+        approval_id = ctx.exception.approval.id
+        await self.manager.approve(approval_id, comment="approved")
+
+        first = asyncio.create_task(self.manager.execute_decision(self.session.id, decision, approval_id=approval_id))
+        await started.wait()
+        try:
+            with self.assertRaises(PermissionError):
+                await asyncio.wait_for(
+                    self.manager.execute_decision(self.session.id, decision, approval_id=approval_id),
+                    timeout=5,
+                )
+        finally:
+            release.set()
+        await first
+
+        self.manager.click.assert_awaited_once()
+        with self.assertRaises(PermissionError):
+            await self.manager.execute_decision(self.session.id, decision, approval_id=approval_id)
+
+    async def test_failed_action_releases_its_approval_for_a_retry(self) -> None:
+        self.manager.click = AsyncMock(side_effect=[RuntimeError("detached"), {"action": "click"}])  # type: ignore[method-assign]
+        decision = BrowserActionDecision(
+            action="click",
+            reason="This button submits a payment",
+            element_id="op-pay",
+            risk_category="payment",
+        )
+        with self.assertRaises(ApprovalRequiredError) as ctx:
+            await self.manager.execute_decision(self.session.id, decision)
+        approval_id = ctx.exception.approval.id
+        await self.manager.approve(approval_id, comment="approved")
+
+        with self.assertRaises(RuntimeError):
+            await self.manager.execute_decision(self.session.id, decision, approval_id=approval_id)
+        await self.manager.execute_decision(self.session.id, decision, approval_id=approval_id)
+
+        stored = await self.manager.get_approval(approval_id)
+        self.assertEqual(stored["status"], "executed")
 
     async def test_governed_write_decision_requires_write_approval(self) -> None:
         decision = BrowserActionDecision(
