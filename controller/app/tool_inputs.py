@@ -103,9 +103,16 @@ class EmptyInput(StrictInputModel):
 
 class HarnessStartConvergenceInput(StrictInputModel):
     contract: TaskContract
-    session_id: str | None = Field(default=None, min_length=1, max_length=120)
+    session_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=120,
+        description="Live session to run in; needs workflow_profile=governed.",
+    )
     provider: ProviderName = "openai"
-    mock_final_observation: dict[str, Any] | None = None
+    mock_final_observation: dict[str, Any] | None = Field(
+        default=None, description="Fixed final page (url, text) for a deterministic run with no browser."
+    )
     max_attempts: int | None = Field(default=None, ge=1, le=20)
 
 
@@ -120,7 +127,7 @@ class HarnessGetStatusInput(StrictInputModel):
 
 
 class HarnessGetTraceInput(HarnessGetStatusInput):
-    attempt_index: int | None = Field(default=None, ge=1, le=20)
+    attempt_index: int | None = Field(default=None, ge=1, le=20, description="1-based attempt. Omitted: the latest.")
 
 
 class HarnessListRunsInput(StrictInputModel):
@@ -213,7 +220,7 @@ class ExecuteActionInput(SessionIdInput):
 
 
 class SaveAuthStateInput(SessionIdInput):
-    path: str = Field(min_length=1, max_length=500)
+    path: str = Field(min_length=1, max_length=500, description="File name, relative to the session's auth directory.")
 
 
 class SaveAuthProfileInput(SessionIdInput):
@@ -321,7 +328,10 @@ class GetRemoteAccessInput(StrictInputModel):
 
 
 class ReadinessCheckInput(StrictInputModel):
-    mode: Literal["normal", "confidential"] = "normal"
+    mode: Literal["normal", "confidential"] = Field(
+        default="normal",
+        description="confidential applies the stricter bar: shared isolation fails and ALLOWED_HOSTS=* warns.",
+    )
 
 
 class AgentJobIdInput(StrictInputModel):
@@ -329,7 +339,9 @@ class AgentJobIdInput(StrictInputModel):
 
 
 class ResumeAgentJobInput(AgentJobIdInput):
-    max_steps: int | None = Field(default=None, ge=1, le=20)
+    max_steps: int | None = Field(
+        default=None, ge=1, le=20, description="Steps to allow from here. Omitted: what the job had left."
+    )
 
 
 class QueueAgentStepInput(SessionIdInput):
@@ -342,8 +354,8 @@ class QueueAgentRunInput(SessionIdInput):
 
 class GetNetworkLogInput(SessionIdInput):
     limit: int = Field(default=100, ge=1, le=1000)
-    method: str | None = Field(default=None, max_length=10)
-    url_contains: str | None = Field(default=None, max_length=500)
+    method: str | None = Field(default=None, max_length=10, description="Only this HTTP method, such as GET.")
+    url_contains: str | None = Field(default=None, max_length=500, description="Only URLs containing this text.")
 
     @field_validator("method")
     @classmethod
@@ -396,7 +408,9 @@ class WaitForSelectorInput(SessionIdInput):
 
 
 class GetCookiesInput(SessionIdInput):
-    urls: list[str] | None = Field(default=None)
+    urls: list[str] | None = Field(
+        default=None, description="Only cookies that apply to these URLs. Omitted: all cookies."
+    )
 
     @field_validator("urls")
     @classmethod
@@ -412,7 +426,11 @@ class GetCookiesInput(SessionIdInput):
 
 
 class SetCookiesInput(SessionIdInput):
-    cookies: list[dict[str, Any]] = Field(min_length=1, max_length=100)
+    cookies: list[dict[str, Any]] = Field(
+        min_length=1,
+        max_length=100,
+        description="Playwright cookie objects: name, value, and either url or domain plus path.",
+    )
 
     @model_validator(mode="after")
     def validate_cookies(self) -> "SetCookiesInput":
@@ -440,7 +458,7 @@ class SetCookiesInput(SessionIdInput):
 
 class GetStorageInput(SessionIdInput):
     storage_type: Literal["local", "session"] = "local"
-    key: str | None = Field(default=None, max_length=500)
+    key: str | None = Field(default=None, max_length=500, description="One key to read. Omitted: every key.")
 
 
 class SetStorageInput(SessionIdInput):
@@ -494,10 +512,14 @@ class FindElementsInput(SessionIdInput):
 
 class DragDropInput(SessionIdInput):
     source_selector: str | None = Field(default=None, max_length=2000)
-    source_x: float | None = None
+    source_x: float | None = Field(
+        default=None, description="Viewport x to drag from, with source_y. Not with source_selector."
+    )
     source_y: float | None = None
     target_selector: str | None = Field(default=None, max_length=2000)
-    target_x: float | None = None
+    target_x: float | None = Field(
+        default=None, description="Viewport x to drop at, with target_y. Not with target_selector."
+    )
     target_y: float | None = None
 
     @model_validator(mode="after")
@@ -516,7 +538,9 @@ class ExportScriptInput(SessionIdInput):
 
 
 class CdpAttachInput(StrictInputModel):
-    cdp_url: str = Field(min_length=1, max_length=500)
+    cdp_url: str = Field(
+        min_length=1, max_length=500, description="DevTools endpoint of a running Chrome, such as http://host:9222."
+    )
 
     @field_validator("cdp_url")
     @classmethod
@@ -548,7 +572,7 @@ class VisionFindInput(SessionIdInput):
 
 
 class ShareSessionInput(SessionIdInput):
-    ttl_minutes: int = Field(default=60, ge=1, le=1440)
+    ttl_minutes: int = Field(default=60, ge=1, le=1440, description="How long the share link works.")
 
 
 class ValidateShareTokenInput(StrictInputModel):
@@ -565,7 +589,7 @@ class ProxyPersonaNameInput(StrictInputModel):
 
 class CreateProxyPersonaInput(StrictInputModel):
     name: str = Field(min_length=1, max_length=200)
-    server: str = Field(min_length=1, max_length=500)
+    server: str = Field(min_length=1, max_length=500, description="Proxy URL such as http://host:port.")
     username: str | None = Field(default=None, max_length=200)
     password: str | None = Field(default=None, max_length=500, repr=False)
     description: str = Field(default="", max_length=500)
@@ -582,15 +606,21 @@ class CronJobIdInput(StrictInputModel):
 
 class CreateCronJobInput(StrictInputModel):
     name: str = Field(min_length=1, max_length=200)
-    goal: str = Field(min_length=1, max_length=5000)
+    goal: str = Field(min_length=1, max_length=5000, description="What the agent should do on each run.")
     provider: ProviderName = "openai"
-    schedule: str | None = Field(default=None, max_length=100)
-    start_url: str | None = Field(default=None, max_length=2000)
+    schedule: str | None = Field(
+        default=None,
+        max_length=100,
+        description='Cron expression such as "0 9 * * 1-5". Omitted: runs only on trigger.',
+    )
+    start_url: str | None = Field(default=None, max_length=2000, description="Page each run starts on.")
     auth_profile: str | None = Field(default=None, max_length=200)
     proxy_persona: str | None = Field(default=None, max_length=200)
-    max_steps: int = Field(default=20, ge=1, le=100)
+    max_steps: int = Field(default=20, ge=1, le=100, description="Most agent steps per run.")
     enabled: bool = True
-    webhook_enabled: bool = False
+    webhook_enabled: bool = Field(
+        default=False, description="Also issue a secret key so POST /crons/{id}/trigger can start a run."
+    )
 
     @field_validator("start_url")
     @classmethod
