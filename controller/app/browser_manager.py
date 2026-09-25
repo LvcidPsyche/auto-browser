@@ -120,6 +120,7 @@ class BrowserSession:
     tunnel_error: str | None = None
     mouse_position: tuple[float, float] | None = None
     totp_secret: str | None = None
+    totp_hosts: tuple[str, ...] = ()
     network_inspector: NetworkInspector | None = None
     # Headless/headed state — set to False to request headed mode on next fork
     headless: bool = True
@@ -314,6 +315,7 @@ class BrowserManager:
         user_agent: str | None = None,
         protection_mode: str | None = None,
         totp_secret: str | None = None,
+        totp_hosts: list[str] | None = None,
     ) -> dict[str, Any]:
         return await self.session_lifecycle.create(
             name=name,
@@ -328,6 +330,7 @@ class BrowserManager:
             user_agent=user_agent,
             protection_mode=protection_mode,
             totp_secret=totp_secret,
+            totp_hosts=totp_hosts,
         )
 
     async def get_session(self, session_id: str) -> BrowserSession:

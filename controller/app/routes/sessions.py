@@ -52,6 +52,7 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                 user_agent=payload.user_agent,
                 protection_mode=payload.protection_mode,
                 totp_secret=payload.totp_secret,
+                totp_hosts=payload.totp_hosts,
             )
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid request") from None

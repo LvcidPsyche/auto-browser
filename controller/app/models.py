@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
@@ -41,6 +42,41 @@ def validate_coordinate_pair(
         raise ValueError(f"{field_name} requires both x and y coordinates")
 
 
+_TOTP_HOST_PATTERN = re.compile(r"(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*")
+
+
+def resolve_totp_hosts(hosts: list[str] | None, start_url: str | None) -> list[str]:
+    """Where a session's one-time codes may be typed, normalized and checked.
+
+    The TOTP autofill types a live code into any visible "code" field after
+    every action, so without a bound a page the agent was sent to could read
+    it. Explicit hosts win; otherwise the start_url host is the one place the
+    caller has said the login happens. With neither there is no safe default.
+    """
+    if hosts:
+        normalized = [host.strip().lower().rstrip(".") for host in hosts]
+        for host in normalized:
+            if not _TOTP_HOST_PATTERN.fullmatch(host):
+                raise ValueError(f"totp_hosts entry {host!r} must be a host name, optionally prefixed with '*.'")
+        return normalized
+    start_host = (urlparse(start_url).hostname or "").lower().rstrip(".") if start_url else ""
+    if not start_host:
+        raise ValueError("totp_secret requires totp_hosts or a start_url, to bound where codes are typed")
+    return [start_host]
+
+
+def totp_host_allowed(host: str, patterns: list[str] | tuple[str, ...]) -> bool:
+    host = host.lower().rstrip(".")
+    for pattern in patterns:
+        if pattern.startswith("*."):
+            suffix = pattern[1:]
+            if host == pattern[2:] or host.endswith(suffix):
+                return True
+        elif host == pattern:
+            return True
+    return False
+
+
 class _WithApproval(StrictInputModel):
     """Mixin that adds an optional approval_id field to action request models."""
 
@@ -65,6 +101,14 @@ class CreateSessionRequest(StrictInputModel):
     user_agent: str | None = Field(default=None, min_length=1, max_length=2000)
     protection_mode: ProtectionMode | None = None
     totp_secret: str | None = Field(default=None, max_length=500, repr=False)
+    totp_hosts: list[Annotated[str, Field(min_length=1, max_length=260)]] | None = Field(
+        default=None,
+        max_length=20,
+        description=(
+            'Hosts where one-time codes from totp_secret may be typed ("*.example.com" also matches '
+            "subdomains). Defaults to the start_url host."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_auth_source(self) -> "CreateSessionRequest":
@@ -86,6 +130,10 @@ class CreateSessionRequest(StrictInputModel):
                 field_name="proxy_server",
                 allowed_schemes=PROXY_URL_SCHEMES,
             )
+        if self.totp_hosts is not None and not self.totp_secret:
+            raise ValueError("totp_hosts requires totp_secret")
+        if self.totp_secret:
+            self.totp_hosts = resolve_totp_hosts(self.totp_hosts, self.start_url)
         return self
 
 

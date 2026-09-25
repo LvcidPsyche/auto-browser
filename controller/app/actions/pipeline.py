@@ -99,10 +99,12 @@ class BrowserActionPipeline:
         if witness_state.outcome.should_block:
             raise PermissionError(witness_state.outcome.block_reason or "Witness policy blocked this action")
         await context.operation()
+        # Checked before the TOTP autofill, which types a live code into the
+        # page: a redirect to a disallowed host must not receive one first.
+        manager._assert_runtime_url_allowed(session.page.url)
         totp_result = await manager._maybe_handle_totp(session)
         if totp_result is not None:
             context.target.setdefault("totp", totp_result)
-        manager._assert_runtime_url_allowed(session.page.url)
         challenge = await manager._check_bot_challenge(session)
         if challenge is not None:
             await manager.request_human_takeover(session.id, reason=f"Bot challenge detected: {challenge['signal']}")
