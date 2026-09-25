@@ -1,5 +1,5 @@
 """
-routes.extensions — FastAPI route definitions for all 1.0 pillars.
+routes.extensions — FastAPI routes for the optional subsystems.
 
 Registers: /mesh, /network, /cdp, /workflow, /dashboard
 
@@ -34,10 +34,10 @@ __all__ = [
 
 
 def register_all_routers(app) -> None:
-    """Call from main.py startup to register all 1.0 routers."""
+    """Call from main.py startup to register the extension routers."""
     app.include_router(mesh_router)
     app.include_router(network_router)
     app.include_router(cdp_router)
     app.include_router(workflow_router)
     app.include_router(dashboard_router)
-    logger.info("routes.extensions: 1.0 routers registered")
+    logger.info("routes.extensions: registered /mesh, /network, /cdp, /workflow, /dashboard")
