@@ -125,6 +125,53 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Resuming background agent job", resumed_record["request"]["context_hints"])
         self.assertIn("https://example.com/3", resumed_record["request"]["context_hints"])
 
+    async def test_resume_context_stays_within_the_request_limit(self) -> None:
+        # Long checkpoint URLs, operator hints and repeated resumes each pushed
+        # context_hints past its limit, and the resumed job then failed with a
+        # ValidationError before running a single step.
+        long_url = "https://example.com/" + "a" * 1900
+
+        async def long_url_run(**kwargs):
+            for step_index in range(1, kwargs["max_steps"] + 1):
+                step = AgentStepResult(
+                    provider=kwargs["provider_name"],
+                    model="test-model",
+                    goal=kwargs["goal"],
+                    status="acted",
+                    observation={"url": long_url},
+                    decision={"action": "click", "reason": "r"},
+                    execution={"after": {"url": long_url}},
+                )
+                await kwargs["on_step"](step_index, step)
+            return AgentRunResult(
+                provider=kwargs["provider_name"],
+                model="test-model",
+                goal=kwargs["goal"],
+                status="max_steps_reached",
+                steps=[],
+                final_session={"id": kwargs["session_id"]},
+            )
+
+        self.orchestrator.run = long_url_run
+        job = await self.queue.enqueue_run(
+            "session-9",
+            AgentRunRequest(provider="openai", goal="go", max_steps=6, context_hints="stay on site " * 300),
+        )
+        for _ in range(3):
+            for _ in range(100):
+                stored = await self.queue.get_job(job["id"])
+                if stored["status"] in {"completed", "failed"}:
+                    break
+                await asyncio.sleep(0.02)
+            self.assertEqual(stored["status"], "completed", stored["error"])
+            job = await self.queue.resume_job(job["id"], max_steps=6)
+
+        hints = job["request"]["context_hints"]
+        self.assertLessEqual(len(hints), 4000)
+        self.assertTrue(hints.startswith("stay on site"))
+        self.assertEqual(hints.count("Resuming background agent job"), 1)
+        AgentRunRequest.model_validate(job["request"])
+
     async def test_discard_queued_job_marks_it_discarded(self) -> None:
         record = await self.queue.store.create(
             session_id="session-3",
