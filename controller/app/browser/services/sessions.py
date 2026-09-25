@@ -166,7 +166,10 @@ class BrowserSessionService:
                     body_max_bytes=self.manager.settings.network_inspector_body_max_bytes,
                     scrubber=self.manager.pii_scrubber if self.manager.settings.pii_scrub_enabled else None,
                 )
-                inspector.attach(page)
+                # The context, not the first page: attached to the page, the
+                # log missed every popup and tab opened later, and recorded
+                # nothing at all once the first tab was closed.
+                inspector.attach(context if hasattr(context, "on") else page)
                 session.network_inspector = inspector
 
             self.manager.sessions[session_id] = session

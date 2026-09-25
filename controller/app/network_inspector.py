@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from playwright.async_api import Page, Request, Response
+    from playwright.async_api import BrowserContext, Page, Request, Response
 
     from .pii_scrub import PiiScrubber
 from .utils import UTC, spawn_background_task
@@ -74,12 +74,12 @@ class NetworkInspector:
 
         self._log: deque[dict[str, Any]] = deque(maxlen=max_entries)
         self._pending: dict[str, dict[str, Any]] = {}  # request_id → partial entry
-        self._page: "Page | None" = None
+        self._page: "Page | BrowserContext | None" = None
         self._lock = asyncio.Lock()
         self._hooks: dict[str, HookFn] = {}
 
-    def attach(self, page: "Page") -> None:
-        """Register listeners on a Playwright Page."""
+    def attach(self, page: "Page | BrowserContext") -> None:
+        """Register listeners on a Playwright Page, or a BrowserContext for all its pages."""
         self._page = page
         page.on("request", self._on_request)
         page.on("response", self._on_response)
