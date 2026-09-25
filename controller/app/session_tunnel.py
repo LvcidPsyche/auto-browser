@@ -104,7 +104,21 @@ class IsolatedSessionTunnelBroker:
                     tunnel.stderr_handle.close()
                     raise
 
-                await asyncio.sleep(self.settings.isolated_tunnel_startup_grace_seconds)
+                try:
+                    await asyncio.sleep(self.settings.isolated_tunnel_startup_grace_seconds)
+                except BaseException:
+                    # A create cancelled during the grace period (the caller
+                    # gave up, shutdown) left autossh running with nothing
+                    # tracking it, holding its remote port on the bastion.
+                    process = tunnel.process
+                    if process.returncode is None:
+                        process.kill()
+                        await asyncio.shield(process.wait())
+                    tunnel.error = "provision_cancelled"
+                    self._write_metadata(tunnel, status="error")
+                    tunnel.stderr_handle.close()
+                    tunnel.stderr_handle = None
+                    raise
                 if tunnel.process.returncode is not None:
                     tunnel.error = self._tail_file(tunnel.log_path) or (
                         f"autossh exited early with code {tunnel.process.returncode}"
