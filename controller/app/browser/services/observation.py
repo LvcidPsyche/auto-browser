@@ -243,7 +243,9 @@ class BrowserObservationService:
         except Exception as exc:
             logger.debug("failed to capture accessibility snapshot: %s", exc)
             return unavailable_outline("accessibility_snapshot_unavailable")
-        return outline_from_aria_snapshot(snapshot or "")
+        # A large page's snapshot runs to megabytes (3 MB, ~0.25 s to parse, for
+        # 20,000 links), so it is parsed off the event loop other sessions share.
+        return await asyncio.to_thread(outline_from_aria_snapshot, snapshot or "")
 
     async def _scrub_screenshot_if_needed(
         self,
