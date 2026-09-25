@@ -325,6 +325,12 @@ configuration now answers `400` until you list the name in
 - The unserved legacy dashboard page, `controller/app/ui/index.html`, is
   removed. `/ui` still redirects to `/dashboard`.
 
+- `make test` and `make test-local` run pytest, as CI does. They ran
+  `unittest discover -s tests`, which imports test modules outside the `tests`
+  package, so `tests/__init__.py` (the suite's environment defaults) never ran
+  and about 145 HTTP tests failed. It also skipped every pytest-style test,
+  roughly a third of the suite. `make test-local` now runs all 1,091 tests.
+
 ### Documentation
 
 - `docs/llm-adapters.md` now covers the OpenAI-compatible provider family,

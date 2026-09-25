@@ -26,6 +26,7 @@ required = [
     "PIL",
     "pyotp",
     "pytesseract",
+    "pytest",
     "redis",
 ]
 missing = [name for name in required if importlib.util.find_spec(name) is None]
@@ -50,4 +51,8 @@ export PYTHONPATH="${ROOT_DIR}/controller${PYTHONPATH:+:${PYTHONPATH}}"
 # id, rate limits) turns on auth the tests don't send — ~138 route tests then
 # fail with 400s that never happen in CI or Docker, which have no .env.
 cd "${ROOT_DIR}/controller"
-exec "${PYTHON_BIN}" -m unittest discover -s tests -v
+# pytest, as CI runs it. `unittest discover -s tests` imports the test modules
+# as top-level modules, so tests/__init__.py — the suite's environment
+# defaults — never runs, and ~145 HTTP tests fail; it also skips every
+# pytest-style test (about a third of the suite).
+exec "${PYTHON_BIN}" -m pytest tests/ -q "$@"
