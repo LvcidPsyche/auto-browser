@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ... import events as _events
-from ...browser_scripts import ACTIVE_ELEMENT_SCRIPT, INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
+from ...browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
 from ..aria_outline import outline_from_aria_snapshot, unavailable_outline
 
 if TYPE_CHECKING:
@@ -227,11 +227,17 @@ class BrowserObservationService:
             logger.warning("failed to stop tracing for session %s: %s", session.id, exc)
 
     async def page_summary(self, page: "Page", text_limit: int = 2000) -> dict[str, Any]:
-        summary = await page.evaluate(PAGE_SUMMARY_SCRIPT, text_limit)
-        accessibility_outline = await self.accessibility_outline(page)
+        # One evaluate returns the text, outline, title and focused element, and
+        # it runs alongside the ARIA snapshot rather than after it: this is paid
+        # before and after every action, and each round trip costs more when the
+        # browser is a remote node.
+        summary, accessibility_outline = await asyncio.gather(
+            page.evaluate(PAGE_SUMMARY_SCRIPT, text_limit),
+            self.accessibility_outline(page),
+        )
         return {
-            "title": await page.title(),
-            "active_element": await page.evaluate(ACTIVE_ELEMENT_SCRIPT),
+            "title": summary.get("title", ""),
+            "active_element": summary.get("active_element"),
             "text_excerpt": summary.get("text_excerpt", ""),
             "dom_outline": summary.get("dom_outline", {}),
             "accessibility_outline": accessibility_outline,

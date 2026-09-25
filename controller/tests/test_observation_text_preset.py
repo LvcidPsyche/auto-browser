@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from app.browser.services.observation import BrowserObservationService
-from app.browser_scripts import ACTIVE_ELEMENT_SCRIPT, INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
+from app.browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
 
 
 class FakePage:
@@ -33,9 +33,12 @@ class FakePage:
         if script is INTERACTABLES_SCRIPT:
             return [{"element_id": "op-1", "label": "Submit"}]
         if script is PAGE_SUMMARY_SCRIPT:
-            return {"text_excerpt": self._text_excerpt, "dom_outline": {"headings": []}}
-        if script is ACTIVE_ELEMENT_SCRIPT:
-            return {"tag": "body"}
+            return {
+                "title": "Example",
+                "active_element": {"tag": "body"},
+                "text_excerpt": self._text_excerpt,
+                "dom_outline": {"headings": []},
+            }
         raise AssertionError(f"unexpected script passed to evaluate: {script!r}")
 
 
