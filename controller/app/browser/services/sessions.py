@@ -28,6 +28,12 @@ class BrowserSessionService:
 
     def __init__(self, manager: Any) -> None:
         self.manager = manager
+        # Creates past the limit check but not yet in manager.sessions. The
+        # check and the insert are separated by browser startup and page
+        # loads, so without counting these, concurrent creates all passed the
+        # check and MAX_SESSIONS was exceeded (with the default of 1, two
+        # sessions shared the one visible desktop).
+        self._creating = 0
 
     async def list(self) -> list[dict[str, Any]]:
         session_map = {record.id: record.model_dump() for record in await self.manager.session_store.list()}
@@ -100,6 +106,9 @@ class BrowserSessionService:
         session: BrowserSession | None = None
         browser: Browser | None = None
         runtime: IsolatedBrowserRuntime | None = None
+        # No await since check_limit, so nothing slipped in between.
+        self._creating += 1
+        reserved = True
         try:
             from ...browser_manager import BrowserSession
 
@@ -160,6 +169,9 @@ class BrowserSessionService:
                 session.network_inspector = inspector
 
             self.manager.sessions[session_id] = session
+            # Counted by manager.sessions from here on.
+            self._creating -= 1
+            reserved = False
             if self.manager._session_created_hook is not None:
                 try:
                     await self.manager._session_created_hook(session_id, page)
@@ -220,16 +232,20 @@ class BrowserSessionService:
             )
             raise
         finally:
+            if reserved:
+                self._creating -= 1
             if prepared_auth_state is not None:
                 prepared_auth_state.cleanup()
 
     def check_limit(self) -> None:
-        if len(self.manager.sessions) >= self.manager.settings.max_sessions:
-            active_ids = ", ".join(sorted(self.manager.sessions.keys()))
+        if len(self.manager.sessions) + self._creating >= self.manager.settings.max_sessions:
+            active_ids = ", ".join(sorted(self.manager.sessions.keys())) or "none"
             message = (
                 f"Session limit reached: max_sessions={self.manager.settings.max_sessions}. "
                 f"Active live session(s): {active_ids}."
             )
+            if self._creating:
+                message += f" {self._creating} more still starting."
             if self.manager.settings.session_isolation_mode == "shared_browser_node":
                 message += (
                     " This scaffold uses one visible desktop and one shared browser node by default, "

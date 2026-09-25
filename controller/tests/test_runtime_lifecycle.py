@@ -345,3 +345,44 @@ def test_cron_store_roundtrips_valid_json(tmp_path: Path) -> None:
     assert service._load()["j1"]["goal"] == "do a thing"
     assert not list(tmp_path.glob("*corrupt*"))
     assert json.loads((tmp_path / "cron.json").read_text(encoding="utf-8"))["j1"]["id"] == "j1"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_creates_cannot_exceed_max_sessions(tmp_path: Path) -> None:
+    """The limit check ran before browser startup and the insert after it.
+
+    Regression: every create in flight passed the check, so two concurrent
+    create_session calls with MAX_SESSIONS=1 both got a live session.
+    """
+    from app.browser_manager import BrowserManager
+    from app.config import Settings
+
+    settings = Settings(_env_file=None)
+    settings.artifact_root = str(tmp_path / "artifacts")
+    settings.upload_root = str(tmp_path / "uploads")
+    settings.auth_root = str(tmp_path / "auth")
+    settings.max_sessions = 1
+    manager = BrowserManager(settings)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_browser(_session_id):
+        started.set()
+        await release.wait()
+        raise RuntimeError("browser node unavailable")
+
+    manager._acquire_session_browser = slow_browser  # type: ignore[method-assign]
+
+    first = asyncio.create_task(manager.create_session(name="first"))
+    await started.wait()
+    try:
+        with pytest.raises(RuntimeError, match="Session limit reached"):
+            await asyncio.wait_for(manager.create_session(name="second"), timeout=5)
+    finally:
+        release.set()
+    with pytest.raises(RuntimeError, match="browser node unavailable"):
+        await first
+
+    # A failed create gives its slot back.
+    manager._check_session_limit()
