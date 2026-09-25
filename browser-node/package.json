@@ -3,6 +3,9 @@
   "version": "1.7.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/real-chromium.test.mjs"
+  },
   "dependencies": {
     "playwright": "1.62.0"
   }

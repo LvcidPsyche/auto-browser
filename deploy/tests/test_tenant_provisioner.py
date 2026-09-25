@@ -391,3 +391,28 @@ def test_allow_list_update_preserves_private_file_mode_and_owner(tmp_path: Path)
     manager.update_allowed_hosts(enrollment, "changed.example", expected_revision=1)
 
     assert [(path.stat().st_uid, path.stat().st_gid, stat.S_IMODE(path.stat().st_mode)) for path in (env_path, descriptor_path)] == expected
+
+
+def test_profile_control_token_is_generated_and_backfilled_for_older_stacks(tmp_path: Path) -> None:
+    runner = RecordingRunner(control_network_exists=True)
+    manager = provisioner(tmp_path, runner)
+    enrollment = TenantEnrollment("user-token", "tenant-token")
+    key = stack_key_for(enrollment)
+    manager.provision(enrollment)
+    env_path = tmp_path / key / ".env"
+    values = dict(line.split("=", 1) for line in env_path.read_text(encoding="utf-8").splitlines())
+    token = values["TENANT_PROFILE_CONTROL_TOKEN"]
+    assert len(token) >= 40
+    assert token not in (values["TENANT_CONTROLLER_TOKEN"], values["TENANT_SHARE_SECRET"])
+
+    # A stack provisioned before the token existed: every compose call (even
+    # the idle reaper's `stop`) would fail on the required variable, so it is
+    # added once, and never rotated afterwards.
+    legacy = "".join(f"{k}={v}\n" for k, v in values.items() if k != "TENANT_PROFILE_CONTROL_TOKEN")
+    env_path.write_text(legacy, encoding="utf-8")
+    manager.stop_for_idle(enrollment)
+    backfilled = dict(line.split("=", 1) for line in env_path.read_text(encoding="utf-8").splitlines())
+    assert backfilled["TENANT_PROFILE_CONTROL_TOKEN"]
+    manager.provision(enrollment)
+    again = dict(line.split("=", 1) for line in env_path.read_text(encoding="utf-8").splitlines())
+    assert again["TENANT_PROFILE_CONTROL_TOKEN"] == backfilled["TENANT_PROFILE_CONTROL_TOKEN"]

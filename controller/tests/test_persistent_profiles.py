@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.persistent_profiles import PersistentProfileClient, normalize_profile_name
+from app.persistent_profiles import PersistentProfileClient, PersistentProfileError, normalize_profile_name
 
 
 def _settings(**overrides) -> SimpleNamespace:
@@ -16,6 +16,7 @@ def _settings(**overrides) -> SimpleNamespace:
         persistent_profile_timezone="Africa/Cairo",
         persistent_profile_user_agent="",
         browser_profiles_root="/data/browser-profiles",
+        profile_control_token="secret-token",
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -142,6 +143,9 @@ class PersistentProfileClientCloseTests(unittest.IsolatedAsyncioTestCase):
 
         body = mock_client.post.await_args.kwargs["json"]
         self.assertEqual(body, {"name": "owner-default"})
+        self.assertEqual(
+            mock_client.post.await_args.kwargs["headers"], {"Authorization": "Bearer secret-token"}
+        )
 
     async def test_close_skips_the_request_for_an_invalid_name(self) -> None:
         settings = _settings()
@@ -149,6 +153,103 @@ class PersistentProfileClientCloseTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.persistent_profiles.httpx.AsyncClient") as mock_ctor:
             await client.close("bad name")
             mock_ctor.assert_not_called()
+
+
+class PersistentProfileClientAuthTests(unittest.IsolatedAsyncioTestCase):
+    """Finding 7: every control call carries the shared bearer secret, and
+    nothing is attempted at all when it is not configured."""
+
+    async def test_open_sends_the_bearer_token_and_owner(self) -> None:
+        client = PersistentProfileClient(_settings())
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"cdp_endpoint": "ws://browser-node:9225/cdp/x/devtools/browser/1"}
+        context, mock_client = _mock_async_client(response)
+        with patch("app.persistent_profiles.httpx.AsyncClient", return_value=context):
+            await client.open("owner-default", owner="tenant", context_kwargs={}, storage_state=None)
+        kwargs = mock_client.post.await_args.kwargs
+        self.assertEqual(kwargs["headers"], {"Authorization": "Bearer secret-token"})
+        self.assertEqual(kwargs["json"]["owner"], "tenant")
+
+    async def test_no_token_refuses_before_any_request(self) -> None:
+        client = PersistentProfileClient(_settings(profile_control_token=""))
+        with patch("app.persistent_profiles.httpx.AsyncClient") as mock_ctor:
+            with self.assertRaises(PersistentProfileError):
+                await client.open("owner-default", context_kwargs={}, storage_state=None)
+            with self.assertRaises(PersistentProfileError):
+                await client.trash("owner-default", reason="deleted", owner=None)
+            with self.assertRaises(PersistentProfileError):
+                await client.rename("a", "b", owner=None)
+            self.assertFalse(await client.close("owner-default"))
+            mock_ctor.assert_not_called()
+
+    async def test_trash_and_rename_send_owner_and_surface_status(self) -> None:
+        client = PersistentProfileClient(_settings())
+        response = MagicMock()
+        response.status_code = 403
+        response.json.return_value = {"error": "profile directory belongs to a different owner"}
+        context, mock_client = _mock_async_client(response)
+        with patch("app.persistent_profiles.httpx.AsyncClient", return_value=context):
+            with self.assertRaises(PersistentProfileError) as caught:
+                await client.trash("owner-default", reason="deleted", owner="tenant")
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertEqual(
+            mock_client.post.await_args.kwargs["json"],
+            {"name": "owner-default", "reason": "deleted", "owner": "tenant"},
+        )
+
+        ok = MagicMock()
+        ok.status_code = 200
+        ok.json.return_value = {"renamed": True}
+        context, mock_client = _mock_async_client(ok)
+        with patch("app.persistent_profiles.httpx.AsyncClient", return_value=context):
+            result = await client.rename("old-name", "new-name", owner=None)
+        self.assertEqual(result, {"renamed": True})
+        self.assertEqual(mock_client.post.await_args.args[0], "http://browser-node:9224/profiles/rename")
+
+
+class RuntimeAttachTests(unittest.IsolatedAsyncioTestCase):
+    async def test_attach_sends_the_token_and_does_not_apply_client_defaults(self) -> None:
+        from app.browser.services.runtime import BrowserRuntimeService
+        from app.persistent_profiles import PersistentProfileHandle
+
+        context = object()
+        browser = MagicMock()
+        browser.contexts = [context]
+        manager = MagicMock()
+        manager.playwright.chromium.connect_over_cdp = AsyncMock(return_value=browser)
+        manager.persistent_profiles = PersistentProfileClient(_settings())
+        handle = PersistentProfileHandle(
+            name="owner-default",
+            cdp_endpoint="ws://browser-node:9225/cdp/owner-default/devtools/browser/1",
+            already_open=False,
+            seeded=False,
+            was_empty=True,
+        )
+        attachment = await BrowserRuntimeService(manager).attach_persistent_context(handle)
+        manager.playwright.chromium.connect_over_cdp.assert_awaited_once_with(
+            handle.cdp_endpoint,
+            headers={"Authorization": "Bearer secret-token"},
+            no_defaults=True,
+        )
+        self.assertIs(attachment.context, context)
+
+    async def test_attach_with_no_context_disconnects_but_does_not_release(self) -> None:
+        from app.browser.services.runtime import BrowserRuntimeService
+        from app.persistent_profiles import PersistentProfileHandle
+
+        browser = MagicMock()
+        browser.contexts = []
+        browser.close = AsyncMock()
+        manager = MagicMock()
+        manager.playwright.chromium.connect_over_cdp = AsyncMock(return_value=browser)
+        manager.persistent_profiles = PersistentProfileClient(_settings())
+        manager.persistent_profiles.close = AsyncMock()
+        handle = PersistentProfileHandle("owner-default", "ws://x/y", False, False, True)
+        with self.assertRaises(RuntimeError):
+            await BrowserRuntimeService(manager).attach_persistent_context(handle)
+        browser.close.assert_awaited_once()
+        manager.persistent_profiles.close.assert_not_awaited()
 
 
 class ProfileDiskUsageTests(unittest.TestCase):

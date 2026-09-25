@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     browser_node_host: str = Field("browser-node", alias="BROWSER_NODE_HOST")
     profile_control_port: int = Field(9224, alias="PROFILE_CONTROL_PORT")
     profile_control_timeout_seconds: float = Field(30.0, alias="PROFILE_CONTROL_TIMEOUT_SECONDS")
+    # Shared secret for browser-node's /profiles/* API and its CDP relay (sent
+    # as a bearer token). Empty = every persistent-profile call is refused
+    # before any request is made (fail closed).
+    profile_control_token: str = Field("", alias="PROFILE_CONTROL_TOKEN")
     # Same shared /data volume browser-node writes profiles into -- used only
     # for the read-only disk-size report (see BrowserAuthProfileService), not
     # for launching anything.

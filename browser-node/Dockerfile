@@ -50,6 +50,6 @@ COPY entrypoint.sh /entrypoint.sh
 COPY server.mjs /opt/browser-node/server.mjs
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
-EXPOSE 5900 6080 9223 9224
+EXPOSE 5900 6080 9223 9224 9225
 
 CMD ["/entrypoint.sh"]

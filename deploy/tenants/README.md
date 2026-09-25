@@ -41,3 +41,25 @@ python3 deploy/tenants/provision.py provision \
 The caller must have already authenticated the immutable identifiers. Docker
 administrators and host root remain trusted; Compose isolation is not a
 hostile-host security boundary.
+
+## Persistent browser profiles
+
+With `PERSISTENT_PROFILES_ENABLED: "true"` (both services), each named login
+profile is a real on-disk Chromium profile under `/data/browser-profiles/<name>`
+inside browser-node, so Google/Facebook see the same device every Open.
+
+- The controller reaches it only through browser-node's authenticated control
+  API (`:9224`) and CDP relay (`:9225`); Chromium's own debugging port is
+  loopback-only. Both require `TENANT_PROFILE_CONTROL_TOKEN` from `.env`,
+  which the provisioner generates (and backfills into older stacks on the
+  next compose call). A stack created by hand needs one line in its `.env`:
+  `TENANT_PROFILE_CONTROL_TOKEN=<output of: python3 -c "import secrets; print(secrets.token_urlsafe(36))">`.
+- Deleting, renaming or importing an auth profile moves its browser profile
+  with it. Nothing is ever deleted automatically: replaced or deleted profiles
+  go to `/data/browser-profiles/.trash/<name>--<UTC time>--<reason>`; clean
+  that up by hand (`du -sh /data/browser-profiles/.trash/*` inside
+  browser-node shows the sizes).
+- One live session at a time in this mode (one visible browser on the shared
+  display); a second Open of the same profile returns the live session.
+- Rollback: set `PERSISTENT_PROFILES_ENABLED` to `"false"` on both services and
+  recreate them. Profiles stay on disk untouched for a later re-enable.

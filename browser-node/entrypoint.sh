@@ -19,6 +19,20 @@ BROWSER_USER="${BROWSER_USER:-browser}"
 
 mkdir -p /data/profile /data/downloads /data/browser-profiles /tmp/runtime
 rm -f "$WS_ENDPOINT_FILE"
+
+# Crash recovery for persistent profiles. Nothing of ours is running yet at
+# container start, so any Chromium profile lock found now was left by a dead
+# container (a new container also has a new hostname, and Chromium would
+# refuse the profile as "in use on another computer"). The same sweep runs
+# per profile in server.mjs before every launch, guarded by a live-process
+# check. Dot-directories (.trash) are never touched; .healthcheck only ever
+# holds disposable check profiles.
+PROFILES_ROOT="${BROWSER_PROFILES_ROOT:-/data/browser-profiles}"
+for profile_dir in "$PROFILES_ROOT"/*/; do
+  [[ -d "$profile_dir" ]] || continue
+  rm -f "${profile_dir}SingletonLock" "${profile_dir}SingletonSocket"     "${profile_dir}SingletonCookie" "${profile_dir}DevToolsActivePort"
+done
+rm -rf "$PROFILES_ROOT/.healthcheck"
 DISPLAY_NUM="${DISPLAY#:}"
 rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
 

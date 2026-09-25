@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from ...audit import get_current_operator
+from ...persistent_profiles import PersistentProfileError
 from ...utils import UTC, utc_now
 from ...witness import WitnessActionContext
 
@@ -31,6 +32,10 @@ MAX_ARCHIVE_MEMBERS = 2_000
 MAX_ARCHIVE_MEMBER_BYTES = 64 * 1024 * 1024
 MAX_ARCHIVE_TOTAL_BYTES = 256 * 1024 * 1024
 _COPY_CHUNK_BYTES = 64 * 1024
+
+
+class ProfileInUseError(RuntimeError):
+    """A live session holds this profile's persistent browser; close it first."""
 
 
 class BrowserAuthProfileService:
@@ -488,6 +493,9 @@ class BrowserAuthProfileService:
 
         profile_root = self.root()
 
+        if self._persistent_profiles_active():
+            await self._reset_persistent_for_import(src, profile_root, overwrite=overwrite)
+
         def _extract() -> str:
             with tarfile.open(str(src), "r:gz") as tar:
                 members = tar.getmembers()
@@ -606,29 +614,80 @@ class BrowserAuthProfileService:
             "imported": True,
         }
 
+    async def _reset_persistent_for_import(self, src: Path, profile_root: Path, *, overwrite: bool) -> None:
+        """Retire the on-disk browser profile an import is about to replace.
+
+        An imported archive is "this is the account for that name": the next
+        Open must seed from it, not reopen whatever browser profile already
+        sits under the name. Validated (name, overwrite rule, ownership, no
+        live session) before anything moves; the old directory goes to
+        trash, never deleted, so a failed import loses nothing.
+        """
+
+        def _top_level_name() -> str:
+            with tarfile.open(str(src), "r:gz") as tar:
+                top_level: str | None = None
+                for member in tar.getmembers():
+                    if member.issym() or member.islnk() or member.isdev():
+                        raise ValueError("archive contains an unsupported member type")
+                    safe_path = self.safe_archive_member_name(member.name)
+                    if top_level is None:
+                        top_level = safe_path.parts[0]
+                    elif safe_path.parts[0] != top_level:
+                        raise ValueError("archive must contain a single top-level profile directory")
+                if top_level is None:
+                    raise ValueError("archive contains no importable files")
+                return self.normalize_name(top_level)
+
+        profile_name = await asyncio.to_thread(_top_level_name)
+        dest_dir = self.resolve_contained_path(profile_root, profile_name)
+        if dest_dir.exists():
+            if not overwrite:
+                raise FileExistsError(f"profile '{profile_name}' already exists; pass overwrite=true")
+            owner = self.require_access(profile_name, action="overwriting an auth profile")
+        else:
+            owner = self.require_access(profile_name, action="importing an auth profile")
+        self._refuse_if_in_use(profile_name)
+        await self._trash_persistent(profile_name, reason="replaced-by-import", owner=owner)
+
     async def delete(self, profile_name: str) -> dict[str, Any]:
         normalized = self.normalize_name(profile_name)
-        self.require_access(normalized, action="deleting an auth profile")
+        owner = self.require_access(normalized, action="deleting an auth profile")
         profile_dir = self.dir(normalized, create=False)
         profile_root_str = os.path.realpath(os.fspath(self.root()))
         profile_dir_str = os.path.realpath(os.fspath(profile_dir))
         profile_root_prefix = profile_root_str if profile_root_str.endswith(os.sep) else profile_root_str + os.sep
         if not profile_dir_str.startswith(profile_root_prefix):
             raise PermissionError("auth profile path must stay inside auth profile root")
-        if not os.path.isdir(profile_dir_str):
+        export_exists = os.path.isdir(profile_dir_str)
+        browser_profile_trashed = False
+        if self._persistent_profiles_active():
+            # The on-disk browser profile goes first (to trash): if that
+            # fails, the export stays too, rather than leaving a directory
+            # that would reopen the "deleted" account under this name.
+            self._refuse_if_in_use(normalized)
+            result = await self._trash_persistent(normalized, reason="deleted", owner=owner)
+            browser_profile_trashed = bool(result.get("trashed"))
+        if not export_exists and not browser_profile_trashed:
             raise FileNotFoundError(f"auth profile '{normalized}' not found")
-        await asyncio.to_thread(shutil.rmtree, profile_dir_str)
+        if export_exists:
+            await asyncio.to_thread(shutil.rmtree, profile_dir_str)
         await self.manager.audit.append(
             event_type="auth_profile_deleted",
             status="ok",
             action="delete_auth_profile",
             session_id=None,
-            details={"profile_name": normalized},
+            details={"profile_name": normalized, "browser_profile_trashed": browser_profile_trashed},
         )
         await self._record_profile_receipt(
-            action="delete_auth_profile", profile_name=normalized, metadata={},
+            action="delete_auth_profile",
+            profile_name=normalized,
+            metadata={"browser_profile_trashed": browser_profile_trashed},
         )
-        return {"profile_name": normalized, "deleted": True}
+        payload: dict[str, Any] = {"profile_name": normalized, "deleted": True}
+        if self._persistent_profiles_active():
+            payload["browser_profile_trashed"] = browser_profile_trashed
+        return payload
 
     async def rename(self, profile_name: str, new_name: str) -> dict[str, Any]:
         normalized = self.normalize_name(profile_name)
@@ -650,11 +709,32 @@ class BrowserAuthProfileService:
             # Renaming onto an existing name is the same takeover as saving
             # over it, so the destination's own ownership must allow the write.
             self.require_access(normalized_new, action="overwriting an auth profile")
-            await asyncio.to_thread(shutil.rmtree, os.path.realpath(os.fspath(destination_dir)))
-        profile_root = self.root()
-        source = self.resolve_contained_path(profile_root, normalized)
-        destination = self.resolve_contained_path(profile_root, normalized_new)
-        await asyncio.to_thread(shutil.move, str(source), str(destination))
+        persistent_renamed = False
+        if self._persistent_profiles_active():
+            # Move the on-disk browser profile first; a stale directory under
+            # the new name goes to trash. If this fails nothing has changed.
+            self._refuse_if_in_use(normalized, normalized_new)
+            result = await self._rename_persistent(normalized, normalized_new, owner=owner)
+            persistent_renamed = bool(result.get("renamed"))
+        try:
+            if destination_dir.exists():
+                await asyncio.to_thread(shutil.rmtree, os.path.realpath(os.fspath(destination_dir)))
+            profile_root = self.root()
+            source = self.resolve_contained_path(profile_root, normalized)
+            destination = self.resolve_contained_path(profile_root, normalized_new)
+            await asyncio.to_thread(shutil.move, str(source), str(destination))
+        except Exception:
+            if persistent_renamed:
+                # Keep the pair together: put the browser profile back under
+                # its old name so it still matches the export that stayed.
+                try:
+                    await self._rename_persistent(normalized_new, normalized, owner=owner)
+                except Exception as exc:
+                    logger.error(
+                        "rename rollback: browser profile '%s' could not be moved back to '%s': %s",
+                        normalized_new, normalized, exc,
+                    )
+            raise
         metadata = self.read_metadata(normalized_new)
         metadata["profile_name"] = normalized_new
         if owner:
@@ -678,6 +758,54 @@ class BrowserAuthProfileService:
             metadata={"previous_name": normalized},
         )
         return {"profile_name": normalized_new, "previous_name": normalized}
+
+    # ── Persistent browser profile lifecycle ─────────────────────────────────
+    #
+    # With PERSISTENT_PROFILES_ENABLED the real login lives in browser-node's
+    # on-disk Chromium profile (/data/browser-profiles/<name>), not only in
+    # this encrypted export. Delete, rename and import must move that
+    # directory with the export, or the old account keeps opening under the
+    # name. The directory is 0700 for browser-node's uid and this container
+    # runs with cap_drop ALL, so it is changed through browser-node's
+    # authenticated API -- and it is only ever moved to trash, never deleted.
+
+    def _persistent_profiles_active(self) -> bool:
+        settings = self.manager.settings
+        return bool(
+            getattr(settings, "persistent_profiles_enabled", False)
+            and getattr(settings, "session_isolation_mode", None) == "shared_browser_node"
+        )
+
+    def _refuse_if_in_use(self, *profile_names: str) -> None:
+        lifecycle = getattr(self.manager, "session_lifecycle", None)
+        if lifecycle is None:
+            return
+        for name in profile_names:
+            holder = lifecycle.session_holding_profile(name)
+            if holder is not None:
+                raise ProfileInUseError(
+                    f"auth profile '{name}' is open in live session {holder.id}; close that session first"
+                )
+
+    @staticmethod
+    def _translate_persistent_error(exc: PersistentProfileError) -> Exception:
+        if exc.status_code == 403:
+            return PermissionError(str(exc))
+        if exc.status_code == 409:
+            return ProfileInUseError(str(exc))
+        return exc
+
+    async def _trash_persistent(self, profile_name: str, *, reason: str, owner: str | None) -> dict[str, Any]:
+        try:
+            return await self.manager.persistent_profiles.trash(profile_name, reason=reason, owner=owner)
+        except PersistentProfileError as exc:
+            raise self._translate_persistent_error(exc) from exc
+
+    async def _rename_persistent(self, profile_name: str, new_name: str, *, owner: str | None) -> dict[str, Any]:
+        try:
+            return await self.manager.persistent_profiles.rename(profile_name, new_name, owner=owner)
+        except PersistentProfileError as exc:
+            raise self._translate_persistent_error(exc) from exc
 
     def owner_of(self, profile_name: str) -> str | None:
         owner = self.read_metadata(self.normalize_name(profile_name)).get("owner")

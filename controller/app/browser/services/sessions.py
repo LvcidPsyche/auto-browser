@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from playwright.async_api import Error as PlaywrightError
 
-from ...browser_scripts import apply_persistent_stealth, apply_stealth
+from ...browser_scripts import apply_stealth
 from ...models import SessionRecord, SessionStatus
 from ...network_inspector import NetworkInspector
 from ...utils import UTC
@@ -76,10 +76,7 @@ class BrowserSessionService:
         if start_url:
             self.manager._assert_url_allowed(start_url)
         resolved_protection_mode = protection_mode or self.manager.settings.witness_protection_mode_default
-        self.manager._check_session_limit()
 
-        session_id = uuid4().hex[:12]
-        artifact_dir, auth_dir, upload_dir = self.prepare_dirs(session_id)
         prepared_auth_state = None
         source_path: Path | None = None
 
@@ -115,11 +112,17 @@ class BrowserSessionService:
 
         unattended_max_age = self.manager.settings.auth_state_unattended_max_age_hours
 
+        # The owner each profile was authorized for (require_access's answer),
+        # carried to browser-node with a persistent Open so a directory
+        # recorded for somebody else is never reopened for this caller.
+        auth_profile_owner: str | None = None
         if auth_profile:
             # The takeover the report described: opening a session against
             # someone else's stored profile drives a browser already logged in
             # as them. Authorize before the state is ever loaded.
-            self.manager.auth_profiles.require_access(auth_profile, action="opening a session from an auth profile")
+            auth_profile_owner = self.manager.auth_profiles.require_access(
+                auth_profile, action="opening a session from an auth profile"
+            )
             source_path = self.manager.auth_profiles.resolve_state_path(auth_profile, must_exist=True)
         elif storage_state_path:
             source_path = self.manager.auth_profiles.safe_auth_path(storage_state_path, must_exist=True)
@@ -134,19 +137,30 @@ class BrowserSessionService:
         # 72h between browser opens must not be what silently erases a login
         # (the incident this whole fix responds to).
         auto_persist_name = self.manager.settings.auto_persist_profile_name
+        # Whether this caller may use the remembered-login profile at all.
+        # False means a plain fresh browser, never the on-disk profile.
+        auto_persist_allowed = False
+        auto_persist_owner: str | None = None
         if source_path is None and self.manager.settings.auto_persist_login_enabled:
             candidate_path: Path | None = None
             try:
-                self.manager.auth_profiles.require_access(
+                auto_persist_owner = self.manager.auth_profiles.require_access(
                     auto_persist_name, action="auto-loading the remembered login"
                 )
-                candidate_path = self.manager.auth_profiles.resolve_state_path(auto_persist_name, must_exist=True)
-            except FileNotFoundError:
-                pass  # nothing saved yet -- not an error, nothing lost
+                auto_persist_allowed = True
             except Exception as exc:
                 logger.warning(
-                    "auto-persist: could not access remembered login profile '%s': %s", auto_persist_name, exc
+                    "auto-persist: not allowed to use remembered login profile '%s': %s", auto_persist_name, exc
                 )
+            if auto_persist_allowed:
+                try:
+                    candidate_path = self.manager.auth_profiles.resolve_state_path(auto_persist_name, must_exist=True)
+                except FileNotFoundError:
+                    pass  # nothing saved yet -- not an error, nothing lost
+                except Exception as exc:
+                    logger.warning(
+                        "auto-persist: could not access remembered login profile '%s': %s", auto_persist_name, exc
+                    )
 
             if candidate_path is not None:
                 try:
@@ -169,69 +183,192 @@ class BrowserSessionService:
             )
             context_kwargs["storage_state"] = str(prepared_auth_state.path)
 
-        # Persistent Chromium profiles (see persistent_profiles.py): a named
-        # identity/profile -- an explicit auth_profile, or the auto-persist
-        # default ("owner-default") when the caller names none -- gets its
-        # own on-disk user-data-dir in browser-node instead of a brand-new
-        # context every Open. Only wired for shared_browser_node; the
-        # docker_ephemeral runtime keeps its existing per-session container
-        # lifecycle unchanged. Any storage_state resolved above is popped out
-        # of context_kwargs here: it is only ever consulted by browser-node,
-        # and only to seed a profile whose user-data-dir is still empty (see
-        # server.mjs) -- never to overwrite a profile that already exists.
-        # An explicit storage_state_path (fork()'s "clone this session" path,
-        # or a direct API caller) is left out of persistent-profile mode on
-        # purpose: a fork exists to run an independent, parallel clone, and
-        # collapsing it onto the same named profile's already-running
-        # persistent context would hand it the SAME tab instead of one of
-        # its own.
-        persistent_profile_name: str | None = None
-        persistent_storage_state: dict[str, Any] | None = None
-        if (
-            self.manager.settings.persistent_profiles_enabled
-            and self.manager.settings.session_isolation_mode == "shared_browser_node"
-            and storage_state_path is None
-        ):
-            persistent_profile_name = (
-                self.manager.auth_profiles.normalize_name(auth_profile) if auth_profile else auto_persist_name
+        try:
+            persistent_profile_name, persistent_owner = self._select_persistent_profile(
+                auth_profile=auth_profile,
+                auth_profile_owner=auth_profile_owner,
+                storage_state_path=storage_state_path,
+                auto_persist_allowed=auto_persist_allowed,
+                auto_persist_owner=auto_persist_owner,
             )
-            resolved_storage_state_path = context_kwargs.pop("storage_state", None)
-            if resolved_storage_state_path:
-                persistent_storage_state = json.loads(Path(resolved_storage_state_path).read_text(encoding="utf-8"))
-            # A real device's locale/timezone/UA do not change between logins.
-            # Override whatever build_context_kwargs picked for a one-off
-            # ephemeral context (it defaults to en-US/America-New_York when
-            # stealth is on, and a fresh random UA every time) with this
-            # profile's pinned, env-configurable identity instead.
-            context_kwargs["locale"] = self.manager.settings.persistent_profile_locale
-            context_kwargs["timezone_id"] = self.manager.settings.persistent_profile_timezone
-            # Let Playwright derive Accept-Language from locale rather than
-            # keeping a hardcoded "en-US,en;q=0.9" that would contradict it.
-            context_kwargs.pop("extra_http_headers", None)
-            if self.manager.settings.persistent_profile_user_agent:
-                context_kwargs["user_agent"] = self.manager.settings.persistent_profile_user_agent
-            else:
-                # A real, headed Chromium's own UA is more convincing than a
-                # spoofed one -- see PERSISTENT_STEALTH_INIT_SCRIPT.
-                context_kwargs.pop("user_agent", None)
+            persistent_storage_state: dict[str, Any] | None = None
+            if persistent_profile_name is not None:
+                # Any storage_state resolved above is only ever consulted by
+                # browser-node, and only to seed a profile whose user-data-dir
+                # is still empty (see server.mjs) -- never to overwrite one.
+                resolved_storage_state_path = context_kwargs.pop("storage_state", None)
+                if resolved_storage_state_path:
+                    persistent_storage_state = json.loads(
+                        Path(resolved_storage_state_path).read_text(encoding="utf-8")
+                    )
+                # A real device's locale/timezone/UA do not change between
+                # logins. Override whatever build_context_kwargs picked for a
+                # one-off ephemeral context (en-US/America-New_York when
+                # stealth is on, and a fresh random UA every time) with this
+                # profile's pinned, env-configurable identity instead.
+                context_kwargs["locale"] = self.manager.settings.persistent_profile_locale
+                context_kwargs["timezone_id"] = self.manager.settings.persistent_profile_timezone
+                # Let Chromium derive Accept-Language from the locale rather
+                # than a hardcoded "en-US,en;q=0.9" that would contradict it.
+                context_kwargs.pop("extra_http_headers", None)
+                if self.manager.settings.persistent_profile_user_agent:
+                    context_kwargs["user_agent"] = self.manager.settings.persistent_profile_user_agent
+                else:
+                    # A real, headed Chromium's own UA is more convincing
+                    # than a spoofed one.
+                    context_kwargs.pop("user_agent", None)
 
+            lease_lock = (
+                self._profile_lease_lock(persistent_profile_name)
+                if persistent_profile_name is not None
+                else contextlib.nullcontext()
+            )
+            async with lease_lock:
+                if persistent_profile_name is not None:
+                    # One exclusive lease per identity: a profile already held
+                    # by a live session is handed back as that session instead
+                    # of a second attach to the same browser, which would
+                    # share its tab and tear it down on either close.
+                    existing = self._live_session_for_profile(persistent_profile_name)
+                    if existing is not None:
+                        return await self._reuse_existing_session(existing)
+
+                session_id = uuid4().hex[:12]
+                self.check_limit(reserve=session_id)
+                try:
+                    return await self._open_new_session(
+                        session_id=session_id,
+                        name=name,
+                        start_url=start_url,
+                        storage_state_path=storage_state_path,
+                        auth_profile=auth_profile,
+                        memory_profile=memory_profile,
+                        proxy_persona=proxy_persona,
+                        totp_secret=totp_secret,
+                        resolved_protection_mode=resolved_protection_mode,
+                        context_kwargs=context_kwargs,
+                        source_path=source_path,
+                        remembered_login_loaded=remembered_login_loaded,
+                        remembered_login_error=remembered_login_error,
+                        remembered_load_failed_over_existing_profile=remembered_load_failed_over_existing_profile,
+                        auto_persist_name=auto_persist_name,
+                        persistent_profile_name=persistent_profile_name,
+                        persistent_owner=persistent_owner,
+                        persistent_storage_state=persistent_storage_state,
+                    )
+                finally:
+                    self.manager._session_reservations.discard(session_id)
+        finally:
+            if prepared_auth_state is not None:
+                prepared_auth_state.cleanup()
+
+    def _select_persistent_profile(
+        self,
+        *,
+        auth_profile: str | None,
+        auth_profile_owner: str | None,
+        storage_state_path: str | None,
+        auto_persist_allowed: bool,
+        auto_persist_owner: str | None,
+    ) -> tuple[str | None, str | None]:
+        """Which on-disk persistent profile (if any) this Open attaches to.
+
+        Only for shared_browser_node with PERSISTENT_PROFILES_ENABLED. Returns
+        (None, None) -- a plain fresh context on the shared browser, exactly
+        the pre-profile behaviour -- when:
+        - an explicit storage_state_path was given (fork(), or a direct API
+          caller): an independent clone must not collapse onto the same
+          running profile and its tab;
+        - no auth_profile was named and the caller may not use the remembered
+          login (require_access denied it, or AUTO_PERSIST_LOGIN_ENABLED is
+          off). Denied access to the "remember me" profile must never open
+          its on-disk directory -- it holds the owner's live logins.
+        """
+        settings = self.manager.settings
+        if not (settings.persistent_profiles_enabled and settings.session_isolation_mode == "shared_browser_node"):
+            return None, None
+        if storage_state_path is not None:
+            return None, None
+        if auth_profile:
+            return self.manager.auth_profiles.normalize_name(auth_profile), auth_profile_owner
+        if auto_persist_allowed:
+            return self.manager.auth_profiles.normalize_name(settings.auto_persist_profile_name), auto_persist_owner
+        return None, None
+
+    def _profile_lease_lock(self, profile_name: str) -> asyncio.Lock:
+        locks = self.manager._profile_lease_locks
+        lock = locks.get(profile_name)
+        if lock is None:
+            lock = locks[profile_name] = asyncio.Lock()
+        return lock
+
+    def _live_session_for_profile(self, profile_name: str) -> "BrowserSession | None":
+        for session in self.manager.sessions.values():
+            if session.persistent_profile_name == profile_name and not session.persistent_profile_released:
+                return session
+        return None
+
+    def session_holding_profile(self, profile_name: str) -> "BrowserSession | None":
+        """The live session currently holding this persistent profile, if any."""
+        return self._live_session_for_profile(profile_name)
+
+    async def _reuse_existing_session(self, session: "BrowserSession") -> dict[str, Any]:
+        summary = await self.manager._session_summary(session)
+        summary["reused_existing_session"] = True
+        await self.manager.audit.append(
+            event_type="session_reused",
+            status="ok",
+            action="create_session",
+            session_id=session.id,
+            details={"persistent_profile": session.persistent_profile_name},
+        )
+        return summary
+
+    async def _open_new_session(
+        self,
+        *,
+        session_id: str,
+        name: str | None,
+        start_url: str | None,
+        storage_state_path: str | None,
+        auth_profile: str | None,
+        memory_profile: str | None,
+        proxy_persona: str | None,
+        totp_secret: str | None,
+        resolved_protection_mode: str,
+        context_kwargs: dict[str, Any],
+        source_path: Path | None,
+        remembered_login_loaded: bool,
+        remembered_login_error: str | None,
+        remembered_load_failed_over_existing_profile: bool,
+        auto_persist_name: str,
+        persistent_profile_name: str | None,
+        persistent_owner: str | None,
+        persistent_storage_state: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        artifact_dir, auth_dir, upload_dir = self.prepare_dirs(session_id)
         context: BrowserContext | None = None
         session: BrowserSession | None = None
         browser: Browser | None = None
         runtime: IsolatedBrowserRuntime | None = None
         persistent_handle = None
+        # Set the moment browser-node confirms the profile is open: from then
+        # on exactly one release is owed, by whoever tears this session down.
+        persistent_opened = False
         try:
             from ...browser_manager import BrowserSession
 
             if persistent_profile_name is not None:
-                attachment = await self.manager.runtime.acquire_persistent_context(
-                    profile_name=persistent_profile_name,
+                persistent_handle = await self.manager.persistent_profiles.open(
+                    persistent_profile_name,
+                    owner=persistent_owner,
                     context_kwargs=context_kwargs,
                     storage_state=persistent_storage_state,
                 )
+                persistent_opened = True
+                attachment = await self.manager.runtime.attach_persistent_context(persistent_handle)
                 browser = attachment.browser
                 context = attachment.context
-                persistent_handle = attachment.handle
                 # The on-disk profile already had content (most opens, after
                 # the first) or this call just seeded it from the saved
                 # storage_state -- either way, this session did not start
@@ -243,25 +380,33 @@ class BrowserSessionService:
                 browser, runtime = await self.manager._acquire_session_browser(session_id)
                 context = await browser.new_context(**context_kwargs)
 
-            # A reused, already-running profile may already be tracing from
-            # its current open; starting it again would raise. A reused
-            # profile also normally still has its tab(s) open -- adopt the
-            # most recently opened one instead of piling on a redundant tab.
-            if persistent_handle is None or not persistent_handle.already_open:
-                if self.manager.settings.enable_tracing:
+            if self.manager.settings.enable_tracing:
+                if persistent_handle is None:
                     await context.tracing.start(screenshots=True, snapshots=True, sources=False)
-                page = await context.new_page()
-            elif context.pages:
+                else:
+                    # A profile re-attached after a controller restart may
+                    # still carry tracing state; never fail an Open over it.
+                    try:
+                        await context.tracing.start(screenshots=True, snapshots=True, sources=False)
+                    except Exception as exc:
+                        logger.debug(
+                            "tracing not started for persistent profile '%s': %s", persistent_profile_name, exc
+                        )
+            if persistent_handle is not None and context.pages:
+                # A persistent launch already has its first tab (and a profile
+                # re-attached after a controller restart keeps its tabs):
+                # adopt the most recent one instead of piling on another.
                 page = context.pages[-1]
             else:
                 page = await context.new_page()
 
             page.set_default_timeout(self.manager.settings.action_timeout_ms)
-            if self.manager.settings.stealth_enabled:
-                if persistent_handle is not None:
-                    await apply_persistent_stealth(page)
-                else:
-                    await apply_stealth(page)
+            # A persistent profile is a real, consistent headed Chromium:
+            # nothing is injected into it. navigator.webdriver is kept false by
+            # browser-node's launch switches, not by a JS override (which
+            # would itself be a detectable own property on navigator).
+            if self.manager.settings.stealth_enabled and persistent_handle is None:
+                await apply_stealth(page)
             session = BrowserSession(
                 id=session_id,
                 name=name or f"session-{session_id}",
@@ -390,26 +535,40 @@ class BrowserSessionService:
                 context=context,
                 browser=browser,
                 runtime=runtime,
-                persistent_profile_name=persistent_profile_name,
+                persistent_profile_name=persistent_profile_name if persistent_opened else None,
             )
             raise
-        finally:
-            if prepared_auth_state is not None:
-                prepared_auth_state.cleanup()
 
-    def check_limit(self) -> None:
-        if len(self.manager.sessions) >= self.manager.settings.max_sessions:
-            active_ids = ", ".join(sorted(self.manager.sessions.keys()))
-            message = (
-                f"Session limit reached: max_sessions={self.manager.settings.max_sessions}. "
-                f"Active live session(s): {active_ids}."
-            )
-            if self.manager.settings.session_isolation_mode == "shared_browser_node":
+    def effective_max_sessions(self) -> int:
+        settings = self.manager.settings
+        if settings.persistent_profiles_enabled and settings.session_isolation_mode == "shared_browser_node":
+            # Every persistent profile is its own visible Chromium on the one
+            # shared X display the owner watches: one at a time.
+            return min(settings.max_sessions, 1)
+        return settings.max_sessions
+
+    def check_limit(self, *, reserve: str | None = None) -> None:
+        """Refuse a new session over the limit; optionally reserve a slot.
+
+        With `reserve`, the check and the reservation happen with no await in
+        between, so concurrent Opens cannot both pass the check before either
+        registers its session (the caller discards the reservation once the
+        session is registered or the Open failed).
+        """
+        manager = self.manager
+        occupied = set(manager.sessions) | manager._session_reservations
+        limit = self.effective_max_sessions()
+        if len(occupied) >= limit:
+            active_ids = ", ".join(sorted(manager.sessions.keys())) or "(an Open is still in progress)"
+            message = f"Session limit reached: max_sessions={limit}. Active live session(s): {active_ids}."
+            if manager.settings.session_isolation_mode == "shared_browser_node":
                 message += (
                     " This scaffold uses one visible desktop and one shared browser node by default, "
                     "so only one live workflow is allowed unless you switch to docker_ephemeral isolation."
                 )
             raise RuntimeError(message)
+        if reserve is not None:
+            manager._session_reservations.add(reserve)
 
     def prepare_dirs(self, session_id: str) -> tuple[Path, Path, Path]:
         artifact_dir = self.manager.artifacts.prepare_session_dir(session_id)
@@ -462,8 +621,6 @@ class BrowserSessionService:
         persistent_profile_name: str | None = None,
     ) -> None:
         self.manager.sessions.pop(session_id, None)
-        if persistent_profile_name is not None:
-            await self.manager.persistent_profiles.close(persistent_profile_name)
         if session is not None and session.auto_persist_task is not None:
             session.auto_persist_task.cancel()
         if session is not None and session.tunnel is not None:
@@ -471,6 +628,22 @@ class BrowserSessionService:
                 await self.manager.tunnel_broker.release(session.tunnel)
             except Exception as exc:
                 logger.warning("failed to release session tunnel during create_session rollback: %s", exc)
+        if persistent_profile_name is not None or (session is not None and session.persistent_profile_name):
+            # A persistent profile's context is the profile itself: never
+            # context.close() it from here. Disconnect our CDP client, then
+            # release the profile in browser-node exactly once -- and only if
+            # browser-node had confirmed opening it (persistent_profile_name
+            # is None otherwise).
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception as exc:
+                    logger.debug("CDP disconnect during create_session rollback failed: %s", exc)
+            if session is not None:
+                session.persistent_profile_released = True
+            if persistent_profile_name is not None:
+                await self.manager.persistent_profiles.close(persistent_profile_name)
+            return
         if context is not None:
             try:
                 await context.close()
@@ -531,33 +704,18 @@ class BrowserSessionService:
                         exc,
                     )
             if session.persistent_profile_name:
-                # browser-node owns the actual Chromium process behind a
-                # persistent profile and tracks it by refcount (a second live
-                # session on the same profile must not tear it down under the
-                # first) -- release our hold there before touching the local
-                # CDP client. Best-effort; never blocks the rest of close().
-                await self.manager.persistent_profiles.close(session.persistent_profile_name)
-            try:
-                await session.context.close()
-            except Exception as exc:
-                if session.persistent_profile_name is None:
-                    raise
-                # Expected once the profile above already tore down the
-                # underlying Chromium process (refcount reached zero).
-                logger.debug(
-                    "context.close() after releasing persistent profile '%s' for session %s: %s",
-                    session.persistent_profile_name,
-                    session_id,
-                    exc,
-                )
-            finally:
-                if session.browser is not None and session.browser is not self.manager.browser:
-                    try:
-                        await session.browser.close()
-                    except Exception as exc:  # pragma: no cover - best effort isolated cleanup
-                        logger.warning("failed to close isolated browser for session %s: %s", session_id, exc)
-                if session.runtime is not None:
-                    await self.manager.runtime_provisioner.release(session.runtime)
+                await self.release_persistent_profile(session)
+            else:
+                try:
+                    await session.context.close()
+                finally:
+                    if session.browser is not None and session.browser is not self.manager.browser:
+                        try:
+                            await session.browser.close()
+                        except Exception as exc:  # pragma: no cover - best effort isolated cleanup
+                            logger.warning("failed to close isolated browser for session %s: %s", session_id, exc)
+                    if session.runtime is not None:
+                        await self.manager.runtime_provisioner.release(session.runtime)
             self.manager.sessions.pop(session_id, None)
             if self.manager._session_closed_hook is not None:
                 try:
@@ -656,6 +814,27 @@ class BrowserSessionService:
                             )
                             return
 
+    async def release_persistent_profile(self, session: "BrowserSession") -> None:
+        """Give back this session's persistent profile -- at most once.
+
+        Disconnects our CDP client (for a CDP-attached browser, close() only
+        drops the connection; the profile's context is never close()d from
+        here, since for a persistent context that would be the browser
+        itself), then asks browser-node to close the profile's Chromium so
+        its state is flushed to disk and the window leaves the owner's view.
+        close(), dead-session retirement and create rollback all funnel here,
+        so the release can never happen twice.
+        """
+        if session.persistent_profile_released or not session.persistent_profile_name:
+            return
+        session.persistent_profile_released = True
+        if session.browser is not None:
+            try:
+                await session.browser.close()
+            except Exception as exc:
+                logger.debug("CDP disconnect for session %s failed: %s", session.id, exc)
+        await self.manager.persistent_profiles.close(session.persistent_profile_name)
+
     async def _retire_dead_session(self, session: "BrowserSession", *, reason: str) -> None:
         """End a session whose underlying page died without an explicit close.
 
@@ -682,16 +861,17 @@ class BrowserSessionService:
             session.network_inspector.detach()
             session.network_inspector = None
         if session.persistent_profile_name:
-            await self.manager.persistent_profiles.close(session.persistent_profile_name)
-        try:
-            await session.context.close()
-        except Exception as exc:
-            logger.debug("context close failed while retiring dead session %s: %s", session.id, exc)
-        if session.browser is not None and session.browser is not self.manager.browser:
+            await self.release_persistent_profile(session)
+        else:
             try:
-                await session.browser.close()
+                await session.context.close()
             except Exception as exc:
-                logger.debug("browser close failed while retiring dead session %s: %s", session.id, exc)
+                logger.debug("context close failed while retiring dead session %s: %s", session.id, exc)
+            if session.browser is not None and session.browser is not self.manager.browser:
+                try:
+                    await session.browser.close()
+                except Exception as exc:
+                    logger.debug("browser close failed while retiring dead session %s: %s", session.id, exc)
         if session.runtime is not None:
             try:
                 await self.manager.runtime_provisioner.release(session.runtime)

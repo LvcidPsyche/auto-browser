@@ -152,6 +152,10 @@ class BrowserSession:
     # a repeat Open of the same profile reuses the running one instead of
     # launching a second Chromium against the same user-data-dir.
     persistent_profile_name: str | None = None
+    # Set once this session's hold on its persistent profile has been given
+    # back (CDP client disconnected + browser-node told to close it), so
+    # close / retire / create-rollback can never release it twice.
+    persistent_profile_released: bool = False
 
 
 SessionCreatedHook = Callable[[str, Page], Awaitable[None]]
@@ -251,6 +255,14 @@ class BrowserManager:
         self.runtime_provisioner = DockerBrowserNodeProvisioner(self.settings)
         self.tunnel_broker = IsolatedSessionTunnelBroker(self.settings)
         self.persistent_profiles = PersistentProfileClient(self.settings)
+        # Session ids that passed the session-limit check but are not in
+        # `self.sessions` yet (their Open is still in flight). Counted by the
+        # limit check so two concurrent Opens cannot both squeeze past it.
+        self._session_reservations: set[str] = set()
+        # One lock per persistent profile name: at most one live session may
+        # hold a profile, and a second Open of it waits for the first to
+        # finish and then gets that same session back.
+        self._profile_lease_locks: dict[str, asyncio.Lock] = {}
         self._session_created_hook: SessionCreatedHook | None = None
         self._session_closed_hook: SessionClosedHook | None = None
 

@@ -130,6 +130,11 @@ def stack_key_for(enrollment: TenantEnrollment) -> str:
     return digest.hexdigest()[:32]
 
 
+# Secrets introduced after the first tenants were provisioned; see
+# TenantProvisioner._ensure_generated_secrets.
+_BACKFILLED_SECRETS = ("TENANT_PROFILE_CONTROL_TOKEN",)
+
+
 def _secret() -> str:
     return secrets.token_urlsafe(36)
 
@@ -386,6 +391,7 @@ class TenantProvisioner:
             "TENANT_CONTROLLER_TOKEN": _secret(),
             "TENANT_SHARE_SECRET": _secret(),
             "TENANT_FERNET_KEY": _fernet_key(),
+            "TENANT_PROFILE_CONTROL_TOKEN": _secret(),
             "TENANT_ALLOWED_HOSTS": ",".join(descriptor.allowed_hosts),
             "BROKER_PORTAL_ASSERTION_PUBLIC_KEY": self.config.portal_assertion_public_key,
             "BROKER_USER_ID": descriptor.user_id,
@@ -514,7 +520,24 @@ class TenantProvisioner:
             raise ProvisioningError("Docker resource labels are malformed")
         return labels
 
+    def _ensure_generated_secrets(self, home: Path) -> None:
+        """Backfill tenant secrets added after a stack was first provisioned.
+
+        compose.yml requires every one of them (`${VAR:?...}`), so an older
+        .env without them would make every compose call -- even `stop` from
+        the idle reaper -- fail. Generated once, never rotated here.
+        """
+        path = home / ".env"
+        values = self._parse_env(self._read_private_text(path))
+        missing = [name for name in _BACKFILLED_SECRETS if not values.get(name)]
+        if not missing:
+            return
+        for name in missing:
+            values[name] = _secret()
+        self._write_private(path, self._render_env(values))
+
     def _compose(self, home: Path, key: str, *operation: str) -> None:
+        self._ensure_generated_secrets(home)
         self.runner.run(
             (
                 self.config.docker_binary,

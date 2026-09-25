@@ -10,6 +10,17 @@ process (it is the container with the X display the owner's noVNC view
 renders); this module only talks to its small internal HTTP control API,
 reachable exclusively over the tenant-private Docker network.
 
+Every call except the unauthenticated liveness ping carries the shared
+PROFILE_CONTROL_TOKEN as a bearer token, and so does the CDP connection
+itself (browser-node relays it to the profile's loopback-only debugging
+port). With no token configured nothing is attempted at all.
+
+Ownership: every call that can open or move a profile's directory carries
+the effective owner the controller already authorized (`require_access`).
+browser-node records it in the directory and refuses (or, on open, trashes
+and starts fresh) when it does not match, so the same name recreated under
+a different owner never reopens the old identity's logins.
+
 See browser-node/server.mjs for the server side of this protocol.
 """
 
@@ -34,6 +45,14 @@ def normalize_profile_name(name: str) -> str:
     return normalized
 
 
+class PersistentProfileError(RuntimeError):
+    """browser-node refused or failed a persistent-profile operation."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 @dataclass
 class PersistentProfileHandle:
     name: str
@@ -51,10 +70,39 @@ class PersistentProfileClient:
     def base_url(self) -> str:
         return f"http://{self.settings.browser_node_host}:{self.settings.profile_control_port}"
 
+    @property
+    def configured(self) -> bool:
+        return bool(getattr(self.settings, "profile_control_token", ""))
+
+    def auth_headers(self) -> dict[str, str]:
+        token = getattr(self.settings, "profile_control_token", "")
+        if not token:
+            raise PersistentProfileError(
+                "PROFILE_CONTROL_TOKEN is not configured; refusing to use persistent browser profiles"
+            )
+        return {"Authorization": f"Bearer {token}"}
+
+    async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        headers = self.auth_headers()
+        async with httpx.AsyncClient(timeout=self.settings.profile_control_timeout_seconds) as client:
+            response = await client.post(f"{self.base_url}{path}", json=body, headers=headers)
+        if response.status_code >= 400:
+            try:
+                detail = response.json().get("error") or response.text
+            except ValueError:
+                detail = response.text
+            raise PersistentProfileError(
+                f"browser-node refused {path} for '{body.get('name')}': {response.status_code} {str(detail)[:300]}",
+                status_code=response.status_code,
+            )
+        data = response.json()
+        return data if isinstance(data, dict) else {}
+
     async def open(
         self,
         name: str,
         *,
+        owner: str | None = None,
         context_kwargs: dict[str, Any] | None = None,
         storage_state: dict[str, Any] | None = None,
     ) -> PersistentProfileHandle:
@@ -62,6 +110,7 @@ class PersistentProfileClient:
         context_kwargs = context_kwargs or {}
         body: dict[str, Any] = {
             "name": name,
+            "owner": owner,
             "viewport": context_kwargs.get("viewport"),
             "accept_downloads": context_kwargs.get("accept_downloads", True),
             "locale": context_kwargs.get("locale") or self.settings.persistent_profile_locale,
@@ -74,17 +123,10 @@ class PersistentProfileClient:
         if user_agent:
             body["user_agent"] = user_agent
 
-        async with httpx.AsyncClient(timeout=self.settings.profile_control_timeout_seconds) as client:
-            response = await client.post(f"{self.base_url}/profiles/open", json=body)
-        if response.status_code >= 400:
-            raise RuntimeError(
-                f"browser-node refused to open persistent profile '{name}': "
-                f"{response.status_code} {response.text[:500]}"
-            )
-        data = response.json()
+        data = await self._post("/profiles/open", body)
         cdp_endpoint = data.get("cdp_endpoint")
         if not cdp_endpoint:
-            raise RuntimeError(f"browser-node did not return a CDP endpoint for persistent profile '{name}'")
+            raise PersistentProfileError(f"browser-node did not return a CDP endpoint for persistent profile '{name}'")
         return PersistentProfileHandle(
             name=name,
             cdp_endpoint=cdp_endpoint,
@@ -96,42 +138,51 @@ class PersistentProfileClient:
     async def ping(self) -> None:
         """Raise unless browser-node's profile-control API is reachable.
 
-        Used by /readyz and the deep health probe in persistent-profile mode,
-        where there is no longer one shared browser for `ensure_browser()` to
-        connect to -- readiness there means "browser-node is up", not "a
-        browser is already running" (persistent profiles launch lazily, on
-        the first session that asks for one).
+        Used by /readyz and the deep health probe in persistent-profile mode.
+        Readiness there means "browser-node is up"; persistent profiles launch
+        lazily, on the first session that asks for one.
         """
         async with httpx.AsyncClient(timeout=self.settings.profile_control_timeout_seconds) as client:
             response = await client.get(f"{self.base_url}/healthz")
         response.raise_for_status()
 
-    async def close(self, name: str) -> None:
-        """Release this session's hold on the profile.
+    async def close(self, name: str) -> bool:
+        """Close the profile's Chromium process in browser-node.
 
-        Best-effort and non-fatal: browser-node keeps a refcount per profile
-        (see server.mjs) and only tears down the actual Chromium process once
-        nothing else holds it, so a failure here leaves behind a running
-        profile process rather than losing session-close cleanup for
-        everything else. Logged, never raised.
+        The controller holds at most one live session per profile (see
+        BrowserSessionService), so this is called exactly once per session.
+        Best-effort and non-fatal: a failure leaves a running profile process
+        behind (the next Open simply re-attaches to it) rather than breaking
+        the rest of session-close cleanup. Returns whether it succeeded.
         """
         try:
             name = normalize_profile_name(name)
         except ValueError as exc:
             logger.warning("persistent profile close skipped: %s", exc)
-            return
+            return False
         try:
-            async with httpx.AsyncClient(timeout=self.settings.profile_control_timeout_seconds) as client:
-                response = await client.post(f"{self.base_url}/profiles/close", json={"name": name})
-            if response.status_code >= 400:
-                logger.warning(
-                    "persistent profile close for '%s' returned %s: %s",
-                    name,
-                    response.status_code,
-                    response.text[:500],
-                )
+            await self._post("/profiles/close", {"name": name})
+            return True
         except Exception as exc:
             logger.warning("persistent profile close failed for '%s': %s", name, exc)
+            return False
+
+    async def trash(self, name: str, *, reason: str, owner: str | None) -> dict[str, Any]:
+        """Move a profile's on-disk directory to browser-node's trash.
+
+        Never deletes: a login is always recoverable from
+        /data/browser-profiles/.trash. Closes the profile first if it is
+        running. Raises on any failure, so callers can abort the operation
+        that asked for it instead of leaving the old directory in place.
+        """
+        name = normalize_profile_name(name)
+        return await self._post("/profiles/trash", {"name": name, "reason": reason, "owner": owner})
+
+    async def rename(self, name: str, new_name: str, *, owner: str | None) -> dict[str, Any]:
+        """Rename a profile's on-disk directory (a stale destination goes to trash)."""
+        name = normalize_profile_name(name)
+        new_name = normalize_profile_name(new_name)
+        return await self._post("/profiles/rename", {"name": name, "new_name": new_name, "owner": owner})
 
     def profile_disk_usage_bytes(self, name: str) -> int | None:
         """Best-effort on-disk size of a profile's user-data-dir.

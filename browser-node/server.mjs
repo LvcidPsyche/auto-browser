@@ -1,6 +1,8 @@
-import { createServer } from "node:http";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { createServer, request as httpRequest } from "node:http";
+import { connect as netConnect } from "node:net";
 import { dirname, join } from "node:path";
 import { chromium } from "playwright";
 
@@ -10,50 +12,189 @@ const endpointFile = process.env.BROWSER_WS_ENDPOINT_FILE || "/data/profile/brow
 const host = process.env.PLAYWRIGHT_SERVER_HOST || "0.0.0.0";
 const port = Number.parseInt(process.env.PLAYWRIGHT_SERVER_PORT || "9223", 10);
 const advertisedHost = process.env.PLAYWRIGHT_SERVER_ADVERTISED_HOST || "browser-node";
+const downloadsDir = process.env.BROWSER_DOWNLOADS_DIR || "/data/downloads";
 
 // Persistent Chromium profiles -- one named identity's on-disk user-data-dir
-// (owner-default, nihad-google, ...), launched on demand and reused for as
-// long as it stays open, so IndexedDB/service workers/cache/history survive
-// across Opens, controller restarts and image rebuilds. See
-// controller/app/persistent_profiles.py for the client side of this
-// protocol, and the PERSISTENT_PROFILES_ENABLED rollback flag: unset (the
-// code default), this whole feature is inert and the container behaves
-// exactly as before -- the shared chromium.launchServer() below boots the
-// same way it always has.
+// (owner-default, nihad-google, ...), launched on demand, so IndexedDB,
+// service workers, cache and history survive across Opens, controller
+// restarts and image rebuilds. See controller/app/persistent_profiles.py for
+// the client side of this protocol. Unset (the code default), this whole
+// feature is inert and the container behaves exactly as before.
 const persistentProfilesEnabled = (process.env.PERSISTENT_PROFILES_ENABLED || "false").toLowerCase() === "true";
 const profileControlHost = process.env.PROFILE_CONTROL_HOST || "0.0.0.0";
 const profileControlPort = Number.parseInt(process.env.PROFILE_CONTROL_PORT || "9224", 10);
+// Chromium binds --remote-debugging-port to 127.0.0.1 no matter what
+// --remote-debugging-address says (that switch is honoured by headless only),
+// so the controller -- another container -- can never reach a profile's CDP
+// port directly. This relay is the only way in: it listens on the tenant
+// network, requires the shared bearer token, and pipes to the loopback port.
+const cdpRelayHost = process.env.PROFILE_CDP_RELAY_HOST || "0.0.0.0";
+const cdpRelayPort = Number.parseInt(process.env.PROFILE_CDP_RELAY_PORT || "9225", 10);
+const cdpRelayAdvertisedHost = process.env.PROFILE_CDP_RELAY_ADVERTISED_HOST || advertisedHost;
+// Shared secret between browser-node and the controller. Required for every
+// /profiles/* call and every relayed CDP connection; without it configured
+// those endpoints refuse everything (fail closed), /healthz stays up.
+const profileControlToken = process.env.PROFILE_CONTROL_TOKEN || "";
 const profilesRoot = process.env.BROWSER_PROFILES_ROOT || "/data/browser-profiles";
-// A real device's language/timezone do not change between logins; the
-// container's own default (en-US/UTC) is a bigger tell than an unset user
-// agent, so a real, headed Chromium's own UA is left alone unless
-// PERSISTENT_PROFILE_USER_AGENT is set (env-configurable per the incident
-// report; ar-EG / Africa/Cairo are the sensible defaults for this owner).
+// Never deleted automatically: delete/rename/import/owner-change move a
+// profile here, so a login is never silently lost. Cleanup is manual.
+const trashRoot = join(profilesRoot, ".trash");
+const healthcheckRoot = join(profilesRoot, ".healthcheck");
+const deepHealthTtlMs = Number.parseFloat(process.env.PROFILE_DEEP_HEALTH_TTL_SECONDS || "300") * 1000;
 const defaultLocale = process.env.PERSISTENT_PROFILE_LOCALE || "ar-EG";
 const defaultTimezoneId = process.env.PERSISTENT_PROFILE_TIMEZONE || "Africa/Cairo";
 
 const PROFILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/;
+const OWNER_MARKER = ".auto-browser-owner.json";
+// Chromium's own "this profile is in use" markers (Linux) plus the CDP port
+// file. After a killed container they are left behind pointing at the old
+// container's hostname/pid, and Chromium then refuses the profile as "in use
+// by another computer". Removed only when no live process holds the profile.
+const STALE_LOCK_FILES = ["SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"];
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// name -> { context, cdpEndpoint, refCount }
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+// name -> { context, localPort, wsPath, cdpEndpoint, owner }
 const profiles = new Map();
-// name -> in-flight launch Promise, so two near-simultaneous opens of the
-// same never-yet-open profile await the one real launch instead of racing
-// two Chromium processes onto the same user-data-dir (which Chromium's own
-// profile lock would refuse anyway, but noisily).
-const launching = new Map();
+// relay id -> loopback CDP port. Profile names map to themselves; the deep
+// healthcheck registers a temporary id that no profile name can collide with.
+const relayTargets = new Map();
+
+// Every lifecycle operation (open/close/trash/rename) runs one at a time.
+// The controller holds one exclusive lease per profile, and this is a
+// single-owner stack, so serializing is cheap and removes every race between
+// "launch", "close" and "move the directory" on the same user-data-dir.
+let lifecycleChain = Promise.resolve();
+function withLifecycleLock(fn) {
+  const run = lifecycleChain.then(fn, fn);
+  lifecycleChain = run.catch(() => {});
+  return run;
+}
+
+function tokenMatches(authorizationHeader) {
+  if (!profileControlToken) return false;
+  const match = /^Bearer\s+(.+)$/i.exec(authorizationHeader || "");
+  if (!match) return false;
+  // Hash both sides so timingSafeEqual always compares equal-length buffers
+  // (it throws on a length mismatch, which would itself leak the length).
+  const supplied = createHash("sha256").update(match[1].trim(), "utf8").digest();
+  const expected = createHash("sha256").update(profileControlToken, "utf8").digest();
+  return timingSafeEqual(supplied, expected);
+}
+
+function profileDir(name) {
+  return join(profilesRoot, name);
+}
+
+function normalizeOwner(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+async function readOwnerMarker(dir) {
+  try {
+    const parsed = JSON.parse(await readFile(join(dir, OWNER_MARKER), "utf-8"));
+    return { exists: true, owner: normalizeOwner(parsed.owner) };
+  } catch {
+    return { exists: false, owner: null };
+  }
+}
+
+async function writeOwnerMarker(dir, owner) {
+  const payload = JSON.stringify({ owner, updated_at: new Date().toISOString() });
+  await writeFile(join(dir, OWNER_MARKER), payload, { encoding: "utf-8", mode: 0o600 });
+}
+
+/**
+ * PIDs of any live process whose command line names this user-data-dir.
+ * Linux only (/proc); elsewhere nothing can be proven, so nothing is reported
+ * and Chromium's own lock handling is left to decide.
+ */
+async function profileHolderPids(dir) {
+  if (process.platform !== "linux") return [];
+  const needle = `--user-data-dir=${dir}`;
+  const holders = [];
+  let entries = [];
+  try {
+    entries = await readdir("/proc");
+  } catch {
+    return [];
+  }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const cmdline = await readFile(`/proc/${entry}/cmdline`, "utf-8");
+      if (cmdline.split("\0").includes(needle)) holders.push(Number(entry));
+    } catch {
+      // process exited while we looked -- not a holder
+    }
+  }
+  return holders;
+}
+
+async function clearStaleLocks(dir) {
+  const removed = [];
+  for (const file of STALE_LOCK_FILES) {
+    const path = join(dir, file);
+    try {
+      await lstat(path); // lstat: SingletonLock is a dangling symlink
+    } catch {
+      continue;
+    }
+    try {
+      await unlink(path);
+      removed.push(file);
+    } catch (err) {
+      console.warn(`could not remove stale ${path}: ${err.message}`);
+    }
+  }
+  return removed;
+}
+
+/** Refuse to touch a directory some process we do not manage still holds. */
+async function assertNotHeldElsewhere(dir) {
+  // A profile we just closed can keep a child process alive for a moment.
+  let holders = await profileHolderPids(dir);
+  for (let attempt = 0; holders.length && attempt < 10; attempt += 1) {
+    await sleep(200);
+    holders = await profileHolderPids(dir);
+  }
+  if (holders.length) {
+    throw new HttpError(409, `profile directory is held by running process(es) ${holders.join(",")}`);
+  }
+}
+
+function timestampSlug() {
+  return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+}
+
+async function moveToTrash(name, reason) {
+  const dir = profileDir(name);
+  if (!existsSync(dir)) return null;
+  await mkdir(trashRoot, { recursive: true, mode: 0o700 });
+  const safeReason = String(reason || "trashed").replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 40) || "trashed";
+  let destination = join(trashRoot, `${name}--${timestampSlug()}--${safeReason}`);
+  if (existsSync(destination)) destination += `-${randomBytes(3).toString("hex")}`;
+  await rename(dir, destination);
+  console.log(`persistent profile '${name}' moved to trash: ${destination} (${safeReason})`);
+  return destination;
+}
 
 /**
  * Chromium writes its actual (OS-assigned, since we ask for port 0) remote
- * debugging port into this file inside the user-data-dir shortly after
- * start. This is the standard way to discover a CDP endpoint for a browser
- * launched with an explicit user-data-dir -- there is no equivalent of
- * launchServer()'s wsEndpoint() for a persistent context.
+ * debugging port into this file inside the user-data-dir shortly after start.
+ * Any stale copy from an earlier run is deleted before launch (see
+ * clearStaleLocks), so whatever is read here belongs to this process.
  */
-async function discoverCdpEndpoint(userDataDir) {
+async function discoverCdpPort(userDataDir) {
   const portFile = join(userDataDir, "DevToolsActivePort");
   for (let attempt = 0; attempt < 80; attempt += 1) {
     if (existsSync(portFile)) {
@@ -61,7 +202,7 @@ async function discoverCdpEndpoint(userDataDir) {
       const [portLine, wsPathLine] = content.split("\n");
       const cdpPort = Number.parseInt(portLine, 10);
       if (Number.isFinite(cdpPort) && wsPathLine) {
-        return `ws://${advertisedHost}:${cdpPort}${wsPathLine}`;
+        return { localPort: cdpPort, wsPath: wsPathLine.trim() };
       }
     }
     await sleep(250);
@@ -69,102 +210,126 @@ async function discoverCdpEndpoint(userDataDir) {
   throw new Error(`timed out waiting for DevToolsActivePort under ${userDataDir}`);
 }
 
-async function launchProfile(name, opts) {
-  const userDataDir = join(profilesRoot, name);
-  // 0700: this directory holds a real, logged-in browser profile (cookies,
-  // IndexedDB, history) for one named identity -- readable/writable only by
-  // the browser user that owns it (this process itself, uid 10001; see
-  // entrypoint.sh), not by anything else that might land in this container.
+function relayEndpoint(relayId, wsPath) {
+  return `ws://${cdpRelayAdvertisedHost}:${cdpRelayPort}/cdp/${encodeURIComponent(relayId)}${wsPath}`;
+}
+
+function persistentLaunchArgs() {
+  return [
+    `--window-size=${width},${height}`,
+    "--disable-dev-shm-usage",
+    // No GPU under Xvfb. --disable-software-rasterizer is deliberately NOT
+    // passed here: together with --disable-gpu it removes WebGL entirely,
+    // and "no WebGL at all" is a far rarer fingerprint than SwiftShader's
+    // software WebGL (Playwright already passes --enable-unsafe-swiftshader).
+    "--disable-gpu",
+    "--disable-background-networking",
+    // Keeps navigator.webdriver false natively -- no JS override (an own
+    // property on navigator is itself detectable).
+    "--disable-blink-features=AutomationControlled",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-notifications",
+    // Loopback only (Chromium ignores any other address for a headed
+    // browser); reached from the controller through the authenticated relay.
+    "--remote-debugging-port=0",
+  ];
+}
+
+async function launchProfile(name, opts, owner) {
+  const userDataDir = profileDir(name);
+  if (existsSync(userDataDir)) {
+    await assertNotHeldElsewhere(userDataDir);
+    const removed = await clearStaleLocks(userDataDir);
+    if (removed.length) console.log(`persistent profile '${name}': cleared stale ${removed.join(", ")}`);
+    const marker = await readOwnerMarker(userDataDir);
+    if (marker.owner !== null && marker.owner !== owner) {
+      // Same name, different owner: the old identity's logins must never
+      // open for the new one. Kept (in trash), never reused.
+      await moveToTrash(name, "owner-changed");
+    }
+  }
+  // 0700: this directory holds a real, logged-in browser profile.
   await mkdir(userDataDir, { recursive: true, mode: 0o700 });
-  // Checked before launch: Chromium creates its own "Default" directory the
-  // moment it starts, so this is the last point at which "does this profile
-  // already have real content" can still be answered.
+  const marker = await readOwnerMarker(userDataDir);
+  if (!marker.exists || (marker.owner === null && owner !== null)) {
+    await writeOwnerMarker(userDataDir, owner);
+  }
+  // Checked before launch: Chromium creates "Default" the moment it starts.
   const wasEmpty = !existsSync(join(userDataDir, "Default"));
 
   const launchOptions = {
     headless: false,
     chromiumSandbox: false,
+    // Playwright 1.62 no longer passes --enable-automation, but pin it off
+    // explicitly so an upgrade cannot quietly bring the infobar/flag back.
+    ignoreDefaultArgs: ["--enable-automation"],
     viewport: opts.viewport || { width, height },
     acceptDownloads: opts.accept_downloads !== false,
-    downloadsPath: "/data/downloads",
+    downloadsPath: downloadsDir,
     locale: opts.locale || defaultLocale,
     timezoneId: opts.timezone_id || defaultTimezoneId,
-    args: [
-      `--window-size=${width},${height}`,
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--disable-software-rasterizer",
-      "--disable-background-networking",
-      "--disable-blink-features=AutomationControlled",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-notifications",
-      // Bound to 0.0.0.0 (not loopback) so the controller container can
-      // reach it over the tenant-private Docker network -- the same
-      // exposure the shared launchServer() below already has on 9223.
-      "--remote-debugging-address=0.0.0.0",
-      "--remote-debugging-port=0",
-    ],
+    args: persistentLaunchArgs(),
   };
   if (opts.user_agent) launchOptions.userAgent = opts.user_agent;
   if (opts.extra_http_headers) launchOptions.extraHTTPHeaders = opts.extra_http_headers;
   if (opts.proxy && opts.proxy.server) launchOptions.proxy = opts.proxy;
   // Seed cookies + localStorage from the encrypted "remember me" backup, but
-  // ONLY into a profile that has never been launched before. A profile that
-  // already exists holds the real, current, on-disk login state -- replaying
-  // a possibly-stale export over it is exactly the silent-downgrade the
-  // auto-persist guard on the controller side already refuses to do.
+  // ONLY into a profile that has never been launched before. An existing
+  // profile holds the real, current, on-disk login state.
   const seeded = Boolean(wasEmpty && opts.storage_state);
   if (seeded) launchOptions.storageState = opts.storage_state;
 
   const context = await chromium.launchPersistentContext(userDataDir, launchOptions);
-  let cdpEndpoint;
+  let discovered;
   try {
-    cdpEndpoint = await discoverCdpEndpoint(userDataDir);
+    discovered = await discoverCdpPort(userDataDir);
   } catch (err) {
     await context.close().catch(() => {});
     throw err;
   }
 
-  const entry = { context, cdpEndpoint, refCount: 1 };
+  const entry = {
+    context,
+    localPort: discovered.localPort,
+    wsPath: discovered.wsPath,
+    cdpEndpoint: relayEndpoint(name, discovered.wsPath),
+    owner,
+  };
   profiles.set(name, entry);
+  relayTargets.set(name, discovered.localPort);
   context.on("close", () => {
-    profiles.delete(name);
+    if (profiles.get(name) === entry) {
+      profiles.delete(name);
+      relayTargets.delete(name);
+    }
   });
-  console.log(`persistent profile '${name}' opened (${wasEmpty ? "new" : "existing"} profile): ${cdpEndpoint}`);
-  return { cdpEndpoint, wasEmpty, seeded };
+  console.log(`persistent profile '${name}' opened (${wasEmpty ? "new" : "existing"} profile) on loopback :${discovered.localPort}`);
+  return { entry, wasEmpty, seeded };
 }
 
-async function acquireProfile(name, opts) {
+async function openProfile(name, opts) {
+  const owner = normalizeOwner(opts.owner);
   const existing = profiles.get(name);
   if (existing) {
-    existing.refCount += 1;
-    return { cdpEndpoint: existing.cdpEndpoint, alreadyOpen: true, seeded: false, wasEmpty: false };
-  }
-
-  const joinedExisting = launching.has(name);
-  const promise = joinedExisting ? launching.get(name) : launchProfile(name, opts);
-  if (!joinedExisting) launching.set(name, promise);
-  try {
-    const launched = await promise;
-    if (joinedExisting) {
-      // The launch we joined already registered itself in `profiles`.
-      const entry = profiles.get(name);
-      entry.refCount += 1;
-      return { cdpEndpoint: entry.cdpEndpoint, alreadyOpen: true, seeded: false, wasEmpty: false };
+    if (existing.owner !== null && existing.owner !== owner) {
+      throw new HttpError(409, "profile is open for a different owner");
     }
-    return { cdpEndpoint: launched.cdpEndpoint, alreadyOpen: false, seeded: launched.seeded, wasEmpty: launched.wasEmpty };
-  } finally {
-    if (launching.get(name) === promise) launching.delete(name);
+    if (existing.owner === null && owner !== null) {
+      existing.owner = owner;
+      await writeOwnerMarker(profileDir(name), owner).catch(() => {});
+    }
+    return { entry: existing, alreadyOpen: true, seeded: false, wasEmpty: false };
   }
+  const launched = await launchProfile(name, opts, owner);
+  return { entry: launched.entry, alreadyOpen: false, seeded: launched.seeded, wasEmpty: launched.wasEmpty };
 }
 
-async function releaseProfile(name) {
+async function closeProfile(name) {
   const entry = profiles.get(name);
   if (!entry) return { closed: true, existed: false };
-  entry.refCount -= 1;
-  if (entry.refCount > 0) return { closed: false, existed: true, ref_count: entry.refCount };
   profiles.delete(name);
+  relayTargets.delete(name);
   try {
     await entry.context.close();
   } catch (err) {
@@ -173,13 +338,130 @@ async function releaseProfile(name) {
   return { closed: true, existed: true };
 }
 
+async function assertOwnerAllows(dir, owner) {
+  const marker = await readOwnerMarker(dir);
+  if (marker.owner !== null && marker.owner !== owner) {
+    throw new HttpError(403, "profile directory belongs to a different owner");
+  }
+}
+
+async function trashProfile(name, reason, owner) {
+  const dir = profileDir(name);
+  if (!existsSync(dir)) return { trashed: false, existed: false, was_open: false };
+  await assertOwnerAllows(dir, owner);
+  const wasOpen = profiles.has(name);
+  if (wasOpen) await closeProfile(name);
+  await assertNotHeldElsewhere(dir);
+  const destination = await moveToTrash(name, reason);
+  return { trashed: true, existed: true, was_open: wasOpen, trash_path: destination };
+}
+
+async function renameProfile(name, newName, owner) {
+  const source = profileDir(name);
+  const destination = profileDir(newName);
+  if (!existsSync(source)) {
+    // Nothing on disk for the old name. A stale directory already sitting
+    // under the new name must still not survive into the renamed identity.
+    const replaced = existsSync(destination) ? await trashProfile(newName, "replaced-by-rename", owner) : null;
+    return { renamed: false, existed: false, replaced_destination: Boolean(replaced && replaced.trashed) };
+  }
+  await assertOwnerAllows(source, owner);
+  if (existsSync(destination)) await assertOwnerAllows(destination, owner);
+  if (profiles.has(name)) await closeProfile(name);
+  if (profiles.has(newName)) await closeProfile(newName);
+  await assertNotHeldElsewhere(source);
+  let replacedDestination = false;
+  if (existsSync(destination)) {
+    await assertNotHeldElsewhere(destination);
+    await moveToTrash(newName, "replaced-by-rename");
+    replacedDestination = true;
+  }
+  await rename(source, destination);
+  console.log(`persistent profile '${name}' renamed to '${newName}'`);
+  return { renamed: true, existed: true, replaced_destination: replacedDestination };
+}
+
+// ---------------------------------------------------------------------------
+// Deep health: proves launch -> DevToolsActivePort -> relay -> CDP attach
+// works end to end, on a disposable profile (never a real one). Headless on
+// purpose (same full Chromium binary via channel "chromium") so the check
+// never flashes a window on the owner's live noVNC view. Cached, and only
+// one run in flight, so the container healthcheck stays cheap.
+let deepHealth = { at: 0, ok: false, error: "not run yet" };
+// Set once the shared launchServer() browser below is up.
+let legacyEndpoint = null;
+let deepHealthInFlight = null;
+
+async function runDeepHealthcheck() {
+  const id = `~hc-${randomBytes(6).toString("hex")}`;
+  const dir = join(healthcheckRoot, id.slice(1));
+  let context = null;
+  let browser = null;
+  const started = Date.now();
+  try {
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    if (process.platform === "linux") {
+      // Exercise the crash-recovery path every time: a lock left by a
+      // container that no longer exists must not block the launch.
+      const { symlink } = await import("node:fs/promises");
+      await symlink("stale-host-that-no-longer-exists-99999", join(dir, "SingletonLock")).catch(() => {});
+    }
+    await clearStaleLocks(dir);
+    context = await chromium.launchPersistentContext(dir, {
+      headless: true,
+      channel: "chromium",
+      chromiumSandbox: false,
+      ignoreDefaultArgs: ["--enable-automation"],
+      args: persistentLaunchArgs(),
+    });
+    const discovered = await discoverCdpPort(dir);
+    relayTargets.set(id, discovered.localPort);
+    browser = await chromium.connectOverCDP(`ws://127.0.0.1:${cdpRelayPort}/cdp/${encodeURIComponent(id)}${discovered.wsPath}`, {
+      headers: { Authorization: `Bearer ${profileControlToken}` },
+      timeout: 15000,
+    });
+    if (!browser.contexts().length) throw new Error("relay attach exposed no browser context");
+    if (!legacyEndpoint || !existsSync(endpointFile)) throw new Error("legacy browser server is not up");
+    return { ok: true, elapsed_ms: Date.now() - started };
+  } finally {
+    relayTargets.delete(id);
+    if (browser) await browser.close().catch(() => {});
+    if (context) await context.close().catch(() => {});
+    // A throwaway profile with no logins in it -- safe to remove outright.
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function deepHealthcheck() {
+  if (deepHealth.ok && Date.now() - deepHealth.at < deepHealthTtlMs) {
+    return { ...deepHealth, cached: true };
+  }
+  if (!deepHealthInFlight) {
+    deepHealthInFlight = runDeepHealthcheck()
+      .then((result) => {
+        deepHealth = { at: Date.now(), ok: true, error: null, elapsed_ms: result.elapsed_ms };
+      })
+      .catch((err) => {
+        deepHealth = { at: Date.now(), ok: false, error: (err && err.message) || String(err) };
+      })
+      .finally(() => {
+        deepHealthInFlight = null;
+      });
+  }
+  await deepHealthInFlight;
+  return { ...deepHealth, cached: false };
+}
+
+// ---------------------------------------------------------------------------
+// HTTP plumbing
+
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let data = "";
     req.on("data", (chunk) => {
       data += chunk;
       if (data.length > 5_000_000) {
-        reject(new Error("request body too large"));
+        reject(new HttpError(413, "request body too large"));
         req.destroy();
       }
     });
@@ -187,8 +469,8 @@ function readJsonBody(req) {
       if (!data) return resolve({});
       try {
         resolve(JSON.parse(data));
-      } catch (err) {
-        reject(err);
+      } catch {
+        reject(new HttpError(400, "invalid JSON body"));
       }
     });
     req.on("error", reject);
@@ -204,101 +486,239 @@ function sendJson(res, status, body) {
   res.end(payload);
 }
 
-// A small always-on control API, reachable only on the internal tenant
-// network (never published to the host -- see deploy/tenants/compose.yml).
-// /healthz is served even when persistent profiles are disabled, so the
-// container healthcheck can rely on this port in both modes; /profiles/*
-// only does anything when PERSISTENT_PROFILES_ENABLED=true.
+function requireName(value, field = "name") {
+  const name = String(value || "");
+  if (!PROFILE_NAME_RE.test(name)) throw new HttpError(400, `invalid profile ${field}`);
+  return name;
+}
+
+// Control API, reachable only on the internal tenant network (never
+// published). /healthz is unauthenticated and reveals nothing; everything
+// else requires the bearer token.
 const controlServer = createServer(async (req, res) => {
   try {
-    if (req.method === "GET" && req.url === "/healthz") {
-      return sendJson(res, 200, { ok: true, persistent_profiles_enabled: persistentProfilesEnabled });
+    const path = (req.url || "").split("?")[0];
+    if (req.method === "GET" && path === "/healthz") {
+      return sendJson(res, 200, {
+        ok: true,
+        persistent_profiles_enabled: persistentProfilesEnabled,
+        control_token_configured: Boolean(profileControlToken),
+      });
     }
     if (!persistentProfilesEnabled) {
       return sendJson(res, 404, { error: "persistent profiles are disabled (PERSISTENT_PROFILES_ENABLED=false)" });
     }
-    if (req.method === "POST" && req.url === "/profiles/open") {
-      const body = await readJsonBody(req);
-      const name = String(body.name || "");
-      if (!PROFILE_NAME_RE.test(name)) {
-        return sendJson(res, 400, { error: "invalid profile name" });
-      }
-      const result = await acquireProfile(name, body);
+    if (!profileControlToken) {
+      return sendJson(res, 503, { error: "PROFILE_CONTROL_TOKEN is not configured; refusing profile control" });
+    }
+    if (!tokenMatches(req.headers.authorization)) {
+      return sendJson(res, 401, { error: "unauthorized" });
+    }
+    if (req.method === "GET" && path === "/healthz/deep") {
+      const result = await deepHealthcheck();
+      return sendJson(res, result.ok ? 200 : 503, result);
+    }
+    if (req.method !== "POST") return sendJson(res, 404, { error: "not found" });
+    const body = await readJsonBody(req);
+    if (path === "/profiles/open") {
+      const name = requireName(body.name);
+      const result = await withLifecycleLock(() => openProfile(name, body));
       return sendJson(res, 200, {
-        cdp_endpoint: result.cdpEndpoint,
+        cdp_endpoint: result.entry.cdpEndpoint,
         already_open: result.alreadyOpen,
         seeded: result.seeded,
         was_empty: result.wasEmpty,
       });
     }
-    if (req.method === "POST" && req.url === "/profiles/close") {
-      const body = await readJsonBody(req);
-      const name = String(body.name || "");
-      if (!PROFILE_NAME_RE.test(name)) {
-        return sendJson(res, 400, { error: "invalid profile name" });
-      }
-      const result = await releaseProfile(name);
-      return sendJson(res, 200, result);
+    if (path === "/profiles/close") {
+      const name = requireName(body.name);
+      return sendJson(res, 200, await withLifecycleLock(() => closeProfile(name)));
+    }
+    if (path === "/profiles/trash") {
+      const name = requireName(body.name);
+      const owner = normalizeOwner(body.owner);
+      return sendJson(res, 200, await withLifecycleLock(() => trashProfile(name, body.reason, owner)));
+    }
+    if (path === "/profiles/rename") {
+      const name = requireName(body.name);
+      const newName = requireName(body.new_name, "new_name");
+      if (name === newName) throw new HttpError(400, "new_name must differ from name");
+      const owner = normalizeOwner(body.owner);
+      return sendJson(res, 200, await withLifecycleLock(() => renameProfile(name, newName, owner)));
     }
     return sendJson(res, 404, { error: "not found" });
   } catch (err) {
-    console.error("profile control server error:", err);
-    return sendJson(res, 500, { error: (err && err.message) || String(err) });
+    const status = err instanceof HttpError ? err.status : 500;
+    if (status >= 500) console.error("profile control server error:", err);
+    return sendJson(res, status, { error: (err && err.message) || String(err) });
   }
 });
 
-await new Promise((resolve, reject) => {
-  controlServer.once("error", reject);
-  controlServer.listen(profileControlPort, profileControlHost, resolve);
+// ---------------------------------------------------------------------------
+// CDP relay: ws://browser-node:9225/cdp/<name>/devtools/browser/<id>
+//   -> ws://127.0.0.1:<profile's loopback port>/devtools/browser/<id>
+
+const RELAY_PATH_RE = /^\/cdp\/([^/]+)(\/.*)$/;
+
+function parseRelayPath(url) {
+  const match = RELAY_PATH_RE.exec((url || "").split("?")[0]);
+  if (!match) return null;
+  let id;
+  try {
+    id = decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+  const localPort = relayTargets.get(id);
+  if (!localPort) return null;
+  return { id, localPort, upstreamPath: match[2] };
+}
+
+function rejectUpgrade(socket, status, reason) {
+  socket.end(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+}
+
+const relayServer = createServer((req, res) => {
+  if (!profileControlToken || !tokenMatches(req.headers.authorization)) {
+    return sendJson(res, 401, { error: "unauthorized" });
+  }
+  const target = parseRelayPath(req.url);
+  if (!target || req.method !== "GET" || target.upstreamPath !== "/json/version") {
+    return sendJson(res, 404, { error: "not found" });
+  }
+  const upstream = httpRequest(
+    {
+      host: "127.0.0.1",
+      port: target.localPort,
+      path: "/json/version",
+      // Chromium rejects DevTools HTTP requests whose Host is not localhost/IP.
+      headers: { Host: `127.0.0.1:${target.localPort}` },
+      timeout: 5000,
+    },
+    (upstreamRes) => {
+      let data = "";
+      upstreamRes.on("data", (chunk) => {
+        data += chunk;
+      });
+      upstreamRes.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.webSocketDebuggerUrl) {
+            const wsPath = new URL(parsed.webSocketDebuggerUrl).pathname;
+            parsed.webSocketDebuggerUrl = relayEndpoint(target.id, wsPath);
+          }
+          sendJson(res, 200, parsed);
+        } catch {
+          sendJson(res, 502, { error: "invalid upstream response" });
+        }
+      });
+    },
+  );
+  upstream.on("error", () => sendJson(res, 502, { error: "upstream unavailable" }));
+  upstream.on("timeout", () => upstream.destroy(new Error("timeout")));
+  upstream.end();
 });
+
+relayServer.on("upgrade", (req, socket, head) => {
+  socket.on("error", () => socket.destroy());
+  if (!profileControlToken || !tokenMatches(req.headers.authorization)) {
+    return rejectUpgrade(socket, 401, "Unauthorized");
+  }
+  const target = parseRelayPath(req.url);
+  if (!target || !target.upstreamPath.startsWith("/devtools/")) {
+    return rejectUpgrade(socket, 404, "Not Found");
+  }
+  const upstream = netConnect({ host: "127.0.0.1", port: target.localPort });
+  const teardown = () => {
+    socket.destroy();
+    upstream.destroy();
+  };
+  upstream.on("error", teardown);
+  upstream.on("close", () => socket.destroy());
+  socket.on("close", () => upstream.destroy());
+  upstream.on("connect", () => {
+    socket.setNoDelay(true);
+    upstream.setNoDelay(true);
+    const lines = [`GET ${target.upstreamPath} HTTP/1.1`];
+    const raw = req.rawHeaders;
+    for (let i = 0; i < raw.length; i += 2) {
+      const key = raw[i].toLowerCase();
+      // The bearer token never reaches Chromium; Host/Origin are rewritten
+      // so Chromium's DNS-rebinding / origin checks see a loopback client.
+      if (key === "host" || key === "authorization" || key === "origin") continue;
+      lines.push(`${raw[i]}: ${raw[i + 1]}`);
+    }
+    lines.push(`Host: 127.0.0.1:${target.localPort}`);
+    upstream.write(`${lines.join("\r\n")}\r\n\r\n`);
+    if (head && head.length) upstream.write(head);
+    upstream.pipe(socket);
+    socket.pipe(upstream);
+  });
+});
+
+async function listen(server, portNumber, hostName) {
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(portNumber, hostName, resolve);
+  });
+}
+
+await listen(controlServer, profileControlPort, profileControlHost);
 console.log(
   `profile control server listening on ${profileControlHost}:${profileControlPort} ` +
     `(persistent profiles ${persistentProfilesEnabled ? "enabled" : "disabled"})`,
 );
-
-let legacyBrowserServer = null;
-
-if (!persistentProfilesEnabled) {
-  // Exactly today's behaviour: one shared Chromium process, one context per
-  // session (see controller/app/browser/services/sessions.py), driven over
-  // Playwright's own server protocol.
-  legacyBrowserServer = await chromium.launchServer({
-    headless: false,
-    chromiumSandbox: false,
-    host,
-    port,
-    downloadsPath: "/data/downloads",
-    args: [
-      `--window-size=${width},${height}`,
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--disable-software-rasterizer",
-      "--disable-background-networking",
-      "--disable-blink-features=AutomationControlled",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--lang=en-US,en",
-      "--disable-notifications",
-    ],
-  });
-
-  const rawEndpoint = new URL(legacyBrowserServer.wsEndpoint());
-  rawEndpoint.hostname = advertisedHost;
-  rawEndpoint.port = String(port);
-  const advertisedEndpoint = rawEndpoint.toString();
-
-  await mkdir(dirname(endpointFile), { recursive: true });
-  const tmpFile = `${endpointFile}.tmp`;
-  await writeFile(tmpFile, advertisedEndpoint, "utf-8");
-  await rename(tmpFile, endpointFile);
-  console.log(`wrote ${endpointFile}: ${advertisedEndpoint}`);
+if (persistentProfilesEnabled) {
+  await listen(relayServer, cdpRelayPort, cdpRelayHost);
+  console.log(`CDP relay listening on ${cdpRelayHost}:${cdpRelayPort}`);
+  if (!profileControlToken) {
+    console.error("PROFILE_CONTROL_TOKEN is empty: profile control and CDP relay will refuse every request");
+  }
 }
 
+// The shared launchServer() browser. Always started, in both modes: with
+// persistent profiles on, it still serves the sessions that must NOT attach
+// to a named on-disk profile -- fork() / an explicit storage_state_path (an
+// independent clone), and an Open whose caller is not allowed to use the
+// remembered login (a plain fresh context, exactly the pre-profile
+// behaviour). Idle, it has no window (Playwright passes --no-startup-window).
+const legacyBrowserServer = await chromium.launchServer({
+  headless: false,
+  chromiumSandbox: false,
+  host,
+  port,
+  downloadsPath: downloadsDir,
+  args: [
+    `--window-size=${width},${height}`,
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    "--disable-background-networking",
+    "--disable-blink-features=AutomationControlled",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--lang=en-US,en",
+    "--disable-notifications",
+  ],
+});
+
+const rawEndpoint = new URL(legacyBrowserServer.wsEndpoint());
+rawEndpoint.hostname = advertisedHost;
+rawEndpoint.port = String(port);
+legacyEndpoint = rawEndpoint.toString();
+
+await mkdir(dirname(endpointFile), { recursive: true });
+const tmpFile = `${endpointFile}.tmp`;
+await writeFile(tmpFile, legacyEndpoint, "utf-8");
+await rename(tmpFile, endpointFile);
+console.log(`wrote ${endpointFile}: ${legacyEndpoint}`);
+
+let shuttingDown = false;
 async function shutdown() {
-  if (legacyBrowserServer) {
-    await legacyBrowserServer.close().catch(() => {});
-  }
+  if (shuttingDown) return;
+  shuttingDown = true;
   await Promise.all([...profiles.values()].map((entry) => entry.context.close().catch(() => {})));
+  await legacyBrowserServer.close().catch(() => {});
   process.exit(0);
 }
 
@@ -308,10 +728,4 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
   });
 }
 
-if (legacyBrowserServer) {
-  await new Promise((resolve) => legacyBrowserServer.on("close", resolve));
-} else {
-  // Nothing else to await -- the open control-server socket keeps the
-  // process alive; persistent profiles are launched lazily on demand.
-  await new Promise(() => {});
-}
+await new Promise((resolve) => legacyBrowserServer.on("close", resolve));
