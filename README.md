@@ -122,7 +122,7 @@ curl -s http://127.0.0.1:8000/sessions/<session-id>/observe | jq
 
 ## Recent Changes
 
-**Unreleased**
+**1.8.0**
 
 - **Smaller results for agents.** MCP results refer to sessions instead of repeating the full session record, and `execute_action` no longer returns the pre-action snapshot (`detail="full"` restores both). An action result is less than half its old size. The default tool list carries the 20 tools a browsing agent needs, and the rest are one `MCP_TOOL_PROFILE=full` away.
 - **Agents can see and read.** `browser.screenshot` and observe's `fast` preset return the screenshot as MCP image content. `browser.read_download` reads a downloaded CSV, JSON or text file. `browser.get_html(text_only=true)` is paged and keeps line breaks and table cells.

@@ -2,7 +2,7 @@
 
 This is the near-term direction for Auto Browser.
 
-## Now (current in v1.7.0)
+## Now (current in v1.8.0)
 
 - Ed25519-signed Witness receipt chains — each receipt attests to itself and its whole history, and an exported bundle verifies anywhere via `scripts/verify_witness_bundle.py`, which imports nothing from this project
 - `text` observation preset — accessibility outline, extracted text, and interactables with no screenshot and no OCR
@@ -14,7 +14,9 @@ This is the near-term direction for Auto Browser.
 - human takeover via noVNC
 - approvals and audit trails
 - Witness receipts with on-demand hash-chain verification and Ed25519 signatures (REST + MCP), plus third-party-verifiable evidence bundles
-- MCP transport + REST API with 70+ tools (curated and full profiles)
+- MCP transport + REST API with 70+ tools: a 20-tool curated profile with compact results, and the full profile
+- screenshots returned to MCP clients as images, and `browser.read_download` for reading a downloaded CSV, JSON or text file
+- a pending-approvals queue on the dashboard, with governed tool calls approved for their exact arguments
 - Docker-based isolated session mode with orphan reaping and resource limits
 - Stage 0 convergence harness for governed skill induction
 - CDP connect mode — attach to an existing Chrome
@@ -40,6 +42,7 @@ This is the near-term direction for Auto Browser.
 
 ## Recently Shipped
 
+- v1.8.0 a security pass (navigation allowlist parsed the way Chromium parses URLs, DNS-rebinding Host guard, sandboxed artifacts, scoped share links, a non-root browser) and an agent-experience pass (compact MCP results, image screenshots, `browser.read_download`, a dashboard approvals queue, and readable tool errors)
 - v1.7.0 fail-closed authentication: a reachable API needs a token (`API_BIND_SCOPE`), operator identity can be proven by a named credential, auth profiles belong to the operator who saved them, staged skills are signature-checked on read, and Codex keeps its sandbox
 - v1.6.1 fixes from a privately reported disclosure, including code execution and cookie theft through the raw-CDP allowlist
 - v1.6.0 Ed25519-signed Witness chains and exportable, independently verifiable evidence bundles
