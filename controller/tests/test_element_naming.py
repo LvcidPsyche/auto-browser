@@ -182,6 +182,10 @@ def test_real_chromium_names_a_login_form_and_leaks_nothing_typed() -> None:
 
     labels = [item["label"] for item in items]
     assert labels[:5] == ["Email", "Password", "secret", "Remember me", "Country"]
+    # The summary carries the same focused element, so an observation needs no
+    # separate evaluate for it.
+    assert summary["active_element"] == active
+    assert summary["title"] == ""
     blob = json.dumps([items, active, summary])
     assert "hunter2" not in blob and "s3cr3t-typed" not in blob
     # An unlabelled rich-text editor holding typed text falls back to its id,

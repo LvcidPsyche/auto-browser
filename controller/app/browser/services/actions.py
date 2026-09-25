@@ -525,13 +525,21 @@ class BrowserActionService:
             start_y + (y - start_y) * random.uniform(0.5, 0.9) + random.randint(-60, 60),
         )
         steps = random.randint(18, 34)
+        loop = asyncio.get_running_loop()
         for step in range(1, steps + 1):
             t = step / steps
             inv = 1 - t
             px = inv**3 * start_x + 3 * inv * inv * t * control_1[0] + 3 * inv * t * t * control_2[0] + t**3 * x
             py = inv**3 * start_y + 3 * inv * inv * t * control_1[1] + 3 * inv * t * t * control_2[1] + t**3 * y
+            step_started = loop.time()
             await session.page.mouse.move(px, py)
-            await asyncio.sleep(random.uniform(0.004, 0.018))
+            # The gap between moves is meant to be 4-18 ms. A move already waits
+            # for the browser to dispatch it (about a frame, ~17 ms, in Chromium),
+            # and sleeping the whole gap on top of that made each step 20-35 ms:
+            # a 26-step path took ~670 ms of every click. Sleep only what is left.
+            remaining = random.uniform(0.004, 0.018) - (loop.time() - step_started)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
         session.mouse_position = (x, y)
 
     async def click_human_like(self, session: "BrowserSession", x: float, y: float) -> None:
