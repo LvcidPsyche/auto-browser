@@ -10,12 +10,13 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from app.browser.services.observation import BrowserObservationService
-from app.browser_scripts import ACTIVE_ELEMENT_SCRIPT, INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
+from app.browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
 
 
 class FakePage:
@@ -33,9 +34,12 @@ class FakePage:
         if script is INTERACTABLES_SCRIPT:
             return [{"element_id": "op-1", "label": "Submit"}]
         if script is PAGE_SUMMARY_SCRIPT:
-            return {"text_excerpt": self._text_excerpt, "dom_outline": {"headings": []}}
-        if script is ACTIVE_ELEMENT_SCRIPT:
-            return {"tag": "body"}
+            return {
+                "title": "Example",
+                "active_element": {"tag": "body"},
+                "text_excerpt": self._text_excerpt,
+                "dom_outline": {"headings": []},
+            }
         raise AssertionError(f"unexpected script passed to evaluate: {script!r}")
 
 
@@ -167,6 +171,35 @@ class OcrGatingTests(unittest.IsolatedAsyncioTestCase):
         await service.observation_payload(_make_session(text_excerpt="Hello world"), preset="normal")
 
         manager.ocr.extract_from_image.assert_awaited_once()
+
+
+class OverlappedCaptureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_failed_screenshot_waits_for_the_dom_reads_to_finish(self) -> None:
+        # The error must not surface while a page call is still in flight: the
+        # caller releases the session lock as soon as it does.
+        finished: list[str] = []
+
+        class SlowPage(FakePage):
+            async def evaluate(self, script: str, *args: object) -> object:
+                await asyncio.sleep(0.05)
+                result = await super().evaluate(script, *args)
+                finished.append("evaluate")
+                return result
+
+        manager = _make_manager()
+        manager._capture_screenshot = AsyncMock(side_effect=RuntimeError("screenshot failed"))
+        session = _make_session()
+        session.page = SlowPage()
+        service = BrowserObservationService(manager=manager)
+
+        with self.assertRaisesRegex(RuntimeError, "screenshot failed"):
+            await service.observation_payload(session, preset="normal")
+        self.assertEqual(finished, ["evaluate", "evaluate"])
+
+        finished.clear()
+        with self.assertRaisesRegex(RuntimeError, "screenshot failed"):
+            await service.light_snapshot(session, label="before-click")
+        self.assertEqual(finished, ["evaluate"])
 
 
 if __name__ == "__main__":

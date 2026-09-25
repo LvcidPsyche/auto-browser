@@ -159,7 +159,8 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.isolation.yml config >/tmp/compose-isolation.out
 
       - name: Build controller image
-        run: docker compose build controller
+        # With the test tooling, which the image leaves out by default.
+        run: INSTALL_DEV_DEPS=true docker compose build controller
 
       - name: Run controller unit tests
         # pytest, not `unittest discover`. unittest only collects unittest.TestCase
@@ -169,7 +170,7 @@ jobs:
         # and test_readiness.py (4) because they are pytest-style. The one job that
         # validates the shipped container was running zero PII and zero mesh-crypto
         # tests, and any new pytest-style file was excluded with no warning.
-        # controller/Dockerfile installs requirements-dev.txt, so pytest is present.
+        # The build above sets INSTALL_DEV_DEPS=true, so pytest is present.
         run: docker compose run --no-deps --rm controller python -m pytest tests/ -q
 
   compose-smoke:

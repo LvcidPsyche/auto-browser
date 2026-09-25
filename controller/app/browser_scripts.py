@@ -204,6 +204,18 @@ _ELEMENT_NAMING_JS = r"""
     if (el.tagName.toLowerCase() === 'input' && (type === 'checkbox' || type === 'radio')) return Boolean(el.checked);
     return null;
   }
+
+  function abActiveElement() {
+    const el = document.activeElement;
+    if (!el) return null;
+    return {
+      tag: el.tagName.toLowerCase(),
+      element_id: el.dataset?.operatorId || null,
+      name: el.getAttribute('name'),
+      id: el.id || null,
+      label: abName(el).slice(0, 120)
+    };
+  }
 """
 
 
@@ -279,15 +291,7 @@ ACTIVE_ELEMENT_SCRIPT = _with_element_naming(
     r"""
 () => {
 /*__ELEMENT_NAMING__*/
-  const el = document.activeElement;
-  if (!el) return null;
-  return {
-    tag: el.tagName.toLowerCase(),
-    element_id: el.dataset?.operatorId || null,
-    name: el.getAttribute('name'),
-    id: el.id || null,
-    label: abName(el).slice(0, 120)
-  };
+  return abActiveElement();
 }
 """
 )
@@ -344,7 +348,11 @@ PAGE_SUMMARY_SCRIPT = _with_element_naming(
         }))
     }));
 
+  // The title and focused element ride along so an observation costs one
+  // evaluate round trip instead of three (page.title() reads document.title).
   return {
+    title: document.title,
+    active_element: abActiveElement(),
     text_excerpt: readable(document.body?.innerText).slice(0, textLimit),
     dom_outline: {
       headings,

@@ -109,3 +109,53 @@ class AuditStoreTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(events), 2)
             self.assertEqual(events[0].session_id, "session-3")
             self.assertEqual(events[-1].session_id, "session-2")
+
+
+class FileAuditListTests(unittest.IsolatedAsyncioTestCase):
+    async def _store(self, tempdir: str) -> AuditStore:
+        store = AuditStore(Path(tempdir), file_trim_interval=10_000)
+        await store.startup()
+        return store
+
+    async def test_returns_the_newest_events_first_up_to_the_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = await self._store(tempdir)
+            for index in range(10):
+                await store.append(event_type="browser_action", status="ok", action=f"a{index}")
+            events = await store.list(limit=3)
+            self.assertEqual([event.action for event in events], ["a9", "a8", "a7"])
+            self.assertEqual(await store.list(limit=0), [])
+
+    async def test_filters_match_exactly_not_by_substring(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = await self._store(tempdir)
+            # "session-1" is a substring of "session-10"; and "session-1" also
+            # appears in the second event's details without being its session.
+            await store.append(event_type="browser_action", status="ok", session_id="session-1")
+            await store.append(
+                event_type="browser_action",
+                status="ok",
+                session_id="session-10",
+                details={"note": "session-1"},
+            )
+            events = await store.list(limit=10, session_id="session-1")
+            self.assertEqual([event.session_id for event in events], ["session-1"])
+
+    async def test_values_json_escapes_still_match(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = await self._store(tempdir)
+            for session_id in ('quote"d', "back\\slash", "café", "tab\there"):
+                await store.append(event_type="browser_action", status="ok", session_id=session_id)
+                events = await store.list(limit=10, session_id=session_id)
+                self.assertEqual([event.session_id for event in events], [session_id])
+
+    async def test_a_torn_line_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = await self._store(tempdir)
+            await store.append(event_type="browser_action", status="ok", session_id="s1")
+            with store.file_store.events_path.open("a", encoding="utf-8") as handle:
+                handle.write('{"id": "torn", "session_id": "s1"\n')
+            await store.append(event_type="browser_action", status="ok", session_id="s1")
+            with self.assertLogs("app.audit", level="WARNING"):
+                events = await store.list(limit=10, session_id="s1")
+            self.assertEqual(len(events), 2)

@@ -20,7 +20,7 @@ up-reverse-ssh: ## Start with the reverse-SSH sidecar profile
 	./scripts/compose_local.sh --profile reverse-ssh up --build
 
 test: ## Run controller tests in Docker
-	./scripts/compose_local.sh build controller
+	INSTALL_DEV_DEPS=true ./scripts/compose_local.sh build controller
 	./scripts/compose_local.sh run --no-deps --rm controller python -m pytest tests/ -q
 
 test-local: ## Run controller tests on the host with Python 3.11+

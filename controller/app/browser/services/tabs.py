@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -98,19 +99,25 @@ class BrowserTabService:
         return [session.page]
 
     async def summaries(self, session: "BrowserSession") -> list[dict[str, Any]]:
-        tabs: list[dict[str, Any]] = []
-        for index, page in enumerate(self.pages(session)):
+        pages = self.pages(session)
+        for page in pages:
             self.manager._attach_page_listeners(page, session)
-            try:
-                title = await page.title()
-            except Exception:
-                title = ""
-            tabs.append(
-                {
-                    "index": index,
-                    "active": page is session.page,
-                    "url": getattr(page, "url", ""),
-                    "title": title,
-                }
-            )
-        return tabs
+        # Every observation lists the tabs; fetch the titles together rather
+        # than paying one browser round trip per open tab in turn.
+        titles = await asyncio.gather(*(self._title(page) for page in pages))
+        return [
+            {
+                "index": index,
+                "active": page is session.page,
+                "url": getattr(page, "url", ""),
+                "title": title,
+            }
+            for index, (page, title) in enumerate(zip(pages, titles))
+        ]
+
+    @staticmethod
+    async def _title(page: "Page") -> str:
+        try:
+            return await page.title()
+        except Exception:
+            return ""
