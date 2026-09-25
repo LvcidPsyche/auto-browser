@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
+import secrets
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta
@@ -16,6 +19,9 @@ from .sqlite_utils import connect_sqlite
 from .utils import UTC, record_path, utc_now
 
 logger = logging.getLogger(__name__)
+
+# What a sensitive `type` action's text is stored as in its approval.
+SENSITIVE_TEXT_PREFIX = "[sensitive text] hmac-sha256:"
 
 
 class ApprovalRequiredError(HTTPException):
@@ -205,6 +211,13 @@ class ApprovalStore:
         self.sqlite_store = SQLiteApprovalStore(db_path) if db_path else None
         self._primary: ApprovalStoreBackend = self.file_store
         self.approval_ttl = timedelta(minutes=max(1, approval_ttl_minutes))
+        # Keyed per process, so a stored digest cannot be brute-forced offline.
+        # An approval for sensitive text therefore does not survive a restart:
+        # the action asks again rather than matching an unverifiable record.
+        self._sensitive_text_key = secrets.token_bytes(32)
+        # The text itself stays in memory only, so an approved sensitive action
+        # can still be run through execute_approval by this process.
+        self._sensitive_texts: dict[str, str] = {}
 
     async def startup(self) -> None:
         await self.file_store.startup()
@@ -253,10 +266,12 @@ class ApprovalStore:
                 created_at=now,
                 updated_at=now,
                 reason=reason,
-                action=action,
+                action=self._stored_action(action),
                 observation=observation,
             )
             await self._persist(approval)
+            if approval.action is not action:
+                self._sensitive_texts[approval.id] = action.text or ""
             return approval
 
     async def approve(self, approval_id: str, comment: str | None = None) -> ApprovalRecord:
@@ -276,6 +291,7 @@ class ApprovalStore:
             approval.updated_at = now
             approval.executed_at = now
             await self._persist(approval)
+            self._sensitive_texts.pop(approval_id, None)
             return approval
 
     async def require_approved(
@@ -318,6 +334,7 @@ class ApprovalStore:
                 approval.approved_expires_at = self._expiry_timestamp(now)
             else:
                 approval.approved_expires_at = None
+                self._sensitive_texts.pop(approval_id, None)
             await self._persist(approval)
             return approval
 
@@ -338,10 +355,35 @@ class ApprovalStore:
                 return approval
         return None
 
-    @staticmethod
-    def _actions_match(left: BrowserActionDecision, right: BrowserActionDecision) -> bool:
+    def _stored_action(self, action: BrowserActionDecision) -> BrowserActionDecision:
+        """The action as an approval records it: sensitive text only as a keyed digest.
+
+        Approvals are written to APPROVAL_ROOT, listed by GET /approvals and the
+        approvals MCP tool, and shown to whoever approves. A `type` marked
+        sensitive (a password, a card number) was stored and served verbatim,
+        while the witness chain and action logs already redacted it.
+        """
+        if not (action.sensitive and action.text):
+            return action
+        digest = hmac.new(self._sensitive_text_key, action.text.encode("utf-8"), hashlib.sha256).hexdigest()
+        return action.model_copy(update={"text": f"{SENSITIVE_TEXT_PREFIX}{digest}"})
+
+    def executable_action(self, approval: ApprovalRecord) -> BrowserActionDecision:
+        """The approved action with its sensitive text restored, for execute_approval."""
+        action = approval.action
+        if not (action.sensitive and action.text and action.text.startswith(SENSITIVE_TEXT_PREFIX)):
+            return action
+        text = self._sensitive_texts.get(approval.id)
+        if text is None:
+            raise PermissionError(
+                f"approval {approval.id} is for sensitive text, which is not kept across restarts; "
+                "run the action again to request a new approval"
+            )
+        return action.model_copy(update={"text": text})
+
+    def _actions_match(self, stored: BrowserActionDecision, requested: BrowserActionDecision) -> bool:
         excluded = {"reason", "confidence"}
-        return left.model_dump(exclude=excluded) == right.model_dump(exclude=excluded)
+        return stored.model_dump(exclude=excluded) == self._stored_action(requested).model_dump(exclude=excluded)
 
     def _ensure_not_expired(self, approval: ApprovalRecord) -> None:
         if approval.approved_expires_at is None:

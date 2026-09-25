@@ -85,7 +85,7 @@ class BrowserApprovalService:
         if approval.status != "approved":
             raise PermissionError(f"approval {approval_id} is not approved")
 
-        decision = approval.action
+        decision = self.manager.approvals.executable_action(approval)
         if decision.action == "upload":
             execution = await self.manager.upload(
                 approval.session_id,
