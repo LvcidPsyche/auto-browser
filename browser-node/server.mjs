@@ -57,6 +57,12 @@ const nodeLeaseStaleMs = Number.parseFloat(process.env.PROFILE_NODE_LEASE_STALE_
 // browser-node may really be running on the same volume.
 const nodeLeaseForce = (process.env.PROFILE_NODE_LEASE_FORCE || "").toLowerCase() === "true";
 const deepHealthTtlMs = Number.parseFloat(process.env.PROFILE_DEEP_HEALTH_TTL_SECONDS || "300") * 1000;
+// A FAILED deep check is cached too. The container healthcheck polls every
+// 10s; without this, a failing check launched a fresh disposable Chromium on
+// every poll. Under the container's pid cap that loop is what starved the
+// owner's live profile of threads (2026-09-25: 79 healthcheck Chromium
+// crashes in 8 minutes, then the owner's own browser process crashed).
+const deepHealthFailureTtlMs = Number.parseFloat(process.env.PROFILE_DEEP_HEALTH_FAILURE_TTL_SECONDS || "60") * 1000;
 const defaultLocale = process.env.PERSISTENT_PROFILE_LOCALE || "ar-EG";
 const defaultTimezoneId = process.env.PERSISTENT_PROFILE_TIMEZONE || "Africa/Cairo";
 
@@ -519,15 +525,32 @@ async function launchProfile(name, opts, owner) {
   // Seed cookies + localStorage from the encrypted "remember me" backup, but
   // ONLY into a profile that has never been launched before. An existing
   // profile holds the real, current, on-disk login state.
+  //
+  // launchPersistentContext() accepts a `storageState` option and silently
+  // ignores it (Playwright 1.62 applies storageState only in newContext();
+  // the persistent launch path never calls setStorageState). Passing it there
+  // is what made every "seeded" profile start with zero cookies -- the
+  // remembered Google login never reached the first persistent profile. So
+  // the state is applied explicitly after launch.
   const seeded = Boolean(wasEmpty && opts.storage_state);
-  if (seeded) launchOptions.storageState = opts.storage_state;
 
   const context = await chromium.launchPersistentContext(userDataDir, launchOptions);
   let discovered;
   try {
+    if (seeded) {
+      await context.setStorageState(opts.storage_state);
+      const cookies = await context.cookies();
+      console.log(`persistent profile '${name}': seeded ${cookies.length} cookie(s) from the saved login`);
+    }
     discovered = await discoverCdpPort(userDataDir);
   } catch (err) {
     await context.close().catch(() => {});
+    if (seeded) {
+      // Chromium ran against this directory only to be seeded; leaving it
+      // behind would make the next Open treat it as "not empty" and never
+      // seed again, silently dropping the saved login for good.
+      await rm(userDataDir, { recursive: true, force: true }).catch(() => {});
+    }
     throw err;
   }
 
@@ -680,7 +703,7 @@ async function runDeepHealthcheck() {
     });
     if (!browser.contexts().length) throw new Error("relay attach exposed no browser context");
     if (!legacyEndpoint || !existsSync(endpointFile)) throw new Error("legacy browser server is not up");
-    return { ok: true, elapsed_ms: Date.now() - started };
+    return { ok: true, elapsed_ms: Date.now() - started, mode: "disposable-launch" };
   } finally {
     relayTargets.delete(id);
     if (browser) await browser.close().catch(() => {});
@@ -690,14 +713,68 @@ async function runDeepHealthcheck() {
   }
 }
 
+// While a real profile is open the launch path is already proven by it, and a
+// second (disposable) Chromium beside the owner's live one only competes with
+// it for the container's pids and memory. Probe the open profiles' own CDP
+// endpoints through the relay instead -- the exact hop the controller uses.
+function relayJsonVersion(relayId) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        host: "127.0.0.1",
+        port: cdpRelayPort,
+        path: `/cdp/${encodeURIComponent(relayId)}/json/version`,
+        headers: { Authorization: `Bearer ${profileControlToken}` },
+        timeout: 5000,
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk) => {
+          data += chunk;
+        });
+        res.on("end", () => {
+          if (res.statusCode !== 200) return reject(new Error(`relay answered ${res.statusCode} for '${relayId}'`));
+          try {
+            const parsed = JSON.parse(data);
+            if (!parsed.webSocketDebuggerUrl) throw new Error("no webSocketDebuggerUrl");
+            resolve(parsed);
+          } catch (err) {
+            reject(new Error(`relay returned an invalid /json/version for '${relayId}': ${err.message}`));
+          }
+        });
+      },
+    );
+    req.on("error", reject);
+    req.on("timeout", () => req.destroy(new Error(`relay /json/version timed out for '${relayId}'`)));
+    req.end();
+  });
+}
+
+async function runLiveProfilesHealthcheck(names) {
+  const started = Date.now();
+  await requireNodeLease();
+  for (const name of names) await relayJsonVersion(name);
+  if (!legacyEndpoint || !existsSync(endpointFile)) throw new Error("legacy browser server is not up");
+  return { ok: true, elapsed_ms: Date.now() - started, mode: "live-profiles", profiles: names.length };
+}
+
 async function deepHealthcheck() {
-  if (deepHealth.ok && Date.now() - deepHealth.at < deepHealthTtlMs) {
+  const ttl = deepHealth.ok ? deepHealthTtlMs : deepHealthFailureTtlMs;
+  if (deepHealth.at && Date.now() - deepHealth.at < ttl) {
     return { ...deepHealth, cached: true };
   }
   if (!deepHealthInFlight) {
-    deepHealthInFlight = runDeepHealthcheck()
+    const openNames = [...profiles.keys()];
+    const run = openNames.length ? runLiveProfilesHealthcheck(openNames) : runDeepHealthcheck();
+    deepHealthInFlight = run
       .then((result) => {
-        deepHealth = { at: Date.now(), ok: true, error: null, elapsed_ms: result.elapsed_ms };
+        deepHealth = {
+          at: Date.now(),
+          ok: true,
+          error: null,
+          elapsed_ms: result.elapsed_ms,
+          mode: result.mode || "disposable-launch",
+        };
       })
       .catch((err) => {
         deepHealth = { at: Date.now(), ok: false, error: (err && err.message) || String(err) };

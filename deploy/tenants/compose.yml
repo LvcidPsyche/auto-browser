@@ -13,6 +13,15 @@ services:
     mem_limit: 6g
     memswap_limit: 6g
     cpus: 4.0
+    # pids counts THREADS. The shared launchServer() Chromium alone is ~100,
+    # the owner's headed persistent profile ~150-250 (one renderer of ~15 per
+    # site it has open), and every new site or tab adds more. At 256 the cap
+    # was hit hundreds of times in the first hours of persistent profiles:
+    # Chromium could not create threads (glib g_thread_new abort / SIGTRAP),
+    # renderers and then the owner's own browser process crashed, websockify
+    # could not fork a noVNC connection, and the controller's Playwright
+    # driver died on the fallout (2026-09-25). browser-node now reports
+    # pids.current/max/events in /healthz/deep and warns above 80%.
     pids_limit: 4096
     shm_size: 1g
     security_opt: [no-new-privileges:true]
@@ -25,8 +34,10 @@ services:
       # launches a disposable headless profile, clears a planted stale
       # SingletonLock, and attaches to it through the authenticated CDP relay
       # -- the exact path every Open takes. Its result is cached for 5 min
-      # inside browser-node, so this runs a real Chromium launch at most that
-      # often.
+      # inside browser-node (a failure for 1 min), so this runs a real
+      # Chromium launch at most that often -- and never while a real profile
+      # is open: then it probes that profile's CDP endpoint through the relay
+      # instead of launching a second Chromium beside the owner's.
       test: [CMD-SHELL, 'test -s /data/browser-profile/browser-ws-endpoint.txt && curl -s --max-time 3 -o /dev/null http://127.0.0.1:9223/ && curl -fsS --max-time 3 http://127.0.0.1:6080/ >/dev/null && if [ "$$PERSISTENT_PROFILES_ENABLED" = "true" ]; then curl -fsS --max-time 45 -H "Authorization: Bearer $$PROFILE_CONTROL_TOKEN" http://127.0.0.1:9224/healthz/deep >/dev/null; fi']
       interval: 10s
       timeout: 50s

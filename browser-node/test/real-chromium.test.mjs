@@ -123,6 +123,7 @@ before(async () => {
       BROWSER_PROFILES_ROOT: profilesRoot,
       BROWSER_DOWNLOADS_DIR: join(root, "downloads"),
       PROFILE_DEEP_HEALTH_TTL_SECONDS: "0",
+      PROFILE_DEEP_HEALTH_FAILURE_TTL_SECONDS: "0",
       PROFILE_NODE_LEASE_HEARTBEAT_SECONDS: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -309,6 +310,60 @@ test("deep healthcheck launches, relays and attaches a disposable profile", asyn
   assert.equal(deep.status, 200, JSON.stringify(deep.body));
   assert.equal(deep.body.ok, true);
   assert.deepEqual(readdirSync(join(profilesRoot, ".healthcheck")), []);
+});
+
+test("deep healthcheck never launches a second Chromium beside an open profile", async () => {
+  const opened = await control("/profiles/open", { name: "hc-live", owner: "op1" });
+  assert.equal(opened.status, 200, JSON.stringify(opened.body));
+  try {
+    const deep = await control("/healthz/deep", null, { method: "GET" });
+    assert.equal(deep.status, 200, JSON.stringify(deep.body));
+    assert.equal(deep.body.ok, true);
+    assert.equal(deep.body.mode, "live-profiles");
+    const hcRoot = join(profilesRoot, ".healthcheck");
+    assert.ok(!existsSync(hcRoot) || readdirSync(hcRoot).length === 0, "no disposable profile while one is open");
+  } finally {
+    await closeLatest("hc-live");
+  }
+  const idle = await control("/healthz/deep", null, { method: "GET" });
+  assert.equal(idle.body.mode, "disposable-launch");
+});
+
+test("a new profile is really seeded from the saved login (cookies incl. __Host-/__Secure-, localStorage)", async () => {
+  const expires = Math.floor(Date.now() / 1000) + 300 * 86400;
+  const storage_state = {
+    cookies: [
+      { name: "SID", value: "s1", domain: ".google.com", path: "/", expires, httpOnly: false, secure: false, sameSite: "Lax" },
+      { name: "__Secure-1PSID", value: "s2", domain: ".google.com", path: "/", expires, httpOnly: true, secure: true, sameSite: "Lax" },
+      { name: "__Secure-3PSID", value: "s3", domain: ".google.com", path: "/", expires, httpOnly: true, secure: true, sameSite: "None" },
+      { name: "__Host-GAPS", value: "s4", domain: "accounts.google.com", path: "/", expires, httpOnly: true, secure: true, sameSite: "Lax" },
+    ],
+    origins: [{ origin: `http://${LAN}:${CONTROL_PORT}`, localStorage: [{ name: "seeded", value: "yes" }] }],
+  };
+  const opened = await control("/profiles/open", { name: "seedy", owner: "op1", storage_state });
+  assert.equal(opened.status, 200, JSON.stringify(opened.body));
+  assert.equal(opened.body.seeded, true);
+  let browser = await attach(opened.body.cdp_endpoint);
+  const names = (await browser.contexts()[0].cookies()).map((c) => c.name).sort();
+  assert.deepEqual(names, ["SID", "__Host-GAPS", "__Secure-1PSID", "__Secure-3PSID"]);
+  const page = await browser.contexts()[0].newPage();
+  await page.goto(`http://${LAN}:${CONTROL_PORT}/healthz`);
+  assert.equal(await page.evaluate(() => localStorage.getItem("seeded")), "yes");
+  await browser.close();
+  await closeLatest("seedy");
+  // Reopened from disk: never re-seeded (a stale export must not overwrite
+  // the profile's real, newer state), but the cookies are still there.
+  const reopened = await control("/profiles/open", {
+    name: "seedy",
+    owner: "op1",
+    storage_state: { cookies: [{ ...storage_state.cookies[0], value: "stale" }], origins: [] },
+  });
+  assert.equal(reopened.body.seeded, false);
+  browser = await attach(reopened.body.cdp_endpoint);
+  const sid = (await browser.contexts()[0].cookies()).find((c) => c.name === "SID");
+  assert.equal(sid.value, "s1");
+  await browser.close();
+  await closeLatest("seedy");
 });
 
 test("a close carrying an older generation cannot kill a newer open (Open/Close interleaving)", async () => {
