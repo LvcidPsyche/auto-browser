@@ -87,7 +87,11 @@ class HttpMcpClient:
     def _decode_json(raw: bytes) -> dict[str, Any] | None:
         if not raw:
             return None
-        return json.loads(raw.decode("utf-8"))
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except ValueError:
+            # A proxy's HTML error page, say. Reported with its status below.
+            return None
 
 
 class StdioMcpBridge:
@@ -178,11 +182,33 @@ class StdioMcpBridge:
 
         if payload.get("id") is None:
             return None
-        if response.body is None:
-            return self._jsonrpc_error(
-                request_id, -32000, f"Empty response from Auto Browser MCP endpoint ({response.status_code})"
-            )
+        if not isinstance(response.body, dict) or "jsonrpc" not in response.body:
+            # The HTTP layer's own errors (401 bad token, 400 missing operator
+            # header, 429) are {"detail": ...}, not JSON-RPC. Relayed as-is
+            # they carried no id, so the client never saw a response to its
+            # request and hung without learning why.
+            return self._jsonrpc_error(request_id, -32000, self._http_error_message(response))
         return response.body
+
+    @staticmethod
+    def _http_error_message(response: HttpMcpResponse) -> str:
+        if response.body is None:
+            return f"Empty or non-JSON response from Auto Browser MCP endpoint ({response.status_code})"
+        detail = response.body.get("detail") if isinstance(response.body, dict) else None
+        message = f"Auto Browser controller returned HTTP {response.status_code}"
+        if detail:
+            message += f": {detail}"
+        if response.status_code == 401:
+            message += " (set --bearer-token or AUTO_BROWSER_BEARER_TOKEN to the controller's API token)"
+        elif response.status_code == 400 and "operator" in str(detail).lower():
+            message += (
+                " (this controller requires an operator id on every request: give the bridge one if it"
+                " supports it, or turn off REQUIRE_OPERATOR_ID on the controller)"
+            )
+        elif response.status_code == 429:
+            retry_after = response.headers.get("retry-after")
+            message += f" (rate limited; retry after {retry_after}s)" if retry_after else " (rate limited)"
+        return message
 
     def _reinitialize(self) -> bool:
         """Open a fresh controller session with the client's own initialize.
