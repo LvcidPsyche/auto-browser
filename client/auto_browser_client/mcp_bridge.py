@@ -182,18 +182,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--base-url",
         default=os.environ.get("AUTO_BROWSER_BASE_URL", "http://127.0.0.1:8000/mcp"),
-        help="HTTP MCP endpoint to proxy to (default: %(default)s)",
+        help="HTTP MCP endpoint to proxy to; env AUTO_BROWSER_BASE_URL (default: %(default)s)",
     )
     parser.add_argument(
         "--bearer-token",
         default=os.environ.get("AUTO_BROWSER_BEARER_TOKEN"),
-        help="Optional API bearer token for the Auto Browser HTTP server.",
+        help="API bearer token for a protected controller; env AUTO_BROWSER_BEARER_TOKEN.",
     )
     parser.add_argument(
         "--timeout-seconds",
         type=float,
         default=float(os.environ.get("AUTO_BROWSER_HTTP_TIMEOUT_SECONDS", "60")),
-        help="Per-request timeout when talking to the HTTP MCP endpoint.",
+        help="Per-request timeout in seconds; env AUTO_BROWSER_HTTP_TIMEOUT_SECONDS (default: %(default)s).",
     )
     return parser
 
