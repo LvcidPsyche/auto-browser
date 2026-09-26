@@ -190,12 +190,23 @@ class BrowserSessionService:
                 await self.manager._settle(page)
 
             await self.manager._maybe_provision_session_tunnel(session)
-            if memory_profile and self.manager.memory is not None:
-                memory = await self.manager.memory.get(memory_profile)
+            # Load memory profile: explicit name takes precedence, then hostname lookup
+            if self.manager.memory is not None:
+                memory = None
+                resolved_profile = memory_profile
+                if memory_profile:
+                    memory = await self.manager.memory.get(memory_profile)
+                elif start_url:
+                    # Auto-lookup by hostname when no explicit profile given
+                    memory = await self.manager.memory.get_by_url(start_url)
+                    if memory is not None:
+                        resolved_profile = memory.name
+                        logger.info("memory profile auto-loaded by hostname: %s", resolved_profile)
                 if memory is not None:
                     session.metadata["memory_context"] = memory.to_system_prompt()
-                    session.metadata["memory_profile"] = memory_profile
-                    logger.info("memory profile loaded: %s", memory_profile)
+                    session.metadata["memory_profile"] = resolved_profile
+                    if memory_profile:
+                        logger.info("memory profile loaded: %s", memory_profile)
             await self.manager._persist_session(session, status="active")
             await self.manager.witness_bridge.record_session_receipt(
                 session,
