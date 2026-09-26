@@ -36,6 +36,9 @@ _SEGMENT = r"[^/]+"
 _TAB_SCOPED_PATHS = (
     (re.compile(rf"^/sessions/{_SEGMENT}/observe/?$"), {"GET", "POST"}),
     (re.compile(rf"^/sessions/{_SEGMENT}/screenshot/?$"), {"POST"}),
+    # An employee reading the API key HE just created reads his own tab, not the
+    # owner's active one (the header used to be ignored here).
+    (re.compile(rf"^/sessions/{_SEGMENT}/api-keys/?$"), {"GET"}),
     (
         re.compile(rf"^/sessions/{_SEGMENT}/actions/(?:{'|'.join(re.escape(a) for a in TAB_SCOPED_ACTIONS)})/?$"),
         {"POST"},

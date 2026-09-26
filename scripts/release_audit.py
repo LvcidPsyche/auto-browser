@@ -33,7 +33,7 @@ LAUNCH_FILES = [
     "scripts/mcp_stdio_bridge.py",
 ]
 SECRET_PATTERN = (
-    r"sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{20,}|ghp_[A-Za-z0-9]{20,}|"
+    r"sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{20,}|AQ\.[A-Za-z0-9_-]{30,}|ghp_[A-Za-z0-9]{20,}|"
     r"github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}"
 )
 

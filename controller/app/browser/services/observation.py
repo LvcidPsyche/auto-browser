@@ -5,6 +5,7 @@ import logging
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from ... import events as _events
 from ...browser_scripts import ACTIVE_ELEMENT_SCRIPT, INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
@@ -21,9 +22,24 @@ ACCESSIBILITY_NODE_LIMIT = 30
 
 
 # Strict shapes only -- a match is a credential, never ordinary page text.
+# Google has two: the legacy standard key ("AIza" + 35) and, since 2026-05-28 the ONLY kind
+# Google AI Studio creates, the auth key ("AQ." + a long [A-Za-z0-9._-] body, never ending
+# in a dot). Missing the second one is why Emad's freshly created key was not found.
+GOOGLE_STANDARD_KEY = r"AIza[0-9A-Za-z_\-]{35}"
+GOOGLE_AUTH_KEY = (
+    r"(?<![A-Za-z0-9_.\-])AQ\.[A-Za-z0-9_\-][A-Za-z0-9_.\-]{29,509}[A-Za-z0-9_\-](?![A-Za-z0-9_\-])"
+)
 API_KEY_PATTERNS: dict[str, str] = {
-    "google": r"AIza[0-9A-Za-z_\-]{35}",
+    "google": f"(?:{GOOGLE_STANDARD_KEY})|(?:{GOOGLE_AUTH_KEY})",
 }
+_API_KEY_MARKERS = ("AIza", "AQ.")
+
+# The clipboard is read only on the provider's own pages (the "Copy" button of its
+# "API key created" dialog), never on an arbitrary site. Hosts, exact or as a parent domain.
+CLIPBOARD_KEY_HOSTS: dict[str, tuple[str, ...]] = {
+    "google": ("aistudio.google.com", "console.cloud.google.com", "makersuite.google.com"),
+}
+MAX_KEY_FRAMES = 25
 
 _API_KEY_RE = re.compile("|".join(f"(?:{pattern})" for pattern in API_KEY_PATTERNS.values()))
 REDACTED_API_KEY = "[api key hidden]"
@@ -35,7 +51,9 @@ def redact_api_keys(value: Any) -> Any:
     must never reach the calling agent's model or our logs. find_api_keys is the one,
     pattern-limited way to read it."""
     if isinstance(value, str):
-        return _API_KEY_RE.sub(REDACTED_API_KEY, value) if "AIza" in value else value
+        if any(marker in value for marker in _API_KEY_MARKERS):
+            return _API_KEY_RE.sub(REDACTED_API_KEY, value)
+        return value
     if isinstance(value, dict):
         return {key: redact_api_keys(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -65,6 +83,35 @@ FIND_API_KEYS_SCRIPT = """
 }
 """
 
+# Reads the clipboard in the page and hands back ONLY key-shaped matches; the clipboard is
+# emptied only when it held one (an unrelated clipboard the owner copied is left alone).
+CLIPBOARD_API_KEYS_SCRIPT = """
+async (pattern) => {
+  let text = '';
+  try { text = await navigator.clipboard.readText(); } catch (e) { return {keys: [], error: true}; }
+  const keys = typeof text === 'string' ? Array.from(text.matchAll(new RegExp(pattern, 'g')), m => m[0]) : [];
+  if (keys.length) { try { await navigator.clipboard.writeText(''); } catch (e) {} }
+  return {keys: keys.slice(0, 5), error: false};
+}
+"""
+
+
+def _host_allowed(url: str, hosts: tuple[str, ...]) -> bool:
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    host = (parts.hostname or "").lower()
+    if parts.scheme not in {"https", "http"} or not host:
+        return False
+    return any(host == allowed or host.endswith("." + allowed) for allowed in hosts)
+
+
+def _origin(url: str) -> str:
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 class BrowserObservationService:
     """Encapsulates observation, screenshot, and trace payload helpers."""
 
@@ -90,25 +137,72 @@ class BrowserObservationService:
             return result
 
     async def find_api_keys(self, session_id: str, provider: str) -> dict[str, Any]:
-        """API keys of ONE known shape shown on the page (text or a field's value).
+        """API keys of ONE known shape shown on the page -- or just copied by its "Copy" button.
 
         The narrowest read that lets the agent's server store a key the owner's employee just
         created (e.g. Google AI Studio's "API key created" dialog) without the key ever going
         through the model: only strings matching the provider's strict key pattern come back,
-        nothing else from the page. observe() keeps redacting them (see API_KEY_PATTERNS)."""
+        nothing else from the page. observe() keeps redacting them (see API_KEY_PATTERNS).
+
+        Looks in every frame of the tab (a dialog may live in an iframe); when none shows a
+        key and the tab is on the provider's own site, reads the clipboard (a dialog that
+        shows the key masked still copies the full key) -- matches only, cleared after.
+        Through X-Tab-Id this is the employee's own tab, never the owner's active one."""
         pattern = API_KEY_PATTERNS.get(provider)
         if pattern is None:
             raise ValueError("unknown provider")
         session = await self.manager.get_session(session_id)
         async with session.lock:
-            found = await self.manager.session_lifecycle.guarded(
+            found, source = await self.manager.session_lifecycle.guarded(
                 session,
-                session.page.evaluate(FIND_API_KEYS_SCRIPT, pattern),
+                self._collect_api_keys(session.page, provider, pattern),
                 what="find_api_keys",
                 timeout=self.manager.settings.browser_call_timeout_seconds,
             )
-        keys = [key for key in (found or []) if isinstance(key, str)]
-        return {"provider": provider, "keys": list(dict.fromkeys(keys))[:5], "url": session.page.url}
+        strict = re.compile(pattern)
+        keys = [key for key in (found or []) if isinstance(key, str) and strict.fullmatch(key)]
+        keys = list(dict.fromkeys(keys))[:5]
+        return {"provider": provider, "keys": keys, "source": source if keys else None, "url": session.page.url}
+
+    async def _collect_api_keys(self, page: Any, provider: str, pattern: str) -> tuple[list[Any], str | None]:
+        found: list[Any] = []
+        frames = list(getattr(page, "frames", None) or [])[:MAX_KEY_FRAMES]
+        if not frames:
+            found.extend(await page.evaluate(FIND_API_KEYS_SCRIPT, pattern) or [])
+        for frame in frames:
+            try:
+                found.extend(await frame.evaluate(FIND_API_KEYS_SCRIPT, pattern) or [])
+            except Exception as exc:  # a detached / navigating frame: skip it, keep the rest
+                logger.debug("find_api_keys: frame skipped: %s", type(exc).__name__)
+        if found:
+            return found, "page"
+        url = getattr(page, "url", "") or ""
+        if not _host_allowed(url, CLIPBOARD_KEY_HOSTS.get(provider, ())):
+            return [], None
+        return await self._clipboard_api_keys(page, url, pattern), "clipboard"
+
+    async def _clipboard_api_keys(self, page: Any, url: str, pattern: str) -> list[Any]:
+        context = page.context
+        try:
+            await context.grant_permissions(["clipboard-read", "clipboard-write"], origin=_origin(url))
+        except Exception as exc:
+            logger.warning("find_api_keys: clipboard permission not granted: %s", type(exc).__name__)
+            return []
+        try:
+            result = await page.evaluate(CLIPBOARD_API_KEYS_SCRIPT, pattern)
+        except Exception as exc:
+            logger.warning("find_api_keys: clipboard read failed: %s", type(exc).__name__)
+            return []
+        finally:
+            # Nothing else in the controller grants permissions: drop the override again so
+            # the site does not keep clipboard access.
+            try:
+                await context.clear_permissions()
+            except Exception:
+                pass
+        if not isinstance(result, dict):
+            return []
+        return list(result.get("keys") or [])
 
     async def capture_screenshot(self, session_id: str, *, label: str = "manual") -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
