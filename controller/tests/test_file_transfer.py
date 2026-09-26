@@ -234,3 +234,51 @@ class PublicFetchGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     asyncio.run(unittest.main())
+
+
+def _zip(files: dict[str, bytes], *, compression: int = 8) -> bytes:
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=compression) as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+class ZipDownloadTests(unittest.IsolatedAsyncioTestCase):
+    """Google Flow's single-video "Download" hands over a zip (2026-09-26)."""
+
+    async def _receive(self, data: bytes, *, max_bytes: int = 10_000, filename: str = "flow.zip"):
+        raw = tempfile.TemporaryDirectory()
+        self.addCleanup(raw.cleanup)
+        service = FileTransferService(_manager(Path(raw.name), max_bytes=max_bytes))
+        record = await service.receive_upload("s1", filename=filename, chunks=_chunks(data), declared_length=None)
+        return service, record
+
+    async def test_the_one_video_inside_a_zip_is_taken_out(self) -> None:
+        service, record = await self._receive(_zip({"clips/ugc video.mp4": MP4, "meta.json": b"{}"}))
+        self.assertEqual((record["mime_type"], record["kind"]), ("video/mp4", "video"))
+        self.assertEqual(record["filename"], "ugc video.mp4")
+        self.assertEqual(record["archive_members"], 2)
+        self.assertEqual(Path(service.get("s1", record["id"])["path"]).read_bytes(), MP4)
+
+    async def test_the_largest_video_wins_over_images_and_smaller_videos(self) -> None:
+        big = MP4 + b"x" * 200
+        _, record = await self._receive(_zip({"a.mp4": MP4, "b.mp4": big, "c.png": b"\x89PNG\r\n\x1a\n" + b"p" * 500}))
+        self.assertEqual(record["kind"], "video")
+        self.assertEqual(record["size_bytes"], len(big))
+        self.assertEqual(record["archive_members"], 3)
+
+    async def test_a_zip_without_media_is_refused_as_zip(self) -> None:
+        with self.assertRaises(BrowserActionError) as refused:
+            await self._receive(_zip({"notes.txt": b"hello", "data.json": b"{}"}))
+        self.assertEqual(refused.exception.code, "file_unsupported_type")
+        self.assertEqual(refused.exception.details.get("reason"), "zip")
+
+    async def test_a_member_over_its_ceiling_is_refused_without_extracting_it(self) -> None:
+        huge = MP4 + b"\x00" * 50_000  # compresses tiny, expands past the 10 KB ceiling
+        with self.assertRaises(BrowserActionError) as refused:
+            await self._receive(_zip({"bomb.mp4": huge}), max_bytes=10_000)
+        self.assertEqual(refused.exception.code, "file_too_large")

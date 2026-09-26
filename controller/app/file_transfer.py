@@ -34,6 +34,7 @@ import os
 import secrets
 import shutil
 import time
+import zipfile
 from collections.abc import AsyncIterator
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -258,6 +259,76 @@ def unsupported_reason(head: bytes) -> str:
     return "unknown"
 
 
+_ZIP_MAX_MEMBERS = 200
+_KIND_RANK = {"video": 3, "image": 2, "audio": 1, "pdf": 0}
+
+
+def _unpack_media_zip(raw: Path, overall_max: int, *, action: str) -> tuple[str, int] | None:
+    """Replace `raw` (a zip) with the one media file inside it, in place.
+
+    Returns (the member's base name, how many files the zip held), or None when the zip
+    holds no media (the caller then refuses it as reason "zip"). Picks the best member:
+    video over image over audio over PDF, then the largest. Never trusts member names as
+    paths (only the base name is kept, and safe_filename cleans it later), never extracts
+    anything but that one member, and stops reading the moment the uncompressed bytes pass
+    that member's kind ceiling -- a zip bomb costs at most one ceiling of disk.
+    """
+    try:
+        archive = zipfile.ZipFile(raw)
+    except (zipfile.BadZipFile, OSError):
+        return None
+    with archive:
+        members = [info for info in archive.infolist() if not info.is_dir()]
+        if not members or len(members) > _ZIP_MAX_MEMBERS:
+            return None
+        best: tuple[tuple[int, int], zipfile.ZipInfo, str] | None = None
+        for info in members:
+            if info.flag_bits & 0x1:  # encrypted
+                continue
+            try:
+                with archive.open(info) as member:
+                    head = member.read(_SNIFF_BYTES)
+            except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError):
+                continue
+            typed = sniff(head)
+            if typed is None:
+                continue
+            _mime, kind = typed
+            rank = (_KIND_RANK.get(kind, -1), info.file_size)
+            if best is None or rank > best[0]:
+                best = (rank, info, kind)
+        if best is None:
+            return None
+        _rank, info, kind = best
+        limit = kind_limit(kind, overall_max)
+        if info.file_size > limit:
+            raise _error(
+                "file_too_large", "The file is larger than allowed for its type", 413,
+                action=action, max_bytes=limit, size_bytes=info.file_size, kind=kind,
+            )
+        extracted = raw.with_name(raw.name + ".unzipped")
+        written = 0
+        try:
+            with archive.open(info) as member, extracted.open("wb") as out:
+                for block in iter(lambda: member.read(1024 * 1024), b""):
+                    written += len(block)
+                    if written > limit:
+                        raise _error(
+                            "file_too_large", "The file is larger than allowed for its type", 413,
+                            action=action, max_bytes=limit, kind=kind,
+                        )
+                    out.write(block)
+        except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError):
+            extracted.unlink(missing_ok=True)
+            return None
+        except BrowserActionError:
+            extracted.unlink(missing_ok=True)
+            raise
+    os.replace(extracted, raw)
+    base = info.filename.replace("\\", "/").rsplit("/", 1)[-1]
+    return base, len(members)
+
+
 def safe_filename(name: str | None, mime_type: str) -> str:
     """A plain display name whose extension matches what the bytes really are
     (a JPEG named `x.html` becomes `x.jpg`)."""
@@ -362,6 +433,15 @@ class FileTransferService:
                 raise _error("file_empty", "The file is empty", 422, action=action)
             with raw.open("rb") as handle:
                 head = handle.read(_SNIFF_BYTES)
+            archive_members = None
+            if head[:4] == b"PK\x03\x04":
+                unpacked = _unpack_media_zip(raw, self.max_bytes, action=action)
+                if unpacked is not None:
+                    inner_name, archive_members = unpacked
+                    name = inner_name or name
+                    size = raw.stat().st_size
+                    with raw.open("rb") as handle:
+                        head = handle.read(_SNIFF_BYTES)
             typed = sniff(head)
             if typed is None:
                 raise _error(
@@ -406,6 +486,10 @@ class FileTransferService:
             "source": source or {},
             "path": str(final),
         }
+        if archive_members is not None:
+            # The site handed over a zip (Google Flow's single-video "Download", 2026-09-26);
+            # this is the media file taken out of it, and how many files the zip held.
+            record["archive_members"] = archive_members
         return record
 
     # -------------------------------------------------------------- download
