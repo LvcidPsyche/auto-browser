@@ -172,5 +172,68 @@ class OcrGatingTests(unittest.IsolatedAsyncioTestCase):
         manager.ocr.extract_from_image.assert_awaited_once()
 
 
+class OnDemandScreenshotTests(unittest.IsolatedAsyncioTestCase):
+    """POST /sessions/{id}/screenshot -- browser_see's vision capture. Distinct from the
+    observe() path above: this one always base64-encodes the frame it captured, read back
+    from disk AFTER `_capture_screenshot_redacted` has (possibly) rewritten it with PII
+    boxes, so an agent calling it never sees an unscrubbed frame."""
+
+    async def test_capture_screenshot_reads_back_the_file_as_base64(self) -> None:
+        import asyncio
+        import base64
+        import tempfile
+        from pathlib import Path
+
+        from app.browser.services.observation import BrowserObservationService
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            png_path = Path(tempdir) / "shot.png"
+            png_path.write_bytes(b"not really a png, just bytes")
+            session = SimpleNamespace(id="session-1", lock=asyncio.Lock(), page=SimpleNamespace(url="https://example.com"))
+
+            async def guarded(session, awaitable, *, what, timeout):
+                return await awaitable
+
+            manager = _make_manager()
+            manager.get_session = AsyncMock(return_value=session)
+            manager.session_lifecycle = SimpleNamespace(guarded=guarded)
+            manager.settings.browser_action_timeout_seconds = 5
+            manager._capture_screenshot = AsyncMock(
+                return_value={"path": str(png_path), "url": "/artifacts/session-1/shot.png"}
+            )
+            service = BrowserObservationService(manager=manager)
+
+            result = await service.capture_screenshot("session-1", label="see")
+
+            self.assertEqual(result["screenshot_path"], str(png_path))
+            self.assertEqual(result["screenshot_url"], "/artifacts/session-1/shot.png")
+            self.assertEqual(
+                base64.b64decode(result["screenshot_base64"]), png_path.read_bytes()
+            )
+
+    async def test_capture_screenshot_tolerates_a_missing_file(self) -> None:
+        import asyncio
+
+        from app.browser.services.observation import BrowserObservationService
+
+        session = SimpleNamespace(id="session-1", lock=asyncio.Lock(), page=SimpleNamespace(url="https://example.com"))
+
+        async def guarded(session, awaitable, *, what, timeout):
+            return await awaitable
+
+        manager = _make_manager()
+        manager.get_session = AsyncMock(return_value=session)
+        manager.session_lifecycle = SimpleNamespace(guarded=guarded)
+        manager.settings.browser_action_timeout_seconds = 5
+        manager._capture_screenshot = AsyncMock(
+            return_value={"path": "/no/such/file.png", "url": "/artifacts/session-1/shot.png"}
+        )
+        service = BrowserObservationService(manager=manager)
+
+        result = await service.capture_screenshot("session-1", label="see")
+
+        self.assertIsNone(result["screenshot_base64"])
+
+
 if __name__ == "__main__":
     unittest.main()

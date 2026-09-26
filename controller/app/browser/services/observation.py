@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
 from pathlib import Path
@@ -213,13 +214,27 @@ class BrowserObservationService:
                 what="screenshot",
                 timeout=self.manager.settings.browser_action_timeout_seconds,
             )
+            # Read back the file AFTER redaction (PII scrubbing rewrites the same path in
+            # place -- see _capture_screenshot_redacted) so an agent asking for these bytes
+            # (browser_see, social-operator) never receives an unscrubbed frame. Bounded to
+            # this one on-demand capture, never the ordinary observe() path, so routine
+            # look/click/type calls pay no extra encode cost.
             return {
                 "session": await self.manager._session_summary(session),
                 "url": session.page.url,
                 "screenshot_path": screenshot["path"],
                 "screenshot_url": screenshot["url"],
+                "screenshot_base64": await self._read_screenshot_base64(screenshot["path"]),
                 "takeover_url": self.manager._current_takeover_url(session),
             }
+
+    @staticmethod
+    async def _read_screenshot_base64(path: str) -> str | None:
+        try:
+            data = await asyncio.to_thread(Path(path).read_bytes)
+        except OSError:
+            return None
+        return base64.b64encode(data).decode("ascii")
 
     async def stop_trace(self, session_id: str) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)

@@ -40,7 +40,20 @@ ALLOWED_ACTIONS = frozenset({
     # Answer the JavaScript dialog (alert/confirm/prompt/leave-page) open on
     # the active tab -- controller POST /sessions/{id}/actions/dialog.
     "dialog",
+    # A human-pointer click at a page position instead of a resolved element
+    # (browser_see -> browser_click_at, when the target is icon-only or a text
+    # click failed twice). Maps to the SAME controller endpoint as "click"
+    # (/actions/click already accepts x/y -- see ClickRequest), but is kept a
+    # distinct action name here and validated to x/y/pace ONLY: never a
+    # selector or element_id, so a coordinate click can never silently become
+    # an element-targeted one through this channel.
+    "click_at",
 })
+# Read-only capture of the caller's own tab, for vision (browser_see). Maps to
+# controller POST /sessions/{id}/screenshot -- a distinct REST path from the
+# generic /actions/{operation} used by ALLOWED_ACTIONS, so it gets its own
+# branch in operation_request() below, same as TAB_OPERATIONS.
+SCREENSHOT_OPERATIONS = frozenset({"screenshot"})
 # Controller error codes whose meaning an agent needs to act on (answer the
 # dialog, hand a captcha to the owner). Only the code and the dialog's own
 # type/text are relayed -- never the rest of the controller's error body.
@@ -1049,6 +1062,23 @@ def create_app(
             return "POST", f"/sessions/{session_id}/tabs/open", body, {}
         if operation in FILE_OPERATIONS:
             raise HTTPException(500, "File operations are not session-locked")
+        if operation == "click_at":
+            headers = _pop_tab_id(arguments)
+            if set(arguments) - {"x", "y", "pace"}:
+                raise HTTPException(400, "click_at takes only x, y and pace")
+            x, y = arguments.get("x"), arguments.get("y")
+            if isinstance(x, bool) or isinstance(y, bool) or not isinstance(x, (int, float)) \
+                    or not isinstance(y, (int, float)):
+                raise HTTPException(400, "click_at requires numeric x and y")
+            return "POST", f"/sessions/{session_id}/actions/click", arguments, headers
+        if operation in SCREENSHOT_OPERATIONS:
+            headers = _pop_tab_id(arguments)
+            if set(arguments) - {"label"}:
+                raise HTTPException(400, "screenshot takes only 'label'")
+            label = arguments.get("label", "see")
+            if not isinstance(label, str) or not 1 <= len(label) <= 120:
+                raise HTTPException(400, "screenshot 'label' must be a short string")
+            return "POST", f"/sessions/{session_id}/screenshot", {"label": label}, headers
         if operation in ALLOWED_ACTIONS:
             headers = _pop_tab_id(arguments)
             if "approval_id" in arguments:
@@ -1346,7 +1376,7 @@ def create_app(
     @app.get("/mcp/tools")
     async def list_tools(authorization: str | None = Header(default=None)):
         require_role(authorization, "agent")
-        return [{"name": f"browser.{name}"} for name in ("session_status", "request_access", "get_request", "complete", "observe", "find_api_keys", *sorted(TAB_OPERATIONS), *sorted(FILE_OPERATIONS), *sorted(ALLOWED_ACTIONS))]
+        return [{"name": f"browser.{name}"} for name in ("session_status", "request_access", "get_request", "complete", "observe", "find_api_keys", *sorted(TAB_OPERATIONS), *sorted(FILE_OPERATIONS), *sorted(SCREENSHOT_OPERATIONS), *sorted(ALLOWED_ACTIONS))]
 
     async def session_status() -> dict[str, str]:
         """Safe agent setup signal; deliberately unrelated to TOTP state."""
@@ -1414,7 +1444,7 @@ def create_app(
                 },
             }
         if payload.method == "tools/list":
-            names = ("session_status", "request_access", "get_request", "complete", "observe", "find_api_keys", *sorted(TAB_OPERATIONS), *sorted(FILE_OPERATIONS), *sorted(ALLOWED_ACTIONS))
+            names = ("session_status", "request_access", "get_request", "complete", "observe", "find_api_keys", *sorted(TAB_OPERATIONS), *sorted(FILE_OPERATIONS), *sorted(SCREENSHOT_OPERATIONS), *sorted(ALLOWED_ACTIONS))
             return {
                 "jsonrpc": "2.0", "id": payload.id,
                 "result": {"tools": [

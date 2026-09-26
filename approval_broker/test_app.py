@@ -138,7 +138,8 @@ def test_agent_can_list_and_switch_tabs_but_not_close_them(tmp_path: Path, clock
                 "session_status", "request_access", "get_request", "complete", "observe", "find_api_keys",
                 "activate_tab", "list_tabs", "open_tab",
                 "download_file", "upload_file",
-                "click", "dialog", "go_back", "go_forward", "hover", "navigate", "press", "reload",
+                "screenshot",
+                "click", "click_at", "dialog", "go_back", "go_forward", "hover", "navigate", "press", "reload",
                 "scroll", "select_option", "type", "upload", "wait",
             )
         ]
@@ -217,6 +218,65 @@ def test_click_type_scroll_hover_accept_a_pace_argument(tmp_path: Path, clock: l
         request_id = client.post("/requests", headers=auth(AGENT), json={"purpose": "orders"}).json()["id"]
         assert client.post(f"/requests/{request_id}/actions/type", headers=auth(AGENT), json={"arguments": {"element_id": "op-1", "text": "hi", "pace": "fast"}}).status_code == 200
         assert ("POST", "/sessions/owner-1/actions/type", {"element_id": "op-1", "text": "hi", "pace": "fast"}) in calls
+
+
+def test_click_at_forwards_only_coordinates_and_rejects_a_selector(tmp_path: Path, clock: list[float]) -> None:
+    """browser_click_at (browser_see's pointer fallback) maps to the same controller
+    endpoint as an ordinary element click, but this channel is coordinates-only: a
+    selector/element_id sneaking in here would defeat the point of a distinct, narrowly
+    audited action name."""
+    active, calls = False, []
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal active
+        payload = json.loads(request.content) if request.content else None; calls.append((request.method, request.url.path, payload))
+        if request.method == "GET" and request.url.path == "/sessions": return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
+        if request.method == "POST" and request.url.path == "/sessions": active = True; return httpx.Response(200, json={"id": "owner-1"})
+        return httpx.Response(200, json={"ok": True})
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        secret = enroll(client, clock)
+        client.post("/owner/sessions", headers=auth(OWNER), json={"start_url": "https://example.com", "totp_code": fresh(secret, clock)})
+        request_id = client.post("/requests", headers=auth(AGENT), json={"purpose": "orders"}).json()["id"]
+        ok = client.post("/mcp/tools/call", headers=auth(AGENT), json={
+            "name": "browser.click_at", "arguments": {"request_id": request_id, "x": 120.5, "y": 40, "pace": "fast"},
+        })
+        assert ok.status_code == 200
+        assert ("POST", "/sessions/owner-1/actions/click", {"x": 120.5, "y": 40, "pace": "fast"}) in calls
+        missing_y = client.post("/mcp/tools/call", headers=auth(AGENT), json={
+            "name": "browser.click_at", "arguments": {"request_id": request_id, "x": 1},
+        })
+        assert missing_y.status_code == 400
+        with_selector = client.post("/mcp/tools/call", headers=auth(AGENT), json={
+            "name": "browser.click_at",
+            "arguments": {"request_id": request_id, "x": 1, "y": 2, "selector": "#sneaky"},
+        })
+        assert with_selector.status_code == 400
+
+
+def test_screenshot_maps_to_the_dedicated_controller_route(tmp_path: Path, clock: list[float]) -> None:
+    """browser_see's screenshot call goes to POST /sessions/{id}/screenshot (which returns
+    the REDACTED, base64-encoded frame -- see controller test coverage), never the generic
+    /actions/{op} path the click/type family uses."""
+    active, calls = False, []
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal active
+        payload = json.loads(request.content) if request.content else None; calls.append((request.method, request.url.path, payload))
+        if request.method == "GET" and request.url.path == "/sessions": return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
+        if request.method == "POST" and request.url.path == "/sessions": active = True; return httpx.Response(200, json={"id": "owner-1"})
+        return httpx.Response(200, json={"url": "https://example.com", "screenshot_base64": "aGk="})
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        secret = enroll(client, clock)
+        client.post("/owner/sessions", headers=auth(OWNER), json={"start_url": "https://example.com", "totp_code": fresh(secret, clock)})
+        request_id = client.post("/requests", headers=auth(AGENT), json={"purpose": "orders"}).json()["id"]
+        result = client.post("/mcp/tools/call", headers=auth(AGENT), json={
+            "name": "browser.screenshot", "arguments": {"request_id": request_id},
+        })
+        assert result.status_code == 200
+        assert result.json()["screenshot_base64"] == "aGk="
+        assert ("POST", "/sessions/owner-1/screenshot", {"label": "see"}) in calls
+        bad = client.post("/mcp/tools/call", headers=auth(AGENT), json={
+            "name": "browser.screenshot", "arguments": {"request_id": request_id, "extra": 1},
+        })
+        assert bad.status_code == 400
 
 
 def test_closure_and_restart_cannot_be_adopted_or_resurrected(tmp_path: Path, clock: list[float]) -> None:
