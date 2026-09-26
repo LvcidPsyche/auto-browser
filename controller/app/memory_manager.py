@@ -5,12 +5,31 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
 from .utils import atomic_write_text, utc_now
 
 logger = logging.getLogger(__name__)
+
+
+def extract_hostname(url: str) -> str | None:
+    """Extract and sanitize hostname from URL. Returns None if invalid."""
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return None
+        # Sanitize: only allow alphanumeric, dots, and hyphens
+        if not all(c.isalnum() or c in ".-" for c in hostname):
+            return None
+        # Reject path traversal attempts
+        if ".." in hostname or hostname.startswith(".") or hostname.endswith("."):
+            return None
+        return hostname.lower()
+    except Exception:
+        return None
 
 
 class MemoryProfile(BaseModel):
@@ -97,6 +116,18 @@ class MemoryManager:
 
     async def get(self, name: str) -> MemoryProfile | None:
         return await self._load(name)
+
+    async def get_by_url(self, url: str) -> MemoryProfile | None:
+        """Look up a memory profile by URL hostname.
+
+        Enables automatic memory loading when visiting a URL without
+        explicitly naming a profile. The profile name must match the
+        URL's hostname (e.g., "github.com").
+        """
+        hostname = extract_hostname(url)
+        if not hostname:
+            return None
+        return await self._load(hostname)
 
     async def list(self) -> list[dict[str, Any]]:
         def _list_sync() -> list[dict[str, Any]]:
