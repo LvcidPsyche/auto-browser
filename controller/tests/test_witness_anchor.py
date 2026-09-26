@@ -137,3 +137,22 @@ def test_concurrent_writers_cannot_fork_the_chain() -> None:
         assert json.loads(lines[-1])["chain_hash"] == read_anchor(path)["head_hash"]
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.mark.parametrize("shift", range(0, 8))
+def test_tail_read_never_splits_an_arabic_character(tmp_path: Path, shift: int, monkeypatch) -> None:
+    """2026-09-26: the tail window's byte offset landed inside an Arabic character and the
+    text-mode read raised UnicodeDecodeError, failing browser actions with a 500."""
+    import app.witness_anchor as wa
+
+    path = tmp_path / "chain.jsonl"
+    older = json.dumps({"target": "تسجيل الدخول " * 50}, ensure_ascii=False)
+    last = json.dumps({"target": "إضافة ملفات والمزيد", "n": shift}, ensure_ascii=False)
+    path.write_text(older + "\n" + last + "\n", encoding="utf-8")
+    size = path.stat().st_size
+    # Put the window start at every byte offset around the Arabic text of the older record.
+    monkeypatch.setattr(wa, "TAIL_READ_BYTES", size - 20 - shift)
+    with open(path, "a+", encoding="utf-8") as handle:
+        assert wa.read_tail_line(handle) == last
+        handle.write("{}\n")  # the handle must still append at the end afterwards
+    assert path.read_text(encoding="utf-8").endswith(last + "\n{}\n")

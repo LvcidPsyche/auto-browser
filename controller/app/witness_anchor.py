@@ -82,16 +82,33 @@ def read_tail_line(handle: IO[Any]) -> str | None:
     if size == 0:
         return None
     start = max(0, size - TAIL_READ_BYTES)
-    handle.seek(start)
-    chunk = handle.read()
+    # Read BYTES, not text: a byte offset can land inside a multi-byte UTF-8
+    # character (every Arabic target/label the employees click is logged here),
+    # and a text-mode read from there raised UnicodeDecodeError, failing the whole
+    # browser action with a 500 (2026-09-26, uploads/clicks on chatgpt.com).
+    raw = getattr(handle, "buffer", None)
+    if raw is not None:
+        handle.flush()
+        raw.seek(start)
+        data = raw.read()
+    else:
+        handle.seek(start)
+        data = handle.read()
+    chunk = data.decode("utf-8", errors="replace") if isinstance(data, bytes) else data
     lines = [line for line in chunk.splitlines() if line.strip()]
-    if not lines:
-        return None
-    if start > 0 and len(lines) == 1:
-        # The tail window landed mid-record; fall back to a full read rather
-        # than returning a fragment that would not parse.
-        handle.seek(0)
-        lines = [line for line in handle.read().splitlines() if line.strip()]
+    if start > 0 and lines and not data[:1] in (b"\n", "\n"):
+        # The first line of a mid-file window is a fragment of an older record.
+        lines = lines[1:]
+    if start > 0 and not lines:
+        # The last record is longer than the window: fall back to a full read.
+        if raw is not None:
+            raw.seek(0)
+            chunk = raw.read().decode("utf-8", errors="replace")
+        else:
+            handle.seek(0)
+            chunk = handle.read()
+        lines = [line for line in chunk.splitlines() if line.strip()]
+    handle.seek(0, os.SEEK_END)
     return lines[-1] if lines else None
 
 
