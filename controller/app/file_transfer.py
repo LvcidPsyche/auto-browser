@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
 
 from .action_errors import BrowserActionError
+from .browser.tab_view import unwrap_session
 from .persistent_profiles import PersistentProfileError
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -260,6 +261,8 @@ def unsupported_reason(head: bytes) -> str:
 
 
 _ZIP_MAX_MEMBERS = 200
+# How long a file chooser the page opened (by anyone's click) stays fillable.
+PENDING_CHOOSER_SECONDS = 60.0
 _KIND_RANK = {"video": 3, "image": 2, "audio": 1, "pdf": 0}
 
 
@@ -815,13 +818,37 @@ class FileTransferService:
             if (selector or element_id) else {"mode": "page"}
         )
         method: dict[str, str] = {}
+        owner = unwrap_session(session)
+
+        async def fill_pending_chooser() -> bool:
+            pending = getattr(owner, "pending_file_chooser", None)
+            if not pending:
+                return False
+            chooser, opened_at = pending
+            owner.pending_file_chooser = None
+            if time.monotonic() - opened_at > PENDING_CHOOSER_SECONDS:
+                return False
+            try:
+                await chooser.set_files(path)
+            except Exception as exc:  # the chooser's page/input is gone
+                logger.debug("pending file chooser could not be filled: %s", exc)
+                return False
+            method["via"] = "pending_chooser"
+            return True
 
         async def operation() -> None:
             page = session.page
+            if not target.get("selector") and await fill_pending_chooser():
+                return
             if target.get("selector"):
                 locator = page.locator(target["selector"]).first
-                handle = await locator.element_handle(timeout=10_000)
+                try:
+                    handle = await locator.element_handle(timeout=10_000)
+                except Exception:
+                    handle = None
                 if handle is None:
+                    if await fill_pending_chooser():
+                        return
                     raise _error("file_no_input", "Target element not found", 404, action=action)
                 is_input = await handle.evaluate(
                     "(el) => el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'file'"
@@ -842,6 +869,7 @@ class FileTransferService:
                         await locator.click()
                     chooser = await chooser_info.value
                     await chooser.set_files(path)
+                    owner.pending_file_chooser = None  # the listener saw this one too
                     method["via"] = "file_chooser"
                     return
                 except Exception as exc:  # no chooser opened -- look for the hidden input
@@ -852,6 +880,8 @@ class FileTransferService:
                     method["via"] = "nearby_input"
                     return
             chosen = await self._page_file_input(page, record["mime_type"])
+            if chosen is None and await fill_pending_chooser():
+                return
             if chosen is None:
                 raise _error(
                     "file_no_input",

@@ -118,6 +118,10 @@ class BrowserSession:
     page_errors: list[str] = field(default_factory=list)
     request_failures: list[dict[str, Any]] = field(default_factory=list)
     downloads: list[dict[str, Any]] = field(default_factory=list)
+    # The newest native file-chooser the page opened (Playwright FileChooser,
+    # monotonic time) -- a site whose "Upload" opens it straight from a click
+    # (Google Flow) is filled by upload_file even when the agent clicked first.
+    pending_file_chooser: tuple[Any, float] | None = None
     # Weak refs: a collected Page must not block re-attaching listeners to a
     # new Page that happens to reuse its id().
     attached_pages: weakref.WeakSet[Any] = field(default_factory=weakref.WeakSet)

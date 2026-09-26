@@ -282,3 +282,68 @@ class ZipDownloadTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(BrowserActionError) as refused:
             await self._receive(_zip({"bomb.mp4": huge}), max_bytes=10_000)
         self.assertEqual(refused.exception.code, "file_too_large")
+
+
+class PendingChooserTests(unittest.IsolatedAsyncioTestCase):
+    """Google Flow's "Upload" opens the native chooser straight from a click (2026-09-26):
+    the agent clicked, the chooser opened, and upload_file found nothing to fill."""
+
+    class _Chooser:
+        def __init__(self) -> None:
+            self.files = None
+
+        async def set_files(self, path) -> None:
+            self.files = path
+
+    async def _service(self, *, target: dict, element=None):
+        import time as _time
+
+        raw = tempfile.TemporaryDirectory()
+        self.addCleanup(raw.cleanup)
+        manager = _manager(Path(raw.name))
+
+        class _Locator:
+            first = None
+
+            async def element_handle(self, timeout=None):
+                return element
+
+        locator = _Locator()
+        locator.first = locator
+        manager.session.page = SimpleNamespace(locator=lambda selector: locator, frames=[])
+        manager.session.pending_file_chooser = None
+        manager.actions = SimpleNamespace(resolve_target=lambda **kwargs: dict(target))
+
+        async def run_action(session, name, payload, operation):
+            await operation()
+            return {"status": "ok"}
+
+        manager._run_action = run_action
+        service = FileTransferService(manager)
+        record = await service.receive_upload("s1", filename="shoe.png", chunks=_chunks(b"\x89PNG\r\n\x1a\n" + b"p" * 50), declared_length=None)
+        return service, manager, record, _time
+
+    async def test_a_chooser_opened_by_an_earlier_click_is_filled(self) -> None:
+        service, manager, record, _time = await self._service(target={"mode": "page"})
+        chooser = self._Chooser()
+        manager.session.pending_file_chooser = (chooser, _time.monotonic())
+        result = await service.attach("s1", record["id"])
+        self.assertEqual(result["via"], "pending_chooser")
+        self.assertEqual(chooser.files, service.get("s1", record["id"])["path"])
+        self.assertIsNone(manager.session.pending_file_chooser)
+
+    async def test_an_unresolvable_target_falls_back_to_the_open_chooser(self) -> None:
+        service, manager, record, _time = await self._service(target={"selector": "#gone"}, element=None)
+        chooser = self._Chooser()
+        manager.session.pending_file_chooser = (chooser, _time.monotonic())
+        result = await service.attach("s1", record["id"], selector="#gone")
+        self.assertEqual(result["via"], "pending_chooser")
+
+    async def test_a_stale_chooser_is_not_used(self) -> None:
+        service, manager, record, _time = await self._service(target={"mode": "page"})
+        chooser = self._Chooser()
+        manager.session.pending_file_chooser = (chooser, _time.monotonic() - 120)
+        with self.assertRaises(BrowserActionError) as refused:
+            await service.attach("s1", record["id"])
+        self.assertEqual(refused.exception.code, "file_no_input")
+        self.assertIsNone(chooser.files)

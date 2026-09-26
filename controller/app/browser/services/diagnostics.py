@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -122,6 +123,11 @@ class BrowserDiagnosticsService:
             ),
         )
         page.on("download", lambda download: spawn_background_task(self.manager._handle_download(session, download)))
+        # Remember the newest file chooser whoever opened it (see
+        # FileTransferService.attach): Google Flow's "Upload" opens the native
+        # chooser straight from a click, with no <input type=file> left on the
+        # page, so an upload after an agent's own click had nothing to fill.
+        page.on("filechooser", lambda chooser: setattr(session, "pending_file_chooser", (chooser, time.monotonic())))
         # Dialog + popup listeners. Registering a dialog listener at all is what
         # stops Playwright auto-dismissing every alert/confirm/prompt -- including
         # the ones the owner sees while browsing by hand. See dialogs.py.
