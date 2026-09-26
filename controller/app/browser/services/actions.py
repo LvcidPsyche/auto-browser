@@ -39,6 +39,46 @@ SLOW_INPUT_STEP_SECONDS = 0.25
 HUMAN_GESTURE_BUDGET_SECONDS = 1.5
 
 
+# Hit-test a candidate point before pressing on it: a real user's pointer lands on
+# whatever is actually drawn there, and an overlay that intercepts the click is a
+# real (and common) reason a click silently does nothing. Loosely handles shadow
+# DOM by walking the composed tree from the hit node back up to `el`.
+HIT_TEST_SCRIPT = """(el, point) => {
+  const { x, y } = point;
+  const hit = document.elementFromPoint(x, y);
+  if (!hit) return false;
+  if (hit === el || el.contains(hit)) return true;
+  // A styled checkbox/radio/input covered by its own <label>: clicking the label
+  // is exactly what a person does, and it acts on the control.
+  const label = hit.closest ? hit.closest('label') : null;
+  if (label && label.control === el) return true;
+  let node = hit;
+  const seen = new Set();
+  while (node && !seen.has(node)) {
+    seen.add(node);
+    if (node === el) return true;
+    if (node.assignedSlot === el) return true;
+    const root = typeof node.getRootNode === 'function' ? node.getRootNode() : null;
+    if (node.parentElement) {
+      node = node.parentElement;
+    } else if (root && root.host) {
+      node = root.host;
+    } else {
+      node = null;
+    }
+  }
+  return false;
+}"""
+
+# Whether focus actually landed on the element (or something inside it) after a
+# click, for focus_locator's fallback to a plain .focus() call.
+FOCUS_CHECK_SCRIPT = """(el) => {
+  const active = document.activeElement;
+  if (!active) return false;
+  return active === el || el.contains(active);
+}"""
+
+
 # document.activeElement's identifying attributes, for type_focused's redaction check.
 FOCUSED_INPUT_ATTRIBUTES_SCRIPT = """() => {
   const el = document.activeElement;
@@ -106,12 +146,7 @@ class BrowserActionService:
             else:
                 locator = session.page.locator(target["selector"]).first
                 await locator.scroll_into_view_if_needed()
-                coords = await self.locator_center(locator)
-                if coords is None:
-                    await locator.click()
-                else:
-                    target["x"], target["y"] = coords
-                    await self.click_human_like(session, coords[0], coords[1], fast=fast)
+                await self.pointer_click_locator(session, locator, fast=fast, target=target)
             await self.manager._settle(session.page)
             await self.pace_delay(pace)
 
@@ -137,12 +172,7 @@ class BrowserActionService:
             else:
                 locator = session.page.locator(target["selector"]).first
                 await locator.scroll_into_view_if_needed()
-                coords = await self.locator_center(locator)
-                if coords is None:
-                    await locator.hover()
-                else:
-                    target["x"], target["y"] = coords
-                    await self.move_mouse_human_like(session, coords[0], coords[1], fast=fast)
+                await self.pointer_hover_locator(session, locator, fast=fast, target=target)
             await self.manager._settle(session.page)
             await self.pace_delay(pace)
 
@@ -675,14 +705,198 @@ class BrowserActionService:
         await session.page.mouse.up()
         session.mouse_position = (jitter_x, jitter_y)
 
-    async def focus_locator(self, session: "BrowserSession", locator: Any, *, fast: bool = False) -> None:
-        coords = await self.locator_center(locator)
-        if coords is None:
-            await locator.click()
+    @staticmethod
+    def _random_point_in_box(box: dict[str, Any]) -> tuple[float, float]:
+        """A point inside the box that is not its exact center -- e.g. x = box.x +
+        box.w * uniform(0.3, 0.7) -- clamped so a sliver of an element (a few px
+        wide) still lands at least 1px inside instead of on its edge."""
+        width = float(box["width"])
+        height = float(box["height"])
+        margin = 1.0
+
+        px = width * random.uniform(0.3, 0.7)
+        if width > 2 * margin:
+            px = min(max(px, margin), width - margin)
         else:
-            await self.click_human_like(session, coords[0], coords[1], fast=fast)
+            px = width / 2
+
+        py = height * random.uniform(0.3, 0.7)
+        if height > 2 * margin:
+            py = min(max(py, margin), height - margin)
+        else:
+            py = height / 2
+
+        return (float(box["x"]) + px, float(box["y"]) + py)
+
+    @staticmethod
+    def _locator_is_in_iframe(locator: Any) -> bool:
+        """Best-effort only: Playwright's public Locator API has no supported way to
+        ask "are you inside a child frame". elementFromPoint uses main-frame viewport
+        coordinates, which bounding_box() also reports for a main-frame element, so
+        when we cannot tell we default to False (run the hit-test as normal) rather
+        than silently skipping it."""
+        try:
+            frame = getattr(getattr(locator, "_impl_obj", None), "_frame", None)
+            if frame is None:
+                return False
+            parent_frame = getattr(frame, "parent_frame", None)
+            return parent_frame is not None
+        except Exception:
+            return False
+
+    async def _hit_test(self, locator: Any, point: tuple[float, float]) -> bool:
+        # Deliberately not try/except here: a failure (e.g. no `evaluate` on a test
+        # double, or a genuinely detached element) is part of "the pointer path
+        # raised" and is handled by the caller's fallback to locator.click()/hover().
+        return bool(await locator.evaluate(HIT_TEST_SCRIPT, {"x": point[0], "y": point[1]}))
+
+    async def _resolve_click_point(
+        self, locator: Any, box: dict[str, Any], target: dict[str, Any],
+    ) -> tuple[float, float]:
+        if self._locator_is_in_iframe(locator):
+            # bounding_box() is already page-relative for a same-frame element, but
+            # elementFromPoint on the top document cannot see into a child frame --
+            # skip the hit-test rather than raise a false click_intercepted.
+            return self._random_point_in_box(box)
+
+        candidate = self._random_point_in_box(box)
+        if await self._hit_test(locator, candidate):
+            return candidate
+        for _ in range(3):
+            candidate = self._random_point_in_box(box)
+            if await self._hit_test(locator, candidate):
+                return candidate
+
+        center = (float(box["x"] + box["width"] / 2), float(box["y"] + box["height"] / 2))
+        if await self._hit_test(locator, center):
+            return center
+
+        raise BrowserActionError(
+            "Another element covers the target",
+            code="click_intercepted",
+            action="click",
+            status_code=400,
+            retryable=True,
+            details={"selector": target.get("selector")},
+        )
+
+    async def pointer_click_locator(
+        self, session: "BrowserSession", locator: Any, *, fast: bool, target: dict[str, Any],
+    ) -> None:
+        """The real human pointer path for a click on a resolved locator: a random
+        point inside the box (not its center), hit-tested so an overlay covering the
+        target is caught instead of silently clicking through it, moved to along the
+        existing bezier path, with a hover dwell before the press. Any failure in
+        that path (other than our own click_intercepted) falls back to a plain
+        locator.click(); `target["pointer"]` records which one actually ran."""
+        try:
+            box = await locator.bounding_box()
+        except Exception as exc:
+            logger.info("click: bounding_box failed (%s); falling back to locator.click()", exc)
+            await locator.click()
+            target["pointer"] = "element_click"
+            return
+        if not box:
+            logger.info("click: no bounding box for target; falling back to locator.click()")
+            await locator.click()
+            target["pointer"] = "element_click"
+            return
+
+        try:
+            point = await self._resolve_click_point(locator, box, target)
+        except BrowserActionError:
+            raise
+        except Exception as exc:
+            logger.info("click: pointer path failed (%s); falling back to locator.click()", exc)
+            await locator.click()
+            target["pointer"] = "element_click"
+            return
+
+        pressed = False
+        try:
+            if fast:
+                await session.page.mouse.move(point[0], point[1])
+                session.mouse_position = point
+            else:
+                await self.move_mouse_human_like(session, point[0], point[1])
+                # Hover dwell: a small wiggle and back so the page gets
+                # mouseover/mouseenter/pointermove before the press, not a press
+                # that lands with no prior hover at all. The press itself lands on
+                # the hit-tested point, never on the wiggle.
+                wiggle = (point[0] + random.uniform(-2, 2), point[1] + random.uniform(-2, 2))
+                await session.page.mouse.move(*wiggle)
+                await asyncio.sleep(random.uniform(0.08, 0.25))
+                await session.page.mouse.move(point[0], point[1])
+            session.mouse_position = point
+            pressed = True
+            await session.page.mouse.down()
+            if not fast:
+                await asyncio.sleep(random.uniform(0.05, 0.14))
+            await session.page.mouse.up()
+            target["pointer"] = "mouse"
+            target["x"], target["y"] = point
+        except Exception as exc:
+            if pressed:
+                # The press may already have reached the page: a second, element-level
+                # click could act twice (submit twice, toggle back). Report instead.
+                raise
+            logger.info("click: mouse move failed (%s); falling back to locator.click()", exc)
+            await locator.click()
+            target["pointer"] = "element_click"
+
+    async def pointer_hover_locator(
+        self, session: "BrowserSession", locator: Any, *, fast: bool, target: dict[str, Any],
+    ) -> None:
+        """Same random-point-in-box + curved move + dwell as the click path, minus
+        the hit-test (no intercepted-click concept for a hover) and the press."""
+        try:
+            box = await locator.bounding_box()
+        except Exception as exc:
+            logger.info("hover: bounding_box failed (%s); falling back to locator.hover()", exc)
+            await locator.hover()
+            return
+        if not box:
+            logger.info("hover: no bounding box for target; falling back to locator.hover()")
+            await locator.hover()
+            return
+
+        point = self._random_point_in_box(box)
+        try:
+            if fast:
+                await session.page.mouse.move(point[0], point[1])
+                session.mouse_position = point
+            else:
+                await self.move_mouse_human_like(session, point[0], point[1])
+                wiggle = (point[0] + random.uniform(-3, 3), point[1] + random.uniform(-3, 3))
+                await session.page.mouse.move(*wiggle)
+                session.mouse_position = wiggle
+                await asyncio.sleep(random.uniform(0.08, 0.25))
+            target["x"], target["y"] = point
+        except Exception as exc:
+            logger.info("hover: mouse sequence failed (%s); falling back to locator.hover()", exc)
+            await locator.hover()
+
+    async def focus_locator(self, session: "BrowserSession", locator: Any, *, fast: bool = False) -> None:
+        target: dict[str, Any] = {}
+        try:
+            await self.pointer_click_locator(session, locator, fast=fast, target=target)
+        except BrowserActionError as exc:
+            if exc.code != "click_intercepted":
+                raise
+            # A field under a floating label / placeholder overlay: focus it directly
+            # (checked below) rather than refusing to type.
+            logger.info("focus_locator: field is covered; focusing it directly")
         if not fast:
             await asyncio.sleep(0.05 + random.random() * 0.1)
+        try:
+            focused = await locator.evaluate(FOCUS_CHECK_SCRIPT)
+        except Exception:
+            focused = False
+        if not focused:
+            try:
+                await locator.focus()
+            except Exception as exc:
+                logger.info("focus_locator: fallback locator.focus() failed: %s", exc)
 
     async def type_text_human_like(self, page: "Page", text: str, *, fast: bool = False) -> None:
         if fast:

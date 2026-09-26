@@ -18,6 +18,57 @@ logger = logging.getLogger(__name__)
 
 ActionOperation = Callable[[], Awaitable[None]]
 
+# Markers within a raw Playwright error message that mean "the element is simply
+# no longer there" -- a fresh observation and a different element_id is the fix,
+# not a bare retry. Strict-mode violation cannot actually happen (every locator we
+# build ends in `.first`), but it means the same thing if it ever did.
+_TARGET_NOT_FOUND_MARKERS = (
+    "waiting for locator",
+    "strict mode violation",
+    "is not attached to the dom",
+    "element is not attached",
+    "resolved to 0 elements",
+    "timeout while waiting for selector",
+)
+
+# The element exists and is attached, but Playwright would not actually be able to
+# click/type on it as it stands (off-screen, display:none, still animating).
+_TARGET_NOT_VISIBLE_MARKERS = (
+    "not visible",
+    "outside of the viewport",
+    "element is not visible",
+    "element is not stable",
+)
+
+# Something else is drawn on top of the target and would eat the click.
+_CLICK_INTERCEPTED_MARKERS = (
+    "intercepts pointer events",
+    "would receive the click",
+)
+
+
+def classify_playwright_error(message: str) -> tuple[str, str]:
+    """Map a raw Playwright error message to a specific (code, message) pair.
+
+    Everything used to surface as one generic "browser_action_failed" no matter
+    the cause, which left the only recovery a blind retry. This gives the caller
+    (an agent, or the owner) enough to react correctly: re-observe and pick a
+    different element vs. just wait and retry vs. the target being covered."""
+    lowered = (message or "").lower()
+
+    # Most specific first: a Playwright timeout's call log always starts with
+    # "waiting for locator", and only its later lines say what actually stopped it.
+    if any(marker in lowered for marker in _CLICK_INTERCEPTED_MARKERS):
+        return ("click_intercepted", "Another element covers the target.")
+    if any(marker in lowered for marker in _TARGET_NOT_VISIBLE_MARKERS):
+        return ("target_not_visible", "The element is on the page but not visible or not stable.")
+    if any(marker in lowered for marker in _TARGET_NOT_FOUND_MARKERS):
+        return (
+            "target_not_found",
+            "The element is no longer on the page. Observe again and pick a current element.",
+        )
+    return ("browser_action_failed", "Action failed. Refresh observation and retry.")
+
 
 def _dialogs(manager: Any) -> Any:
     from ..browser.services.dialogs import BrowserDialogService
@@ -111,9 +162,10 @@ class BrowserActionPipeline:
             raise
         except PlaywrightError as exc:
             failed = await self._handle_playwright_error(context, witness_state)
+            code, message = classify_playwright_error(str(exc))
             raise BrowserActionError(
-                "Action failed. Refresh observation and retry.",
-                code="browser_action_failed",
+                message,
+                code=code,
                 action=context.action_name,
                 status_code=400,
                 retryable=True,

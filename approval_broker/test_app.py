@@ -686,7 +686,7 @@ def test_a_session_the_controller_retired_frees_open_and_a_reattached_one_keeps_
 def test_agent_answers_a_dialog_and_learns_why_an_action_was_blocked(tmp_path: Path, clock: list[float]) -> None:
     """The dialog action forwards to the controller, and a controller 423 dialog_open
     reaches the agent with only its code and the dialog's own type/text -- every other
-    controller error body stays hidden behind the generic message."""
+    controller error body (an unlisted code included) stays hidden behind the generic message."""
     active, calls = False, []
     def upstream(request: httpx.Request) -> httpx.Response:
         nonlocal active
@@ -697,7 +697,7 @@ def test_agent_answers_a_dialog_and_learns_why_an_action_was_blocked(tmp_path: P
             return httpx.Response(423, json={"ok": False, "code": "dialog_open", "error": "x", "url": "https://secret.example/token=abc",
                                              "dialog": {"type": "confirm", "message": "Leave site?", "url": "https://secret.example"}})
         if request.url.path == "/sessions/owner-1/actions/press":
-            return httpx.Response(400, json={"ok": False, "code": "browser_action_failed", "error": "internal detail"})
+            return httpx.Response(400, json={"ok": False, "code": "some_internal_code", "error": "internal detail"})
         return httpx.Response(200, json={"handled": True})
     with TestClient(app_at(tmp_path, upstream)) as client:
         secret = enroll(client, clock)
@@ -1036,6 +1036,36 @@ def test_tab_gone_is_relayed_to_the_agent(tmp_path: Path, clock: list[float]) ->
                                json={"arguments": {"x": 1, "tab_id": "t-0123456789ab"}})
         assert response.status_code == 410
         assert response.json()["detail"] == {"message": "Browser controller rejected request", "code": "tab_gone"}
+
+
+@pytest.mark.parametrize("status, code", [
+    (400, "target_not_found"), (400, "target_not_visible"), (400, "click_intercepted"),
+    (400, "browser_action_failed"), (403, "browser_action_blocked"),
+])
+def test_why_an_action_failed_is_relayed_so_it_is_never_read_as_a_closed_browser(
+    tmp_path: Path, clock: list[float], status: int, code: str,
+) -> None:
+    active = False
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal active
+        if request.method == "GET" and request.url.path == "/sessions":
+            return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
+        if request.method == "POST" and request.url.path == "/sessions":
+            active = True
+            return httpx.Response(200, json={"id": "owner-1"})
+        return httpx.Response(status, json={"ok": False, "code": code, "error": "internal detail",
+                                            "url": "https://secret.example/path"})
+
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        _open_owner_session(client, clock)
+        grant = client.post("/requests", headers=auth(AGENT), json={"purpose": "a"}).json()["id"]
+        response = client.post("/mcp/tools/call", headers=auth(AGENT), json={
+            "name": "browser.click", "arguments": {"request_id": grant, "element_id": "op-abc12345"},
+        })
+        assert response.status_code == status
+        # Only the code travels -- never the controller's own message or the page URL.
+        assert response.json()["detail"] == {"message": "Browser controller rejected request", "code": code}
 
 
 def test_owner_tab_endpoints_are_owner_only_and_bound_to_the_owner_session(

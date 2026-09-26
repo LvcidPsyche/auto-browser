@@ -46,6 +46,11 @@ ALLOWED_ACTIONS = frozenset({
 # type/text are relayed -- never the rest of the controller's error body.
 RELAYED_ERROR_CODES = frozenset({
     "dialog_open", "captcha_detected",
+    # Why an action did not happen (controller app/actions/pipeline.py): the agent
+    # must look again / pick another element / close what covers it -- and must
+    # never mistake a refused click for a closed browser (2026-09-26).
+    "target_not_found", "target_not_visible", "click_intercepted",
+    "browser_action_failed", "browser_action_blocked",
     # A tab-scoped call (X-Tab-Id) whose tab has closed: list/open tabs again.
     "tab_gone",
     # File transfer (controller app/file_transfer.py): what went wrong with a
