@@ -25,7 +25,7 @@ make release-audit   # launch-prep audit; run before any release PR
 ## Invariants CI enforces
 
 - **Version parity:** every version string in the repo must match (`scripts/check_version_parity.py`
-  lists them). A release bumps all of them together.
+  lists them). A release bumps all of them together with `python scripts/bump_version.py X.Y.Z`.
 - **Playwright pin parity:** the controller (pip) and `browser-node` (npm) Playwright versions must
   be identical (`scripts/check_playwright_pins.py`).
 - Security-sensitive changes (auth, isolation, witness receipts, PII scrubbing) follow `SECURITY.md`.

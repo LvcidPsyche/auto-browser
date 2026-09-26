@@ -30,6 +30,13 @@ jobs:
         run: python scripts/check_playwright_pins.py
       - name: Check version strings matched across packages
         run: python scripts/check_version_parity.py
+      - name: Check bump_version.py still finds every version field
+        # A no-op bump to the current version must leave the tree unchanged; if a field moved,
+        # the script exits non-zero or rewrites something and the diff check fails.
+        run: |
+          CURRENT=$(python -c "import tomllib; print(tomllib.load(open('client/pyproject.toml','rb'))['project']['version'])")
+          python scripts/bump_version.py "$CURRENT"
+          git diff --exit-code
       - name: Check stdio bridge copies matched (client <-> controller)
         run: python scripts/check_bridge_parity.py
       - name: Validate agent eval matrix
