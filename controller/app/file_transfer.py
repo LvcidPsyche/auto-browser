@@ -214,6 +214,18 @@ def sniff(head: bytes) -> tuple[str, str] | None:
         if brand == b"qt  ":
             return "video/quicktime", "video"
         return "video/mp4", "video"
+    box_size = int.from_bytes(head[:4], "big") if len(head) >= 8 else -1
+    if box_size in (0, 1) or box_size >= 8:
+        # An ISO-BMFF / QuickTime file whose FIRST box is not ftyp: classic MOV
+        # opens with wide/free/mdat/moov, a fragmented MP4 segment with
+        # styp/sidx/moof (Google Flow's single-video download was refused three
+        # times as "not a video", 2026-09-26). Box size 0 = to end of file,
+        # 1 = 64-bit size follows; the consumer (ffprobe) validates the rest.
+        box = head[4:8]
+        if box in {b"wide", b"free", b"skip", b"mdat", b"moov", b"pnot"}:
+            return "video/quicktime", "video"
+        if box in {b"styp", b"sidx", b"moof"}:
+            return "video/mp4", "video"
     if head[:4] == b"\x1aE\xdf\xa3":
         return "video/webm", "video"
     if head.startswith(b"ID3"):
@@ -229,6 +241,21 @@ def sniff(head: bytes) -> tuple[str, str] | None:
     if head[:5] == b"%PDF-":
         return "application/pdf", "pdf"
     return None
+
+
+def unsupported_reason(head: bytes) -> str:
+    """What a refused file most likely is -- relayed as the bounded `reason`
+    fact so the agent (and whoever debugs it) never has to guess."""
+    lowered = head.lstrip()[:64].lower()
+    if head[:4] == b"PK\x03\x04":
+        return "zip"
+    if lowered.startswith((b"<!doctype html", b"<html", b"<head", b"<body")):
+        return "html"
+    if lowered.startswith((b"{", b"[")):
+        return "json"
+    if lowered.startswith(b"<?xml") or lowered.startswith(b"<svg"):
+        return "xml_or_svg"
+    return "unknown"
 
 
 def safe_filename(name: str | None, mime_type: str) -> str:
@@ -340,7 +367,7 @@ class FileTransferService:
                 raise _error(
                     "file_unsupported_type",
                     "Only images, video, audio and PDF files can be transferred",
-                    415, action=action,
+                    415, action=action, reason=unsupported_reason(head),
                 )
             mime_type, kind = typed
             limit = kind_limit(kind, self.max_bytes)
