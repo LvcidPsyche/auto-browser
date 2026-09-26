@@ -1747,6 +1747,29 @@ def create_app(
     }
     _VNC_KEEP_RESPONSE_HEADERS = {"content-type", "content-length", "etag", "last-modified", "cache-control"}
 
+    # noVNC's own static files (JS modules, CSS, icons) are the same open-source bundle for
+    # everyone and carry nothing of the owner's screen -- the screen itself only ever travels
+    # over /vnc/websockify, which stays fully gated below. Fetching all ~50 of them through
+    # the full viewer check made two broker->controller round trips per file (the broker's
+    # relay waits behind the session lock while an agent is working); a phone that took more
+    # than the 1-second viewer memo to pull the burst re-ran the check for every file, and
+    # one refused file left noVNC stuck on its loading dots with no Connect button (owner,
+    # 2026-09-26, Chrome on Android). A file fetched once through the full gate is kept here
+    # and served to a signed-in owner without re-asking the broker. vnc.html itself is never
+    # cached, so opening the viewer still requires a live, owned session.
+    _novnc_static_cache: dict[str, tuple[float, int, dict[str, str], bytes]] = {}
+    _NOVNC_CACHE_SECONDS = 3600.0
+    _NOVNC_CACHE_MAX_BYTES = 20 * 1024 * 1024
+    _NOVNC_CACHEABLE_SUFFIXES = {
+        "js", "mjs", "css", "svg", "png", "ico", "woff", "woff2", "ttf", "json", "mp3", "oga", "gif", "jpg",
+    }
+
+    def _novnc_cacheable(path: str) -> bool:
+        return "." in path and path.rsplit(".", 1)[-1].lower() in _NOVNC_CACHEABLE_SUFFIXES
+
+    def _novnc_cache_size() -> int:
+        return sum(len(entry[3]) for entry in _novnc_static_cache.values())
+
     @app.api_route("/vnc/{path:path}", methods=["GET", "HEAD"])
     async def vnc_static(path: str, request: Request):
         # Interactive access is intentional and required: the owner types
@@ -1756,6 +1779,16 @@ def create_app(
         require_sole_new_surface_owner(row)
         if ".." in path or path.startswith("/") or not re.fullmatch(r"[A-Za-z0-9._/-]*", path):
             raise HTTPException(404, "Not found")
+        cacheable = _novnc_cacheable(path)
+        cache_key = f"{path}?{request.query_params}"
+        if cacheable:
+            hit = _novnc_static_cache.get(cache_key)
+            if hit is not None and clock() - hit[0] < _NOVNC_CACHE_SECONDS:
+                _fetched, status_code, cached_headers, body = hit
+                return Response(
+                    content=body if request.method != "HEAD" else b"",
+                    status_code=status_code, headers=cached_headers,
+                )
         if await viewer_session_id_cached(row) is None:
             raise HTTPException(403, VIEWER_DENIAL_AR)
         # noVNC itself lives on browser-node, which only the broker can reach
@@ -1782,6 +1815,10 @@ def create_app(
             key: value for key, value in upstream.headers.items()
             if key.lower() in _VNC_KEEP_RESPONSE_HEADERS
         }
+        if cacheable and upstream.status_code == 200 and request.method == "GET":
+            body = upstream.content
+            if _novnc_cache_size() + len(body) <= _NOVNC_CACHE_MAX_BYTES:
+                _novnc_static_cache[cache_key] = (clock(), 200, dict(response_headers), body)
         return Response(
             content=upstream.content if request.method != "HEAD" else b"",
             status_code=upstream.status_code, headers=response_headers,

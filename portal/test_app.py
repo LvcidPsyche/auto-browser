@@ -138,6 +138,8 @@ class Upstreams:
                 return httpx.Response(403, json={"detail": "Owner must open a verified browser session first"})
             if request.url.path == "/owner/vnc/vnc.html":
                 return httpx.Response(200, text="<html>fake novnc page</html>", headers={"content-type": "text/html"})
+            if request.url.path == "/owner/vnc/app/ui.js":
+                return httpx.Response(200, text="export const ui = 1;", headers={"content-type": "text/javascript"})
             return httpx.Response(404)
         return httpx.Response(404)
 
@@ -1042,3 +1044,32 @@ def test_tab_strip_lists_who_works_where_and_shows_a_tab_on_the_owners_tap(tmp_p
         assert client.get("/api/browser/tabs").status_code == 403
         assert client.post("/api/browser/tabs/activate", headers=mutate(second_csrf), json={"index": 0}).status_code == 403
         assert upstreams.activated_tabs == [1]
+
+
+def test_novnc_static_files_are_cached_after_one_gated_fetch_but_vnc_html_never_is(tmp_path, clock, upstreams):
+    """Owner, 2026-09-26: on a phone noVNC stayed on its loading dots -- every one of its ~50
+    static files re-ran the broker/controller gate once the 1-second memo lapsed. A static
+    file fetched once through the full gate is served from the portal afterwards; vnc.html
+    and the websocket keep the full gate."""
+    app = app_at(tmp_path, clock, upstreams)
+    with TestClient(app, base_url=ORIGIN) as client:
+        csrf = login(client)
+        denied = client.get("/vnc/app/ui.js")
+        assert denied.status_code == 403  # nothing cached yet, no session: refused, not cached
+
+        opened = client.post("/api/browser/open", headers=mutate(csrf), json={"totp_code": "333333"})
+        assert opened.status_code == 200
+        first = client.get("/vnc/app/ui.js")
+        assert first.status_code == 200 and "export const ui" in first.text
+        calls = list(upstreams.novnc_calls)
+
+        second = client.get("/vnc/app/ui.js")
+        assert second.status_code == 200 and "export const ui" in second.text
+        assert upstreams.novnc_calls == calls  # served from the portal, no broker call
+
+        client.get("/vnc/vnc.html")
+        client.get("/vnc/vnc.html")
+        assert upstreams.novnc_calls.count("/vnc.html") == 2  # the page itself: always gated
+
+        client.cookies.clear()
+        assert client.get("/vnc/app/ui.js").status_code == 401  # cached, but still sign-in only
