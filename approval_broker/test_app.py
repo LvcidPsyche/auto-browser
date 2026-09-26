@@ -716,6 +716,44 @@ def test_agent_answers_a_dialog_and_learns_why_an_action_was_blocked(tmp_path: P
         assert ("POST", "/sessions/owner-1/actions/dialog", {"accept": True}) in calls
 
 
+def test_an_html_dialog_blocking_a_click_relays_its_title_and_buttons(tmp_path: Path, clock: list[float]) -> None:
+    """An in-page HTML modal (cookie banner, welcome/memory modal) covering the click
+    target is a controller `dialog_blocking` (400, not the native-dialog 423) -- it must
+    still reach the agent with the dialog's own title/buttons, the same shape a native
+    dialog_open carries, and never the raw controller message or page URL."""
+    active = False
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal active
+        if request.method == "GET" and request.url.path == "/sessions":
+            return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
+        if request.method == "POST" and request.url.path == "/sessions":
+            active = True
+            return httpx.Response(200, json={"id": "owner-1"})
+        return httpx.Response(400, json={
+            "ok": False, "code": "dialog_blocking", "error": "internal detail",
+            "url": "https://secret.example/path",
+            "dialog": {
+                "type": "html_dialog",
+                "message": "عدم استخدام الذاكرة -- visible buttons: عدم استخدام الذاكرة",
+                "title": "عدم استخدام الذاكرة",
+                "buttons": ["عدم استخدام الذاكرة"],
+                "selector_hint": '[data-operator-id="op-modal1"]',
+            },
+        })
+
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        _open_owner_session(client, clock)
+        grant = client.post("/requests", headers=auth(AGENT), json={"purpose": "a"}).json()["id"]
+        response = client.post(f"/requests/{grant}/actions/click", headers=auth(AGENT),
+                               json={"arguments": {"element_id": "op-bg"}})
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "message": "Browser controller rejected request", "code": "dialog_blocking",
+            "dialog": {"type": "html_dialog", "message": "عدم استخدام الذاكرة -- visible buttons: عدم استخدام الذاكرة"},
+        }
+
+
 # --- file transfer (download_file / upload_file and the byte routes) ----------
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"x" * 100
@@ -1040,7 +1078,7 @@ def test_tab_gone_is_relayed_to_the_agent(tmp_path: Path, clock: list[float]) ->
 
 @pytest.mark.parametrize("status, code", [
     (400, "target_not_found"), (400, "target_not_visible"), (400, "click_intercepted"),
-    (400, "browser_action_failed"), (403, "browser_action_blocked"),
+    (400, "browser_action_failed"), (403, "browser_action_blocked"), (400, "dialog_blocking"),
 ])
 def test_why_an_action_failed_is_relayed_so_it_is_never_read_as_a_closed_browser(
     tmp_path: Path, clock: list[float], status: int, code: str,

@@ -38,6 +38,12 @@ logger = logging.getLogger(__name__)
 SLOW_INPUT_STEP_SECONDS = 0.25
 HUMAN_GESTURE_BUDGET_SECONDS = 1.5
 
+# How many matches of an ambiguous selector are actually probed (visibility +
+# hit-test) before giving up and falling back to the historical `.first`. An
+# LLM-authored text/CSS selector rarely matches more than a handful of
+# elements; bounding this keeps a pathological selector (e.g. "button") cheap.
+MAX_AMBIGUOUS_CANDIDATES = 8
+
 
 # Hit-test a candidate point before pressing on it: a real user's pointer lands on
 # whatever is actually drawn there, and an overlay that intercepts the click is a
@@ -76,6 +82,46 @@ FOCUS_CHECK_SCRIPT = """(el) => {
   const active = document.activeElement;
   if (!active) return false;
   return active === el || el.contains(active);
+}"""
+
+
+# An in-page HTML dialog/modal (ChatGPT's cookie banner, welcome/memory modal,
+# any `role="dialog"` overlay) blocks whatever is behind it exactly like a
+# native `window.confirm` does, but nothing about it shows up in
+# BrowserDialogService (that only watches `page.on("dialog")`, which never
+# fires for these). Finds the topmost visible one and describes it -- title
+# and visible button labels -- so a refused click can say *why* instead of
+# "Another element covers the target".
+OPEN_HTML_DIALOG_SCRIPT = """() => {
+  const isVisible = (el) => {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  };
+  const candidates = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog[open]')]
+    .filter(isVisible);
+  if (!candidates.length) return null;
+  // A stack of dialogs is rare; when it happens the most recently opened one
+  // is usually last in DOM order and visually on top.
+  const el = candidates[candidates.length - 1];
+  const labelledBy = el.getAttribute('aria-labelledby');
+  const title = el.getAttribute('aria-label')
+    || (labelledBy && document.getElementById(labelledBy) ? document.getElementById(labelledBy).innerText : '')
+    || (el.querySelector('h1,h2,h3,[role="heading"]') || {}).innerText
+    || '';
+  const buttons = [...el.querySelectorAll('button, [role="button"]')]
+    .filter(isVisible)
+    .map((b) => (b.innerText || b.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(0, 6);
+  if (!el.dataset.operatorId) {
+    el.dataset.operatorId = `op-${Math.random().toString(36).slice(2, 10)}`;
+  }
+  return {
+    selector_hint: `[data-operator-id="${el.dataset.operatorId}"]`,
+    title: String(title).replace(/\\s+/g, ' ').trim().slice(0, 160),
+    buttons,
+  };
 }"""
 
 
@@ -144,7 +190,7 @@ class BrowserActionService:
             if target["mode"] == "coordinates":
                 await self.click_human_like(session, float(x), float(y), fast=fast)
             else:
-                locator = session.page.locator(target["selector"]).first
+                locator = await self.resolve_candidate_locator(session.page, target["selector"], target)
                 await locator.scroll_into_view_if_needed()
                 await self.pointer_click_locator(session, locator, fast=fast, target=target)
             await self.manager._settle(session.page)
@@ -170,7 +216,7 @@ class BrowserActionService:
             if target["mode"] == "coordinates":
                 await self.move_mouse_human_like(session, float(x), float(y), fast=fast)
             else:
-                locator = session.page.locator(target["selector"]).first
+                locator = await self.resolve_candidate_locator(session.page, target["selector"], target)
                 await locator.scroll_into_view_if_needed()
                 await self.pointer_hover_locator(session, locator, fast=fast, target=target)
             await self.manager._settle(session.page)
@@ -192,7 +238,7 @@ class BrowserActionService:
         target = self.resolve_target(selector=selector, element_id=element_id)
 
         async def operation() -> None:
-            locator = session.page.locator(target["selector"]).first
+            locator = await self.resolve_candidate_locator(session.page, target["selector"], target)
             await locator.scroll_into_view_if_needed()
             if index is not None:
                 await locator.select_option(index=index)
@@ -232,7 +278,7 @@ class BrowserActionService:
         fast = pace == "fast"
 
         async def operation() -> None:
-            locator = session.page.locator(target["selector"]).first
+            locator = await self.resolve_candidate_locator(session.page, target["selector"], target)
             if await self.locator_is_sensitive_input(locator):
                 payload.pop("text_preview", None)
                 payload["text_redacted"] = True
@@ -750,6 +796,129 @@ class BrowserActionService:
         # raised" and is handled by the caller's fallback to locator.click()/hover().
         return bool(await locator.evaluate(HIT_TEST_SCRIPT, {"x": point[0], "y": point[1]}))
 
+    async def _open_html_dialog(self, page: "Page") -> dict[str, Any] | None:
+        """The topmost visible in-page dialog/modal (`role="dialog"`,
+        `aria-modal="true"`, `<dialog open>`) -- see OPEN_HTML_DIALOG_SCRIPT.
+        None on any failure (a detached page, a page with no such element)."""
+        try:
+            return await page.evaluate(OPEN_HTML_DIALOG_SCRIPT)
+        except Exception:
+            return None
+
+    async def _locator_in_dialog(self, locator: Any, dialog_selector_hint: str) -> bool:
+        try:
+            return bool(await locator.evaluate("(el, sel) => !!el.closest(sel)", dialog_selector_hint))
+        except Exception:
+            return False
+
+    async def resolve_candidate_locator(self, page: "Page", selector: str, target: dict[str, Any]) -> Any:
+        """`page.locator(selector)` may match more than one element -- an LLM-built
+        text/CSS selector ("تسجيل الدخول") is not guaranteed unique the way a
+        `data-operator-id` is. `.first` alone always takes whichever match is
+        first in DOM order, covered or not, in an open dialog or not: a cookie
+        banner over a header duplicate made every click on it fail forever even
+        though a second, perfectly clickable match existed on the page.
+
+        Picks, in order: a visible+enabled+hit-testable match inside the
+        topmost open HTML dialog (an open dialog is exactly where the next
+        real click belongs); otherwise the first visible+enabled+hit-testable
+        match in DOM order. Records the pick on `target` for the audit trail.
+        Falls back to `.first` (unresolved) when there is exactly one match,
+        or when none of the probed candidates come out clickable -- the
+        existing click_intercepted / dialog-aware error paths then fire with a
+        real, reproducible target instead of silently guessing."""
+        group = page.locator(selector)
+        try:
+            count = await group.count()
+        except Exception:
+            return group.first
+        if count <= 1:
+            return group.first
+
+        dialog = await self._open_html_dialog(page)
+        fallback: tuple[int, Any] | None = None
+        for index in range(min(count, MAX_AMBIGUOUS_CANDIDATES)):
+            candidate = group.nth(index)
+            try:
+                if not await candidate.is_visible() or await candidate.is_disabled():
+                    continue
+                box = await candidate.bounding_box()
+            except Exception:
+                continue
+            if not box:
+                continue
+            try:
+                hit = await self._hit_test(candidate, self._random_point_in_box(box))
+            except Exception:
+                hit = False
+            if not hit:
+                continue
+            if fallback is None:
+                fallback = (index, candidate)
+            if dialog and await self._locator_in_dialog(candidate, dialog["selector_hint"]):
+                self._record_ambiguous_pick(target, count, index, "inside_open_dialog", selector)
+                return candidate
+        if fallback is not None:
+            index, candidate = fallback
+            self._record_ambiguous_pick(target, count, index, "first_visible_in_viewport", selector)
+            return candidate
+        target["ambiguous_matches"] = count
+        return group.first
+
+    @staticmethod
+    def _record_ambiguous_pick(
+        target: dict[str, Any], count: int, index: int, reason: str, selector: str,
+    ) -> None:
+        target["ambiguous_matches"] = count
+        target["ambiguous_picked_index"] = index
+        target["ambiguous_pick_reason"] = reason
+        logger.info(
+            "resolve_candidate_locator: %d matches for %r, picked #%d (%s)",
+            count, selector, index, reason,
+        )
+
+    async def _click_blocked_error(self, locator: Any, target: dict[str, Any]) -> BrowserActionError:
+        """The `click_intercepted` a hit-test failure raises, enriched: when an
+        HTML dialog is open on the page and the target itself is not inside
+        it, the dialog is almost always what is actually in the way -- say so
+        (its title and visible buttons) instead of the generic "another
+        element covers the target", so the employee knows to handle the
+        dialog first rather than retry the same click."""
+        try:
+            page = locator.page
+        except Exception:
+            page = None
+        dialog = await self._open_html_dialog(page) if page is not None else None
+        if dialog is not None and not await self._locator_in_dialog(locator, dialog["selector_hint"]):
+            title = dialog.get("title") or "(untitled)"
+            buttons = dialog.get("buttons") or []
+            suffix = f" -- visible buttons: {', '.join(buttons)}" if buttons else ""
+            message = f"{title}{suffix}"
+            return BrowserActionError(
+                f"A dialog is open and is blocking this target: {message}",
+                code="dialog_blocking",
+                action="click",
+                status_code=400,
+                retryable=True,
+                # `type`/`message` match the shape the native-dialog `dialog_open`
+                # error already uses (see BrowserDialogService) so anything
+                # relaying "a dialog is on the page" generically (the approval
+                # broker's _relayed_error_detail) already knows how to carry
+                # this one through with no further changes.
+                details={
+                    "selector": target.get("selector"),
+                    "dialog": {**dialog, "type": "html_dialog", "message": message},
+                },
+            )
+        return BrowserActionError(
+            "Another element covers the target",
+            code="click_intercepted",
+            action="click",
+            status_code=400,
+            retryable=True,
+            details={"selector": target.get("selector")},
+        )
+
     async def _resolve_click_point(
         self, locator: Any, box: dict[str, Any], target: dict[str, Any],
     ) -> tuple[float, float]:
@@ -771,14 +940,7 @@ class BrowserActionService:
         if await self._hit_test(locator, center):
             return center
 
-        raise BrowserActionError(
-            "Another element covers the target",
-            code="click_intercepted",
-            action="click",
-            status_code=400,
-            retryable=True,
-            details={"selector": target.get("selector")},
-        )
+        raise await self._click_blocked_error(locator, target)
 
     async def pointer_click_locator(
         self, session: "BrowserSession", locator: Any, *, fast: bool, target: dict[str, Any],

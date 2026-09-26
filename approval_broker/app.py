@@ -51,6 +51,11 @@ RELAYED_ERROR_CODES = frozenset({
     # never mistake a refused click for a closed browser (2026-09-26).
     "target_not_found", "target_not_visible", "click_intercepted",
     "browser_action_failed", "browser_action_blocked",
+    # An in-page HTML dialog/modal (cookie banner, welcome/memory modal -- not
+    # a native window.confirm, which is "dialog_open" above) is covering the
+    # target: the agent must close or answer it, not retry the same click
+    # (2026-09-26, ChatGPT's Arabic UI).
+    "dialog_blocking",
     # A tab-scoped call (X-Tab-Id) whose tab has closed: list/open tabs again.
     "tab_gone",
     # File transfer (controller app/file_transfer.py): what went wrong with a
