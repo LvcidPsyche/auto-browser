@@ -667,7 +667,7 @@ class TabScopeMiddlewareTests(unittest.TestCase):
             ("POST", "/sessions/s1/observe"),
             ("POST", "/sessions/s1/screenshot"),
             *[("POST", f"/sessions/s1/actions/{op}") for op in (
-                "navigate", "click", "type", "press", "dialog", "scroll", "upload", "hover",
+                "navigate", "click", "type", "type-focused", "press", "dialog", "scroll", "upload", "hover",
                 "select-option", "wait", "reload", "go-back", "go-forward",
             )],
             ("POST", "/sessions/s1/files/download"),
@@ -680,7 +680,6 @@ class TabScopeMiddlewareTests(unittest.TestCase):
             ("GET", "/sessions/s1/tabs"),
             ("POST", "/sessions/s1/tabs/open"),
             ("POST", "/sessions/s1/tabs/activate"),
-            ("POST", "/sessions/s1/actions/type-focused"),
             ("POST", "/sessions/s1/actions/execute"),
             ("GET", "/sessions/s1"),
             ("GET", "/sessions/s1/screenshot"),

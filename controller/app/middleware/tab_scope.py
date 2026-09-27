@@ -20,6 +20,13 @@ TAB_SCOPED_ACTIONS = (
     "navigate",
     "click",
     "type",
+    # Employee-facing "type into whatever has focus" (approval_broker's
+    # type_focused tool). The owner's own noVNC "type here" bridge
+    # (approval_broker owner_type) never sends X-Tab-Id, so this addition
+    # does not change its behaviour -- it stays unscoped for the owner and
+    # becomes tab-scoped only when an employee's call carries the header,
+    # so it always lands in the employee's own tab, never the owner's.
+    "type-focused",
     "press",
     "dialog",
     "scroll",

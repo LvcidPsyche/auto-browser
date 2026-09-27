@@ -48,6 +48,19 @@ ALLOWED_ACTIONS = frozenset({
     # selector or element_id, so a coordinate click can never silently become
     # an element-targeted one through this channel.
     "click_at",
+    # Insert text into whatever already has DOM focus -- no selector/element_id
+    # needed. For rich-text editors that never surface as a text field in
+    # observe() (Lexical-style contenteditable boxes: Google Flow's prompt box,
+    # ChatGPT, Canva, Notion-like editors), an agent clicks the box first
+    # (click / click_at) and then uses this instead of "type". Maps to the
+    # controller's own POST /sessions/{id}/actions/type-focused -- the same
+    # endpoint the owner's noVNC "type here" bridge already used
+    # (approval_broker owner_type above) -- kept tab-scoped via X-Tab-Id so an
+    # employee's call always lands in ITS tab, never the owner's active one
+    # (see controller/app/middleware/tab_scope.py TAB_SCOPED_ACTIONS). The
+    # controller applies the identical sensitive-field redaction as "type"
+    # (password/OTP inputs never get their text logged).
+    "type_focused",
 })
 # Read-only capture of the caller's own tab, for vision (browser_see). Maps to
 # controller POST /sessions/{id}/screenshot -- a distinct REST path from the
@@ -92,6 +105,7 @@ _ACTION_PATH_OVERRIDES = {
     "select_option": "select-option",
     "go_back": "go-back",
     "go_forward": "go-forward",
+    "type_focused": "type-focused",
 }
 # Tab visibility/switching/opening lives at the controller's own REST paths (/tabs,
 # /tabs/activate, /tabs/open), not the generic /sessions/{id}/actions/{operation} used by

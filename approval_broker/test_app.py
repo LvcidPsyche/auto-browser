@@ -140,7 +140,7 @@ def test_agent_can_list_and_switch_tabs_but_not_close_them(tmp_path: Path, clock
                 "download_file", "upload_file",
                 "screenshot",
                 "click", "click_at", "dialog", "go_back", "go_forward", "hover", "navigate", "press", "reload",
-                "scroll", "select_option", "type", "upload", "wait",
+                "scroll", "select_option", "type", "type_focused", "upload", "wait",
             )
         ]
 
@@ -200,6 +200,37 @@ def test_agent_can_use_the_newly_forwarded_actions(tmp_path: Path, clock: list[f
         assert ("POST", "/sessions/owner-1/actions/upload", {"element_id": "op-2", "file_path": "photo.jpg"}) in calls
         # Agent-supplied approval_id stays forbidden on every one of these too, not just the original set.
         assert client.post(f"/requests/{request_id}/actions/upload", headers=auth(AGENT), json={"arguments": {"element_id": "op-2", "file_path": "photo.jpg", "approval_id": "x"}}).status_code == 400
+
+
+def test_type_focused_forwards_text_and_is_scoped_to_the_agents_own_tab(tmp_path: Path, clock: list[float]) -> None:
+    """browser.type_focused (the Google Flow / rich-editor fix): no selector needed --
+    it lands on the controller's own type-focused endpoint, exactly like the owner's
+    noVNC "type here" bridge (owner_type above), but carries the caller's tab_id as
+    X-Tab-Id so it always types into the employee's own tab, never the owner's."""
+    calls: list = []
+    with TestClient(app_at(tmp_path, _tab_upstream(calls))) as client:
+        _open_owner_session(client, clock)
+        request_id = client.post("/requests", headers=auth(AGENT), json={"purpose": "orders"}).json()["id"]
+        sent = client.post(
+            f"/requests/{request_id}/actions/type_focused", headers=auth(AGENT),
+            json={"arguments": {"text": "مرحبا", "tab_id": "t-0123456789ab"}},
+        )
+        assert sent.status_code == 200
+        assert ("POST", "/sessions/owner-1/actions/type-focused", {"text": "مرحبا"}, "t-0123456789ab") in calls
+        # No tab_id: still forwards, just with no header (matches every other action).
+        client.post(
+            f"/requests/{request_id}/actions/type_focused", headers=auth(AGENT), json={"arguments": {"text": "hi"}},
+        )
+        assert ("POST", "/sessions/owner-1/actions/type-focused", {"text": "hi"}, None) in calls
+        # Same route through /mcp/tools/call.
+        assert client.post("/mcp/tools/call", headers=auth(AGENT), json={
+            "name": "browser.type_focused", "arguments": {"request_id": request_id, "text": "yo"},
+        }).status_code == 200
+        # Agent-supplied approval_id is forbidden here too.
+        assert client.post(
+            f"/requests/{request_id}/actions/type_focused", headers=auth(AGENT),
+            json={"arguments": {"text": "hi", "approval_id": "x"}},
+        ).status_code == 400
 
 
 def test_click_type_scroll_hover_accept_a_pace_argument(tmp_path: Path, clock: list[float]) -> None:
