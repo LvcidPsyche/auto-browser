@@ -1061,18 +1061,11 @@ def create_app(
         state = "closed" if owner is None else "open" if owner["broker_session_id"] else "opening"
         csrf = html.escape(request.cookies.get(CSRF_COOKIE, ""), quote=True)
         account = html.escape(row["account"])
-        # Always render the code field. Freshness can expire between rendering this page and
-        # pressing Open, which used to produce a bare "A 6-digit authenticator code is required"
-        # JSON error with no field to type it into.
         fresh = authentication_is_fresh(row, now=clock())
-        label = (
-            "كود المصادقة لو اتطلب منك (authenticator code)" if fresh else "Fresh authenticator code"
-        )
         authenticator_field = (
-            f"<label>{label} <input name=totp_code inputmode=numeric "
-            "autocomplete=one-time-code pattern='[0-9]{6}'"
-            + ("" if fresh else " required")
-            + "></label>"
+            "" if fresh else
+            "<label>Fresh authenticator code <input name=totp_code inputmode=numeric "
+            "autocomplete=one-time-code pattern='[0-9]{6}' required></label>"
         )
         viewer_link = (
             "<p><a href='/vnc/vnc.html?autoconnect=true&reconnect=true&reconnect_delay=1500&resize=scale&path=websockify&quality=4&compression=7'>"

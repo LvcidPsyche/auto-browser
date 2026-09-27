@@ -211,6 +211,15 @@ class BrowserOrchestrator:
         elif decision.action == "request_human_takeover":
             execution = await self.manager.request_human_takeover(session_id, reason=decision.reason)
             status = "takeover"
+        elif decision.risk_category == "payment":
+            # Payment is the only normal web boundary the owner wants to handle
+            # himself. Do not create an approval that asks the agent to carry
+            # on after a click: hand him the live browser before the paid action.
+            execution = await self.manager.request_human_takeover(
+                session_id,
+                reason="A payment or billing step needs the owner to continue in the live browser.",
+            )
+            status = "takeover"
         elif decision.action in {
             "navigate",
             "click",

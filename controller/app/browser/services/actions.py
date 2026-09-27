@@ -1141,7 +1141,7 @@ class BrowserActionService:
     def approval_kind_for_decision(self, decision: BrowserActionDecision) -> ApprovalKind | None:
         if decision.action == "upload":
             return "upload" if self.manager.settings.require_approval_for_uploads else None
-        if decision.risk_category in {"post", "payment", "account_change", "destructive"}:
+        if decision.risk_category in {"payment", "destructive"}:
             return decision.risk_category
         return None
 

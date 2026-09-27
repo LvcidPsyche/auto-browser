@@ -673,9 +673,12 @@ def test_authenticated_browser_page_matches_gateway_portal_link(tmp_path, clock,
         page = client.get("/browser?connection=opaque")
         assert page.status_code == 200
         assert "Fresh authenticator code" not in page.text
+        assert "name=totp_code" not in page.text
         assert "/api/browser/open" in page.text and "/api/browser/close" in page.text
         clock[0] += 120
-        assert "Fresh authenticator code" in client.get("/browser").text
+        stale_page = client.get("/browser").text
+        assert "Fresh authenticator code" in stale_page
+        assert "name=totp_code" in stale_page
 
 
 def test_all_responses_get_security_headers_and_mutations_require_origin(tmp_path, clock, upstreams):

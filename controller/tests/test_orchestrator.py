@@ -205,6 +205,36 @@ class BrowserOrchestratorLoopGuardTests(unittest.IsolatedAsyncioTestCase):
         self.manager.require_governed_approval.assert_not_awaited()
         self.manager.execute_decision.assert_awaited_once()
 
+    async def test_payment_hands_the_live_browser_to_the_owner_without_clicking(self) -> None:
+        class PaymentAdapter:
+            default_model = "test-model"
+
+            async def decide(self, **kwargs):
+                return ProviderDecision(
+                    provider="openai",
+                    model="test-model",
+                    decision=BrowserActionDecision(
+                        action="click",
+                        reason="Submit the paid order",
+                        element_id="op-pay",
+                        risk_category="payment",
+                    ),
+                    usage={"provider": "fake"},
+                    raw_text='{"action":"click"}',
+                )
+
+        orchestrator = BrowserOrchestrator(self.manager, StaticRegistry(PaymentAdapter()))
+        result = await orchestrator.step(
+            session_id="session-1",
+            provider_name="openai",
+            goal="Finish the paid checkout",
+        )
+
+        self.assertEqual(result.status, "takeover")
+        self.assertEqual(result.execution["takeover_url"], "http://127.0.0.1:6080/vnc.html")
+        self.manager.execute_decision.assert_not_awaited()
+        self.manager.request_human_takeover.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()

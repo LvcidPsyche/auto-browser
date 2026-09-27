@@ -112,12 +112,14 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(decide("alert", "Saved!", agent_flow=True), "accept")
         self.assertEqual(decide("beforeunload", "", agent_flow=True), "accept")
         self.assertEqual(decide("confirm", "Continue with Google?", agent_flow=True), "accept")
+        self.assertEqual(decide("confirm", "Subscribe to the free plan?", agent_flow=True), "accept")
 
     def test_agent_flow_leaves_risky_confirms_and_prompts_for_the_agent(self) -> None:
         for message in (
             "Are you sure you want to delete this page?",
             "Cancel your subscription?",
             "Confirm payment of $20",
+            "Subscribe for $20 per month?",
             "هل تريد حذف الحساب؟",
         ):
             with self.subTest(message=message):

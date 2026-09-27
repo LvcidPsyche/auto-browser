@@ -56,10 +56,14 @@ LIVENESS_PROBE_SECONDS = 1.0
 
 # A confirm whose text matches this is never auto-accepted, even inside an
 # agent action: deleting, cancelling, paying, leaving an account, sending money.
+# A bare "subscribe" is deliberately not here: free subscriptions are a
+# normal owner-authorized web action. A paid subscription is still caught by
+# the payment and currency terms below.
 RISKY_CONFIRM = re.compile(
     r"delete|remove|erase|destroy|discard|cancel|unsubscribe|deactivate|terminate|"
-    r"close (?:your |this )?account|pay\b|payment|purchase|buy\b|charge|subscribe|transfer|"
-    r"حذف|احذف|امسح|مسح|إلغاء|الغاء|إيقاف|ادفع|دفع|شراء|اشتراك|تحويل|قفل الحساب",
+    r"close (?:your |this )?account|pay\b|payment|purchase|buy\b|charge|transfer|"
+    r"\$|€|£|\b(?:usd|eur|egp|gbp)\b|"
+    r"حذف|احذف|امسح|مسح|إلغاء|الغاء|إيقاف|ادفع|دفع|شراء|تحويل|جنيه|دولار|قفل الحساب",
     re.IGNORECASE,
 )
 
