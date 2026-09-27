@@ -137,18 +137,7 @@ class BrowserSessionService:
             auth_profile_owner = self.manager.auth_profiles.require_access(
                 auth_profile, action="opening a session from an auth profile"
             )
-            try:
-                source_path = self.manager.auth_profiles.resolve_state_path(auth_profile, must_exist=True)
-            except FileNotFoundError:
-                # A named persistent profile is also the safe way to begin a
-                # brand-new third-party identity.  Do not fall through to the
-                # owner's generic remembered login: that would put the first
-                # login for this identity in the wrong browser profile.
-                if not (
-                    self.manager.settings.persistent_profiles_enabled
-                    and self.manager.settings.session_isolation_mode == "shared_browser_node"
-                ):
-                    raise
+            source_path = self.manager.auth_profiles.resolve_state_path(auth_profile, must_exist=True)
         elif storage_state_path:
             source_path = self.manager.auth_profiles.safe_auth_path(storage_state_path, must_exist=True)
 
@@ -166,7 +155,7 @@ class BrowserSessionService:
         # False means a plain fresh browser, never the on-disk profile.
         auto_persist_allowed = False
         auto_persist_owner: str | None = None
-        if source_path is None and not auth_profile and self.manager.settings.auto_persist_login_enabled:
+        if source_path is None and self.manager.settings.auto_persist_login_enabled:
             candidate_path: Path | None = None
             try:
                 auto_persist_owner = self.manager.auth_profiles.require_access(
