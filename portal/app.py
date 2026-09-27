@@ -292,7 +292,6 @@ class PortalStore:
                     user_id TEXT NOT NULL,
                     tenant_id TEXT NOT NULL,
                     broker_session_id TEXT,
-                    auth_profile TEXT,
                     claimed_at REAL NOT NULL,
                     PRIMARY KEY(user_id, tenant_id)
                 );
@@ -340,11 +339,6 @@ class PortalStore:
                     "ALTER TABLE portal_sessions "
                     "ADD COLUMN authenticated_at REAL NOT NULL DEFAULT 0"
                 )
-            ownership_columns = {
-                row["name"] for row in db.execute("PRAGMA table_info(browser_ownership_v2)")
-            }
-            if "auth_profile" not in ownership_columns:
-                db.execute("ALTER TABLE browser_ownership_v2 ADD COLUMN auth_profile TEXT")
             if db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_ownership'"
             ).fetchone():
@@ -1390,14 +1384,6 @@ def create_app(
     async def open_browser(request: Request):
         row = await mutation(request)
         data = await _payload(request)
-        raw_profile = data.get("auth_profile")
-        if isinstance(raw_profile, str) and not raw_profile.strip():
-            data = {k: v for k, v in data.items() if k != "auth_profile"}
-        requested_profile = None
-        if "auth_profile" in data:
-            requested_profile = _required_text(data, "auth_profile", 200)
-            if not PROFILE_NAME_PATTERN.fullmatch(requested_profile):
-                raise HTTPException(422, "Invalid auth_profile")
         now = clock()
         code = None
         requires_code = not authentication_is_fresh(row, now=now)
@@ -1418,20 +1404,12 @@ def create_app(
                 # database fix. Verify against the broker and clear a dead record instead of
                 # trusting the local row blindly.
                 if await viewer_session_id(row) is not None:
-                    if requested_profile is not None and owner["auth_profile"] != requested_profile:
-                        raise HTTPException(409, "A different browser identity is already open")
                     return browser_open_response(request, owner["broker_session_id"])
                 with closing(store.connect()) as cleanup_db:
                     cleanup_db.execute(
-                        """UPDATE browser_ownership_v2
-                           SET broker_session_id=NULL, auth_profile=?
+                        """UPDATE browser_ownership_v2 SET broker_session_id=NULL
                            WHERE user_id=? AND tenant_id=? AND broker_session_id=?""",
-                        (
-                            requested_profile,
-                            row["user_id"],
-                            row["tenant_id"],
-                            owner["broker_session_id"],
-                        ),
+                        (row["user_id"], row["tenant_id"], owner["broker_session_id"]),
                     )
                     cleanup_db.commit()
                 # The row already exists (broker_session_id now NULL) -- do not INSERT again,
@@ -1442,16 +1420,11 @@ def create_app(
                 newly_claimed = True
             elif owner is None:
                 db.execute(
-                    "INSERT INTO browser_ownership_v2"
-                    "(user_id,tenant_id,broker_session_id,auth_profile,claimed_at) "
-                    "VALUES(?,?,NULL,?,?)",
-                    (row["user_id"], row["tenant_id"], requested_profile, clock()),
+                    "INSERT INTO browser_ownership_v2(user_id,tenant_id,broker_session_id,claimed_at) VALUES(?,?,NULL,?)",
+                    (row["user_id"], row["tenant_id"], clock()),
                 )
                 newly_claimed = True
             else:
-                if requested_profile is not None and owner["auth_profile"] != requested_profile:
-                    db.commit()
-                    raise HTTPException(409, "A different browser identity is already opening")
                 # Another request from this same authenticated owner has already claimed the
                 # row and is between broker Open and recording the returned session id.  Do
                 # not race it with a second broker Open; wait outside the SQLite transaction.
@@ -1487,9 +1460,13 @@ def create_app(
                 broker_payload["start_url"] = _required_text(data, "start_url", 2048)
             # An HTML form always submits the field, empty or not; an empty value means
             # "fresh browser, no saved login", not an invalid profile name.
+            raw_profile = data.get("auth_profile")
+            if isinstance(raw_profile, str) and not raw_profile.strip():
+                data = {k: v for k, v in data.items() if k != "auth_profile"}
             if "auth_profile" in data:
-                profile_name = requested_profile
-                assert profile_name is not None
+                profile_name = _required_text(data, "auth_profile", 200)
+                if not PROFILE_NAME_PATTERN.fullmatch(profile_name):
+                    raise HTTPException(422, "Invalid auth_profile")
                 # Opening a browser pre-logged-in from a saved profile is exactly
                 # as sensitive as viewing or managing that profile, so it is
                 # gated the same way (see require_sole_new_surface_owner).

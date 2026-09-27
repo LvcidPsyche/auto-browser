@@ -338,32 +338,6 @@ def test_repeated_open_rejoins_live_browser_without_second_broker_open(tmp_path,
         assert len(opens) == 1
 
 
-def test_repeated_open_refuses_a_different_named_identity(tmp_path, clock, upstreams):
-    with TestClient(app_at(tmp_path, clock, upstreams), base_url=ORIGIN) as client:
-        csrf = login(client)
-        first = client.post(
-            "/api/browser/open",
-            headers=mutate(csrf),
-            json={"auth_profile": "meta-first"},
-        )
-        same = client.post(
-            "/api/browser/open",
-            headers=mutate(csrf),
-            json={"auth_profile": "meta-first"},
-        )
-        different = client.post(
-            "/api/browser/open",
-            headers=mutate(csrf),
-            json={"auth_profile": "meta-second"},
-        )
-
-        assert first.status_code == 200
-        assert same.status_code == 200
-        assert different.status_code == 409
-        opens = [call for call in upstreams.broker_calls if call[:2] == ("POST", BROKER_OPEN_PATH)]
-        assert len(opens) == 1
-
-
 def test_second_open_waits_for_identical_inflight_request(tmp_path, clock, upstreams):
     app = app_at(tmp_path, clock, upstreams)
     with TestClient(app, base_url=ORIGIN) as client:
