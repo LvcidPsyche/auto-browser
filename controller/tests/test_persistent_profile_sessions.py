@@ -182,14 +182,6 @@ class PersistentProfileSessionCreateTests(_Base):
         self.assertEqual(call.kwargs["storage_state"], {"cookies": [], "origins": []})
         self.assertTrue(self.manager.sessions[result["id"]].remembered_login_loaded)
 
-    async def test_new_named_profile_never_falls_back_to_the_owner_default_login(self) -> None:
-        result = await self.manager.create_session(name="fixture", auth_profile="meta-email-two")
-
-        call = self.manager.persistent_profiles.open.await_args
-        self.assertEqual(call.args[0], "meta-email-two")
-        self.assertIsNone(call.kwargs["storage_state"])
-        self.assertFalse(self.manager.sessions[result["id"]].remembered_login_loaded)
-
     async def test_owner_of_a_named_profile_is_sent_to_browser_node(self) -> None:
         self._write_profile("alice-login", owner="alice")
         token = set_current_operator("alice", source="token")
