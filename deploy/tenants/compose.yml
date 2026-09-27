@@ -38,7 +38,7 @@ services:
       # Chromium launch at most that often -- and never while a real profile
       # is open: then it probes that profile's CDP endpoint through the relay
       # instead of launching a second Chromium beside the owner's.
-      test: [CMD-SHELL, 'test -s /data/browser-profile/browser-ws-endpoint.txt && curl -s --max-time 3 -o /dev/null http://127.0.0.1:9223/ && curl -fsS --max-time 3 http://127.0.0.1:6080/ >/dev/null && if [ "$$PERSISTENT_PROFILES_ENABLED" = "true" ]; then curl -fsS --max-time 45 -H "Authorization: Bearer $$PROFILE_CONTROL_TOKEN" http://127.0.0.1:9224/healthz/deep >/dev/null; fi']
+      test: [CMD-SHELL, 'test -s /data/browser-profile/browser-ws-endpoint.txt && curl -s --max-time 3 -o /dev/null http://127.0.0.1:9223/ && curl -fsS --max-time 3 http://127.0.0.1:6080/ >/dev/null && python3 -c "import socket; socket.create_connection((\"127.0.0.1\", 5900), 3).close()" && if [ "$$PERSISTENT_PROFILES_ENABLED" = "true" ]; then curl -fsS --max-time 45 -H "Authorization: Bearer $$PROFILE_CONTROL_TOKEN" http://127.0.0.1:9224/healthz/deep >/dev/null; fi']
       interval: 10s
       timeout: 50s
       retries: 12

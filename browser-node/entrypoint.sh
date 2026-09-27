@@ -75,10 +75,23 @@ run_as_browser Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" -ac +extension 
 run_as_browser fluxbox >/tmp/fluxbox.log 2>&1 &
 # -add_keysyms teaches the X keymap Arabic and other non-Latin keysyms while
 # preserving the VNC authentication and non-root process boundary.
-run_as_browser x11vnc -display "$DISPLAY" -forever -shared -rfbport 5900 "${VNC_AUTH_ARGS[@]}" -xkb -add_keysyms >/tmp/x11vnc.log 2>&1 &
+start_x11vnc() {
+  # x11vnc is deliberately separate from Chromium.  If it dies, agents can
+  # still drive the browser through Playwright while the owner viewer waits
+  # forever for a framebuffer.  Keep that recovery local to the viewer: do
+  # not restart Chromium, the browser-node, or the active owner session.
+  run_as_browser x11vnc -display "$DISPLAY" -forever -shared -rfbport 5900 "${VNC_AUTH_ARGS[@]}" -xkb -add_keysyms >>/tmp/x11vnc.log 2>&1 &
+  X11VNC_PID=$!
+}
+
+start_x11vnc
 run_as_browser /usr/share/novnc/utils/novnc_proxy --vnc localhost:5900 --listen 6080 >/tmp/novnc.log 2>&1 &
 
 cleanup() {
+  if [[ -n "${X11VNC_WATCHDOG_PID:-}" ]] && kill -0 "$X11VNC_WATCHDOG_PID" >/dev/null 2>&1; then
+    kill "$X11VNC_WATCHDOG_PID" >/dev/null 2>&1 || true
+    wait "$X11VNC_WATCHDOG_PID" >/dev/null 2>&1 || true
+  fi
   if [[ -n "${PLAYWRIGHT_SERVER_PID:-}" ]] && kill -0 "$PLAYWRIGHT_SERVER_PID" >/dev/null 2>&1; then
     kill "$PLAYWRIGHT_SERVER_PID" >/dev/null 2>&1 || true
     wait "$PLAYWRIGHT_SERVER_PID" >/dev/null 2>&1 || true
@@ -89,5 +102,19 @@ trap cleanup EXIT INT TERM
 
 run_as_browser node /opt/browser-node/server.mjs >/tmp/playwright-server.log 2>&1 &
 PLAYWRIGHT_SERVER_PID=$!
+
+# Do not make a transient VNC failure invisible behind a healthy Playwright
+# process.  The viewer self-heals within two seconds and an agent's active
+# browser work remains untouched.
+(
+  while kill -0 "$PLAYWRIGHT_SERVER_PID" >/dev/null 2>&1; do
+    if ! kill -0 "$X11VNC_PID" >/dev/null 2>&1; then
+      echo "x11vnc exited; restarting the display relay" >&2
+      start_x11vnc
+    fi
+    sleep 2
+  done
+) &
+X11VNC_WATCHDOG_PID=$!
 
 wait "$PLAYWRIGHT_SERVER_PID"
