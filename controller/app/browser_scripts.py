@@ -140,11 +140,13 @@ INTERACTABLES_SCRIPT = r"""
   ].join(',');
 
   const out = [];
+  const seen = new Set();
   for (const el of document.querySelectorAll(selector)) {
     if (!isVisible(el) || el.closest('[aria-hidden="true"]')) continue;
     if (!el.dataset.operatorId) {
       el.dataset.operatorId = `op-${Math.random().toString(36).slice(2, 10)}`;
     }
+    seen.add(el);
     const rect = el.getBoundingClientRect();
     out.push({
       element_id: el.dataset.operatorId,
@@ -163,6 +165,157 @@ INTERACTABLES_SCRIPT = r"""
       }
     });
     if (out.length >= limit) break;
+  }
+
+  // Custom dropdown/listbox/menu options: divs or spans with a click handler
+  // that never match the `selector` list above (no role, no tabindex) --
+  // rendered by a portal or a virtualized list, invisible to every click/type
+  // target resolver even though a screenshot shows them plainly. Detect the
+  // container (an explicit ARIA role, an open in-page dialog that commonly
+  // carries its own search+results, or a portal panel appended straight to
+  // <body>) and list its item children, even plain divs, capped.
+  function isOptionLike(el) {
+    if (seen.has(el)) return false;
+    const role = el.getAttribute('role');
+    if (role && ['option', 'menuitem', 'menuitemradio', 'menuitemcheckbox', 'listitem'].includes(role)) return true;
+    if (el.tagName === 'LI') return true;
+    let cursor = '';
+    try { cursor = window.getComputedStyle(el).cursor; } catch (_) {}
+    if (cursor !== 'pointer' && !el.hasAttribute('onclick')) return false;
+    // A leaf-ish clickable row, not a wrapper around several rows of its own.
+    if (el.querySelector('button, a, input, [role="option"], [role="menuitem"], li')) return false;
+    return true;
+  }
+
+  function optionContainers() {
+    const containers = new Set();
+    for (const el of document.querySelectorAll('[role="listbox"], [role="menu"], [role="tree"], [role="grid"]')) {
+      if (isVisible(el)) containers.add(el);
+    }
+    for (const el of document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog[open]')) {
+      if (isVisible(el)) containers.add(el);
+    }
+    // A portal-rendered dropdown: a fixed/absolute panel appended as a direct
+    // child of <body>, holding several pointer-cursor rows, with no ARIA
+    // role of its own.
+    for (const el of document.body.children) {
+      if (containers.has(el) || !isVisible(el) || el.closest('[aria-hidden="true"]')) continue;
+      let position = '';
+      try { position = window.getComputedStyle(el).position; } catch (_) {}
+      if (position !== 'fixed' && position !== 'absolute') continue;
+      const rows = [...el.querySelectorAll('*')].filter(isOptionLike);
+      if (rows.length >= 2) containers.add(el);
+    }
+    return containers;
+  }
+
+  const OPTION_CAP = 60;
+  let optionCount = 0;
+  outer:
+  for (const container of optionContainers()) {
+    const items = container.querySelectorAll(
+      '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="listitem"], li'
+    );
+    const candidates = items.length ? [...items] : [...container.querySelectorAll('*')].filter(isOptionLike);
+    for (const el of candidates) {
+      if (seen.has(el) || !isVisible(el)) continue;
+      seen.add(el);
+      if (!el.dataset.operatorId) {
+        el.dataset.operatorId = `op-${Math.random().toString(36).slice(2, 10)}`;
+      }
+      const rect = el.getBoundingClientRect();
+      out.push({
+        element_id: el.dataset.operatorId,
+        selector_hint: `[data-operator-id="${el.dataset.operatorId}"]`,
+        tag: el.tagName.toLowerCase(),
+        type: null,
+        role: el.getAttribute('role') || 'option',
+        label: getLabel(el),
+        disabled: Boolean(el.getAttribute('aria-disabled') === 'true'),
+        href: null,
+        bbox: {
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height)
+        },
+        list_option: true
+      });
+      optionCount += 1;
+      if (optionCount >= OPTION_CAP) break outer;
+    }
+  }
+
+  return out;
+}
+"""
+
+# A scoped (or whole-page, when scopeSelector is null/absent) scan for visible
+# elements carrying a text label -- their own direct text, an aria-label, or a
+# placeholder -- used as the click/type text-fallback's candidate pool when a
+# selector matches nothing (see resolve_candidate_locator's text fallback in
+# actions.py). For each candidate, walks up to the nearest element that is
+# actually clickable (a native control, an ARIA interactive role, an
+# onclick/tabindex, or a computed cursor:pointer) so a click lands on the row
+# a person would actually press, not on an inert text node inside it.
+TEXT_CANDIDATES_SCRIPT = r"""
+(scopeSelector) => {
+  const isVisible = (el) => {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  };
+  const isClickable = (el) => {
+    if (!el || !el.tagName) return false;
+    const tag = el.tagName.toLowerCase();
+    if (['a', 'button', 'input', 'select', 'textarea', 'label'].includes(tag)) return true;
+    const role = el.getAttribute('role');
+    if (role && [
+      'button', 'option', 'menuitem', 'menuitemradio', 'menuitemcheckbox',
+      'link', 'tab', 'checkbox', 'radio', 'listitem'
+    ].includes(role)) return true;
+    if (el.hasAttribute('onclick') || el.hasAttribute('tabindex')) return true;
+    try { return window.getComputedStyle(el).cursor === 'pointer'; } catch (_) { return false; }
+  };
+  const clickableAncestor = (el) => {
+    let node = el;
+    for (let i = 0; i < 6 && node && node !== document.body; i++) {
+      if (isClickable(node)) return node;
+      node = node.parentElement;
+    }
+    return el;
+  };
+
+  const root = scopeSelector ? document.querySelector(scopeSelector) : document.body;
+  if (!root) return [];
+
+  const out = [];
+  const seen = new Set();
+  for (const el of root.querySelectorAll('*')) {
+    if (!isVisible(el) || el.closest('[aria-hidden="true"]')) continue;
+    const own = Array.from(el.childNodes)
+      .filter((n) => n.nodeType === 3)
+      .map((n) => n.textContent)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const placeholder = el.getAttribute('placeholder') || '';
+    const ariaLabel = el.getAttribute('aria-label') || '';
+    const label = own || ariaLabel || placeholder;
+    if (!label) continue;
+    const target = clickableAncestor(el);
+    if (seen.has(target)) continue;
+    seen.add(target);
+    if (!target.dataset.operatorId) {
+      target.dataset.operatorId = `op-${Math.random().toString(36).slice(2, 10)}`;
+    }
+    out.push({
+      selector_hint: `[data-operator-id="${target.dataset.operatorId}"]`,
+      text: own.slice(0, 200),
+      placeholder: placeholder || null,
+      aria_label: ariaLabel || null
+    });
+    if (out.length >= 500) break;
   }
   return out;
 }

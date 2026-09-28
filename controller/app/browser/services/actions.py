@@ -10,8 +10,10 @@ from ... import events as _events
 from ...action_errors import BrowserActionError
 from ...actions import ActionRunContext
 from ...approvals import ApprovalRequiredError
+from ...browser_scripts import TEXT_CANDIDATES_SCRIPT
 from ...models import ApprovalKind, BrowserActionDecision
 from ...navigation_policy import await_public_dns_check
+from ...text_normalize import normalize_arabic_text
 from ...utils import spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
@@ -826,13 +828,42 @@ class BrowserActionService:
         Falls back to `.first` (unresolved) when there is exactly one match,
         or when none of the probed candidates come out clickable -- the
         existing click_intercepted / dialog-aware error paths then fire with a
-        real, reproducible target instead of silently guessing."""
-        group = page.locator(selector)
+        real, reproducible target instead of silently guessing.
+
+        `selector` is usually a real CSS selector or a `data-operator-id` hint
+        from `browser.observe`, but an agent regularly hands over the plain
+        visible text of a custom dropdown/menu option instead (it has no
+        role/tabindex, so it never made it into that observe list). Playwright
+        then either parses it as an always-empty CSS selector or rejects it
+        outright. Either way, before giving up, try the text/role fallback
+        chain (`_resolve_text_fallback_locator`): role-aware locators, then a
+        visible-text scan with Arabic-letter-variant normalization, preferring
+        matches inside the topmost open dialog/overlay."""
         try:
+            group = page.locator(selector)
             count = await group.count()
-        except Exception:
+        except Exception as exc:
+            logger.info(
+                "resolve_candidate_locator: %r is not a usable selector (%s); trying text fallback",
+                selector, exc,
+            )
+            fallback = await self._resolve_text_fallback_locator(page, selector, target)
+            if fallback is not None:
+                return fallback
+            raise BrowserActionError(
+                f"No element on the page matches target {selector!r}",
+                code="target_unresolved",
+                action="click",
+                status_code=400,
+                retryable=True,
+                details={"selector": selector},
+            ) from exc
+        if count == 0:
+            fallback = await self._resolve_text_fallback_locator(page, selector, target)
+            if fallback is not None:
+                return fallback
             return group.first
-        if count <= 1:
+        if count == 1:
             return group.first
 
         dialog = await self._open_html_dialog(page)
@@ -864,6 +895,116 @@ class BrowserActionService:
             return candidate
         target["ambiguous_matches"] = count
         return group.first
+
+    async def _resolve_text_fallback_locator(
+        self, page: "Page", text: str, target: dict[str, Any],
+    ) -> Any | None:
+        """A raw selector that matched nothing (or wasn't valid CSS at all) is,
+        in practice, almost always the *visible text* of a custom dropdown /
+        menu / listbox option: a div or span with a click handler and no
+        role/tabindex, so it never appears among `browser.observe`'s
+        interactables and Playwright cannot resolve it as a CSS selector.
+
+        Tries, in order: role-aware locators (`option`, `menuitem`, `button`,
+        `link`) by accessible name; then a visible-text/placeholder/aria-label
+        scan of the page (or, when one is open, scoped to the topmost open
+        HTML dialog/overlay first -- that is exactly where the next real
+        option list lives), comparing with Arabic letter-variant
+        normalization so "مدينة" matches a page that spells it "مدينه". Each
+        candidate is filtered to visible + enabled + hit-testable before it is
+        returned, so a covered or disabled look-alike is skipped over.
+        Returns None (never raises) when nothing usable is found; the caller
+        decides how to fail."""
+        normalized_target = normalize_arabic_text(text)
+        if not normalized_target:
+            return None
+
+        dialog = await self._open_html_dialog(page)
+        scope = dialog["selector_hint"] if dialog else None
+
+        role_locator = await self._role_fallback_locator(page, text, scope)
+        if role_locator is not None:
+            return role_locator
+
+        # Try the dialog scope first (an open dialog is exactly where the next
+        # real option list belongs), but a scope that turns up candidates with
+        # no actual match (e.g. the dialog holds only a title and a search
+        # box, and the option list is a *separate* portal panel outside it)
+        # must not block the whole-page attempt -- only a scope that yields a
+        # real match short-circuits the other one.
+        for scope_attempt in ([scope, None] if scope else [None]):
+            try:
+                candidates = await page.evaluate(TEXT_CANDIDATES_SCRIPT, scope_attempt) or []
+            except Exception:
+                candidates = []
+
+            exact_matches: list[dict[str, Any]] = []
+            partial_matches: list[dict[str, Any]] = []
+            for candidate in candidates:
+                for field in ("text", "placeholder", "aria_label"):
+                    value = candidate.get(field)
+                    if not value:
+                        continue
+                    normalized_value = normalize_arabic_text(value)
+                    if not normalized_value:
+                        continue
+                    if normalized_value == normalized_target:
+                        exact_matches.append(candidate)
+                        break
+                    if normalized_target in normalized_value or normalized_value in normalized_target:
+                        partial_matches.append(candidate)
+                        break
+
+            for candidate in (exact_matches + partial_matches)[:MAX_AMBIGUOUS_CANDIDATES]:
+                locator = await self._clickable_candidate_locator(page, candidate["selector_hint"])
+                if locator is not None:
+                    target["resolved_via"] = "text_fallback"
+                    target["resolved_text"] = candidate.get("text") or candidate.get("placeholder")
+                    return locator
+        return None
+
+    async def _role_fallback_locator(self, page: "Page", text: str, scope: str | None) -> Any | None:
+        """`get_by_role`/`get_by_text`, exact then substring, scoped to the open
+        dialog when there is one. Playwright's own text matching does not know
+        about Arabic letter variants, so this only ever catches a byte-for-byte
+        (case-insensitive) match; the normalized scan above is what actually
+        handles "مدينة" vs "مدينه"."""
+        base = page.locator(scope) if scope else page
+        roles = ("option", "menuitem", "button", "link")
+        attempts = []
+        for exact in (True, False):
+            for role in roles:
+                attempts.append(lambda r=role, e=exact: base.get_by_role(r, name=text, exact=e))
+            attempts.append(lambda e=exact: base.get_by_text(text, exact=e))
+        for build in attempts:
+            try:
+                locator = build().first
+                if await locator.count() == 0:
+                    continue
+            except Exception:
+                continue
+            resolved = await self._clickable_locator_if_usable(locator)
+            if resolved is not None:
+                return resolved
+        return None
+
+    async def _clickable_candidate_locator(self, page: "Page", selector_hint: str) -> Any | None:
+        return await self._clickable_locator_if_usable(page.locator(selector_hint).first)
+
+    async def _clickable_locator_if_usable(self, locator: Any) -> Any | None:
+        try:
+            if not await locator.is_visible() or await locator.is_disabled():
+                return None
+            box = await locator.bounding_box()
+        except Exception:
+            return None
+        if not box:
+            return None
+        try:
+            hit = await self._hit_test(locator, self._random_point_in_box(box))
+        except Exception:
+            hit = False
+        return locator if hit else None
 
     @staticmethod
     def _record_ambiguous_pick(
