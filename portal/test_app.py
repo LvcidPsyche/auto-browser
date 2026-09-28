@@ -681,6 +681,47 @@ def test_authenticated_browser_page_matches_gateway_portal_link(tmp_path, clock,
         assert "name=totp_code" in stale_page
 
 
+def test_browser_page_stops_offering_a_dead_viewer_link_after_a_broker_restart(tmp_path, clock, upstreams):
+    """A tenant stack restart wipes the broker's in-memory owner session while
+
+    the portal's own row still says "open" (2026-09-29: the owner's viewer sat
+    on its loading dots forever because of exactly this). /api/browser/open
+    already self-heals a dead row on the next Open click, but nothing on this
+    page used to tell the owner that click was needed -- it kept offering the
+    same "watch" link, which noVNC would retry against forever without ever
+    surfacing the rejection. The page must ask the broker before promising a
+    working view, the way the Open endpoint already does.
+    """
+    with TestClient(app_at(tmp_path, clock, upstreams), base_url=ORIGIN) as client:
+        csrf = login(client)
+        client.post("/api/browser/open", headers=mutate(csrf), json={})
+        live_page = client.get("/browser").text
+        assert "/vnc/vnc.html" in live_page
+        assert "/api/browser/type" in live_page
+        assert "tab-strip" in live_page
+
+        # The broker (and controller) restarted; it no longer trusts this session,
+        # exactly like the owner's viewer log did, even though the portal's own
+        # ownership row is untouched and still says "open".
+        upstreams.active = False
+        dead_page = client.get("/browser")
+        assert dead_page.status_code == 200
+        assert "Browser: open" in dead_page.text
+        assert "/vnc/vnc.html" not in dead_page.text
+        assert "/api/browser/type" not in dead_page.text
+        assert "tab-strip" not in dead_page.text
+        assert "دوس Open تحت" in dead_page.text
+        # The recovery path is the same "Open" form the page already renders,
+        # and it must still be there for the owner to press.
+        assert "/api/browser/open" in dead_page.text
+
+        # Pressing it self-heals, exactly as /api/browser/open already did.
+        reopened = client.post("/api/browser/open", headers=mutate(csrf), json={})
+        assert reopened.status_code == 200
+        healed_page = client.get("/browser").text
+        assert "/vnc/vnc.html" in healed_page
+
+
 def test_all_responses_get_security_headers_and_mutations_require_origin(tmp_path, clock, upstreams):
     with TestClient(app_at(tmp_path, clock, upstreams), base_url=ORIGIN) as client:
         page = client.get("/signin")

@@ -1059,6 +1059,17 @@ def create_app(
                 (row["user_id"], row["tenant_id"]),
             ).fetchone()
         state = "closed" if owner is None else "open" if owner["broker_session_id"] else "opening"
+        # The recorded session can go dark upstream -- the tenant stack's controller
+        # and broker restart together and forget it, while the row here still says
+        # "open" -- and the viewer link below is then indistinguishable from a
+        # working one: noVNC's own autoconnect/reconnect loop hides the rejection
+        # and just spins on its loading dots forever (owner, phone, 2026-09-29;
+        # confirmed in the portal's own websocket log as an unbroken run of 403s
+        # after a broker restart). /api/browser/open already recovers from exactly
+        # this by re-verifying with the broker and clearing a dead row, but nothing
+        # prompted the owner to press it since the page still looked open. Ask the
+        # broker here too, once, before promising a view that cannot connect.
+        viewable = state == "open" and await viewer_session_id(row) is not None
         csrf = html.escape(request.cookies.get(CSRF_COOKIE, ""), quote=True)
         account = html.escape(row["account"])
         fresh = authentication_is_fresh(row, now=clock())
@@ -1070,8 +1081,10 @@ def create_app(
         viewer_link = (
             "<p><a href='/vnc/vnc.html?autoconnect=true&reconnect=true&reconnect_delay=1500&resize=scale&path=websockify&quality=4&compression=7'>"
             "شوف المتصفح (Watch and control the browser)</a></p>"
-            if state == "open" else
-            "<p>شوف المتصفح: افتح المتصفح أولاً.</p>"
+            if viewable else
+            "<p>شوف المتصفح: افتح المتصفح أولاً.</p>" if state != "open" else
+            "<p>المتصفح اتقفل من غير قصد ومحتاج يتفتح تاني عشان تشوفه -- "
+            "دوس Open تحت (بكود جديد لو اتطلب).</p>"
         )
         # The viewer's keyboard goes through VNC/X11, which does not reliably carry
         # Arabic (or other non-Latin) typing from a phone keyboard. This box sends
@@ -1085,7 +1098,7 @@ def create_app(
             "<input name=text dir=auto lang=ar autocomplete=off "
             "placeholder='اكتب هنا بأي لغة' style='width:100%;font-size:1.1em' required>"
             "<button>ابعت (Send)</button></form>"
-            if state == "open" else ""
+            if viewable else ""
         )
         # Which tab each employee is working in, and which one the live view
         # shows. Polled by /browser/tabs.js; a tap asks to show that tab.
@@ -1093,7 +1106,7 @@ def create_app(
             f"<section id=tab-strip data-csrf='{csrf}'>"
             "<h2>التبويبات</h2><ol></ol><p></p></section>"
             "<script src=/browser/tabs.js></script>"
-            if state == "open" else ""
+            if viewable else ""
         )
         return HTMLResponse(
             "<!doctype html><meta charset=utf-8><title>Secure Browser</title>"
