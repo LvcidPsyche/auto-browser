@@ -37,11 +37,17 @@ TAB_SCOPED_ACTIONS = (
     "reload",
     "go-back",
     "go-forward",
+    # Read-only CSS/text DOM query (browser_dom_query / browser.dom_query):
+    # the employee's own tab, never the owner's active one.
+    "dom-query",
 )
 
 _SEGMENT = r"[^/]+"
 _TAB_SCOPED_PATHS = (
     (re.compile(rf"^/sessions/{_SEGMENT}/observe/?$"), {"GET", "POST"}),
+    # The "raw view" digest (browser_diagnostics / browser.diagnostics):
+    # console errors, failed requests, validation messages of ONE tab.
+    (re.compile(rf"^/sessions/{_SEGMENT}/diagnostics/?$"), {"GET"}),
     (re.compile(rf"^/sessions/{_SEGMENT}/screenshot/?$"), {"POST"}),
     # An employee reading the API key HE just created reads his own tab, not the
     # owner's active one (the header used to be ignored here).

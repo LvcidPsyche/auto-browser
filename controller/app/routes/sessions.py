@@ -14,6 +14,7 @@ from ..models import (
     ClickRequest,
     CreateSessionRequest,
     DialogRequest,
+    DomQueryRequest,
     DownloadFileRequest,
     ExecuteActionRequest,
     HoverRequest,
@@ -88,6 +89,21 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             raise
         except Exception:
             raise internal_error(logger, "observe failed for session %s", session_id) from None
+
+    @router.get("/sessions/{session_id}/diagnostics")
+    async def get_diagnostics(session_id: str, limit: int = 20) -> dict[str, Any]:
+        """The one-tab "raw view" -- recent console errors/warnings, failed
+        requests (with JSON error bodies), visible validation messages, and
+        the tab's own url/title. Tab-scoped via X-Tab-Id like /observe."""
+        try:
+            return await manager.get_diagnostics(session_id, limit=min(max(limit, 1), 200))
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Unknown session") from None
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 410 tab_gone).
+            raise
+        except Exception:
+            raise internal_error(logger, "diagnostics failed for session %s", session_id) from None
 
     @router.get("/sessions/{session_id}/api-keys")
     async def find_api_keys(session_id: str, provider: str) -> dict[str, Any]:
@@ -435,6 +451,18 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             raise
         except Exception:
             raise internal_error(logger, "select option failed for session %s", session_id) from None
+
+    @router.post("/sessions/{session_id}/actions/dom-query")
+    async def dom_query(session_id: str, payload: DomQueryRequest) -> dict[str, Any]:
+        try:
+            return await manager.dom_query(session_id, css=payload.css, text=payload.text, limit=payload.limit)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid request") from None
+        except BrowserActionError:
+            # Carries its own status + code (e.g. 410 tab_gone).
+            raise
+        except Exception:
+            raise internal_error(logger, "dom-query failed for session %s", session_id) from None
 
     @router.post("/sessions/{session_id}/actions/wait")
     async def wait(session_id: str, payload: WaitRequest) -> dict[str, Any]:

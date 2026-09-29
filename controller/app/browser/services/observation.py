@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from ... import events as _events
-from ...browser_scripts import ACTIVE_ELEMENT_SCRIPT, INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
+from ...browser_scripts import ACTIVE_ELEMENT_SCRIPT, DOM_QUERY_SCRIPT, INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -204,6 +204,40 @@ class BrowserObservationService:
         if not isinstance(result, dict):
             return []
         return list(result.get("keys") or [])
+
+    async def dom_query(
+        self, session_id: str, *, css: str | None = None, text: str | None = None, limit: int = 50
+    ) -> dict[str, Any]:
+        """A compact, capped list of elements matching a CSS selector and/or a
+        text filter -- the same "raw view" a developer gets from DevTools'
+        element inspector, on any site with no per-site code. Read-only: the
+        page only ever runs DOM_QUERY_SCRIPT, parameterised by plain css/text
+        strings, never arbitrary JS from the caller."""
+        session = await self.manager.get_session(session_id)
+        limit = max(1, min(int(limit), 200))
+        async with session.lock:
+            result = await self.manager.session_lifecycle.guarded(
+                session,
+                self._dom_query_locked(session, css=css, text=text, limit=limit),
+                what="dom_query",
+                timeout=self.manager.settings.browser_call_timeout_seconds,
+            )
+        return redact_api_keys(result)
+
+    async def _dom_query_locked(
+        self, session: "BrowserSession", *, css: str | None, text: str | None, limit: int
+    ) -> dict[str, Any]:
+        try:
+            raw = await session.page.evaluate(DOM_QUERY_SCRIPT, {"css": css, "text": text, "limit": limit})
+        except Exception as exc:
+            logger.debug("dom_query failed for session %s: %s", getattr(session, "id", "?"), exc)
+            return {"error": "dom_query_failed", "items": [], "total_matched": 0, "url": session.page.url}
+        if not isinstance(raw, dict):
+            raw = {"error": "invalid_result", "items": [], "total_matched": 0}
+        raw.setdefault("items", [])
+        raw.setdefault("total_matched", 0)
+        raw["url"] = session.page.url
+        return raw
 
     async def capture_screenshot(self, session_id: str, *, label: str = "manual") -> dict[str, Any]:
         session = await self.manager.get_session(session_id)

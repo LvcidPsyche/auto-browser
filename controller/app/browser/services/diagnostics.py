@@ -8,17 +8,30 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ...browser_scripts import VALIDATION_MESSAGES_SCRIPT
 from ...downloads import DownloadCaptureService
 from ...pii_scrub import PiiScrubber
 from ...utils import UTC, spawn_background_task
-from ..tab_view import unwrap_session
+from ..tab_diagnostics import bounded_append as _tab_bounded_append
+from ..tab_diagnostics import get_buffer
+from ..tab_view import tab_id_for, unwrap_session
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from playwright.async_api import Page
+    from playwright.async_api import Page, Response
 
     from ...browser_manager import BrowserSession
+
+# A failed response's JSON/text body is capped before it is even decoded --
+# this is where a site puts the real reason ("invalid area"), so it is worth
+# capturing, but never the whole body of an oversized response.
+_RESPONSE_BODY_CAP_BYTES = 16384
+_RESPONSE_BODY_SNIPPET_CHARS = 2000
+# Only XHR/fetch responses are diagnostic-relevant here -- a failed image or a
+# third-party script 404 is noise an employee cannot act on; a failed document
+# navigation already shows up as its own console/page error.
+_DIAGNOSTIC_RESOURCE_TYPES = frozenset({"xhr", "fetch"})
 
 
 class BrowserDiagnosticsService:
@@ -99,29 +112,10 @@ class BrowserDiagnosticsService:
             return
         session.attached_pages.add(page)
 
-        page.on(
-            "console",
-            lambda message: self._bounded_append(
-                session.console_messages,
-                {
-                    "type": message.type,
-                    "text": message.text,
-                    "location": message.location,
-                },
-            ),
-        )
-        page.on("pageerror", lambda error: self._bounded_append(session.page_errors, str(error)))
-        page.on(
-            "requestfailed",
-            lambda request: self._bounded_append(
-                session.request_failures,
-                {
-                    "url": request.url,
-                    "method": request.method,
-                    "failure": str(request.failure) if request.failure else None,
-                },
-            ),
-        )
+        page.on("console", lambda message: self._on_console(session, page, message))
+        page.on("pageerror", lambda error: self._on_pageerror(session, page, error))
+        page.on("requestfailed", lambda request: self._on_request_failed(session, page, request))
+        page.on("response", lambda response: spawn_background_task(self._on_response(session, page, response)))
         page.on("download", lambda download: spawn_background_task(self.manager._handle_download(session, download)))
         # Remember the newest file chooser whoever opened it (see
         # FileTransferService.attach): Google Flow's "Upload" opens the native
@@ -140,6 +134,138 @@ class BrowserDiagnosticsService:
         items.append(value)
         if len(items) > limit:
             del items[: len(items) - limit]
+
+    # ── Per-page listeners: feed both the session-wide lists (used by
+    # observe(), unchanged) and this page's own tab buffer (used by
+    # get_diagnostics() / build_digest()) ──────────────────────────────────
+
+    def _on_console(self, session: "BrowserSession", page: "Page", message: Any) -> None:
+        entry = {"type": message.type, "text": message.text, "location": message.location}
+        self._bounded_append(session.console_messages, entry)
+        _tab_bounded_append(get_buffer(session, tab_id_for(session, page)).console, entry)
+
+    def _on_pageerror(self, session: "BrowserSession", page: "Page", error: Any) -> None:
+        text = str(error)
+        self._bounded_append(session.page_errors, text)
+        _tab_bounded_append(get_buffer(session, tab_id_for(session, page)).page_errors, {"text": text})
+
+    def _on_request_failed(self, session: "BrowserSession", page: "Page", request: Any) -> None:
+        entry = {
+            "url": request.url,
+            "method": request.method,
+            "failure": str(request.failure) if request.failure else None,
+        }
+        self._bounded_append(session.request_failures, entry)
+        _tab_bounded_append(get_buffer(session, tab_id_for(session, page)).request_failures, entry)
+
+    async def _on_response(self, session: "BrowserSession", page: "Page", response: "Response") -> None:
+        """A failed XHR/fetch response (status >= 400): capture its JSON/text
+        body, capped and PII-scrubbed -- this is where a site states the real
+        reason ("invalid area"), which a bare status code never tells."""
+        try:
+            status = response.status
+            if status < 400:
+                return
+            request = getattr(response, "request", None)
+            resource_type = (getattr(request, "resource_type", "") or "").lower()
+            if resource_type not in _DIAGNOSTIC_RESOURCE_TYPES:
+                return
+            headers = response.headers or {}
+            content_type = headers.get("content-type", "") or ""
+            body_snippet: str | None = None
+            if any(marker in content_type.lower() for marker in ("json", "text")):
+                try:
+                    raw = await response.body()
+                except Exception as exc:
+                    logger.debug("diagnostics: could not read response body for %s: %s", response.url, exc)
+                    raw = None
+                if raw:
+                    text = raw[:_RESPONSE_BODY_CAP_BYTES].decode("utf-8", errors="replace")
+                    if self.pii_scrubber is not None:
+                        try:
+                            scrubbed, _hits = self.pii_scrubber.network_body(text, content_type)
+                            if isinstance(scrubbed, str):
+                                text = scrubbed
+                        except Exception as exc:
+                            logger.debug("diagnostics: response body scrub failed: %s", exc)
+                    body_snippet = text[:_RESPONSE_BODY_SNIPPET_CHARS]
+            entry = {
+                "url": response.url,
+                "method": getattr(request, "method", None),
+                "status": status,
+                "content_type": content_type,
+                "body": body_snippet,
+            }
+            _tab_bounded_append(get_buffer(session, tab_id_for(session, page)).response_errors, entry)
+        except Exception as exc:
+            logger.debug("diagnostics: response capture failed: %s", exc)
+
+    async def get_diagnostics(self, session_id: str, *, limit: int = 20) -> dict[str, Any]:
+        """GET /sessions/{id}/diagnostics: the tab-scoped DevTools digest --
+        recent console errors/warnings, failed requests with their bodies,
+        visible validation messages, and the tab's own url/title."""
+        session = await self.manager.get_session(session_id)
+        async with session.lock:
+            return await self.manager.session_lifecycle.guarded(
+                session, self._get_diagnostics_locked(session, limit=limit),
+                what="diagnostics", timeout=self.manager.settings.browser_call_timeout_seconds,
+            )
+
+    async def _get_diagnostics_locked(self, session: "BrowserSession", *, limit: int) -> dict[str, Any]:
+        digest = await self.build_digest(session, limit=limit)
+        digest["session"] = await self.manager._session_summary(session)
+        return digest
+
+    async def build_digest(self, session: "BrowserSession", *, limit: int = 5) -> dict[str, Any]:
+        """The digest used both by GET /diagnostics (generous limit) and by
+        the automatic error-payload attachment on a failed action (a small
+        limit -- see app/actions/pipeline.py)."""
+        real = unwrap_session(session)
+        page = session.page
+        tab_id = getattr(session, "tab_id", None) or tab_id_for(real, page)
+        buf = real.tab_diagnostics.get(tab_id)
+        console_errors: list[dict[str, Any]] = []
+        page_errors: list[Any] = []
+        failed_requests: list[dict[str, Any]] = []
+        if buf is not None:
+            console_errors = [m for m in buf.console if m.get("type") in ("error", "warning")][-limit:]
+            page_errors = list(buf.page_errors[-limit:])
+            failed_requests = (buf.request_failures + buf.response_errors)[-limit:]
+        if console_errors and self.pii_scrubber.console_enabled:
+            try:
+                console_errors, hits = self.pii_scrubber.console(console_errors)
+                if hits and self.pii_scrubber.audit_report:
+                    await self.manager.audit.append(
+                        event_type="pii_redaction",
+                        status="ok",
+                        action="diagnostics_scrub",
+                        session_id=getattr(real, "id", ""),
+                        details=self.pii_scrubber.build_audit_report(getattr(real, "id", ""), "console", hits),
+                    )
+            except Exception as exc:
+                logger.debug("diagnostics: console scrub failed: %s", exc)
+        validation_messages = await self._validation_messages(page, limit=limit)
+        try:
+            title = await page.title()
+        except Exception:
+            title = ""
+        return {
+            "url": getattr(page, "url", ""),
+            "title": title,
+            "tab_id": tab_id,
+            "console_errors": console_errors,
+            "page_errors": page_errors,
+            "failed_requests": failed_requests,
+            "validation_messages": validation_messages,
+        }
+
+    async def _validation_messages(self, page: "Page", *, limit: int = 20) -> list[dict[str, Any]]:
+        try:
+            result = await page.evaluate(VALIDATION_MESSAGES_SCRIPT, max(1, min(limit, 50)))
+        except Exception as exc:
+            logger.debug("diagnostics: validation message scan failed: %s", exc)
+            return []
+        return result if isinstance(result, list) else []
 
     async def list_downloads(self, session_id: str) -> list[dict[str, Any]]:
         session = self.manager.sessions.get(session_id)

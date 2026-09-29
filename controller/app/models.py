@@ -305,6 +305,18 @@ class ObserveRequest(StrictInputModel):
     limit: int = Field(default=40, ge=1, le=200)
 
 
+class DomQueryRequest(StrictInputModel):
+    css: str | None = Field(default=None, min_length=1, max_length=2000)
+    text: str | None = Field(default=None, min_length=1, max_length=500)
+    limit: int = Field(default=50, ge=1, le=200)
+
+    @model_validator(mode="after")
+    def validate_query(self) -> "DomQueryRequest":
+        if not (self.css or self.text):
+            raise ValueError("dom_query requires css and/or text")
+        return self
+
+
 class ImportAuthProfileRequest(StrictInputModel):
     archive_path: str = Field(min_length=1, max_length=500)
     overwrite: bool = False

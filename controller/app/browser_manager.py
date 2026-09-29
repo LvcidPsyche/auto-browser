@@ -117,6 +117,11 @@ class BrowserSession:
     console_messages: list[dict[str, Any]] = field(default_factory=list)
     page_errors: list[str] = field(default_factory=list)
     request_failures: list[dict[str, Any]] = field(default_factory=list)
+    # Per-tab equivalents of the three lists above, keyed by tab id (see
+    # app/browser/tab_diagnostics.py) -- what GET /sessions/{id}/diagnostics
+    # and the automatic failed-action digest read, so one employee's tab
+    # never sees another tab's console errors or failed requests.
+    tab_diagnostics: dict[str, Any] = field(default_factory=dict)
     downloads: list[dict[str, Any]] = field(default_factory=list)
     # The newest native file-chooser the page opened (Playwright FileChooser,
     # monotonic time) -- a site whose "Upload" opens it straight from a click
@@ -631,6 +636,19 @@ class BrowserManager:
 
     async def get_request_failures(self, session_id: str, *, limit: int = 20) -> dict[str, Any]:
         return await self.diagnostics.get_request_failures(session_id, limit=limit)
+
+    async def get_diagnostics(self, session_id: str, *, limit: int = 20) -> dict[str, Any]:
+        """The one-tab "DevTools" digest: recent console errors/warnings,
+        failed requests (with JSON error bodies), visible validation
+        messages, and the tab's own url/title. Tab-scoped via X-Tab-Id."""
+        return await self.diagnostics.get_diagnostics(session_id, limit=limit)
+
+    async def dom_query(
+        self, session_id: str, *, css: str | None = None, text: str | None = None, limit: int = 50
+    ) -> dict[str, Any]:
+        """Read-only CSS/text query over the tab's live DOM -- no JS eval
+        exposed to the caller, only a fixed, parameterised scan."""
+        return await self.observation.dom_query(session_id, css=css, text=text, limit=limit)
 
     async def get_network_log(
         self,

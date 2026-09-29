@@ -61,6 +61,11 @@ ALLOWED_ACTIONS = frozenset({
     # controller applies the identical sensitive-field redaction as "type"
     # (password/OTP inputs never get their text logged).
     "type_focused",
+    # Read-only CSS/text DOM query (the DevTools-style "raw view" -- see
+    # browser.diagnostics below). Maps to POST /sessions/{id}/actions/dom-query
+    # (see _ACTION_PATH_OVERRIDES); the controller runs a fixed, parameterised
+    # scan script -- no JS eval is ever exposed to the caller.
+    "dom_query",
 })
 # Read-only capture of the caller's own tab, for vision (browser_see). Maps to
 # controller POST /sessions/{id}/screenshot -- a distinct REST path from the
@@ -106,6 +111,7 @@ _ACTION_PATH_OVERRIDES = {
     "go_back": "go-back",
     "go_forward": "go-forward",
     "type_focused": "type-focused",
+    "dom_query": "dom-query",
 }
 # Tab visibility/switching/opening lives at the controller's own REST paths (/tabs,
 # /tabs/activate, /tabs/open), not the generic /sessions/{id}/actions/{operation} used by
@@ -152,7 +158,32 @@ def _relayed_error_detail(response: httpx.Response) -> Any:
             "type": str(dialog.get("type") or "")[:20],
             "message": str(dialog.get("message") or "")[:500],
         }
+    diagnostics = body.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        detail["diagnostics"] = _bounded_diagnostics(diagnostics)
     return detail
+
+
+def _bounded_diagnostics(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    """The auto-attached "why did this fail" digest (controller
+    app/actions/pipeline.py): bounded the same defensive way as every other
+    relayed field here -- capped strings, capped lists, nothing else of the
+    controller's error body leaks through."""
+
+    def cap_str(value: Any, n: int) -> str:
+        return str(value or "")[:n]
+
+    def cap_list(value: Any, n: int) -> list[Any]:
+        return list(value)[:n] if isinstance(value, list) else []
+
+    return {
+        "url": cap_str(diagnostics.get("url"), 500),
+        "title": cap_str(diagnostics.get("title"), 200),
+        "console_errors": cap_list(diagnostics.get("console_errors"), 5),
+        "page_errors": cap_list(diagnostics.get("page_errors"), 5),
+        "failed_requests": cap_list(diagnostics.get("failed_requests"), 5),
+        "validation_messages": cap_list(diagnostics.get("validation_messages"), 5),
+    }
 
 
 class SessionLock:
@@ -1043,6 +1074,11 @@ def create_app(
             if arguments:
                 raise HTTPException(400, "Observation options are not exposed")
             return "GET", f"/sessions/{session_id}/observe", None, headers
+        if operation == "diagnostics":
+            headers = _pop_tab_id(arguments)
+            if arguments:
+                raise HTTPException(400, "Diagnostics options are not exposed")
+            return "GET", f"/sessions/{session_id}/diagnostics", None, headers
         if operation == "find_api_keys":
             headers = _pop_tab_id(arguments)
             provider = arguments.get("provider")
@@ -1271,6 +1307,10 @@ def create_app(
     async def observe(grant_id: str, authorization: str | None = Header(default=None)):
         return await operate(agent_grant(grant_id, authorization), "observe", {})
 
+    @app.get("/requests/{grant_id}/diagnostics")
+    async def diagnostics(grant_id: str, authorization: str | None = Header(default=None)):
+        return await operate(agent_grant(grant_id, authorization), "diagnostics", {})
+
     @app.post("/requests/{grant_id}/actions/{action_name}")
     async def action(grant_id: str, action_name: str, payload: Action, authorization: str | None = Header(default=None)):
         grant = agent_grant(grant_id, authorization)
@@ -1390,7 +1430,7 @@ def create_app(
     @app.get("/mcp/tools")
     async def list_tools(authorization: str | None = Header(default=None)):
         require_role(authorization, "agent")
-        return [{"name": f"browser.{name}"} for name in ("session_status", "request_access", "get_request", "complete", "observe", "find_api_keys", *sorted(TAB_OPERATIONS), *sorted(FILE_OPERATIONS), *sorted(SCREENSHOT_OPERATIONS), *sorted(ALLOWED_ACTIONS))]
+        return [{"name": f"browser.{name}"} for name in ("session_status", "request_access", "get_request", "complete", "observe", "diagnostics", "find_api_keys", *sorted(TAB_OPERATIONS), *sorted(FILE_OPERATIONS), *sorted(SCREENSHOT_OPERATIONS), *sorted(ALLOWED_ACTIONS))]
 
     async def session_status() -> dict[str, str]:
         """Safe agent setup signal; deliberately unrelated to TOTP state."""
@@ -1458,7 +1498,7 @@ def create_app(
                 },
             }
         if payload.method == "tools/list":
-            names = ("session_status", "request_access", "get_request", "complete", "observe", "find_api_keys", *sorted(TAB_OPERATIONS), *sorted(FILE_OPERATIONS), *sorted(SCREENSHOT_OPERATIONS), *sorted(ALLOWED_ACTIONS))
+            names = ("session_status", "request_access", "get_request", "complete", "observe", "diagnostics", "find_api_keys", *sorted(TAB_OPERATIONS), *sorted(FILE_OPERATIONS), *sorted(SCREENSHOT_OPERATIONS), *sorted(ALLOWED_ACTIONS))
             return {
                 "jsonrpc": "2.0", "id": payload.id,
                 "result": {"tools": [

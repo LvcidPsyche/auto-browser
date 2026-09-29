@@ -772,6 +772,119 @@ FIND_ACCESSIBLE_TARGET_SCRIPT = r"""
 """
 
 
+# Visible form-validation state -- what GET /sessions/{id}/diagnostics reports
+# alongside console errors and failed requests. Deliberately narrow: aria-invalid
+# fields, role=alert banners, error-shaped classes (only when they actually hold
+# text and are visible -- most sites keep an empty error <div> in the DOM at all
+# times), and native :invalid fields with their browser-computed validationMessage.
+VALIDATION_MESSAGES_SCRIPT = r"""
+(limit) => {
+  function isVisible(el) {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  }
+  function text(el) {
+    return (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+  }
+  const out = [];
+  const seen = new Set();
+  function push(kind, el, message) {
+    if (seen.has(el) || out.length >= limit) return;
+    seen.add(el);
+    const rect = el.getBoundingClientRect();
+    out.push({
+      kind,
+      tag: el.tagName.toLowerCase(),
+      message: message || text(el),
+      name: el.getAttribute('name') || el.id || null,
+      visible: isVisible(el),
+      bbox: {
+        x: Math.round(rect.x), y: Math.round(rect.y),
+        width: Math.round(rect.width), height: Math.round(rect.height),
+      },
+    });
+  }
+
+  for (const el of document.querySelectorAll('[aria-invalid="true"]')) {
+    if (out.length >= limit) break;
+    push('aria-invalid', el, null);
+  }
+  for (const el of document.querySelectorAll('[role="alert"]')) {
+    if (out.length >= limit) break;
+    const t = text(el);
+    if (t) push('role-alert', el, t);
+  }
+  const errorClassRe = /(^|[-_ ])(error|invalid)([-_ ]|$)|invalid-feedback|field-error|form-error|validation-message/i;
+  for (const el of document.querySelectorAll('[class]')) {
+    if (out.length >= limit) break;
+    if (typeof el.className !== 'string' || !errorClassRe.test(el.className)) continue;
+    if (!isVisible(el)) continue;
+    const t = text(el);
+    if (t) push('error-class', el, t);
+  }
+  for (const el of document.querySelectorAll('input, select, textarea')) {
+    if (out.length >= limit) break;
+    try {
+      if (el.matches(':invalid') && el.validationMessage) push('invalid-field', el, el.validationMessage);
+    } catch (e) { /* :invalid unsupported on this element -- skip it */ }
+  }
+  return out;
+}
+"""
+
+# Read-only CSS/text query for browser_dom_query -- the CSS selector and the
+# text filter are plain strings passed as arguments, never interpolated into
+# the script, so an employee can point at any element without ever getting a
+# JS-eval channel into the page.
+DOM_QUERY_SCRIPT = r"""
+(args) => {
+  const css = args.css || null;
+  const needle = (args.text || '').toLowerCase();
+  const limit = args.limit || 50;
+  function isVisible(el) {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  }
+  let nodes;
+  try {
+    nodes = Array.from(document.querySelectorAll(css || '*'));
+  } catch (e) {
+    return { error: 'invalid_selector', items: [], total_matched: 0 };
+  }
+  const total_matched = nodes.length;
+  // A huge page must not be scanned node-by-node in full -- cap the scan,
+  // not just the result, before the text filter runs.
+  nodes = nodes.slice(0, 2000);
+  const out = [];
+  for (const el of nodes) {
+    if (out.length >= limit) break;
+    const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (needle && !t.toLowerCase().includes(needle)) continue;
+    const rect = el.getBoundingClientRect();
+    out.push({
+      tag: el.tagName.toLowerCase(),
+      role: el.getAttribute('role') || null,
+      text: t.slice(0, 200),
+      id: el.id || null,
+      name: el.getAttribute('name') || null,
+      class_name: typeof el.className === 'string' ? el.className.slice(0, 200) : null,
+      type: el.getAttribute('type') || null,
+      href: el.getAttribute('href') || null,
+      aria_label: el.getAttribute('aria-label') || null,
+      visible: isVisible(el),
+      bbox: {
+        x: Math.round(rect.x), y: Math.round(rect.y),
+        width: Math.round(rect.width), height: Math.round(rect.height),
+      },
+    });
+  }
+  return { error: null, items: out, total_matched };
+}
+"""
+
+
 async def apply_stealth(page: object) -> None:
     """Inject stealth init script into a page before any navigation."""
     add_init_script = getattr(page, "add_init_script", None)

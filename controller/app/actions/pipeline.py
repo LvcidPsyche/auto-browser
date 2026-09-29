@@ -163,6 +163,10 @@ class BrowserActionPipeline:
         except PlaywrightError as exc:
             failed = await self._handle_playwright_error(context, witness_state)
             code, message = classify_playwright_error(str(exc))
+            details: dict[str, Any] = {"snapshot": failed}
+            digest = await self._diagnostics_digest(context)
+            if digest is not None:
+                details["diagnostics"] = digest
             raise BrowserActionError(
                 message,
                 code=code,
@@ -170,9 +174,25 @@ class BrowserActionPipeline:
                 status_code=400,
                 retryable=True,
                 url=context.session.page.url,
-                details={"snapshot": failed},
+                details=details,
             ) from exc
         return await self._record_success(context, witness_state)
+
+    async def _diagnostics_digest(self, context: ActionRunContext) -> dict[str, Any] | None:
+        """A small "why did this fail" digest -- recent console errors, failed
+        requests with their JSON bodies, and visible validation messages --
+        attached to a failed click/type/upload/press so the agent does not
+        have to make a second round trip to browser_diagnostics just to see
+        what the site already said. Best-effort: a digest failure must never
+        hide the real action error."""
+        diagnostics = getattr(context.manager, "diagnostics", None)
+        if diagnostics is None:
+            return None
+        try:
+            return await diagnostics.build_digest(context.session, limit=3)
+        except Exception as exc:
+            logger.debug("diagnostics digest failed for %s: %s", context.action_name, exc)
+            return None
 
     async def _prepare(self, context: ActionRunContext) -> ActionWitnessState:
         manager = context.manager
@@ -274,6 +294,9 @@ class BrowserActionPipeline:
             approval_status="failed",
         )
         exc.details.setdefault("snapshot", failed)
+        digest = await self._diagnostics_digest(context)
+        if digest is not None:
+            exc.details.setdefault("diagnostics", digest)
 
     async def _handle_playwright_error(
         self,

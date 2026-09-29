@@ -135,12 +135,13 @@ def test_agent_can_list_and_switch_tabs_but_not_close_them(tmp_path: Path, clock
         assert client.post("/mcp/tools/call", headers=auth(AGENT), json={"name": "browser.list_tabs", "arguments": {"request_id": request_id}}).status_code == 200
         assert client.get("/mcp/tools", headers=auth(AGENT)).json() == [
             {"name": f"browser.{name}"} for name in (
-                "session_status", "request_access", "get_request", "complete", "observe", "find_api_keys",
+                "session_status", "request_access", "get_request", "complete", "observe", "diagnostics",
+                "find_api_keys",
                 "activate_tab", "list_tabs", "open_tab",
                 "download_file", "upload_file",
                 "screenshot",
-                "click", "click_at", "dialog", "go_back", "go_forward", "hover", "navigate", "press", "reload",
-                "scroll", "select_option", "type", "type_focused", "upload", "wait",
+                "click", "click_at", "dialog", "dom_query", "go_back", "go_forward", "hover", "navigate", "press",
+                "reload", "scroll", "select_option", "type", "type_focused", "upload", "wait",
             )
         ]
 
@@ -1143,6 +1144,80 @@ def test_tab_id_becomes_the_x_tab_id_header_and_is_validated(tmp_path: Path, clo
                 {"url": "https://example.com", "activate": False, "owner": "emad"}, None) in calls
         assert client.post(f"/requests/{grant}/actions/open_tab", headers=auth(AGENT),
                            json={"arguments": {"owner": "Emad!"}}).status_code == 400
+
+
+def test_diagnostics_and_dom_query_relay_tab_scoped_like_observe(tmp_path: Path, clock: list[float]) -> None:
+    """browser.diagnostics is a GET, exactly like observe -- no options exposed besides
+    tab_id. browser.dom_query is a POST action, tab-scoped the same way click/type are,
+    and forwards css/text/limit straight through to the controller's dom-query action."""
+    calls: list = []
+    with TestClient(app_at(tmp_path, _tab_upstream(calls))) as client:
+        _open_owner_session(client, clock)
+        grant = client.post("/requests", headers=auth(AGENT), json={"purpose": "a"}).json()["id"]
+
+        assert client.post("/mcp/tools/call", headers=auth(AGENT), json={
+            "name": "browser.diagnostics", "arguments": {"request_id": grant, "tab_id": "t-0123456789ab"},
+        }).status_code == 200
+        assert ("GET", "/sessions/owner-1/diagnostics", None, "t-0123456789ab") in calls
+        assert client.get(f"/requests/{grant}/diagnostics", headers=auth(AGENT)).status_code == 200
+        assert client.post("/mcp/tools/call", headers=auth(AGENT), json={
+            "name": "browser.diagnostics", "arguments": {"request_id": grant, "limit": 5},
+        }).status_code == 400, "diagnostics takes no options besides tab_id"
+
+        dom_query = client.post(f"/requests/{grant}/actions/dom_query", headers=auth(AGENT), json={
+            "arguments": {"css": "[role=alert]", "text": "invalid", "limit": 10, "tab_id": "t-0123456789ab"},
+        })
+        assert dom_query.status_code == 200
+        assert ("POST", "/sessions/owner-1/actions/dom-query",
+                {"css": "[role=alert]", "text": "invalid", "limit": 10}, "t-0123456789ab") in calls
+        # No tab_id: still forwards, just without the header (like every other action).
+        client.post(f"/requests/{grant}/actions/dom_query", headers=auth(AGENT), json={"arguments": {"css": "input"}})
+        assert ("POST", "/sessions/owner-1/actions/dom-query", {"css": "input"}, None) in calls
+        # dom_query is now a listed tool, alongside diagnostics.
+        names = {tool["name"] for tool in client.get("/mcp/tools", headers=auth(AGENT)).json()}
+        assert {"browser.diagnostics", "browser.dom_query"} <= names
+
+
+def test_a_failed_action_relays_its_bounded_diagnostics_digest(tmp_path: Path, clock: list[float]) -> None:
+    """The controller attaches a "why did this fail" digest to a failed click/type/upload
+    (app/actions/pipeline.py). The broker must relay it -- bounded the same defensive way
+    as every other relayed field -- and never the rest of the controller's error body."""
+    active = False
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal active
+        if request.method == "GET" and request.url.path == "/sessions":
+            return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
+        if request.method == "POST" and request.url.path == "/sessions":
+            active = True
+            return httpx.Response(200, json={"id": "owner-1"})
+        return httpx.Response(400, json={
+            "ok": False, "code": "target_not_found", "error": "internal detail",
+            "url": "https://secret.example/path",
+            "diagnostics": {
+                "url": "https://secret.example/path", "title": "Sign up",
+                "console_errors": [{"type": "error", "text": "boom"}] * 8,
+                "page_errors": [], "failed_requests": [{"url": "https://secret.example/api", "status": 422}] * 8,
+                "validation_messages": [{"kind": "aria-invalid", "message": "invalid area"}],
+                "never_relayed": "secret internal field",
+            },
+        })
+
+    with TestClient(app_at(tmp_path, upstream)) as client:
+        _open_owner_session(client, clock)
+        grant = client.post("/requests", headers=auth(AGENT), json={"purpose": "a"}).json()["id"]
+        response = client.post(f"/requests/{grant}/actions/click", headers=auth(AGENT),
+                               json={"arguments": {"element_id": "op-1"}})
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["code"] == "target_not_found"
+        digest = detail["diagnostics"]
+        assert digest["url"] == "https://secret.example/path"
+        assert digest["title"] == "Sign up"
+        assert digest["validation_messages"] == [{"kind": "aria-invalid", "message": "invalid area"}]
+        assert len(digest["console_errors"]) == 5, "capped, not the full 8"
+        assert len(digest["failed_requests"]) == 5
+        assert "never_relayed" not in digest
 
 
 def test_tab_gone_is_relayed_to_the_agent(tmp_path: Path, clock: list[float]) -> None:
