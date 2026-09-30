@@ -752,12 +752,11 @@ def create_app(
             raise HTTPException(400, "Invalid profile name")
         return profile_name
 
-    async def ensure_no_active_session() -> None:
+    async def active_controller_sessions() -> list[dict[str, Any]]:
         sessions = await upstream("GET", "/sessions")
         if not isinstance(sessions, list) or not all(isinstance(item, dict) for item in sessions):
             raise HTTPException(502, "Invalid browser controller response")
-        if any(item.get("status") == "active" for item in sessions):
-            raise HTTPException(409, "Close the current session first")
+        return [item for item in sessions if item.get("status") == "active"]
 
     async def trusted_owner_session() -> str:
         nonlocal owner_session_id
@@ -950,7 +949,6 @@ def create_app(
             async with session_state_lock:
                 session_opening = True
                 try:
-                    await ensure_no_active_session()
                     if assertion_key is not None:
                         if payload.totp_code is not None or payload.portal_assertion is None:
                             raise HTTPException(403, "A portal assertion is required")
@@ -959,13 +957,31 @@ def create_app(
                         if payload.portal_assertion is not None or payload.totp_code is None:
                             raise HTTPException(403, "A fresh authenticator code is required")
                         totp.verify(payload.totp_code)
-                    session_payload = {"name": "owner-login", "start_url": payload.start_url}
-                    if payload.auth_profile is not None:
-                        session_payload["auth_profile"] = payload.auth_profile
-                    result = await upstream("POST", "/sessions", session_payload)
-                    if not isinstance(result, dict) or not isinstance(result.get("id"), str):
-                        raise HTTPException(502, "Controller did not return a session id")
-                    owner_session_id = result["id"]
+
+                    active_sessions = await active_controller_sessions()
+                    if active_sessions:
+                        # The broker's owner binding is intentionally process-local,
+                        # while the tenant controller and persistent browser survive a
+                        # broker-only deploy. A fresh, correctly scoped owner proof may
+                        # recover that one orphaned tenant session instead of trapping
+                        # the owner between "no verified session" and "close current
+                        # session first". Never choose between multiple active sessions,
+                        # and never replace a binding this broker still remembers.
+                        if owner_session_id is not None or len(active_sessions) != 1:
+                            raise HTTPException(409, "Close the current session first")
+                        recovered_id = active_sessions[0].get("id")
+                        if not isinstance(recovered_id, str):
+                            raise HTTPException(502, "Controller returned an invalid active session")
+                        owner_session_id = safe_session_id(recovered_id)
+                        result = {"id": owner_session_id, "reattached": True}
+                    else:
+                        session_payload = {"name": "owner-login", "start_url": payload.start_url}
+                        if payload.auth_profile is not None:
+                            session_payload["auth_profile"] = payload.auth_profile
+                        result = await upstream("POST", "/sessions", session_payload)
+                        if not isinstance(result, dict) or not isinstance(result.get("id"), str):
+                            raise HTTPException(502, "Controller did not return a session id")
+                        owner_session_id = safe_session_id(result["id"])
                     owner_session_generation += 1
                 finally:
                     session_opening = False
