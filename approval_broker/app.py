@@ -883,7 +883,8 @@ def create_app(
         ws_url = "ws" + novnc_url.removeprefix("http") + "/websockify"
         try:
             async with ws_connect(ws_url, max_size=16 * 1024 * 1024, open_timeout=5) as upstream:
-                if not await still_live():
+                session_is_live = await still_live()
+                if not session_is_live:
                     await websocket.close(code=1008)
                     return
                 await websocket.accept()
@@ -894,7 +895,13 @@ def create_app(
                             message = await websocket.receive()
                             if message["type"] == "websocket.disconnect":
                                 break
-                            if not await still_live():
+                            # The periodic guard below checks the controller once a
+                            # second. A framebuffer can contain hundreds of frames;
+                            # checking /sessions for every one overloaded the exact
+                            # connection it was protecting and made the owner's view
+                            # disconnect. Explicit broker-side revocation remains an
+                            # immediate in-memory check on every control frame.
+                            if owner_session_id != session_id or not session_is_live:
                                 break
                             if message.get("bytes") is not None:
                                 await upstream.send(message["bytes"])
@@ -905,7 +912,7 @@ def create_app(
 
                 async def vnc_to_browser() -> None:
                     async for message in upstream:
-                        if not await still_live():
+                        if owner_session_id != session_id or not session_is_live:
                             break
                         if isinstance(message, bytes):
                             await websocket.send_bytes(message)
@@ -913,9 +920,11 @@ def create_app(
                             await websocket.send_text(message)
 
                 async def periodic_guard() -> None:
+                    nonlocal session_is_live
                     while True:
                         await asyncio.sleep(1)
-                        if not await still_live():
+                        session_is_live = await still_live()
+                        if not session_is_live:
                             break
 
                 tasks = [

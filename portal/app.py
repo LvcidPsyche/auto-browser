@@ -76,7 +76,7 @@ VIEWER_CONTENT_SECURITY_POLICY = (
 # The /browser page's tab strip is one same-origin script polling one
 # same-origin JSON endpoint; nothing else is loosened.
 BROWSER_PAGE_CONTENT_SECURITY_POLICY = (
-    "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; "
+    "default-src 'none'; script-src 'self'; connect-src 'self'; frame-src 'self'; style-src 'unsafe-inline'; "
     "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 )
 # Who opened each tab, as the owner reads it. Unknown labels are shown as-is.
@@ -123,68 +123,116 @@ TAB_STRIP_SCRIPT = """(function () {
 })();
 """
 
-VIEWER_SCRIPT = r"""import RFB from "/vnc/core/rfb.js";
-
-const screen = document.getElementById("screen");
+VIEWER_SCRIPT = r"""const frame = document.getElementById("remote-frame");
 const status = document.getElementById("status");
 const typingPanel = document.getElementById("typing-panel");
 const typingForm = document.getElementById("typing-form");
 const typingInput = document.getElementById("typing-input");
 const csrf = document.body.dataset.csrf || "";
-const amplifiedWheelEvents = new WeakSet();
+let reconnectTimer = null;
 
-const socketUrl = new URL("/vnc/websockify", window.location.href);
-socketUrl.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-
-const rfb = new RFB(screen, socketUrl.href);
-rfb.viewOnly = false;
-rfb.focusOnClick = true;
-rfb.clipViewport = false;
-rfb.scaleViewport = true;
-rfb.resizeSession = false;
-rfb.qualityLevel = 4;
-rfb.compressionLevel = 7;
-
-rfb.addEventListener("connect", () => {
-  status.textContent = "تم الاتصال";
-  status.dataset.state = "connected";
-});
-rfb.addEventListener("disconnect", (event) => {
-  status.textContent = event.detail.clean ? "انتهى الاتصال" : "انقطع الاتصال — أعد فتح الصفحة";
-  status.dataset.state = "disconnected";
-});
-rfb.addEventListener("securityfailure", () => {
-  status.textContent = "تعذر فتح الاتصال الآمن";
-  status.dataset.state = "disconnected";
-});
-
-function remoteCanvas() {
-  return screen.querySelector("canvas");
+function remoteDocument() {
+  try {
+    return frame.contentDocument;
+  } catch (_) {
+    return null;
+  }
 }
 
-function dispatchWheel(deltaX, deltaY) {
+function remoteCanvas() {
+  return remoteDocument()?.querySelector("#screen canvas") || null;
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer !== null) return;
+  status.textContent = "انقطع الاتصال — جاري إعادة الاتصال…";
+  status.dataset.state = "disconnected";
+  reconnectTimer = window.setTimeout(() => {
+    reconnectTimer = null;
+    connectViewer();
+  }, 1500);
+}
+
+function syncRemoteStatus(remoteStatus) {
+  const value = (remoteStatus?.textContent || "").trim().toLowerCase();
+  if (value.startsWith("connected")) {
+    if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    status.textContent = "تم الاتصال";
+    status.dataset.state = "connected";
+  } else if (value.includes("disconnected") || value.includes("wrong") || value.includes("closed")) {
+    scheduleReconnect();
+  } else {
+    status.textContent = "جاري الاتصال…";
+    status.dataset.state = "connecting";
+  }
+}
+
+function prepareRemoteViewer() {
+  const doc = remoteDocument();
+  if (!doc) {
+    scheduleReconnect();
+    return;
+  }
+  const remoteStatus = doc.getElementById("status");
+  const remoteScreen = doc.getElementById("screen");
+  if (!remoteStatus || !remoteScreen) {
+    scheduleReconnect();
+    return;
+  }
+
+  const topBar = doc.getElementById("top_bar");
+  if (topBar) topBar.hidden = true;
+  doc.documentElement.style.height = "100%";
+  doc.documentElement.style.overflow = "hidden";
+  doc.body.style.height = "100%";
+  doc.body.style.margin = "0";
+  doc.body.style.overflow = "hidden";
+  remoteScreen.style.width = "100%";
+  remoteScreen.style.height = "100%";
+  remoteScreen.style.overflow = "hidden";
+
+  const amplifiedWheelEvents = new WeakSet();
+  remoteScreen.addEventListener("wheel", (event) => {
+    if (amplifiedWheelEvents.has(event)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    dispatchWheel(event.deltaX * 2.5, event.deltaY * 2.5, amplifiedWheelEvents);
+  }, {capture: true, passive: false});
+
+  new MutationObserver(() => syncRemoteStatus(remoteStatus)).observe(remoteStatus, {
+    childList: true,
+    characterData: true,
+    subtree: true,
+  });
+  syncRemoteStatus(remoteStatus);
+}
+
+function connectViewer() {
+  status.textContent = "جاري الاتصال…";
+  status.dataset.state = "connecting";
+  const url = new URL("/vnc/vnc_lite.html", window.location.href);
+  url.searchParams.set("path", "vnc/websockify");
+  url.searchParams.set("scale", "true");
+  url.searchParams.set("attempt", String(Date.now()));
+  frame.src = url.href;
+}
+
+function dispatchWheel(deltaX, deltaY, amplifiedEvents = null) {
   const target = remoteCanvas();
   if (!target) return;
-  const event = new WheelEvent("wheel", {
+  const event = new frame.contentWindow.WheelEvent("wheel", {
     bubbles: true,
     cancelable: true,
-    deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+    deltaMode: frame.contentWindow.WheelEvent.DOM_DELTA_PIXEL,
     deltaX,
     deltaY,
   });
-  amplifiedWheelEvents.add(event);
+  if (amplifiedEvents) amplifiedEvents.add(event);
   target.dispatchEvent(event);
 }
 
-// Laptop trackpads and phone browsers often produce tiny deltas after the
-// remote screen has been scaled down.  Multiply only the owner's real wheel
-// event, then let noVNC consume the replacement event normally.
-screen.addEventListener("wheel", (event) => {
-  if (amplifiedWheelEvents.has(event)) return;
-  event.preventDefault();
-  event.stopImmediatePropagation();
-  dispatchWheel(event.deltaX * 2.5, event.deltaY * 2.5);
-}, {capture: true, passive: false});
+frame.addEventListener("load", prepareRemoteViewer);
 
 document.getElementById("scroll-up").addEventListener("click", () => dispatchWheel(0, -720));
 document.getElementById("scroll-down").addEventListener("click", () => dispatchWheel(0, 720));
@@ -195,7 +243,7 @@ document.getElementById("show-keyboard").addEventListener("click", () => {
 });
 document.getElementById("hide-keyboard").addEventListener("click", () => {
   typingPanel.hidden = true;
-  remoteCanvas()?.focus();
+  frame.contentWindow?.focus();
 });
 
 typingForm.addEventListener("submit", async (event) => {
@@ -214,7 +262,7 @@ typingForm.addEventListener("submit", async (event) => {
     if (!response.ok) throw new Error(String(response.status));
     typingInput.value = "";
     typingPanel.hidden = true;
-    remoteCanvas()?.focus();
+    frame.contentWindow?.focus();
   } catch (_) {
     status.textContent = "تعذر إرسال النص — حاول مرة أخرى";
     status.dataset.state = "disconnected";
@@ -230,6 +278,8 @@ document.getElementById("fullscreen").addEventListener("click", async () => {
     await document.documentElement.requestFullscreen();
   }
 });
+
+connectViewer();
 """
 
 SECURITY_HEADERS = {
@@ -745,6 +795,13 @@ def create_app(
         # viewer paths get a policy that is still same-origin-only but lets the app run.
         if request.url.path == "/vnc" or request.url.path.startswith("/vnc/"):
             response.headers["Content-Security-Policy"] = VIEWER_CONTENT_SECURITY_POLICY
+            if request.url.path == "/vnc/vnc_lite.html":
+                # The fitted owner page embeds only this same-origin, authenticated
+                # noVNC shell. Keep every other page unframeable.
+                response.headers["X-Frame-Options"] = "SAMEORIGIN"
+                response.headers["Content-Security-Policy"] = (
+                    VIEWER_CONTENT_SECURITY_POLICY.replace("frame-ancestors 'none'", "frame-ancestors 'self'")
+                )
         elif request.url.path in {"/browser", "/browser/tabs.js", "/viewer", "/viewer/app.js"}:
             response.headers["Content-Security-Policy"] = BROWSER_PAGE_CONTENT_SECURITY_POLICY
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
@@ -1704,8 +1761,7 @@ def create_app(
             "<title>متصفح فريق الآمن</title><style>"
             "*{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#101714}"
             "body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;color:#fff}"
-            "#screen{position:fixed;inset:0;width:100vw;height:100dvh;overflow:hidden;background:#101714;touch-action:none}"
-            "#screen canvas{display:block;margin:0!important;max-width:100%;max-height:100%}"
+            "#remote-frame{position:fixed;inset:0;width:100vw;height:100dvh;border:0;background:#101714}"
             "#status{position:fixed;top:max(10px,env(safe-area-inset-top));left:12px;z-index:4;padding:7px 11px;"
             "border-radius:999px;background:#182d27d9;font-size:13px;box-shadow:0 2px 12px #0005;pointer-events:none}"
             "#status[data-state=connected]{opacity:.58}#status[data-state=disconnected]{background:#7c2929}"
@@ -1724,7 +1780,7 @@ def create_app(
             "@media(max-width:560px){.tools{gap:5px;padding:5px}.tools button,.tools .back{min-width:42px;padding:0 10px}.label{display:none}}"
             "</style></head>"
             f"<body data-csrf='{csrf}'>"
-            "<main id=screen aria-label='شاشة المتصفح'></main>"
+            "<iframe id=remote-frame title='شاشة المتصفح'></iframe>"
             "<p id=status>جاري الاتصال…</p>"
             "<nav class=tools aria-label='أدوات المتصفح'>"
             "<a class=back href=/browser title='رجوع'>↩</a>"
