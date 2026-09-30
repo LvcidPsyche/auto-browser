@@ -138,6 +138,12 @@ class Upstreams:
                 return httpx.Response(403, json={"detail": "Owner must open a verified browser session first"})
             if request.url.path == "/owner/vnc/vnc.html":
                 return httpx.Response(200, text="<html>fake novnc page</html>", headers={"content-type": "text/html"})
+            if request.url.path == "/owner/vnc/vnc_lite.html":
+                return httpx.Response(
+                    200,
+                    text="<html><div id='status'>Connecting</div><div id='screen'></div></html>",
+                    headers={"content-type": "text/html"},
+                )
             if request.url.path == "/owner/vnc/app/ui.js":
                 return httpx.Response(200, text="export const ui = 1;", headers={"content-type": "text/javascript"})
             return httpx.Response(404)
@@ -703,14 +709,23 @@ def test_browser_page_stops_offering_a_dead_viewer_link_after_a_broker_restart(t
         viewer = client.get("/viewer")
         assert viewer.status_code == 200
         assert "height:100dvh" in viewer.text
+        assert "id=remote-frame" in viewer.text
         assert "id=typing-input" in viewer.text
         assert "id=scroll-down" in viewer.text
         assert "src=/viewer/app.js" in viewer.text
         viewer_script = client.get("/viewer/app.js")
         assert viewer_script.status_code == 200
-        assert "rfb.scaleViewport = true" in viewer_script.text
+        assert 'new URL("/vnc/vnc_lite.html"' in viewer_script.text
+        assert 'url.searchParams.set("scale", "true")' in viewer_script.text
+        assert "scheduleReconnect" in viewer_script.text
         assert "event.deltaY * 2.5" in viewer_script.text
         assert 'fetch("/api/browser/type"' in viewer_script.text
+
+        embedded = client.get("/vnc/vnc_lite.html")
+        assert embedded.status_code == 200
+        assert embedded.headers["x-frame-options"] == "SAMEORIGIN"
+        assert "frame-ancestors 'self'" in embedded.headers["content-security-policy"]
+        assert "frame-src 'self'" in viewer.headers["content-security-policy"]
 
         # The broker (and controller) restarted; it no longer trusts this session,
         # exactly like the owner's viewer log did, even though the portal's own

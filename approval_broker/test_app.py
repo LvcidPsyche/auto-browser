@@ -690,11 +690,13 @@ def test_owner_vnc_websocket_requires_bearer_and_open_session_and_rechecks_frame
     import approval_broker.app as broker_module
 
     active = False
+    session_checks = 0
     sent: list[bytes] = []
 
     def upstream(request: httpx.Request) -> httpx.Response:
-        nonlocal active
+        nonlocal active, session_checks
         if request.method == "GET":
+            session_checks += 1
             return httpx.Response(200, json=[{"id": "owner-1", "status": "active"}] if active else [])
         if request.method == "POST" and request.url.path == "/sessions":
             active = True
@@ -734,12 +736,17 @@ def test_owner_vnc_websocket_requires_bearer_and_open_session_and_rechecks_frame
             "start_url": "https://example.com", "totp_code": fresh(secret, clock),
         })
         with client.websocket_connect("/owner/vnc/websockify", headers=auth(OWNER)) as socket:
+            checks_before_frames = session_checks
             socket.send_bytes(b"first-frame")
+            for _ in range(50):
+                socket.send_bytes(b"frame")
+            # Frame volume must not turn into one controller session lookup per
+            # framebuffer packet. The one-second periodic guard owns that check.
+            assert session_checks <= checks_before_frames + 1
             active = False
-            socket.send_bytes(b"second-frame")
             with pytest.raises(Exception):
                 socket.receive_bytes()
-        assert b"second-frame" not in sent
+        assert sent.count(b"frame") == 50
 
 
 def test_a_session_the_controller_retired_frees_open_and_a_reattached_one_keeps_access(
