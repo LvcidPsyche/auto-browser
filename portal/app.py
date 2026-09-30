@@ -123,6 +123,115 @@ TAB_STRIP_SCRIPT = """(function () {
 })();
 """
 
+VIEWER_SCRIPT = r"""import RFB from "/vnc/core/rfb.js";
+
+const screen = document.getElementById("screen");
+const status = document.getElementById("status");
+const typingPanel = document.getElementById("typing-panel");
+const typingForm = document.getElementById("typing-form");
+const typingInput = document.getElementById("typing-input");
+const csrf = document.body.dataset.csrf || "";
+const amplifiedWheelEvents = new WeakSet();
+
+const socketUrl = new URL("/vnc/websockify", window.location.href);
+socketUrl.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+
+const rfb = new RFB(screen, socketUrl.href);
+rfb.viewOnly = false;
+rfb.focusOnClick = true;
+rfb.clipViewport = false;
+rfb.scaleViewport = true;
+rfb.resizeSession = false;
+rfb.qualityLevel = 4;
+rfb.compressionLevel = 7;
+
+rfb.addEventListener("connect", () => {
+  status.textContent = "تم الاتصال";
+  status.dataset.state = "connected";
+});
+rfb.addEventListener("disconnect", (event) => {
+  status.textContent = event.detail.clean ? "انتهى الاتصال" : "انقطع الاتصال — أعد فتح الصفحة";
+  status.dataset.state = "disconnected";
+});
+rfb.addEventListener("securityfailure", () => {
+  status.textContent = "تعذر فتح الاتصال الآمن";
+  status.dataset.state = "disconnected";
+});
+
+function remoteCanvas() {
+  return screen.querySelector("canvas");
+}
+
+function dispatchWheel(deltaX, deltaY) {
+  const target = remoteCanvas();
+  if (!target) return;
+  const event = new WheelEvent("wheel", {
+    bubbles: true,
+    cancelable: true,
+    deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+    deltaX,
+    deltaY,
+  });
+  amplifiedWheelEvents.add(event);
+  target.dispatchEvent(event);
+}
+
+// Laptop trackpads and phone browsers often produce tiny deltas after the
+// remote screen has been scaled down.  Multiply only the owner's real wheel
+// event, then let noVNC consume the replacement event normally.
+screen.addEventListener("wheel", (event) => {
+  if (amplifiedWheelEvents.has(event)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  dispatchWheel(event.deltaX * 2.5, event.deltaY * 2.5);
+}, {capture: true, passive: false});
+
+document.getElementById("scroll-up").addEventListener("click", () => dispatchWheel(0, -720));
+document.getElementById("scroll-down").addEventListener("click", () => dispatchWheel(0, 720));
+
+document.getElementById("show-keyboard").addEventListener("click", () => {
+  typingPanel.hidden = false;
+  typingInput.focus();
+});
+document.getElementById("hide-keyboard").addEventListener("click", () => {
+  typingPanel.hidden = true;
+  remoteCanvas()?.focus();
+});
+
+typingForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = typingInput.value;
+  if (!text) return;
+  const button = typingForm.querySelector("button[type=submit]");
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/browser/type", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {"Content-Type": "application/json", "X-CSRF-Token": csrf},
+      body: JSON.stringify({text}),
+    });
+    if (!response.ok) throw new Error(String(response.status));
+    typingInput.value = "";
+    typingPanel.hidden = true;
+    remoteCanvas()?.focus();
+  } catch (_) {
+    status.textContent = "تعذر إرسال النص — حاول مرة أخرى";
+    status.dataset.state = "disconnected";
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.getElementById("fullscreen").addEventListener("click", async () => {
+  if (document.fullscreenElement) {
+    await document.exitFullscreen();
+  } else {
+    await document.documentElement.requestFullscreen();
+  }
+});
+"""
+
 SECURITY_HEADERS = {
     "Cache-Control": "no-store, max-age=0",
     "Pragma": "no-cache",
@@ -636,7 +745,7 @@ def create_app(
         # viewer paths get a policy that is still same-origin-only but lets the app run.
         if request.url.path == "/vnc" or request.url.path.startswith("/vnc/"):
             response.headers["Content-Security-Policy"] = VIEWER_CONTENT_SECURITY_POLICY
-        elif request.url.path in {"/browser", "/browser/tabs.js"}:
+        elif request.url.path in {"/browser", "/browser/tabs.js", "/viewer", "/viewer/app.js"}:
             response.headers["Content-Security-Policy"] = BROWSER_PAGE_CONTENT_SECURITY_POLICY
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
@@ -1079,7 +1188,7 @@ def create_app(
             "autocomplete=one-time-code pattern='[0-9]{6}' required></label>"
         )
         viewer_link = (
-            "<p><a href='/vnc/vnc.html?autoconnect=true&reconnect=true&reconnect_delay=1500&resize=scale&path=websockify&quality=4&compression=7'>"
+            "<p><a href='/viewer'>"
             "شوف المتصفح (Watch and control the browser)</a></p>"
             if viewable else
             "<p>شوف المتصفح: افتح المتصفح أولاً.</p>" if state != "open" else
@@ -1575,6 +1684,69 @@ def create_app(
         result.delete_cookie(SESSION_COOKIE, secure=True, httponly=True, samesite="lax", path="/")
         result.delete_cookie(CSRF_COOKIE, secure=True, samesite="lax", path="/")
         return result
+
+    @app.get("/viewer")
+    async def viewer_page(request: Request):
+        """Render a fitted viewer with scrolling and Unicode input in one page."""
+        try:
+            row = session_for(request)
+        except HTTPException as exc:
+            if exc.status_code != 401:
+                raise
+            return RedirectResponse("/signin?next=%2Fviewer", status_code=303)
+        require_sole_new_surface_owner(row)
+        if await viewer_session_id(row) is None:
+            return RedirectResponse("/browser", status_code=303)
+        csrf = html.escape(request.cookies.get(CSRF_COOKIE, ""), quote=True)
+        return HTMLResponse(
+            "<!doctype html><html lang=ar dir=rtl><head><meta charset=utf-8>"
+            "<meta name=viewport content='width=device-width,initial-scale=1,viewport-fit=cover'>"
+            "<title>متصفح فريق الآمن</title><style>"
+            "*{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#101714}"
+            "body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;color:#fff}"
+            "#screen{position:fixed;inset:0;width:100vw;height:100dvh;overflow:hidden;background:#101714;touch-action:none}"
+            "#screen canvas{display:block;margin:0!important;max-width:100%;max-height:100%}"
+            "#status{position:fixed;top:max(10px,env(safe-area-inset-top));left:12px;z-index:4;padding:7px 11px;"
+            "border-radius:999px;background:#182d27d9;font-size:13px;box-shadow:0 2px 12px #0005;pointer-events:none}"
+            "#status[data-state=connected]{opacity:.58}#status[data-state=disconnected]{background:#7c2929}"
+            ".tools{position:fixed;z-index:5;right:50%;bottom:max(12px,env(safe-area-inset-bottom));transform:translateX(50%);"
+            "display:flex;gap:8px;padding:7px;border:1px solid #ffffff26;border-radius:18px;background:#102a23e8;box-shadow:0 6px 22px #0008}"
+            "button,.back{min-width:46px;min-height:46px;border:0;border-radius:12px;background:#fff;color:#123f35;"
+            "font:700 15px/1 system-ui;text-decoration:none;display:grid;place-items:center;padding:0 13px;cursor:pointer}"
+            "button:disabled{opacity:.55}.scroll{font-size:22px}.back{background:#d9e6e2}"
+            "#typing-panel{position:fixed;z-index:7;right:10px;left:10px;bottom:max(10px,env(safe-area-inset-bottom));"
+            "padding:12px;border:1px solid #ffffff30;border-radius:18px;background:#102a23f7;box-shadow:0 8px 32px #000a}"
+            "#typing-panel[hidden]{display:none}#typing-panel header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px}"
+            "#typing-panel h1{font-size:16px;margin:0}#hide-keyboard{min-width:40px;min-height:40px;padding:0;font-size:21px}"
+            "#typing-form{display:flex;gap:8px}#typing-input{flex:1;min-width:0;min-height:50px;max-height:34dvh;resize:vertical;"
+            "border:2px solid #5f8d80;border-radius:12px;padding:11px;background:#fff;color:#111;font:18px/1.45 system-ui}"
+            "#typing-form button{min-width:76px;background:#d7b864;color:#102a23}"
+            "@media(max-width:560px){.tools{gap:5px;padding:5px}.tools button,.tools .back{min-width:42px;padding:0 10px}.label{display:none}}"
+            "</style></head>"
+            f"<body data-csrf='{csrf}'>"
+            "<main id=screen aria-label='شاشة المتصفح'></main>"
+            "<p id=status>جاري الاتصال…</p>"
+            "<nav class=tools aria-label='أدوات المتصفح'>"
+            "<a class=back href=/browser title='رجوع'>↩</a>"
+            "<button id=show-keyboard type=button title='الكتابة بالعربية'>⌨ <span class=label>كتابة</span></button>"
+            "<button id=scroll-up class=scroll type=button title='تمرير لأعلى'>↑</button>"
+            "<button id=scroll-down class=scroll type=button title='تمرير لأسفل'>↓</button>"
+            "<button id=fullscreen type=button title='ملء الشاشة'>⛶</button>"
+            "</nav>"
+            "<section id=typing-panel hidden>"
+            "<header><h1>اكتب النص هنا بعد اختيار الحقل داخل المتصفح</h1>"
+            "<button id=hide-keyboard type=button aria-label='إغلاق'>×</button></header>"
+            "<form id=typing-form><textarea id=typing-input dir=auto lang=ar autocomplete=off "
+            "placeholder='اكتب بالعربية أو بأي لغة' required maxlength=2000></textarea>"
+            "<button type=submit>إرسال</button></form></section>"
+            "<script type=module src=/viewer/app.js></script></body></html>"
+        )
+
+    @app.get("/viewer/app.js")
+    async def viewer_script(request: Request):
+        row = session_for(request)
+        require_sole_new_surface_owner(row)
+        return Response(VIEWER_SCRIPT, media_type="text/javascript")
 
     @app.post("/api/browser/type")
     async def type_into_browser(request: Request):

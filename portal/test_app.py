@@ -696,9 +696,21 @@ def test_browser_page_stops_offering_a_dead_viewer_link_after_a_broker_restart(t
         csrf = login(client)
         client.post("/api/browser/open", headers=mutate(csrf), json={})
         live_page = client.get("/browser").text
-        assert "/vnc/vnc.html" in live_page
+        assert "href='/viewer'" in live_page
         assert "/api/browser/type" in live_page
         assert "tab-strip" in live_page
+
+        viewer = client.get("/viewer")
+        assert viewer.status_code == 200
+        assert "height:100dvh" in viewer.text
+        assert "id=typing-input" in viewer.text
+        assert "id=scroll-down" in viewer.text
+        assert "src=/viewer/app.js" in viewer.text
+        viewer_script = client.get("/viewer/app.js")
+        assert viewer_script.status_code == 200
+        assert "rfb.scaleViewport = true" in viewer_script.text
+        assert "event.deltaY * 2.5" in viewer_script.text
+        assert 'fetch("/api/browser/type"' in viewer_script.text
 
         # The broker (and controller) restarted; it no longer trusts this session,
         # exactly like the owner's viewer log did, even though the portal's own
@@ -707,7 +719,7 @@ def test_browser_page_stops_offering_a_dead_viewer_link_after_a_broker_restart(t
         dead_page = client.get("/browser")
         assert dead_page.status_code == 200
         assert "Browser: open" in dead_page.text
-        assert "/vnc/vnc.html" not in dead_page.text
+        assert "href='/viewer'" not in dead_page.text
         assert "/api/browser/type" not in dead_page.text
         assert "tab-strip" not in dead_page.text
         assert "دوس Open تحت" in dead_page.text
@@ -719,7 +731,7 @@ def test_browser_page_stops_offering_a_dead_viewer_link_after_a_broker_restart(t
         reopened = client.post("/api/browser/open", headers=mutate(csrf), json={})
         assert reopened.status_code == 200
         healed_page = client.get("/browser").text
-        assert "/vnc/vnc.html" in healed_page
+        assert "href='/viewer'" in healed_page
 
 
 def test_all_responses_get_security_headers_and_mutations_require_origin(tmp_path, clock, upstreams):
