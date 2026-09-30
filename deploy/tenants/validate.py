@@ -11,6 +11,10 @@ def main() -> None:
     assert "external: true" in compose
     assert "TENANT_DATA_VOLUME" in compose
     assert "http://127.0.0.1:8000/healthz" in compose
+    assert 'BROWSER_WIDTH: "1600"' in compose
+    assert 'BROWSER_DISPLAY_WIDTH: "1600"' in compose
+    assert 'DEFAULT_VIEWPORT_WIDTH: "1600"' in compose
+    assert 'DEFAULT_VIEWPORT_HEIGHT: "800"' in compose
     print("Offline enrolled-tenant compose invariants passed.")
 
 
