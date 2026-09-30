@@ -4,6 +4,12 @@ set -euo pipefail
 export DISPLAY=:99
 WIDTH="${BROWSER_WIDTH:-1600}"
 HEIGHT="${BROWSER_HEIGHT:-900}"
+# Chromium's page viewport is WIDTH x HEIGHT, but the headed browser also needs
+# room for its tabs, address bar, and the Fluxbox window frame.  Giving Xvfb the
+# exact viewport height clips part of that real window in the VNC framebuffer.
+# Keep the agent-facing viewport unchanged and add display-only headroom.
+DISPLAY_WIDTH="${BROWSER_DISPLAY_WIDTH:-$WIDTH}"
+DISPLAY_HEIGHT="${BROWSER_DISPLAY_HEIGHT:-$((HEIGHT + 100))}"
 WS_ENDPOINT_FILE="${BROWSER_WS_ENDPOINT_FILE:-/data/profile/browser-ws-endpoint.txt}"
 PLAYWRIGHT_SERVER_PORT="${PLAYWRIGHT_SERVER_PORT:-9223}"
 PLAYWRIGHT_SERVER_HOST="${PLAYWRIGHT_SERVER_HOST:-0.0.0.0}"
@@ -71,7 +77,7 @@ if [[ -n "${VNC_PASSWORD:-}" ]]; then
 fi
 unset VNC_PASSWORD
 
-run_as_browser Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" -ac +extension RANDR >/tmp/xvfb.log 2>&1 &
+run_as_browser Xvfb "$DISPLAY" -screen 0 "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}x24" -ac +extension RANDR >/tmp/xvfb.log 2>&1 &
 run_as_browser fluxbox >/tmp/fluxbox.log 2>&1 &
 # -add_keysyms teaches the X keymap Arabic and other non-Latin keysyms while
 # preserving the VNC authentication and non-root process boundary.

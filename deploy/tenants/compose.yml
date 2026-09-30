@@ -46,6 +46,8 @@ services:
     environment:
       BROWSER_WIDTH: "1280"
       BROWSER_HEIGHT: "800"
+      BROWSER_DISPLAY_WIDTH: "1280"
+      BROWSER_DISPLAY_HEIGHT: "900"
       BROWSER_WS_ENDPOINT_FILE: /data/browser-profile/browser-ws-endpoint.txt
       PLAYWRIGHT_SERVER_HOST: 0.0.0.0
       PLAYWRIGHT_SERVER_PORT: "9223"
