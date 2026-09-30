@@ -457,6 +457,73 @@ def test_portal_assertion_is_signed_scoped_fresh_and_single_use(
         }).status_code == 403
 
 
+def test_fresh_owner_proof_reattaches_one_session_after_broker_restart(
+    tmp_path: Path, clock: list[float]
+) -> None:
+    active: list[dict[str, str]] = []
+    controller_creates = 0
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal controller_creates
+        if request.method == "GET" and request.url.path == "/sessions":
+            return httpx.Response(200, json=active)
+        if request.method == "POST" and request.url.path == "/sessions":
+            controller_creates += 1
+            active[:] = [{"id": "owner-1", "status": "active"}]
+            return httpx.Response(200, json={"id": "owner-1"})
+        return httpx.Response(200, json={})
+
+    key = Ed25519PrivateKey.generate()
+    public = base64.urlsafe_b64encode(
+        key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw
+        )
+    ).rstrip(b"=").decode()
+    options = {
+        "portal_assertion_public_key": public,
+        "expected_user_id": "user-a",
+        "expected_tenant_id": "tenant-a",
+    }
+
+    # First process creates the tenant's one browser session.
+    with TestClient(app_at(tmp_path, upstream, **options)) as client:
+        opened = client.post("/owner/sessions", headers=auth(OWNER), json={
+            "start_url": "https://example.com",
+            "portal_assertion": signed_assertion(key, clock, jti="before-restart-assertion"),
+        })
+        assert opened.status_code == 200
+        assert opened.json()["id"] == "owner-1"
+
+    # A broker-only restart loses its in-memory owner_session_id, but the
+    # dedicated tenant controller and browser intentionally remain alive.
+    # A new scoped proof must adopt that exact session, not create a second one.
+    with TestClient(app_at(tmp_path, upstream, **options)) as restarted:
+        recovered = restarted.post("/owner/sessions", headers=auth(OWNER), json={
+            "start_url": "https://example.com",
+            "portal_assertion": signed_assertion(key, clock, jti="after-restart-assertion"),
+        })
+        assert recovered.status_code == 200
+        assert recovered.json()["id"] == "owner-1"
+        assert recovered.json()["reattached"] is True
+        assert restarted.get("/owner/visual-access", headers=auth(OWNER)).json() == {
+            "session_id": "owner-1"
+        }
+    assert controller_creates == 1
+
+    # Ambiguous controller state is never guessed or attached.
+    active[:] = [
+        {"id": "owner-1", "status": "active"},
+        {"id": "owner-2", "status": "active"},
+    ]
+    with TestClient(app_at(tmp_path, upstream, **options)) as ambiguous:
+        refused = ambiguous.post("/owner/sessions", headers=auth(OWNER), json={
+            "start_url": "https://example.com",
+            "portal_assertion": signed_assertion(key, clock, jti="ambiguous-restart-assertion"),
+        })
+        assert refused.status_code == 409
+    assert controller_creates == 1
+
+
 def test_owner_deny_or_revoke_blocks_agent_until_next_owner_session(tmp_path: Path, clock: list[float]) -> None:
     active = False
 
