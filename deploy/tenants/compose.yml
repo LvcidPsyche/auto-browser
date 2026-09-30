@@ -44,9 +44,12 @@ services:
       retries: 12
       start_period: 30s
     environment:
-      BROWSER_WIDTH: "1280"
+      # A 16:9 framebuffer fills common desktop viewers without distorting the
+      # page or breaking pointer coordinates. The page keeps 100 px less height
+      # so Chromium's tabs/address bar remain inside the captured display.
+      BROWSER_WIDTH: "1600"
       BROWSER_HEIGHT: "800"
-      BROWSER_DISPLAY_WIDTH: "1280"
+      BROWSER_DISPLAY_WIDTH: "1600"
       BROWSER_DISPLAY_HEIGHT: "900"
       BROWSER_WS_ENDPOINT_FILE: /data/browser-profile/browser-ws-endpoint.txt
       PLAYWRIGHT_SERVER_HOST: 0.0.0.0
@@ -127,6 +130,8 @@ services:
       # One visible browser on the shared X display. Enforced in code too
       # whenever PERSISTENT_PROFILES_ENABLED is on.
       MAX_SESSIONS: "1"
+      DEFAULT_VIEWPORT_WIDTH: "1600"
+      DEFAULT_VIEWPORT_HEIGHT: "800"
       STATE_DB_PATH: /data/db/operator.db
       BROWSER_WS_ENDPOINT_FILE: /data/browser-profile/browser-ws-endpoint.txt
       TAKEOVER_URL: http://127.0.0.1:6080/vnc.html

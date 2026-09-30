@@ -3,7 +3,7 @@ set -euo pipefail
 
 export DISPLAY=:99
 WIDTH="${BROWSER_WIDTH:-1600}"
-HEIGHT="${BROWSER_HEIGHT:-900}"
+HEIGHT="${BROWSER_HEIGHT:-800}"
 # Chromium's page viewport is WIDTH x HEIGHT, but the headed browser also needs
 # room for its tabs, address bar, and the Fluxbox window frame.  Giving Xvfb the
 # exact viewport height clips part of that real window in the VNC framebuffer.

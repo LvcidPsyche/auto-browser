@@ -157,12 +157,18 @@ class _Base(unittest.IsolatedAsyncioTestCase):
 
 
 class PersistentProfileSessionCreateTests(_Base):
+    settings_overrides = {"DEFAULT_VIEWPORT_WIDTH": 1600, "DEFAULT_VIEWPORT_HEIGHT": 800}
+
     async def test_no_named_profile_uses_the_auto_persist_default(self) -> None:
         result = await self.manager.create_session(name="fixture")
 
         self.manager.persistent_profiles.open.assert_awaited_once()
         self.assertEqual(self.manager.persistent_profiles.open.await_args.args[0], "owner-default")
         self.assertIsNone(self.manager.persistent_profiles.open.await_args.kwargs["owner"])
+        self.assertEqual(
+            self.manager.persistent_profiles.open.await_args.kwargs["context_kwargs"]["viewport"],
+            {"width": 1600, "height": 800},
+        )
         session = self.manager.sessions[result["id"]]
         self.assertEqual(session.persistent_profile_name, "owner-default")
         self.assertIs(session.context, self.contexts[0])

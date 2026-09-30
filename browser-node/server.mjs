@@ -7,7 +7,7 @@ import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { chromium } from "playwright";
 
-const width = Number.parseInt(process.env.BROWSER_WIDTH || "1280", 10);
+const width = Number.parseInt(process.env.BROWSER_WIDTH || "1600", 10);
 const height = Number.parseInt(process.env.BROWSER_HEIGHT || "800", 10);
 const endpointFile = process.env.BROWSER_WS_ENDPOINT_FILE || "/data/profile/browser-ws-endpoint.txt";
 const host = process.env.PLAYWRIGHT_SERVER_HOST || "0.0.0.0";
