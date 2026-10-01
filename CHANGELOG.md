@@ -4,6 +4,58 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+Upgrade notes:
+- **Everything in `.env` now reaches the controller.** Docker Compose used to pass only the
+  keys it listed, so `API_BEARER_TOKENS`, `PII_SCRUB_*`, `WITNESS_*`, `SHARE_TOKEN_SECRET`,
+  `APPROVAL_WEBHOOK_*` and other documented settings set in `.env` were ignored. Check your
+  `.env` for values you did not mean to apply. Needs Docker Compose 2.24 or newer.
+- `SHADOW_BROWSE_ENABLED` and the new `CURATOR_ENABLED` default to `false`. The curator
+  reviewed every closed session with a paid model call whenever a provider key was set.
+- `scripts/verify_witness_bundle.py` fails a bundle with no signed receipt unless you pass
+  `--allow-unsigned`, and takes `--expect-key-id` and `--expect-head` to pin the signing key
+  and the chain head.
+- Staged skill candidates signed before this release fail verification, because their
+  envelopes carry no file hashes; induce them again.
+- A `type` action whose field will not keep keyboard focus now fails with `focus_lost`
+  instead of typing elsewhere.
+
+### Security
+
+- Hardened approvals, navigation, the TOTP autofill, click and type targeting, PII scrubbing,
+  auth-state handling and witness bundle verification. Advisories will follow with details.
+
+### Fixed
+
+- **Governed approvals work.** A governed payment, post, account change, destructive action
+  or upload through the MCP gateway failed with "already being executed" and never ran. A
+  governed write approval is consumed when its action runs, through the orchestrator and
+  `POST /approvals/{id}/execute` alike, and an expired approval is refused before its action
+  runs.
+- **A page that never answers cannot hang the controller.** A page running a script in an
+  endless loop hung `GET /sessions` and `DELETE /sessions/{id}`; with the default
+  `MAX_SESSIONS=1` it held the only slot until a restart. Listing no longer fails when a
+  session closes mid-list.
+- **The Claude provider works on Claude Opus 5.5, Sonnet 5.5 and Fable 5.1**, which reject a
+  forced tool choice, and has room for their thinking (16k output tokens instead of 1,024).
+- **PII scrubbing:** card numbers written in groups, provider API tokens, Basic credentials,
+  cookie headers and OAuth codes are redacted; screenshots are redacted a line at a time, so
+  phone numbers and grouped card numbers no longer slip through; console text that a page
+  writes can no longer stall the controller.
+- **Codespaces start**, with an API token generated into `.env`. `make doctor` sends the token
+  and refuses to run when it cannot see whether live sessions would be interrupted.
+- **Isolated sessions work from any checkout directory**: the browser image has a fixed name.
+- **Releases publish only commits on `main`.**
+- **The browser node waits for its display** before starting the takeover desktop, which
+  could otherwise fail silently while the container reported healthy.
+- **Memory profiles** whose names map to the same file (`github.com`, `github_com`) are no
+  longer merged.
+- `read_download` reads CSV files on Windows hosts, where the registry types them as Excel.
+
+### Changed
+
+- The test suite writes only to a temporary directory; it used to write into `./data` (and
+  under `make test`, into the real witness chains). Real-Chromium tests run in CI.
+
 ## [1.8.1] — 2026-09-26
 
 A reliability, speed, polish and security pass over 1.8.0.

@@ -176,6 +176,36 @@ class ApprovalExecutionTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.execute_approval(approval_id)
         self.manager.click.assert_awaited_once()
 
+    async def test_concurrent_execute_approval_requests_run_the_action_once(self) -> None:
+        """GHSA-q7xx-f6pw-w7mv's reproduction: N parallel POST /approvals/{id}/execute."""
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_click(*_args, **_kwargs):
+            started.set()
+            await release.wait()
+            return {"action": "click"}
+
+        self.manager.click = AsyncMock(side_effect=slow_click)  # type: ignore[method-assign]
+        decision = BrowserActionDecision(action="click", reason="post it", element_id="op-post", risk_category="post")
+        with self.assertRaises(ApprovalRequiredError) as ctx:
+            await self.manager.execute_decision(SESSION, decision)
+        approval_id = ctx.exception.approval.id
+        await self.manager.approve(approval_id, comment="ok")
+
+        first = asyncio.create_task(self.manager.execute_approval(approval_id))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+            others = await asyncio.gather(
+                *(self.manager.execute_approval(approval_id) for _ in range(7)), return_exceptions=True
+            )
+        finally:
+            release.set()
+        await first
+
+        self.assertTrue(all(isinstance(result, PermissionError) for result in others), others)
+        self.manager.click.assert_awaited_once()
+        self.assertEqual(await self._status(approval_id), "executed")
+
     async def test_an_expired_approval_is_refused_before_its_action_runs(self) -> None:
         decision = BrowserActionDecision(action="click", reason="save", element_id="op-save", risk_category="write")
         with self.assertRaises(ApprovalRequiredError) as ctx:
