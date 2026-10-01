@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# page.title() and page.evaluate() have no timeout, and a page running a script
+# in an endless loop never answers them. These bound what the session list and
+# close_session wait for, so one such page cannot hang either of them.
+PAGE_TITLE_TIMEOUT_SECONDS = 2.0
+# How long close_session waits for an action to release the session before it
+# closes the browser context out from under it.
+CLOSE_LOCK_WAIT_SECONDS = 10.0
+# Each teardown step (trace, context, isolated runtime) gets at most this long.
+TEARDOWN_STEP_TIMEOUT_SECONDS = 30.0
+
 
 class BrowserSessionService:
     """Encapsulates live session lifecycle and durable session summaries."""
@@ -38,7 +49,9 @@ class BrowserSessionService:
 
     async def list(self) -> list[dict[str, Any]]:
         session_map = {record.id: record.model_dump() for record in await self.manager.session_store.list()}
-        for session in self.manager.sessions.values():
+        # A snapshot: summaries await, and a session created or closed meanwhile
+        # changed the dict mid-iteration ("dictionary changed size").
+        for session in list(self.manager.sessions.values()):
             summary = await self.manager._session_summary(session)
             session_map[summary["id"]] = summary
         return sorted(
@@ -361,7 +374,8 @@ class BrowserSessionService:
 
     async def close(self, session_id: str) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
-        async with session.lock:
+        locked = await self._lock_for_close(session)
+        try:
             if self.manager.sessions.get(session_id) is not session:
                 # Closed by a concurrent call while this one waited for the
                 # lock. Carrying on released the tunnel and runtime twice and
@@ -412,6 +426,30 @@ class BrowserSessionService:
             summary["witness_remote"] = session.witness_remote_state.model_dump()
             await self.manager.session_store.upsert(SessionRecord.model_validate(summary))
             return {"closed": True, "trace_path": str(session.trace_path), "session": summary}
+        finally:
+            if locked:
+                session.lock.release()
+
+    async def _lock_for_close(self, session: "BrowserSession") -> bool:
+        """Take the session lock for closing, even from an action stuck on its page.
+
+        An action waiting on a page that never answers holds the lock forever.
+        Closing the browser context fails that wait, which releases the lock.
+        Returns whether the lock is held; close goes ahead without it rather
+        than leave the session — and its MAX_SESSIONS slot — stuck until restart.
+        """
+        try:
+            await asyncio.wait_for(session.lock.acquire(), timeout=CLOSE_LOCK_WAIT_SECONDS)
+            return True
+        except TimeoutError:
+            logger.warning("session %s is busy; closing its browser context so it can be closed", session.id)
+        await self._teardown_step(session, "close a stuck browser context", session.context.close)
+        try:
+            await asyncio.wait_for(session.lock.acquire(), timeout=CLOSE_LOCK_WAIT_SECONDS)
+            return True
+        except TimeoutError:
+            logger.warning("session %s is still busy after its context closed; closing it anyway", session.id)
+            return False
 
     async def _release_resources(self, session: "BrowserSession") -> None:
         """Tear down everything a live session holds, each step independently.
@@ -436,7 +474,9 @@ class BrowserSessionService:
     @staticmethod
     async def _teardown_step(session: "BrowserSession", label: str, step: Any) -> None:
         try:
-            await step()
+            await asyncio.wait_for(step(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.warning("gave up waiting to %s for session %s", label, session.id)
         except Exception as exc:
             logger.warning("failed to %s for session %s: %s", label, session.id, exc)
 
@@ -570,7 +610,11 @@ class BrowserSessionService:
         if callable(is_closed) and is_closed():
             return "", "", False
         try:
-            return page.url, await page.title(), True
+            return page.url, await asyncio.wait_for(page.title(), timeout=PAGE_TITLE_TIMEOUT_SECONDS), True
+        except TimeoutError:
+            # Live, but its renderer is not answering (a script in an endless
+            # loop). Without a bound this hung every listing and every close.
+            return page.url, "", True
         except PlaywrightError as exc:
             logger.debug("page snapshot failed for session %s: %s", session.id, exc)
             return "", "", False

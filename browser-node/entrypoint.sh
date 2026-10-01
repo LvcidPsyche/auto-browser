@@ -59,6 +59,19 @@ fi
 unset VNC_PASSWORD
 
 run_as_browser Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" -ac +extension RANDR >/tmp/xvfb.log 2>&1 &
+# Everything below draws on or serves this display. Started in the same breath
+# as Xvfb, x11vnc could lose the race, fail to open the display and exit — and
+# takeover stayed dead while the healthcheck, which reaches noVNC's static page,
+# reported healthy. Wait for the display's socket first.
+for _ in {1..100}; do
+  [[ -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ]] && break
+  sleep 0.1
+done
+if [[ ! -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ]]; then
+  echo "Xvfb did not start within 10s:" >&2
+  cat /tmp/xvfb.log >&2 || true
+  exit 1
+fi
 run_as_browser fluxbox >/tmp/fluxbox.log 2>&1 &
 run_as_browser x11vnc -display "$DISPLAY" -forever -shared -rfbport 5900 "${VNC_AUTH_ARGS[@]}" -xkb >/tmp/x11vnc.log 2>&1 &
 # websockify serves noVNC directly, rather than through its wrapper script, so it can take an
