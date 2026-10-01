@@ -76,7 +76,6 @@ class BrowserSessionService:
 
         session_id = uuid4().hex[:12]
         artifact_dir, auth_dir, upload_dir = self.prepare_dirs(session_id)
-        prepared_auth_state = None
         source_path: Path | None = None
 
         if proxy_persona:
@@ -102,8 +101,7 @@ class BrowserSessionService:
         elif storage_state_path:
             source_path = self.manager.auth_profiles.storage_state_source(storage_state_path)
         if source_path is not None:
-            prepared_auth_state = self.manager.auth_state.prepare_for_context(source_path)
-            context_kwargs["storage_state"] = str(prepared_auth_state.path)
+            context_kwargs["storage_state"] = self.manager.auth_state.prepare_for_context(source_path).storage_state
 
         context: BrowserContext | None = None
         session: BrowserSession | None = None
@@ -244,8 +242,6 @@ class BrowserSessionService:
         finally:
             if reserved:
                 self._creating -= 1
-            if prepared_auth_state is not None:
-                prepared_auth_state.cleanup()
 
     def check_limit(self) -> None:
         if len(self.manager.sessions) + self._creating >= self.manager.settings.max_sessions:

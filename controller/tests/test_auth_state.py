@@ -12,11 +12,13 @@ from app.auth_state import AuthStateManager
 
 
 class FakeContext:
-    async def storage_state(self, path: str) -> None:
-        Path(path).write_text(
-            json.dumps({"cookies": [{"name": "sid", "value": "abc123"}], "origins": []}),
-            encoding="utf-8",
-        )
+    """Like Playwright: returns the state, and writes it only when given a path."""
+
+    async def storage_state(self, path: str | None = None) -> dict:
+        state = {"cookies": [{"name": "sid", "value": "abc123"}], "origins": []}
+        if path is not None:
+            Path(path).write_text(json.dumps(state), encoding="utf-8")
+        return state
 
 
 class AuthStateManagerTests(unittest.IsolatedAsyncioTestCase):
@@ -38,15 +40,11 @@ class AuthStateManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["format"], "fernet-json")
             self.assertIn("ciphertext", payload)
 
+            before = sorted(p.name for p in root.iterdir())
             prepared = manager.prepare_for_context(stored_path)
-            try:
-                restored = json.loads(prepared.path.read_text(encoding="utf-8"))
-                self.assertEqual(restored["cookies"][0]["name"], "sid")
-                self.assertTrue(prepared.cleanup_path is not None)
-            finally:
-                prepared.cleanup()
-
-            self.assertFalse(prepared.path.exists())
+            self.assertEqual(prepared.storage_state["cookies"][0]["name"], "sid")
+            # Decrypted in memory: no plaintext copy on disk, not even briefly.
+            self.assertEqual(sorted(p.name for p in root.iterdir()), before)
 
     async def test_failed_encryption_leaves_no_plaintext_behind(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -66,10 +64,9 @@ class AuthStateManagerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_concurrent_saves_to_one_path_all_succeed(self) -> None:
         class SlowContext:
-            async def storage_state(self, path: str) -> None:
-                Path(path).write_text("{", encoding="utf-8")
+            async def storage_state(self, path: str | None = None) -> dict:
                 await asyncio.sleep(0.01)
-                Path(path).write_text(json.dumps({"cookies": [], "origins": []}), encoding="utf-8")
+                return {"cookies": [], "origins": []}
 
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -87,10 +84,7 @@ class AuthStateManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([r for r in results if isinstance(r, Exception)], [])
             self.assertEqual([p.name for p in root.iterdir()], ["state.json.enc"])
             prepared = manager.prepare_for_context(root / "state.json.enc")
-            try:
-                self.assertEqual(json.loads(prepared.path.read_text(encoding="utf-8"))["cookies"], [])
-            finally:
-                prepared.cleanup()
+            self.assertEqual(prepared.storage_state["cookies"], [])
 
     async def test_inspect_marks_stale_and_prepare_rejects_old_state(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

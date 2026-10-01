@@ -251,18 +251,15 @@ def test_encrypted_content_is_detected_without_the_enc_suffix(tmp_path: Path) ->
     handed to Playwright verbatim — so no cookies loaded and the agent carried
     on believing the auth profile had been applied.
     """
-    import json
-
     manager, key = _auth_manager(tmp_path, require_encryption=False)
     mislabelled = _write_envelope(tmp_path / "state-no-suffix.json", key)
 
     assert manager.inspect(mislabelled)["encrypted"] is True
 
     prepared = manager.prepare_for_context(mislabelled)
-    body = json.loads(Path(prepared.path).read_text(encoding="utf-8"))
-    assert "cookies" in body, "the envelope must be decrypted, not passed through"
+    body = prepared.storage_state
+    assert isinstance(body, dict) and "cookies" in body, "the envelope must be decrypted, not passed through"
     assert body["cookies"][0]["value"] == "SUPER-SECRET"
-    prepared.cleanup()
 
 
 def test_plaintext_named_enc_is_detected_as_plaintext(tmp_path: Path) -> None:

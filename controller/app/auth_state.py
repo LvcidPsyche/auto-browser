@@ -21,11 +21,11 @@ _MAX_INSPECT_BYTES = 8 * 1024 * 1024
 class PreparedAuthState:
     path: Path
     source_info: dict[str, Any]
-    cleanup_path: Path | None = None
-
-    def cleanup(self) -> None:
-        if self.cleanup_path and self.cleanup_path.exists():
-            self.cleanup_path.unlink(missing_ok=True)
+    # What browser.new_context(storage_state=...) takes: the path of a
+    # plaintext state file, or decrypted state as a dict. Decrypted state used
+    # to go to a temp file beside the encrypted one, inside the auth profile
+    # directory, where an export taken while a session opened packed it.
+    storage_state: str | dict[str, Any]
 
 
 class AuthStateManager:
@@ -58,28 +58,30 @@ class AuthStateManager:
 
     async def write_storage_state(self, context, destination: Path) -> dict[str, Any]:
         final_path = self.output_path(destination)
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.encryption_enabled or self.require_encryption:
+            # Encrypted from memory: Playwright returns the state, and the
+            # plaintext it used to write to a temp file first never exists.
+            state = await context.storage_state()
+            ciphertext = self._encrypt(json.dumps(state).encode("utf-8"))
+            payload = {
+                "version": 1,
+                "format": "fernet-json",
+                "ciphertext": ciphertext,
+            }
+            atomic_write_text(final_path, json.dumps(payload))
+            return self.inspect(final_path)
+
         # A fresh temp file per save, removed whatever happens. The fixed
         # ".<name>.tmp.json" it replaces was shared by concurrent saves of one
         # profile (from different sessions, so no session lock serializes
-        # them), and when encrypting failed it stayed behind holding the
-        # plaintext cookies; under auth profiles, which cleanup never touches,
-        # it stayed for good. mkstemp also makes it owner-only.
-        final_path.parent.mkdir(parents=True, exist_ok=True)
+        # them). mkstemp also makes it owner-only.
         fd, temp_name = tempfile.mkstemp(dir=final_path.parent, prefix=f".{final_path.name}.", suffix=".tmp.json")
         os.close(fd)
         temp_plain = Path(temp_name)
         try:
             await context.storage_state(path=str(temp_plain))
-            if self.encryption_enabled or self.require_encryption:
-                ciphertext = self._encrypt(temp_plain.read_bytes())
-                payload = {
-                    "version": 1,
-                    "format": "fernet-json",
-                    "ciphertext": ciphertext,
-                }
-                atomic_write_text(final_path, json.dumps(payload))
-            else:
-                os.replace(temp_plain, final_path)
+            os.replace(temp_plain, final_path)
         finally:
             temp_plain.unlink(missing_ok=True)
 
@@ -104,17 +106,13 @@ class AuthStateManager:
                     "REQUIRE_AUTH_STATE_ENCRYPTION=true but this auth state is not encrypted: "
                     f"{source_path}. Re-save it with an encryption key configured."
                 )
-            return PreparedAuthState(path=source_path, source_info=info)
+            return PreparedAuthState(path=source_path, source_info=info, storage_state=str(source_path))
         if self._fernet is None:
             raise RuntimeError("Encrypted auth state provided but AUTH_STATE_ENCRYPTION_KEY is not configured")
 
         payload = json.loads(source_path.read_text(encoding="utf-8"))
         plaintext = self._fernet.decrypt(payload["ciphertext"].encode("utf-8"))
-        fd, temp_name = tempfile.mkstemp(suffix=".json", prefix="auth-state-", dir=str(source_path.parent))
-        os.close(fd)
-        temp_path = Path(temp_name)
-        temp_path.write_bytes(plaintext)
-        return PreparedAuthState(path=temp_path, source_info=info, cleanup_path=temp_path)
+        return PreparedAuthState(path=source_path, source_info=info, storage_state=json.loads(plaintext))
 
     def inspect(self, path: Path | None) -> dict[str, Any]:
         payload: dict[str, Any] = {
