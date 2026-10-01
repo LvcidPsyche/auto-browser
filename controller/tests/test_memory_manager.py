@@ -85,3 +85,34 @@ class MemoryProfileTests(unittest.TestCase):
         self.assertIn("Do the thing", prompt)
         self.assertIn("step a", prompt)
         self.assertIn("#submit", prompt)
+
+
+class MemoryProfileNameCollisionTests(unittest.IsolatedAsyncioTestCase):
+    """Two names that map to one file are two profiles, not one.
+
+    File names replace every character outside [A-Za-z0-9_-] with "_", so
+    "github.com" and "github_com" were both github_com.json: saving one merged
+    into the other, and reading one returned the other's notes.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.manager = MemoryManager(Path(self.tempdir.name))
+        await self.manager.startup()
+        await self.manager.save("github.com", notes=["note for github.com"])
+
+    async def asyncTearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    async def test_saving_a_colliding_name_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            await self.manager.save("github_com", notes=["note for github_com"])
+        profile = await self.manager.get("github.com")
+        self.assertEqual(profile.notes, ["note for github.com"])
+
+    async def test_reading_a_colliding_name_finds_nothing(self) -> None:
+        self.assertIsNone(await self.manager.get("github_com"))
+
+    async def test_deleting_a_colliding_name_leaves_the_other_profile(self) -> None:
+        self.assertFalse(await self.manager.delete("github_com"))
+        self.assertIsNotNone(await self.manager.get("github.com"))

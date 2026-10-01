@@ -63,6 +63,16 @@ class MemoryManager:
     ) -> MemoryProfile:
         async with self._lock:
             existing = await self._load(name)
+            if existing is None:
+                stored_as = await self._stored_name(name)
+                if stored_as is not None:
+                    # File names fold every character outside [A-Za-z0-9_-]
+                    # to "_", so "github.com" and "github_com" share a file.
+                    # Saving one merged into the other.
+                    raise ValueError(
+                        f"memory profile name {name!r} collides with the existing profile {stored_as!r}; "
+                        "choose another name"
+                    )
             now = utc_now()
             if existing:
                 profile = existing.model_copy(
@@ -122,13 +132,21 @@ class MemoryManager:
         return await asyncio.to_thread(_list_sync)
 
     async def delete(self, name: str) -> bool:
-        path = self._profile_path(name)
-        if path.exists():
-            await asyncio.to_thread(path.unlink)
-            return True
-        return False
+        if await self._load(name) is None:
+            return False
+        await asyncio.to_thread(self._profile_path(name).unlink)
+        return True
 
     async def _load(self, name: str) -> MemoryProfile | None:
+        """The profile saved under exactly `name`; a file another name maps to is not it."""
+        profile = await self._read(name)
+        return profile if profile is not None and profile.name == name else None
+
+    async def _stored_name(self, name: str) -> str | None:
+        profile = await self._read(name)
+        return profile.name if profile is not None else None
+
+    async def _read(self, name: str) -> MemoryProfile | None:
         path = self._profile_path(name)
 
         def _read_sync() -> MemoryProfile | None:
