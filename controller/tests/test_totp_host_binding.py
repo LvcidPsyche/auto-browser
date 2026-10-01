@@ -63,10 +63,10 @@ class TotpHostResolutionTests(unittest.TestCase):
 class TotpAutofillTests(unittest.TestCase):
     def run_autofill(self, url: str, *, hosts: tuple[str, ...]) -> tuple[object, AsyncMock]:
         typed = AsyncMock()
-        locator = SimpleNamespace(fill=AsyncMock())
+        locator = SimpleNamespace(fill=AsyncMock(), press=AsyncMock())
         service = BrowserActionService(SimpleNamespace(_settle=AsyncMock()))
-        service.first_visible_locator = AsyncMock(side_effect=[(locator, 'input[name*="code" i]'), None])
-        service.focus_locator = AsyncMock()
+        service._find_one_time_code_field = AsyncMock(return_value=(locator, 'input[name*="code" i]'))
+        service.focus_verified = AsyncMock()
         service.type_text_human_like = typed
         session = SimpleNamespace(page=SimpleNamespace(url=url), totp_secret=SECRET, totp_hosts=hosts)
         return asyncio.run(service.maybe_handle_totp(session)), typed

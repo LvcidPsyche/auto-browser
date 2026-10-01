@@ -4,6 +4,7 @@ import asyncio
 import logging
 import random
 import re
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -53,6 +54,48 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y]) => {
   }
   return false;
 }"""
+
+# Where the TOTP autofill looks for a one-time-code field, most specific first.
+# Every candidate must still pass is_one_time_code_field.
+_ONE_TIME_CODE_FIELD_SELECTORS = (
+    'input[autocomplete="one-time-code"]',
+    'input[name*="otp" i]',
+    'input[id*="otp" i]',
+    'input[inputmode="numeric"][maxlength="6"]',
+    'input[name*="code" i]',
+    'input[id*="code" i]',
+    'input[aria-label*="code" i]',
+    'input[placeholder*="code" i]',
+)
+_MAX_CODE_FIELD_CANDIDATES = 5
+_ONE_TIME_CODE_INPUT_TYPES = frozenset({"", "text", "tel", "number", "password"})
+# Words that say a field holds some other kind of code. The autofill typed live
+# one-time codes into promo, ZIP and card-security fields because their names
+# contain "code"; missing a real code field only means the agent types it.
+_NOT_A_ONE_TIME_CODE = re.compile(
+    r"zip|postal|postcode|promo|coupon|discount|voucher|gift|referr|invite|country|area|region|"
+    r"phone|\btel\b|currency|locale|lang|product|sku|order|track|captcha|cvv|cvc|csc|card|cc-",
+    re.IGNORECASE,
+)
+_FIELD_ATTRIBUTES_SCRIPT = """(el) => ({
+  type: el.getAttribute('type') || '',
+  name: el.getAttribute('name') || '',
+  id: el.id || '',
+  placeholder: el.getAttribute('placeholder') || '',
+  'aria-label': el.getAttribute('aria-label') || '',
+  autocomplete: el.getAttribute('autocomplete') || '',
+})"""
+
+
+def is_one_time_code_field(attributes: Mapping[str, Any]) -> bool:
+    """Whether an input's own attributes say it takes a one-time code."""
+    if str(attributes.get("type") or "").strip().lower() not in _ONE_TIME_CODE_INPUT_TYPES:
+        return False
+    if str(attributes.get("autocomplete") or "").strip().lower() == "one-time-code":
+        return True
+    described = " ".join(str(attributes.get(key) or "") for key in ("name", "id", "placeholder", "aria-label", "autocomplete"))
+    return not _NOT_A_ONE_TIME_CODE.search(described)
+
 
 # Whether keyboard focus is in the element or inside it, shadow roots included.
 _HAS_FOCUS_SCRIPT = """(el) => {
@@ -679,14 +722,21 @@ class BrowserActionService:
                 delay_ms += random.randint(180, 600)
             await asyncio.sleep(delay_ms / 1000)
 
-    async def first_visible_locator(self, page: "Page", selectors: list[str]) -> tuple[Any, str] | None:
-        for selector in selectors:
+    async def _find_one_time_code_field(self, page: "Page") -> tuple[Any, str] | None:
+        for selector in _ONE_TIME_CODE_FIELD_SELECTORS:
             try:
-                locator = page.locator(selector).first
-                if await locator.count() > 0 and await locator.is_visible():
-                    return locator, selector
-            except Exception:
+                candidates = await page.locator(selector).all()
+            except PlaywrightError:
                 continue
+            for candidate in candidates[:_MAX_CODE_FIELD_CANDIDATES]:
+                try:
+                    if not await candidate.is_visible():
+                        continue
+                    attributes = await candidate.evaluate(_FIELD_ATTRIBUTES_SCRIPT)
+                except PlaywrightError:
+                    continue  # detached while we looked; the next candidate may still do
+                if is_one_time_code_field(attributes):
+                    return candidate, selector
         return None
 
     async def maybe_handle_totp(self, session: "BrowserSession") -> dict[str, Any] | None:
@@ -705,17 +755,7 @@ class BrowserActionService:
                 retryable=False,
                 details={"url": session.page.url},
             )
-        selectors = [
-            'input[autocomplete="one-time-code"]',
-            'input[inputmode="numeric"][maxlength="6"]',
-            'input[name*="otp" i]',
-            'input[name*="code" i]',
-            'input[id*="otp" i]',
-            'input[id*="code" i]',
-            'input[aria-label*="code" i]',
-            'input[placeholder*="code" i]',
-        ]
-        located = await self.first_visible_locator(session.page, selectors)
+        located = await self._find_one_time_code_field(session.page)
         if located is None:
             return None
 
@@ -724,30 +764,17 @@ class BrowserActionService:
         if not self._totp_host_allowed(session):
             return None
         code = pyotp.TOTP(session.totp_secret).now()
-        await self.focus_locator(session, locator)
+        await self.focus_verified(session, locator, action="totp_fill")
         try:
             await locator.fill("")
         except Exception:
             await session.page.keyboard.press("Control+a")
             await session.page.keyboard.press("Delete")
         await self.type_text_human_like(session.page, code)
-        submit = await self.first_visible_locator(
-            session.page,
-            [
-                'button[type="submit"]',
-                '[aria-label*="verify" i][role="button"]',
-                'button:has-text("Verify")',
-                'button:has-text("Continue")',
-                'button:has-text("Next")',
-                'button:has-text("Submit")',
-            ],
-        )
-        if submit is not None:
-            coords = await self.locator_center(submit[0])
-            if coords is None:
-                await submit[0].click()
-            else:
-                await self.click_human_like(session, coords[0], coords[1])
+        # Enter submits the form the code went into. This used to click the
+        # first submit button anywhere on the page — on a checkout page that
+        # was "Place order", clicked with no approval anywhere in this path.
+        await locator.press("Enter")
         await self.manager._settle(session.page)
         return {"selector": selector, "code_length": len(code)}
 
