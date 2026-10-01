@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 
 from ..approvals import ApprovalRequiredError
 from ..models import (
+    HTTP_URL_SCHEMES,
     ClickRequest,
     CreateSessionRequest,
     ExecuteActionRequest,
@@ -23,6 +24,7 @@ from ..models import (
     TypeRequest,
     UploadRequest,
     WaitRequest,
+    validate_url,
 )
 from ._utils import internal_error
 
@@ -324,8 +326,17 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
 
     @router.post("/sessions/{session_id}/fork")
     async def fork_session(session_id: str, name: str | None = None, start_url: str | None = None) -> dict[str, Any]:
+        # Query parameters skip the request models every other route uses, so
+        # the URL gets the same validation here.
+        try:
+            if start_url is not None:
+                start_url = validate_url(start_url, field_name="start_url", allowed_schemes=HTTP_URL_SCHEMES)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid request") from None
         try:
             return await manager.fork_session(session_id, name=name, start_url=start_url)
+        except PermissionError:
+            raise HTTPException(status_code=403, detail="Not permitted") from None
         except RuntimeError:
             raise HTTPException(status_code=409, detail="Conflict") from None
 

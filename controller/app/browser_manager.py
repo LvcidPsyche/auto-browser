@@ -37,6 +37,7 @@ from .config import Settings
 from .downloads import DownloadCaptureService
 from .memory_manager import MemoryManager
 from .models import (
+    HTTP_URL_SCHEMES,
     BrowserActionDecision,
     SessionStatus,
     WitnessRemoteState,
@@ -650,7 +651,13 @@ class BrowserManager:
     def _assert_url_allowed(self, url: str) -> None:
         # Parsed as the browser will parse it, not as urllib does — see
         # app/url_safety.py for the backslash host confusion this closes.
-        host = urlparse(browser_equivalent_url(url)).hostname
+        parsed = urlparse(browser_equivalent_url(url))
+        # The scheme is decided here, not left to each request model: the REST
+        # fork route had none, and file://localhost/... passed this gate on the
+        # strength of its host and opened local files in the browser.
+        if parsed.scheme.lower() not in HTTP_URL_SCHEMES:
+            raise PermissionError(f"URL scheme {parsed.scheme!r} is not allowed; only http and https are")
+        host = parsed.hostname
         if not host:
             raise PermissionError(f"Could not determine hostname for URL: {url}")
         patterns = self.settings.allowed_host_patterns
@@ -665,7 +672,9 @@ class BrowserManager:
 
     def _assert_runtime_url_allowed(self, url: str) -> None:
         parsed = urlparse(url)
-        if parsed.scheme in {"about", "data", "blob", ""}:
+        # Where a page may legitimately be after an action: a blank or
+        # script-built document, or Chromium's own page for a failed load.
+        if parsed.scheme in {"about", "data", "blob", "chrome-error", ""}:
             return
         self._assert_url_allowed(url)
 
