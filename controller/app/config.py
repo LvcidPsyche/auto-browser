@@ -340,7 +340,10 @@ class Settings(BaseSettings):
     cdp_connect_url: str | None = Field(None, alias="CDP_CONNECT_URL")
 
     # Shadow browsing — enable headed mode for debugging
-    shadow_browse_enabled: bool = Field(True, alias="SHADOW_BROWSE_ENABLED")
+    # Off by default: it launches a headed Chromium inside the controller with
+    # its sandbox disabled, next to every secret the controller holds, and the
+    # shipped image has neither a browser nor a display for it anyway.
+    shadow_browse_enabled: bool = Field(False, alias="SHADOW_BROWSE_ENABLED")
     # Post-session skill review by an LLM. Off unless asked for: it calls a paid
     # model on every session close.
     curator_enabled: bool = Field(False, alias="CURATOR_ENABLED")

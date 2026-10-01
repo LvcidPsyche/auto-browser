@@ -28,6 +28,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # A v* tag on any commit published it: a branch nobody merged, or a
+      # commit whose CI never ran. Release only what main holds.
+      - name: Verify the tagged commit is on main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main"
+            exit 1
+          fi
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -82,8 +93,10 @@ jobs:
           mkdir -p dist
           cp all-dist/${{ matrix.dist_glob }} dist/
           ls -l dist/
+      # Pinned by commit: this step holds the job's OIDC token, which PyPI
+      # trusts to publish. A branch ref would run whatever it moved to next.
       - name: Publish ${{ matrix.package }} to PyPI (trusted publishing)
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
 
   github-release:
     needs: publish-pypi

@@ -11,8 +11,17 @@ if [ -f /opt/venv/bin/activate ]; then
     . /opt/venv/bin/activate
 fi
 
-# The app module lives under controller/ — move there so Python can find it
-cd /app/controller || exit 1
+# Find the `app` package. Glama clones the repo to /app, so it is under
+# /app/controller; the root Dockerfile copies it to /app/app. Requiring
+# /app/controller made the image that Dockerfile builds exit at once.
+if [ -d /app/controller/app ]; then
+    cd /app/controller || exit 1
+elif [ -d /app/app ]; then
+    cd /app || exit 1
+else
+    echo "glama_entrypoint: no app package under /app/controller or /app" >&2
+    exit 1
+fi
 
 # Launch uvicorn in the background; skip browser-node connection for inspection.
 #

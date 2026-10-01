@@ -161,6 +161,20 @@ if b"200 OK" not in payload:
 PY
 }
 
+# The controller demands API_BEARER_TOKEN whenever one is set (and an operator id
+# when REQUIRE_OPERATOR_ID is on); every API call here used to go without them.
+API_AUTH_ARGS=()
+if [[ -n "${API_BEARER_TOKEN:-}" ]]; then
+  API_AUTH_ARGS+=(-H "Authorization: Bearer ${API_BEARER_TOKEN}")
+fi
+if [[ "${REQUIRE_OPERATOR_ID:-false}" == "true" ]]; then
+  API_AUTH_ARGS+=(-H "${OPERATOR_ID_HEADER:-X-Operator-Id}: ${DOCTOR_OPERATOR_ID:-doctor}")
+fi
+# The ${a[@]+...} form keeps an empty array legal under `set -u` in bash < 4.4 (macOS).
+api_curl() {
+  curl ${API_AUTH_ARGS[@]+"${API_AUTH_ARGS[@]}"} "$@"
+}
+
 require_bin docker
 require_bin curl
 require_bin jq
@@ -205,7 +219,13 @@ OPENAI_AUTH_MODE="${OPENAI_AUTH_MODE:-api}"
 OPENAI_HOST_BRIDGE_SOCKET="${OPENAI_HOST_BRIDGE_SOCKET:-/data/host-bridge/codex.sock}"
 
 if [[ -n "$current_controller_port" ]]; then
-  active_sessions_json="$(curl -fsS "http://127.0.0.1:${current_controller_port}/sessions" 2>/dev/null || echo '[]')"
+  # Fails closed. When the list call failed (a token the controller wants, for
+  # one) this counted zero sessions and went on to interrupt live work.
+  if ! active_sessions_json="$(api_curl -fsS "http://127.0.0.1:${current_controller_port}/sessions")"; then
+    echo "Could not list sessions on API port ${current_controller_port}, so doctor cannot tell whether it would interrupt live work." >&2
+    echo "Set API_BEARER_TOKEN (and the operator id, if REQUIRE_OPERATOR_ID=true) to what that controller expects." >&2
+    exit 1
+  fi
   active_count="$(echo "$active_sessions_json" | jq '[.[] | select(.status == "active")] | length')"
   if [[ "$active_count" != "0" ]]; then
     echo "Refusing readiness smoke because ${active_count} active session(s) already exist on API port ${current_controller_port}." >&2
@@ -240,7 +260,7 @@ if ! wait_for_http "http://127.0.0.1:${API_PORT}/readyz"; then
 fi
 
 echo "Provider readiness:"
-providers_json="$(curl -fsS "http://127.0.0.1:${API_PORT}/agent/providers")"
+providers_json="$(api_curl -fsS "http://127.0.0.1:${API_PORT}/agent/providers")"
 echo "$providers_json" | jq .
 
 smoke_provider_ready="$(echo "$providers_json" | jq -r --arg provider "$SMOKE_PROVIDER" '.[] | select(.provider == $provider) | .configured')"
@@ -248,13 +268,13 @@ smoke_provider_ready="$(echo "$providers_json" | jq -r --arg provider "$SMOKE_PR
 session_id=""
 cleanup() {
   if [[ -n "$session_id" ]]; then
-    curl -fsS -X DELETE "http://127.0.0.1:${API_PORT}/sessions/${session_id}" >/dev/null 2>&1 || true
+    api_curl -fsS -X DELETE "http://127.0.0.1:${API_PORT}/sessions/${session_id}" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
 
 session_payload="$(jq -nc --arg start_url "$SMOKE_URL" --arg name "doctor-smoke" '{start_url:$start_url,name:$name}')"
-session_json="$(curl -fsS "http://127.0.0.1:${API_PORT}/sessions" \
+session_json="$(api_curl -fsS "http://127.0.0.1:${API_PORT}/sessions" \
   -X POST \
   -H 'Content-Type: application/json' \
   -d "$session_payload")"
@@ -264,7 +284,7 @@ echo "Smoke session:"
 echo "$session_json" | jq '{id,status,current_url,title,takeover_url}'
 
 echo "Observe smoke:"
-curl -fsS "http://127.0.0.1:${API_PORT}/sessions/${session_id}/observe" \
+api_curl -fsS "http://127.0.0.1:${API_PORT}/sessions/${session_id}/observe" \
   | jq '{title,url,interactable_count:(.interactables|length),screenshot_url}'
 
 if [[ "$smoke_provider_ready" == "true" ]]; then
@@ -274,7 +294,7 @@ if [[ "$smoke_provider_ready" == "true" ]]; then
   step_status=""
   for attempt in 1 2 3; do
     step_status="$(
-      curl -sS \
+      api_curl -sS \
         -o "$step_response_file" \
         -w '%{http_code}' \
         "http://127.0.0.1:${API_PORT}/sessions/${session_id}/agent/step" \

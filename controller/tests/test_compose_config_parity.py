@@ -98,3 +98,14 @@ def test_env_example_model_matches_settings(key: str, attr: str) -> None:
     assert match.group(1).strip() == settings_value, (
         f".env.example sets {key}={match.group(1).strip()!r} but config.py defaults {attr}={settings_value!r}."
     )
+
+
+def test_the_controller_reads_every_setting_in_dotenv() -> None:
+    """Settings in .env must reach the controller, not only the keys compose lists.
+
+    The controller image holds no .env, so before env_file every documented
+    setting compose did not list by name — API_BEARER_TOKENS, PII_SCRUB_*,
+    WITNESS_*, SHARE_TOKEN_SECRET — was silently ignored.
+    """
+    controller = COMPOSE.read_text(encoding="utf-8").split("\n  controller:\n", 1)[1].split("\n  reverse-ssh:\n", 1)[0]
+    assert re.search(r"env_file:\s*\n\s*- path: \.env\s*\n\s*required: false", controller), controller[:400]
