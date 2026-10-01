@@ -30,6 +30,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
   && rm -rf /var/lib/apt/lists/*
 
+# noVNC releases before 1.8.0 only checked that VideoDecoder existed. Chrome
+# 86-93 on Android exposed that constructor without isConfigSupported(), so
+# importing noVNC failed at top-level await and the phone stayed on a blank or
+# endlessly-loading viewer without ever attempting the VNC websocket. Apply
+# the exact upstream compatibility guard from noVNC PR #2061 until the Debian
+# package contains it. Keep the grep assertion so a future package layout
+# change fails the image build instead of silently dropping mobile support.
+RUN sed -i \
+      "s/if (!('VideoDecoder' in window)) {/if (!('VideoDecoder' in window) || !('isConfigSupported' in VideoDecoder)) {/" \
+      /usr/share/novnc/core/util/browser.js \
+  && grep -Fq "!('isConfigSupported' in VideoDecoder)" /usr/share/novnc/core/util/browser.js
+
 # Chromium, Xvfb, x11vnc and noVNC run as this unprivileged user. Chromium runs
 # without its own sandbox (there is no user namespace to build one in under
 # Docker's default seccomp profile), so root inside the container was the whole
