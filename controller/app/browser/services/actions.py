@@ -7,6 +7,8 @@ import re
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+from playwright.async_api import Error as PlaywrightError
+
 from ... import events as _events
 from ...action_errors import BrowserActionError
 from ...actions import ActionRunContext
@@ -27,6 +29,38 @@ if TYPE_CHECKING:
     from ...browser_manager import BrowserSession
 
 logger = logging.getLogger(__name__)
+
+# How long a click that only moves focus waits for its target to become
+# clickable before focusing it programmatically instead.
+_FOCUS_CLICK_TIMEOUT_MS = 1000
+
+# Whether the element (or a label for it) is what the pointer at (x, y) hits.
+# Runs in the element's own frame; a target inside a child frame was already
+# checked, across frame boundaries, by Playwright's trial click.
+_RECEIVES_POINTER_SCRIPT = """(el, [x, y]) => {
+  if (window !== window.top) return true;
+  let hit = document.elementFromPoint(x, y);
+  while (hit && hit.shadowRoot) {
+    const inner = hit.shadowRoot.elementFromPoint(x, y);
+    if (!inner || inner === hit) break;
+    hit = inner;
+  }
+  if (!hit) return false;
+  const label = hit.closest ? hit.closest('label') : null;
+  if (label && label.control === el) return true;
+  for (let node = hit; node; node = node.parentNode || node.host) {
+    if (node === el) return true;
+  }
+  return false;
+}"""
+
+# Whether keyboard focus is in the element or inside it, shadow roots included.
+_HAS_FOCUS_SCRIPT = """(el) => {
+  for (let node = el.getRootNode().activeElement; node; node = node.parentNode || node.host) {
+    if (node === el) return true;
+  }
+  return false;
+}"""
 
 
 class BrowserActionService:
@@ -82,7 +116,7 @@ class BrowserActionService:
                     await locator.click()
                 else:
                     target["x"], target["y"] = coords
-                    await self.click_human_like(session, coords[0], coords[1])
+                    await self.click_locator_human_like(session, locator, coords)
             await self.manager._settle(session.page)
 
         return await self.manager._run_action(session, "click", target, operation)
@@ -172,7 +206,7 @@ class BrowserActionService:
                 payload.pop("text_preview", None)
                 payload["text_redacted"] = True
             await locator.scroll_into_view_if_needed()
-            await self.focus_locator(session, locator)
+            await self.focus_verified(session, locator, action="type")
             if clear_first:
                 await session.page.keyboard.press("Control+a")
                 await asyncio.sleep(0.03)
@@ -550,19 +584,89 @@ class BrowserActionService:
         jitter_x = x + random.uniform(-2.5, 2.5)
         jitter_y = y + random.uniform(-2.5, 2.5)
         await self.move_mouse_human_like(session, jitter_x, jitter_y)
+        await self._press_mouse(session, jitter_x, jitter_y)
+
+    async def _press_mouse(self, session: "BrowserSession", x: float, y: float) -> None:
         await asyncio.sleep(random.uniform(0.03, 0.12))
         await session.page.mouse.down()
         await asyncio.sleep(random.uniform(0.02, 0.08))
         await session.page.mouse.up()
-        session.mouse_position = (jitter_x, jitter_y)
+        session.mouse_position = (x, y)
+
+    async def click_locator_human_like(
+        self,
+        session: "BrowserSession",
+        locator: Any,
+        coords: tuple[float, float],
+        *,
+        timeout_ms: float | None = None,
+    ) -> None:
+        """Click `locator` along a human-like path, but only if it is what the pointer hits.
+
+        Pressing the mouse at an element's centre sends the click to whatever is
+        on top there: a transparent element over a "Save draft" button took the
+        click, while the approval and the audit trail named the button. Playwright's
+        own checks run first (visible, stable, enabled, receiving events at its
+        click point, frames included), and the point is checked again once the
+        pointer has arrived, so a cover put up during the move is caught as well.
+        When that last check fails the click goes to Playwright's `click()`,
+        which clicks the element if it can and otherwise refuses — it never
+        clicks what covers it.
+        """
+        await locator.click(trial=True, timeout=timeout_ms)
+        x = coords[0] + random.uniform(-2.5, 2.5)
+        y = coords[1] + random.uniform(-2.5, 2.5)
+        await self.move_mouse_human_like(session, x, y)
+        if await self._receives_pointer_at(locator, x, y):
+            await self._press_mouse(session, x, y)
+        else:
+            await locator.click(timeout=timeout_ms)
+
+    @staticmethod
+    async def _receives_pointer_at(locator: Any, x: float, y: float) -> bool:
+        try:
+            return bool(await locator.evaluate(_RECEIVES_POINTER_SCRIPT, [x, y]))
+        except Exception:
+            return False
 
     async def focus_locator(self, session: "BrowserSession", locator: Any) -> None:
         coords = await self.locator_center(locator)
         if coords is None:
             await locator.click()
         else:
-            await self.click_human_like(session, coords[0], coords[1])
+            await self.click_locator_human_like(session, locator, coords, timeout_ms=_FOCUS_CLICK_TIMEOUT_MS)
         await asyncio.sleep(0.05 + random.random() * 0.1)
+
+    async def focus_verified(self, session: "BrowserSession", locator: Any, *, action: str) -> None:
+        """Put keyboard focus in `locator` and prove it is there before anything is typed.
+
+        Keystrokes go to whatever has focus. A field that hands focus on to
+        another one, or a click that never reached the field, sent the text —
+        sometimes a password — somewhere the caller did not name.
+        """
+        try:
+            await self.focus_locator(session, locator)
+        except PlaywrightError:
+            # Covered or not clickable: focus it without clicking anything.
+            pass
+        if await self._has_focus(locator):
+            return
+        await locator.focus()
+        if await self._has_focus(locator):
+            return
+        raise BrowserActionError(
+            "Keyboard focus would not stay in the target field, so nothing was typed.",
+            action=action,
+            code="focus_lost",
+            retryable=True,
+        )
+
+    @staticmethod
+    async def _has_focus(locator: Any) -> bool:
+        try:
+            return bool(await locator.evaluate(_HAS_FOCUS_SCRIPT))
+        except Exception:
+            return False
 
     async def type_text_human_like(self, page: "Page", text: str) -> None:
         for index, char in enumerate(text):
