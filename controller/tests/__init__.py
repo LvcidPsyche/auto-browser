@@ -8,7 +8,41 @@ shape as the August-2026 finding that the Docker job silently ran 566 of 637
 tests.
 """
 
+import atexit
 import os
+import shutil
+import tempfile
+
+# Every data root defaults to /data/..., and tests that build Settings without
+# overriding a root wrote there: on a host, the real /data (C:\data on Windows);
+# under `make test`, which mounts ./data, the developer's own audit log and
+# witness chains — test receipts appended to real chains, signed with the
+# deployment's real witness key. Every root now defaults to a throwaway
+# directory, removed when the run ends. Tests that set a root explicitly win.
+_DATA_ROOT = tempfile.mkdtemp(prefix="auto-browser-tests-")
+atexit.register(shutil.rmtree, _DATA_ROOT, ignore_errors=True)
+for _name, _relative in {
+    "ARTIFACT_ROOT": "artifacts",
+    "UPLOAD_ROOT": "uploads",
+    "AUTH_ROOT": "auth",
+    "APPROVAL_ROOT": "approvals",
+    "AUDIT_ROOT": "audit",
+    "WITNESS_ROOT": "witness",
+    "SESSION_STORE_ROOT": "sessions",
+    "JOB_STORE_ROOT": "jobs",
+    "HARNESS_ROOT": "harness",
+    "MEMORY_ROOT": "memory",
+    "SKILLS_STAGING_ROOT": "skills-staging",
+    "WORKFLOWS_ROOT": "workflows",
+    "MESH_IDENTITY_DIR": "mesh/identity",
+    "MESH_PEERS_PATH": "mesh/peers.json",
+    "CRON_STORE_PATH": "crons/crons.json",
+    "MCP_SESSION_STORE_PATH": "mcp/sessions.json",
+    "COMPLIANCE_MANIFEST_PATH": "compliance-manifest.json",
+    "REMOTE_ACCESS_INFO_PATH": "tunnels/reverse-ssh.json",
+    "ISOLATED_TUNNEL_INFO_ROOT": "tunnels/sessions",
+}.items():
+    os.environ.setdefault(_name, os.path.join(_DATA_ROOT, _relative))
 
 # API_BIND_SCOPE defaults to `exposed` so that an undeclared deployment fails
 # closed (app/auth_policy.py). A TestClient run is loopback by construction and

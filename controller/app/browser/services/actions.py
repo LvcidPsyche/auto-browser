@@ -4,6 +4,7 @@ import asyncio
 import logging
 import random
 import re
+import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -30,6 +31,11 @@ if TYPE_CHECKING:
     from ...browser_manager import BrowserSession
 
 logger = logging.getLogger(__name__)
+
+# Times the human-like mouse path's 4-18 ms gaps. perf_counter, not the event
+# loop's clock: that is time.monotonic, which ticks every 15.6 ms on Windows
+# before Python 3.13, coarser than what is being measured.
+_step_clock = time.perf_counter
 
 # How long a click that only moves focus waits for its target to become
 # clickable before focusing it programmatically instead.
@@ -606,19 +612,18 @@ class BrowserActionService:
             start_y + (y - start_y) * random.uniform(0.5, 0.9) + random.randint(-60, 60),
         )
         steps = random.randint(18, 34)
-        loop = asyncio.get_running_loop()
         for step in range(1, steps + 1):
             t = step / steps
             inv = 1 - t
             px = inv**3 * start_x + 3 * inv * inv * t * control_1[0] + 3 * inv * t * t * control_2[0] + t**3 * x
             py = inv**3 * start_y + 3 * inv * inv * t * control_1[1] + 3 * inv * t * t * control_2[1] + t**3 * y
-            step_started = loop.time()
+            step_started = _step_clock()
             await session.page.mouse.move(px, py)
             # The gap between moves is meant to be 4-18 ms. A move already waits
             # for the browser to dispatch it (about a frame, ~17 ms, in Chromium),
             # and sleeping the whole gap on top of that made each step 20-35 ms:
             # a 26-step path took ~670 ms of every click. Sleep only what is left.
-            remaining = random.uniform(0.004, 0.018) - (loop.time() - step_started)
+            remaining = random.uniform(0.004, 0.018) - (_step_clock() - step_started)
             if remaining > 0:
                 await asyncio.sleep(remaining)
         session.mouse_position = (x, y)

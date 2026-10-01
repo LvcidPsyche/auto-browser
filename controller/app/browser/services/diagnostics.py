@@ -18,6 +18,18 @@ logger = logging.getLogger(__name__)
 
 # Larger downloads are fetched from their artifact URL, not read into a model's context.
 DOWNLOAD_READ_MAX_BYTES = 10 * 1024 * 1024
+
+# A fixed type table, not the host's: mimetypes.guess_type reads /etc/mime.types
+# or the Windows registry, and Windows with Office installed maps .csv to
+# application/vnd.ms-excel, so every CSV download read as binary there. Python's
+# built-in table, plus the Office formats it lacks.
+_MIME_TYPES = mimetypes.MimeTypes()
+for _type, _extension in (
+    ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"),
+    ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"),
+    ("application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx"),
+):
+    _MIME_TYPES.add_type(_type, _extension)
 # Console text is written by the page and kept for the whole session, and every
 # read scrubbed all of it on the event loop. One message is cut to this length.
 CONSOLE_TEXT_MAX_CHARS = 8_000
@@ -177,7 +189,7 @@ class BrowserDiagnosticsService:
             size = path.stat().st_size
         except OSError:
             raise ValueError(f"Download {record.get('id')} ({record.get('filename')}) is no longer on disk.") from None
-        content_type = mimetypes.guess_type(path.name)[0]
+        content_type = _MIME_TYPES.guess_type(path.name)[0]
         described = f"{record.get('filename')} ({content_type or 'unknown type'}, {size:,} bytes)"
         if size > DOWNLOAD_READ_MAX_BYTES:
             raise ValueError(
