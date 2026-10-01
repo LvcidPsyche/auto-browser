@@ -10,7 +10,6 @@ model that asked for it.
 from __future__ import annotations
 
 import asyncio
-import glob
 import json
 import shutil
 import subprocess
@@ -26,6 +25,7 @@ import pytest
 from app.browser_scripts import PAGE_SUMMARY_SCRIPT, PAGE_TEXT_SCRIPT
 from app.models import McpToolCallRequest
 from app.tool_gateway import McpToolGateway
+from tests._chromium import chromium_executable, requires_chromium
 
 NODE = shutil.which("node")
 
@@ -66,12 +66,9 @@ def test_the_excerpt_and_get_html_share_one_normaliser() -> None:
     assert "readable(document.body?.innerText).slice(0, textLimit)" in PAGE_SUMMARY_SCRIPT
 
 
-def _chromium() -> str | None:
-    candidates = sorted(glob.glob("/opt/pw-browsers/chromium-*/chrome-linux*/chrome"))
-    return candidates[-1] if candidates else None
 
 
-@pytest.mark.skipif(_chromium() is None, reason="no local Chromium binary")
+@requires_chromium
 def test_real_chromium_excerpt_keeps_a_table_readable() -> None:
     from playwright.async_api import async_playwright
 
@@ -83,7 +80,7 @@ def test_real_chromium_excerpt_keeps_a_table_readable() -> None:
 
     async def run() -> tuple[str, str]:
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(executable_path=_chromium())
+            browser = await playwright.chromium.launch(executable_path=chromium_executable())
             try:
                 page = await browser.new_page()
                 await page.set_content(html)

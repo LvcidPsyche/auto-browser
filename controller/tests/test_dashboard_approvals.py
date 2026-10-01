@@ -10,17 +10,15 @@ decision with the operator's identity headers.
 from __future__ import annotations
 
 import asyncio
-import glob
 import json
 import re
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
-
 from app.routes.extensions import _DASHBOARD_HTML
 from app.tool_gateway import McpToolGateway
 from app.tool_inputs import EvalJsInput
+from tests._chromium import chromium_executable, requires_chromium
 
 ORIGIN = "http://dashboard.test"
 HOSTILE_REASON = '<img src=x onerror="window.__pwned = 1">Approve browser.eval_js with {"expression": "1+1"}'
@@ -83,12 +81,9 @@ def test_the_tool_call_pattern_matches_the_gateways_stand_in() -> None:
     assert re.fullmatch(js_pattern.strip("^$"), decision.text).group(1) == "browser.eval_js"
 
 
-def _chromium() -> str | None:
-    candidates = sorted(glob.glob("/opt/pw-browsers/chromium-*/chrome-linux*/chrome"))
-    return candidates[-1] if candidates else None
 
 
-@pytest.mark.skipif(_chromium() is None, reason="no local Chromium binary")
+@requires_chromium
 def test_real_browser_approves_and_rejects_from_the_queue() -> None:
     from playwright.async_api import async_playwright
 
@@ -134,7 +129,7 @@ def test_real_browser_approves_and_rejects_from_the_queue() -> None:
                 await dialog.accept("")
 
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(executable_path=_chromium())
+            browser = await playwright.chromium.launch(executable_path=chromium_executable())
             try:
                 page = await browser.new_page()
                 page.on("dialog", lambda dialog: asyncio.ensure_future(on_dialog(dialog)))

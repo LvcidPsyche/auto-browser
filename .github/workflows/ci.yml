@@ -58,6 +58,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install host test dependencies
         run: python -m pip install -e ./controller[dev]
+      # The real-Chromium tests (page text, element naming, overlays, TOTP, the
+      # dashboard) skip when no browser is installed, and until now none was, so
+      # they never ran in CI. One leg is enough: they test the page, not Python.
+      - name: Install Chromium for the real-browser tests
+        if: matrix.python-version == '3.11'
+        run: python -m playwright install --with-deps chromium
       - name: Run controller tests on host Python
         run: |
           cd controller

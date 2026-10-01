@@ -16,7 +16,6 @@ browser binary is available.
 from __future__ import annotations
 
 import asyncio
-import glob
 import json
 import shutil
 import subprocess
@@ -27,6 +26,7 @@ import pytest
 
 from app import browser_scripts
 from app.browser.dom_pruner import _TYPE_PRIORITY
+from tests._chromium import chromium_executable, requires_chromium
 
 NODE = shutil.which("node")
 
@@ -141,12 +141,9 @@ def test_the_pruner_ranks_the_reported_aria_roles() -> None:
         assert role in _TYPE_PRIORITY, role
 
 
-def _chromium() -> str | None:
-    candidates = sorted(glob.glob("/opt/pw-browsers/chromium-*/chrome-linux*/chrome"))
-    return candidates[-1] if candidates else None
 
 
-@pytest.mark.skipif(_chromium() is None, reason="no local Chromium binary")
+@requires_chromium
 def test_real_chromium_names_a_login_form_and_leaks_nothing_typed() -> None:
     from playwright.async_api import async_playwright
 
@@ -161,7 +158,7 @@ def test_real_chromium_names_a_login_form_and_leaks_nothing_typed() -> None:
 
     async def run() -> tuple[list, dict, dict]:
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(executable_path=_chromium())
+            browser = await playwright.chromium.launch(executable_path=chromium_executable())
             try:
                 page = await browser.new_page()
                 await page.set_content(html)

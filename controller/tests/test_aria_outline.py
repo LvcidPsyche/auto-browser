@@ -15,14 +15,13 @@ Chromium 1194 / Playwright 1.62.
 from __future__ import annotations
 
 import asyncio
-import glob
 import json
 
-import pytest
 from playwright.async_api import Page
 
 from app.browser.aria_outline import outline_from_aria_snapshot
 from app.browser.services.observation import BrowserObservationService
+from tests._chromium import chromium_executable, requires_chromium
 
 FORM_SNAPSHOT = r"""- generic [ref=e1]:
   - navigation [ref=e2]:
@@ -184,12 +183,9 @@ def test_a_page_without_the_api_reports_unavailable() -> None:
     assert outline["error"] == "accessibility_snapshot_unavailable"
 
 
-def _chromium() -> str | None:
-    candidates = sorted(glob.glob("/opt/pw-browsers/chromium-*/chrome-linux*/chrome"))
-    return candidates[-1] if candidates else None
 
 
-@pytest.mark.skipif(_chromium() is None, reason="no local Chromium binary")
+@requires_chromium
 def test_real_chromium_outline_of_a_filled_form() -> None:
     from playwright.async_api import async_playwright
 
@@ -203,7 +199,7 @@ def test_real_chromium_outline_of_a_filled_form() -> None:
 
     async def run() -> dict:
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(executable_path=_chromium())
+            browser = await playwright.chromium.launch(executable_path=chromium_executable())
             try:
                 page = await browser.new_page()
                 await page.set_content(html)
