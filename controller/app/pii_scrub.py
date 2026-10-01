@@ -55,8 +55,27 @@ _RAW_PATTERNS: list[tuple[str, str]] = [
     ),
     # AWS secret access keys: 40 chars base64url after = sign or whitespace
     ("aws_secret_key", r"(?i)(?:aws_secret(?:_access)?_key|secret_access_key)\s*[=:]\s*([A-Za-z0-9/+=]{40})"),
-    # JWT tokens: header.payload.signature (base64url)
-    ("jwt_token", r"eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}"),
+    # JWT tokens: header.payload.signature (base64url). The lookbehind lets a
+    # match start only where a token starts: "eyJeyJeyJ…" otherwise made every
+    # "eyJ" rescan the rest of the run, quadratic in the input.
+    ("jwt_token", r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}"),
+    # Provider API tokens, by their documented prefixes. Anchored to a token
+    # start and long enough that ordinary hyphenated words do not match.
+    (
+        "provider_token",
+        r"(?<![A-Za-z0-9_-])(?:"
+        r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,}|sk-ant-[a-z]+\d{2}-[A-Za-z0-9_-]{40,}|sk-[A-Za-z0-9]{32,}|"
+        r"gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[abposr]-[A-Za-z0-9-]{10,}|"
+        r"AIza[0-9A-Za-z_-]{35}|glpat-[A-Za-z0-9_-]{20,}|hf_[A-Za-z0-9]{30,})",
+    ),
+    # HTTP Basic credentials, only after an Authorization header name: "Basic"
+    # alone is an ordinary word.
+    ("basic_auth", r"(?i)\b(?:proxy-)?authorization\s*[:=]\s*[\"']?basic\s+[A-Za-z0-9+/]{4,}={0,2}"),
+    # Cookie headers as text (console logs, bodies); captured headers are
+    # masked separately. Needs name=value after the colon.
+    ("cookie_header", r"(?i)(?<![A-Za-z-])(?:set-)?cookie\s*:\s*[^\s=;,]+=[^\r\n]*"),
+    # OAuth authorization codes in callback URLs.
+    ("oauth_code", r"(?<=[?&#])code=[A-Za-z0-9._~%/+-]{12,}"),
     # Bearer tokens in Authorization headers.
     # No trailing \b: a word boundary cannot occur after '=', so it forced the
     # engine to backtrack off the base64 padding and leave it in the output
@@ -80,20 +99,21 @@ _RAW_PATTERNS: list[tuple[str, str]] = [
         r'(?i)"?(?:password|passwd|pwd|pass|new_password|current_password|'
         r'confirm_password)"?\s*[=:]\s*["\']?([^\s"\'&]{4,})["\']?',
     ),
-    # Credit card numbers: 13-19 digit sequences with optional spaces/dashes
-    # Very rough — checked with Luhn in code, not regex
-    (
-        "credit_card",
-        r"\b(?:4[0-9]{12}(?:[0-9]{3,6})?|5[1-5][0-9]{14}|"
-        r"3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|"
-        r"6(?:011|5[0-9]{2})[0-9]{12}|(?:2131|1800|35\d{3})\d{11})\b",
-    ),
+    # Credit card numbers: 13-19 digits, with or without space/dash grouping.
+    # The regex only finds the shape; _looks_like_card checks the issuer prefix
+    # and Luhn. The previous pattern promised separators in its comment but
+    # matched contiguous digits only, so "4111 1111 1111 1111" — how a card
+    # number is usually shown — was never redacted.
+    ("credit_card", r"(?<![\d-])(?:\d[ -]?){12,18}\d(?![\d-])"),
     # US SSN: ###-##-####
     ("ssn", r"\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b"),
-    # Email addresses
+    # Email addresses. The local part starts where a run of local-part
+    # characters starts; with `\b` there it could start inside a run, and text
+    # with a boundary at every character ("a.a.a.…") was rescanned to its end
+    # from each one: quadratic, 3.4 s for 40 KB of page-controlled console text.
     (
         "email",
-        r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b",
+        r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b",
     ),
     # US phone numbers: many formats
     (
@@ -147,6 +167,34 @@ def _luhn_check(number: str) -> bool:
     return total % 10 == 0
 
 
+# Issuer prefixes: Visa, Mastercard (51-55 and 2221-2720), Amex, Diners,
+# Discover, JCB and the older 2131/1800 ranges — the set the previous pattern
+# spelled out inline.
+_CARD_PREFIX = re.compile(r"4|5[1-5]|2(?:22[1-9]|2[3-9]\d|[3-6]\d{2}|7[01]\d|720)|3[47]|3(?:0[0-5]|[68])|6(?:011|5)|35|2131|1800")
+
+
+def _looks_like_card(candidate: str) -> bool:
+    digits = re.sub(r"\D", "", candidate)
+    return 13 <= len(digits) <= 19 and _CARD_PREFIX.match(digits) is not None and _luhn_check(digits)
+
+
+def find_pii_spans(text: str, enabled_patterns: set[str] | None = None) -> list[tuple[int, int, str]]:
+    """(start, end, pattern) of every PII match in `text`, as positions in `text` itself.
+
+    scrub_text rewrites as it goes, so the offsets it reports belong to a
+    partly redacted string; redacting pixels needs positions in the original.
+    """
+    spans: list[tuple[int, int, str]] = []
+    for name, pattern in _COMPILED.items():
+        if enabled_patterns is not None and name not in enabled_patterns:
+            continue
+        for match in pattern.finditer(text):
+            if name == "credit_card" and not _looks_like_card(match.group(0)):
+                continue
+            spans.append((match.start(), match.end(), name))
+    return spans
+
+
 # ── Core text scrubber ─────────────────────────────────────────────────────
 
 
@@ -184,10 +232,8 @@ def scrub_text(
         def _replace(m: re.Match, _name: str = name) -> str:  # noqa: B023
             matched = m.group(0)
             # Extra validation for credit cards
-            if _name == "credit_card":
-                digits_only = re.sub(r"[\s-]", "", matched)
-                if not _luhn_check(digits_only):
-                    return matched
+            if _name == "credit_card" and not _looks_like_card(matched):
+                return matched
             hits.append(
                 {
                     "pattern": _name,
@@ -214,13 +260,20 @@ def scrub_screenshot(
 ) -> tuple[bytes, list[dict[str, Any]]]:
     """
     Redact PII from a PNG screenshot by drawing opaque black boxes
-    over OCR bounding boxes that contain PII text.
+    over the OCR words it is written in.
+
+    OCR reports one block per word, and each word used to be scrubbed on its
+    own, so nothing containing a space ever matched: "(555) 123-4567", a card
+    number in groups. Words are now joined into the line OCR found them on
+    (`line` holds tesseract's block/paragraph/line numbers), the line is
+    scrubbed, and every word a match touches is redacted. A block without line
+    information is a line of its own.
 
     Args:
         image_bytes: Raw PNG bytes of the screenshot.
         ocr_blocks:  List of OCR result dicts with keys:
-                     x, y, width, height, text (from ocr.py OCRExtractor)
-        replacement: Replacement string for PII found in OCR text.
+                     text, bbox {x, y, width, height}, line (from ocr.py OCRExtractor)
+        replacement: Unused; kept for the call signature.
         enabled_patterns: Restrict to these pattern names (None = all).
 
     Returns:
@@ -232,36 +285,33 @@ def scrub_screenshot(
     all_hits: list[dict[str, Any]] = []
     boxes_to_redact: list[tuple[int, int, int, int]] = []
 
-    for block in ocr_blocks:
-        text = block.get("text", "")
-        if not text:
-            continue
-        result = scrub_text(text, replacement=replacement, enabled_patterns=enabled_patterns)
-        if result.scrubbed:
-            # OCRExtractor emits geometry nested under "bbox" (see ocr.py); this
-            # read them as flat top-level keys, so every .get(..., 0) fell to its
-            # default and every rectangle computed to (0, 0, 0, 0). Redaction was
-            # a silent no-op in production while `hits` stayed non-empty, so the
-            # caller wrote a "pii_redaction / ok" audit event over an unredacted
-            # screenshot. The flat shape is still accepted for callers that pass
-            # geometry directly.
-            geometry = block.get("bbox") or block
-            x = int(geometry.get("x", 0))
-            y = int(geometry.get("y", 0))
-            w = int(geometry.get("width", 0))
-            h = int(geometry.get("height", 0))
-            if w <= 0 or h <= 0:
-                # A degenerate box redacts nothing. Refuse to report success for
-                # it — that is exactly how this defect stayed invisible.
-                logger.warning(
-                    "pii_scrub: OCR block matched %s but carries no usable geometry; cannot redact pixels",
-                    [h["pattern"] for h in result.hits],
+    for words in _ocr_lines(ocr_blocks):
+        text, word_spans = _join_words(words)
+        for start, end, pattern in find_pii_spans(text, enabled_patterns):
+            matched = text[start:end]
+            for word, (word_start, word_end) in zip(words, word_spans):
+                if word_start >= end or word_end <= start:
+                    continue
+                box = _word_box(word)
+                if box is None:
+                    # A degenerate box redacts nothing. Refuse to report success
+                    # for it — that is how redaction once stayed a silent no-op.
+                    logger.warning(
+                        "pii_scrub: OCR block matched %s but carries no usable geometry; cannot redact pixels",
+                        pattern,
+                    )
+                    continue
+                x, y, w, h = box
+                boxes_to_redact.append((x, y, x + w, y + h))
+                all_hits.append(
+                    {
+                        "pattern": pattern,
+                        "offset": start,
+                        "length": len(matched),
+                        "preview": matched[:6] + "…" if len(matched) > 6 else "…",
+                        "bbox": {"x": x, "y": y, "width": w, "height": h},
+                    }
                 )
-                continue
-            boxes_to_redact.append((x, y, x + w, y + h))
-            for hit in result.hits:
-                hit["bbox"] = {"x": x, "y": y, "width": w, "height": h}
-                all_hits.append(hit)
 
     if not boxes_to_redact:
         return image_bytes, []
@@ -279,6 +329,38 @@ def scrub_screenshot(
     except Exception as exc:
         logger.warning("screenshot PII redaction failed: %s", exc)
         return image_bytes, all_hits
+
+
+def _ocr_lines(blocks: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    lines: dict[Any, list[dict[str, Any]]] = {}
+    for index, block in enumerate(blocks):
+        if not block.get("text"):
+            continue
+        key = tuple(block["line"]) if block.get("line") else ("block", index)
+        lines.setdefault(key, []).append(block)
+    return list(lines.values())
+
+
+def _join_words(words: list[dict[str, Any]]) -> tuple[str, list[tuple[int, int]]]:
+    spans: list[tuple[int, int]] = []
+    position = 0
+    for word in words:
+        length = len(str(word["text"]))
+        spans.append((position, position + length))
+        position += length + 1
+    return " ".join(str(word["text"]) for word in words), spans
+
+
+def _word_box(block: dict[str, Any]) -> tuple[int, int, int, int] | None:
+    # OCRExtractor nests geometry under "bbox"; reading it flat once made every
+    # rectangle (0, 0, 0, 0). The flat shape is still accepted for callers that
+    # pass geometry directly.
+    geometry = block.get("bbox") or block
+    x, y = int(geometry.get("x", 0)), int(geometry.get("y", 0))
+    w, h = int(geometry.get("width", 0)), int(geometry.get("height", 0))
+    if w <= 0 or h <= 0:
+        return None
+    return x, y, w, h
 
 
 # ── Network payload scrubber ───────────────────────────────────────────────

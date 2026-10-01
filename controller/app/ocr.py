@@ -18,6 +18,13 @@ _MIN_CONFIDENCE = 30
 _REDACTION_BLOCK_CAP = 5000
 
 
+def _line_key(data: dict[str, Any], idx: int) -> list[int] | None:
+    try:
+        return [int(data[key][idx]) for key in ("block_num", "par_num", "line_num")]
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
 class OCRExtractor:
     def __init__(self, *, enabled: bool, language: str, max_blocks: int, text_limit: int):
         self.enabled = enabled
@@ -82,7 +89,9 @@ class OCRExtractor:
             # bar exhausted the budget before reaching the page body. Dropping
             # low-confidence blocks here would be fail-open for privacy too.
             if len(redaction_blocks) < _REDACTION_BLOCK_CAP:
-                redaction_blocks.append(block)
+                # The line a word is on lets redaction match text that spans
+                # words, such as "(555) 123-4567"; see pii_scrub.scrub_screenshot.
+                redaction_blocks.append({**block, "line": _line_key(data, idx)})
 
             # The model-facing payload keeps both limits: callers pay tokens for it.
             if confidence < _MIN_CONFIDENCE:

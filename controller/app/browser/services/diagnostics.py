@@ -18,6 +18,16 @@ logger = logging.getLogger(__name__)
 
 # Larger downloads are fetched from their artifact URL, not read into a model's context.
 DOWNLOAD_READ_MAX_BYTES = 10 * 1024 * 1024
+# Console text is written by the page and kept for the whole session, and every
+# read scrubbed all of it on the event loop. One message is cut to this length.
+CONSOLE_TEXT_MAX_CHARS = 8_000
+
+
+def console_entry(message: Any) -> dict[str, Any]:
+    text = message.text
+    if len(text) > CONSOLE_TEXT_MAX_CHARS:
+        text = f"{text[:CONSOLE_TEXT_MAX_CHARS]}… [{len(text) - CONSOLE_TEXT_MAX_CHARS} more characters]"
+    return {"type": message.type, "text": text, "location": message.location}
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -38,7 +48,9 @@ class BrowserDiagnosticsService:
         async with session.lock:
             messages = session.console_messages[-limit:]
             if self.pii_scrubber.console_enabled:
-                messages, hits = self.pii_scrubber.console(messages)
+                # Off the event loop: the text is the page's, and a slow scrub
+                # here stalled every session the controller was running.
+                messages, hits = await asyncio.to_thread(self.pii_scrubber.console, messages)
                 if hits and self.pii_scrubber.audit_report:
                     await self.manager.audit.append(
                         event_type="pii_redaction",
@@ -100,17 +112,7 @@ class BrowserDiagnosticsService:
             return
         session.attached_pages.add(page)
 
-        page.on(
-            "console",
-            lambda message: self._bounded_append(
-                session.console_messages,
-                {
-                    "type": message.type,
-                    "text": message.text,
-                    "location": message.location,
-                },
-            ),
-        )
+        page.on("console", lambda message: self._bounded_append(session.console_messages, console_entry(message)))
         page.on("pageerror", lambda error: self._bounded_append(session.page_errors, str(error)))
         page.on(
             "requestfailed",
