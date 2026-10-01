@@ -341,6 +341,9 @@ class Settings(BaseSettings):
 
     # Shadow browsing — enable headed mode for debugging
     shadow_browse_enabled: bool = Field(True, alias="SHADOW_BROWSE_ENABLED")
+    # Post-session skill review by an LLM. Off unless asked for: it calls a paid
+    # model on every session close.
+    curator_enabled: bool = Field(False, alias="CURATOR_ENABLED")
 
     # Cron / webhook triggers
     cron_store_path: str = Field("/data/crons/crons.json", alias="CRON_STORE_PATH")

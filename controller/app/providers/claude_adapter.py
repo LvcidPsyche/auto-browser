@@ -6,6 +6,10 @@ from typing import Any
 from ..models import BrowserActionDecision
 from .base import BaseProviderAdapter, ProviderDecision
 
+# Current Claude models think on every request, and thinking counts against
+# max_tokens; 1024 could run out before the tool call was written.
+_MAX_TOKENS = 16_000
+
 
 class ClaudeAdapter(BaseProviderAdapter):
     provider = "claude"
@@ -71,11 +75,15 @@ class ClaudeAdapter(BaseProviderAdapter):
         mime_type, image_b64 = self.encode_image(observation["screenshot_path"])
         payload = {
             "model": model,
-            "max_tokens": 1024,
+            "max_tokens": _MAX_TOKENS,
             "system": (
-                "You are the Auto Browser planner. Pick exactly one next action. Return it via the browser_action tool."
+                "You are the Auto Browser planner. Pick exactly one next action. "
+                "Respond by calling the browser_action tool exactly once."
             ),
-            "tool_choice": {"type": "tool", "name": "browser_action"},
+            # Requested, not forced: Claude Opus 5.5, Sonnet 5.5 and Fable 5.1
+            # reject tool_choice "tool"/"any" with a 400, so a forced choice
+            # failed every step on them. The instruction above asks for the call.
+            "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
             "tools": [
                 {
                     "name": "browser_action",
@@ -119,7 +127,10 @@ class ClaudeAdapter(BaseProviderAdapter):
         )
         tool_use = next((item for item in response.get("content", []) if item.get("type") == "tool_use"), None)
         if not tool_use:
-            raise RuntimeError("Claude did not return a browser_action tool_use block")
+            # refusal, max_tokens or a plain-text answer each need a different fix.
+            raise RuntimeError(
+                f"Claude did not return a browser_action tool_use block (stop_reason={response.get('stop_reason')})"
+            )
         decision = BrowserActionDecision.model_validate(tool_use.get("input", {}))
         usage = response.get("usage")
         return ProviderDecision(

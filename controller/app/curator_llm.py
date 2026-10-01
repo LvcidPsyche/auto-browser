@@ -168,9 +168,10 @@ class CuratorLLMAdapter:
         return _OPENAI_URL, headers, body
 
     def _build_gemini(self, prompt: str, system: Optional[str]) -> tuple[str, dict, dict]:
-        api_key = os.environ[self._api_key_env()]
-        url = _GEMINI_URL_TMPL.format(model=self.model) + f"?key={api_key}"
-        headers = {"Content-Type": "application/json"}
+        # The key goes in a header: httpx puts the request URL in its error
+        # messages, and a ?key= query string put the key in the logs with them.
+        url = _GEMINI_URL_TMPL.format(model=self.model)
+        headers = {"Content-Type": "application/json", "x-goog-api-key": os.environ[self._api_key_env()]}
         parts: list[dict[str, str]] = []
         if system:
             parts.append({"text": f"System: {system}\n\n"})

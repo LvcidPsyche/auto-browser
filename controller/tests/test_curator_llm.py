@@ -4,6 +4,7 @@ import os
 import unittest
 from unittest.mock import patch
 
+from app.config import Settings
 from app.curator_llm import CuratorLLMAdapter, build_curator_adapter
 
 
@@ -103,7 +104,11 @@ class CuratorLLMAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "gemini-output")
         url, headers, body = fake_client.calls[0]
-        self.assertIn("gemini-test:generateContent?key=gemini-key", url)
+        # In a header, not the URL: httpx puts the URL in its error messages,
+        # and the curator logs those.
+        self.assertTrue(url.endswith("gemini-test:generateContent"), url)
+        self.assertNotIn("gemini-key", url)
+        self.assertEqual(headers["x-goog-api-key"], "gemini-key")
         self.assertEqual(headers["Content-Type"], "application/json")
         self.assertEqual(body["contents"][0]["parts"][0]["text"], "System: use bullets\n\n")
         self.assertEqual(body["contents"][0]["parts"][1]["text"], "idea list")
@@ -123,3 +128,27 @@ class CuratorLLMAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_build_curator_adapter_swallows_factory_failures(self) -> None:
         with patch("app.curator_llm.CuratorLLMAdapter.from_env", side_effect=RuntimeError("boom")):
             self.assertIsNone(build_curator_adapter())
+
+
+class CuratorOptInTests(unittest.TestCase):
+    """A provider key alone no longer turns the curator on.
+
+    ANTHROPIC_API_KEY is set by anyone running the Claude agent provider, and
+    the curator then called a paid model on every session close.
+    """
+
+    def _init(self, settings: Settings):
+        from types import SimpleNamespace
+
+        from app.startup.extensions import _init_curator
+
+        app = SimpleNamespace(state=SimpleNamespace(settings=settings))
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False):
+            _init_curator(app)
+        return app.state.curator_adapter
+
+    def test_off_by_default_even_with_a_key(self) -> None:
+        self.assertIsNone(self._init(Settings(_env_file=None)))
+
+    def test_on_when_asked_for(self) -> None:
+        self.assertIsNotNone(self._init(Settings(_env_file=None, CURATOR_ENABLED=True)))

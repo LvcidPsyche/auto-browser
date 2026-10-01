@@ -45,7 +45,18 @@ def register_extensions(app) -> None:
 
 
 def _init_curator(app) -> None:
-    """Initialize the Skills Curator LLM adapter. None when no API key is set."""
+    """Initialize the Skills Curator LLM adapter, when CURATOR_ENABLED asks for it.
+
+    It used to start whenever a provider key was present — and ANTHROPIC_API_KEY
+    is there for anyone running the Claude agent provider — so every closed
+    session paid for an LLM call (claude-opus-4-7 by default) on a placeholder
+    transcript and wrote whatever came back to skills-staging.
+    """
+    settings = getattr(app.state, "settings", None)
+    if not getattr(settings, "curator_enabled", False):
+        app.state.curator_adapter = None
+        logger.info("startup.curator: disabled (set CURATOR_ENABLED=true to turn it on)")
+        return
     try:
         from app.curator_llm import build_curator_adapter
 
