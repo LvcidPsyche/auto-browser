@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from ... import events as _events
 from ...action_errors import BrowserActionError
 from ...actions import ActionRunContext
-from ...approvals import ApprovalRequiredError
+from ...approvals import ApprovalRequiredError, held_for_execution
 from ...models import ApprovalKind, BrowserActionDecision, totp_host_allowed
 from ...utils import spawn_background_task
 from ...webhooks import dispatch_approval_event
@@ -267,80 +267,76 @@ class BrowserActionService:
             "runtime_requires_approval": approval is not None or approval_id is not None,
             "sensitive_input": bool(getattr(decision, "sensitive", False)),
         }
-        # Uploads go through manager.upload, which checks and claims the
-        # approval itself.
-        claimed = approval is not None and decision.action != "upload"
         try:
-            if claimed:
-                await self.manager.approvals.claim_execution(approval.id)
-            if decision.action == "navigate":
-                result = await self.manager.navigate(session_id, decision.url or "")
-            elif decision.action == "click":
-                result = await self.manager.click(
-                    session_id,
-                    selector=decision.selector,
-                    element_id=decision.element_id,
-                    x=decision.x,
-                    y=decision.y,
-                )
-            elif decision.action == "hover":
-                result = await self.manager.hover(
-                    session_id,
-                    selector=decision.selector,
-                    element_id=decision.element_id,
-                    x=decision.x,
-                    y=decision.y,
-                )
-            elif decision.action == "select_option":
-                result = await self.manager.select_option(
-                    session_id,
-                    selector=decision.selector,
-                    element_id=decision.element_id,
-                    value=decision.value,
-                    label=decision.label,
-                    index=decision.index,
-                )
-            elif decision.action == "type":
-                result = await self.manager.type(
-                    session_id,
-                    selector=decision.selector,
-                    element_id=decision.element_id,
-                    text=decision.text or "",
-                    clear_first=decision.clear_first,
-                    sensitive=decision.sensitive,
-                )
-            elif decision.action == "press":
-                result = await self.manager.press(session_id, decision.key or "")
-            elif decision.action == "scroll":
-                result = await self.manager.scroll(session_id, decision.delta_x, decision.delta_y)
-            elif decision.action == "wait":
-                result = await self.manager.wait(session_id, decision.wait_ms)
-            elif decision.action == "reload":
-                result = await self.manager.reload(session_id)
-            elif decision.action == "go_back":
-                result = await self.manager.go_back(session_id)
-            elif decision.action == "go_forward":
-                result = await self.manager.go_forward(session_id)
-            elif decision.action == "upload":
-                result = await self.manager.upload(
-                    session_id,
-                    selector=decision.selector,
-                    element_id=decision.element_id,
-                    file_path=decision.file_path or "",
-                    approved=False,
-                    approval_id=approval_id,
-                )
+            # Uploads go through manager.upload, which checks and claims the
+            # approval itself.
+            if approval is None or decision.action == "upload":
+                return await self._dispatch_decision(session_id, decision, approval_id=approval_id)
+            async with held_for_execution(self.manager.approvals, approval.id) as held:
+                result = await self._dispatch_decision(session_id, decision, approval_id=approval_id)
+                await held.executed()
                 return result
-            else:  # pragma: no cover - guarded by schema
-                raise ValueError(f"Unsupported action: {decision.action}")
-
-            if approval is not None:
-                await self.manager.approvals.mark_executed(approval.id)
-            return result
         finally:
             session.pending_witness_context = None
-            if claimed:
-                self.manager.approvals.release_execution(approval.id)
+
+    async def _dispatch_decision(
+        self,
+        session_id: str,
+        decision: BrowserActionDecision,
+        *,
+        approval_id: str | None,
+    ) -> dict[str, Any]:
+        if decision.action == "navigate":
+            return await self.manager.navigate(session_id, decision.url or "")
+        if decision.action in {"click", "hover"}:
+            run = self.manager.click if decision.action == "click" else self.manager.hover
+            return await run(
+                session_id,
+                selector=decision.selector,
+                element_id=decision.element_id,
+                x=decision.x,
+                y=decision.y,
+            )
+        if decision.action == "select_option":
+            return await self.manager.select_option(
+                session_id,
+                selector=decision.selector,
+                element_id=decision.element_id,
+                value=decision.value,
+                label=decision.label,
+                index=decision.index,
+            )
+        if decision.action == "type":
+            return await self.manager.type(
+                session_id,
+                selector=decision.selector,
+                element_id=decision.element_id,
+                text=decision.text or "",
+                clear_first=decision.clear_first,
+                sensitive=decision.sensitive,
+            )
+        if decision.action == "press":
+            return await self.manager.press(session_id, decision.key or "")
+        if decision.action == "scroll":
+            return await self.manager.scroll(session_id, decision.delta_x, decision.delta_y)
+        if decision.action == "wait":
+            return await self.manager.wait(session_id, decision.wait_ms)
+        if decision.action == "reload":
+            return await self.manager.reload(session_id)
+        if decision.action == "go_back":
+            return await self.manager.go_back(session_id)
+        if decision.action == "go_forward":
+            return await self.manager.go_forward(session_id)
+        if decision.action == "upload":
+            return await self.manager.upload(
+                session_id,
+                selector=decision.selector,
+                element_id=decision.element_id,
+                file_path=decision.file_path or "",
+                approved=False,
+                approval_id=approval_id,
+            )
+        raise ValueError(f"Unsupported action: {decision.action}")  # pragma: no cover - guarded by schema
 
     async def require_decision_approval(
         self,

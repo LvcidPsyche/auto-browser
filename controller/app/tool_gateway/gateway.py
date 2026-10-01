@@ -15,7 +15,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from pydantic import BaseModel, ValidationError
 
 from ..action_errors import BrowserActionError, SessionNotFoundError
-from ..approvals import ApprovalRequiredError
+from ..approvals import ApprovalRequiredError, held_for_execution
 from ..browser_scripts import PAGE_TEXT_SCRIPT
 from ..models import (
     ActionName,
@@ -276,12 +276,9 @@ class McpToolGateway:
             if approval is None:
                 result = await spec.handler(arguments)
             else:
-                await self.manager.approvals.claim_execution(approval.id)
-                try:
+                async with held_for_execution(self.manager.approvals, approval.id) as held:
                     result = await spec.handler(arguments)
-                    await self.manager.approvals.mark_executed(approval.id)
-                finally:
-                    self.manager.approvals.release_execution(approval.id)
+                    await held.executed()
             result = shape_mcp_result(spec.name, result, detail=getattr(arguments, "detail", "compact"))
             # The JSON stays the first block: clients (and the LangChain
             # adapter) read content[0].text as the result.

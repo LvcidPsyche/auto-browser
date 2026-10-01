@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 from playwright.async_api import Error as PlaywrightError
 
-from .approvals import ApprovalRequiredError
+from .approvals import ApprovalRequiredError, held_for_execution
 from .browser_manager import BrowserManager
 from .models import AgentRunResult, AgentStepResult, ProviderName, WorkflowProfile
 from .provider_registry import ProviderRegistry
@@ -259,17 +259,22 @@ class BrowserOrchestrator:
             "go_forward",
             "upload",
         }:
+            approval = None
             if workflow_profile == "governed":
-                await self.manager.require_governed_approval(
+                approval = await self.manager.require_governed_approval(
                     session_id,
                     decision,
                     approval_id=approval_id,
                 )
-            execution = await self.manager.execute_decision(
-                session_id,
-                decision,
-                approval_id=approval_id,
-            )
+            if approval is None:
+                execution = await self.manager.execute_decision(session_id, decision, approval_id=approval_id)
+            else:
+                # The governed approval is consumed here: for a write the
+                # runtime does not itself require approval for, nothing below
+                # this would, and the same approval ran the action every step.
+                async with held_for_execution(self.manager.approvals, approval.id) as held:
+                    execution = await self.manager.execute_decision(session_id, decision, approval_id=approval_id)
+                    await held.executed()
             status = "acted"
         else:  # pragma: no cover - guarded by schema
             raise ValueError(f"Unsupported action: {decision.action}")

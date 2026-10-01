@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...approvals import held_for_execution
 from ...witness import WitnessApproval
 
 
@@ -86,23 +87,28 @@ class BrowserApprovalService:
             raise PermissionError(f"approval {approval_id} is not approved")
 
         decision = self.manager.approvals.executable_action(approval)
-        if decision.action == "upload":
-            execution = await self.manager.upload(
-                approval.session_id,
-                selector=decision.selector,
-                element_id=decision.element_id,
-                file_path=decision.file_path or "",
-                approved=False,
-                approval_id=approval.id,
-            )
-            latest = await self.manager.approvals.get(approval.id)
-        else:
-            execution = await self.manager.execute_decision(
-                approval.session_id,
-                decision,
-                approval_id=approval.id,
-            )
-            latest = await self.manager.approvals.get(approval.id)
+        # Claimed here, for the approval's own kind: execute_decision only
+        # claims the kinds the runtime requires, so a governed `write` approval
+        # executed through this endpoint was never consumed and ran again on
+        # every call.
+        async with held_for_execution(self.manager.approvals, approval.id) as held:
+            if decision.action == "upload":
+                execution = await self.manager.upload(
+                    approval.session_id,
+                    selector=decision.selector,
+                    element_id=decision.element_id,
+                    file_path=decision.file_path or "",
+                    approved=False,
+                    approval_id=approval.id,
+                )
+            else:
+                execution = await self.manager.execute_decision(
+                    approval.session_id,
+                    decision,
+                    approval_id=approval.id,
+                )
+            await held.executed()
+        latest = await self.manager.approvals.get(approval.id)
         await self.manager.audit.append(
             event_type="approval_executed",
             status="ok",

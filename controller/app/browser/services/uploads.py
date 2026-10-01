@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ...approvals import held_for_execution
 from ...models import BrowserActionDecision
 
 if TYPE_CHECKING:
@@ -54,17 +55,14 @@ class BrowserUploadService:
                 {**target, "file_path": str(safe_path), "approved": False, "approval_id": approval_id},
                 operation,
             )
-        await self.manager.approvals.claim_execution(approval.id)
-        try:
+        async with held_for_execution(self.manager.approvals, approval.id) as held:
             result = await self.manager._run_action(
                 session,
                 "upload",
                 {**target, "file_path": str(safe_path), "approved": True, "approval_id": approval_id},
                 operation,
             )
-            await self.manager.approvals.mark_executed(approval.id)
-        finally:
-            self.manager.approvals.release_execution(approval.id)
+            await held.executed()
         return result
 
     def safe_path(self, file_path: str, *, session: "BrowserSession" | None = None) -> Path:
