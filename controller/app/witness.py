@@ -457,6 +457,15 @@ class WitnessRecorder:
             result["checked"] = index + 1
             if not receipt.chain_signature:
                 result["unsigned"] += 1
+                if result["signed"]:
+                    # Unsigned receipts before the first signed one predate
+                    # signing and its hash covers them. One after it means a
+                    # signature was removed — the forgery signing exists to stop.
+                    result["valid"] = False
+                    result["first_invalid_index"] = index
+                    result["first_invalid_receipt_id"] = receipt.receipt_id
+                    result["reason"] = "unsigned receipt after signed ones: a signature was removed"
+                    return result
                 continue
             if not verify_signature(
                 public_key_b64=public_key_b64,

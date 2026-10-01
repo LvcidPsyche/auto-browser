@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any, Callable
 
-from .induce import SkillCandidate
+from .induce import SIGNED_SKILL_FILES, SkillCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -69,12 +70,34 @@ class SkillStagingRegistry:
             payload = self.verifier(envelope)
         except Exception as exc:
             raise PermissionError(f"staged skill candidate {candidate.skill_id} failed signature check: {exc}") from exc
-        for field, expected in (("contract_hash", candidate.contract_hash), ("trace_hash", candidate.trace_hash)):
-            if payload.get(field) != expected:
+        signed_claims = {
+            "contract_hash": (payload.get("contract_hash"), candidate.contract_hash),
+            "trace_hash": (payload.get("trace_hash"), candidate.trace_hash),
+            "skill_id": (payload.get("skill_id"), candidate.skill_id),
+            "verifier passed": ((payload.get("verifier") or {}).get("passed"), candidate.verifier_passed),
+            "simulated": ((payload.get("metadata") or {}).get("simulated", False), candidate.simulated),
+        }
+        for field, (signed, stored) in signed_claims.items():
+            if signed != stored:
                 # A valid signature over a different candidate is still a forged
                 # candidate, so the envelope has to match the artifact it sits in.
                 raise PermissionError(
                     f"staged skill candidate {candidate.skill_id} does not match its signed envelope ({field})"
+                )
+        self._verify_files(candidate, payload.get("files_sha256"))
+
+    def _verify_files(self, candidate: SkillCandidate, signed_hashes: Any) -> None:
+        """The files a reviewer reads and promotes are the ones that were signed."""
+        if not isinstance(signed_hashes, dict) or set(signed_hashes) != set(SIGNED_SKILL_FILES):
+            raise PermissionError(
+                f"staged skill candidate {candidate.skill_id} was signed without hashes of its files; induce it again"
+            )
+        directory = self._candidate_path(candidate.skill_id).parent
+        for name, digest in signed_hashes.items():
+            path = directory / name
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                raise PermissionError(
+                    f"staged skill candidate {candidate.skill_id} has a {name} that is not the one it was signed with"
                 )
 
     def candidate_dir(self, skill_id: str) -> Path:

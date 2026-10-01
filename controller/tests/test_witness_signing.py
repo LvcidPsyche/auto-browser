@@ -236,3 +236,166 @@ def test_list_with_a_zero_limit_returns_nothing(tmp_path: Path) -> None:
 
     assert recorder._list_sync(path, 0) == []
     assert recorder._list_sync(path, -5) == []
+
+
+# ── Forgeries the standalone verifier used to pass ─────────────────────────
+#
+# The verifier took the public key from the bundle and never derived its id,
+# printed the bundle's own head instead of computing one, and treated unsigned
+# receipts as a note. So an edited chain with its signatures stripped, a chain
+# re-signed with another key while still naming the genuine key id, and a
+# chain cut short with its original head left in place all read VERIFIED.
+
+
+def _load_verifier():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("verify_witness_bundle", VERIFIER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _rehash(receipts: list[dict]) -> None:
+    canonical_chain_hash = _load_verifier().canonical_chain_hash
+    previous = None
+    for receipt in receipts:
+        receipt["chain_prev_hash"] = previous
+        receipt["chain_hash"] = canonical_chain_hash(receipt)
+        previous = receipt["chain_hash"]
+
+
+def _run_verifier(bundle: dict, tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
+    path = tmp_path / f"bundle-{len(list(tmp_path.glob('bundle-*.json')))}.json"
+    path.write_text(json.dumps(bundle), encoding="utf-8")
+    return subprocess.run(  # noqa: S603 - fixed argv
+        [sys.executable, str(VERIFIER), str(path), *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+async def _genuine_bundle(recorder: WitnessRecorder, count: int = 3) -> dict:
+    await recorder.startup()
+    for i in range(count):
+        await recorder.record("sess-1", **_receipt_kwargs(f"click-{i}"))
+    return await recorder.export_bundle("sess-1")
+
+
+@requires_verifier
+@pytest.mark.asyncio
+async def test_verifier_rejects_an_edited_chain_with_its_signatures_stripped(
+    signed_recorder: WitnessRecorder, tmp_path: Path
+) -> None:
+    bundle = await _genuine_bundle(signed_recorder)
+    bundle["receipts"][1]["action"] = "nothing-was-clicked"
+    for receipt in bundle["receipts"]:
+        receipt["chain_signature"] = None
+        receipt["signing_key_id"] = None
+    _rehash(bundle["receipts"])
+    bundle["head_hash"] = bundle["receipts"][-1]["chain_hash"]
+
+    result = _run_verifier(bundle, tmp_path)
+    assert result.returncode == 1, result.stdout
+    assert "RESULT: FAILED" in result.stdout
+
+
+@requires_verifier
+@pytest.mark.asyncio
+async def test_verifier_rejects_a_chain_resigned_with_another_key(signed_recorder: WitnessRecorder, tmp_path: Path) -> None:
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    bundle = await _genuine_bundle(signed_recorder)
+    bundle["receipts"][1]["action"] = "transfer-funds"
+    _rehash(bundle["receipts"])
+    attacker = Ed25519PrivateKey.generate()
+    bundle["public_key_b64"] = base64.b64encode(attacker.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()
+    for receipt in bundle["receipts"]:
+        receipt["chain_signature"] = base64.b64encode(attacker.sign(receipt["chain_hash"].encode())).decode()
+    bundle["head_hash"] = bundle["receipts"][-1]["chain_hash"]
+    # bundle["signing_key_id"] still names the genuine key, which is what a reader compares.
+
+    result = _run_verifier(bundle, tmp_path)
+    assert result.returncode == 1, result.stdout
+    assert "RESULT: FAILED" in result.stdout
+
+
+@requires_verifier
+@pytest.mark.asyncio
+async def test_verifier_rejects_a_truncated_chain_that_keeps_its_old_head(
+    signed_recorder: WitnessRecorder, tmp_path: Path
+) -> None:
+    bundle = await _genuine_bundle(signed_recorder)
+    bundle["receipts"] = bundle["receipts"][:1]
+
+    result = _run_verifier(bundle, tmp_path)
+    assert result.returncode == 1, result.stdout
+    assert "RESULT: FAILED" in result.stdout
+
+
+@requires_verifier
+@pytest.mark.asyncio
+async def test_verifier_rejects_a_signature_stripped_from_one_receipt(
+    signed_recorder: WitnessRecorder, tmp_path: Path
+) -> None:
+    bundle = await _genuine_bundle(signed_recorder)
+    bundle["receipts"][-1]["chain_signature"] = None
+
+    result = _run_verifier(bundle, tmp_path)
+    assert result.returncode == 1, result.stdout
+
+
+@requires_verifier
+@pytest.mark.asyncio
+async def test_verifier_accepts_unsigned_receipts_that_predate_signing(tmp_path: Path) -> None:
+    legacy = WitnessRecorder(tmp_path / "witness")
+    await legacy.startup()
+    await legacy.record("sess-1", **_receipt_kwargs("before-signing"))
+    signed = WitnessRecorder(tmp_path / "witness", signer=WitnessSigner(tmp_path / "keys"))
+    bundle = await _genuine_bundle(signed, count=2)
+
+    result = _run_verifier(bundle, tmp_path)
+    assert result.returncode == 0, result.stdout
+    assert "RESULT: VERIFIED" in result.stdout
+
+
+@requires_verifier
+@pytest.mark.asyncio
+async def test_an_unsigned_bundle_verifies_only_when_asked_to(tmp_path: Path) -> None:
+    bundle = await _genuine_bundle(WitnessRecorder(tmp_path / "witness"))
+
+    assert _run_verifier(bundle, tmp_path).returncode == 1
+    allowed = _run_verifier(bundle, tmp_path, "--allow-unsigned")
+    assert allowed.returncode == 0, allowed.stdout
+    assert "UNSIGNED" in allowed.stdout
+
+
+@requires_verifier
+@pytest.mark.asyncio
+async def test_the_verifier_checks_a_pinned_key_and_head(signed_recorder: WitnessRecorder, tmp_path: Path) -> None:
+    bundle = await _genuine_bundle(signed_recorder)
+
+    pinned = _run_verifier(bundle, tmp_path, "--expect-key-id", bundle["signing_key_id"], "--expect-head", bundle["head_hash"])
+    assert pinned.returncode == 0, pinned.stdout
+    assert _run_verifier(bundle, tmp_path, "--expect-key-id", "0" * 64).returncode == 1
+    assert _run_verifier(bundle, tmp_path, "--expect-head", "0" * 64).returncode == 1
+
+
+@pytest.mark.asyncio
+async def test_in_app_verification_rejects_a_stripped_signature(signed_recorder: WitnessRecorder) -> None:
+    await signed_recorder.startup()
+    for i in range(3):
+        await signed_recorder.record("sess-1", **_receipt_kwargs(f"click-{i}"))
+    path = signed_recorder._path("sess-1")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    last = json.loads(lines[-1])
+    last["chain_signature"] = None
+    path.write_text("\n".join([*lines[:-1], json.dumps(last)]) + "\n", encoding="utf-8")
+
+    result = await signed_recorder.verify_signatures("sess-1")
+    assert result["valid"] is False
+    assert result["first_invalid_index"] == 2

@@ -15,6 +15,9 @@ from .verifier.base import VerificationResult
 
 Signer = Callable[[dict[str, Any]], dict[str, Any]]
 
+# The generated files a candidate's envelope carries hashes of.
+SIGNED_SKILL_FILES = ("SKILL.md", "helper.py", "test_skill.py")
+
 
 class SkillCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -84,10 +87,29 @@ class SkillInducer:
             signed=self.signer is not None,
             simulated=str(trace.metadata.get("mode") or "").lower() == "mock",
         )
-        skill_md = _render_skill_markdown(contract, candidate, verification)
-        helper_py = _render_helper(contract)
-        self_test = _render_self_test(contract)
+        # What a reviewer reads and promotes. Written as bytes, so the hashes
+        # below are of exactly what is on disk on every platform, and signed:
+        # the envelope used to cover only the contract and trace hashes, so
+        # these could be rewritten under a valid signature.
+        rendered = dict(
+            zip(
+                SIGNED_SKILL_FILES,
+                (
+                    _render_skill_markdown(contract, candidate, verification),
+                    _render_helper(contract),
+                    _render_self_test(contract),
+                ),
+                strict=True,
+            )
+        )
+        files_sha256: dict[str, str] = {}
+        for name, content in rendered.items():
+            body = content.encode("utf-8")
+            (target_dir / name).write_bytes(body)
+            candidate.files[name] = str(target_dir / name)
+            files_sha256[name] = hashlib.sha256(body).hexdigest()
         provenance = {
+            "files_sha256": files_sha256,
             "candidate": candidate.model_dump(mode="json", exclude={"files", "envelope"}),
             "contract": contract.model_dump(mode="json"),
             "trace": {
@@ -110,6 +132,7 @@ class SkillInducer:
             "contract_hash": contract_hash,
             "trace_hash": trace_hash,
             "verifier": verification.model_dump(mode="json"),
+            "files_sha256": files_sha256,
             "provenance_hash": hash_payload(provenance),
             "metadata": {
                 "task_class": contract.task_class,
@@ -130,9 +153,6 @@ class SkillInducer:
             candidate.envelope = {**envelope_payload, "signed": False}
 
         files = {
-            "SKILL.md": skill_md,
-            "helper.py": helper_py,
-            "test_skill.py": self_test,
             "provenance.json": json.dumps(provenance, indent=2, sort_keys=True),
             "envelope.json": json.dumps(candidate.envelope, indent=2, sort_keys=True),
         }
