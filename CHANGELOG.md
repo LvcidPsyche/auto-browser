@@ -2,7 +2,15 @@
 
 All notable changes to auto-browser are documented here.
 
-## [Unreleased]
+## [1.9.0] — 2026-10-02
+
+A security and correctness pass over 1.8.1, from a maintainer review: every finding was
+reproduced before it was fixed. The client, LangChain and MCP bridge packages are unchanged
+apart from their version.
+
+**If you run the controller with named credentials (`API_BEARER_TOKENS`) or keep settings in
+`.env`, read the upgrade notes first:** operators no longer share sessions, and every setting
+in `.env` now takes effect.
 
 Upgrade notes:
 - **Everything in `.env` now reaches the controller.** Docker Compose used to pass only the
