@@ -4,8 +4,11 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException
+from starlette.responses import Response
+from starlette.types import Scope
 
 from .agent_jobs import AgentJobQueue
 from .browser_manager import BrowserManager
@@ -19,7 +22,9 @@ from .orchestrator import BrowserOrchestrator
 from .provider_registry import ProviderRegistry
 from .proxy_personas import ProxyPersonaStore
 from .rate_limits import SlidingWindowRateLimiter
+from .routes._utils import require_session_access
 from .routes.system import create_system_router
+from .session_ownership import may_use
 from .session_share import SessionShareManager
 from .tool_gateway import McpToolGateway
 from .vision_target import VisionTargeter
@@ -53,6 +58,7 @@ def build_controller_services(settings: Settings, *, version: str) -> Controller
     job_queue = AgentJobQueue(
         orchestrator=orchestrator,
         store_root=settings.job_store_root,
+        session_owner=manager.session_owner,
         worker_count=settings.agent_job_worker_count,
         audit_store=manager.audit,
     )
@@ -123,6 +129,25 @@ def install_controller_host_middleware(application: FastAPI, allowed_hosts: list
         application.add_middleware(ControllerHostMiddleware, allowed_hosts=allowed_hosts)
 
 
+class SessionArtifactFiles(StaticFiles):
+    """/artifacts/<session id>/..., served to whoever may use that session.
+
+    A mount is outside the routes' dependencies, and an artifact path names its
+    session, so screenshots, traces and downloads of another operator's session
+    were one guessed path away (trace.zip always has the same name).
+    """
+
+    def __init__(self, *, directory: str, manager: BrowserManager) -> None:
+        super().__init__(directory=directory)
+        self.manager = manager
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        session_id = path.replace("\\", "/").lstrip("/").split("/", 1)[0]
+        if session_id and not may_use(await self.manager.session_owner(session_id)):
+            raise HTTPException(status_code=404)
+        return await super().get_response(path, scope)
+
+
 def create_controller_app(
     *,
     services: ControllerServices,
@@ -134,6 +159,7 @@ def create_controller_app(
         version=version,
         lifespan=lifespan,
         summary="Visual Auto Browser control plane for LLM workflows.",
+        dependencies=[Depends(require_session_access)],
     )
     install_controller_host_middleware(application, services.settings.controller_allowed_host_patterns)
 
@@ -141,7 +167,11 @@ def create_controller_app(
     application.state.tool_gateway = services.tool_gateway
     application.state.settings = services.settings
 
-    application.mount("/artifacts", StaticFiles(directory=services.settings.artifact_root), name="artifacts")
+    application.mount(
+        "/artifacts",
+        SessionArtifactFiles(directory=services.settings.artifact_root, manager=services.manager),
+        name="artifacts",
+    )
     application.include_router(
         create_system_router(
             settings=services.settings,

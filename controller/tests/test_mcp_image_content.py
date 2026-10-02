@@ -34,6 +34,7 @@ class InlineScreenshotTests(unittest.IsolatedAsyncioTestCase):
         self.shot.parent.mkdir(parents=True)
         self.shot.write_bytes(PNG_BYTES)
         self.manager = SimpleNamespace(
+            ensure_session_accessible=AsyncMock(),
             settings=SimpleNamespace(artifact_root=str(self.artifact_root)),
             capture_screenshot=AsyncMock(side_effect=lambda *a, **k: self._shot_result()),
             observe=AsyncMock(side_effect=lambda *a, preset=None, **k: self._observation(preset or "normal")),

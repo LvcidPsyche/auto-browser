@@ -26,6 +26,15 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   `X-Operator-Id` is attribution only and is recorded as `source: "header"`.
   When a header disagrees with the authenticated operator, the credential wins
   and the claim is kept in `asserted_id`.
+- Under named credentials, sessions and auth profiles belong to the operator
+  who created them. Another operator's session is left out of listings and
+  answers like a session that does not exist, together with its approvals,
+  agent jobs, cron jobs and `/artifacts` files. Agent jobs run as the operator
+  who queued them, and cron jobs fire as their creator, opening only the auth
+  profiles their creator may open. Sessions created under the shared token are
+  unowned and open to every operator. The audit log stays operator-wide, and
+  the takeover desktop is shared by every session on a browser node; use
+  `docker_ephemeral` isolation to give each session its own.
 - Request-rate limiting with 429 responses and reset headers
 - Metrics endpoint for scraping and alert wiring
 - Automated retention cleanup for:

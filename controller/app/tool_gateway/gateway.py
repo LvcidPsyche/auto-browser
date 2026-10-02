@@ -267,6 +267,11 @@ class McpToolGateway:
                 )
             arguments = spec.input_model.model_validate(raw_arguments)
             arguments = await self._resolve_implicit_session(spec, arguments)
+            # Before the handler, for tools that read a session's records
+            # without resolving the session itself (witness, audit, downloads).
+            session_id = getattr(arguments, "session_id", None)
+            if isinstance(session_id, str) and session_id:
+                await self.manager.ensure_session_accessible(session_id)
             approval = await self._require_governed_tool_approval(
                 spec,
                 arguments,

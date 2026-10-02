@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from ...audit import get_current_operator
+from ...session_ownership import verified_operator
 from ...utils import UTC, atomic_write_text, utc_now
 from ...witness import WitnessActionContext
 
@@ -540,14 +541,8 @@ class BrowserAuthProfileService:
 
     @staticmethod
     def verified_operator() -> str | None:
-        """The current operator, but only when it was actually proven.
-
-        `source: "header"` is a self-asserted label (see app/auth_policy.py), so
-        it can never grant access to a profile — anyone able to reach the API
-        could set it to any value.
-        """
-        operator = get_current_operator()
-        return operator.id if operator.source == "token" else None
+        """The current operator, but only when it was actually proven (see app/session_ownership.py)."""
+        return verified_operator()
 
     def require_access(self, profile_name: str, *, action: str) -> str | None:
         """Authorize this operator against a profile; return who now owns it.

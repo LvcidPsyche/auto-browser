@@ -225,6 +225,7 @@ class ProjectionTests(unittest.TestCase):
 class GatewayShapingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.manager = SimpleNamespace(
+            ensure_session_accessible=AsyncMock(),
             list_sessions=AsyncMock(return_value=[_session_summary()]),
             get_session_record=AsyncMock(return_value=_session_summary()),
             observe=AsyncMock(side_effect=lambda *args, **kwargs: _observation()),

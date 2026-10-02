@@ -47,6 +47,7 @@ from .network_inspector import NetworkInspector
 from .ocr import OCRExtractor
 from .pii_scrub import PiiScrubber
 from .session_isolation import DockerBrowserNodeProvisioner, IsolatedBrowserRuntime
+from .session_ownership import as_system
 from .session_store import DurableSessionStore
 from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
 from .url_safety import browser_equivalent_url
@@ -130,6 +131,9 @@ class BrowserSession:
     pending_witness_context: dict[str, Any] | None = None
     witness_remote_state: WitnessRemoteState = field(default_factory=WitnessRemoteState)
     metadata: dict[str, Any] = field(default_factory=dict)
+    # The token-verified operator who created it; None for an unowned session
+    # (see app/session_ownership.py).
+    owner: str | None = None
 
 
 SessionCreatedHook = Callable[[str, Page], Awaitable[None]]
@@ -261,11 +265,13 @@ class BrowserManager:
     async def shutdown(self) -> None:
         logger.info("shutting down browser manager")
         session_ids = list(self.sessions.keys())
-        for session_id in session_ids:
-            try:
-                await self.close_session(session_id)
-            except Exception as exc:  # pragma: no cover - best effort cleanup
-                logger.warning("failed to close session %s during shutdown: %s", session_id, exc)
+        # Every operator's sessions close, not only those of whoever is current.
+        with as_system():
+            for session_id in session_ids:
+                try:
+                    await self.close_session(session_id)
+                except Exception as exc:  # pragma: no cover - best effort cleanup
+                    logger.warning("failed to close session %s during shutdown: %s", session_id, exc)
 
         self.browser = None
         if self.playwright is not None:
@@ -340,6 +346,12 @@ class BrowserManager:
 
     async def get_session_record(self, session_id: str) -> dict[str, Any]:
         return await self.session_lifecycle.get_record(session_id)
+
+    async def ensure_session_accessible(self, session_id: str) -> None:
+        await self.session_lifecycle.ensure_accessible(session_id)
+
+    async def session_owner(self, session_id: str) -> str | None:
+        return await self.session_lifecycle.owner_of(session_id)
 
     async def get_session_summary(self, session_id: str) -> dict[str, Any]:
         """Public API for getting a session summary by ID."""

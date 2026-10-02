@@ -103,6 +103,7 @@ class GetHtmlPagingTests(unittest.IsolatedAsyncioTestCase):
             evaluate=AsyncMock(side_effect=self._evaluate),
         )
         self.manager = SimpleNamespace(
+            ensure_session_accessible=AsyncMock(),
             get_session=AsyncMock(return_value=SimpleNamespace(page=self.page)),
             require_governed_approval=AsyncMock(return_value=None),
         )

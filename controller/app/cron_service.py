@@ -19,6 +19,7 @@ Job schema:
     "auth_profile":str | null,
     "proxy_persona":str | null,
     "max_steps":   int (default 20),
+    "owner":       str | null (token-verified operator who created it),
     "created_at":  ISO datetime,
     "last_run_at": ISO datetime | null,
     "last_status": str | null,
@@ -43,6 +44,7 @@ from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
+from .session_ownership import ANONYMOUS, acting_as, as_system, may_use, owner_identity, verified_operator
 from .utils import UTC, atomic_write_text
 
 try:
@@ -110,6 +112,7 @@ class CronService:
         webhook_enabled: bool = False,
     ) -> dict[str, Any]:
         self._validate_schedule(schedule)
+        self._require_profile_access(auth_profile, owner=verified_operator())
         async with self._lock:
             jobs = self._load()
             if len(jobs) >= self._max_jobs:
@@ -130,6 +133,9 @@ class CronService:
                 "auth_profile": auth_profile,
                 "proxy_persona": proxy_persona,
                 "max_steps": max_steps,
+                # A job fires as the operator who created it: its session is
+                # theirs, and it may open only auth profiles they may open.
+                "owner": verified_operator(),
                 "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                 "last_run_at": None,
                 "last_status": None,
@@ -150,22 +156,38 @@ class CronService:
             return created
 
     async def list_jobs(self) -> list[dict[str, Any]]:
-        return [self._safe_job(j) for j in self._load().values()]
+        return [self._safe_job(j) for j in self._load().values() if may_use(j.get("owner"))]
 
     async def get_job(self, job_id: str) -> dict[str, Any]:
-        jobs = self._load()
-        if job_id not in jobs:
+        return self._safe_job(self._accessible(self._load(), job_id))
+
+    @staticmethod
+    def _accessible(jobs: dict[str, Any], job_id: str) -> dict[str, Any]:
+        """Another operator's job answers as if it did not exist."""
+        job = jobs.get(job_id)
+        if job is None or not may_use(job.get("owner")):
             raise KeyError(f"Cron job not found: {job_id}")
-        return self._safe_job(jobs[job_id])
+        return job
+
+    def _require_profile_access(self, auth_profile: str | None, *, owner: str | None) -> None:
+        """Refuse a profile the job could not open when it fires, as whom it fires.
+
+        Checked when the job is defined, not first when it fires: a job is not a
+        way to reach a profile its creator could not open directly.
+        """
+        if not auth_profile or self.manager is None:
+            return
+        with acting_as(owner_identity(owner) or ANONYMOUS):
+            self.manager.auth_profiles.require_access(auth_profile, action="scheduling a cron job with it")
 
     async def update_job(self, job_id: str, updates: dict[str, Any]) -> dict[str, Any]:
         if "schedule" in updates:
             self._validate_schedule(updates["schedule"])
         async with self._lock:
             jobs = self._load()
-            if job_id not in jobs:
-                raise KeyError(f"Cron job not found: {job_id}")
-            job = jobs[job_id]
+            job = self._accessible(jobs, job_id)
+            if "auth_profile" in updates:
+                self._require_profile_access(updates["auth_profile"], owner=job.get("owner"))
             allowed = {
                 "name",
                 "goal",
@@ -197,7 +219,7 @@ class CronService:
     async def delete_job(self, job_id: str) -> bool:
         async with self._lock:
             jobs = self._load()
-            if job_id not in jobs:
+            if job_id not in jobs or not may_use(jobs[job_id].get("owner")):
                 return False
             del jobs[job_id]
             self._save(jobs)
@@ -227,10 +249,7 @@ class CronService:
 
     async def trigger_job(self, job_id: str) -> dict[str, Any]:
         """Trigger a job immediately (no auth — internal use only)."""
-        jobs = self._load()
-        if job_id not in jobs:
-            raise KeyError(f"Cron job not found: {job_id}")
-        return await self._run_job_now(jobs[job_id])
+        return await self._run_job_now(self._accessible(self._load(), job_id))
 
     # ── Internal ───────────────────────────────────────────────────────────
 
@@ -306,13 +325,17 @@ class CronService:
         # Claim the slot before the first await, so a webhook and a scheduled
         # fire arriving together cannot both pass the check above.
         self._active_runs[job_id] = ""
+        # Fires as the job's owner, whoever triggered it (the scheduler, a
+        # webhook): the session and the agent job are theirs.
+        owner = owner_identity(job.get("owner"))
         try:
-            session_result = await self.manager.create_session(
-                name=f"cron-{job_id}",
-                start_url=job.get("start_url"),
-                auth_profile=job.get("auth_profile"),
-                proxy_persona=job.get("proxy_persona"),
-            )
+            with acting_as(owner):
+                session_result = await self.manager.create_session(
+                    name=f"cron-{job_id}",
+                    start_url=job.get("start_url"),
+                    auth_profile=job.get("auth_profile"),
+                    proxy_persona=job.get("proxy_persona"),
+                )
         except BaseException:
             self._active_runs.pop(job_id, None)
             raise
@@ -320,7 +343,8 @@ class CronService:
         self._active_runs[job_id] = session_id
 
         try:
-            queued = await self.job_queue.enqueue_run(session_id, run_request)
+            with acting_as(owner):
+                queued = await self.job_queue.enqueue_run(session_id, run_request)
         except Exception:
             # Enqueue can reject (queue at capacity). The session exists but
             # nothing will ever run in it, so release it here rather than
@@ -365,7 +389,9 @@ class CronService:
         if self.manager is None:
             return
         try:
-            await self.manager.close_session(session_id)
+            # Housekeeping, from the job queue's finish callback: no operator.
+            with as_system():
+                await self.manager.close_session(session_id)
         except Exception as exc:
             logger.warning(
                 "cron job %s: failed to close session %s: %s",

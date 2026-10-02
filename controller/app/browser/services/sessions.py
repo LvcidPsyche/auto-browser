@@ -14,6 +14,7 @@ from ...action_errors import SessionNotFoundError
 from ...browser_scripts import apply_stealth
 from ...models import SessionRecord, SessionStatus, resolve_totp_hosts
 from ...network_inspector import NetworkInspector
+from ...session_ownership import may_use, verified_operator
 from ...utils import UTC
 
 if TYPE_CHECKING:
@@ -48,10 +49,16 @@ class BrowserSessionService:
         self._creating = 0
 
     async def list(self) -> list[dict[str, Any]]:
-        session_map = {record.id: record.model_dump() for record in await self.manager.session_store.list()}
+        session_map = {
+            record.id: record.model_dump()
+            for record in await self.manager.session_store.list()
+            if may_use(record.owner)
+        }
         # A snapshot: summaries await, and a session created or closed meanwhile
         # changed the dict mid-iteration ("dictionary changed size").
         for session in list(self.manager.sessions.values()):
+            if not may_use(session.owner):
+                continue
             summary = await self.manager._session_summary(session)
             session_map[summary["id"]] = summary
         return sorted(
@@ -165,6 +172,7 @@ class BrowserSessionService:
                 totp_secret=totp_secret,
                 totp_hosts=resolved_totp_hosts,
                 witness_remote_state=self.manager._initial_witness_remote_state(resolved_protection_mode),
+                owner=verified_operator(),
             )
             if source_path is not None:
                 session.last_auth_state_path = source_path
@@ -347,17 +355,44 @@ class BrowserSessionService:
         session = self.manager.sessions.get(session_id)
         if session is None:
             raise SessionNotFoundError(session_id, status=await self._recorded_status(session_id))
+        if not may_use(session.owner):
+            # Another operator's session answers as if it did not exist.
+            raise SessionNotFoundError(session_id)
         return session
 
     async def get_record(self, session_id: str) -> dict[str, Any]:
         session = self.manager.sessions.get(session_id)
         if session is not None:
+            if not may_use(session.owner):
+                raise SessionNotFoundError(session_id)
             return await self.manager._session_summary(session)
         try:
             record = await self.manager.session_store.get(session_id)
         except KeyError:
             raise SessionNotFoundError(session_id) from None
+        if not may_use(record.owner):
+            raise SessionNotFoundError(session_id)
         return record.model_dump()
+
+    async def owner_of(self, session_id: str) -> str | None:
+        """Who owns a session, live or recorded; None when unowned or unknown."""
+        session = self.manager.sessions.get(session_id)
+        if session is not None:
+            return session.owner
+        try:
+            record = await self.manager.session_store.get(session_id)
+        except KeyError:
+            return None
+        return record.owner
+
+    async def ensure_accessible(self, session_id: str) -> None:
+        """Refuse a session that belongs to another operator, as if it did not exist.
+
+        For entry points that address a session by id but never resolve it
+        through get(): diagnostics that read its files, approvals, agent jobs.
+        """
+        if not may_use(await self.owner_of(session_id)):
+            raise SessionNotFoundError(session_id)
 
     async def _recorded_status(self, session_id: str) -> str | None:
         """Status of a session that is not live, from its persisted record, if any.
@@ -370,7 +405,7 @@ class BrowserSessionService:
         except Exception:  # message enrichment only; any store failure means "unknown"
             logger.debug("no readable record for session %s", session_id, exc_info=True)
             return None
-        return record.status
+        return record.status if may_use(record.owner) else None
 
     async def close(self, session_id: str) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
@@ -650,6 +685,7 @@ class BrowserSessionService:
             "proxy_persona": session.proxy_persona,
             "protection_mode": session.protection_mode,
             "witness_remote": session.witness_remote_state.model_dump(),
+            "owner": session.owner,
         }
 
     async def get_summary(self, session_id: str) -> dict[str, Any]:

@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 
 from ..models import ShareSessionRequest
+from ..session_ownership import as_system
 from ._utils import internal_error, require_safe_segment
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,10 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
     async def shared_observe(token: str) -> dict[str, Any]:
         session_id = _shared_session_id(token)
         try:
-            observation = await manager.observe(session_id)
+            # The token is the credential, issued by someone who could use the
+            # session; the viewer is no operator, so this reads as the system.
+            with as_system():
+                observation = await manager.observe(session_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Unknown session") from None
         except Exception:
@@ -80,7 +84,8 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
     async def shared_session_view(token: str) -> HTMLResponse:
         session_id = _shared_session_id(token)
         try:
-            await manager.get_session(session_id)
+            with as_system():
+                await manager.get_session(session_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Unknown session") from None
 

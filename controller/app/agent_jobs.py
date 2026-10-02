@@ -16,7 +16,9 @@ from .models import (
     AgentRunRequest,
     AgentStepRequest,
     AgentStepResult,
+    OperatorIdentity,
 )
+from .session_ownership import acting_as, may_use
 from .utils import atomic_write_text, record_path, utc_now
 
 logger = logging.getLogger(__name__)
@@ -232,8 +234,19 @@ RESUME_CONTEXT_MIN_CHARS = 1000
 
 
 class AgentJobQueue:
-    def __init__(self, *, orchestrator, store_root: str | Path, worker_count: int = 1, audit_store=None):
+    def __init__(
+        self,
+        *,
+        orchestrator,
+        store_root: str | Path,
+        session_owner: Callable[[str], Awaitable[str | None]],
+        worker_count: int = 1,
+        audit_store=None,
+    ):
         self.orchestrator = orchestrator
+        # Who owns a session (BrowserManager.session_owner): a job in another
+        # operator's session is left out of listings and refused by id.
+        self.session_owner = session_owner
         self.store = AgentJobStore(store_root)
         self.worker_count = max(1, worker_count)
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
@@ -294,10 +307,18 @@ class AgentJobQueue:
         session_id: str | None = None,
     ) -> list[dict]:
         records = await self.store.list(status=status, session_id=session_id)
-        return [self._public_record(record) for record in records]
+        owners = {record.session_id: await self.session_owner(record.session_id) for record in records}
+        return [self._public_record(record) for record in records if may_use(owners[record.session_id])]
 
     async def get_job(self, job_id: str) -> dict:
-        return self._public_record(await self.store.get(job_id))
+        return self._public_record(await self._accessible(job_id))
+
+    async def _accessible(self, job_id: str) -> AgentJobRecord:
+        """A job in another operator's session answers as if it did not exist."""
+        record = await self.store.get(job_id)
+        if not may_use(await self.session_owner(record.session_id)):
+            raise KeyError(job_id)
+        return record
 
     async def enqueue_step(self, session_id: str, payload: AgentStepRequest) -> dict:
         return await self._enqueue(session_id, "agent_step", payload)
@@ -306,7 +327,7 @@ class AgentJobQueue:
         return await self._enqueue(session_id, "agent_run", payload)
 
     async def resume_job(self, job_id: str, *, max_steps: int | None = None) -> dict:
-        source = await self.store.get(job_id)
+        source = await self._accessible(job_id)
         if not self._is_resumable(source):
             raise ValueError("Job is not resumable")
         if source.kind != "agent_run":
@@ -330,12 +351,14 @@ class AgentJobQueue:
         return resumed
 
     async def discard_job(self, job_id: str) -> dict:
+        await self._accessible(job_id)
         record, changed = await self.store.discard(job_id)
         if changed:
             await self._audit("agent_job_discarded", "discarded", record)
         return self._public_record(record)
 
     async def cancel_job(self, job_id: str) -> dict:
+        await self._accessible(job_id)
         record, changed = await self.store.request_cancel(job_id)
         if changed:
             await self._audit("agent_job_cancel_requested", record.status, record)
@@ -410,11 +433,20 @@ class AgentJobQueue:
 
     async def _process_job(self, job_id: str) -> None:
         try:
-            await self._process_job_inner(job_id)
+            # The worker has no operator of its own: the job runs as whoever
+            # queued it, so it can use that operator's session and no other.
+            with acting_as(await self._queued_by(job_id)):
+                await self._process_job_inner(job_id)
         finally:
             # Runs on success, failure, and cancellation alike. Whoever created a
             # session purely to host this job gets it back here or not at all.
             await self._run_finish_callback(job_id)
+
+    async def _queued_by(self, job_id: str) -> OperatorIdentity | None:
+        try:
+            return (await self.store.get(job_id)).operator
+        except KeyError:
+            return None
 
     async def _process_job_inner(self, job_id: str) -> None:
         record = await self.store.start_queued(job_id)

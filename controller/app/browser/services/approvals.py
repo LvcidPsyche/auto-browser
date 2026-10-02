@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from ...approvals import held_for_execution
-from ...models import ApprovalDecider
+from ...models import ApprovalDecider, ApprovalRecord
+from ...session_ownership import may_use
 from ...witness import WitnessApproval
 
 
@@ -18,11 +19,18 @@ class BrowserApprovalService:
         session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         approvals = await self.manager.approvals.list(status=status, session_id=session_id)
-        return [approval.model_dump() for approval in approvals]
+        owners = {item.session_id: await self.manager.session_owner(item.session_id) for item in approvals}
+        return [approval.model_dump() for approval in approvals if may_use(owners[approval.session_id])]
 
     async def get(self, approval_id: str) -> dict[str, Any]:
+        return (await self._accessible(approval_id)).model_dump()
+
+    async def _accessible(self, approval_id: str) -> ApprovalRecord:
+        """An approval of another operator's session answers as if it did not exist."""
         approval = await self.manager.approvals.get(approval_id)
-        return approval.model_dump()
+        if not may_use(await self.manager.session_owner(approval.session_id)):
+            raise KeyError(approval_id)
+        return approval
 
     async def approve(
         self,
@@ -31,6 +39,7 @@ class BrowserApprovalService:
         *,
         decided_via: ApprovalDecider = "operator",
     ) -> dict[str, Any]:
+        await self._accessible(approval_id)
         approval = await self.manager.approvals.approve(approval_id, comment=comment, decided_via=decided_via)
         session = self.manager.sessions.get(approval.session_id)
         await self.manager.audit.append(
@@ -66,6 +75,7 @@ class BrowserApprovalService:
         *,
         decided_via: ApprovalDecider = "operator",
     ) -> dict[str, Any]:
+        await self._accessible(approval_id)
         approval = await self.manager.approvals.reject(approval_id, comment=comment, decided_via=decided_via)
         session = self.manager.sessions.get(approval.session_id)
         await self.manager.audit.append(
@@ -95,7 +105,7 @@ class BrowserApprovalService:
         return approval.model_dump()
 
     async def execute(self, approval_id: str) -> dict[str, Any]:
-        approval = await self.manager.approvals.get(approval_id)
+        approval = await self._accessible(approval_id)
         if approval.status != "approved":
             raise PermissionError(f"approval {approval_id} is not approved")
 

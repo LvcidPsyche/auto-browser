@@ -119,6 +119,7 @@ class GatewaySurfaceTests(unittest.IsolatedAsyncioTestCase):
     async def test_mcp_error_carries_the_reason_and_code(self) -> None:
         manager = MagicMock()
         manager.observe = AsyncMock(side_effect=SessionNotFoundError("sess-closed", status="closed"))
+        manager.ensure_session_accessible = AsyncMock()
         gateway = McpToolGateway(manager=manager, orchestrator=MagicMock(), job_queue=MagicMock())
 
         response = await gateway.call_tool(

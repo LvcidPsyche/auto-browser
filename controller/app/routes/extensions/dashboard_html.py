@@ -338,7 +338,7 @@ async function loadSessions() {
     appendCell(row, sessionId ? `${sessionId}...` : '—', {className: 'mono'});
     appendCell(row, s.name);
     appendNodeCell(row, statusBadge(s.status || 'unknown'));
-    appendCell(row, s.operator_id);
+    appendCell(row, s.owner);
     appendCell(row, s.current_url || s.start_url, {className: 'mono', maxWidth: '200px'});
     const actionCell = document.createElement('td');
     const href = safeHttpUrl(s.takeover_url);

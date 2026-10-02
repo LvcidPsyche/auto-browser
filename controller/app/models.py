@@ -604,6 +604,8 @@ class SessionRecord(BaseModel):
     proxy_persona: str | None = None
     protection_mode: ProtectionMode = "normal"
     witness_remote: WitnessRemoteState = Field(default_factory=WitnessRemoteState)
+    # The token-verified operator who created it; None for an unowned session.
+    owner: str | None = None
 
 
 class AgentJobRecord(BaseModel):
