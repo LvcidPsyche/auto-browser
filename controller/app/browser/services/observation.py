@@ -211,9 +211,10 @@ class BrowserObservationService:
         ever covered a fraction of the images written under /data/artifacts and
         served over /artifacts/.
 
-        OCR here costs time, but it is gated on the operator having explicitly
-        asked for screenshot scrubbing; silently honouring that setting for some
-        screenshots and not others is the worse trade.
+        OCR here costs time, and it is on by default (PII_SCRUB_SCREENSHOT):
+        honouring that setting for some screenshots and not others is the worse
+        trade. The before/after snapshots of actions can opt out separately with
+        PII_SCRUB_ACTION_SCREENSHOTS=false; see light_snapshot.
         """
         screenshot = await self.manager._capture_screenshot(session, label)
         if self.manager.pii_scrubber.screenshot_enabled:
@@ -222,10 +223,14 @@ class BrowserObservationService:
         return screenshot
 
     async def light_snapshot(self, session: "BrowserSession", *, label: str) -> dict[str, Any]:
-        screenshot, summary = await _gather_settled(
-            self._capture_screenshot_redacted(session, label),
-            self.page_summary(session.page),
-        )
+        # The before/after snapshot of every action. Redacting it runs OCR twice
+        # per action, the largest cost an action has; PII_SCRUB_ACTION_SCREENSHOTS
+        # =false trades that redaction for speed and leaves observations redacted.
+        if self.manager.settings.pii_scrub_action_screenshots:
+            capture = self._capture_screenshot_redacted(session, label)
+        else:
+            capture = self.manager._capture_screenshot(session, label)
+        screenshot, summary = await _gather_settled(capture, self.page_summary(session.page))
         return {
             "url": session.page.url,
             "title": summary["title"],

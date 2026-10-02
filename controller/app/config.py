@@ -324,6 +324,10 @@ class Settings(BaseSettings):
     # PII scrubbing
     pii_scrub_enabled: bool = Field(True, alias="PII_SCRUB_ENABLED")
     pii_scrub_screenshot: bool = Field(True, alias="PII_SCRUB_SCREENSHOT")
+    # Also redact the before/after snapshot of every action. It runs OCR twice
+    # per action; false makes actions much faster and leaves those images
+    # unredacted (observations stay redacted).
+    pii_scrub_action_screenshots: bool = Field(True, alias="PII_SCRUB_ACTION_SCREENSHOTS")
     pii_scrub_network: bool = Field(True, alias="PII_SCRUB_NETWORK")
     pii_scrub_console: bool = Field(True, alias="PII_SCRUB_CONSOLE")
     pii_scrub_patterns: str = Field("", alias="PII_SCRUB_PATTERNS")  # "" = all patterns

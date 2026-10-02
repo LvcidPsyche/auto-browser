@@ -64,6 +64,7 @@ def _make_manager(
         settings=SimpleNamespace(
             ocr_skip_when_text_available=ocr_skip,
             perception_preset_default=preset_default,
+            pii_scrub_action_screenshots=True,
         ),
         pii_scrubber=SimpleNamespace(screenshot_enabled=scrubbing_active, audit_report=False),
         _capture_screenshot=AsyncMock(return_value={"path": "/tmp/shot.png", "url": "/artifacts/shot.png"}),
@@ -170,6 +171,28 @@ class OcrGatingTests(unittest.IsolatedAsyncioTestCase):
         service = BrowserObservationService(manager=manager)
         await service.observation_payload(_make_session(text_excerpt="Hello world"), preset="normal")
 
+        manager.ocr.extract_from_image.assert_awaited_once()
+
+
+class ActionSnapshotRedactionTests(unittest.IsolatedAsyncioTestCase):
+    """Action snapshots are redacted by default; PII_SCRUB_ACTION_SCREENSHOTS=false skips their OCR."""
+
+    async def test_action_snapshots_are_redacted_by_default(self) -> None:
+        manager = _make_manager(scrubbing_active=True)
+        await BrowserObservationService(manager=manager).light_snapshot(_make_session(), label="before-click")
+        manager.ocr.extract_from_image.assert_awaited_once()
+
+    async def test_turning_it_off_skips_ocr_for_action_snapshots_only(self) -> None:
+        manager = _make_manager(scrubbing_active=True)
+        manager.settings.pii_scrub_action_screenshots = False
+        service = BrowserObservationService(manager=manager)
+
+        await service.light_snapshot(_make_session(), label="before-click")
+        manager.ocr.extract_from_image.assert_not_awaited()
+        manager._capture_screenshot.assert_awaited_once()
+
+        # Manual captures and the fast preset still go through redaction.
+        await service._capture_screenshot_redacted(_make_session(), "manual")
         manager.ocr.extract_from_image.assert_awaited_once()
 
 
