@@ -173,9 +173,11 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
             mime_type, image_b64 = self.encode_image(observation["screenshot_path"])
             content.append({"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}})
 
+        # No temperature: reasoning models behind these endpoints (OpenRouter
+        # serving an OpenAI model, for one) accept only their default, and
+        # leaving it out is valid everywhere.
         payload = {
             "model": model,
-            "temperature": 0,
             "messages": [
                 {
                     "role": "system",
@@ -193,7 +195,9 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
                     "function": {
                         "name": "browser_action",
                         "description": "Select the single best next browser action.",
-                        "parameters": self.action_schema,
+                        # The strict form: strict: true over the plain schema was a
+                        # 400 from OpenAI ("required" must list every property).
+                        "parameters": self.strict_action_schema,
                         "strict": True,
                     },
                 }

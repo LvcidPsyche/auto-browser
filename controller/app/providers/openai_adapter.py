@@ -99,22 +99,23 @@ class OpenAIAdapter(BaseProviderAdapter):
 
         model = model_override or self.settings.openai_model
         mime_type, image_b64 = self.encode_image(observation["screenshot_path"])
+        # The Responses API, not chat completions: current OpenAI models
+        # (gpt-6.1-sol) refuse function tools on chat completions while they
+        # reason, and cannot turn reasoning off. The request also used to send
+        # the non-strict schema with strict: true and temperature 0, each of
+        # which OpenAI rejected with a 400 — every step failed.
         payload = {
             "model": model,
-            "temperature": 0,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are the Auto Browser planner. Pick exactly one next action. "
-                        "Use the provided function tool for your answer."
-                    ),
-                },
+            "instructions": (
+                "You are the Auto Browser planner. Pick exactly one next action. "
+                "Use the provided function tool for your answer."
+            ),
+            "input": [
                 {
                     "role": "user",
                     "content": [
                         {
-                            "type": "text",
+                            "type": "input_text",
                             "text": self.build_text_prompt(
                                 goal=goal,
                                 observation=observation,
@@ -122,51 +123,44 @@ class OpenAIAdapter(BaseProviderAdapter):
                                 previous_steps=previous_steps,
                             ),
                         },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{mime_type};base64,{image_b64}",
-                            },
-                        },
+                        {"type": "input_image", "image_url": f"data:{mime_type};base64,{image_b64}"},
                     ],
-                },
+                }
             ],
             "tools": [
                 {
                     "type": "function",
-                    "function": {
-                        "name": "browser_action",
-                        "description": "Select the single best next browser action.",
-                        "parameters": self.action_schema,
-                        "strict": True,
-                    },
+                    "name": "browser_action",
+                    "description": "Select the single best next browser action.",
+                    "parameters": self.strict_action_schema,
+                    "strict": True,
                 }
             ],
-            "tool_choice": {"type": "function", "function": {"name": "browser_action"}},
+            "tool_choice": {"type": "function", "name": "browser_action"},
         }
         response = await self._post_json(
-            url=f"{self.settings.openai_base_url.rstrip('/')}/chat/completions",
+            url=f"{self.settings.openai_base_url.rstrip('/')}/responses",
             headers={
                 "Authorization": f"Bearer {self.settings.openai_api_key}",
                 "Content-Type": "application/json",
             },
             payload=payload,
         )
-        choices = response.get("choices") or []
-        if not choices:
-            raise RuntimeError("OpenAI response contained no choices")
-        message = choices[0].get("message", {})
-        tool_calls = message.get("tool_calls") or []
-        if not tool_calls:
-            raise RuntimeError("OpenAI did not return a tool call for browser_action")
-        arguments = tool_calls[0]["function"]["arguments"]
+        call = next(
+            (item for item in response.get("output") or [] if item.get("type") == "function_call"),
+            None,
+        )
+        if call is None:
+            raise RuntimeError(
+                f"OpenAI did not return a browser_action function call (status={response.get('status')})"
+            )
+        arguments = call.get("arguments") or "{}"
         decision = BrowserActionDecision.model_validate_json(arguments)
-        usage = response.get("usage")
         return ProviderDecision(
             provider=self.provider,
             model=response.get("model", model),
             decision=decision,
-            usage=usage,
+            usage=response.get("usage"),
             raw_text=arguments,
         )
 
