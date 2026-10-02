@@ -17,8 +17,11 @@ import tempfile
 # overriding a root wrote there: on a host, the real /data (C:\data on Windows);
 # under `make test`, which mounts ./data, the developer's own audit log and
 # witness chains — test receipts appended to real chains, signed with the
-# deployment's real witness key. Every root now defaults to a throwaway
-# directory, removed when the run ends. Tests that set a root explicitly win.
+# deployment's real witness key. Every root now points at a throwaway
+# directory, removed when the run ends. Assigned, not defaulted: compose sets
+# ARTIFACT_ROOT and nine other roots to /data/... in the container, so under
+# `make test` and the CI controller-tests job a default never applied. Tests that
+# need a particular root set it themselves, after this runs.
 _DATA_ROOT = tempfile.mkdtemp(prefix="auto-browser-tests-")
 atexit.register(shutil.rmtree, _DATA_ROOT, ignore_errors=True)
 for _name, _relative in {
@@ -41,7 +44,7 @@ for _name, _relative in {
     "REMOTE_ACCESS_INFO_PATH": "tunnels/reverse-ssh.json",
     "ISOLATED_TUNNEL_INFO_ROOT": "tunnels/sessions",
 }.items():
-    os.environ.setdefault(_name, os.path.join(_DATA_ROOT, _relative))
+    os.environ[_name] = os.path.join(_DATA_ROOT, _relative)
 
 # API_BIND_SCOPE defaults to `exposed` so that an undeclared deployment fails
 # closed (app/auth_policy.py). A TestClient run is loopback by construction and
