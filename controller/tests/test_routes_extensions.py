@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -65,28 +64,6 @@ class FakeCdp:
         return {"method": method, "params": params}
 
 
-class FakeWorkflowRun(SimpleNamespace):
-    def __init__(self) -> None:
-        super().__init__(
-            run_id="run-1",
-            status=SimpleNamespace(value="completed"),
-            step_statuses={"step-1": SimpleNamespace(value="completed")},
-            context={"ok": True},
-            error=None,
-        )
-
-
-class FakeWorkflowEngine:
-    def __init__(self) -> None:
-        self.run = AsyncMock(return_value=FakeWorkflowRun())
-        self._runs = [{"run_id": "run-1", "workflow_id": "fixture", "status": "completed"}]
-
-    def list_runs(self, workflow_id: str = ""):
-        if workflow_id:
-            return [run for run in self._runs if run["workflow_id"] == workflow_id]
-        return list(self._runs)
-
-
 class RoutesExtensionsTests(unittest.TestCase):
     def make_client(self) -> TestClient:
         app = FastAPI()
@@ -96,7 +73,6 @@ class RoutesExtensionsTests(unittest.TestCase):
         )
         app.state.network_inspectors = {"session-1": FakeInspector()}
         app.state.cdp_sessions = {"session-1": FakeCdp()}
-        app.state.workflow_engine = FakeWorkflowEngine()
         app.state.peer_registry = FakePeerRegistry()
         app.state.mesh_identity = SimpleNamespace(node_id="node-1", pubkey_b64="pub")
         register_all_routers(app)
@@ -117,7 +93,7 @@ class RoutesExtensionsTests(unittest.TestCase):
         self.assertTrue(removed.json()["removed"])
         self.assertEqual(client.get("/sessions/missing/network/requests").status_code, 404)
 
-    def test_mesh_cdp_workflow_and_dashboard_routes(self) -> None:
+    def test_mesh_cdp_and_dashboard_routes(self) -> None:
         client = self.make_client()
 
         peer = {
@@ -140,21 +116,6 @@ class RoutesExtensionsTests(unittest.TestCase):
         self.assertEqual(
             client.post("/sessions/session-1/cdp/raw", json={"method": "Forbidden.command"}).status_code, 403
         )
-
-        run = client.post("/workflows/run", json={"workflow_id": "fixture", "steps": []}).json()
-        self.assertEqual(run["status"], "completed")
-        self.assertEqual(client.get("/workflows/runs?workflow_id=fixture").json()["runs"][0]["run_id"], "run-1")
-        self.assertEqual(client.get("/workflows/runs/run-1").json()["run_id"], "run-1")
-        self.assertEqual(client.get("/workflows/runs/missing").status_code, 404)
-        for bad_steps in (
-            [{"id": "a", "action": "x", "retries": 3}],
-            [{"action": "x"}],
-            [{"id": "a", "action": "x", "retry_max": 1000}],
-            [{"id": "a", "action": "x"}, {"id": "a", "action": "y"}],
-            [{"id": "a", "action": "x", "depends_on": ["missing"]}],
-        ):
-            response = client.post("/workflows/run", json={"workflow_id": "fixture", "steps": bad_steps})
-            self.assertEqual(response.status_code, 422, bad_steps)
 
         dashboard = client.get("/dashboard")
         self.assertEqual(dashboard.status_code, 200)

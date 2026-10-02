@@ -3,7 +3,7 @@ tests — auto-browser 1.0 test suite.
 
 Covers: mesh (identity, peers, policy, transport, delegation),
         stealth (humanizer, fingerprint), network inspector,
-        cdp passthrough, dom pruner, workflow engine.
+        cdp passthrough, dom pruner.
 
 Run with: pytest tests/test_1_0.py -v
 """
@@ -593,94 +593,6 @@ class TestDOMPruner:
         assert len(result["interactable_elements"]) <= 5
         assert result["elements_total"] == 30
         assert result["elements_pruned"] == 25
-
-
-# ===========================================================================
-# Workflow Engine
-# ===========================================================================
-
-
-class TestWorkflowEngine:
-    async def test_simple_workflow(self, tmp_path):
-        from app.workflow.engine import WorkflowEngine
-
-        engine = WorkflowEngine(workflows_root=tmp_path / "workflows")
-        results_store = {}
-
-        async def handler(action: str, params: dict, ctx: dict) -> dict:
-            results_store[action] = params
-            return {"done": True, "action": action}
-
-        engine.register_action("test.step", handler)
-
-        steps = [{"id": "s1", "action": "test.step", "params": {"key": "value"}}]
-        run = await engine.run("test_wf", steps, {"initial": "ctx"})
-        assert run.status.value == "completed"
-        assert run.step_statuses["s1"].value == "completed"
-
-    async def test_template_chaining(self, tmp_path):
-        from app.workflow.engine import _resolve_templates
-
-        ctx = {"video_id": "abc123", "nested": {"key": "val"}}
-        assert _resolve_templates("Upload {{ context.video_id }}", ctx) == "Upload abc123"
-        assert _resolve_templates("{{ context.nested.key }}", ctx) == "val"
-        assert _resolve_templates("{{ context.missing }}", ctx) == ""
-
-    async def test_dependency_ordering(self, tmp_path):
-        from app.workflow.engine import WorkflowEngine
-
-        order = []
-
-        async def handler(action: str, params: dict, ctx: dict) -> dict:
-            order.append(action)
-            return {}
-
-        engine = WorkflowEngine(workflows_root=tmp_path / "workflows")
-        engine.register_action("step.a", handler)
-        engine.register_action("step.b", handler)
-
-        steps = [
-            {"id": "b", "action": "step.b", "depends_on": ["a"]},
-            {"id": "a", "action": "step.a"},
-        ]
-        await engine.run("dep_test", steps)
-        assert order.index("step.a") < order.index("step.b")
-
-    async def test_missing_action_fails_run(self, tmp_path):
-        from app.workflow.engine import WorkflowEngine
-
-        engine = WorkflowEngine(workflows_root=tmp_path / "workflows")
-        steps = [{"id": "x", "action": "unregistered.action"}]
-        run = await engine.run("fail_test", steps)
-        assert run.status.value == "failed"
-
-    async def test_retry_on_transient_failure(self, tmp_path):
-        from app.workflow.engine import WorkflowEngine
-
-        call_count = [0]
-
-        async def flaky(action, params, ctx):
-            call_count[0] += 1
-            if call_count[0] < 2:
-                raise RuntimeError("transient")
-            return {"ok": True}
-
-        engine = WorkflowEngine(workflows_root=tmp_path / "workflows")
-        engine.register_action("flaky.step", flaky)
-        steps = [{"id": "s1", "action": "flaky.step", "retry_max": 2, "retry_backoff_seconds": 0.01}]
-        run = await engine.run("retry_test", steps)
-        assert run.status.value == "completed"
-        assert call_count[0] == 2
-
-    async def test_persists_to_disk(self, tmp_path):
-        from app.workflow.engine import WorkflowEngine
-
-        engine = WorkflowEngine(workflows_root=tmp_path / "wf")
-        engine.register_action("x", AsyncMock(return_value={}))
-        steps = [{"id": "s", "action": "x"}]
-        run = await engine.run("persist_test", steps)
-        runs = engine.list_runs()
-        assert any(r["run_id"] == run.run_id for r in runs)
 
 
 # ===========================================================================

@@ -24,7 +24,6 @@ class CapabilityKind(str, Enum):
 
     TOOL = "tool"  # delegate a named browser tool call
     SESSION = "session"  # delegate session-level verbs (create/close/observe)
-    WORKFLOW = "workflow"  # delegate a named workflow run
 
 
 # ---------------------------------------------------------------------------

@@ -56,6 +56,14 @@ Upgrade notes:
 - The test suite writes only to a temporary directory; it used to write into `./data` (and
   under `make test`, into the real witness chains). Real-Chromium tests run in CI.
 
+### Removed
+
+- **`/workflows`** (`POST /workflows/run`, `GET /workflows/runs`, `GET /workflows/runs/{id}`)
+  and the dashboard's Workflow Runs panel. The engine had no step actions registered, so every
+  run failed; it will come back when there are workflows to run with it. `WORKFLOWS_ROOT` is no
+  longer read, and run records already in `/data/workflows` can be deleted. A mesh peer asking
+  for a `workflow:` capability now gets "Unknown capability kind" instead of "not yet wired".
+
 ## [1.8.1] — 2026-09-26
 
 A reliability, speed, polish and security pass over 1.8.0.

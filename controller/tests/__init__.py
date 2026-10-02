@@ -33,7 +33,6 @@ for _name, _relative in {
     "HARNESS_ROOT": "harness",
     "MEMORY_ROOT": "memory",
     "SKILLS_STAGING_ROOT": "skills-staging",
-    "WORKFLOWS_ROOT": "workflows",
     "MESH_IDENTITY_DIR": "mesh/identity",
     "MESH_PEERS_PATH": "mesh/peers.json",
     "CRON_STORE_PATH": "crons/crons.json",

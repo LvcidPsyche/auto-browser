@@ -66,7 +66,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <nav>
   <a href="#sessions" class="active">Sessions</a>
   <a href="#approvals">Approvals</a>
-  <a href="#workflows">Workflows</a>
   <a href="#agent-jobs">Agent Jobs</a>
   <a href="#peers">Peers</a>
   <a href="#audit">Audit Log</a>
@@ -76,7 +75,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="grid" id="stats">
     <div class="card"><h3>Active Sessions</h3><div class="value" id="stat-sessions">—</div></div>
     <div class="card"><h3>Pending Approvals</h3><div class="value" id="stat-approvals">—</div></div>
-    <div class="card"><h3>Workflow Runs</h3><div class="value" id="stat-workflows">—</div></div>
     <div class="card"><h3>Agent Jobs</h3><div class="value" id="stat-agent-jobs">—</div></div>
     <div class="card"><h3>Mesh Peers</h3><div class="value" id="stat-peers">—</div></div>
     <div class="card"><h3>Audit Events</h3><div class="value" id="stat-audit">—</div></div>
@@ -103,17 +101,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <table><thead><tr>
       <th>Session ID</th><th>Name</th><th>Status</th><th>Operator</th><th>URL</th><th>Actions</th>
     </tr></thead><tbody id="sessions-tbody"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody></table>
-  </div>
-
-  <!-- Workflows -->
-  <div class="section" id="workflows">
-    <div class="section-header">
-      <h2>Workflow Runs</h2>
-      <button class="refresh-btn" id="refresh-workflows">↻ Refresh</button>
-    </div>
-    <table><thead><tr>
-      <th>Run ID</th><th>Workflow</th><th>Status</th><th>Started</th><th>Duration</th>
-    </tr></thead><tbody id="workflows-tbody"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody></table>
   </div>
 
   <!-- Agent Jobs -->
@@ -330,7 +317,7 @@ const safeHttpUrl = (value) => {
 };
 
 async function loadAll() {
-  await Promise.all([loadIdentity(), loadApprovals(), loadSessions(), loadWorkflows(), loadAgentJobs(), loadPeers(), loadAudit(), loadAuthProfiles()]);
+  await Promise.all([loadIdentity(), loadApprovals(), loadSessions(), loadAgentJobs(), loadPeers(), loadAudit(), loadAuthProfiles()]);
 }
 
 async function loadIdentity() {
@@ -368,26 +355,6 @@ async function loadSessions() {
       actionCell.textContent = '—';
     }
     row.appendChild(actionCell);
-    tbody.appendChild(row);
-  });
-}
-
-async function loadWorkflows() {
-  const d = await api('/workflows/runs');
-  const runs = d.runs || [];
-  document.getElementById('stat-workflows').textContent = runs.length;
-  const tbody = document.getElementById('workflows-tbody');
-  if (!runs.length) { appendEmptyRow(tbody, 5, 'No runs yet'); return; }
-  tbody.replaceChildren();
-  runs.slice(0,50).forEach(r => {
-    const dur = r.finished_at && r.started_at ? `${((r.finished_at-r.started_at)).toFixed(1)}s` : '—';
-    const row = document.createElement('tr');
-    const runId = asText(r.run_id, '').slice(0, 12);
-    appendCell(row, runId ? `${runId}...` : '—', {className: 'mono'});
-    appendCell(row, r.workflow_id);
-    appendNodeCell(row, statusBadge(r.status || 'unknown'));
-    appendCell(row, timeAgo(r.started_at));
-    appendCell(row, dur);
     tbody.appendChild(row);
   });
 }
@@ -815,7 +782,6 @@ document.getElementById('refresh-auth-profiles').addEventListener('click', loadA
 
 document.getElementById('refresh-approvals').addEventListener('click', loadApprovals);
 document.getElementById('refresh-sessions').addEventListener('click', loadSessions);
-document.getElementById('refresh-workflows').addEventListener('click', loadWorkflows);
 document.getElementById('refresh-agent-jobs').addEventListener('click', loadAgentJobs);
 document.getElementById('refresh-peers').addEventListener('click', loadPeers);
 document.getElementById('refresh-audit').addEventListener('click', loadAudit);

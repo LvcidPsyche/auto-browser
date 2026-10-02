@@ -58,7 +58,6 @@ ROUTER_CANARIES = {
     "/mesh/identity": "routes/extensions/mesh.py (via register_all_routers)",
     "/sessions/{session_id}/network/requests": "routes/extensions/network.py (via register_all_routers)",
     "/sessions/{session_id}/cdp/raw": "routes/extensions/cdp.py (via register_all_routers)",
-    "/workflows/runs": "routes/extensions/workflow.py (via register_all_routers)",
     "/dashboard": "routes/extensions/dashboard.py (via register_all_routers)",
     "/agent/jobs": "routes/agent.py (via main.py)",
     "/auth-profiles": "routes/auth_profiles.py (via main.py)",
@@ -82,7 +81,6 @@ DISPATCH_PROBES = (
     "/auth-profiles",
     "/approvals",
     "/mesh/identity",
-    "/workflows/runs",
 )
 
 

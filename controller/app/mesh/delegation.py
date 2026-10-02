@@ -1,7 +1,7 @@
 """
 mesh.delegation — Orchestrator for outbound and inbound capability delegation.
 
-receive_inbound is fully implemented: routes tool/session/workflow capabilities,
+receive_inbound is fully implemented: routes tool/session capabilities,
 honors require_approval, returns DelegationResponse.
 """
 
@@ -339,11 +339,5 @@ class DelegationManager:
             verb = cap[8:]
             logger.info("mesh.delegation.session_verb verb=%s session_id=%s", verb, request.session_id)
             return {"_mesh_error": True, "error": "session delegation not yet wired", "verb": verb}
-
-        # workflow:<name> → workflow engine stub
-        if cap.startswith("workflow:"):
-            name = cap[9:]
-            logger.info("mesh.delegation.workflow name=%s", name)
-            return {"_mesh_error": True, "error": "workflow delegation not yet wired", "name": name}
 
         return {"_mesh_error": True, "error": f"Unknown capability kind: {cap!r}"}

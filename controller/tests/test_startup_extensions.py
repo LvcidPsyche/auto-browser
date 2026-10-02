@@ -19,19 +19,13 @@ class StartupExtensionsTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.old_mesh_enabled = os.environ.pop("MESH_ENABLED", None)
         self.old_stealth_profile = os.environ.pop("STEALTH_PROFILE", None)
-        self.old_workflows_root = os.environ.get("WORKFLOWS_ROOT")
         self.temp_dir = tempfile.TemporaryDirectory()
-        os.environ["WORKFLOWS_ROOT"] = self.temp_dir.name
 
     def tearDown(self) -> None:
         if self.old_mesh_enabled is not None:
             os.environ["MESH_ENABLED"] = self.old_mesh_enabled
         if self.old_stealth_profile is not None:
             os.environ["STEALTH_PROFILE"] = self.old_stealth_profile
-        if self.old_workflows_root is not None:
-            os.environ["WORKFLOWS_ROOT"] = self.old_workflows_root
-        else:
-            os.environ.pop("WORKFLOWS_ROOT", None)
         self.temp_dir.cleanup()
 
     def test_register_extensions_initializes_disabled_state_and_hooks(self) -> None:
@@ -58,7 +52,7 @@ class StartupExtensionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(app.state.veo3_client)
         self.assertIsNotNone(app.state.harness_service)
         self.assertIs(gateway.harness_service, app.state.harness_service)
-        self.assertIsNotNone(app.state.workflow_engine)
+        self.assertFalse(hasattr(app.state, "workflow_engine"))
         curator.assert_called_once_with(app)
         app.state.browser_manager.register_extension_hooks.assert_called_once()
 
