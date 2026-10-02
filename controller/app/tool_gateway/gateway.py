@@ -669,10 +669,17 @@ class McpToolGateway:
         return await self.manager.list_approvals(status=payload.status, session_id=payload.session_id)
 
     async def _approve_approval(self, payload: ApprovalDecisionInput) -> dict[str, Any]:
-        return await self.manager.approve(payload.approval_id, comment=payload.comment)
+        # The caller here is the agent whose action is waiting: approving it
+        # would make the approval meaningless unless the deployment opted in.
+        if not self.manager.settings.autonomous_approvals:
+            raise PermissionError(
+                "approvals come from an operator, in the dashboard or with POST /approvals/{id}/approve; "
+                "set AUTONOMOUS_APPROVALS=true on the controller to let agents approve their own actions"
+            )
+        return await self.manager.approve(payload.approval_id, comment=payload.comment, decided_via="agent")
 
     async def _reject_approval(self, payload: ApprovalDecisionInput) -> dict[str, Any]:
-        return await self.manager.reject(payload.approval_id, comment=payload.comment)
+        return await self.manager.reject(payload.approval_id, comment=payload.comment, decided_via="agent")
 
     async def _execute_approval(self, payload: ExecuteApprovalInput) -> dict[str, Any]:
         return await self.manager.execute_approval(payload.approval_id)

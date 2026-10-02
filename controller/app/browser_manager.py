@@ -38,6 +38,7 @@ from .downloads import DownloadCaptureService
 from .memory_manager import MemoryManager
 from .models import (
     HTTP_URL_SCHEMES,
+    ApprovalDecider,
     BrowserActionDecision,
     SessionStatus,
     WitnessRemoteState,
@@ -406,11 +407,23 @@ class BrowserManager:
     async def get_approval(self, approval_id: str) -> dict[str, Any]:
         return await self.approval_service.get(approval_id)
 
-    async def approve(self, approval_id: str, comment: str | None = None) -> dict[str, Any]:
-        return await self.approval_service.approve(approval_id, comment=comment)
+    async def approve(
+        self,
+        approval_id: str,
+        comment: str | None = None,
+        *,
+        decided_via: ApprovalDecider = "operator",
+    ) -> dict[str, Any]:
+        return await self.approval_service.approve(approval_id, comment=comment, decided_via=decided_via)
 
-    async def reject(self, approval_id: str, comment: str | None = None) -> dict[str, Any]:
-        return await self.approval_service.reject(approval_id, comment=comment)
+    async def reject(
+        self,
+        approval_id: str,
+        comment: str | None = None,
+        *,
+        decided_via: ApprovalDecider = "operator",
+    ) -> dict[str, Any]:
+        return await self.approval_service.reject(approval_id, comment=comment, decided_via=decided_via)
 
     async def execute_approval(self, approval_id: str) -> dict[str, Any]:
         return await self.approval_service.execute(approval_id)

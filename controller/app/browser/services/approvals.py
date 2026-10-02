@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...approvals import held_for_execution
+from ...models import ApprovalDecider
 from ...witness import WitnessApproval
 
 
@@ -23,8 +24,14 @@ class BrowserApprovalService:
         approval = await self.manager.approvals.get(approval_id)
         return approval.model_dump()
 
-    async def approve(self, approval_id: str, comment: str | None = None) -> dict[str, Any]:
-        approval = await self.manager.approvals.approve(approval_id, comment=comment)
+    async def approve(
+        self,
+        approval_id: str,
+        comment: str | None = None,
+        *,
+        decided_via: ApprovalDecider = "operator",
+    ) -> dict[str, Any]:
+        approval = await self.manager.approvals.approve(approval_id, comment=comment, decided_via=decided_via)
         session = self.manager.sessions.get(approval.session_id)
         await self.manager.audit.append(
             event_type="approval_decision",
@@ -32,7 +39,7 @@ class BrowserApprovalService:
             action="approve",
             session_id=approval.session_id,
             approval_id=approval.id,
-            details={"kind": approval.kind, "comment": comment},
+            details={"kind": approval.kind, "comment": comment, "decided_via": decided_via},
         )
         if session is not None:
             await self.manager._record_witness_receipt(
@@ -48,12 +55,18 @@ class BrowserApprovalService:
                     reason=approval.reason,
                 ),
                 target={"kind": approval.kind, "action": approval.action.action},
-                metadata={"comment": comment},
+                metadata={"comment": comment, "decided_via": decided_via},
             )
         return approval.model_dump()
 
-    async def reject(self, approval_id: str, comment: str | None = None) -> dict[str, Any]:
-        approval = await self.manager.approvals.reject(approval_id, comment=comment)
+    async def reject(
+        self,
+        approval_id: str,
+        comment: str | None = None,
+        *,
+        decided_via: ApprovalDecider = "operator",
+    ) -> dict[str, Any]:
+        approval = await self.manager.approvals.reject(approval_id, comment=comment, decided_via=decided_via)
         session = self.manager.sessions.get(approval.session_id)
         await self.manager.audit.append(
             event_type="approval_decision",
@@ -61,7 +74,7 @@ class BrowserApprovalService:
             action="reject",
             session_id=approval.session_id,
             approval_id=approval.id,
-            details={"kind": approval.kind, "comment": comment},
+            details={"kind": approval.kind, "comment": comment, "decided_via": decided_via},
         )
         if session is not None:
             await self.manager._record_witness_receipt(
@@ -77,7 +90,7 @@ class BrowserApprovalService:
                     reason=approval.reason,
                 ),
                 target={"kind": approval.kind, "action": approval.action.action},
-                metadata={"comment": comment},
+                metadata={"comment": comment, "decided_via": decided_via},
             )
         return approval.model_dump()
 

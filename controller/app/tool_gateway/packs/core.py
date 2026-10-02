@@ -255,14 +255,18 @@ def register(registry, gateway):
         ),
         ToolSpec(
             name="browser.approve_approval",
-            description="Approve a pending approval item.",
+            description=(
+                "Approve a pending approval item yourself. Refused unless the controller sets "
+                "AUTONOMOUS_APPROVALS=true; otherwise an operator approves it in the dashboard. "
+                "Your approvals are recorded as decided_via=agent."
+            ),
             input_model=ApprovalDecisionInput,
             handler=gateway._approve_approval,
             profiles=("full",),
         ),
         ToolSpec(
             name="browser.reject_approval",
-            description="Reject a pending approval item.",
+            description="Reject a pending approval item. Your rejections are recorded as decided_via=agent.",
             input_model=ApprovalDecisionInput,
             handler=gateway._reject_approval,
             profiles=("full",),

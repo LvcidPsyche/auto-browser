@@ -185,6 +185,9 @@ class Settings(BaseSettings):
     max_sessions: int = Field(1, alias="MAX_SESSIONS")
     require_approval_for_uploads: bool = Field(True, alias="REQUIRE_APPROVAL_FOR_UPLOADS")
     approval_ttl_minutes: int = Field(15, alias="APPROVAL_TTL_MINUTES")
+    # Lets agents approve their own pending actions: MCP browser.approve_approval
+    # and the built-in agent loop. Off, an operator approves every one.
+    autonomous_approvals: bool = Field(False, alias="AUTONOMOUS_APPROVALS")
     witness_enabled: bool = Field(True, alias="WITNESS_ENABLED")
     witness_protection_mode_default: Literal["normal", "confidential"] = Field(
         "normal",

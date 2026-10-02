@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
-from .models import ApprovalKind, ApprovalRecord, ApprovalStatus, BrowserActionDecision
+from .models import ApprovalDecider, ApprovalKind, ApprovalRecord, ApprovalStatus, BrowserActionDecision
 from .sqlite_utils import connect_sqlite
 from .utils import UTC, atomic_write_text, record_path, utc_now
 
@@ -291,11 +291,23 @@ class ApprovalStore:
                 self._sensitive_texts[approval.id] = (action.text or "", time.monotonic())
             return approval
 
-    async def approve(self, approval_id: str, comment: str | None = None) -> ApprovalRecord:
-        return await self._transition(approval_id, status="approved", comment=comment)
+    async def approve(
+        self,
+        approval_id: str,
+        comment: str | None = None,
+        *,
+        decided_via: ApprovalDecider = "operator",
+    ) -> ApprovalRecord:
+        return await self._transition(approval_id, status="approved", comment=comment, decided_via=decided_via)
 
-    async def reject(self, approval_id: str, comment: str | None = None) -> ApprovalRecord:
-        return await self._transition(approval_id, status="rejected", comment=comment)
+    async def reject(
+        self,
+        approval_id: str,
+        comment: str | None = None,
+        *,
+        decided_via: ApprovalDecider = "operator",
+    ) -> ApprovalRecord:
+        return await self._transition(approval_id, status="rejected", comment=comment, decided_via=decided_via)
 
     async def claim_execution(self, approval_id: str) -> bool:
         """Reserve an approved approval for one execution, or refuse.
@@ -374,16 +386,29 @@ class ApprovalStore:
         *,
         status: ApprovalStatus,
         comment: str | None,
+        decided_via: ApprovalDecider,
     ) -> ApprovalRecord:
         async with self._lock:
             approval = await self.get(approval_id)
             if approval.status == "executed":
                 raise PermissionError(f"approval {approval_id} has already been executed")
+            # An operator may change their mind before the action runs; an
+            # agent may not overturn a decision, or rejecting would only delay it.
+            if decided_via == "agent" and approval.status != "pending":
+                raise PermissionError(f"approval {approval_id} has already been {approval.status}")
+            # Nor by asking again: the same action requested anew is a new
+            # approval, and it stays the operator's to decide.
+            if decided_via == "agent" and status == "approved" and await self._operator_rejected(approval):
+                raise PermissionError(
+                    f"an operator rejected this action in session {approval.session_id}; "
+                    f"only an operator can approve {approval_id}"
+                )
             now = utc_now()
             approval.status = status
             approval.updated_at = now
             approval.decided_at = now
             approval.decision_comment = comment
+            approval.decided_via = decided_via
             if status == "approved":
                 approval.approved_expires_at = self._expiry_timestamp(now)
             else:
@@ -396,6 +421,16 @@ class ApprovalStore:
         await self.file_store.upsert(approval)
         if self.sqlite_store is not None and self._primary is self.sqlite_store:
             await self.sqlite_store.upsert(approval)
+
+    async def _operator_rejected(self, approval: ApprovalRecord) -> bool:
+        excluded = {"reason", "confidence"}
+        requested = approval.action.model_dump(exclude=excluded)
+        return any(
+            other.kind == approval.kind
+            and other.decided_via != "agent"
+            and other.action.model_dump(exclude=excluded) == requested
+            for other in await self.list(status="rejected", session_id=approval.session_id)
+        )
 
     async def _find_matching_pending(
         self,

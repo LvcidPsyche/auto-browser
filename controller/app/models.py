@@ -371,6 +371,9 @@ RiskCategory = Literal[
 ]
 ApprovalKind = Literal["write", "upload", "post", "payment", "account_change", "destructive"]
 ApprovalStatus = Literal["pending", "approved", "rejected", "executed"]
+# Who decided an approval: an operator (dashboard, REST API) or an agent
+# (MCP, the built-in agent loop) under AUTONOMOUS_APPROVALS.
+ApprovalDecider = Literal["operator", "agent"]
 SessionStatus = Literal["active", "closed", "interrupted", "failed"]
 AgentJobKind = Literal["agent_step", "agent_run"]
 AgentJobStatus = Literal[
@@ -537,6 +540,7 @@ class ApprovalRecord(BaseModel):
     observation: dict[str, Any] | None = None
     decision_comment: str | None = None
     decided_at: str | None = None
+    decided_via: ApprovalDecider | None = None
     approved_expires_at: str | None = None
     executed_at: str | None = None
 

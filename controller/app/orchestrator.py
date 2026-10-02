@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -18,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 # How long to let a navigating page settle before observing it again.
 OBSERVE_RETRY_DELAY_SECONDS = 0.5
+# The decision comment on an approval the agent gave itself.
+AUTONOMOUS_APPROVAL_COMMENT = "Approved by the agent (AUTONOMOUS_APPROVALS=true)"
 
 
 class BrowserOrchestrator:
@@ -81,15 +84,38 @@ class BrowserOrchestrator:
                 previous_steps=prompt_history,
                 model_override=provider_model,
             )
-            result = await self._execute_decision(
+            execute = functools.partial(
+                self._execute_decision,
                 session_id=session_id,
                 goal=goal,
                 observation=observation,
                 provider_decision=provider_decision,
                 upload_approved=upload_approved,
-                approval_id=approval_id,
                 workflow_profile=workflow_profile,
             )
+            try:
+                result = await execute(approval_id=approval_id)
+            except ApprovalRequiredError as exc:
+                if not self.manager.settings.autonomous_approvals:
+                    raise
+                # The agent approves its own action and carries on. The
+                # approval is still created, decided and executed, so the audit
+                # log and witness chain show what ran on the agent's say-so.
+                try:
+                    await self.manager.approve(
+                        exc.approval.id, comment=AUTONOMOUS_APPROVAL_COMMENT, decided_via="agent"
+                    )
+                except PermissionError:
+                    # An operator turned this action down, or decided this
+                    # approval already: it waits for them.
+                    raise exc from None
+                logger.info(
+                    "agent approved its own %s action %s in session %s (AUTONOMOUS_APPROVALS)",
+                    exc.approval.kind,
+                    exc.approval.id,
+                    session_id,
+                )
+                result = await execute(approval_id=exc.approval.id)
         except ApprovalRequiredError as exc:
             result = AgentStepResult(
                 provider=provider_name,

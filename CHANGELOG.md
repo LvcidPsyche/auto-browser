@@ -18,6 +18,9 @@ Upgrade notes:
   envelopes carry no file hashes; induce them again.
 - A `type` action whose field will not keep keyboard focus now fails with `focus_lost`
   instead of typing elsewhere.
+- `browser.approve_approval` over MCP (the `full` tool profile) refuses unless
+  `AUTONOMOUS_APPROVALS=true`. It let the agent whose action was waiting approve it. Operators
+  approve in the dashboard or with `POST /approvals/{id}/approve`, as before.
 
 ### Security
 
@@ -55,6 +58,15 @@ Upgrade notes:
 
 - The test suite writes only to a temporary directory; it used to write into `./data` (and
   under `make test`, into the real witness chains). Real-Chromium tests run in CI.
+
+### Added
+
+- **Autonomous mode**, off by default: with `AUTONOMOUS_APPROVALS=true` agents approve their
+  own actions instead of waiting for an operator. The built-in agent approves and carries on,
+  and MCP clients may call `browser.approve_approval`. Every approval is still created and
+  recorded, marked `decided_via: agent` on the approval, in the audit log and in the witness
+  chain. An agent cannot overturn an operator's decision, or approve again an action an
+  operator rejected in that session; those wait for an operator.
 
 ### Removed
 

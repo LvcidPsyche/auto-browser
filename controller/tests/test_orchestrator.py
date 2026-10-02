@@ -49,6 +49,7 @@ class BrowserOrchestratorLoopGuardTests(unittest.IsolatedAsyncioTestCase):
         artifact_dir = Path(self.tempdir.name)
         self.session = SimpleNamespace(artifact_dir=artifact_dir)
         self.manager = SimpleNamespace(
+            settings=SimpleNamespace(autonomous_approvals=False),
             observe=AsyncMock(
                 return_value={
                     "url": "https://example.com",
