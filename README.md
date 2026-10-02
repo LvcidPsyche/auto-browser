@@ -21,7 +21,8 @@ Auto Browser is an MCP-native browser control plane for authorized workflows. It
 
 Works with:
 
-- Claude Code, Cursor, and VS Code, connected directly over HTTP
+- Claude Code, Codex (CLI, IDE extension, and app), Google Antigravity, Cursor, and VS Code,
+  connected directly over HTTP
 - Claude Desktop, through the bundled stdio bridge
 - any MCP client that can talk HTTP or stdio
 - direct REST callers when you want curl-first control
@@ -150,10 +151,23 @@ Auto Browser exposes:
 - convenience endpoints at `http://127.0.0.1:8000/mcp/tools` and `http://127.0.0.1:8000/mcp/tools/call`
 - a stdio bridge: `uvx auto-browser-mcp` from PyPI, or [`scripts/mcp_stdio_bridge.py`](./scripts/mcp_stdio_bridge.py) in a repo checkout
 
-Clients that speak MCP over HTTP connect directly. With Claude Code:
+Clients that speak MCP over HTTP connect directly. With Claude Code or Codex:
 
 ```bash
 claude mcp add --transport http auto-browser http://127.0.0.1:8000/mcp
+codex mcp add auto-browser --url http://127.0.0.1:8000/mcp
+```
+
+Google Antigravity takes the server in its raw MCP config (MCP Servers, then Manage MCP
+Servers, then View raw config), or in `~/.gemini/config/mcp_config.json`. It reads
+`serverUrl`, not `url`:
+
+```json
+{
+  "mcpServers": {
+    "auto-browser": { "serverUrl": "http://127.0.0.1:8000/mcp" }
+  }
+}
 ```
 
 Cursor, VS Code, bearer tokens, and pairing Auto Browser with a web-search MCP
@@ -315,7 +329,7 @@ Core components:
 | If You Want To... | Start Here |
 | --- | --- |
 | understand the system shape | [`docs/architecture.md`](./docs/architecture.md) |
-| connect Claude Desktop or Cursor | [`docs/mcp-clients.md`](./docs/mcp-clients.md) |
+| connect Claude, Codex, Antigravity, Cursor, or VS Code | [`docs/mcp-clients.md`](./docs/mcp-clients.md) |
 | run the curl-first examples | [`examples/README.md`](./examples/README.md) |
 | deploy on a trusted host | [`docs/deployment.md`](./docs/deployment.md) |
 | review production constraints | [`docs/production-hardening.md`](./docs/production-hardening.md) |

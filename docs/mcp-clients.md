@@ -36,6 +36,42 @@ claude mcp add --transport http auto-browser http://127.0.0.1:8000/mcp
 claude mcp list   # auto-browser: http://127.0.0.1:8000/mcp (HTTP) - ✓ Connected
 ```
 
+**Codex**: the CLI, the IDE extension, and the desktop app share
+`~/.codex/config.toml`, so one registration covers all three:
+
+```bash
+codex mcp add auto-browser --url http://127.0.0.1:8000/mcp
+codex mcp list
+```
+
+The same entry written by hand in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.auto-browser]
+url = "http://127.0.0.1:8000/mcp"
+```
+
+Codex renames tools to fit OpenAI's function-name rules, which do not allow the
+dots in names like `browser.observe`, and maps the calls back. Nothing to configure.
+
+**Google Antigravity**: open the agent panel's menu, then MCP Servers, Manage MCP
+Servers, and View raw config (in Antigravity 2.0: Settings, Customizations,
+Installed MCP Servers). That opens `~/.gemini/config/mcp_config.json`; for one
+workspace, use `.agents/mcp_config.json` instead:
+
+```json
+{
+  "mcpServers": {
+    "auto-browser": {
+      "serverUrl": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+Antigravity reads `serverUrl` and ignores the `url` key the Cursor example below
+uses, so a copied Cursor entry never connects.
+
 **Cursor**: `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project:
 
 ```json
@@ -62,11 +98,15 @@ claude mcp list   # auto-browser: http://127.0.0.1:8000/mcp (HTTP) - ✓ Connect
 ```
 
 If the controller has an `API_BEARER_TOKEN`, send it as a header. With Claude
-Code, add `--header "Authorization: Bearer $API_BEARER_TOKEN"`. With Cursor and
-VS Code, add `"headers": {"Authorization": "Bearer <token>"}` next to `url`.
-Without the header, the client reports a 401 "Missing or invalid bearer token".
-With `REQUIRE_OPERATOR_ID=true`, also send `X-Operator-Id` (or whatever
-`OPERATOR_ID_HEADER` names) the same way.
+Code, add `--header "Authorization: Bearer $API_BEARER_TOKEN"`. Codex reads the
+token from an environment variable you name: export it, then add
+`--bearer-token-env-var API_BEARER_TOKEN` to `codex mcp add` (in
+`config.toml`, `bearer_token_env_var = "API_BEARER_TOKEN"`). With Antigravity,
+Cursor, and VS Code, add `"headers": {"Authorization": "Bearer <token>"}` next
+to the URL. Without the header, the client reports a 401 "Missing or invalid
+bearer token". With `REQUIRE_OPERATOR_ID=true`, also send `X-Operator-Id` (or
+whatever `OPERATOR_ID_HEADER` names) the same way; in Codex that is
+`http_headers = { "X-Operator-Id" = "<your id>" }` in `config.toml`.
 
 Claude Desktop's config file only launches local (stdio) servers, so it uses
 the bridge below.
