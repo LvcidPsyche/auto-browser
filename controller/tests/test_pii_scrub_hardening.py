@@ -21,7 +21,24 @@ from PIL import Image
 
 from app.pii_scrub import ALL_PATTERN_NAMES, PiiScrubber, scrub_screenshot, scrub_text
 
-HOSTILE_UNITS = ("a.", "a@", "a.a@", "a-", "eyJ", "eyJa.", "1 ", "1-", "+1 ", "4", "4111 ", "x=", "key=", "Bearer ", "@a.", "a@a.")
+HOSTILE_UNITS = (
+    "a.",
+    "a@",
+    "a.a@",
+    "a-",
+    "eyJ",
+    "eyJa.",
+    "1 ",
+    "1-",
+    "+1 ",
+    "4",
+    "4111 ",
+    "x=",
+    "key=",
+    "Bearer ",
+    "@a.",
+    "a@a.",
+)
 
 
 @pytest.mark.parametrize("unit", HOSTILE_UNITS)

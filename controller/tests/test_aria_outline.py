@@ -183,8 +183,6 @@ def test_a_page_without_the_api_reports_unavailable() -> None:
     assert outline["error"] == "accessibility_snapshot_unavailable"
 
 
-
-
 @requires_chromium
 def test_real_chromium_outline_of_a_filled_form() -> None:
     from playwright.async_api import async_playwright

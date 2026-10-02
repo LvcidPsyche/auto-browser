@@ -40,10 +40,16 @@ def candidate(skill_id: str = "skill-1", **overrides) -> SkillCandidate:
     return SkillCandidate(**payload)
 
 
-STAGED_FILES = {"SKILL.md": b"# skill\n", "helper.py": b"def run():\n    return 1\n", "test_skill.py": b"def test():\n    pass\n"}
+STAGED_FILES = {
+    "SKILL.md": b"# skill\n",
+    "helper.py": b"def run():\n    return 1\n",
+    "test_skill.py": b"def test():\n    pass\n",
+}
 
 
-def signed_envelope(contract_hash: str = "contract-hash", trace_hash: str = "trace-hash", skill_id: str = "skill-1") -> dict:
+def signed_envelope(
+    contract_hash: str = "contract-hash", trace_hash: str = "trace-hash", skill_id: str = "skill-1"
+) -> dict:
     return {
         "contract_hash": contract_hash,
         "trace_hash": trace_hash,
@@ -158,7 +164,9 @@ class SignedFilesTests(unittest.TestCase):
             evidence_required=[EvidenceRequirement(kind="trace")],
             budget=Budget(max_attempts=1, max_steps=2, max_wall_seconds=300),
         )
-        trace = TraceEnvelope(run_id="t-1", contract_hash=contract.hash(), final_observation={"url": "https://example.com/done"})
+        trace = TraceEnvelope(
+            run_id="t-1", contract_hash=contract.hash(), final_observation={"url": "https://example.com/done"}
+        )
         self.candidate = SkillInducer(self.root / "staging", signer=mesh_identity_signer(identity)).induce(
             contract=contract,
             trace=trace,
@@ -186,6 +194,8 @@ class SignedFilesTests(unittest.TestCase):
 
     def test_a_flipped_verifier_verdict_is_refused(self) -> None:
         self._edit("candidate.json", lambda text: text.replace('"verifier_passed": false', '"verifier_passed": true'))
-        self.assertIn('"verifier_passed": true', Path(self.candidate.files["candidate.json"]).read_text(encoding="utf-8"))
+        self.assertIn(
+            '"verifier_passed": true', Path(self.candidate.files["candidate.json"]).read_text(encoding="utf-8")
+        )
         with self.assertRaises(PermissionError):
             self.registry.get_candidate(self.candidate.skill_id)

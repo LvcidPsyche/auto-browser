@@ -105,7 +105,11 @@ def _autofill(html: str) -> dict:
                 )
                 result = await BrowserActionService(manager).maybe_handle_totp(session)
                 await asyncio.sleep(0.3)
-                return {"result": result, "title": await page.title(), "promo": await page.input_value("[name=promo_code]")}
+                return {
+                    "result": result,
+                    "title": await page.title(),
+                    "promo": await page.input_value("[name=promo_code]"),
+                }
             finally:
                 await browser.close()
 

@@ -303,7 +303,9 @@ async def test_verifier_rejects_an_edited_chain_with_its_signatures_stripped(
 
 @requires_verifier
 @pytest.mark.asyncio
-async def test_verifier_rejects_a_chain_resigned_with_another_key(signed_recorder: WitnessRecorder, tmp_path: Path) -> None:
+async def test_verifier_rejects_a_chain_resigned_with_another_key(
+    signed_recorder: WitnessRecorder, tmp_path: Path
+) -> None:
     import base64
 
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -313,7 +315,9 @@ async def test_verifier_rejects_a_chain_resigned_with_another_key(signed_recorde
     bundle["receipts"][1]["action"] = "transfer-funds"
     _rehash(bundle["receipts"])
     attacker = Ed25519PrivateKey.generate()
-    bundle["public_key_b64"] = base64.b64encode(attacker.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()
+    bundle["public_key_b64"] = base64.b64encode(
+        attacker.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    ).decode()
     for receipt in bundle["receipts"]:
         receipt["chain_signature"] = base64.b64encode(attacker.sign(receipt["chain_hash"].encode())).decode()
     bundle["head_hash"] = bundle["receipts"][-1]["chain_hash"]
@@ -379,7 +383,9 @@ async def test_an_unsigned_bundle_verifies_only_when_asked_to(tmp_path: Path) ->
 async def test_the_verifier_checks_a_pinned_key_and_head(signed_recorder: WitnessRecorder, tmp_path: Path) -> None:
     bundle = await _genuine_bundle(signed_recorder)
 
-    pinned = _run_verifier(bundle, tmp_path, "--expect-key-id", bundle["signing_key_id"], "--expect-head", bundle["head_hash"])
+    pinned = _run_verifier(
+        bundle, tmp_path, "--expect-key-id", bundle["signing_key_id"], "--expect-head", bundle["head_hash"]
+    )
     assert pinned.returncode == 0, pinned.stdout
     assert _run_verifier(bundle, tmp_path, "--expect-key-id", "0" * 64).returncode == 1
     assert _run_verifier(bundle, tmp_path, "--expect-head", "0" * 64).returncode == 1

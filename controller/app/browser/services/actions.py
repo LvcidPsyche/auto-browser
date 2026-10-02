@@ -99,7 +99,9 @@ def is_one_time_code_field(attributes: Mapping[str, Any]) -> bool:
         return False
     if str(attributes.get("autocomplete") or "").strip().lower() == "one-time-code":
         return True
-    described = " ".join(str(attributes.get(key) or "") for key in ("name", "id", "placeholder", "aria-label", "autocomplete"))
+    described = " ".join(
+        str(attributes.get(key) or "") for key in ("name", "id", "placeholder", "aria-label", "autocomplete")
+    )
     return not _NOT_A_ONE_TIME_CODE.search(described)
 
 

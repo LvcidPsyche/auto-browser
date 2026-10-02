@@ -170,7 +170,9 @@ def _luhn_check(number: str) -> bool:
 # Issuer prefixes: Visa, Mastercard (51-55 and 2221-2720), Amex, Diners,
 # Discover, JCB and the older 2131/1800 ranges — the set the previous pattern
 # spelled out inline.
-_CARD_PREFIX = re.compile(r"4|5[1-5]|2(?:22[1-9]|2[3-9]\d|[3-6]\d{2}|7[01]\d|720)|3[47]|3(?:0[0-5]|[68])|6(?:011|5)|35|2131|1800")
+_CARD_PREFIX = re.compile(
+    r"4|5[1-5]|2(?:22[1-9]|2[3-9]\d|[3-6]\d{2}|7[01]\d|720)|3[47]|3(?:0[0-5]|[68])|6(?:011|5)|35|2131|1800"
+)
 
 
 def _looks_like_card(candidate: str) -> bool:

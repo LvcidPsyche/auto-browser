@@ -66,8 +66,6 @@ def test_the_excerpt_and_get_html_share_one_normaliser() -> None:
     assert "readable(document.body?.innerText).slice(0, textLimit)" in PAGE_SUMMARY_SCRIPT
 
 
-
-
 @requires_chromium
 def test_real_chromium_excerpt_keeps_a_table_readable() -> None:
     from playwright.async_api import async_playwright

@@ -56,7 +56,15 @@ class StuckContext:
 
 def _manager(root: Path) -> BrowserManager:
     settings = Settings(_env_file=None)
-    for attr in ("artifact_root", "upload_root", "auth_root", "approval_root", "session_store_root", "audit_root", "witness_root"):
+    for attr in (
+        "artifact_root",
+        "upload_root",
+        "auth_root",
+        "approval_root",
+        "session_store_root",
+        "audit_root",
+        "witness_root",
+    ):
         setattr(settings, attr, str(root / attr))
     return BrowserManager(settings)
 

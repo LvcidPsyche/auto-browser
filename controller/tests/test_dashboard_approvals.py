@@ -81,8 +81,6 @@ def test_the_tool_call_pattern_matches_the_gateways_stand_in() -> None:
     assert re.fullmatch(js_pattern.strip("^$"), decision.text).group(1) == "browser.eval_js"
 
 
-
-
 @requires_chromium
 def test_real_browser_approves_and_rejects_from_the_queue() -> None:
     from playwright.async_api import async_playwright

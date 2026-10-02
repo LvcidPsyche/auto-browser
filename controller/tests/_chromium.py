@@ -18,12 +18,19 @@ import pytest
 
 _LINUX = ("chromium-*/chrome-linux*/chrome", "chromium_headless_shell-*/chrome-*/chrome-headless-shell")
 _MAC = ("chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium",)
-_WINDOWS = ("chromium-*/chrome-win*/chrome.exe", "chromium_headless_shell-*/chrome-headless-shell-win*/chrome-headless-shell.exe")
+_WINDOWS = (
+    "chromium-*/chrome-win*/chrome.exe",
+    "chromium_headless_shell-*/chrome-headless-shell-win*/chrome-headless-shell.exe",
+)
 
 
 def _browser_roots() -> list[Path]:
     roots = [Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"])] if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") else []
-    roots += [Path("/opt/pw-browsers"), Path.home() / ".cache" / "ms-playwright", Path.home() / "Library" / "Caches" / "ms-playwright"]
+    roots += [
+        Path("/opt/pw-browsers"),
+        Path.home() / ".cache" / "ms-playwright",
+        Path.home() / "Library" / "Caches" / "ms-playwright",
+    ]
     if os.environ.get("LOCALAPPDATA"):
         roots.append(Path(os.environ["LOCALAPPDATA"]) / "ms-playwright")
     return roots

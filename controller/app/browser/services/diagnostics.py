@@ -41,6 +41,7 @@ def console_entry(message: Any) -> dict[str, Any]:
         text = f"{text[:CONSOLE_TEXT_MAX_CHARS]}… [{len(text) - CONSOLE_TEXT_MAX_CHARS} more characters]"
     return {"type": message.type, "text": text, "location": message.location}
 
+
 if TYPE_CHECKING:
     from playwright.async_api import Page
 

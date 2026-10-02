@@ -31,7 +31,9 @@ class ClaudeAdapterRequestTests(unittest.IsolatedAsyncioTestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.screenshot = Path(self.tempdir.name) / "shot.png"
         Image.new("RGB", (8, 8), "white").save(self.screenshot)
-        self.adapter = ClaudeAdapter(Settings(_env_file=None, ANTHROPIC_API_KEY="test-key", CLAUDE_MODEL="claude-opus-5-5"))
+        self.adapter = ClaudeAdapter(
+            Settings(_env_file=None, ANTHROPIC_API_KEY="test-key", CLAUDE_MODEL="claude-opus-5-5")
+        )
 
     async def asyncTearDown(self) -> None:
         self.tempdir.cleanup()
@@ -48,7 +50,9 @@ class ClaudeAdapterRequestTests(unittest.IsolatedAsyncioTestCase):
         return decision, self.adapter._post_json.await_args.kwargs["payload"]
 
     async def test_the_tool_is_requested_not_forced(self) -> None:
-        decision, payload = await self._decide({"content": [TOOL_USE], "model": "claude-opus-5-5", "stop_reason": "tool_use"})
+        decision, payload = await self._decide(
+            {"content": [TOOL_USE], "model": "claude-opus-5-5", "stop_reason": "tool_use"}
+        )
 
         self.assertEqual(payload["tool_choice"], {"type": "auto", "disable_parallel_tool_use": True})
         self.assertIn("browser_action", payload["system"])

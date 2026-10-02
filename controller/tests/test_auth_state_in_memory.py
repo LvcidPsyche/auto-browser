@@ -23,7 +23,10 @@ from cryptography.fernet import Fernet
 from app.auth_state import AuthStateManager
 from app.browser.services.auth_profiles import BrowserAuthProfileService
 
-STATE = {"cookies": [{"name": "session", "value": "SECRET-COOKIE-VALUE", "domain": "example.com", "path": "/"}], "origins": []}
+STATE = {
+    "cookies": [{"name": "session", "value": "SECRET-COOKIE-VALUE", "domain": "example.com", "path": "/"}],
+    "origins": [],
+}
 
 
 class MemoryOnlyContext:
@@ -48,7 +51,9 @@ class InMemoryAuthStateTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
-        self.auth = AuthStateManager(encryption_key=Fernet.generate_key().decode(), require_encryption=True, max_age_hours=72)
+        self.auth = AuthStateManager(
+            encryption_key=Fernet.generate_key().decode(), require_encryption=True, max_age_hours=72
+        )
 
     async def asyncTearDown(self) -> None:
         self.tempdir.cleanup()
@@ -93,7 +98,11 @@ class InMemoryAuthStateTests(unittest.IsolatedAsyncioTestCase):
         exported = await profiles.export("work")
 
         with tarfile.open(exported["archive_path"]) as archive:
-            leaked = [m.name for m in archive.getmembers() if m.isfile() and b"SECRET-COOKIE-VALUE" in archive.extractfile(m).read()]
+            leaked = [
+                m.name
+                for m in archive.getmembers()
+                if m.isfile() and b"SECRET-COOKIE-VALUE" in archive.extractfile(m).read()
+            ]
             names = [m.name for m in archive.getmembers()]
         self.assertEqual(leaked, [])
         self.assertTrue(any(name.endswith("state.json.enc") for name in names), names)

@@ -141,8 +141,6 @@ def test_the_pruner_ranks_the_reported_aria_roles() -> None:
         assert role in _TYPE_PRIORITY, role
 
 
-
-
 @requires_chromium
 def test_real_chromium_names_a_login_form_and_leaks_nothing_typed() -> None:
     from playwright.async_api import async_playwright

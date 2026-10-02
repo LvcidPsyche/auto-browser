@@ -68,7 +68,11 @@ class OpenAIAdapterTests(unittest.IsolatedAsyncioTestCase):
         return adapter, decision, adapter._post_json.await_args.kwargs
 
     async def test_the_request_is_a_responses_call_with_the_strict_schema(self) -> None:
-        response = {"model": "gpt-6.1-sol", "status": "completed", "output": [{"type": "function_call", "arguments": ARGUMENTS}]}
+        response = {
+            "model": "gpt-6.1-sol",
+            "status": "completed",
+            "output": [{"type": "function_call", "arguments": ARGUMENTS}],
+        }
         adapter, decision, sent = await self._decide(response)
         payload = sent["payload"]
 
