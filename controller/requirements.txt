@@ -9,7 +9,7 @@
 # flattened Route objects. Never enumerate app.routes expecting .path -- use
 # app.openapi() or a request. The upper bound keeps minor bumps reviewed;
 # Dependabot moves it, so it is deliberately not restated as a number here.
-fastapi>=0.141.1,<0.142
+fastapi>=0.142.2,<0.143
 starlette==1.7.0
 uvicorn[standard]==0.54.0
 playwright==1.62.0
