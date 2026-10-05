@@ -16,7 +16,7 @@ playwright==1.62.0
 pydantic-settings==2.15.0
 httpx==0.28.1
 redis==8.1.0
-cryptography==50.0.1
+cryptography==50.0.2
 Pillow==12.3.0
 pytesseract==0.3.13
 docker==7.2.0
