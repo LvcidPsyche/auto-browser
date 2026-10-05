@@ -2,6 +2,19 @@
 
 All notable changes to auto-browser are documented here.
 
+## [Unreleased]
+
+- **Prebuilt Docker images on GHCR** (thanks @FRFlo, #151):
+  `ghcr.io/lvcidpsyche/auto-browser-controller` and `ghcr.io/lvcidpsyche/auto-browser-browser-node`.
+  Every push to `main` publishes `edge` and `sha-<commit>`. Release tags publish `X.Y.Z`, `X.Y` and
+  `latest`, and only from a tag on `main` whose version matches the packages. Each image carries an
+  SBOM and a build-provenance attestation:
+  `gh attestation verify oci://ghcr.io/lvcidpsyche/auto-browser-controller:edge -R LvcidPsyche/auto-browser`.
+  The images are linux/amd64. The controller image is built without the agent CLIs, so
+  `*_AUTH_MODE=cli` still needs a local build with `INSTALL_AGENT_CLIS=true`.
+- Controller dependencies: FastAPI `>=0.142.2,<0.143` (#173); ruff 0.16.10 and cryptography
+  50.0.2 (#172).
+
 ## [1.9.0] — 2026-10-02
 
 A security and correctness pass over 1.8.1, from a maintainer review: every finding was
