@@ -85,6 +85,20 @@ Open:
 
 All published ports bind to `127.0.0.1` by default.
 
+### Prebuilt images
+
+Every release is also published to GHCR, so you can skip the build:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.images.yml up -d
+```
+
+`AUTO_BROWSER_IMAGE_TAG` picks the version: `latest` (the default), a release such as `1.9.1`, or
+`edge` for the current `main`. The images are linux/amd64, and each carries an SBOM and a build
+provenance attestation (`gh attestation verify oci://ghcr.io/lvcidpsyche/auto-browser-controller:latest -R LvcidPsyche/auto-browser`).
+The controller image leaves out the agent CLIs; for `*_AUTH_MODE=cli`, build from source with
+`INSTALL_AGENT_CLIS=true`.
+
 ## Try It in Codespaces
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/LvcidPsyche/auto-browser?quickstart=1)
@@ -123,23 +137,23 @@ curl -s http://127.0.0.1:8000/sessions/<session-id>/observe | jq
 
 ## Recent Changes
 
+**1.9.1**
+
+- **Prebuilt Docker images** on GHCR (thanks @FRFlo): run a release without building it. See [Prebuilt images](#prebuilt-images).
+
+**1.9.0**
+
+- **Operators no longer share sessions.** With named credentials (`API_BEARER_TOKENS`), a session belongs to the operator who created it, as auth profiles already did.
+- **Every setting in `.env` reaches the controller.** Compose used to forward only the keys it listed, so settings like `API_BEARER_TOKENS` and `PII_SCRUB_*` were ignored. Check your `.env` before upgrading.
+- **Governed approvals run**, a page stuck in a script loop can no longer hang the controller, and the Claude and OpenAI providers work on current models.
+- **Security fixes** for approvals, navigation, TOTP autofill, PII scrubbing and witness bundle verification ([GHSA-37hm-f6gf-q7vx](https://github.com/LvcidPsyche/auto-browser/security/advisories/GHSA-37hm-f6gf-q7vx)).
+
 **1.8.1**
 
 - **Sturdier sessions and stores.** Actions that ran are no longer reported as failed when the page navigates right after, an approved action runs at most once, `MAX_SESSIONS` holds under concurrent creates, and sessions, tabs, cron jobs and the JSON stores no longer leak or lose writes.
 - **The stdio MCP bridge survives a controller restart** and reports auth and rate-limit errors instead of hanging. The SDK, bridge and LangChain adapters can send an operator id for controllers with `REQUIRE_OPERATOR_ID=true`.
 - **Faster actions and observations**, fewer browser round trips per observation, and a controller image without the test tooling.
 - **Security fixes** for the noVNC socket, TOTP autofill, auth-profile paths, approvals and witness receipts. `create_session` with `totp_secret` now needs `totp_hosts` or a `start_url`.
-
-**1.8.0**
-
-- **Smaller results for agents.** MCP results refer to sessions instead of repeating the full session record, and `execute_action` no longer returns the pre-action snapshot (`detail="full"` restores both). An action result is less than half its old size. The default tool list carries the 20 tools a browsing agent needs, and the rest are one `MCP_TOOL_PROFILE=full` away.
-- **Agents can see and read.** `browser.screenshot` and observe's `fast` preset return the screenshot as MCP image content. `browser.read_download` reads a downloaded CSV, JSON or text file. `browser.get_html(text_only=true)` is paged and keeps line breaks and table cells.
-- **Approvals you can find and trust.** The dashboard has a pending-approvals queue with Approve and Reject. A governed tool call such as `browser.eval_js` is approved for its exact arguments, which the operator sees.
-- **Observations name things as a person reads them.** Fields are labelled from their `<label>`, never from what was typed into them. The accessibility outline works again on current Playwright.
-- **A security pass.** The navigation allowlist now matches how Chromium parses URLs. A tokenless controller refuses DNS-rebinding Host headers, downloaded artifacts are served sandboxed, share links are scoped, and the browser runs as an unprivileged user.
-- **A leaner image.** The controller leaves out the provider CLIs (about 750 MB) unless built with `INSTALL_AGENT_CLIS=true`.
-
-**1.7.0** closed the fail-open design issues from GHSA-xmh3-cw7j-9gp5. A reachable API now needs a token (`API_BIND_SCOPE`), operator identity can be proven by a named credential, auth profiles belong to the operator who saved them, and staged skills are signature-checked on read.
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full release history.
 
