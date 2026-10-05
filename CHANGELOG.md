@@ -2,16 +2,26 @@
 
 All notable changes to auto-browser are documented here.
 
-## [Unreleased]
+## [1.9.1] — 2026-10-05
+
+Prebuilt images: you can now run auto-browser without building it. Nothing else changes for
+users; the client, LangChain and MCP bridge packages are unchanged apart from their version.
+
+### Added
 
 - **Prebuilt Docker images on GHCR** (thanks @FRFlo, #151):
   `ghcr.io/lvcidpsyche/auto-browser-controller` and `ghcr.io/lvcidpsyche/auto-browser-browser-node`.
+  Run them with `docker compose -f docker-compose.yml -f docker-compose.images.yml up -d`;
+  `AUTO_BROWSER_IMAGE_TAG` picks `latest` (default), a release such as `1.9.1`, or `edge`.
   Every push to `main` publishes `edge` and `sha-<commit>`. Release tags publish `X.Y.Z`, `X.Y` and
   `latest`, and only from a tag on `main` whose version matches the packages. Each image carries an
   SBOM and a build-provenance attestation:
-  `gh attestation verify oci://ghcr.io/lvcidpsyche/auto-browser-controller:edge -R LvcidPsyche/auto-browser`.
+  `gh attestation verify oci://ghcr.io/lvcidpsyche/auto-browser-controller:1.9.1 -R LvcidPsyche/auto-browser`.
   The images are linux/amd64. The controller image is built without the agent CLIs, so
   `*_AUTH_MODE=cli` still needs a local build with `INSTALL_AGENT_CLIS=true`.
+
+### Changed
+
 - Controller dependencies: FastAPI `>=0.142.2,<0.143` (#173); ruff 0.16.10 and cryptography
   50.0.2 (#172).
 

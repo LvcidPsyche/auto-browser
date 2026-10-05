@@ -1,0 +1,18 @@
+# Run the published images from GHCR instead of building from source.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.images.yml up -d
+#
+# AUTO_BROWSER_IMAGE_TAG picks the version: `latest` (default, the newest release), a release
+# such as `1.9.1`, or `edge` (the current main branch). The controller image is built without
+# the agent CLIs; `*_AUTH_MODE=cli` needs a local build with INSTALL_AGENT_CLIS=true.
+services:
+  browser-node:
+    image: ghcr.io/lvcidpsyche/auto-browser-browser-node:${AUTO_BROWSER_IMAGE_TAG:-latest}
+    pull_policy: always
+
+  controller:
+    image: ghcr.io/lvcidpsyche/auto-browser-controller:${AUTO_BROWSER_IMAGE_TAG:-latest}
+    pull_policy: always
+    environment:
+      # Isolated sessions start their own browser containers from this image.
+      ISOLATED_BROWSER_IMAGE: ghcr.io/lvcidpsyche/auto-browser-browser-node:${AUTO_BROWSER_IMAGE_TAG:-latest}
