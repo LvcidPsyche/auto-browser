@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.memory_manager import MemoryManager, MemoryProfile
+from app.memory_manager import MemoryManager, MemoryProfile, extract_hostname
 
 
 class MemoryManagerTests(unittest.IsolatedAsyncioTestCase):
@@ -67,6 +67,53 @@ class MemoryManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_delete_nonexistent(self) -> None:
         await self.mem.startup()
         self.assertFalse(await self.mem.delete("ghost"))
+
+    async def test_get_by_url(self) -> None:
+        await self.mem.startup()
+        await self.mem.save(
+            "github.com",
+            goal_summary="GitHub workflows",
+            discovered_selectors={"login_btn": "#login"},
+        )
+        # Should find profile by URL hostname
+        profile = await self.mem.get_by_url("https://github.com/user/repo")
+        self.assertIsNotNone(profile)
+        assert profile is not None
+        self.assertEqual(profile.name, "github.com")
+        self.assertEqual(profile.goal_summary, "GitHub workflows")
+
+    async def test_get_by_url_not_found(self) -> None:
+        await self.mem.startup()
+        # No profile for this hostname
+        profile = await self.mem.get_by_url("https://example.com/page")
+        self.assertIsNone(profile)
+
+    async def test_get_by_url_invalid(self) -> None:
+        await self.mem.startup()
+        # Invalid URLs should return None, not raise
+        self.assertIsNone(await self.mem.get_by_url("not-a-url"))
+        self.assertIsNone(await self.mem.get_by_url(""))
+
+
+class ExtractHostnameTests(unittest.TestCase):
+    def test_valid_urls(self) -> None:
+        self.assertEqual(extract_hostname("https://github.com/user"), "github.com")
+        self.assertEqual(extract_hostname("http://example.org:8080/path"), "example.org")
+        self.assertEqual(extract_hostname("https://sub.domain.co.uk"), "sub.domain.co.uk")
+
+    def test_case_normalization(self) -> None:
+        self.assertEqual(extract_hostname("https://GitHub.COM/"), "github.com")
+
+    def test_path_traversal_rejected(self) -> None:
+        # These should be rejected to prevent path traversal attacks
+        self.assertIsNone(extract_hostname("https://.."))
+        self.assertIsNone(extract_hostname("https://.hidden"))
+        self.assertIsNone(extract_hostname("https://trailing."))
+
+    def test_invalid_urls(self) -> None:
+        self.assertIsNone(extract_hostname("not-a-url"))
+        self.assertIsNone(extract_hostname(""))
+        self.assertIsNone(extract_hostname("file:///etc/passwd"))
 
 
 class MemoryProfileTests(unittest.TestCase):
