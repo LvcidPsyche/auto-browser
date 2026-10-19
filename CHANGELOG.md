@@ -7,9 +7,9 @@ All notable changes to auto-browser are documented here.
 ### Security
 
 Most of these matter only if you run the controller with named credentials
-(`API_BEARER_TOKENS`). Single-operator and shared-token (`API_BEARER_TOKEN`) deployments see two
-changes: the export fix, and `browser.cdp_attach` refusing while live sessions use the current
-browser.
+(`API_BEARER_TOKENS`). Single-operator and shared-token (`API_BEARER_TOKEN`) deployments see three
+changes: the export fix, `browser.cdp_attach` refusing while live sessions use the current browser,
+and `GET /proxy-personas/{name}` no longer returning the proxy password.
 
 - **Saved session auth state is owned by the session's operator.** `storage_state_path` is
   relative to the auth root, so another operator could name `<session id>/state.json` and open a
@@ -62,6 +62,16 @@ browser.
   update stream notified the subscriber whenever those sessions were active. Listing, subscribing
   and notifications now cover only sessions you may use. Unowned sessions are still listed for
   everyone, and reading another operator's session content was already refused.
+- **Uploads can no longer be taken from another operator's session.** A session's staged files
+  live in `UPLOAD_ROOT/<session id>/`, and the upload path check also allowed the shared
+  `UPLOAD_ROOT`, so another operator could upload `<session id>/file` (or the absolute path) into a
+  page of their own. A file in a session's directory can now be uploaded only by the operator who
+  owns that session, also after it closed; files placed directly in `UPLOAD_ROOT` stay shared.
+  Deployments without named credentials have no owners and see no change.
+- **`GET /proxy-personas/{name}` no longer returns the proxy password.** It returned the stored
+  persona, plaintext password included, to any caller with an API token; it now answers the same
+  shape as the list (`has_password`). Session creation with `proxy_persona` is unchanged. This
+  applies to every deployment.
 
 ### Removed
 
