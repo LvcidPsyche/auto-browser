@@ -57,18 +57,18 @@ class PlaywrightExportHelperTests(unittest.TestCase):
             ("unsupported", {}, None),
         ]
 
-        for action, details, expected in cases:
-            with self.subTest(action=action, details=details):
-                self.assertEqual(_action_to_code(action, details), expected)
+        for action, target, expected in cases:
+            with self.subTest(action=action, target=target):
+                self.assertEqual(_action_to_code(action, {"target": target}), expected)
 
     def test_action_to_code_handles_redacted_and_plain_type(self) -> None:
         plain = _action_to_code(
             "type",
-            {"selector": "#email", "text_preview": "alice@example.com", "clear_first": False},
+            {"target": {"selector": "#email", "text_preview": "alice@example.com", "clear_first": False}},
         )
         redacted = _action_to_code(
             "type",
-            {"selector": "#password", "text_redacted": True, "clear_first": True},
+            {"target": {"selector": "#password", "text_redacted": True, "clear_first": True}},
         )
 
         self.assertEqual(plain, "page.locator('#email').first.fill('alice@example.com')\n")
@@ -87,13 +87,13 @@ class PlaywrightExportHelperTests(unittest.TestCase):
                     "event_type": "browser_action",
                     "action": "navigate",
                     "status": "ok",
-                    "details": {"url": "https://example.com"},
+                    "details": {"target": {"url": "https://example.com"}},
                 },
                 {
                     "event_type": "browser_action",
                     "action": "click",
                     "status": "completed",
-                    "details": {"selector": "#submit"},
+                    "details": {"target": {"selector": "#submit"}},
                 },
                 {
                     "event_type": "observe",
@@ -142,7 +142,7 @@ class PlaywrightExportAsyncTests(unittest.IsolatedAsyncioTestCase):
                             "event_type": "browser_action",
                             "action": "navigate",
                             "status": "ok",
-                            "details": {"url": "https://example.com"},
+                            "details": {"target": {"url": "https://example.com"}},
                         }
                     ),
                     EventModel(
@@ -150,7 +150,7 @@ class PlaywrightExportAsyncTests(unittest.IsolatedAsyncioTestCase):
                             "event_type": "browser_action",
                             "action": "click",
                             "status": "success",
-                            "details": {"selector": "#submit"},
+                            "details": {"target": {"selector": "#submit"}},
                         }
                     ),
                     EventModel(
@@ -168,7 +168,6 @@ class PlaywrightExportAsyncTests(unittest.IsolatedAsyncioTestCase):
         export = await export_session_script(
             "session-456",
             audit_store,
-            start_url="https://example.com",
             viewport_w=1440,
             viewport_h=900,
         )
