@@ -124,6 +124,12 @@ class BrowserSessionService:
         if source_path is not None:
             context_kwargs["storage_state"] = self.manager.auth_state.prepare_for_context(source_path).storage_state
 
+        memory = None
+        if memory_profile and self.manager.memory is not None:
+            # Read (and authorized) before any browser is opened: another
+            # operator's profile text would go into this session's agent prompt.
+            memory = await self.manager.memory.get(memory_profile)
+
         context: BrowserContext | None = None
         session: BrowserSession | None = None
         browser: Browser | None = None
@@ -211,12 +217,10 @@ class BrowserSessionService:
                 await self.manager._settle(page)
 
             await self.manager._maybe_provision_session_tunnel(session)
-            if memory_profile and self.manager.memory is not None:
-                memory = await self.manager.memory.get(memory_profile)
-                if memory is not None:
-                    session.metadata["memory_context"] = memory.to_system_prompt()
-                    session.metadata["memory_profile"] = memory_profile
-                    logger.info("memory profile loaded: %s", memory_profile)
+            if memory is not None:
+                session.metadata["memory_context"] = memory.to_system_prompt()
+                session.metadata["memory_profile"] = memory_profile
+                logger.info("memory profile loaded: %s", memory_profile)
             await self.manager._persist_session(session, status="active")
             await self.manager.witness_bridge.record_session_receipt(
                 session,
