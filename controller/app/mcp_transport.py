@@ -14,7 +14,9 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import ValidationError
 
 from . import events as _events
-from .models import McpToolCallRequest
+from .audit import get_current_operator
+from .models import McpToolCallRequest, OperatorIdentity
+from .session_ownership import ANONYMOUS, acting_as, may_use
 from .utils import atomic_write_text, utc_now
 
 JSONRPC_VERSION = "2.0"
@@ -141,8 +143,11 @@ class McpHttpTransport:
                 headers=self._session_headers(session),
             )
 
+        # The body is streamed after this handler has returned, and the HTTP
+        # middleware resets the operator once its call_next returns, so the
+        # operator is not reliably set while the stream runs: take it now.
         return StreamingResponse(
-            self._resource_event_stream(request, session),
+            self._resource_event_stream(request, session, get_current_operator()),
             media_type="text/event-stream",
             headers={
                 **self._session_headers(session),
@@ -298,7 +303,11 @@ class McpHttpTransport:
                 }
             )
 
-        for session_id in list(self.manager.sessions.keys()):
+        # Only sessions the caller may use: listing the rest would hand out the ids
+        # to subscribe to, and subscribing is validated against this list.
+        for session_id, live in list(self.manager.sessions.items()):
+            if not may_use(getattr(live, "owner", None)):
+                continue
             resources += [
                 {
                     "uri": f"browser://{session_id}/screenshot",
@@ -444,7 +453,12 @@ class McpHttpTransport:
             self._persist_sessions()
         return self._json_result_response(request_id, {}, headers=self._session_headers(session))
 
-    async def _resource_event_stream(self, request: Request, session: McpSession):
+    async def _resource_event_stream(
+        self,
+        request: Request,
+        session: McpSession,
+        operator: OperatorIdentity | None = None,
+    ):
         queue = _events.subscribe_all()
         try:
             yield ": connected\n\n"
@@ -461,6 +475,8 @@ class McpHttpTransport:
                 except json.JSONDecodeError:
                     logger.debug("dropping malformed browser event payload from MCP resource stream")
                     continue
+                if not self._may_see_event(event, operator):
+                    continue
                 for uri in self._updated_resource_uris(event, subscribed=session.resource_subscriptions):
                     message = {
                         "jsonrpc": JSONRPC_VERSION,
@@ -470,6 +486,25 @@ class McpHttpTransport:
                     yield f"event: message\ndata: {json.dumps(message, ensure_ascii=False)}\n\n"
         finally:
             _events.unsubscribe_all(queue)
+
+    def _may_see_event(self, event: dict[str, Any], operator: OperatorIdentity | None) -> bool:
+        """Whether the subscriber may hear about this event's session.
+
+        Per-session URIs can only be subscribed to for sessions the subscriber
+        could use then (see _list_resources); this also keeps the generic
+        browser://sessions update from telling a subscriber that another
+        operator's live session is active. A session that has already closed has
+        no owner left to check: its event only reaches the subscriptions the
+        subscriber holds and the generic URI, which names no session.
+        """
+        session_id = event.get("session_id")
+        if self.manager is None or not isinstance(session_id, str):
+            return True
+        live = self.manager.sessions.get(session_id)
+        if live is None:
+            return True
+        with acting_as(operator or ANONYMOUS):
+            return may_use(getattr(live, "owner", None))
 
     @staticmethod
     def _updated_resource_uris(event: dict[str, Any], *, subscribed: list[str]) -> list[str]:
