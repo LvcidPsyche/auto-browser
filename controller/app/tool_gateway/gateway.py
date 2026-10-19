@@ -252,7 +252,7 @@ class McpToolGateway:
                 # advertised — so the tool in the default set could only fail.
                 # The server now routes every call through approval itself.
                 policy_profile = "governed"
-            if spec.governed_kind is not None and self.manager.settings.mcp_force_governed:
+            if spec.governed_kind is not None and self.manager.settings.force_governed_approvals:
                 # workflow_profile is the caller's argument, and the caller is
                 # the agent the approval is meant to check: on a deployment that
                 # opted in, the server decides.

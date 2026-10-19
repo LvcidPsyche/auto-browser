@@ -237,7 +237,7 @@ class GatewayShapingTests(unittest.IsolatedAsyncioTestCase):
                 return_value={"session": _session_summary(), "items": [{"type": "log", "text": "hi"}]}
             ),
             require_governed_approval=AsyncMock(return_value=None),
-            settings=SimpleNamespace(mcp_force_governed=False),
+            settings=SimpleNamespace(force_governed_approvals=False),
         )
         self.gateway = McpToolGateway(
             manager=self.manager,

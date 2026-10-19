@@ -126,9 +126,10 @@ profile; that is a statement about maintenance cost, not about the gateway.
 `workflow_profile` defaults to `fast`. Use `governed` when an operator wants the
 agent to inspect first and require approval before write-sensitive actions.
 
-This is the profile of the built-in agent loop. It is separate from the `workflow_profile`
-an agent passes on an MCP tool call, which `MCP_FORCE_GOVERNED=true` can force to `governed`
-(see `docs/mcp-clients.md`); that setting does not change the built-in loop.
+With `FORCE_GOVERNED_APPROVALS=true` the controller ignores this field and runs every step of
+the loop as `governed`, whether the run came from REST `/agent/*`, a queued MCP job or cron; the
+same setting forces `governed` on MCP tool calls. It does not cover the REST action routes, which
+an agent holding a bearer token can still call directly (see `docs/mcp-clients.md`).
 
 ## Background jobs and resume
 
