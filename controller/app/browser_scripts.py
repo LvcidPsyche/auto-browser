@@ -4,8 +4,11 @@ from __future__ import annotations
 
 # Injected before every page load via add_init_script().
 # Removes automation signals, mocks realistic browser properties.
+# add_init_script runs the source as written, so this is an invoked function
+# expression. A bare arrow function would be defined and never called, and no
+# patch would apply.
 STEALTH_INIT_SCRIPT = r"""
-() => {
+(() => {
   // Remove webdriver flag
   try {
     Object.defineProperty(navigator, 'webdriver', {
@@ -13,9 +16,11 @@ STEALTH_INIT_SCRIPT = r"""
     });
   } catch (_) {}
 
-  // Chrome runtime object (many sites check for this)
-  if (!window.chrome) {
-    window.chrome = {
+  // Chrome runtime object (many sites check for this). Headless Chromium already
+  // defines window.chrome (loadTimes, csi, app) but not runtime, so fill in only
+  // the members that are missing instead of skipping when the object exists.
+  try {
+    const chromeStub = {
       runtime: {
         onMessage: { addListener: () => {}, removeListener: () => {} },
         connect: () => ({ onDisconnect: { addListener: () => {} }, postMessage: () => {} }),
@@ -26,7 +31,11 @@ STEALTH_INIT_SCRIPT = r"""
       csi: () => ({}),
       app: { isInstalled: false },
     };
-  }
+    if (!window.chrome) window.chrome = {};
+    for (const key of Object.keys(chromeStub)) {
+      if (!(key in window.chrome)) window.chrome[key] = chromeStub[key];
+    }
+  } catch (_) {}
 
   // Realistic navigator.plugins (headless has none by default)
   try {
@@ -95,7 +104,7 @@ STEALTH_INIT_SCRIPT = r"""
   try { Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 }); } catch (_) {}
   try { Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 }); } catch (_) {}
   try { Object.defineProperty(screen, 'colorDepth', { get: () => 24 }); } catch (_) {}
-}
+})();
 """
 
 # Shared by the observation scripts below, which inject it at the top of their

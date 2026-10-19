@@ -16,6 +16,7 @@ Skips cleanly when node is unavailable so the suite stays portable; CI has Node
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import tempfile
@@ -84,3 +85,48 @@ def test_no_shell_escape_artifacts_in_scripts() -> None:
             r"In JS `\!` is a syntax error, so the whole script fails to parse "
             "page-side and silently does nothing."
         )
+
+
+# Globals the stealth script reaches for, as a bare minimum for it to run under Node.
+_STEALTH_SANDBOX = r"""
+const vm = require('vm');
+const fs = require('fs');
+const source = fs.readFileSync(process.argv[2], 'utf8');
+const sandbox = {
+  navigator: {},
+  screen: {},
+  PluginArray: function PluginArray() {},
+  Permissions: function Permissions() {},
+};
+sandbox.window = sandbox;
+const completion = vm.runInNewContext(source, sandbox);
+console.log(JSON.stringify({
+  completion: typeof completion,
+  chromeRuntime: Boolean(sandbox.chrome && sandbox.chrome.runtime),
+  webdriverDefined: 'webdriver' in sandbox.navigator,
+}));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not available")
+def test_stealth_init_script_runs_when_injected() -> None:
+    """Parsing is not running: `page.add_init_script` injects the source as written.
+
+    The script was once a bare arrow function. It parsed, so the check above passed,
+    but evaluating it only defined a function and nothing was patched. Injected
+    scripts must act on their own, so run the source the way the page would and
+    look for its effects.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        runner = Path(directory) / "run.js"
+        script = Path(directory) / "stealth.js"
+        runner.write_text(_STEALTH_SANDBOX, encoding="utf-8")
+        script.write_text(browser_scripts.STEALTH_INIT_SCRIPT, encoding="utf-8")
+        completed = subprocess.run(  # noqa: S603 - fixed argv, temp paths
+            [NODE, str(runner), str(script)], capture_output=True, text=True, timeout=30, check=True
+        )
+
+    outcome = json.loads(completed.stdout)
+    assert outcome["completion"] != "function", "the script evaluates to a function that nothing calls"
+    assert outcome["chromeRuntime"] is True, outcome
+    assert outcome["webdriverDefined"] is True, outcome
