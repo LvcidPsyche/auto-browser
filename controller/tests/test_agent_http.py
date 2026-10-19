@@ -273,6 +273,11 @@ class AgentHttpTests(unittest.TestCase):
                 "list_auth_profiles": [{"profile_name": "ops"}],
                 "get_auth_profile": {"profile_name": "ops"},
                 "observe": {"session": {"id": "session-1"}, "url": "https://example.com"},
+                "share_snapshot": {
+                    "url": "https://example.com",
+                    "title": "Example",
+                    "screenshot_path": "/data/artifacts/session-1/frame-share-frame.png",
+                },
                 "capture_screenshot": {"screenshot_url": "/artifacts/session-1/s.png"},
                 "list_downloads": [{"filename": "report.csv"}],
                 "list_tabs": [{"index": 0}],
@@ -874,7 +879,7 @@ class AgentHttpTests(unittest.TestCase):
 
             with (
                 patch.object(main_module.share_manager, "token_info", return_value={"valid": True, "session_id": "s"}),
-                patch.object(main_module.manager, "observe", new=AsyncMock(side_effect=Exception("boom"))),
+                patch.object(main_module.manager, "share_snapshot", new=AsyncMock(side_effect=Exception("boom"))),
             ):
                 self.assertEqual(self.client.get("/share/t/observe").status_code, 500)
 

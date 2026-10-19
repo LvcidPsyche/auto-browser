@@ -52,8 +52,9 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
         try:
             # The token is the credential, issued by someone who could use the
             # session; the viewer is no operator, so this reads as the system.
+            # The page polls this, so it takes a frame, not a full observation.
             with as_system():
-                observation = await manager.observe(session_id)
+                observation = await manager.share_snapshot(session_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Unknown session") from None
         except Exception:

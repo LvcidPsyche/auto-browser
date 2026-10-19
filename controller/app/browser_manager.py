@@ -467,6 +467,9 @@ class BrowserManager:
     async def observe(self, session_id: str, limit: int = 40, preset: str | None = None) -> dict[str, Any]:
         return await self.observation.observe(session_id, limit=limit, preset=preset)
 
+    async def share_snapshot(self, session_id: str) -> dict[str, Any]:
+        return await self.observation.share_snapshot(session_id)
+
     async def capture_screenshot(self, session_id: str, *, label: str = "manual") -> dict[str, Any]:
         return await self.observation.capture_screenshot(session_id, label=label)
 
