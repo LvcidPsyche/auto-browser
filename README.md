@@ -93,7 +93,7 @@ Every release is also published to GHCR, so you can skip the build:
 docker compose -f docker-compose.yml -f docker-compose.images.yml up -d
 ```
 
-`AUTO_BROWSER_IMAGE_TAG` picks the version: `latest` (the default), a release such as `1.9.1`, or
+`AUTO_BROWSER_IMAGE_TAG` picks the version: `latest` (the default), a release such as `1.10.0`, or
 `edge` for the current `main`. The images are linux/amd64, and each carries an SBOM and a build
 provenance attestation (`gh attestation verify oci://ghcr.io/lvcidpsyche/auto-browser-controller:latest -R LvcidPsyche/auto-browser`).
 The controller image leaves out the agent CLIs; for `*_AUTH_MODE=cli`, build from source with
@@ -136,6 +136,13 @@ curl -s http://127.0.0.1:8000/sessions/<session-id>/observe | jq
 ```
 
 ## Recent Changes
+
+**1.10.0**
+
+- **Operators can no longer reach each other's work.** With named credentials (`API_BEARER_TOKENS`), saved auth state, exported archives, harness runs, skill candidates, memory profiles, uploads, MCP resource lists and controller-wide approvals belong to the operator who made them.
+- **`ALLOWED_HOSTS` holds wherever a page ends up:** after a redirect, a tab switch, a cookie write, or a page that navigates itself.
+- **Witness verification rejects a chain with its signatures stripped**, and the top-level `valid` now covers signatures. Read the upgrade notes in the changelog before upgrading.
+- **Fixes** for the Playwright export, stealth mode, REST error statuses, text-only agent steps, private-key scrubbing and the dashboard's error reporting, plus an opt-in `FORCE_GOVERNED_APPROVALS`.
 
 **1.9.1**
 
