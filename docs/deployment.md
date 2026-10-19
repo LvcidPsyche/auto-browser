@@ -206,6 +206,24 @@ Each receipt is hash-chained to the one before it and signed with an Ed25519 key
 
 For evidence that survives a compromised controller host, keep a head hash from before the compromise and check it when you verify: `python scripts/verify_witness_bundle.py bundle.json --expect-head <head_hash> --expect-key-id <key_id>`. The `head_hash` and `signing_key_id` come from `GET /sessions/{id}/witness/bundle` or from the verify result. Sending a copy of each receipt to a hosted Witness service (`WITNESS_REMOTE_URL`), or copying the key id and head somewhere the controller host cannot write, works as well. Without such a pin, a recipient can only check that the bundle is internally consistent.
 
+## What PII scrubbing covers, and what it does not
+
+`PII_SCRUB_*` matches known secret and personal-data shapes (emails, phone numbers, card numbers, API tokens, private-key blocks and so on) in a few specific outputs. It is a safety net for those outputs, not a filter over everything the browser can see.
+
+**Scrubbed**
+
+- **Screenshots** (`observe`, `capture_screenshot` and the before/after action snapshots): matching words are painted over using OCR boxes. This needs the `tesseract` binary, which only the Docker image ships. Outside Docker, or with `OCR_ENABLED=false`, screenshots are returned **unscrubbed**: `/readyz` reports a `screenshot_scrubbing` warning, the controller logs one warning, and each result carries `screenshot_pii_scrub: {"applied": false, "reason": ...}`. OCR is also best-effort, so small or low-contrast text can be missed.
+- **Network inspector bodies**: request and response bodies stored by the network inspector. Text bodies are scrubbed whatever their content type says; binary content types and bytes that are not UTF-8 are stored as they are. Headers such as `Authorization` and `Cookie` are masked separately.
+- **Console messages** returned by `get_console_messages`.
+
+**Not scrubbed**
+
+- **Page content, by design**: `get_html`, `find_elements`, the DOM outline and element text in an observation, cookies and storage, downloads read with `read_download`, and the output of `eval_js`.
+- **Raw CDP**: `raw_cdp_command` returns what the browser returns. `DOM.getDocument` with `{"depth": -1, "pierce": true}` includes a password typed into a page, read from the input's user-agent shadow text. The accessibility tree masks password values (`•••`), but the raw DOM does not. Treat anything an agent types into a page as readable by every caller allowed to use raw CDP.
+- **The last console messages inside an observation** (`console_messages` in an `observe` result), page errors and request failures. Use `get_console_messages` for the scrubbed view.
+
+If a workflow types real credentials into a page, scrubbing does not protect them from the tools above: restrict who can call them, and use the approval gates and `ALLOWED_HOSTS`.
+
 ## Common pitfalls and failure modes
 
 ### Browser session dies or Chromium crashes
