@@ -172,7 +172,7 @@ class ShareHttpTests(unittest.TestCase):
 
         with (
             patch.object(main_module.share_manager, "token_info", token_info),
-            patch.object(main_module.manager, "observe", observe),
+            patch.object(main_module.manager, "share_snapshot", observe),
         ):
             response = self.client.get("/share/fake-token/observe")
 
@@ -270,7 +270,7 @@ class ShareLinkRecipientTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.stack.close()
 
-    def _observe(self):
+    def _snapshot(self):
         observe = AsyncMock(
             return_value={
                 "session": {"id": self.session_id},
@@ -283,11 +283,11 @@ class ShareLinkRecipientTests(unittest.TestCase):
                 "console_messages": ["token=abc"],
             }
         )
-        return patch.object(main_module.manager, "observe", observe)
+        return patch.object(main_module.manager, "share_snapshot", observe)
 
     def test_a_recipient_without_the_api_token_can_view_and_poll(self) -> None:
         with (
-            self._observe(),
+            self._snapshot(),
             patch.object(main_module.manager, "get_session", AsyncMock(return_value=SimpleNamespace(id="x"))),
         ):
             page = self.client.get(f"/share/{self.token}")
@@ -343,7 +343,7 @@ class ShareLinkRecipientTests(unittest.TestCase):
     def test_required_operator_header_does_not_apply_to_recipients(self) -> None:
         with (
             patch.object(main_module.settings, "require_operator_id", True),
-            self._observe(),
+            self._snapshot(),
         ):
             response = self.client.get(f"/share/{self.token}/observe")
 

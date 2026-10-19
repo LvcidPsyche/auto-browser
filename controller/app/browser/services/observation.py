@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +48,23 @@ def _scrub_disclosure(screenshot: dict[str, Any]) -> dict[str, Any]:
 # An outline is a nicety; an observation must not wait long on one.
 ARIA_SNAPSHOT_TIMEOUT_MS = 5000
 
+# The share page asks for a frame every few seconds for as long as it is open.
+# Each frame is a file, so they are named apart and pruned; a viewer loads its
+# frame right after the response that names it, so a minute is ample.
+SHARE_FRAME_LABEL = "share-frame"
+SHARE_FRAME_KEEP_SECONDS = 60.0
+
+
+def _prune_share_frames(directory: Path, *, keep: Path) -> None:
+    cutoff = time.time() - SHARE_FRAME_KEEP_SECONDS
+    try:
+        for path in directory.glob(f"*-{SHARE_FRAME_LABEL}.png"):
+            if path != keep and path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+    except OSError as exc:
+        # Housekeeping: a failure must not take the viewer's frame down with it.
+        logger.warning("failed to prune share frames in %s: %s", directory, exc)
+
 
 class BrowserObservationService:
     """Encapsulates observation, screenshot, and trace payload helpers."""
@@ -66,6 +84,27 @@ class BrowserObservationService:
                 result.get("screenshot_url"),
             )
             return result
+
+    async def share_snapshot(self, session_id: str) -> dict[str, Any]:
+        """What the share page renders on each poll: a frame, the URL and the title.
+
+        The page polls every few seconds for as long as it is open, and this used
+        to be a full observation: DOM and ARIA reads, OCR and a screenshot kept
+        for good, all under the session lock, so a watched session's agent
+        waited on the viewer and its artifact directory filled with PNGs. This
+        holds the lock for one redacted capture and two reads, and keeps only
+        recent frames. It does not emit an observe event or touch the audit log.
+        """
+        session = await self.manager.get_session(session_id)
+        async with session.lock:
+            screenshot = await self._capture_screenshot_redacted(session, SHARE_FRAME_LABEL)
+            snapshot = {
+                "url": session.page.url,
+                "title": await session.page.title(),
+                "screenshot_path": screenshot["path"],
+            }
+        await asyncio.to_thread(_prune_share_frames, Path(session.artifact_dir), keep=Path(screenshot["path"]))
+        return snapshot
 
     async def capture_screenshot(self, session_id: str, *, label: str = "manual") -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
