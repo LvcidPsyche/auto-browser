@@ -234,6 +234,20 @@ deployment that restricts it.
   unquoted, so `Open the page: log in` made the file unparseable and a goal with a line break
   could add keys of its own, such as `status` or `safety_class`, to a file that is then signed.
   It is now a quoted string that reads back exactly.
+- **Releases publish only from green CI on main.** A `v*` tag already had to point at a commit on
+  `main`. It now also needs a successful `CI` push run on `main` for that exact commit, and the
+  release workflow's actions are pinned to commit SHAs. For maintainers: tag after CI on main
+  has finished. A tag pushed while CI is still running fails, and re-running the release
+  workflow once CI is green publishes it.
+- **The reverse-SSH sidecar writes `reverse-ssh.json` atomically and escapes it.** A host, user
+  or URL containing a quote or a backslash produced invalid JSON, and the controller could read
+  a half-written file. A non-numeric port or interval now stops the sidecar at start instead.
+- **The smoke scripts send the bearer token** when `API_BEARER_TOKEN` is set, so `make smoke-*`
+  works against a controller that requires it.
+- **Docs:** the login example reads the session's `id` (it read `session_id`, which the response
+  doesn't have), `docs/llm-adapters.md` matches the current providers (OpenAI's Responses API,
+  Claude's `tool_choice: auto`, async calls, the isolation modes), `ROADMAP.md` names the current
+  release, and `SECURITY.md` lists all five published advisories.
 
 ### Added
 
