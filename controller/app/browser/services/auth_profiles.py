@@ -45,6 +45,10 @@ _PLAINTEXT_LEFTOVER = re.compile(r"auth-state-[^/\\]*\.json|\.[^/\\]*\.tmp\.json
 # ownership of saved state does not depend on anything still being in memory.
 SESSION_OWNER_MARKER = ".owner.json"
 PROFILES_DIRNAME = "profiles"
+# Beside each archive an operator exports: {"exporter": "<operator id>"}. Kept out
+# of the archive so its layout (one top-level profile directory) is unchanged and
+# archives from older releases or other boxes still import.
+EXPORTER_SIDECAR_SUFFIX = ".exporter.json"
 _FOREIGN_SESSION_STATE = "storage_state_path points into the saved auth state of another operator's session"
 
 
@@ -376,7 +380,17 @@ class BrowserAuthProfileService:
             raise PermissionError("auth profile archive path must stay inside auth root")
         archive_path = Path(archive_path_str)
 
-        await asyncio.to_thread(self.write_tar, Path(profile_dir_str), archive_path)
+        # Bound to the exporter before the archive exists, so there is never an
+        # archive in AUTH_ROOT that another operator could import unchecked.
+        sidecar = archive_path.with_name(archive_path.name + EXPORTER_SIDECAR_SUFFIX)
+        exporter = self.verified_operator()
+        if exporter:
+            atomic_write_text(sidecar, json.dumps({"exporter": exporter}))
+        try:
+            await asyncio.to_thread(self.write_tar, Path(profile_dir_str), archive_path)
+        except BaseException:
+            sidecar.unlink(missing_ok=True)
+            raise
 
         # Export packages every cookie and localStorage entry for a logged-in
         # account into a downloadable archive. save_storage_state — which merely
@@ -407,7 +421,6 @@ class BrowserAuthProfileService:
             "profile_name": normalized,
             "archive_path": str(archive_path),
             "archive_name": archive_name,
-            "download_url": f"/auth-export/{archive_name}",
         }
 
     async def import_profile(self, archive_path: str, *, overwrite: bool = False) -> dict[str, Any]:
@@ -424,6 +437,7 @@ class BrowserAuthProfileService:
 
         if not os.path.exists(src_str):
             raise FileNotFoundError(f"archive not found: {archive_name}")
+        self._require_archive_access(src, archive_name)
 
         profile_root = self.root()
 
@@ -544,6 +558,32 @@ class BrowserAuthProfileService:
             "profile_path": str(profile_root / profile_name),
             "imported": True,
         }
+
+    @staticmethod
+    def _require_archive_access(archive: Path, archive_name: str) -> None:
+        """Only the operator who exported an archive may import it.
+
+        An archive with no recorded exporter (made without named credentials,
+        by an earlier release, or copied in from another box) is not bound, and
+        the owner recorded inside the profile still decides who can use it. A
+        sidecar that exists but cannot be read raises, for the reason
+        _read_session_dir_owner does: unreadable must not mean unbound.
+        """
+        sidecar = archive.with_name(archive.name + EXPORTER_SIDECAR_SUFFIX)
+        if not sidecar.exists():
+            return
+        try:
+            payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            payload = None
+        exporter = payload.get("exporter") if isinstance(payload, dict) else None
+        if not isinstance(exporter, str) or not exporter.strip():
+            raise PermissionError(
+                f"the exporter record for archive '{archive_name}' is unreadable, so who may import it "
+                f"cannot be checked; restore or delete {sidecar.name}"
+            )
+        if not may_use(exporter.strip()):
+            raise PermissionError(f"archive '{archive_name}' was exported by another operator")
 
     def owner_of(self, profile_name: str) -> str | None:
         owner = self.read_metadata(self.normalize_name(profile_name), strict=True).get("owner")
