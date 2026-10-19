@@ -33,6 +33,17 @@ async def _gather_settled(*aws: Any) -> list[Any]:
             raise result
     return results
 
+
+def _scrub_disclosure(screenshot: dict[str, Any]) -> dict[str, Any]:
+    """The result field that says a screenshot went out without PII redaction.
+
+    Present only when screenshot scrubbing is on but could not run (no OCR);
+    `_scrub_screenshot_if_needed` records the reason on the screenshot dict.
+    """
+    reason = screenshot.get("pii_scrub_skipped")
+    return {"screenshot_pii_scrub": {"applied": False, "reason": reason}} if reason else {}
+
+
 # An outline is a nicety; an observation must not wait long on one.
 ARIA_SNAPSHOT_TIMEOUT_MS = 5000
 
@@ -42,6 +53,7 @@ class BrowserObservationService:
 
     def __init__(self, manager: Any) -> None:
         self.manager = manager
+        self._warned_unscrubbed: set[str] = set()
 
     async def observe(self, session_id: str, limit: int = 40, preset: str | None = None) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
@@ -64,6 +76,7 @@ class BrowserObservationService:
                 "url": session.page.url,
                 "screenshot_path": screenshot["path"],
                 "screenshot_url": screenshot["url"],
+                **_scrub_disclosure(screenshot),
                 "takeover_url": self.manager._current_takeover_url(session),
             }
 
@@ -107,6 +120,7 @@ class BrowserObservationService:
                 "interactables": [],
                 "screenshot_path": screenshot["path"],
                 "screenshot_url": screenshot["url"],
+                **_scrub_disclosure(screenshot),
                 "console_messages": session.console_messages[-10:],
                 "page_errors": session.page_errors[-10:],
                 "request_failures": session.request_failures[-10:],
@@ -171,6 +185,7 @@ class BrowserObservationService:
             "interactables": interactables,
             "screenshot_path": screenshot["path"],
             "screenshot_url": screenshot["url"],
+            **_scrub_disclosure(screenshot),
             "console_messages": session.console_messages[-10:],
             "page_errors": session.page_errors[-10:],
             "request_failures": session.request_failures[-10:],
@@ -242,6 +257,7 @@ class BrowserObservationService:
             "accessibility_outline": summary["accessibility_outline"],
             "screenshot_path": screenshot["path"],
             "screenshot_url": screenshot["url"],
+            **_scrub_disclosure(screenshot),
         }
 
     async def capture_session_screenshot(self, session: "BrowserSession", label: str) -> dict[str, str]:
@@ -297,6 +313,20 @@ class BrowserObservationService:
     ) -> None:
         pii_scrubber = self.manager.pii_scrubber
         if not pii_scrubber.screenshot_enabled or not ocr:
+            return
+        if ocr.get("available", True) is False:
+            # No OCR boxes means nothing to redact, and the image goes out as
+            # captured. Say so in the result, and in the log once per reason:
+            # outside Docker this is every screenshot.
+            reason = ocr.get("error") or ("ocr_disabled" if ocr.get("enabled") is False else "ocr_unavailable")
+            screenshot["pii_scrub_skipped"] = reason
+            if reason not in self._warned_unscrubbed:
+                self._warned_unscrubbed.add(reason)
+                logger.warning(
+                    "screenshot PII scrubbing is on but OCR is unavailable (%s): screenshots are returned "
+                    "unscrubbed. Run the controller from the Docker image, which ships tesseract.",
+                    reason,
+                )
             return
         # Prefer the uncapped redaction list. `blocks` is truncated to
         # ocr_max_blocks (default 20) for the model-facing payload, and since
