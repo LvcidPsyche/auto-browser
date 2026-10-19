@@ -188,6 +188,30 @@ deployment that restricts it.
   sent with that value as `structuredContent`, which the MCP spec requires to be an object, so
   clients that validate the response rejected it. Such results now carry only the text block,
   which already held the same JSON. Thanks to @sean0407 (#192).
+- **Network capture no longer buffers downloads.** With body capture on, the inspector checks
+  the content type and the declared length before reading a response, so a large binary or
+  oversize body is no longer loaded into memory only to be dropped. A response with no declared
+  length is still read and then size-checked.
+- **A failed session create no longer leaves its network log behind.** When a create failed
+  after the session hook ran (an unreachable start URL, for one), the dead session's network
+  inspector and CDP entry stayed, readable through `/sessions/<id>/network/requests`. They are
+  now removed.
+- **Isolated-session profiles, cookies included, are deleted on every exit path:** when Docker
+  has already lost the container, at startup for anything a crashed controller left (except the
+  profile of a container that could not be removed), and when a container fails to start.
+  `ISOLATED_BROWSER_KEEP_CONTAINERS` still keeps everything.
+- **The Universal Verifier process stops when the caller gives up.** A cancelled verification
+  or a shutdown now kills and reaps the child instead of leaving it running.
+- **The cleanup sweep no longer freezes the controller.** The file walk runs in a worker
+  thread, so sessions and requests keep responding during a sweep (it blocked for 13 s on 6,000
+  files).
+- **Session tunnels start in parallel.** Concurrent provisions no longer wait out each other's
+  startup grace period (four took 4 s, now about 1 s). A tunnel released while it is starting
+  fails that provision cleanly, and a failed metadata write no longer leaks a log handle.
+- **A pathological `url_matches` pattern can no longer hang the harness.** Python's regex
+  engine can't be interrupted, so matches now run in a short-lived child process with a 2 s
+  limit. A postcondition that times out is not satisfied, a forbidden state that times out
+  counts as hit, and both are listed in the result's `details.regex_timeouts`.
 
 ### Added
 
