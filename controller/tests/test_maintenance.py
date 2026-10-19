@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
+import threading
+import time
 import unittest
 from os import utime
 from pathlib import Path
@@ -101,6 +104,41 @@ class MaintenanceServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(profile_state.exists())
         self.assertGreaterEqual(report["roots"][2]["skipped_protected"], 1)
+
+    async def test_cleanup_walks_the_filesystem_off_the_event_loop(self) -> None:
+        """The sweep ran on the loop: 6000 stale files froze it for 13 s on NTFS."""
+        loop_thread = threading.get_ident()
+        walk_threads: list[int] = []
+        real_cleanup_root = self.service._cleanup_root
+
+        def slow_cleanup_root(*args, **kwargs):
+            walk_threads.append(threading.get_ident())
+            time.sleep(0.6)  # stands in for a long walk; blocks only its own thread
+            return real_cleanup_root(*args, **kwargs)
+
+        self.service._cleanup_root = slow_cleanup_root  # type: ignore[method-assign]
+        gaps: list[float] = []
+        stop = asyncio.Event()
+
+        async def ticker() -> None:
+            last = time.perf_counter()
+            while not stop.is_set():
+                await asyncio.sleep(0.01)
+                now = time.perf_counter()
+                gaps.append(now - last)
+                last = now
+
+        task = asyncio.create_task(ticker())
+        await asyncio.sleep(0.05)
+        await self.service.run_cleanup()
+        stop.set()
+        await task
+
+        self.assertEqual(len(walk_threads), 3)
+        self.assertNotIn(loop_thread, walk_threads)
+        # Each blocked walk is 0.6 s; a loop that stayed free ticks every ~10 ms.
+        # Half the walk is a wide margin for a loaded CI box.
+        self.assertLess(max(gaps), 0.3)
 
 
 if __name__ == "__main__":
