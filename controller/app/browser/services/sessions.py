@@ -215,6 +215,10 @@ class BrowserSessionService:
             if start_url:
                 await page.goto(start_url, wait_until="domcontentloaded")
                 await self.manager._settle(page)
+                # The check navigate() makes after the page loads: an allowlisted
+                # start URL can redirect somewhere that is not. Raising here rolls
+                # the session back below, so no live session is left on that host.
+                self.manager._assert_runtime_url_allowed(page.url)
 
             await self.manager._maybe_provision_session_tunnel(session)
             if memory is not None:
