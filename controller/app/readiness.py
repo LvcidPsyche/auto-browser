@@ -90,7 +90,7 @@ def run_readiness_checks(settings: Any, mode: str = "normal") -> ReadinessReport
             )
         )
 
-    bearer = getattr(settings, "api_bearer_token", None)
+    bearer = credentials_for(settings)  # named API_BEARER_TOKENS count as authentication too
     if bearer:
         checks.append(
             ReadinessCheck(
@@ -104,7 +104,7 @@ def run_readiness_checks(settings: Any, mode: str = "normal") -> ReadinessReport
             ReadinessCheck(
                 name="api_bearer_token",
                 status="warn",
-                message="No API_BEARER_TOKEN set; API is unauthenticated.",
+                message="No API_BEARER_TOKEN or API_BEARER_TOKENS set; API is unauthenticated.",
                 fix="Set API_BEARER_TOKEN=<secret> in production.",
             )
         )

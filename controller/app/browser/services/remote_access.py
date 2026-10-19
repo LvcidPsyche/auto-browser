@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+from ...auth_policy import credentials_for
 from ...utils import UTC
 
 if TYPE_CHECKING:
@@ -38,7 +39,7 @@ class BrowserRemoteAccessService:
             "configured_takeover_url": self.manager.settings.takeover_url,
             "takeover_url": self.manager.settings.takeover_url,
             "api_url": None,
-            "api_auth_enabled": bool(self.manager.settings.api_bearer_token),
+            "api_auth_enabled": bool(credentials_for(self.manager.settings)),
             "info_path": str(info_path),
             "exists": info_path.exists(),
             "last_updated": None,
