@@ -610,6 +610,8 @@ class BrowserSessionService:
                 trace_path=artifact_dir / "trace.zip",
                 browser=headed_browser,
                 headless=False,
+                # Same logins as the source, so the same operator and nobody else.
+                owner=session.owner,
             )
             manager._attach_page_listeners(page, shadow_session)
             manager.sessions[shadow_session_id] = shadow_session
