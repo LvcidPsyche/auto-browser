@@ -241,9 +241,14 @@ class McpHttpTransport:
                     headers=self._session_headers(session),
                 )
             tool_response = await self.tool_gateway.call_tool(tool_request)
+            result = tool_response.model_dump(exclude_none=True, by_alias=True)
+            # Protocol versions supported here require structuredContent to be an object.
+            # List and scalar results remain available in the text content block.
+            if not isinstance(result.get("structuredContent"), dict):
+                result.pop("structuredContent", None)
             return self._json_result_response(
                 request_id,
-                tool_response.model_dump(exclude_none=True, by_alias=True),
+                result,
                 headers=self._session_headers(session),
             )
 
