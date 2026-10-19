@@ -40,6 +40,28 @@ browser.
 - **Closing a session no longer closes the shared browser after a swap.** The check compared the
   session's browser with `manager.browser`, which `cdp_attach` replaces; sessions now record whether
   their browser is their own (isolated runtime, shadow-browse window) and only those are closed.
+- **Harness runs and staged skill candidates belong to the operator who started them.** Any
+  operator could list every run, read its trace (traces of live sessions carry page content),
+  graduate someone else's candidate, and read or drift-check their staged skills. A run now
+  records the verified operator, and its candidate inherits that owner, which is signed into the
+  envelope so stripping it is caught. Other operators get a permission error and don't see these
+  in lists. An owned candidate's id now also depends on its owner, so two operators staging the
+  same contract no longer overwrite each other. Runs and candidates from earlier releases, or
+  made without named credentials, stay open.
+- **An unowned cron job fires as nobody.** Triggering one by hand or by webhook ran it as the
+  triggering operator, and the session and agent job it created became theirs. It now fires as
+  the anonymous identity, the same as a scheduled fire. Owned jobs still fire as their owner.
+- **Memory profiles belong to the operator who first saved them.** Another operator could list,
+  read, append to and delete a profile, and load it into their own session. Profile text goes
+  into the agent's goal prompt, so that was a prompt-injection path between operators. Those
+  calls are now refused for another operator's profile, which is also left out of lists, and the
+  name-collision error no longer reveals other operators' profile names. Profiles saved without
+  named credentials, or before this release, stay open, and appending to one doesn't claim it.
+- **MCP `resources/list` names only sessions you may use.** It listed every operator's session ids
+  and their screenshot, dom, console and network URIs; `resources/subscribe` accepted them, and the
+  update stream notified the subscriber whenever those sessions were active. Listing, subscribing
+  and notifications now cover only sessions you may use. Unowned sessions are still listed for
+  everyone, and reading another operator's session content was already refused.
 
 ### Removed
 
