@@ -655,7 +655,8 @@ async function loadAudit() {
   events.slice(0,50).forEach(e => {
     const row = document.createElement('tr');
     appendCell(row, formatEventTime(e.timestamp), {className: 'mono'});
-    appendCell(row, e.operator_id);
+    // An AuditEvent carries `operator` ({id, name, source}); there is no top-level operator_id.
+    appendCell(row, e.operator && e.operator.id);
     appendCell(row, e.action || e.event_type);
     appendCell(row, asText(e.session_id, '').slice(0, 8) || '—', {className: 'mono'});
     appendNodeCell(row, statusBadge(e.status || 'ok'));

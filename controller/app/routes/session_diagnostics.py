@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html as _html
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,12 @@ from ..playwright_export import export_session_script
 from ._utils import OFF_LIST_PAGE_DETAIL, require_safe_segment, typed_route_errors
 
 logger = logging.getLogger(__name__)
+
+
+def _event_details(event: dict[str, Any]) -> str:
+    """An audit event's `details` as one line of JSON, cut to fit a table cell."""
+    details = event.get("details")
+    return json.dumps(details, sort_keys=True, default=str)[:120] if details else ""
 
 
 def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRouter:
@@ -115,8 +122,8 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
             "".join(
                 f"<tr><td class=muted>{esc(e.get('timestamp', '')[:19])}</td>"
                 f"<td>{esc(e.get('event_type', ''))}</td>"
-                f"<td>{esc(e.get('operator_id', ''))}</td>"
-                f"<td>{esc(str(e.get('data', ''))[:120])}</td></tr>"
+                f"<td>{esc((e.get('operator') or {}).get('id', ''))}</td>"
+                f"<td>{esc(_event_details(e))}</td></tr>"
                 for e in events
             )
             or "<tr><td colspan=4 class=muted>No audit events.</td></tr>"
