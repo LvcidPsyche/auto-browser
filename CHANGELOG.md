@@ -139,6 +139,20 @@ deployment that restricts it.
   dropped connection made a closed session look unowned, and another operator's ownership check
   let them in. It now falls back to the file copy, which is written first, and logs a Redis error
   when there is one.
+- **The noVNC page can no longer be framed.** The WebSocket origin guard stops a page from
+  opening its own connection to the desktop, but a page the in-container browser visited could
+  still embed `http://127.0.0.1:6080/vnc.html`, whose own WebSocket passes the guard. Every
+  response noVNC serves now sends `X-Frame-Options: DENY` and
+  `Content-Security-Policy: frame-ancestors 'none'`. `docs/deployment.md` now says what the guard
+  and the headers each prevent. This applies to every deployment that exposes noVNC.
+- **Client SDK ids can no longer retarget a request.** The client put ids into URL paths as
+  given, so `get_session("../approvals/x/approve")` reached another route. Every id in a path,
+  the event stream included, is now percent-encoded, and `""`, `.` and `..` raise `ValueError`.
+  The client also gains `close()` and `aclose()` for an instance used outside `with`.
+- **The Codex host bridge caps request bodies and times out stalled reads.** If you run
+  `scripts/codex_host_bridge.py`: a body over 32 MiB gets 413 without being read, a bad
+  `Content-Length` gets 400, and a client that stalls for 30 s gets 408. Before, a 64 MB body was
+  read and parsed, and one idle connection held a handler thread for good.
 
 ### Fixed
 
@@ -256,6 +270,18 @@ deployment that restricts it.
 - **Audit views show who did what.** The dashboard's audit table and the session replay page read
   `operator_id` and `data`, which no audit event has, so those columns were always blank. They now
   show the event's operator id, and the replay page shows its details as JSON.
+- **The MCP bridge reports a failed re-initialize.** When the controller restarted and the
+  bridge's `notifications/initialized` call then failed, the bridge kept the half-open session
+  and the next call failed with "Session not initialized". It now drops that session, relays the
+  controller's original error, and retries on the next call.
+- **Named tokens count as authentication.** `GET /readiness`, the runtime-policy warning and the
+  remote-access info said the API was unauthenticated when only `API_BEARER_TOKENS` was set.
+- **`/version` answers under `REQUIRE_OPERATOR_ID`, and `/ui/*` redirects.** A version probe no
+  longer needs an operator id, and an old bookmark such as `/ui/sessions` redirects to the
+  dashboard as `/ui` does, instead of answering 401.
+- **A network hook whose pattern contains `/` can be removed.** `DELETE
+  /sessions/{id}/network/hooks/{pattern}` never matched a pattern such as `*/api/*`. A Host header
+  such as `[::1]evil.com` is also no longer read as loopback.
 
 ### Added
 
