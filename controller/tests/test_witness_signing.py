@@ -405,3 +405,84 @@ async def test_in_app_verification_rejects_a_stripped_signature(signed_recorder:
     result = await signed_recorder.verify_signatures("sess-1")
     assert result["valid"] is False
     assert result["first_invalid_index"] == 2
+
+
+def _strip_every_signature(recorder: WitnessRecorder, scope: str) -> None:
+    # The signature fields are excluded from the hash input, so removing them
+    # needs no key and leaves the hash walk and the anchor passing.
+    path = recorder._path(scope)
+    receipts = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    for receipt in receipts:
+        receipt["chain_signature"] = None
+        receipt["signing_key_id"] = None
+    path.write_text("\n".join(json.dumps(r) for r in receipts) + "\n", encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_the_one_verdict_fails_a_chain_whose_signatures_were_all_stripped(
+    signed_recorder: WitnessRecorder,
+) -> None:
+    """A client that reads only `valid` must not accept a stripped chain."""
+    await signed_recorder.startup()
+    for i in range(2):
+        await signed_recorder.record("sess-1", **_receipt_kwargs(f"click-{i}"))
+    _strip_every_signature(signed_recorder, "sess-1")
+
+    result = await signed_recorder.verify_with_signatures("sess-1")
+
+    assert result["chain_valid"] is True, "the hash walk alone cannot see a stripped signature"
+    assert result["signatures"]["valid"] is False
+    assert result["valid"] is False
+    assert "no receipt is signed" in result["reason"]
+
+
+@pytest.mark.asyncio
+async def test_the_one_verdict_passes_an_intact_signed_chain(signed_recorder: WitnessRecorder) -> None:
+    await signed_recorder.startup()
+    for i in range(2):
+        await signed_recorder.record("sess-1", **_receipt_kwargs(f"click-{i}"))
+
+    result = await signed_recorder.verify_with_signatures("sess-1")
+
+    assert result["valid"] is True, result
+    assert result["chain_valid"] is True
+    assert result["signatures"]["valid"] is True
+    assert result["reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_one_verdict_keeps_the_hash_walk_reason_when_the_chain_breaks(
+    signed_recorder: WitnessRecorder,
+) -> None:
+    """When both checks fail, the reason names the hash walk: it pins the altered receipt."""
+    await signed_recorder.startup()
+    await signed_recorder.record("sess-1", **_receipt_kwargs())
+    _strip_every_signature(signed_recorder, "sess-1")
+    path = signed_recorder._path("sess-1")
+    receipt = json.loads(path.read_text(encoding="utf-8").strip())
+    receipt["action"] = "transfer-funds"
+    path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+
+    result = await signed_recorder.verify_with_signatures("sess-1")
+
+    assert result["valid"] is False
+    assert result["chain_valid"] is False
+    assert result["signatures"]["valid"] is False
+    assert "receipt altered after write" in result["reason"]
+
+
+@pytest.mark.asyncio
+async def test_the_verify_route_and_tool_report_the_one_verdict(signed_recorder: WitnessRecorder) -> None:
+    """GET /sessions/{id}/witness/verify and browser.verify_witness both go through the manager."""
+    from app.browser_manager import BrowserManager
+
+    await signed_recorder.startup()
+    await signed_recorder.record("sess-1", **_receipt_kwargs())
+    _strip_every_signature(signed_recorder, "sess-1")
+    manager = object.__new__(BrowserManager)
+    manager.witness = signed_recorder
+
+    result = await manager.verify_witness_chain("sess-1")
+
+    assert result["valid"] is False
+    assert result["chain_valid"] is True
