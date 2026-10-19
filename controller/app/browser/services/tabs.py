@@ -81,6 +81,11 @@ class BrowserTabService:
             if index < 0 or index >= len(pages):
                 raise ValueError(f"Unknown tab index: {index}")
             target_page = pages[index]
+            # A popup or tab the page opened may sit on a host the allowlist
+            # refuses, and every later action and observation reads session.page.
+            # Refused before it becomes the active page, so the session stays
+            # where it was.
+            self.manager._assert_runtime_url_allowed(target_page.url)
             self.manager._attach_page_listeners(target_page, session)
             if hasattr(target_page, "bring_to_front"):
                 await target_page.bring_to_front()
