@@ -53,16 +53,26 @@ The controller now includes:
 
 ## Provider strategy
 
+Each of the three first-party providers has an `api` mode (a key in the environment)
+and a `cli` mode (the vendor's CLI, signed in under `CLI_HOME`: `codex`, `claude`,
+`gemini`). OpenAI also has a `host_bridge` mode that reaches a host-side Codex over a
+Unix socket. `GET /agent/providers` reports the mode each provider is in.
+
 ### OpenAI
-Uses the Chat Completions API with:
-- image input
+Uses the Responses API (`POST {OPENAI_BASE_URL}/responses`) with:
+- image input (`input_image`)
 - strict function calling
-- one required tool: `browser_action`
+- one required tool: `browser_action` (`tool_choice` names it)
+
+Not Chat Completions: current OpenAI models refuse function tools there while they reason.
 
 ### Claude
 Uses the Anthropic Messages API with:
 - image input
-- one forced tool: `browser_action`
+- one tool, `browser_action`, requested rather than forced: `tool_choice` is `auto`
+  with `disable_parallel_tool_use`, because Opus 5.5, Sonnet 5.5 and Fable 5.1 reject a
+  forced `tool`/`any` choice with a 400, and the system prompt asks for the call
+- `max_tokens` of 16,000, since thinking counts against it
 
 ### Gemini
 Uses the Gemini `generateContent` API with:
@@ -72,10 +82,12 @@ Uses the Gemini `generateContent` API with:
 
 ### OpenAI-compatible providers
 One shared adapter (`controller/app/providers/openai_compatible.py`) drives every
-provider that speaks the OpenAI Chat Completions dialect: same request shape as
-the OpenAI API path — screenshot input and a required `browser_action` tool —
-with a fallback that parses the decision from message content for endpoints
-that ignore `tool_choice`.
+provider that speaks the OpenAI Chat Completions dialect (`POST {base_url}/chat/completions`,
+unlike the OpenAI provider above, which uses the Responses API): screenshot input
+(`image_url`) and a required strict `browser_action` tool, no `temperature`, with a
+fallback that parses the decision from message content for endpoints that ignore
+`tool_choice`. The `deepseek` profile is text-only, so it gets no screenshot and
+works from the page outline.
 
 Named profiles exist for `openrouter`, `xai`, `deepseek` and `minimax`. Anything
 else — a hosted gateway or router, a self-hosted Ollama / vLLM / LM Studio server,
@@ -166,17 +178,21 @@ If a provider still proposes a side effect, the controller does not trust it bli
 - in `fast`, uploads and high-risk `post`, `payment`, `account_change`, and `destructive` decisions use the approval queue
 - in `governed`, every non-read decision requires approval, including ordinary click/type writes
 - the step/run returns `approval_required` until an approval token is supplied
+  (with `AUTONOMOUS_APPROVALS=true` the agent approves its own action instead; the
+  approval is still recorded)
 
 ## Important limits
 
-- This POC still uses **one visible desktop**, so only one active session is safe.
+- By default (`SESSION_ISOLATION_MODE=shared_browser_node`) all sessions share one Chromium
+  and one noVNC desktop: cookies and storage stay separate per session, but a human taking
+  over one session sees the others' windows. `docker_ephemeral` gives each session its own
+  browser container (see `docs/session-isolation-audit.md`).
 - `element_id` values are **observation-scoped**.
-- Provider calls are synchronous HTTP requests in the API process.
-- Provider HTTP calls now retry `429` and `5xx` responses with exponential backoff using `MODEL_MAX_RETRIES` and `MODEL_RETRY_BACKOFF_SECONDS`.
-- Live provider execution depends on either provider API keys or mounted CLI auth state under `CLI_HOME`.
+- Provider calls are awaited HTTP requests made from the API process; there is no separate model worker.
+- Provider HTTP calls retry timeouts, network errors, `429` and `5xx` responses with exponential backoff (`MODEL_MAX_RETRIES`, `MODEL_RETRY_BACKOFF_SECONDS`); a `Retry-After` header on a `429`/`5xx` lengthens the wait (capped).
+- Live provider execution depends on either provider API keys or mounted CLI auth state under `CLI_HOME` (OpenAI can also use `host_bridge`).
 - Session observations now also include `tabs` and `recent_downloads`, so providers can follow popup flows and stop after a file lands or an export completes.
 
 ## Next production upgrades
 
-- switch OpenAI from Chat Completions to Responses API if you want one modern multimodal path everywhere
 - add streaming/SSE on top of the current REST + MCP surfaces when clients need server-pushed events

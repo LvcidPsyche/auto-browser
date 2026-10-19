@@ -2,7 +2,7 @@
 
 This is the near-term direction for Auto Browser.
 
-## Now (current in v1.8.1)
+## Now (current in v1.9.1)
 
 - Ed25519-signed Witness receipt chains — each receipt attests to itself and its whole history, and an exported bundle verifies anywhere via `scripts/verify_witness_bundle.py`, which imports nothing from this project
 - `text` observation preset — accessibility outline, extracted text, and interactables with no screenshot and no OCR
@@ -42,6 +42,8 @@ This is the near-term direction for Auto Browser.
 
 ## Recently Shipped
 
+- v1.9.1 prebuilt controller and browser-node images on GHCR (`docker-compose.images.yml`), with an SBOM and a build-provenance attestation on each
+- v1.9.0 a security and correctness pass from a maintainer review: sessions no longer shared between operators under named credentials, every `.env` setting now reaches the controller, governed approvals that run, the Claude and OpenAI providers working again on current models, wider PII scrubbing, an opt-in `AUTONOMOUS_APPROVALS` mode, and releases that publish only commits on `main`
 - v1.8.1 reliability, speed and polish passes (sessions and stores that no longer leak or lose writes, a stdio bridge that survives controller restarts, operator ids from every client, fewer browser round trips) and fixes from a private security review
 - v1.8.0 a security pass (navigation allowlist parsed the way Chromium parses URLs, DNS-rebinding Host guard, sandboxed artifacts, scoped share links, a non-root browser) and an agent-experience pass (compact MCP results, image screenshots, `browser.read_download`, a dashboard approvals queue, and readable tool errors)
 - v1.7.0 fail-closed authentication: a reachable API needs a token (`API_BIND_SCOPE`), operator identity can be proven by a named credential, auth profiles belong to the operator who saved them, staged skills are signature-checked on read, and Codex keeps its sandbox
