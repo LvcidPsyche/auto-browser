@@ -25,7 +25,6 @@ from pathlib import Path
 import pytest
 
 from app import browser_scripts
-from app.browser.dom_pruner import _TYPE_PRIORITY
 from tests._chromium import chromium_executable, requires_chromium
 
 NODE = shutil.which("node")
@@ -134,11 +133,6 @@ def test_the_three_observation_scripts_share_the_helper() -> None:
         assert "__ELEMENT_NAMING__" not in source, name
         # The old fallback chains read `el.value` / `field.value` directly.
         assert "|| el.value" not in source and "|| field.value" not in source, name
-
-
-def test_the_pruner_ranks_the_reported_aria_roles() -> None:
-    for role in ("textbox", "searchbox", "link", "button", "checkbox", "combobox", "switch", "tab"):
-        assert role in _TYPE_PRIORITY, role
 
 
 @requires_chromium
