@@ -239,7 +239,12 @@ def _register_session_hooks(app) -> None:
     async def _closed(session_id: str) -> None:
         await on_session_closed(app, session_id)
 
-    manager.register_extension_hooks(session_created=_created, session_closed=_closed)
+    async def _create_failed(session_id: str) -> None:
+        _release_session_state(app, session_id)
+
+    manager.register_extension_hooks(
+        session_created=_created, session_closed=_closed, session_create_failed=_create_failed
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -277,10 +282,15 @@ async def on_session_created(app, session_id: str, page) -> None:
         logger.warning("on_session_created: stealth fingerprint failed — %s", exc)
 
 
-async def on_session_closed(app, session_id: str) -> None:
-    """Called when a browser session is closed. Cleans up per-session resources."""
+def _release_session_state(app, session_id: str) -> None:
+    """Drop what on_session_created registered. Shared by close and a failed create."""
     app.state.network_inspectors.pop(session_id, None)
     app.state.cdp_sessions.pop(session_id, None)
+
+
+async def on_session_closed(app, session_id: str) -> None:
+    """Called when a browser session is closed. Cleans up per-session resources."""
+    _release_session_state(app, session_id)
 
     # Post-session Curator review.
     # Fire-and-forget — never blocks session close, never raises.
