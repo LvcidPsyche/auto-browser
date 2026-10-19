@@ -88,8 +88,16 @@ class SlidingWindowRateLimiter:
             self._events.popitem(last=False)
 
 
+# Exempt entries match one path exactly. Matching a whole subtree exempted
+# /healthz/deep, which runs real browser checks, from the limiter. Only the
+# static artifact mount is a tree: the UI loads many files from under it.
+_EXEMPT_SUBTREES = frozenset({"/artifacts"})
+
+
 def is_exempt_path(path: str, exempt_paths: list[str]) -> bool:
-    return any(path == exempt or path.startswith(f"{exempt}/") for exempt in exempt_paths)
+    return any(
+        path == exempt or (exempt in _EXEMPT_SUBTREES and path.startswith(f"{exempt}/")) for exempt in exempt_paths
+    )
 
 
 def build_rate_limit_key(
