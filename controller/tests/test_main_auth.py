@@ -131,6 +131,25 @@ class MainAuthTests(unittest.TestCase):
         self.assertEqual(response.status_code, 307)
         self.assertEqual(response.headers["location"], "/dashboard")
 
+    def test_version_does_not_need_an_operator_id(self) -> None:
+        # A version probe has no operator; /healthz and /readyz are exempt for the same reason.
+        with patch.object(main_module.settings, "require_operator_id", True):
+            response = self.client.get("/version")
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_legacy_ui_subpaths_redirect_like_ui(self) -> None:
+        with patch.object(main_module.settings, "require_operator_id", True):
+            response = self.client.get("/ui/foo", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 307)
+        self.assertEqual(response.headers["location"], "/dashboard")
+
+    def test_ui_lookalike_paths_still_need_the_bearer_token(self) -> None:
+        for path in ("/uifoo", "/ui2/x"):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path, follow_redirects=False).status_code, 401)
+
     def test_mesh_receive_is_exempt_from_bootstrap_auth(self) -> None:
         body = {
             "sender_node_id": "peer-1",
