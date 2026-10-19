@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.auth_policy import is_loopback_host
 from app.config import Settings
 from app.middleware.hosts import ControllerHostMiddleware, host_from_header, host_is_allowed
 from app.middleware.http import install_controller_http_middleware
@@ -50,6 +51,18 @@ class HostParsingTests(unittest.TestCase):
         self.assertEqual(host_from_header("127.0.0.1:8000"), "127.0.0.1")
         self.assertEqual(host_from_header("Controller.Example.COM"), "controller.example.com")
         self.assertEqual(host_from_header(""), "")
+
+    def test_text_after_the_bracket_is_not_a_loopback_host(self) -> None:
+        # "[::1]evil.com" parsed as "::1" and passed the loopback and allowed-host checks.
+        for header in ("[::1]evil.com", "[::1].evil.com:80", "[::1]x]:80", "[::1", "[::1]:", "[::1]:80x"):
+            with self.subTest(header=header):
+                self.assertEqual(host_from_header(header), "")
+                self.assertFalse(host_is_allowed(header, ["::1"]))
+                self.assertFalse(is_loopback_host(header))
+        for header in ("[::1]", "[::1]:8000"):
+            with self.subTest(header=header):
+                self.assertEqual(host_from_header(header), "::1")
+                self.assertTrue(is_loopback_host(header))
 
     def test_ipv6_loopback_matches_the_entry_compose_ships(self) -> None:
         # Starlette split on the first colon, so "[::1]:8000" became "[" and

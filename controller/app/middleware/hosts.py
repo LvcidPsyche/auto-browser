@@ -22,7 +22,12 @@ def host_from_header(value: str) -> str:
     """The host part of a Host header, lowercased, without port or IPv6 brackets."""
     candidate = value.strip()
     if candidate.startswith("["):
-        return candidate[1:].partition("]")[0].lower()
+        host, closed, rest = candidate[1:].partition("]")
+        # Only "[v6]" or "[v6]:port" is a Host header. "[::1]evil.com" used to
+        # parse as "::1" and so passed as loopback.
+        if not closed or (rest and not (rest.startswith(":") and rest[1:].isdigit())):
+            return ""
+        return host.lower()
     if candidate.count(":") == 1:  # name:port — a bare IPv6 literal has more colons
         candidate = candidate.partition(":")[0]
     return candidate.lower()

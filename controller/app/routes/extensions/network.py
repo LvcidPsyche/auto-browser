@@ -55,7 +55,9 @@ async def network_list_hooks(session_id: str, request: Request):
     return {"hooks": inspector.list_hooks()}
 
 
-@network_router.delete("/hooks/{pattern}")
+# `:path` because a pattern such as "*/api/*" contains "/", which a plain {pattern}
+# never matches (the server decodes %2F before routing), so that hook could not be removed.
+@network_router.delete("/hooks/{pattern:path}")
 async def network_remove_hook(session_id: str, pattern: str, request: Request):
     inspector = _get_inspector(request.app, session_id)
     if inspector is None:

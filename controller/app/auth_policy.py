@@ -66,7 +66,10 @@ class AuthPolicy:
 def is_loopback_host(host: str) -> bool:
     candidate = host.strip()
     if candidate.startswith("["):  # [::1] or [::1]:8000
-        candidate = candidate[1:].partition("]")[0]
+        candidate, closed, rest = candidate[1:].partition("]")
+        # Anything else after the bracket ("[::1]evil.com") is not a loopback host.
+        if not closed or (rest and not (rest.startswith(":") and rest[1:].isdigit())):
+            return False
     elif candidate.count(":") == 1:  # host:port — a bare IPv6 literal has more
         candidate = candidate.partition(":")[0]
     if not candidate:
