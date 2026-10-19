@@ -131,6 +131,18 @@ deployment that restricts it.
   a bad value and 404 for a missing file. Anything unexpected is still logged and answers 500.
   `observe` and `wait` on an unknown session now carry that message and `code` instead of a bare
   "Unknown session".
+- **Agent steps work on a text-only observation.** `observe(preset="text")` returns no
+  screenshot, and `PERCEPTION_PRESET_DEFAULT=text` makes that the default, but the Claude, Gemini,
+  OpenAI and OpenAI-compatible adapters (and the Codex CLI and host-bridge paths) read the
+  screenshot unconditionally and crashed with `KeyError` or `TypeError` before sending anything.
+  They now send a text-only request. If you run `scripts/codex_host_bridge.py` on the host,
+  update it too: an older bridge answers 400 to a request without a screenshot.
+- **The LangChain integration raises a clear error when a tool call fails.** `AutoBrowserNode`
+  raised `JSONDecodeError` or `KeyError`, or returned an empty state, when the controller reported
+  `isError: true`. It now raises `AutoBrowserToolError` with the tool name, the error text, and
+  `code` and `retryable` when the controller sent them, so a graph can tell a missing session from
+  a bad selector. Building `AutoBrowserTool` without `langchain-core` now raises an `ImportError`
+  naming `pip install "auto-browser-langchain[langchain]"` instead of "takes no arguments".
 
 ### Removed
 
