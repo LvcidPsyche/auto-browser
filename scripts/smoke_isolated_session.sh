@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
+source "${ROOT_DIR}/scripts/load_env.sh"
+load_repo_env "${ROOT_DIR}/.env"
+
 COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.isolation.yml)
 API_PORT_VALUE="${API_PORT:-8000}"
 API_BASE_URL="http://127.0.0.1:${API_PORT_VALUE}"
@@ -34,7 +37,7 @@ trap cleanup EXIT
 "${COMPOSE[@]}" up -d --build browser-node controller
 wait_for "controller readiness" "curl -fsS ${API_BASE_URL}/readyz" 120 2
 
-SESSION_JSON="$(curl -fsS "${API_BASE_URL}/sessions" -X POST -H 'content-type: application/json' -d '{"name":"isolated-smoke","start_url":"https://example.com"}')"
+SESSION_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions" -X POST -H 'content-type: application/json' -d '{"name":"isolated-smoke","start_url":"https://example.com"}')"
 read -r SESSION_ID CONTAINER_NAME NOVNC_PORT <<<"$(python3 - <<'PY' "${SESSION_JSON}"
 import json
 import sys
@@ -57,7 +60,7 @@ wait_for \
   30 \
   1
 
-OBSERVE_JSON="$(curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}/observe")"
+OBSERVE_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}/observe")"
 python3 - <<'PY' "${OBSERVE_JSON}" "${CONTAINER_NAME}" "${NOVNC_PORT}"
 import json
 import sys
@@ -73,7 +76,7 @@ assert payload["url"] == "https://example.com/", payload
 print("isolated observe ok")
 PY
 
-REMOTE_ACCESS_JSON="$(curl -fsS "${API_BASE_URL}/remote-access?session_id=${SESSION_ID}")"
+REMOTE_ACCESS_JSON="$(bearer_curl -fsS "${API_BASE_URL}/remote-access?session_id=${SESSION_ID}")"
 python3 - <<'PY' "${REMOTE_ACCESS_JSON}" "${NOVNC_PORT}"
 import json
 import sys
@@ -85,7 +88,7 @@ assert payload["takeover_url"] == f"http://127.0.0.1:{novnc_port}/vnc.html?autoc
 print("isolated remote-access endpoint ok")
 PY
 
-CLOSE_JSON="$(curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}" -X DELETE)"
+CLOSE_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}" -X DELETE)"
 python3 - <<'PY' "${CLOSE_JSON}"
 import json
 import sys

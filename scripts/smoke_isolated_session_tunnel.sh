@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
+source "${ROOT_DIR}/scripts/load_env.sh"
+load_repo_env "${ROOT_DIR}/.env"
+
 SSH_DIR="${ROOT_DIR}/data/ssh"
 TUNNEL_DIR="${ROOT_DIR}/data/tunnels"
 SMOKE_KEY="${SSH_DIR}/smoke_id_ed25519"
@@ -88,7 +91,7 @@ chmod 644 "${SMOKE_KNOWN_HOSTS}"
 "${COMPOSE[@]}" up -d --no-recreate browser-node controller
 wait_for "controller readiness" "curl -fsS ${API_BASE_URL}/readyz" 120 2
 
-SESSION_JSON="$(curl -fsS "${API_BASE_URL}/sessions" -X POST -H 'content-type: application/json' -d '{"name":"isolated-tunnel-smoke","start_url":"https://example.com"}')"
+SESSION_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions" -X POST -H 'content-type: application/json' -d '{"name":"isolated-tunnel-smoke","start_url":"https://example.com"}')"
 read -r SESSION_ID CONTAINER_NAME REMOTE_PORT REMOTE_URL <<<"$(python3 - <<'PY' "${SESSION_JSON}"
 import json
 import sys
@@ -118,7 +121,7 @@ wait_for \
   60 \
   2
 
-OBSERVE_JSON="$(curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}/observe")"
+OBSERVE_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}/observe")"
 python3 - <<'PY' "${OBSERVE_JSON}" "${REMOTE_URL}"
 import json
 import sys
@@ -131,7 +134,7 @@ assert payload["takeover_url"] == remote_url, payload
 print("isolated tunnel observe ok")
 PY
 
-REMOTE_ACCESS_JSON="$(curl -fsS "${API_BASE_URL}/remote-access?session_id=${SESSION_ID}")"
+REMOTE_ACCESS_JSON="$(bearer_curl -fsS "${API_BASE_URL}/remote-access?session_id=${SESSION_ID}")"
 python3 - <<'PY' "${REMOTE_ACCESS_JSON}" "${REMOTE_URL}"
 import json
 import sys
@@ -144,7 +147,7 @@ assert payload["takeover_url"] == remote_url, payload
 print("isolated tunnel remote-access endpoint ok")
 PY
 
-CLOSE_JSON="$(curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}" -X DELETE)"
+CLOSE_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}" -X DELETE)"
 python3 - <<'PY' "${CLOSE_JSON}"
 import json
 import sys

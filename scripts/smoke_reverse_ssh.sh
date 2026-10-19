@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
+source "${ROOT_DIR}/scripts/load_env.sh"
+load_repo_env "${ROOT_DIR}/.env"
+
 COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.smoke.yml --profile reverse-ssh)
 API_PORT_VALUE="${API_PORT:-8000}"
 API_BASE_URL="http://127.0.0.1:${API_PORT_VALUE}"
@@ -14,6 +17,11 @@ SMOKE_PUB="${SMOKE_KEY}.pub"
 SMOKE_AUTHORIZED_KEYS="${SSH_DIR}/smoke_authorized_keys"
 SMOKE_KNOWN_HOSTS="${SSH_DIR}/smoke_known_hosts"
 REMOTE_INFO="${TUNNEL_DIR}/reverse-ssh.json"
+# Same token, for the curls that run inside the bastion against the forwarded API.
+BASTION_AUTH=""
+if [[ -n "${API_BEARER_TOKEN:-}" ]]; then
+  BASTION_AUTH="-H 'Authorization: Bearer ${API_BEARER_TOKEN}'"
+fi
 
 cleanup() {
   "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
@@ -76,7 +84,7 @@ wait_for \
   60 \
   2
 
-REMOTE_ACCESS_JSON="$(curl -fsS "${API_BASE_URL}/remote-access")"
+REMOTE_ACCESS_JSON="$(bearer_curl -fsS "${API_BASE_URL}/remote-access")"
 python3 - <<'PY' "${REMOTE_ACCESS_JSON}"
 import json
 import sys
@@ -89,7 +97,7 @@ assert payload["api_url"] == "http://test-bastion:18000", payload
 print("remote-access endpoint ok")
 PY
 
-SESSION_JSON="$("${COMPOSE[@]}" exec -T test-bastion sh -lc "curl -fsS http://127.0.0.1:18000/sessions -X POST -H 'content-type: application/json' -d '{\"name\":\"smoke\",\"start_url\":\"https://example.com\"}'")"
+SESSION_JSON="$("${COMPOSE[@]}" exec -T test-bastion sh -lc "curl -fsS ${BASTION_AUTH} http://127.0.0.1:18000/sessions -X POST -H 'content-type: application/json' -d '{\"name\":\"smoke\",\"start_url\":\"https://example.com\"}'")"
 SESSION_ID="$(python3 - <<'PY' "${SESSION_JSON}"
 import json
 import sys
@@ -97,7 +105,7 @@ print(json.loads(sys.argv[1])["id"])
 PY
 )"
 
-OBSERVE_JSON="$("${COMPOSE[@]}" exec -T test-bastion sh -lc "curl -fsS http://127.0.0.1:18000/sessions/${SESSION_ID}/observe")"
+OBSERVE_JSON="$("${COMPOSE[@]}" exec -T test-bastion sh -lc "curl -fsS ${BASTION_AUTH} http://127.0.0.1:18000/sessions/${SESSION_ID}/observe")"
 python3 - <<'PY' "${OBSERVE_JSON}"
 import json
 import sys
