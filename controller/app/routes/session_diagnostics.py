@@ -231,11 +231,10 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
 
     @router.get("/sessions/{session_id}/export-script")
     async def export_script(session_id: str) -> dict[str, Any]:
-        session = await manager.get_session(session_id)
+        await manager.get_session(session_id)
         return await export_session_script(
             session_id,
             manager.audit,
-            start_url=session.page.url,
             viewport_w=settings.default_viewport_width,
             viewport_h=settings.default_viewport_height,
         )

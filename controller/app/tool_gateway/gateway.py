@@ -1001,12 +1001,10 @@ class McpToolGateway:
     async def _export_script(self, payload: ExportScriptInput) -> dict[str, Any]:
         from ..playwright_export import export_session_script
 
-        session = await self.manager.get_session(payload.session_id)
-        start_url = session.page.url
+        await self.manager.get_session(payload.session_id)
         return await export_session_script(
             payload.session_id,
             self.manager.audit,
-            start_url=start_url,
             viewport_w=self.manager.settings.default_viewport_width,
             viewport_h=self.manager.settings.default_viewport_height,
         )
