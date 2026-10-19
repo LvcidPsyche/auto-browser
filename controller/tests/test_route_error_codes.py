@@ -24,6 +24,8 @@ from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.action_errors import BrowserActionError, SessionNotFoundError
+from app.approvals import ApprovalRequiredError
+from app.models import ApprovalRecord, BrowserActionDecision
 from app.routes._utils import OFF_LIST_PAGE_DETAIL
 
 SID = "s-missing"
@@ -156,6 +158,28 @@ def test_browser_action_error_keeps_its_status_and_payload(client: TestClient, r
         response = _call(client, route)
     assert response.status_code == 408, response.text
     assert response.json() == exc.payload
+
+
+@pytest.mark.parametrize("route", ALL_ROUTES, ids=lambda r: r.id)
+def test_approval_required_reaches_the_caller_with_its_approval_id(client: TestClient, route: Route) -> None:
+    # Each route used to re-raise ApprovalRequiredError by name; it now passes
+    # through as an HTTPException. The approval_id is what the caller hands back
+    # once an operator approves, so losing it to a 500 strands the agent.
+    approval = ApprovalRecord(
+        id="approval-1",
+        session_id=SID,
+        kind="write",
+        status="pending",
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        reason="needs review",
+        action=BrowserActionDecision(action="click", reason="click", selector="#a", risk_category="write"),
+    )
+    exc = ApprovalRequiredError(approval)
+    with _raising(route, exc):
+        response = _call(client, route)
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": exc.payload}
 
 
 @pytest.mark.parametrize("route", ALL_ROUTES, ids=lambda r: r.id)
