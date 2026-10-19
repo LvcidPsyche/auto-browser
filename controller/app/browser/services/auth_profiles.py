@@ -798,8 +798,22 @@ class BrowserAuthProfileService:
 
     @staticmethod
     def write_tar(source_dir: Path, dest: Path) -> None:
+        # Encrypted state supersedes the plaintext copy beside it. Saving with a
+        # key set writes state.json.enc but leaves a state.json saved before the
+        # key was configured, and the archive is what leaves the box.
+        superseded = {
+            path.relative_to(source_dir.parent).as_posix().removesuffix(".enc")
+            for path in source_dir.rglob("*.enc")
+            if path.is_file()
+        }
+
+        def _filter(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
+            if member.name in superseded:
+                return None
+            return _skip_plaintext_leftovers(member)
+
         with tarfile.open(str(dest), "w:gz") as tar:
-            tar.add(str(source_dir), arcname=source_dir.name, filter=_skip_plaintext_leftovers)
+            tar.add(str(source_dir), arcname=source_dir.name, filter=_filter)
 
     @staticmethod
     def safe_archive_member_name(member_name: str) -> PurePosixPath:
