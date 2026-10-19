@@ -39,6 +39,10 @@ class SkillCandidate(BaseModel):
     # envelope is just a dict that looks like a signed one — which is how a
     # candidate could claim "signed provenance" while being unsigned.
     signed: bool = False
+    # The token-verified operator whose run staged this candidate. None when the
+    # run had no proven identity (shared token, header-only) and for candidates
+    # staged before owners were recorded: those stay open to every caller.
+    owner: str | None = None
     # Induced from a mock trace: no browser ever ran. Recorded on the candidate,
     # inside the provenance hash, and in the envelope, so a simulated skill
     # cannot quietly present itself as a converged one.
@@ -61,8 +65,9 @@ class SkillInducer:
         attempts: int,
         cost_usd: float = 0.0,
         model_tiers: dict[str, str] | None = None,
+        owner: str | None = None,
     ) -> SkillCandidate:
-        skill_id = _skill_id(contract)
+        skill_id = _skill_id(contract, owner)
         staging_root = self.staging_root.resolve()
         target_dir = (self.staging_root / skill_id).resolve()
         try:
@@ -85,6 +90,7 @@ class SkillInducer:
             cost_usd=cost_usd,
             model_tiers={key: value for key, value in (model_tiers or {}).items() if value},
             signed=self.signer is not None,
+            owner=owner,
             simulated=str(trace.metadata.get("mode") or "").lower() == "mock",
         )
         # What a reviewer reads and promotes. Written as bytes, so the hashes
@@ -142,6 +148,9 @@ class SkillInducer:
                 "validated_executor_model": candidate.model_tiers.get("executor", ""),
                 "credential_free": True,
                 "simulated": candidate.simulated,
+                # Signed, so stripping the owner from a stored candidate is
+                # caught by the registry the way any other edit is.
+                **({"owner": owner} if owner else {}),
             },
         }
         if self.signer is not None:
@@ -169,8 +178,13 @@ class SkillInducer:
         return candidate
 
 
-def _skill_id(contract: TaskContract) -> str:
-    return _slug(contract.id, suffix=contract.hash()[:12])
+def _skill_id(contract: TaskContract, owner: str | None = None) -> str:
+    # The id is derived from the contract alone, so two operators staging the
+    # same contract would write into one directory and the later run would take
+    # over the earlier operator's candidate. An owned candidate's id therefore
+    # also depends on its owner; an unowned one keeps the id it always had.
+    digest = hashlib.sha256(f"{contract.hash()}:{owner}".encode()).hexdigest() if owner else contract.hash()
+    return _slug(contract.id, suffix=digest[:12])
 
 
 def _slug(value: str, *, suffix: str | None = None) -> str:
