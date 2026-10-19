@@ -5,10 +5,11 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..session_ownership import may_use, verified_operator
 from .contracts import TaskContract
 from .converge import ConvergenceDecision, ConvergenceDetector
 from .drift import SkillDriftMonitor
@@ -37,6 +38,9 @@ class HarnessRunRecord(BaseModel):
     contract_id: str
     contract_hash: str
     status: str = "created"
+    # The token-verified operator who started the run; None when the caller had
+    # no proven identity, and for runs recorded before owners existed.
+    owner: str | None = None
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
     attempts: list[HarnessAttempt] = Field(default_factory=list)
@@ -72,7 +76,13 @@ class HarnessRunStore:
             raise KeyError(run_id)
         return HarnessRunRecord.model_validate_json(path.read_text(encoding="utf-8"))
 
-    def list(self, *, status: str | None = None, limit: int = 50) -> list[HarnessRunRecord]:
+    def list(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+        visible: Callable[[HarnessRunRecord], bool] | None = None,
+    ) -> list[HarnessRunRecord]:
         records: list[HarnessRunRecord] = []
         for path in sorted(self.runs_root.glob("*/run.json"), key=lambda item: item.stat().st_mtime, reverse=True):
             try:
@@ -81,6 +91,8 @@ class HarnessRunStore:
                 logger.debug("skipping unreadable harness run record %s: %s", path, exc)
                 continue
             if status and record.status != status:
+                continue
+            if visible is not None and not visible(record):
                 continue
             records.append(record)
             if len(records) >= limit:
@@ -128,6 +140,7 @@ class HarnessService:
             contract_id=contract.id,
             contract_hash=contract.hash(),
             status="running",
+            owner=verified_operator(),
             strategy_path=str(strategy_path),
             model_tiers=self.model_tiers,
         )
@@ -237,19 +250,28 @@ class HarnessService:
                 verification=results[-1],
                 attempts=len(record.attempts),
                 model_tiers=self.model_tiers,
+                owner=record.owner,
             )
             record.notes.append("Staged skill candidate emitted; promotion requires review.")
             self.store.save(record)
         return record
 
+    def _get_owned(self, run_id: str) -> HarnessRunRecord:
+        """The run, refused to every operator but its owner (unowned runs are open)."""
+        record = self.store.get(run_id)
+        if not may_use(record.owner):
+            raise PermissionError(f"harness run {run_id} belongs to another operator")
+        return record
+
     def get_status(self, run_id: str) -> dict[str, Any]:
-        return self.store.get(run_id).model_dump(mode="json")
+        return self._get_owned(run_id).model_dump(mode="json")
 
     def list_runs(self, *, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
-        return [record.model_dump(mode="json") for record in self.store.list(status=status, limit=limit)]
+        records = self.store.list(status=status, limit=limit, visible=lambda record: may_use(record.owner))
+        return [record.model_dump(mode="json") for record in records]
 
     def get_trace(self, run_id: str, *, attempt_index: int | None = None) -> dict[str, Any]:
-        record = self.store.get(run_id)
+        record = self._get_owned(run_id)
         if not record.attempts:
             raise KeyError(f"run has no attempts: {run_id}")
         selected_index = attempt_index or len(record.attempts)
@@ -271,7 +293,7 @@ class HarnessService:
         return [item.model_dump(mode="json") for item in await self.drift_monitor.check_all()]
 
     def graduate(self, run_id: str) -> dict[str, Any]:
-        record = self.store.get(run_id)
+        record = self._get_owned(run_id)
         if record.status != "converged" or record.candidate is None:
             raise ValueError("Only converged runs with staged candidates can be graduated")
         return {

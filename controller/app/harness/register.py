@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
+from ..session_ownership import may_use
 from .induce import SIGNED_SKILL_FILES, SkillCandidate
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,10 @@ class SkillStagingRegistry:
     `verifier` takes the stored envelope and returns the payload it actually
     attests to, raising if it does not verify. When one is configured, a
     candidate that fails to verify is refused rather than downgraded.
+
+    A candidate staged by a token-verified operator is that operator's: other
+    operators do not see it listed and are refused when they ask for it by id.
+    Unowned candidates are open, as before.
     """
 
     def __init__(self, staging_root: str | Path, verifier: Verifier | None = None):
@@ -42,6 +47,8 @@ class SkillStagingRegistry:
             except Exception as exc:
                 logger.debug("skipping unreadable staged skill candidate %s: %s", path, exc)
                 continue
+            if not may_use(candidate.owner):
+                continue
             try:
                 self._verify(candidate)
             except PermissionError as exc:
@@ -55,6 +62,8 @@ class SkillStagingRegistry:
         if not path.exists():
             raise KeyError(skill_id)
         candidate = SkillCandidate.model_validate_json(path.read_text(encoding="utf-8"))
+        if not may_use(candidate.owner):
+            raise PermissionError(f"staged skill candidate {candidate.skill_id} belongs to another operator")
         self._verify(candidate)
         return candidate
 
@@ -76,6 +85,7 @@ class SkillStagingRegistry:
             "skill_id": (payload.get("skill_id"), candidate.skill_id),
             "verifier passed": ((payload.get("verifier") or {}).get("passed"), candidate.verifier_passed),
             "simulated": ((payload.get("metadata") or {}).get("simulated", False), candidate.simulated),
+            "owner": ((payload.get("metadata") or {}).get("owner"), candidate.owner),
         }
         for field, (signed, stored) in signed_claims.items():
             if signed != stored:
