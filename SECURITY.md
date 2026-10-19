@@ -40,6 +40,14 @@ Include:
 Issues found by the maintainers are disclosed the same way a reported one would
 be, and the audits that found them are published in full:
 
+- [GHSA-37hm-f6gf-q7vx](https://github.com/LvcidPsyche/auto-browser/security/advisories/GHSA-37hm-f6gf-q7vx)
+  — hardening fixes in the controller: click and type targeting, TOTP autofill,
+  session ownership, `.env` settings and the witness verifier (fixed in 1.9.0)
+- [GHSA-q7xx-f6pw-w7mv](https://github.com/LvcidPsyche/auto-browser/security/advisories/GHSA-q7xx-f6pw-w7mv)
+  — approval double-execution race: a check-then-act outside the store lock
+  (fixed in 1.8.1)
+- [GHSA-mhmf-ww6p-3jhp](https://github.com/LvcidPsyche/auto-browser/security/advisories/GHSA-mhmf-ww6p-3jhp)
+  — several hardening fixes in the controller and browser-node (fixed in 1.8.1)
 - [GHSA-xmh3-cw7j-9gp5](https://github.com/LvcidPsyche/auto-browser/security/advisories/GHSA-xmh3-cw7j-9gp5)
   — `Runtime.evaluate` reachable through the "safe" raw-CDP allowlist, plus a
   Codespaces overlay that published the API unauthenticated (fixed in 1.6.1).
