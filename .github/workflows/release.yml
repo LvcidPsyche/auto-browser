@@ -24,22 +24,44 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  # A v* tag on any commit used to publish it: a branch nobody merged, or a
+  # commit whose CI never ran. Nothing builds or publishes unless the tagged
+  # commit is on main AND the push-to-main run of ci.yml for that exact SHA
+  # succeeded. The push run is the one that counts: a PR run's SHA is the PR
+  # head, and a rebase merge gives main new SHAs, so only the push run on main
+  # names the commit being tagged. Uses the API, so no checkout is needed.
+  gate:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      # A v* tag on any commit published it: a branch nobody merged, or a
-      # commit whose CI never ran. Release only what main holds.
-      - name: Verify the tagged commit is on main
+      - name: Require the tagged commit to be on main with green CI
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          TAG: ${{ github.ref_name }}
         run: |
-          git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::$GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main"
+          rel=$(gh api "repos/$REPO/compare/main...$SHA" --jq .status)
+          if [ "$rel" != "identical" ] && [ "$rel" != "behind" ]; then
+            echo "::error::$TAG points at $SHA, which is not on main (compare status: $rel)"
             exit 1
           fi
-      - uses: actions/setup-python@v7
+          green=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&branch=main&event=push&status=success&per_page=1" --jq .total_count)
+          if [ "$green" -lt 1 ]; then
+            echo "::error::$TAG points at $SHA, but ci.yml has no successful push run on main for that commit (still running, failed, or never ran)"
+            exit 1
+          fi
+          echo "$TAG -> $SHA is on main with a successful ci.yml push run"
+
+  build:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Verify tag matches package versions
@@ -59,7 +81,7 @@ jobs:
           python -m build --outdir dist integrations/langchain
           python -m build --outdir dist packaging/auto-browser-mcp
           ls -l dist/
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist
           path: dist/
@@ -84,7 +106,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dist
           path: all-dist/
@@ -104,8 +126,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dist
           path: dist/
