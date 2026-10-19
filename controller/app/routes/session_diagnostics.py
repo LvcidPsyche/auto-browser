@@ -12,7 +12,7 @@ from starlette.responses import StreamingResponse
 
 from .. import events as _events
 from ..playwright_export import export_session_script
-from ._utils import internal_error, require_safe_segment
+from ._utils import OFF_LIST_PAGE_DETAIL, internal_error, require_safe_segment
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,8 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
     async def screenshot_compare(session_id: str) -> dict[str, Any]:
         try:
             return await manager.screenshot_diff(session_id)
+        except PermissionError:
+            raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
         except Exception:
             raise internal_error(logger, "screenshot diff failed for session %s", session_id) from None
 

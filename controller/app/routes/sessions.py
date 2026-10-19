@@ -26,7 +26,7 @@ from ..models import (
     WaitRequest,
     validate_url,
 )
-from ._utils import internal_error
+from ._utils import OFF_LIST_PAGE_DETAIL, OFF_LIST_TAB_DETAIL, internal_error
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,8 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             return await manager.observe(session_id, limit=limit, preset=preset)
         except KeyError:
             raise HTTPException(status_code=404, detail="Unknown session") from None
+        except PermissionError:
+            raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
         except Exception:
             raise internal_error(logger, "observe failed for session %s", session_id) from None
 
@@ -88,12 +90,17 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             return await manager.observe(session_id, limit=payload.limit, preset=payload.preset)
         except KeyError:
             raise HTTPException(status_code=404, detail="Unknown session") from None
+        except PermissionError:
+            raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
         except Exception:
             raise internal_error(logger, "observe failed for session %s", session_id) from None
 
     @router.post("/sessions/{session_id}/screenshot")
     async def capture_screenshot(session_id: str, payload: ScreenshotRequest) -> dict[str, Any]:
-        return await manager.capture_screenshot(session_id, label=payload.label)
+        try:
+            return await manager.capture_screenshot(session_id, label=payload.label)
+        except PermissionError:
+            raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
 
     @router.get("/sessions/{session_id}/downloads")
     async def list_downloads(session_id: str) -> list[dict[str, Any]]:
@@ -109,6 +116,8 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             return await manager.activate_tab(session_id, payload.index)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid request") from None
+        except PermissionError:
+            raise HTTPException(status_code=403, detail=OFF_LIST_TAB_DETAIL) from None
 
     @router.post("/sessions/{session_id}/tabs/close")
     async def close_tab(session_id: str, payload: TabIndexRequest) -> dict[str, Any]:
