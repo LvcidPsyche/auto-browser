@@ -91,8 +91,10 @@ async def test_a_chain_with_every_signature_stripped_fails_through_the_manager(m
     _strip_and_rehash(manager.witness, forge_action="FORGED_ACTION")
 
     chain = await manager.verify_witness_chain(SCOPE)
-    # The forgery is internally consistent, which is why the hash walk cannot see it.
-    assert chain["valid"] is True
+    # The forgery is internally consistent, which is why the hash walk cannot see it,
+    # so the one verdict a client reads has to come from the signatures.
+    assert chain["chain_valid"] is True
+    assert chain["valid"] is False
     assert chain["signed_count"] == 0
     signatures = chain["signatures"]
     assert signatures["valid"] is False
@@ -111,6 +113,7 @@ async def test_a_chain_with_every_signature_stripped_fails_on_the_rest_route(
     response = client.get(f"/sessions/{SCOPE}/witness/verify")
 
     assert response.status_code == 200, response.text
+    assert response.json()["valid"] is False
     signatures = response.json()["signatures"]
     assert signatures["valid"] is False
     assert NO_SIGNED_RECEIPT in signatures["reason"]
@@ -132,8 +135,10 @@ async def test_a_supplied_public_key_is_held_to_the_same_rule(manager: BrowserMa
 async def test_a_genuine_signed_chain_passes(manager: BrowserManager, client: TestClient) -> None:
     await _record(manager.witness, "navigate", "click", "type")
 
-    signatures = client.get(f"/sessions/{SCOPE}/witness/verify").json()["signatures"]
+    payload = client.get(f"/sessions/{SCOPE}/witness/verify").json()
+    signatures = payload["signatures"]
 
+    assert payload["valid"] is True
     assert signatures["valid"] is True
     assert (signatures["checked"], signatures["signed"], signatures["unsigned"]) == (3, 3, 0)
     assert signatures["reason"] is None
