@@ -94,6 +94,17 @@ deployment that restricts it.
   refused, and summaries leave the page title empty. The list governs the top-level page only:
   iframes and subresources from other hosts are not filtered, and raw CDP passthrough is
   unchanged.
+- **Witness verification no longer accepts a chain with every signature stripped.**
+  `GET /sessions/{id}/witness/verify` and `browser.verify_witness` rejected an unsigned receipt
+  after a signed one, but a chain with no signed receipt at all reported `signatures.valid: true`.
+  Anyone who could write the witness directory could edit receipts, drop every signature,
+  recompute the hashes and the anchor, and pass. Such a chain now fails with the reason
+  `scripts/verify_witness_bundle.py` already gave. Unsigned receipts before the first signed one
+  still pass. A session recorded entirely before signing existed now reports
+  `signatures.valid: false`, which is accurate. The top-level `valid` still covers only the hash
+  walk and the anchor, so read `signatures.valid`. The new section in `docs/deployment.md` says
+  what a signature can prove while the key sits beside the receipts, and how to pin a head hash
+  for evidence that survives a compromised host.
 
 ### Fixed
 
