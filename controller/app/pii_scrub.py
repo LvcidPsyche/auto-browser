@@ -10,7 +10,7 @@ Layers applied across the session lifecycle:
 
 Patterns covered:
   Email addresses, US/intl phone numbers, SSNs, credit card numbers,
-  AWS/GCP/Azure API keys, JWT tokens, Bearer tokens, private key PEM headers,
+  AWS/GCP/Azure API keys, JWT tokens, Bearer tokens, private key PEM blocks,
   generic api_key/token/secret/password URL/query params, IP addresses in
   credentials context, base64-encoded JSON credential blobs.
 
@@ -81,8 +81,19 @@ _RAW_PATTERNS: list[tuple[str, str]] = [
     # engine to backtrack off the base64 padding and leave it in the output
     # ("Bearer abc123==" redacted to "[REDACTED]==").
     ("bearer_token", r"(?i)Bearer\s+([A-Za-z0-9\-._~+/]+=*)"),
-    # Private / public key PEM headers
-    ("pem_header", r"-----BEGIN\s+(?:RSA\s+)?(?:PRIVATE|PUBLIC)\s+KEY-----"),
+    # A private key PEM block, BEGIN line to the matching END line. The name is
+    # kept because PII_SCRUB_PATTERNS users list it; it used to match only the
+    # BEGIN line, leaving the base64 body (the key) and the END line in the
+    # output. Any label ending in "PRIVATE KEY" (RSA, EC, DSA, OPENSSH,
+    # ENCRYPTED, PGP ... BLOCK) counts. Without an END line (a truncated body,
+    # a console line cut off) everything to the end of the text goes: failing
+    # closed beats leaving half a key. PUBLIC KEY blocks are not secret, so they
+    # are no longer touched. `\s` spans CRLF, and the lazy body is linear.
+    (
+        "pem_header",
+        r"-----BEGIN\s+((?:[A-Z0-9]+\s+){0,3}PRIVATE\s+KEY(?:\s+BLOCK)?)-----"
+        r"(?:(?s:.*?)-----END\s+\1-----|(?s:.*))",
+    ),
     # Generic API key / token / secret / password in query params or JSON fields
     (
         "api_key_param",

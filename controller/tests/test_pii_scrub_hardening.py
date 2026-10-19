@@ -37,6 +37,8 @@ HOSTILE_UNITS = (
     "key=",
     "Bearer ",
     "@a.",
+    "-----BEGIN A B C D ",
+    "-----BEGIN RSA PRIVATE KEY-----",
     "a@a.",
 )
 
