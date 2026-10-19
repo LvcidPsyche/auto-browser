@@ -69,11 +69,16 @@ STEALTH_INIT_SCRIPT = r"""
   // Canvas fingerprint noise
   try {
     const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    // The pixel is read with the native getImageData, captured here. The
+    // fingerprint script (STEALTH_PROFILE=light) wraps getImageData with its own
+    // noise; reading through that and writing the result back would change the
+    // canvas a little more on every export.
+    const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
     HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
       const ctx = this.getContext('2d');
       if (ctx && this.width > 0 && this.height > 0) {
         try {
-          const img = ctx.getImageData(0, 0, 1, 1);
+          const img = origGetImageData.call(ctx, 0, 0, 1, 1);
           img.data[0] ^= 1;
           ctx.putImageData(img, 0, 0);
           const result = origToDataURL.call(this, type, quality);
