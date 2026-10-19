@@ -7,9 +7,13 @@ from typing import Any
 
 from playwright.async_api import Browser
 
+from ...auth_policy import credentials_for
 from ...session_isolation import IsolatedBrowserRuntime
 
 logger = logging.getLogger(__name__)
+
+# Closing the browser a CDP attach replaces must not hang the browser lock.
+PREVIOUS_BROWSER_CLOSE_TIMEOUT_SECONDS = 10.0
 
 
 class BrowserRuntimeService:
@@ -41,13 +45,35 @@ class BrowserRuntimeService:
             return manager.browser
 
     async def cdp_attach(self, cdp_url: str) -> dict[str, Any]:
+        """Swap the browser every new session runs on for one reached over CDP.
+
+        The browser is shared by all operators, so with more than one credential
+        configured an attach would hand one operator's Chrome every other
+        operator's sessions: refused. Otherwise it is refused while live
+        sessions still use the current browser, since closing it would kill them.
+        """
         manager = self.manager
+        if len(credentials_for(manager.settings)) > 1:
+            raise PermissionError(
+                "browser.cdp_attach is disabled when more than one operator credential is configured: "
+                "the attached browser would be shared by every operator. "
+                "Run a separate controller per operator, or set CDP_CONNECT_URL at startup."
+            )
         if manager.playwright is None:
             raise RuntimeError("Playwright not started")
         async with manager._browser_lock:
+            in_use = self._sessions_on_shared_browser()
+            if in_use:
+                raise RuntimeError(
+                    f"Cannot attach a new browser: close the {in_use} live session{'' if in_use == 1 else 's'} "
+                    "using the current browser first, since replacing it would end them."
+                )
+            previous = manager.browser
             browser = await manager.playwright.chromium.connect_over_cdp(cdp_url)
             manager.browser = browser
             logger.info("attached to Chrome via CDP at %s", cdp_url)
+            if previous is not None and previous is not browser:
+                await self._close_previous_browser(previous)
             await manager.audit.append(
                 event_type="cdp_attach",
                 status="ok",
@@ -60,6 +86,25 @@ class BrowserRuntimeService:
                 "cdp_url": cdp_url,
                 "browser_version": browser.version,
             }
+
+    def _sessions_on_shared_browser(self) -> int:
+        """Sessions, started or still starting, that run on manager.browser.
+
+        An isolated session (docker_ephemeral) holds a browser of its own and
+        does not depend on the shared one.
+        """
+        manager = self.manager
+        shared = sum(
+            1 for session in manager.sessions.values() if session.browser is None or session.browser is manager.browser
+        )
+        return shared + manager.session_lifecycle._creating
+
+    @staticmethod
+    async def _close_previous_browser(browser: Browser) -> None:
+        try:
+            await asyncio.wait_for(browser.close(), timeout=PREVIOUS_BROWSER_CLOSE_TIMEOUT_SECONDS)
+        except Exception as exc:
+            logger.warning("could not close the browser replaced by cdp_attach: %s", exc, exc_info=True)
 
     async def connect_browser(self, ws_target_factory, *, failure_context: str) -> Browser:
         manager = self.manager

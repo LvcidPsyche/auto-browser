@@ -22,7 +22,11 @@ def register(registry, gateway):
                 "Attach to an already-running Chrome instance via CDP URL "
                 "(e.g. http://localhost:9222). "
                 "After attaching, new sessions will use pages from that browser. "
-                "This allows automation of a real browser with existing logins."
+                "This allows automation of a real browser with existing logins. "
+                "Refused when more than one operator credential is configured (the attached browser "
+                "would be shared by every operator): run a separate controller per operator, or set "
+                "CDP_CONNECT_URL at startup. Also refused while live sessions still use the current "
+                "browser: close them first. The previous browser is disconnected on success."
             ),
             input_model=CdpAttachInput,
             handler=gateway._cdp_attach,
