@@ -67,6 +67,70 @@ class BridgeProtocolEdgeTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], -32001)
         self.assertEqual([post["payload"]["method"] for post in client.posts], ["tools/list", "initialize"])
 
+    def _forgetful_client(self, ack_statuses: list[int]) -> RecordingHttpMcpClient:
+        """Controller that forgot session "S1"; each initialized ack answers the next status."""
+        acks = iter(ack_statuses)
+
+        class Controller(RecordingHttpMcpClient):
+            def post_json(inner, payload, *, session_id=None, protocol_version=None):  # noqa: N805
+                inner.posts.append({"payload": payload, "session_id": session_id})
+                method = payload.get("method")
+                if method == "initialize":
+                    return HttpMcpResponse(200, {MCP_SESSION_HEADER.lower(): "S2"}, {"jsonrpc": "2.0", "id": 1})
+                if method == "notifications/initialized":
+                    return HttpMcpResponse(next(acks), {}, None)
+                if session_id == "S1":
+                    return HttpMcpResponse(404, {}, {"jsonrpc": "2.0", "id": 7, "error": {"code": -32001}})
+                return HttpMcpResponse(200, {}, {"jsonrpc": "2.0", "id": 7, "result": {"ok": 1}})
+
+        return Controller(HttpMcpResponse(200, {}, None))
+
+    def _bridge_after_initialize(self, client: RecordingHttpMcpClient) -> StdioMcpBridge:
+        bridge = StdioMcpBridge(client=client, stderr=io.StringIO())
+        bridge.session_id = "S1"
+        bridge._initialize_payload = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+        bridge._initialized_sent = True
+        return bridge
+
+    def test_failed_initialized_ack_is_not_a_successful_reinitialize(self) -> None:
+        client = self._forgetful_client([429, 202])
+        bridge = self._bridge_after_initialize(client)
+        call = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "x"}})
+
+        first = _run_line(bridge, call)
+
+        # The caller sees the original 404, not "Session not initialized" from a
+        # half-open session, and no tools/call was retried on that session.
+        self.assertEqual(first["error"]["code"], -32001)
+        self.assertEqual([p["payload"].get("method") for p in client.posts].count("tools/call"), 1)
+        # The half-open session is dropped and the old id kept, so the next call retries.
+        self.assertEqual(client.deleted_session_ids[:1], ["S2"])  # run() then closes the live session
+        self.assertEqual(bridge.session_id, "S1")
+
+        second = _run_line(bridge, call)
+
+        self.assertEqual(second["result"], {"ok": 1})
+        self.assertEqual(bridge.session_id, "S2")
+
+    def test_dropped_initialized_ack_raises_and_restores_the_old_session(self) -> None:
+        client = self._forgetful_client([])
+        bridge = self._bridge_after_initialize(client)
+
+        original = client.post_json
+
+        def flaky(payload, **kwargs):
+            if payload.get("method") == "notifications/initialized":
+                raise URLError("connection reset")
+            return original(payload, **kwargs)
+
+        client.post_json = flaky  # type: ignore[method-assign]
+
+        response = _run_line(bridge, json.dumps({"jsonrpc": "2.0", "id": 7, "method": "tools/call"}))
+
+        self.assertIn("No Auto Browser controller reachable", response["error"]["message"])
+        self.assertEqual(client.deleted_session_ids[:1], ["S2"])  # run() then closes the live session
+        self.assertEqual(bridge.session_id, "S1")
+
     def test_non_object_payload_rejected(self) -> None:
         bridge = StdioMcpBridge(client=RecordingHttpMcpClient(self._ok_response()))
         payload = _run_line(bridge, '"just a string"')

@@ -236,16 +236,37 @@ class StdioMcpBridge:
         next_session_id = response.headers.get(MCP_SESSION_HEADER.lower())
         if response.status_code != 200 or not next_session_id:
             return False
-        print("stdio bridge: controller forgot the MCP session; re-initialized", file=self.stderr)
+        previous = (self.session_id, self.protocol_version)
         self.session_id = next_session_id
         self.protocol_version = response.headers.get(MCP_PROTOCOL_HEADER.lower()) or self.protocol_version
         if self._initialized_sent:
-            self.client.post_json(
-                {"jsonrpc": "2.0", "method": "notifications/initialized"},
-                session_id=self.session_id,
-                protocol_version=self.protocol_version,
-            )
+            # The controller refuses tool calls on a session that never got this
+            # notification, so a lost ack (429, 5xx, a dropped connection) leaves a
+            # half-open session. Treating that as success made the retried call
+            # fail with "Session not initialized" instead of the real cause.
+            try:
+                ack = self.client.post_json(
+                    {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                    session_id=self.session_id,
+                    protocol_version=self.protocol_version,
+                )
+            except Exception:
+                self._abandon_reinitialized_session(previous)
+                raise
+            if not 200 <= ack.status_code < 300:
+                print(
+                    f"stdio bridge: re-initialize failed, notifications/initialized got HTTP {ack.status_code}",
+                    file=self.stderr,
+                )
+                self._abandon_reinitialized_session(previous)
+                return False
+        print("stdio bridge: controller forgot the MCP session; re-initialized", file=self.stderr)
         return True
+
+    def _abandon_reinitialized_session(self, previous: tuple[str | None, str | None]) -> None:
+        """Drop the half-open session and go back to the old id, so the next call retries."""
+        self.client.delete_session(session_id=self.session_id)
+        self.session_id, self.protocol_version = previous
 
     @staticmethod
     def _jsonrpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
