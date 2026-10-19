@@ -105,6 +105,13 @@ deployment that restricts it.
   walk and the anchor, so read `signatures.valid`. The new section in `docs/deployment.md` says
   what a signature can prove while the key sits beside the receipts, and how to pin a head hash
   for evidence that survives a compromised host.
+- **Governed tools that name no session ask for approval.** `browser.delete_memory_profile` and
+  `browser.cdp_attach` ran unapproved even under `workflow_profile=governed`, because the approval
+  needed a session to belong to. They now return `approval_required` like every other governed
+  tool, and the approval is held in a controller-wide scope (`session_id: "controller"`). With
+  named credentials it belongs to the operator who asked: another operator cannot list, decide,
+  reuse or spend it. Approvals now record that operator in a new `owner` field; records written
+  before it load as unowned. Agents that use `governed` see the new approval step on those tools.
 
 ### Fixed
 
@@ -154,6 +161,17 @@ deployment that restricts it.
   `code` and `retryable` when the controller sent them, so a graph can tell a missing session from
   a bad selector. Building `AutoBrowserTool` without `langchain-core` now raises an `ImportError`
   naming `pip install "auto-browser-langchain[langchain]"` instead of "takes no arguments".
+
+### Added
+
+- **`FORCE_GOVERNED_APPROVALS` makes governed approvals the server's rule.** Off by default,
+  because it stalls an existing agent loop on its first write. When on, every MCP tool that writes
+  (the 16 with a governed kind) and every step of the agent loop (MCP-queued steps and runs, REST
+  `/agent/*`, cron) needs an operator's approval, whatever `workflow_profile` the request carried.
+  `GET /readiness` warns on a deployment with several operator credentials that leaves it off. It
+  does not change the REST action routes (`/sessions/{id}/actions/*`), which a bearer-token holder
+  can still call directly: it governs agents that act through MCP tools and the agent loop, not
+  token holders. `AUTONOMOUS_APPROVALS=true` lets agents approve their own calls and cancels it.
 
 ### Removed
 
