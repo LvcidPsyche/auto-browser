@@ -6,9 +6,10 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
-These matter only if you run the controller with named credentials (`API_BEARER_TOKENS`).
-Single-operator and shared-token (`API_BEARER_TOKEN`) deployments see no change except the
-export fix below.
+Most of these matter only if you run the controller with named credentials
+(`API_BEARER_TOKENS`). Single-operator and shared-token (`API_BEARER_TOKEN`) deployments see two
+changes: the export fix, and `browser.cdp_attach` refusing while live sessions use the current
+browser.
 
 - **Saved session auth state is owned by the session's operator.** `storage_state_path` is
   relative to the auth root, so another operator could name `<session id>/state.json` and open a
@@ -36,6 +37,9 @@ export fix below.
   With a single credential (or none) nothing changes except that attach is now refused while live
   sessions still use the current browser (close them first), and the browser it replaces is
   disconnected instead of leaking.
+- **Closing a session no longer closes the shared browser after a swap.** The check compared the
+  session's browser with `manager.browser`, which `cdp_attach` replaces; sessions now record whether
+  their browser is their own (isolated runtime, shadow-browse window) and only those are closed.
 
 ### Removed
 
