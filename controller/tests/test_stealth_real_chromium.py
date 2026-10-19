@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock
 
 from app.browser_manager import BrowserManager
 from app.browser_scripts import apply_stealth
+from app.stealth.fingerprint import FingerprintConfig
 from tests._chromium import chromium_executable, requires_chromium
 from tests.test_browser_manager_create_session import _settings
 
@@ -141,3 +142,59 @@ class SessionPagesShareStealthAndTimeoutTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(seen["webdriver"], seen)
                 self.assertTrue(seen["runtime"], seen)
                 self.assertIn(f"Timeout {SESSION_TIMEOUT_MS}ms", seen["timeout"] or "", seen)
+
+
+# --- the fingerprint canvas noise -------------------------------------------------
+
+CANVAS_SESSION_ID = "canvas-noise-session"
+
+# Draw known pixels, then read them back after `calls` more getContext('2d') calls.
+READ_AFTER_CALLS = """(calls) => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 8; canvas.height = 8;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgb(100, 100, 100)';
+  ctx.fillRect(0, 0, 8, 8);
+  for (let i = 0; i < calls; i++) canvas.getContext('2d');
+  return Array.from(canvas.getContext('2d').getImageData(0, 0, 2, 2).data);
+}"""
+
+
+def _expected_noised_pixels(config: FingerprintConfig) -> list[int]:
+    """What one pass of the noise makes of a 2x2 block of rgb(100, 100, 100)."""
+    pixels = []
+    for index in range(0, 16, 4):
+        noise = 1 if (config.canvas_noise_seed ^ index) & 1 else -1
+        pixels += [100 + noise, 100, 100, 255]
+    return pixels
+
+
+@requires_chromium
+def test_canvas_noise_is_applied_once_however_often_getcontext_is_called() -> None:
+    from playwright.async_api import async_playwright
+
+    config = FingerprintConfig(CANVAS_SESSION_ID, "light")
+
+    async def run() -> dict[str, list[int]]:
+        async with async_playwright() as playwright:
+            browser = await _launch(playwright)
+            try:
+                context = await browser.new_context()
+                await context.add_init_script(config.init_script())
+                page = await context.new_page()
+                await page.goto(BLANK)
+                return {
+                    "after 1 call": await page.evaluate(READ_AFTER_CALLS, 1),
+                    "after 1000 calls": await page.evaluate(READ_AFTER_CALLS, 1000),
+                    # Unpatched, the wrapper chain overflows the stack around 20,000 calls.
+                    "after 25000 calls": await page.evaluate(READ_AFTER_CALLS, 25_000),
+                }
+            finally:
+                await browser.close()
+
+    seen = asyncio.run(run())
+    expected = _expected_noised_pixels(config)
+
+    assert seen["after 1 call"] == expected
+    assert seen["after 1000 calls"] == expected
+    assert seen["after 25000 calls"] == expected
