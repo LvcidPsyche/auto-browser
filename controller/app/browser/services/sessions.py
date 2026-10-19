@@ -158,6 +158,7 @@ class BrowserSessionService:
                 browser_node_name=runtime.browser_node_name if runtime is not None else "browser-node",
                 isolation_mode=self.manager.settings.session_isolation_mode,
                 browser=browser,
+                owns_browser=runtime is not None,
                 runtime=runtime,
                 shared_takeover_surface=runtime is None,
                 shared_browser_process=runtime is None,
@@ -341,7 +342,7 @@ class BrowserSessionService:
                 await context.close()
             except Exception as exc:
                 logger.warning("failed to close browser context during create_session rollback: %s", exc)
-        if browser is not None and browser is not self.manager.browser:
+        if browser is not None and runtime is not None:
             try:
                 await browser.close()
             except Exception as exc:
@@ -500,7 +501,7 @@ class BrowserSessionService:
             session.network_inspector.detach()
             session.network_inspector = None
         await self._teardown_step(session, "close browser context", session.context.close)
-        if session.browser is not None and session.browser is not self.manager.browser:
+        if session.browser is not None and session.owns_browser:
             await self._teardown_step(session, "close isolated browser", session.browser.close)
         if session.runtime is not None:
             await self._teardown_step(
@@ -609,6 +610,7 @@ class BrowserSessionService:
                 takeover_url=manager.settings.takeover_url,
                 trace_path=artifact_dir / "trace.zip",
                 browser=headed_browser,
+                owns_browser=True,
                 headless=False,
                 # Same logins as the source, so the same operator and nobody else.
                 owner=session.owner,

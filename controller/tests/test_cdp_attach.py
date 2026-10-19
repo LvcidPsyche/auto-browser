@@ -123,6 +123,7 @@ class CdpAttachTests(unittest.IsolatedAsyncioTestCase):
         own = _browser("isolated")
         self.manager._acquire_session_browser = AsyncMock(return_value=(own, None))  # type: ignore[method-assign]
         session_id = (await self.manager.create_session(name="isolated"))["id"]
+        self.manager.sessions[session_id].owns_browser = True  # what an isolated runtime's session records
         self.assertIs(self.manager.sessions[session_id].browser, own)
 
         result = await self.manager.cdp_attach(CDP_URL)
@@ -141,6 +142,63 @@ class CdpAttachTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["attached"])
         self.assertIs(self.manager.browser, self.attacker)
         self.assertIn("already gone", "\n".join(logs.output))
+
+
+class SessionCloseAfterSwapTests(unittest.IsolatedAsyncioTestCase):
+    """Closing a session closes only a browser that session owns alone."""
+
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.manager = BrowserManager(_settings(Path(self.tmp.name)))
+        self.manager._settle = AsyncMock()  # type: ignore[method-assign]
+        self.manager._maybe_provision_session_tunnel = AsyncMock()  # type: ignore[method-assign]
+        self.original = _browser("original")
+        self.attacker = _browser("attacker")
+        self.manager.browser = self.original  # type: ignore[assignment]
+        self.manager._acquire_session_browser = AsyncMock(  # type: ignore[method-assign]
+            return_value=(self.original, None)
+        )
+
+    async def asyncTearDown(self) -> None:
+        self.tmp.cleanup()
+
+    async def test_closing_a_session_never_closes_the_shared_browser_after_a_swap(self) -> None:
+        first = (await self.manager.create_session(name="first"))["id"]
+        second = (await self.manager.create_session(name="second"))["id"]
+        # The state a cdp_attach leaves behind: manager.browser is a different browser.
+        self.manager.browser = self.attacker  # type: ignore[assignment]
+
+        await self.manager.close_session(first)
+
+        self.original.close.assert_not_awaited()
+        self.attacker.close.assert_not_awaited()
+        self.assertIn(second, self.manager.sessions)
+
+    async def test_closing_a_session_with_its_own_browser_closes_it(self) -> None:
+        own = _browser("isolated")
+        self.manager._acquire_session_browser = AsyncMock(return_value=(own, None))  # type: ignore[method-assign]
+        session_id = (await self.manager.create_session(name="isolated"))["id"]
+        self.manager.sessions[session_id].owns_browser = True
+
+        await self.manager.close_session(session_id)
+
+        own.close.assert_awaited_once()
+        self.original.close.assert_not_awaited()
+
+    async def test_closing_a_shadow_session_closes_its_headed_browser(self) -> None:
+        self.manager.settings.shadow_browse_enabled = True
+        headed = _browser("headed")
+        self.manager.playwright = SimpleNamespace(  # type: ignore[assignment]
+            chromium=SimpleNamespace(launch=AsyncMock(return_value=headed))
+        )
+        source = (await self.manager.create_session(name="source"))["id"]
+        self.manager.sessions[source].context.storage_state = AsyncMock(return_value={})
+
+        shadow_id = (await self.manager.enable_shadow_browse(source))["shadow_session_id"]
+        await self.manager.close_session(shadow_id)
+
+        headed.close.assert_awaited_once()
+        self.original.close.assert_not_awaited()
 
 
 if __name__ == "__main__":
