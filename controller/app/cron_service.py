@@ -326,8 +326,10 @@ class CronService:
         # fire arriving together cannot both pass the check above.
         self._active_runs[job_id] = ""
         # Fires as the job's owner, whoever triggered it (the scheduler, a
-        # webhook): the session and the agent job are theirs.
-        owner = owner_identity(job.get("owner"))
+        # webhook): the session and the agent job are theirs. An unowned job
+        # fires as nobody: acting_as(None) would leave the triggering operator in
+        # place, and the session and agent job it creates would become theirs.
+        owner = owner_identity(job.get("owner")) or ANONYMOUS
         try:
             with acting_as(owner):
                 session_result = await self.manager.create_session(
