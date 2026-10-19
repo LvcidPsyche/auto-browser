@@ -144,7 +144,7 @@ def _validate_api_authentication(settings: Settings, report: RuntimePolicyReport
     scope = resolve_bind_scope(settings)
     exposed = scope == BIND_SCOPE_EXPOSED
     if not (exposed or settings.is_production):
-        if not settings.api_bearer_token:
+        if not credentials_for(settings):
             report.warnings.append(
                 "API_BEARER_TOKEN is unset; the controller serves every route unauthenticated. "
                 "That is allowed only because API_BIND_SCOPE=loopback declares this instance "
