@@ -122,6 +122,15 @@ deployment that restricts it.
 - **`toDataURL` leaves the canvas as it found it.** With both stealth scripts on, each export read
   a pixel through the noisy `getImageData` and wrote it back, so the canvas drifted on every call.
   The base script now reads it with the native method.
+- **REST errors keep their real status and `code`.** On the session action routes, observe,
+  screenshot compare, `/approvals/{id}/execute` and the auth-profile export and import, a
+  catch-all ran before the app's error handlers: an unknown or closed session, a timeout or a
+  missing element came back as 500 "Internal error", which hid the `code` agents act on. They now
+  answer as themselves: 404 with the session message and `code` (`unknown_session`,
+  `session_closed`), a browser action error's own status and payload, 403 for a refusal, 400 for
+  a bad value and 404 for a missing file. Anything unexpected is still logged and answers 500.
+  `observe` and `wait` on an unknown session now carry that message and `code` instead of a bare
+  "Unknown session".
 
 ### Removed
 
