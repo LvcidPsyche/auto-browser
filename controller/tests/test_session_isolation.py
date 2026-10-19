@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from datetime import datetime
@@ -11,6 +12,18 @@ from app.config import Settings
 from app.session_isolation import DockerBrowserNodeProvisioner, IsolatedBrowserRuntime
 from app.session_tunnel import IsolatedSessionTunnel
 from app.utils import UTC
+
+
+def _link_dir(link: Path, target: Path) -> None:
+    """A directory symlink, or a junction where Windows refuses symlinks without privileges."""
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        if os.name != "nt":
+            raise
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
 
 
 class FakeDockerContainer:
@@ -449,6 +462,21 @@ class DockerBrowserNodeProvisionerTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertFalse(reaped_root.exists())
             self.assertFalse(containerless_root.exists())
+            self.assertTrue((outside / "keep.txt").exists())
+
+    async def test_startup_sweep_does_not_follow_a_link_out_of_the_runtime_root(self) -> None:
+        """The sweep removes every entry under the runtime root, so a symlink or
+        junction planted there must not point it at a directory outside."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            provisioner, _ = self._provisioner_with_runtime_root(tempdir)
+            self._write_profile(provisioner, "orphan-1")
+            outside = Path(tempdir) / "data" / "outside"
+            outside.mkdir()
+            (outside / "keep.txt").write_text("not a session dir", encoding="utf-8")
+            _link_dir(provisioner._local_runtime_root("") / "planted", outside)
+
+            await provisioner.startup()
+
             self.assertTrue((outside / "keep.txt").exists())
 
     async def test_startup_keeps_leftover_profiles_when_keep_containers_is_on(self) -> None:

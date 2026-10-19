@@ -273,7 +273,8 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
                 starting = broker._tunnels["session-1"]
                 self.assertEqual(starting.status, "starting")
 
-                await broker.shutdown()
+                # Bounded: a shutdown that queues behind the starting tunnel would hang here.
+                await asyncio.wait_for(broker.shutdown(), timeout=10)
                 end_grace.set()
                 with self.assertRaisesRegex(RuntimeError, "released while it was starting"):
                     await asyncio.wait_for(provision, timeout=10)
