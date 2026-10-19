@@ -954,6 +954,16 @@ class McpToolGateway:
 
     async def _set_cookies(self, payload: SetCookiesInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
+        # Cookies are scoped to a site, so ALLOWED_HOSTS has to cover the site
+        # each one is for: otherwise a caller confined to one host plants a
+        # session cookie on another. All are checked before any is added.
+        for cookie in payload.cookies:
+            url = str(cookie.get("url") or "").strip()
+            domain = str(cookie.get("domain") or "").strip()
+            if url:
+                self.manager._assert_url_allowed(url)
+            if domain:
+                self.manager._assert_url_allowed(f"https://{domain.lstrip('.')}/")
         await session.context.add_cookies(payload.cookies)
         return {"session_id": payload.session_id, "set": len(payload.cookies)}
 

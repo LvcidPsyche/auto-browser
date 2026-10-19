@@ -965,6 +965,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.manager.enable_shadow_browse = AsyncMock(return_value={"enabled": True})
         self.manager.capture_screenshot = AsyncMock(return_value={"screenshot_path": "vision.png"})
         self.manager.get_pii_scrubber_status = lambda: {"enabled": True}
+        self.manager._assert_url_allowed = Mock()
         self.manager.audit = object()
         self.manager.settings.default_viewport_width = 1280
         self.manager.settings.default_viewport_height = 720
