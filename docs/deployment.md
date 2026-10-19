@@ -278,11 +278,21 @@ not the gateway: the VNC protocol uses only the first 8 characters and a
 DES-based challenge.
 
 Chromium runs in the same container as noVNC, so every page it loads can reach
-`ws://127.0.0.1:6080`. noVNC therefore accepts a WebSocket only when its `Origin`
-is the host the client connected to (true of the noVNC page itself and of no page
-the browser visits) and that host is a loopback name or listed in
-`NOVNC_ALLOWED_HOSTS` (so DNS rebinding cannot pass as the noVNC page). If takeover
-fails with "Invalid Origin Header" in `/tmp/novnc.log`:
+`ws://127.0.0.1:6080`. Two things keep such a page out:
+
+- **The WebSocket origin guard** accepts a WebSocket only when its `Origin` is the
+  host the client connected to and that host is a loopback name or listed in
+  `NOVNC_ALLOWED_HOSTS` (so DNS rebinding cannot pass as the noVNC page). This stops a
+  visited page from opening its own WebSocket to noVNC. It cannot tell the noVNC page
+  from a copy of it: the page's own WebSocket carries noVNC's own origin.
+- **The no-framing headers** (`X-Frame-Options: DENY` and
+  `Content-Security-Policy: frame-ancestors 'none'` on every noVNC HTTP response)
+  stop a visited page from embedding `http://127.0.0.1:6080/vnc.html` in a frame and
+  so putting a live desktop behind its own page. A page can still link to noVNC or open
+  it in a window, but then it is a separate cross-origin document the page cannot read
+  or script.
+
+If takeover fails with "Invalid Origin Header" in `/tmp/novnc.log`:
 
 - the takeover URL uses a non-loopback host name (a LAN IP, a bastion, a domain):
   add it to `NOVNC_ALLOWED_HOSTS`, e.g. `vnc.example.com`;
