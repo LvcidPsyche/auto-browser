@@ -112,6 +112,26 @@ deployment that restricts it.
   named credentials it belongs to the operator who asked: another operator cannot list, decide,
   reuse or spend it. Approvals now record that operator in a new `owner` field; records written
   before it load as unowned. Agents that use `governed` see the new approval step on those tools.
+- **PII scrubbing removes a whole private key.** The `pem_header` pattern replaced only the
+  `-----BEGIN ... PRIVATE KEY-----` line and left the key itself and the END line in scrubbed
+  text, network bodies and console messages. It now removes the block from BEGIN to the matching
+  END for every private-key label (PKCS#8, RSA, EC, DSA, OpenSSH, encrypted, PGP), with LF or CRLF
+  line ends, and everything after a BEGIN that has no END. Public keys are no longer touched:
+  they are not secret, and redacting their header only corrupted them. The pattern keeps its name,
+  so `PII_SCRUB_PATTERNS` lists that name it still work.
+- **Request bodies without a text content type are scrubbed.** A `fetch` with a string body (no
+  content type), `application/yaml` and unrecognized vendor types went into the network inspector
+  verbatim. A body is now scrubbed whenever it is text: its type names text, or it has no
+  recognized type and decodes as UTF-8. Images, audio, video, fonts, common binary types and
+  non-UTF-8 bytes are left as they were. An `application/html` response is now scrubbed too.
+- **Screenshot scrubbing without tesseract is no longer silent.** Screenshot redaction draws over
+  OCR-detected words, and tesseract ships only in the Docker image, so outside Docker every
+  screenshot went out unredacted with no sign of it. `GET /readiness` now has a
+  `screenshot_scrubbing` check that warns when tesseract is missing or `OCR_ENABLED=false`, the
+  controller logs one warning, and observe, screenshot and action-snapshot results carry
+  `screenshot_pii_scrub: {"applied": false, "reason": ...}`. The new section in
+  `docs/deployment.md` lists what scrubbing covers and what it does not: page content, raw CDP
+  (which can read back a typed password) and the console messages inside an observation.
 
 ### Fixed
 
