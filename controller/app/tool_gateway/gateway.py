@@ -508,9 +508,10 @@ class McpToolGateway:
     ):
         if workflow_profile != "governed" or spec.governed_kind is None:
             return None
-        session_id = getattr(arguments, "session_id", None)
-        if not session_id:
-            return None
+        # No session_id: the approval goes in the controller-wide scope, so a
+        # tool that names no session (delete_memory_profile, cdp_attach) is
+        # governed as well; require_governed_approval takes None for that.
+        session_id = getattr(arguments, "session_id", None) or None
         decision = getattr(arguments, "action", None)
         reason = None
         if not isinstance(decision, BrowserActionDecision):

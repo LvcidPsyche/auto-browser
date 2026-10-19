@@ -12,9 +12,9 @@ from urllib.parse import urlparse
 from playwright.async_api import Error as PlaywrightError
 
 from ... import events as _events
-from ...action_errors import BrowserActionError
+from ...action_errors import BrowserActionError, SessionNotFoundError
 from ...actions import ActionRunContext
-from ...approvals import ApprovalRequiredError, held_for_execution
+from ...approvals import CONTROLLER_SCOPE, ApprovalRequiredError, held_for_execution
 from ...models import ApprovalKind, BrowserActionDecision, totp_host_allowed
 from ...utils import spawn_background_task
 from ...webhooks import dispatch_approval_event
@@ -425,54 +425,77 @@ class BrowserActionService:
 
     async def require_decision_approval(
         self,
-        session_id: str,
+        session_id: str | None,
         decision: BrowserActionDecision,
         *,
         approval_id: str | None,
         fallback_reason: str | None = None,
         approval_kind: ApprovalKind | None = None,
     ):
+        """Require an approval for ``decision``; ``session_id=None`` asks in CONTROLLER_SCOPE.
+
+        A tool call that names no session (a memory profile, a CDP attach) has
+        no session to observe or witness, and none to look up an owner from: its
+        approval belongs to the operator who asked (ApprovalRecord.owner).
+        """
         kind = approval_kind or self.approval_kind_for_decision(decision)
         if kind is None:
             return None
+        if session_id == CONTROLLER_SCOPE:
+            # The sentinel is a scope, not a session a caller may name: left to
+            # match, it would let a session-bound call spend a controller approval.
+            raise SessionNotFoundError(session_id)
         if approval_id:
             return await self.manager.approvals.require_approved(
                 approval_id=approval_id,
-                session_id=session_id,
+                session_id=session_id or CONTROLLER_SCOPE,
                 kind=kind,
                 action=decision,
             )
 
-        session = await self.manager.get_session(session_id)
+        session = None if session_id is None else await self.manager.get_session(session_id)
         approval = await self.manager.approvals.create_or_reuse_pending(
-            session_id=session_id,
+            session_id=session_id or CONTROLLER_SCOPE,
             kind=kind,
             reason=fallback_reason or decision.reason,
             action=decision,
-            observation=await self._approval_observation(session),
+            observation=None if session is None else await self._approval_observation(session),
         )
-        await self.manager._record_witness_receipt(
-            session,
-            event_type="approval",
-            status="pending",
-            action="approval_requested",
-            action_class="control",
-            risk_category=decision.risk_category,
-            approval=WitnessApproval(
-                required=True,
+        if session is None:
+            # No session means no witness receipt to carry the request, so the
+            # audit log does. The reason stays out: it previews the call's
+            # arguments and the audit log is not scoped to an operator.
+            await self.manager.audit.append(
+                event_type="approval",
+                status="pending",
+                action="approval_requested",
+                session_id=CONTROLLER_SCOPE,
                 approval_id=approval.id,
-                status=approval.status,
-                reason=approval.reason,
-            ),
-            target={
-                "kind": approval.kind,
-                "action": decision.action,
-                "selector": decision.selector,
-                "element_id": decision.element_id,
-            },
-            metadata={"reason": approval.reason},
-        )
-        _events.emit_approval(session_id, approval.id, approval.kind, approval.status, approval.reason)
+                details={"kind": approval.kind},
+            )
+        else:
+            await self.manager._record_witness_receipt(
+                session,
+                event_type="approval",
+                status="pending",
+                action="approval_requested",
+                action_class="control",
+                risk_category=decision.risk_category,
+                approval=WitnessApproval(
+                    required=True,
+                    approval_id=approval.id,
+                    status=approval.status,
+                    reason=approval.reason,
+                ),
+                target={
+                    "kind": approval.kind,
+                    "action": decision.action,
+                    "selector": decision.selector,
+                    "element_id": decision.element_id,
+                },
+                metadata={"reason": approval.reason},
+            )
+            _events.emit_approval(session_id, approval.id, approval.kind, approval.status, approval.reason)
         if self.manager.settings.approval_webhook_url:
             spawn_background_task(
                 dispatch_approval_event(
@@ -485,7 +508,7 @@ class BrowserActionService:
 
     async def require_governed_approval(
         self,
-        session_id: str,
+        session_id: str | None,
         decision: BrowserActionDecision,
         *,
         approval_id: str | None,

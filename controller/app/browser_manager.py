@@ -447,7 +447,7 @@ class BrowserManager:
 
     async def require_governed_approval(
         self,
-        session_id: str,
+        session_id: str | None,
         decision: BrowserActionDecision,
         *,
         approval_id: str | None,

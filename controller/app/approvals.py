@@ -18,11 +18,16 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from .models import ApprovalDecider, ApprovalKind, ApprovalRecord, ApprovalStatus, BrowserActionDecision
+from .session_ownership import may_use, verified_operator
 from .sqlite_utils import connect_sqlite
 from .utils import UTC, atomic_write_text, record_path, utc_now
 
 logger = logging.getLogger(__name__)
 
+# The scope of an approval that belongs to no session (a governed tool whose
+# arguments name none). Session ids are uuid4().hex[:12], so this can never be one.
+# There is no session owner to ask, so these approvals follow ApprovalRecord.owner.
+CONTROLLER_SCOPE = "controller"
 # What a sensitive `type` action's text is stored as in its approval.
 SENSITIVE_TEXT_PREFIX = "[sensitive text] hmac-sha256:"
 # How long the text of an undecided sensitive approval is kept in memory.
@@ -269,7 +274,8 @@ class ApprovalStore:
         observation: dict | None = None,
     ) -> ApprovalRecord:
         async with self._lock:
-            existing = await self._find_matching_pending(session_id=session_id, kind=kind, action=action)
+            owner = verified_operator()
+            existing = await self._find_matching_pending(session_id=session_id, kind=kind, action=action, owner=owner)
             if existing is not None:
                 return existing
 
@@ -284,6 +290,7 @@ class ApprovalStore:
                 reason=reason,
                 action=self._stored_action(action),
                 observation=observation,
+                owner=owner,
             )
             await self._persist(approval)
             if approval.action is not action:
@@ -371,6 +378,12 @@ class ApprovalStore:
         approval = await self.get(approval_id)
         if approval.session_id != session_id:
             raise PermissionError(f"approval {approval_id} does not belong to session {session_id}")
+        # A controller-scope approval has no session whose owner could be asked,
+        # so it is the asking operator's alone: another operator's identical call
+        # hashes to the same action and would otherwise spend it. Answers like an
+        # approval that does not exist, as the listing does.
+        if session_id == CONTROLLER_SCOPE and not may_use(approval.owner):
+            raise KeyError(approval_id)
         if approval.kind != kind:
             raise PermissionError(f"approval {approval_id} does not cover {kind}")
         if approval.status != "approved":
@@ -430,6 +443,9 @@ class ApprovalStore:
             and other.decided_via != "agent"
             and other.action.model_dump(exclude=excluded) == requested
             for other in await self.list(status="rejected", session_id=approval.session_id)
+            # Controller scope is shared by every operator: only the same
+            # requester's rejection counts, not another operator's.
+            if approval.session_id != CONTROLLER_SCOPE or other.owner == approval.owner
         )
 
     async def _find_matching_pending(
@@ -438,8 +454,14 @@ class ApprovalStore:
         session_id: str,
         kind: ApprovalKind,
         action: BrowserActionDecision,
+        owner: str | None,
     ) -> ApprovalRecord | None:
         for approval in await self.list(status="pending", session_id=session_id):
+            # Exactly the requester's own pending approval in controller scope:
+            # joining another operator's would hand them its decision, and hand
+            # the other operator a request they never made.
+            if session_id == CONTROLLER_SCOPE and approval.owner != owner:
+                continue
             if approval.kind == kind and self._actions_match(approval.action, action):
                 return approval
         return None
