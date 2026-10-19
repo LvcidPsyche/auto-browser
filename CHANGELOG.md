@@ -95,6 +95,21 @@ deployment that restricts it.
   iframes and subresources from other hosts are not filtered, and raw CDP passthrough is
   unchanged.
 
+### Fixed
+
+- **The Playwright export script replays the session that ran.** `GET
+  /sessions/{id}/export-script` and `browser.export_script` produced `page.goto('')` and
+  `page.locator('').first.click()`, in reverse order, starting at the page the session ended on:
+  anyone who used the export got an unusable script. It now replays the steps oldest first from
+  the session's own start URL, and says when the session had more than 5000 audit events
+  (`"truncated": true`). Steps that targeted an element by `element_id` carry a comment, because
+  that id exists only after `observe()` tags the live page. A start URL containing `"""` or a
+  backslash escape such as `\N{...}` could stop the script compiling; it is now a one-line comment.
+- **A closed session's replay script and trace are served.** `GET /sessions/{id}/export-script`,
+  `GET /sessions/{id}/trace` and `browser.export_script` answered 404 once a session closed, which
+  is when `trace.zip` exists. They now read the stored session record; another operator's session
+  and an unknown id still answer 404.
+
 ### Removed
 
 - `download_url` from the auth profile export response. It pointed at `/auth-export/<archive>`,
