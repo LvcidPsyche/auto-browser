@@ -36,9 +36,27 @@ require_env REVERSE_SSH_KEY_PATH
 : "${REVERSE_SSH_PUBLIC_API_URL:=${REVERSE_SSH_PUBLIC_SCHEME}://${REVERSE_SSH_PUBLIC_HOST}:${REVERSE_SSH_REMOTE_API_PORT}}"
 : "${REVERSE_SSH_PUBLIC_TAKEOVER_URL:=${REVERSE_SSH_PUBLIC_SCHEME}://${REVERSE_SSH_PUBLIC_HOST}:${REVERSE_SSH_REMOTE_NOVNC_PORT}/vnc.html?autoconnect=true&resize=scale}"
 
+# The numeric fields below are written into reverse-ssh.json unquoted.
+require_int() {
+  eval "value=\${$1}"
+  case "$value" in
+    ''|*[!0-9]*)
+      echo >&2 "$1 must be a non-negative integer, got: $value"
+      exit 1
+      ;;
+  esac
+}
+
+require_int REVERSE_SSH_INFO_INTERVAL_SECONDS
+
 if [ -z "${REVERSE_SSH_STALE_AFTER_SECONDS}" ]; then
   REVERSE_SSH_STALE_AFTER_SECONDS=$((REVERSE_SSH_INFO_INTERVAL_SECONDS * 3))
 fi
+
+require_int REVERSE_SSH_STALE_AFTER_SECONDS
+require_int REVERSE_SSH_PORT
+require_int REVERSE_SSH_REMOTE_API_PORT
+require_int REVERSE_SSH_REMOTE_NOVNC_PORT
 
 if [ ! -r "${REVERSE_SSH_KEY_PATH}" ]; then
   echo >&2 "reverse SSH key is missing or unreadable: ${REVERSE_SSH_KEY_PATH}"
@@ -89,25 +107,38 @@ now_iso8601() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
+# Escape a value for use inside a JSON string: control characters are dropped
+# (none is valid in a host or URL), then backslash and double quote are escaped.
+json_str() {
+  printf '%s' "$1" | tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# Written to a temp file beside the target, then renamed over it: the controller
+# polls this file and must never read a half-written one. mktemp creates the file
+# 0600; the controller may run as another user, so restore the mode a plain
+# redirect gave.
 write_metadata() {
   state="$1"
-  cat >"${REVERSE_SSH_INFO_PATH}" <<EOF
+  tmp="$(mktemp "${REVERSE_SSH_INFO_PATH}.XXXXXX")"
+  cat >"${tmp}" <<EOF
 {
-  "status": "${state}",
+  "status": "$(json_str "${state}")",
   "updated_at": "$(now_iso8601)",
   "info_interval_seconds": ${REVERSE_SSH_INFO_INTERVAL_SECONDS},
   "stale_after_seconds": ${REVERSE_SSH_STALE_AFTER_SECONDS},
-  "ssh_host": "${REVERSE_SSH_HOST}",
+  "ssh_host": "$(json_str "${REVERSE_SSH_HOST}")",
   "ssh_port": ${REVERSE_SSH_PORT},
-  "ssh_user": "${REVERSE_SSH_USER}",
-  "access_mode": "${REVERSE_SSH_ACCESS_MODE}",
-  "remote_bind_address": "${REVERSE_SSH_REMOTE_BIND_ADDRESS}",
+  "ssh_user": "$(json_str "${REVERSE_SSH_USER}")",
+  "access_mode": "$(json_str "${REVERSE_SSH_ACCESS_MODE}")",
+  "remote_bind_address": "$(json_str "${REVERSE_SSH_REMOTE_BIND_ADDRESS}")",
   "remote_api_port": ${REVERSE_SSH_REMOTE_API_PORT},
   "remote_novnc_port": ${REVERSE_SSH_REMOTE_NOVNC_PORT},
-  "public_api_url": "${REVERSE_SSH_PUBLIC_API_URL}",
-  "public_takeover_url": "${REVERSE_SSH_PUBLIC_TAKEOVER_URL}"
+  "public_api_url": "$(json_str "${REVERSE_SSH_PUBLIC_API_URL}")",
+  "public_takeover_url": "$(json_str "${REVERSE_SSH_PUBLIC_TAKEOVER_URL}")"
 }
 EOF
+  chmod 644 "${tmp}"
+  mv "${tmp}" "${REVERSE_SSH_INFO_PATH}"
 }
 
 heartbeat() {
