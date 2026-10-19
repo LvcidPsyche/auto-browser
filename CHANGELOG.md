@@ -134,6 +134,11 @@ deployment that restricts it.
   `screenshot_pii_scrub: {"applied": false, "reason": ...}`. The new section in
   `docs/deployment.md` lists what scrubbing covers and what it does not: page content, raw CDP
   (which can read back a typed password) and the console messages inside an observation.
+- **Closed sessions keep their owner when Redis loses the record.** With `REDIS_URL` set, the
+  session store read only Redis, so an evicted key, a Redis restart without persistence or a
+  dropped connection made a closed session look unowned, and another operator's ownership check
+  let them in. It now falls back to the file copy, which is written first, and logs a Redis error
+  when there is one.
 
 ### Fixed
 
@@ -212,6 +217,23 @@ deployment that restricts it.
   engine can't be interrupted, so matches now run in a short-lived child process with a 2 s
   limit. A postcondition that times out is not satisfied, a forbidden state that times out
   counts as hit, and both are listed in the result's `details.regex_timeouts`.
+- **A bad Host header is refused first.** It now gets the host check's 400 before the bearer
+  token, operator id and rate limit are looked at, instead of a 401 or the missing-operator 400,
+  and it no longer spends rate-limit budget. Every other answer is unchanged.
+- **`/healthz/deep` is rate-limited.** An entry in `REQUEST_RATE_LIMIT_EXEMPT_PATHS` exempted
+  everything under it, so the deep health probe, which opens a browser context and renders a page
+  on every call, was unlimited for a token holder. Entries now match one path exactly; `/artifacts` stays exempt as a tree, because
+  the UI loads many files from it. If you exempted a sub-path by listing its parent, list the
+  sub-path itself. `/docs/oauth2-redirect` is now counted.
+- **An open share link no longer slows the session it shows.** The share page polls every 5 s,
+  and each poll ran a full observation (DOM, accessibility tree, OCR) under the session lock and
+  kept the screenshot for good, so the agent waited on the viewer and the artifact directory
+  filled with PNGs. A poll now takes one redacted frame plus the URL and title, and frames older
+  than a minute are deleted.
+- **Generated `SKILL.md` front matter is always valid YAML.** The goal went into `description`
+  unquoted, so `Open the page: log in` made the file unparseable and a goal with a line break
+  could add keys of its own, such as `status` or `safety_class`, to a file that is then signed.
+  It is now a quoted string that reads back exactly.
 
 ### Added
 
