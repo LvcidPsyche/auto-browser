@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -296,6 +297,112 @@ class UniversalVerifierAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         try:
             await self._run_and_capture_child(adapter, started)
+            self.assertIsNotNone(started[0].returncode)
+        finally:
+            for process in started:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
+
+
+class ProgrammaticRegexTests(unittest.IsolatedAsyncioTestCase):
+    """A caller-supplied url_matches pattern ran in-process: catastrophic
+    backtracking stalled the event loop and wait_for could not interrupt it."""
+
+    # (a+)+$ takes ~11 s in-process on 26 characters and quadruples per two more.
+    CATASTROPHIC = "(a+)+$"
+    CATASTROPHIC_URL = "a" * 26 + "!"
+
+    def _contract(self, *, postcondition: str | None = None, forbidden: str | None = None) -> TaskContract:
+        return TaskContract(
+            id="task-regex",
+            goal="regex handling",
+            postconditions=[
+                Postcondition(kind="url_matches", value=postcondition)
+                if postcondition is not None
+                else Postcondition(kind="url_contains", value="example")
+            ],
+            forbidden_states=[ForbiddenState(kind="url_matches", value=forbidden)] if forbidden is not None else [],
+        )
+
+    async def test_url_matches_postcondition_and_forbidden_state_still_work(self) -> None:
+        trace = {
+            "final_observation": {"url": "https://shop.example.com/checkout?id=42"},
+            "evidence_kinds": ["trace", "actions"],
+        }
+        verifier = ProgrammaticVerifier()
+
+        hit = await verifier.verify(self._contract(postcondition=r"checkout\?id=\d+"), trace)
+        miss = await verifier.verify(self._contract(postcondition=r"cart\?id=\d+"), trace)
+        forbidden_hit = await verifier.verify(self._contract(forbidden=r"checkout\?id=\d+"), trace)
+        forbidden_clear = await verifier.verify(self._contract(forbidden=r"admin"), trace)
+
+        self.assertTrue(hit.passed)
+        self.assertFalse(miss.passed)
+        self.assertEqual(miss.failed_postconditions, ["postcondition[0]:url_matches:cart\\?id=\\d+"])
+        self.assertFalse(forbidden_hit.passed)
+        self.assertTrue(forbidden_clear.passed)
+
+    async def test_catastrophic_pattern_times_out_without_stalling_the_event_loop(self) -> None:
+        gaps: list[float] = []
+        stop = asyncio.Event()
+
+        async def ticker() -> None:
+            last = time.perf_counter()
+            while not stop.is_set():
+                await asyncio.sleep(0.01)
+                now = time.perf_counter()
+                gaps.append(now - last)
+                last = now
+
+        task = asyncio.create_task(ticker())
+        await asyncio.sleep(0.05)
+        verifier = ProgrammaticVerifier(regex_timeout_seconds=0.5)
+        trace = {"final_observation": {"url": self.CATASTROPHIC_URL}, "evidence_kinds": ["trace", "actions"]}
+        result = await verifier.verify(self._contract(postcondition=self.CATASTROPHIC), trace)
+        stop.set()
+        await task
+
+        # In-process the stall is ~11 s; a free loop ticks every ~10 ms. 1.5 s
+        # leaves a wide margin for process start-up on a loaded CI box.
+        self.assertLess(max(gaps), 1.5)
+        self.assertFalse(result.passed)
+        self.assertEqual(result.failed_postconditions, [f"postcondition[0]:url_matches:{self.CATASTROPHIC}"])
+        self.assertEqual(result.details["regex_timeouts"], [f"postcondition[0]:url_matches:{self.CATASTROPHIC}"])
+        self.assertIn("did not finish", result.notes)
+
+    async def test_forbidden_pattern_that_cannot_be_ruled_out_counts_as_hit(self) -> None:
+        verifier = ProgrammaticVerifier(regex_timeout_seconds=0.5)
+        trace = {"final_observation": {"url": self.CATASTROPHIC_URL}, "evidence_kinds": ["trace", "actions"]}
+
+        result = await verifier.verify(self._contract(forbidden=self.CATASTROPHIC), trace)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.forbidden_state_hits, [f"forbidden[0]:url_matches:{self.CATASTROPHIC}"])
+        self.assertEqual(result.details["regex_timeouts"], result.forbidden_state_hits)
+
+    async def test_regex_child_is_killed_when_the_caller_cancels(self) -> None:
+        started: list = []
+        original = asyncio.create_subprocess_exec
+
+        async def spy(*args, **kwargs):
+            process = await original(*args, **kwargs)
+            started.append(process)
+            return process
+
+        verifier = ProgrammaticVerifier(regex_timeout_seconds=300)
+        trace = {"final_observation": {"url": self.CATASTROPHIC_URL}, "evidence_kinds": ["trace", "actions"]}
+        try:
+            with mock.patch("app.harness.verifier.programmatic.asyncio.create_subprocess_exec", spy):
+                task = asyncio.create_task(verifier.verify(self._contract(postcondition=self.CATASTROPHIC), trace))
+                deadline = asyncio.get_running_loop().time() + 30
+                while not started:
+                    self.assertLess(asyncio.get_running_loop().time(), deadline, "child never started")
+                    await asyncio.sleep(0.01)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            # returncode is only set once the child has exited and been reaped.
             self.assertIsNotNone(started[0].returncode)
         finally:
             for process in started:
