@@ -109,6 +109,19 @@ deployment that restricts it.
   `GET /sessions/{id}/trace` and `browser.export_script` answered 404 once a session closed, which
   is when `trace.zip` exists. They now read the stored session record; another operator's session
   and an unknown id still answer 404.
+- **`STEALTH_ENABLED=true` runs the stealth patches.** The init script was a bare arrow function,
+  which `add_init_script` defined and never called, so no patch applied: operators who turned
+  stealth on got none of it, and sessions with it on now present differently to sites. It also
+  adds `window.chrome.runtime` when headless Chromium already defines `window.chrome` without it.
+- **Stealth and `ACTION_TIMEOUT_MS` apply to every tab and popup.** Both were set on a session's
+  first page only, so tabs opened later and popups ran unpatched and waited Playwright's 30 s
+  default. They are now set on the browser context, in session creation and in shadow browse.
+- **The `STEALTH_PROFILE` canvas noise is applied once per read.** The fingerprint script wrapped
+  `getImageData` again on every `getContext('2d')` call, which returns the same context, so each
+  call stacked another layer of noise, and enough calls overflowed the page's stack.
+- **`toDataURL` leaves the canvas as it found it.** With both stealth scripts on, each export read
+  a pixel through the noisy `getImageData` and wrote it back, so the canvas drifted on every call.
+  The base script now reads it with the native method.
 
 ### Removed
 
