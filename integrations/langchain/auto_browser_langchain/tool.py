@@ -11,9 +11,24 @@ try:
     from pydantic import Field as PydanticField
 
     _LANGCHAIN_AVAILABLE = True
-except ImportError:
+except ImportError as _import_error:
     _LANGCHAIN_AVAILABLE = False
-    BaseTool = object
+    _LANGCHAIN_IMPORT_ERROR = _import_error
+
+    class BaseTool:  # type: ignore[no-redef]
+        """Stands in for langchain-core's BaseTool so this module still imports.
+
+        Without it, ``BaseTool = object`` made ``AutoBrowserTool(base_url=...)``
+        fail with "takes no arguments", which says nothing about the cause.
+        Importing the package (and AutoBrowserNode, which needs only httpx) must
+        keep working; only building the tool needs langchain-core.
+        """
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise ImportError(
+                'AutoBrowserTool needs langchain-core. Install it with: pip install "auto-browser-langchain[langchain]"'
+            ) from _LANGCHAIN_IMPORT_ERROR
+
     BaseModel = object
     PydanticField = lambda *args, **kwargs: None  # noqa: E731
 

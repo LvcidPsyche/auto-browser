@@ -5,6 +5,8 @@ from typing import Any, TypedDict
 
 import httpx
 
+from .errors import AutoBrowserToolError
+
 
 class BrowserState(TypedDict, total=False):
     session_id: str
@@ -13,6 +15,40 @@ class BrowserState(TypedDict, total=False):
     goal: str
     result: str
     error: str
+
+
+def _tool_error(name: str, result: dict[str, Any]) -> AutoBrowserToolError:
+    content = result.get("content") or [{}]
+    text = str(content[0].get("text") or "Unknown error")
+    structured = result.get("structuredContent")
+    payload = structured if isinstance(structured, dict) else None
+    if payload is None:
+        # An older controller sends the payload only as JSON text.
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            parsed = None
+        payload = parsed if isinstance(parsed, dict) else None
+    message = payload.get("error") if payload else None
+    return AutoBrowserToolError(name, message if isinstance(message, str) else text, payload)
+
+
+def _tool_data(name: str, result: dict[str, Any]) -> dict[str, Any]:
+    """The tool's result as a dict; raises AutoBrowserToolError for an isError response.
+
+    A successful result is normally JSON in content[0].text. Text that is not
+    JSON (or is JSON but not an object) comes back wrapped, as {"text": ...} or
+    {"result": ...}, rather than failing the parse.
+    """
+    if result.get("isError"):
+        raise _tool_error(name, result)
+    content = result.get("content") or [{}]
+    text = content[0].get("text", "{}")
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return {"text": text}
+    return data if isinstance(data, dict) else {"result": data}
 
 
 class AutoBrowserNode:
@@ -51,8 +87,7 @@ class AutoBrowserNode:
         if start_url:
             arguments["start_url"] = start_url
         result = await self.call_tool("browser.create_session", arguments)
-        content = result.get("content") or [{}]
-        data = json.loads(content[0].get("text", "{}"))
+        data = _tool_data("browser.create_session", result)
         session_id = data.get("session_id") or data.get("id")
         if not session_id:
             raise KeyError("browser.create_session did not return a session id")
@@ -60,8 +95,7 @@ class AutoBrowserNode:
 
     async def observe(self, session_id: str) -> dict[str, Any]:
         result = await self.call_tool("browser.observe", {"session_id": session_id})
-        content = result.get("content") or [{}]
-        return json.loads(content[0].get("text", "{}"))
+        return _tool_data("browser.observe", result)
 
     async def run(self, state: BrowserState) -> BrowserState:
         session_id = state.get("session_id")
