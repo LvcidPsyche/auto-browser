@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .session_ownership import may_use, verified_operator
 from .utils import atomic_write_text, utc_now
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 class MemoryProfile(BaseModel):
     name: str
+    # The token-verified operator who first saved it. None when that save had no
+    # proven identity (shared token, header-only), and for profiles written before
+    # owners existed: those stay open to every caller.
+    owner: str | None = None
     created_at: str
     updated_at: str
     goal_summary: str = ""
@@ -40,6 +45,15 @@ class MemoryProfile(BaseModel):
 
 
 class MemoryManager:
+    """Profiles on disk, each usable only by its owner (see MemoryProfile.owner).
+
+    Profile text goes into the agent's goal prompt, so a profile that another
+    operator could rewrite, or load into their own session, would let them plant
+    instructions for the owner's agent. Reading, appending to, deleting or
+    loading another operator's profile raises PermissionError, and list() leaves
+    it out.
+    """
+
     def __init__(self, root: str | Path):
         self.root = Path(root)
         self._lock = asyncio.Lock()
@@ -62,6 +76,9 @@ class MemoryManager:
         metadata: dict[str, Any] | None = None,
     ) -> MemoryProfile:
         async with self._lock:
+            # Checked against the file the name maps to, before the collision
+            # guard below can name someone else's profile in its error.
+            self._require_access(name, await self._read(name))
             existing = await self._load(name)
             if existing is None:
                 stored_as = await self._stored_name(name)
@@ -91,6 +108,7 @@ class MemoryManager:
             else:
                 profile = MemoryProfile(
                     name=name,
+                    owner=verified_operator(),
                     created_at=now,
                     updated_at=now,
                     goal_summary=goal_summary,
@@ -106,7 +124,9 @@ class MemoryManager:
             return profile
 
     async def get(self, name: str) -> MemoryProfile | None:
-        return await self._load(name)
+        profile = await self._load(name)
+        self._require_access(name, profile)
+        return profile
 
     async def list(self) -> list[dict[str, Any]]:
         def _list_sync() -> list[dict[str, Any]]:
@@ -117,6 +137,8 @@ class MemoryManager:
                 try:
                     data = json.loads(path.read_text(encoding="utf-8"))
                 except Exception:
+                    continue
+                if not may_use(data.get("owner")):
                     continue
                 profiles.append(
                     {
@@ -132,10 +154,19 @@ class MemoryManager:
         return await asyncio.to_thread(_list_sync)
 
     async def delete(self, name: str) -> bool:
-        if await self._load(name) is None:
+        profile = await self._load(name)
+        if profile is None:
             return False
+        self._require_access(name, profile)
         await asyncio.to_thread(self._profile_path(name).unlink)
         return True
+
+    @staticmethod
+    def _require_access(name: str, profile: MemoryProfile | None) -> None:
+        # Names the profile as the caller asked for it, never as stored: the
+        # stored name of a colliding profile would reveal another operator's.
+        if profile is not None and not may_use(profile.owner):
+            raise PermissionError(f"memory profile {name!r} belongs to another operator")
 
     async def _load(self, name: str) -> MemoryProfile | None:
         """The profile saved under exactly `name`; a file another name maps to is not it."""
