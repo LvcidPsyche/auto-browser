@@ -917,9 +917,9 @@ class AgentHttpTests(unittest.TestCase):
         artifact_dir.mkdir(parents=True, exist_ok=True)
         trace_path = artifact_dir / "trace.zip"
         trace_path.write_bytes(b"zip")
-        session = SimpleNamespace(page=SimpleNamespace(url="https://example.com"), trace_path=trace_path)
+        record = {"id": "session-1", "trace_path": str(trace_path)}
 
-        with patch.object(main_module.manager, "get_session", AsyncMock(return_value=session)):
+        with patch.object(main_module.manager, "get_session_record", AsyncMock(return_value=record)):
             payload = self.client.get("/sessions/session-1/trace").json()
 
         self.assertEqual(payload["trace_url"], "/artifacts/session-1/trace.zip")
