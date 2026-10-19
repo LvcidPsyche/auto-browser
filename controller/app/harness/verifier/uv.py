@@ -45,9 +45,14 @@ class UniversalVerifierAdapter:
                 timeout=self.timeout_seconds,
             )
         except asyncio.TimeoutError:
-            process.kill()
-            await process.communicate()
+            await self._kill_and_reap(process)
             return self._unavailable("Universal Verifier command timed out.")
+        except BaseException:
+            # The caller gave up (HarnessService wraps verify() in a wall-clock
+            # wait_for) or the app is shutting down: CancelledError is not a
+            # TimeoutError, so the child used to keep running, unreaped.
+            await self._kill_and_reap(process)
+            raise
 
         if process.returncode != 0:
             detail = stderr.decode("utf-8", errors="replace")[:1024]
@@ -80,6 +85,14 @@ class UniversalVerifierAdapter:
             )
         except Exception as exc:
             return self._unavailable(f"Universal Verifier output schema is invalid: {exc}")
+
+    @staticmethod
+    async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass  # exited between the timeout and the kill
+        await process.communicate()
 
     def _unavailable(self, note: str) -> VerificationResult:
         return VerificationResult(
