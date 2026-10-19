@@ -140,6 +140,64 @@ class BrowserManagerCreateSessionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "one visible desktop"):
             self.manager._check_session_limit()
 
+    async def test_failed_create_undoes_what_the_created_hook_registered(self) -> None:
+        """create_session failing at page.goto, after the created hook ran, left the
+        dead session's network inspector in app.state.network_inspectors for good:
+        only the closed path removed it, and a failed create never gets there."""
+        from app.startup.extensions import _register_session_hooks
+
+        self.manager.settings.network_inspector_enabled = True
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                browser_manager=self.manager,
+                network_inspectors={},
+                cdp_sessions={},
+                settings=self.manager.settings,
+                curator_adapter=None,
+            )
+        )
+        _register_session_hooks(app)
+        page = FakePage()
+        page.goto = AsyncMock(side_effect=RuntimeError("net::ERR_CONNECTION_REFUSED"))
+        self.manager._acquire_session_browser = AsyncMock(return_value=(FakeBrowser(FakeContext(page)), None))  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(RuntimeError, "ERR_CONNECTION_REFUSED"):
+            await self.manager.create_session(name="doomed", start_url="https://example.com")
+
+        self.assertEqual(self.manager.sessions, {})
+        self.assertEqual(app.state.network_inspectors, {})
+        self.assertEqual(app.state.cdp_sessions, {})
+
+    async def test_create_failed_hook_only_runs_after_the_created_hook_did(self) -> None:
+        events: list[str] = []
+
+        async def created(session_id: str, created_page) -> None:
+            events.append("created")
+
+        async def create_failed(session_id: str) -> None:
+            events.append("create_failed")
+
+        self.manager.register_extension_hooks(session_created=created, session_create_failed=create_failed)
+
+        # Fails before the created hook: nothing to undo.
+        self.manager._acquire_session_browser = AsyncMock(side_effect=RuntimeError("no browser"))  # type: ignore[method-assign]
+        with self.assertRaisesRegex(RuntimeError, "no browser"):
+            await self.manager.create_session(name="early")
+        self.assertEqual(events, [])
+
+        # Fails after it: undone, and a broken undo hook does not hide the real error.
+        async def broken_create_failed(session_id: str) -> None:
+            events.append("create_failed")
+            raise RuntimeError("undo exploded")
+
+        self.manager.register_extension_hooks(session_created=created, session_create_failed=broken_create_failed)
+        page = FakePage()
+        page.goto = AsyncMock(side_effect=RuntimeError("goto failed"))
+        self.manager._acquire_session_browser = AsyncMock(return_value=(FakeBrowser(FakeContext(page)), None))  # type: ignore[method-assign]
+        with self.assertRaisesRegex(RuntimeError, "goto failed"):
+            await self.manager.create_session(name="late", start_url="https://example.com")
+        self.assertEqual(events, ["created", "create_failed"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -143,6 +143,8 @@ class BrowserSession:
 
 SessionCreatedHook = Callable[[str, Page], Awaitable[None]]
 SessionClosedHook = Callable[[str], Awaitable[None]]
+# Undoes what the created hook registered when create_session fails after it ran.
+SessionCreateFailedHook = Callable[[str], Awaitable[None]]
 
 
 class BrowserManager:
@@ -238,15 +240,18 @@ class BrowserManager:
         self.tunnel_broker = IsolatedSessionTunnelBroker(self.settings)
         self._session_created_hook: SessionCreatedHook | None = None
         self._session_closed_hook: SessionClosedHook | None = None
+        self._session_create_failed_hook: SessionCreateFailedHook | None = None
 
     def register_extension_hooks(
         self,
         *,
         session_created: SessionCreatedHook | None = None,
         session_closed: SessionClosedHook | None = None,
+        session_create_failed: SessionCreateFailedHook | None = None,
     ) -> None:
         self._session_created_hook = session_created
         self._session_closed_hook = session_closed
+        self._session_create_failed_hook = session_create_failed
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 

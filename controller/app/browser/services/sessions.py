@@ -134,6 +134,7 @@ class BrowserSessionService:
         session: BrowserSession | None = None
         browser: Browser | None = None
         runtime: IsolatedBrowserRuntime | None = None
+        created_hook_started = False
         # No await since check_limit, so nothing slipped in between.
         self._creating += 1
         reserved = True
@@ -210,6 +211,8 @@ class BrowserSessionService:
             self._creating -= 1
             reserved = False
             if self.manager._session_created_hook is not None:
+                # Set before the call: a hook that fails halfway has still registered things.
+                created_hook_started = True
                 try:
                     await self.manager._session_created_hook(session_id, page)
                 except Exception as exc:
@@ -275,6 +278,7 @@ class BrowserSessionService:
                 context=context,
                 browser=browser,
                 runtime=runtime,
+                created_hook_started=created_hook_started,
             )
             raise
         finally:
@@ -345,8 +349,17 @@ class BrowserSessionService:
         context: "BrowserContext | None",
         browser: "Browser | None",
         runtime: "IsolatedBrowserRuntime | None",
+        created_hook_started: bool = False,
     ) -> None:
         self.manager.sessions.pop(session_id, None)
+        if created_hook_started and self.manager._session_create_failed_hook is not None:
+            # The created hook registered per-session state (network inspector,
+            # CDP session) that only the closed path removed; a failed create
+            # never reaches that path, so the dead session's entries stayed.
+            try:
+                await self.manager._session_create_failed_hook(session_id)
+            except Exception as exc:
+                logger.warning("session create-failed hook failed for %s: %s", session_id, exc)
         if session is not None and session.tunnel is not None:
             try:
                 await self.manager.tunnel_broker.release(session.tunnel)
