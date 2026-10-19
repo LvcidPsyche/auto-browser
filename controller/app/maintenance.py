@@ -79,7 +79,10 @@ class MaintenanceService:
             protected_roots = self._protected_roots()
             reports = []
             for root, retention in self._cleanup_roots():
-                reports.append(self._cleanup_root(Path(root), retention, protected_roots))
+                # The walk and the unlinks are blocking filesystem calls (13 s
+                # for 6000 files on NTFS); on the loop they froze every
+                # session and request for the whole sweep.
+                reports.append(await asyncio.to_thread(self._cleanup_root, Path(root), retention, protected_roots))
             completed = datetime.now(UTC)
             self._last_report = CleanupReport(
                 started_at=started.isoformat().replace("+00:00", "Z"),
