@@ -348,6 +348,155 @@ class DockerBrowserNodeProvisionerTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertFalse(orphan.removed)
 
+    def _provisioner_with_runtime_root(
+        self, tempdir: str, **extra
+    ) -> tuple[DockerBrowserNodeProvisioner, FakeDockerClient]:
+        data_root = Path(tempdir) / "data"
+        data_root.mkdir(parents=True, exist_ok=True)
+        settings = Settings(
+            _env_file=None,
+            ARTIFACT_ROOT=str(data_root / "artifacts"),
+            SESSION_ISOLATION_MODE="docker_ephemeral",
+            ISOLATED_HOST_DATA_ROOT=str(data_root),
+            ISOLATED_BROWSER_NETWORK="auto-browser_default",
+            **extra,
+        )
+        controller_container = FakeDockerContainer(
+            container_id="controller-id",
+            name="controller",
+            attrs={"Mounts": [], "NetworkSettings": {"Networks": {}}},
+        )
+        client = FakeDockerClient(controller_container)
+        return DockerBrowserNodeProvisioner(settings, client=client), client
+
+    @staticmethod
+    def _write_profile(provisioner: DockerBrowserNodeProvisioner, session_id: str) -> Path:
+        runtime_root = provisioner._local_runtime_root(session_id)
+        (runtime_root / "profile").mkdir(parents=True)
+        (runtime_root / "profile" / "Cookies").write_text("session-cookie", encoding="utf-8")
+        return runtime_root
+
+    async def test_release_removes_the_profile_even_when_the_container_is_already_gone(self) -> None:
+        """release() returned at once when docker no longer knew the container
+        (removed by hand, a restarted daemon), leaving the Chromium profile and
+        its cookies on disk."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            provisioner, client = self._provisioner_with_runtime_root(tempdir)
+            runtime_root = self._write_profile(provisioner, "gone")
+            runtime = IsolatedBrowserRuntime(
+                session_id="gone",
+                container_id="gone-id",
+                container_name="browser-session-gone",
+                network_name="n",
+                browser_node_name="browser-session-gone",
+                profile_dir=runtime_root / "profile",
+                downloads_dir=runtime_root / "downloads",
+                ws_endpoint_file=runtime_root / "profile" / "ws.txt",
+                ws_endpoint="",
+                takeover_url="",
+                novnc_port=None,
+                vnc_port=None,
+            )
+            self.assertEqual(client.containers.browser_containers, {})
+
+            await provisioner.release(runtime)
+
+            self.assertFalse(runtime_root.exists())
+
+    async def test_release_keeps_the_profile_when_keep_containers_is_on(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            provisioner, _ = self._provisioner_with_runtime_root(tempdir, ISOLATED_BROWSER_KEEP_CONTAINERS="true")
+            runtime_root = self._write_profile(provisioner, "kept")
+            runtime = IsolatedBrowserRuntime(
+                session_id="kept",
+                container_id="x",
+                container_name="x",
+                network_name="n",
+                browser_node_name="x",
+                profile_dir=runtime_root / "profile",
+                downloads_dir=runtime_root / "downloads",
+                ws_endpoint_file=runtime_root / "ws.txt",
+                ws_endpoint="",
+                takeover_url="",
+                novnc_port=None,
+                vnc_port=None,
+            )
+
+            await provisioner.release(runtime)
+
+            self.assertTrue(runtime_root.exists())
+
+    async def test_startup_removes_leftover_profiles_but_only_inside_the_runtime_root(self) -> None:
+        """Reaping an orphan removed its container and left the profile behind, and
+        a profile whose container was removed by hand before the crash had nothing
+        to reap at all."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            provisioner, client = self._provisioner_with_runtime_root(tempdir)
+            reaped_root = self._write_profile(provisioner, "orphan-1")
+            containerless_root = self._write_profile(provisioner, "container-removed-by-hand")
+            outside = Path(tempdir) / "data" / "outside"
+            outside.mkdir()
+            (outside / "keep.txt").write_text("not a session dir", encoding="utf-8")
+            name = "browser-session-orphan-1"
+            client.containers.browser_containers[name] = FakeDockerContainer(
+                container_id=f"{name}-id",
+                name=name,
+                attrs={},
+                labels={"auto-browser.managed": "true", "auto-browser.session_id": "orphan-1"},
+            )
+
+            await provisioner.startup()
+
+            self.assertFalse(reaped_root.exists())
+            self.assertFalse(containerless_root.exists())
+            self.assertTrue((outside / "keep.txt").exists())
+
+    async def test_startup_keeps_leftover_profiles_when_keep_containers_is_on(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            provisioner, _ = self._provisioner_with_runtime_root(tempdir, ISOLATED_BROWSER_KEEP_CONTAINERS="true")
+            runtime_root = self._write_profile(provisioner, "kept")
+
+            await provisioner.startup()
+
+            self.assertTrue(runtime_root.exists())
+
+    async def test_startup_reap_keeps_the_profile_when_the_container_could_not_be_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            provisioner, client = self._provisioner_with_runtime_root(tempdir)
+            runtime_root = self._write_profile(provisioner, "stuck")
+            stuck = FakeDockerContainer(
+                container_id="stuck-id",
+                name="browser-session-stuck",
+                attrs={},
+                labels={"auto-browser.managed": "true", "auto-browser.session_id": "stuck"},
+            )
+
+            def refuse(force: bool = False) -> None:
+                raise RuntimeError("container is busy")
+
+            stuck.remove = refuse  # type: ignore[method-assign]
+            client.containers.browser_containers[stuck.name] = stuck
+
+            await provisioner.startup()
+
+            self.assertTrue(runtime_root.exists())
+
+    async def test_failed_provision_removes_the_directories_it_made(self) -> None:
+        """If docker refuses to start the container there is nothing to release()
+        later, so the profile directories made first would stay."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            provisioner, client = self._provisioner_with_runtime_root(tempdir)
+
+            def refuse(image: str, **kwargs):
+                raise RuntimeError("image not found")
+
+            client.containers.run = refuse  # type: ignore[method-assign]
+
+            with self.assertRaisesRegex(RuntimeError, "image not found"):
+                await provisioner.provision("never-started")
+
+            self.assertFalse(provisioner._local_runtime_root("never-started").exists())
+
 
 class BrowserIsolationSummaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_isolated_session_summary_uses_session_takeover_url_and_runtime_metadata(self) -> None:

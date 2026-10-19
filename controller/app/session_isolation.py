@@ -16,6 +16,7 @@ except Exception:  # pragma: no cover - optional dependency for local host-only 
 logger = logging.getLogger(__name__)
 
 _MANAGED_LABEL = "auto-browser.managed"
+_SESSION_ID_LABEL = "auto-browser.session_id"
 
 
 @dataclass
@@ -79,14 +80,38 @@ class DockerBrowserNodeProvisioner:
         except Exception as exc:
             logger.warning("Could not list orphaned browser containers: %s", exc)
             return
+        still_running: set[str] = set()
         for container in orphans:
             name = getattr(container, "name", "<unknown>")
             try:
                 container.remove(force=True)
             except Exception as exc:
                 logger.warning("Failed to remove orphaned browser container %s: %s", name, exc)
+                # It may still have its profile mounted: leave that directory.
+                still_running.add((getattr(container, "labels", None) or {}).get(_SESSION_ID_LABEL, ""))
                 continue
             logger.info("Reaped orphaned browser container %s", name)
+        self._remove_orphaned_runtime_dirs(keep=still_running)
+
+    def _remove_orphaned_runtime_dirs(self, *, keep: set[str]) -> None:
+        """Delete every per-session profile left from a previous run.
+
+        No session survives a controller restart, so each directory under the
+        runtime root is an orphan, including the ones whose container was
+        already removed by hand before the crash (nothing to reap, profile and
+        cookies still on disk).
+        """
+        root = self._local_runtime_root("")
+        try:
+            leftovers = [entry.name for entry in root.iterdir() if entry.is_dir()]
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            logger.warning("Could not list leftover session runtime dirs in %s: %s", root, exc)
+            return
+        for session_id in leftovers:
+            if session_id not in keep:
+                self._remove_runtime_dirs(session_id)
 
     async def provision(self, session_id: str) -> IsolatedBrowserRuntime:
         pending = await asyncio.to_thread(self._provision_container_sync, session_id)
@@ -141,6 +166,33 @@ class DockerBrowserNodeProvisioner:
         host_profile_dir.mkdir(parents=True, exist_ok=True)
         host_downloads_dir.mkdir(parents=True, exist_ok=True)
 
+        try:
+            return self._run_container_sync(
+                client,
+                session_id,
+                network_name=network_name,
+                host_profile_dir=host_profile_dir,
+                host_downloads_dir=host_downloads_dir,
+                local_profile_dir=local_profile_dir,
+                local_downloads_dir=local_downloads_dir,
+            )
+        except BaseException:
+            # No container exists to release, so release() will never run for
+            # this id and the directories made above would stay.
+            self._remove_runtime_dirs(session_id)
+            raise
+
+    def _run_container_sync(
+        self,
+        client,
+        session_id: str,
+        *,
+        network_name: str,
+        host_profile_dir: Path,
+        host_downloads_dir: Path,
+        local_profile_dir: Path,
+        local_downloads_dir: Path,
+    ) -> PendingBrowserProvision:
         container_name = f"{self.settings.isolated_browser_container_prefix}-{session_id}"
         existing = self._safe_get_container(client, container_name)
         if existing is not None:
@@ -191,7 +243,7 @@ class DockerBrowserNodeProvisioner:
             },
             labels={
                 _MANAGED_LABEL: "true",
-                "auto-browser.session_id": session_id,
+                _SESSION_ID_LABEL: session_id,
                 "auto-browser.mode": "docker_ephemeral",
             },
             **resource_kwargs,
@@ -214,17 +266,19 @@ class DockerBrowserNodeProvisioner:
         container = self._safe_get_container(client, runtime.container_id) or self._safe_get_container(
             client, runtime.container_name
         )
-        if container is None:
-            return
-        try:
-            container.stop(timeout=5)
-        except Exception as exc:
-            logger.debug("Could not stop browser container %s: %s", runtime.container_name, exc)
-        if not self.settings.isolated_browser_keep_containers:
+        if container is not None:
             try:
-                container.remove(force=True)
+                container.stop(timeout=5)
             except Exception as exc:
-                logger.warning("Could not remove browser container %s: %s", runtime.container_name, exc)
+                logger.debug("Could not stop browser container %s: %s", runtime.container_name, exc)
+        if not self.settings.isolated_browser_keep_containers:
+            if container is not None:
+                try:
+                    container.remove(force=True)
+                except Exception as exc:
+                    logger.warning("Could not remove browser container %s: %s", runtime.container_name, exc)
+            # Also when the container is already gone (docker rm, a crashed
+            # daemon): its profile directory, cookies included, is still here.
             self._remove_runtime_dirs(runtime.session_id)
 
     def _remove_runtime_dirs(self, session_id: str) -> None:
