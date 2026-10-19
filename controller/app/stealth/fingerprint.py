@@ -108,25 +108,21 @@ class FingerprintConfig:
         window.chrome.app = window.chrome.app || {{}};
     }}
 
-    // 3. Canvas fingerprint noise — add deterministic per-pixel noise
+    // 3. Canvas fingerprint noise — add deterministic per-pixel noise.
+    // Patched once on the prototype: getContext('2d') returns the same context
+    // every time, so wrapping the instance there stacked another layer of noise
+    // (and another stack frame) on every call.
     const _noise_seed = {noise_seed};
-    const _origGetContext = HTMLCanvasElement.prototype.getContext;
-    HTMLCanvasElement.prototype.getContext = function(type, ...args) {{
-        const ctx = _origGetContext.apply(this, [type, ...args]);
-        if (type === '2d' && ctx) {{
-            const _origGetImageData = ctx.getImageData.bind(ctx);
-            ctx.getImageData = function(x, y, w, h) {{
-                const imageData = _origGetImageData(x, y, w, h);
-                const data = imageData.data;
-                for (let i = 0; i < data.length; i += 4) {{
-                    // Add ±1 noise based on pixel index + seed
-                    const noise = ((_noise_seed ^ i) & 1) ? 1 : -1;
-                    data[i] = Math.max(0, Math.min(255, data[i] + noise));
-                }}
-                return imageData;
-            }};
+    const _origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+    CanvasRenderingContext2D.prototype.getImageData = function(...args) {{
+        const imageData = _origGetImageData.apply(this, args);
+        const data = imageData.data;
+        for (let i = 0; i < data.length; i += 4) {{
+            // Add ±1 noise based on pixel index + seed
+            const noise = ((_noise_seed ^ i) & 1) ? 1 : -1;
+            data[i] = Math.max(0, Math.min(255, data[i] + noise));
         }}
-        return ctx;
+        return imageData;
     }};
 
     // 4. WebGL renderer noise
