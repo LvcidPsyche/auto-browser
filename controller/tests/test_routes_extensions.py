@@ -93,6 +93,20 @@ class RoutesExtensionsTests(unittest.TestCase):
         self.assertTrue(removed.json()["removed"])
         self.assertEqual(client.get("/sessions/missing/network/requests").status_code, 404)
 
+    def test_hooks_whose_pattern_contains_a_slash_can_be_removed(self) -> None:
+        from urllib.parse import quote
+
+        client = self.make_client()
+        for pattern in ("*/api/*", "https://api.example.com/*"):
+            with self.subTest(pattern=pattern):
+                client.post("/sessions/session-1/network/hooks", json={"url_pattern": pattern})
+
+                removed = client.delete("/sessions/session-1/network/hooks/" + quote(pattern, safe=""))
+
+                self.assertEqual(removed.status_code, 200)
+                self.assertTrue(removed.json()["removed"])
+                self.assertNotIn(pattern, client.get("/sessions/session-1/network/hooks").json()["hooks"])
+
     def test_mesh_cdp_and_dashboard_routes(self) -> None:
         client = self.make_client()
 
