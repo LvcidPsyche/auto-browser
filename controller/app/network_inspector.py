@@ -17,7 +17,10 @@ Each entry:
     "request_headers": dict
     "response_headers": dict | None
     "request_body":  str | None  — text, None if binary or disabled
-    "response_body": str | None  — text, None if binary or too large
+    "response_body": str | None  — text, None if binary or too large; filled in
+                                   after requestfinished if the body is still being
+                                   read, so hooks may see None (the hook's entry is
+                                   the log's entry and is updated in place)
     "duration_ms":   float | None
     "failed":        bool
     "failure_text":  str | None
@@ -274,18 +277,19 @@ class NetworkInspector:
             # Capture response body (text/json only, size limited)
             resp_body: str | None = None
             pii_hit = entry.get("pii_redacted", False)
-            if self.capture_bodies:
+            if self.capture_bodies and _worth_reading_body(content_type, resp_headers, self.body_max_bytes):
                 try:
+                    # A response with no declared length (chunked, streamed) can
+                    # only be size-checked after Playwright has buffered it, so
+                    # that case still reads the whole body before it is dropped.
                     raw_bytes = await response.body()
                     if raw_bytes and len(raw_bytes) <= self.body_max_bytes:
-                        is_text = any(m in content_type.lower() for m in ("json", "text", "html", "xml", "javascript"))
-                        if is_text:
-                            resp_body = raw_bytes.decode("utf-8", errors="replace")
-                            if self.scrubber:
-                                scrubbed, hits = self.scrubber.network_body(resp_body, content_type)
-                                if hits:
-                                    resp_body = scrubbed if isinstance(scrubbed, str) else resp_body
-                                    pii_hit = True
+                        resp_body = raw_bytes.decode("utf-8", errors="replace")
+                        if self.scrubber:
+                            scrubbed, hits = self.scrubber.network_body(resp_body, content_type)
+                            if hits:
+                                resp_body = scrubbed if isinstance(scrubbed, str) else resp_body
+                                pii_hit = True
                 except Exception as exc:
                     # Bodies are unavailable for redirects and torn-down contexts.
                     logger.debug("could not read response body for %s: %s", entry.get("url", "?"), exc)
@@ -364,3 +368,23 @@ def _elapsed_ms(entry: dict[str, Any]) -> float | None:
         return None
     elapsed = datetime.now(UTC).timestamp() - started
     return round(elapsed * 1000, 2)
+
+
+_TEXT_CONTENT_MARKERS = ("json", "text", "html", "xml", "javascript")
+
+
+def _worth_reading_body(content_type: str, headers: dict[str, str], max_bytes: int) -> bool:
+    """Decide from the headers alone whether reading the body can be useful.
+
+    Playwright's `response.body()` buffers the whole payload in memory, so a
+    binary download or a declared-oversize body must be ruled out before the
+    call, not after.
+    """
+    if not any(marker in content_type.lower() for marker in _TEXT_CONTENT_MARKERS):
+        return False
+    declared = {k.lower(): v for k, v in headers.items()}.get("content-length")
+    try:
+        return declared is None or int(declared) <= max_bytes
+    except ValueError:
+        # A malformed length is not proof of size; fall back to the post-read check.
+        return True
