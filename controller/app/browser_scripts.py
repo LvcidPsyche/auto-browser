@@ -762,8 +762,11 @@ FIND_ACCESSIBLE_TARGET_SCRIPT = r"""
 """
 
 
-async def apply_stealth(page: object) -> None:
-    """Inject stealth init script into a page before any navigation."""
-    add_init_script = getattr(page, "add_init_script", None)
+async def apply_stealth(target: object) -> None:
+    """Inject the stealth init script into a page or context before any navigation.
+
+    Pass the context to cover every page it opens, popups included.
+    """
+    add_init_script = getattr(target, "add_init_script", None)
     if callable(add_init_script):
         await add_init_script(STEALTH_INIT_SCRIPT)
