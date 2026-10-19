@@ -21,6 +21,14 @@ from typing import Any
 SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 DEFAULT_SANDBOX_MODE = "read-only"
 
+# A request is a prompt, a schema and at most one base64 viewport screenshot
+# (a few MB; a noisy 4K PNG is ~15 MB as base64). Anything larger is not a
+# legitimate request, and the body is read into memory before it is parsed.
+MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024
+# Seconds a client may stall between bytes of a request. Without it one idle or
+# slow connection pinned a handler thread forever.
+REQUEST_READ_TIMEOUT_SECONDS = 30.0
+
 
 def build_sandbox_flags(*, allow_host_exec: bool, sandbox_mode: str) -> list[str]:
     """Mirror of app/codex_sandbox.py — this script runs outside the container.
@@ -175,6 +183,7 @@ class UnixHTTPServer(ThreadingMixIn, UnixStreamServer):
 class BridgeRequestHandler(BaseHTTPRequestHandler):
     server_version = "AutoBrowserCodexHostBridge/0.1"
     protocol_version = "HTTP/1.1"
+    timeout = REQUEST_READ_TIMEOUT_SECONDS
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path != "/healthz":
@@ -196,6 +205,10 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": f"invalid json: {exc}"})
             return
+        except TimeoutError:
+            self.close_connection = True
+            self._send_json(HTTPStatus.REQUEST_TIMEOUT, {"error": "timed out reading the request body"})
+            return
         except Exception as exc:  # pragma: no cover - defensive
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
             return
@@ -206,7 +219,21 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         print(f"[codex-bridge] {format % args}", file=sys.stderr)
 
     def _read_json_body(self) -> dict[str, Any]:
-        length = int(self.headers.get("content-length", "0"))
+        try:
+            length = int(self.headers.get("content-length", "0"))
+        except ValueError:
+            length = -1
+        if length < 0:
+            # rfile.read(-1) would read until the client closes the connection.
+            self.close_connection = True
+            raise BridgeError("invalid Content-Length", status_code=400)
+        if length > MAX_REQUEST_BODY_BYTES:
+            # The body stays unread, so the connection cannot be reused for another request.
+            self.close_connection = True
+            raise BridgeError(
+                f"request body of {length} bytes exceeds the {MAX_REQUEST_BODY_BYTES} byte limit",
+                status_code=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
         body = self.rfile.read(length)
         payload = json.loads(body.decode("utf-8"))
         if not isinstance(payload, dict):
