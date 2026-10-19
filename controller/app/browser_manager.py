@@ -708,6 +708,14 @@ class BrowserManager:
             return
         self._assert_url_allowed(url)
 
+    def _page_off_list(self, session: BrowserSession) -> bool:
+        """Whether the session's active page is on a URL ALLOWED_HOSTS refuses."""
+        try:
+            self._assert_runtime_url_allowed(session.page.url)
+        except PermissionError:
+            return True
+        return False
+
     # ── Tabs ─────────────────────────────────────────────────────────────────
 
     async def list_tabs(self, session_id: str) -> list[dict[str, Any]]:

@@ -30,6 +30,7 @@ from urllib.parse import urlparse
 import pytest
 from playwright.async_api import async_playwright
 
+from app.action_errors import BrowserActionError
 from app.browser_manager import BrowserManager
 from tests._chromium import chromium_executable, requires_chromium
 from tests.test_browser_manager_create_session import _settings
@@ -221,3 +222,63 @@ async def test_activate_tab_still_switches_between_allowed_tabs(tmp_path: Path) 
         await env.manager.activate_tab(session_id, 1)
 
         assert session.page is popup
+
+
+# ── H-4b: a blocked action that cannot be rolled back ────────────────────────
+
+REPLACE_PAGE = "<title>allowed</title><button id=go onclick=\"location.replace('{EVIL}/')\">go</button>"
+
+
+async def popup_with_replace_button(env: Env) -> tuple[str, object]:
+    """A session whose active tab is a popup, whose only history entry is a page that replaces itself.
+
+    A popup has no earlier entry to go back to, which is what leaves a blocked
+    location.replace() with nowhere to roll back to.
+    """
+    session_id = await env.create()
+    popup = await open_popup(env, session_id, f"{env.allowed}/replace")
+    await env.manager.activate_tab(session_id, 1)
+    return session_id, popup
+
+
+async def test_blocked_replace_in_a_popup_leaves_the_page_blank_and_the_snapshot_clean(tmp_path: Path) -> None:
+    async with browser_env(tmp_path, {"/replace": REPLACE_PAGE}) as env:
+        session_id, popup = await popup_with_replace_button(env)
+
+        with pytest.raises(BrowserActionError) as blocked:
+            await env.manager.click(session_id, selector="#go")
+
+        assert blocked.value.code == "browser_action_blocked"
+        assert SECRET not in str(blocked.value.payload), "the 403 carried the disallowed page's content"
+        assert popup.url == "about:blank"
+        observed = await env.manager.observe(session_id, preset="text")
+        assert SECRET not in str(observed)
+
+
+async def test_blocked_action_that_cannot_leave_the_page_withholds_its_content(tmp_path: Path) -> None:
+    """If even the move to about:blank fails, the 403 reports the URL and no page content."""
+    async with browser_env(tmp_path, {"/replace": REPLACE_PAGE}) as env:
+        session_id, popup = await popup_with_replace_button(env)
+        popup.goto = AsyncMock(side_effect=RuntimeError("navigation refused"))
+
+        with pytest.raises(BrowserActionError) as blocked:
+            await env.manager.click(session_id, selector="#go")
+
+        snapshot = blocked.value.details["snapshot"]
+        assert SECRET not in str(blocked.value.payload)
+        assert snapshot["url"].startswith(env.evil)
+        assert "snapshot_error" in snapshot
+
+
+async def test_blocked_navigation_where_history_exists_is_still_rolled_back(tmp_path: Path) -> None:
+    """The case that worked before: location.assign leaves a history entry, and go_back returns to it."""
+    page = "<title>allowed</title><button id=go onclick=\"location.assign('{EVIL}/')\">go</button>"
+    async with browser_env(tmp_path, {"/assign": page}) as env:
+        session_id = await env.create("/assign")
+
+        with pytest.raises(BrowserActionError) as blocked:
+            await env.manager.click(session_id, selector="#go")
+
+        assert blocked.value.code == "browser_action_blocked"
+        assert SECRET not in str(blocked.value.payload)
+        assert env.manager.sessions[session_id].page.url == f"{env.allowed}/assign"
