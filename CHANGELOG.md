@@ -2,6 +2,39 @@
 
 All notable changes to auto-browser are documented here.
 
+## [Unreleased]
+
+### Security
+
+These matter only if you run the controller with named credentials (`API_BEARER_TOKENS`).
+Single-operator and shared-token (`API_BEARER_TOKEN`) deployments see no change except the
+export fix below.
+
+- **Saved session auth state is owned by the session's operator.** `storage_state_path` is
+  relative to the auth root, so another operator could name `<session id>/state.json` and open a
+  browser logged in as the session's owner. A session that has an owner now leaves an
+  `.owner.json` marker beside the state it saves (including forks), and a path into that
+  directory is allowed only to that operator, even after the session closed or the controller
+  restarted. State saved by an earlier release has no marker; it falls back to the owner on the
+  session record, and stays open if there is none. An unreadable marker refuses.
+- **Shadow-browse sessions belong to the session they were made from.** They were created with no
+  owner, so any operator could list and drive the copy of another operator's logged-in browser.
+  There is still no session-limit check, so `MAX_SESSIONS=1` setups can use shadow browsing.
+- **Auth profile export leaves out the plaintext `state.json` when an encrypted
+  `state.json.enc` exists.** A plaintext copy saved before the encryption key was set used to
+  ride along in the archive. This applies to every deployment. Profiles with only a plaintext
+  state still export it.
+- **An exported auth archive can be imported only by the operator who exported it.** Export
+  writes `<archive>.exporter.json` next to the archive; import refuses anyone else. Archives
+  without it (made without named credentials, by an earlier release, or copied in from another
+  box) import as before. The importer never becomes the owner: a profile keeps the owner
+  recorded in its archive.
+
+### Removed
+
+- `download_url` from the auth profile export response. It pointed at `/auth-export/<archive>`,
+  which no route serves; the archive is the file named by `archive_path` in the auth root.
+
 ## [1.9.1] — 2026-10-05
 
 Prebuilt images: you can now run auto-browser without building it. Nothing else changes for
