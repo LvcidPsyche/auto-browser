@@ -21,8 +21,22 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any, Generator
+from urllib.parse import quote
 
 import httpx
+
+
+def _seg(value: str) -> str:
+    """Percent-encode one URL path segment.
+
+    Ids are interpolated into paths, so an id such as ``../approvals/x/approve``
+    used to retarget the request at another route. ``.`` and ``..`` survive
+    quoting and are resolved by the HTTP stack, so they are refused outright.
+    """
+    segment = str(value)
+    if segment in {"", ".", ".."}:
+        raise ValueError(f"invalid id for a URL path segment: {segment!r}")
+    return quote(segment, safe="")
 
 
 class AutoBrowserError(Exception):
@@ -72,15 +86,23 @@ class AutoBrowserClient:
         return self
 
     def __exit__(self, *_) -> None:
-        if self._sync_client:
-            self._sync_client.close()
-            self._sync_client = None
+        self.close()
 
     async def __aenter__(self) -> "AutoBrowserClient":
         self._async_client = httpx.AsyncClient(base_url=self.base_url, headers=self._headers, timeout=self._timeout)
         return self
 
     async def __aexit__(self, *_) -> None:
+        await self.aclose()
+
+    def close(self) -> None:
+        """Close the HTTP client that a call outside ``with`` opened lazily."""
+        if self._sync_client:
+            self._sync_client.close()
+            self._sync_client = None
+
+    async def aclose(self) -> None:
+        """Async counterpart of ``close``."""
         if self._async_client:
             await self._async_client.aclose()
             self._async_client = None
@@ -192,16 +214,16 @@ class AutoBrowserClient:
         return await self._apost("/sessions", body)
 
     def get_session(self, session_id: str) -> dict:
-        return self._get(f"/sessions/{session_id}")
+        return self._get(f"/sessions/{_seg(session_id)}")
 
     async def async_get_session(self, session_id: str) -> dict:
-        return await self._aget(f"/sessions/{session_id}")
+        return await self._aget(f"/sessions/{_seg(session_id)}")
 
     def close_session(self, session_id: str) -> dict:
-        return self._delete(f"/sessions/{session_id}")
+        return self._delete(f"/sessions/{_seg(session_id)}")
 
     async def async_close_session(self, session_id: str) -> dict:
-        return await self._adelete(f"/sessions/{session_id}")
+        return await self._adelete(f"/sessions/{_seg(session_id)}")
 
     # ── Observe ──────────────────────────────────────────────────────────────
 
@@ -222,7 +244,7 @@ class AutoBrowserClient:
         body: dict = {"limit": limit}
         if preset is not None:
             body["preset"] = preset
-        return self._post(f"/sessions/{session_id}/observe", body)
+        return self._post(f"/sessions/{_seg(session_id)}/observe", body)
 
     async def async_observe(
         self,
@@ -235,15 +257,15 @@ class AutoBrowserClient:
         body: dict = {"limit": limit}
         if preset is not None:
             body["preset"] = preset
-        return await self._apost(f"/sessions/{session_id}/observe", body)
+        return await self._apost(f"/sessions/{_seg(session_id)}/observe", body)
 
     # ── Navigation & actions ─────────────────────────────────────────────────
 
     def navigate(self, session_id: str, url: str) -> dict:
-        return self._post(f"/sessions/{session_id}/actions/navigate", {"url": url})
+        return self._post(f"/sessions/{_seg(session_id)}/actions/navigate", {"url": url})
 
     async def async_navigate(self, session_id: str, url: str) -> dict:
-        return await self._apost(f"/sessions/{session_id}/actions/navigate", {"url": url})
+        return await self._apost(f"/sessions/{_seg(session_id)}/actions/navigate", {"url": url})
 
     def click(
         self,
@@ -263,7 +285,7 @@ class AutoBrowserClient:
             body["x"] = x
         if y is not None:
             body["y"] = y
-        return self._post(f"/sessions/{session_id}/actions/click", body)
+        return self._post(f"/sessions/{_seg(session_id)}/actions/click", body)
 
     async def async_click(
         self,
@@ -283,7 +305,7 @@ class AutoBrowserClient:
             body["x"] = x
         if y is not None:
             body["y"] = y
-        return await self._apost(f"/sessions/{session_id}/actions/click", body)
+        return await self._apost(f"/sessions/{_seg(session_id)}/actions/click", body)
 
     def type_text(
         self,
@@ -299,7 +321,7 @@ class AutoBrowserClient:
             body["selector"] = selector
         if element_id:
             body["element_id"] = element_id
-        return self._post(f"/sessions/{session_id}/actions/type", body)
+        return self._post(f"/sessions/{_seg(session_id)}/actions/type", body)
 
     async def async_type_text(
         self,
@@ -315,43 +337,49 @@ class AutoBrowserClient:
             body["selector"] = selector
         if element_id:
             body["element_id"] = element_id
-        return await self._apost(f"/sessions/{session_id}/actions/type", body)
+        return await self._apost(f"/sessions/{_seg(session_id)}/actions/type", body)
 
     def scroll(self, session_id: str, *, delta_x: float = 0, delta_y: float = 600) -> dict:
-        return self._post(f"/sessions/{session_id}/actions/scroll", {"delta_x": delta_x, "delta_y": delta_y})
+        return self._post(f"/sessions/{_seg(session_id)}/actions/scroll", {"delta_x": delta_x, "delta_y": delta_y})
 
     async def async_scroll(self, session_id: str, *, delta_x: float = 0, delta_y: float = 600) -> dict:
-        return await self._apost(f"/sessions/{session_id}/actions/scroll", {"delta_x": delta_x, "delta_y": delta_y})
+        return await self._apost(
+            f"/sessions/{_seg(session_id)}/actions/scroll", {"delta_x": delta_x, "delta_y": delta_y}
+        )
 
     def screenshot(self, session_id: str, label: str = "manual") -> dict:
-        return self._post(f"/sessions/{session_id}/screenshot", {"label": label})
+        return self._post(f"/sessions/{_seg(session_id)}/screenshot", {"label": label})
 
     async def async_screenshot(self, session_id: str, label: str = "manual") -> dict:
-        return await self._apost(f"/sessions/{session_id}/screenshot", {"label": label})
+        return await self._apost(f"/sessions/{_seg(session_id)}/screenshot", {"label": label})
 
     def screenshot_diff(self, session_id: str) -> dict:
         """Capture screenshot and diff against the most recent prior screenshot."""
-        return self._post(f"/sessions/{session_id}/screenshot/compare")
+        return self._post(f"/sessions/{_seg(session_id)}/screenshot/compare")
 
     async def async_screenshot_diff(self, session_id: str) -> dict:
-        return await self._apost(f"/sessions/{session_id}/screenshot/compare")
+        return await self._apost(f"/sessions/{_seg(session_id)}/screenshot/compare")
 
     # ── Agent ────────────────────────────────────────────────────────────────
 
     def agent_step(self, session_id: str, *, provider: str, goal: str, **kwargs) -> dict:
-        return self._post(f"/sessions/{session_id}/agent/step", {"provider": provider, "goal": goal, **kwargs})
+        return self._post(f"/sessions/{_seg(session_id)}/agent/step", {"provider": provider, "goal": goal, **kwargs})
 
     async def async_agent_step(self, session_id: str, *, provider: str, goal: str, **kwargs) -> dict:
-        return await self._apost(f"/sessions/{session_id}/agent/step", {"provider": provider, "goal": goal, **kwargs})
+        return await self._apost(
+            f"/sessions/{_seg(session_id)}/agent/step", {"provider": provider, "goal": goal, **kwargs}
+        )
 
     def agent_run(self, session_id: str, *, provider: str, goal: str, max_steps: int = 6, **kwargs) -> dict:
         return self._post(
-            f"/sessions/{session_id}/agent/run", {"provider": provider, "goal": goal, "max_steps": max_steps, **kwargs}
+            f"/sessions/{_seg(session_id)}/agent/run",
+            {"provider": provider, "goal": goal, "max_steps": max_steps, **kwargs},
         )
 
     async def async_agent_run(self, session_id: str, *, provider: str, goal: str, max_steps: int = 6, **kwargs) -> dict:
         return await self._apost(
-            f"/sessions/{session_id}/agent/run", {"provider": provider, "goal": goal, "max_steps": max_steps, **kwargs}
+            f"/sessions/{_seg(session_id)}/agent/run",
+            {"provider": provider, "goal": goal, "max_steps": max_steps, **kwargs},
         )
 
     # ── Approvals ────────────────────────────────────────────────────────────
@@ -373,16 +401,16 @@ class AutoBrowserClient:
         return await self._aget("/approvals", **params)
 
     def approve(self, approval_id: str, comment: str | None = None) -> dict:
-        return self._post(f"/approvals/{approval_id}/approve", {"comment": comment})
+        return self._post(f"/approvals/{_seg(approval_id)}/approve", {"comment": comment})
 
     async def async_approve(self, approval_id: str, comment: str | None = None) -> dict:
-        return await self._apost(f"/approvals/{approval_id}/approve", {"comment": comment})
+        return await self._apost(f"/approvals/{_seg(approval_id)}/approve", {"comment": comment})
 
     def reject(self, approval_id: str, comment: str | None = None) -> dict:
-        return self._post(f"/approvals/{approval_id}/reject", {"comment": comment})
+        return self._post(f"/approvals/{_seg(approval_id)}/reject", {"comment": comment})
 
     async def async_reject(self, approval_id: str, comment: str | None = None) -> dict:
-        return await self._apost(f"/approvals/{approval_id}/reject", {"comment": comment})
+        return await self._apost(f"/approvals/{_seg(approval_id)}/reject", {"comment": comment})
 
     # ── Auth profiles ────────────────────────────────────────────────────────
 
@@ -393,10 +421,10 @@ class AutoBrowserClient:
         return await self._aget("/auth-profiles")
 
     def save_auth_profile(self, session_id: str, profile_name: str) -> dict:
-        return self._post(f"/sessions/{session_id}/auth-profiles", {"profile_name": profile_name})
+        return self._post(f"/sessions/{_seg(session_id)}/auth-profiles", {"profile_name": profile_name})
 
     async def async_save_auth_profile(self, session_id: str, profile_name: str) -> dict:
-        return await self._apost(f"/sessions/{session_id}/auth-profiles", {"profile_name": profile_name})
+        return await self._apost(f"/sessions/{_seg(session_id)}/auth-profiles", {"profile_name": profile_name})
 
     def import_auth_profile(self, archive_path: str, *, overwrite: bool = False) -> dict:
         return self._post("/auth-profiles/import", {"archive_path": archive_path, "overwrite": overwrite})
@@ -410,7 +438,7 @@ class AutoBrowserClient:
         """Yield parsed event dicts from the SSE stream. Blocks until disconnected."""
         import json as _json
 
-        url = f"{self.base_url}/sessions/{session_id}/events"
+        url = f"{self.base_url}/sessions/{_seg(session_id)}/events"
         # No read timeout — the stream is meant to stay open — but a bounded
         # connect. `timeout=None` disabled both, so an unreachable controller
         # hung this generator forever instead of raising.

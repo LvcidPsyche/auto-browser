@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 from auto_browser_client import AutoBrowserClient
@@ -60,6 +61,55 @@ class ClientPathTests(unittest.TestCase):
         self.assertEqual(request.url.path, "/audit/events")
         self.assertEqual(dict(request.url.params), {"limit": "10", "session_id": "session-1"})
 
+    def test_ids_cannot_retarget_the_request(self) -> None:
+        # An id is one path segment. "../approvals/zz/approve" used to reach
+        # POST /approvals/zz/approve through get_session's own route.
+        hostile = "../approvals/zz/approve?x=1"
+        self.client.get_session(hostile)
+        self.client.navigate("a/b", "https://example.com")
+        self.client.approve("x#y", "ok")
+
+        self.assertEqual(
+            [request.url.raw_path.decode() for request in self.requests],
+            [
+                "/sessions/..%2Fapprovals%2Fzz%2Fapprove%3Fx%3D1",
+                "/sessions/a%2Fb/actions/navigate",
+                "/approvals/x%23y/approve",
+            ],
+        )
+
+    def test_dot_segment_ids_are_refused(self) -> None:
+        # "." and ".." survive percent-encoding and are resolved by URL normalisation.
+        for bad in ("..", ".", ""):
+            with self.assertRaises(ValueError):
+                self.client.get_session(bad)
+        self.assertEqual(self.requests, [])
+
+    def test_stream_events_url_encodes_the_session_id(self) -> None:
+        captured: dict[str, Any] = {}
+
+        def fake_stream(method: str, url: str, **_kwargs: Any):
+            captured["url"] = url
+            raise RuntimeError("stop before any network use")
+
+        with patch("auto_browser_client.client.httpx.stream", side_effect=fake_stream):
+            with self.assertRaises(RuntimeError):
+                list(self.client.stream_events("a/b"))
+
+        self.assertEqual(captured["url"], "http://auto-browser.test/sessions/a%2Fb/events")
+
+    def test_close_releases_a_lazily_opened_client(self) -> None:
+        client = AutoBrowserClient("http://auto-browser.test")
+        client._client()
+        opened = client._sync_client
+        self.assertIsNotNone(opened)
+
+        client.close()
+
+        self.assertTrue(opened.is_closed)
+        self.assertIsNone(client._sync_client)
+        client.close()  # idempotent
+
 
 class AsyncClientPathTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -96,3 +146,23 @@ class AsyncClientPathTests(unittest.IsolatedAsyncioTestCase):
                 "/audit/events",
             ],
         )
+
+    async def test_async_ids_cannot_retarget_the_request(self) -> None:
+        await self.client.async_get_session("../approvals/zz/approve")
+        await self.client.async_reject("a/b")
+
+        self.assertEqual(
+            [request.url.raw_path.decode() for request in self.requests],
+            ["/sessions/..%2Fapprovals%2Fzz%2Fapprove", "/approvals/a%2Fb/reject"],
+        )
+
+    async def test_aclose_releases_a_lazily_opened_client(self) -> None:
+        client = AutoBrowserClient("http://auto-browser.test")
+        client._aclient()
+        opened = client._async_client
+        self.assertIsNotNone(opened)
+
+        await client.aclose()
+
+        self.assertTrue(opened.is_closed)
+        self.assertIsNone(client._async_client)
