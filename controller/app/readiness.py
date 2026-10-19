@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .auth_policy import credentials_for
+
 
 @dataclass
 class ReadinessCheck:
@@ -218,6 +220,32 @@ def run_readiness_checks(settings: Any, mode: str = "normal") -> ReadinessReport
                 fix="Set REQUIRE_APPROVAL_FOR_UPLOADS=true.",
             )
         )
+
+    if len(credentials_for(settings)) > 1:
+        if getattr(settings, "mcp_force_governed", False):
+            checks.append(
+                ReadinessCheck(
+                    name="governed_approvals",
+                    status="pass",
+                    message="MCP_FORCE_GOVERNED=true: MCP write tools need an operator's approval.",
+                )
+            )
+        else:
+            checks.append(
+                ReadinessCheck(
+                    name="governed_approvals",
+                    status="warn",
+                    message=(
+                        "Several operator credentials are configured, but governed approvals are each "
+                        "caller's choice: an agent that omits workflow_profile=governed runs its writes "
+                        "without approval."
+                    ),
+                    fix=(
+                        "Set MCP_FORCE_GOVERNED=true to require approval for every MCP write tool, "
+                        "and leave AUTONOMOUS_APPROVALS off."
+                    ),
+                )
+            )
 
     statuses = {check.status for check in checks}
     if "fail" in statuses:

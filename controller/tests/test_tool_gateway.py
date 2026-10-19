@@ -80,6 +80,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 allowed_hosts="*",
                 pii_scrub_enabled=True,
                 require_approval_for_uploads=True,
+                mcp_force_governed=False,
             ),
             memory=SimpleNamespace(
                 save=AsyncMock(
