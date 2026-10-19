@@ -20,7 +20,7 @@ SESSION_ID=$(
     -X POST \
     -H 'content-type: application/json' \
     -d '{"name":"outlook-login","start_url":"https://outlook.live.com/mail/0/"}' \
-  | jq -r '.session_id'
+  | jq -r '.id'
 )
 
 echo "$SESSION_ID"
