@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from fastapi import FastAPI
 from starlette.datastructures import Headers
 from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -72,3 +73,10 @@ class ControllerHostMiddleware:
             return
         response = PlainTextResponse("Invalid host header", status_code=400)
         await response(scope, receive, send)
+
+
+def install_controller_host_middleware(application: FastAPI, allowed_hosts: Sequence[str]) -> None:
+    # An empty list is not "allow everything" for an unauthenticated API: the
+    # loopback-only Host rule in app/middleware/http.py covers that case.
+    if allowed_hosts:
+        application.add_middleware(ControllerHostMiddleware, allowed_hosts=list(allowed_hosts))

@@ -9,14 +9,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from .action_errors import BrowserActionError, SessionNotFoundError
-from .app_factory import (
-    build_controller_services,
-    create_controller_app,
-    install_controller_host_middleware,
-)
+from .app_factory import build_controller_services, create_controller_app
 from .compliance import apply_compliance_template, write_compliance_manifest
 from .config import get_settings
 from .middleware import install_controller_http_middleware
+from .middleware.hosts import install_controller_host_middleware
 from .routes.agent import create_agent_router
 from .routes.auth_profiles import create_auth_profiles_router
 from .routes.mcp import create_mcp_router

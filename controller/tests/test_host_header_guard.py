@@ -15,7 +15,6 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.app_factory import install_controller_host_middleware
 from app.config import Settings
 from app.middleware.hosts import ControllerHostMiddleware, host_from_header, host_is_allowed
 from app.middleware.http import install_controller_http_middleware
@@ -35,7 +34,6 @@ def _client(**overrides) -> TestClient:
         return {"ok": True}
 
     settings = Settings(_env_file=None, **overrides)
-    install_controller_host_middleware(application, settings.controller_allowed_host_patterns)
     install_controller_http_middleware(
         application,
         settings=settings,

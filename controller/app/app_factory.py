@@ -17,7 +17,6 @@ from .cron_service import CronService
 from .maintenance import MaintenanceService
 from .mcp_transport import McpHttpTransport
 from .metrics import MetricsRecorder
-from .middleware.hosts import ControllerHostMiddleware
 from .orchestrator import BrowserOrchestrator
 from .provider_registry import ProviderRegistry
 from .proxy_personas import ProxyPersonaStore
@@ -122,13 +121,6 @@ def build_controller_services(settings: Settings, *, version: str) -> Controller
     )
 
 
-def install_controller_host_middleware(application: FastAPI, allowed_hosts: list[str]) -> None:
-    # An empty list is not "allow everything" for an unauthenticated API: the
-    # loopback-only Host rule in app/middleware/http.py covers that case.
-    if allowed_hosts:
-        application.add_middleware(ControllerHostMiddleware, allowed_hosts=allowed_hosts)
-
-
 class SessionArtifactFiles(StaticFiles):
     """/artifacts/<session id>/..., served to whoever may use that session.
 
@@ -161,7 +153,6 @@ def create_controller_app(
         summary="Visual Auto Browser control plane for LLM workflows.",
         dependencies=[Depends(require_session_access)],
     )
-    install_controller_host_middleware(application, services.settings.controller_allowed_host_patterns)
 
     application.state.browser_manager = services.manager
     application.state.tool_gateway = services.tool_gateway

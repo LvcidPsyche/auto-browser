@@ -18,6 +18,7 @@ from ..auth_policy import (
     resolve_bind_scope,
 )
 from ..rate_limits import build_rate_limit_key, is_exempt_path
+from .hosts import install_controller_host_middleware
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +217,12 @@ def install_controller_http_middleware(
                 )
             },
         )
+
+    # Installed after every layer above, so it runs before them: a request for a
+    # name this controller does not answer to is refused as such, not as a 401 or
+    # a missing operator id, and never spends rate-limit budget. Metrics stay
+    # outside it so the refusal is still counted.
+    install_controller_host_middleware(application, configured_hosts)
 
     @application.middleware("http")
     async def record_http_metrics(request: Request, call_next):
