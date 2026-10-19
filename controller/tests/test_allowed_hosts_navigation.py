@@ -181,3 +181,43 @@ async def test_create_session_still_follows_a_redirect_between_allowed_pages(tmp
         session_id = await env.create("/hop")
 
         assert env.manager.sessions[session_id].page.url == f"{env.allowed}/final"
+
+
+# ── H-4c: activate_tab ───────────────────────────────────────────────────────
+
+
+async def open_popup(env: Env, session_id: str, url: str):
+    """Open `url` in a second tab of the session, the way a page's own window.open does."""
+    session = env.manager.sessions[session_id]
+    async with session.context.expect_page() as opened:
+        await session.page.evaluate("(url) => window.open(url)", url)
+    popup = await opened.value
+    await popup.wait_for_load_state()
+    return popup
+
+
+async def test_activate_tab_refuses_a_popup_on_a_disallowed_host(tmp_path: Path) -> None:
+    async with browser_env(tmp_path, {}) as env:
+        session_id = await env.create()
+        session = env.manager.sessions[session_id]
+        original = session.page
+        popup = await open_popup(env, session_id, f"{env.evil}/")
+        assert popup.url.startswith(env.evil)
+
+        with pytest.raises(PermissionError, match="127.0.0.1"):
+            await env.manager.activate_tab(session_id, 1)
+
+        assert session.page is original, "the session was switched onto the disallowed tab"
+        observed = await env.manager.observe(session_id, preset="text")
+        assert SECRET not in str(observed)
+
+
+async def test_activate_tab_still_switches_between_allowed_tabs(tmp_path: Path) -> None:
+    async with browser_env(tmp_path, {"/second": "<title>second</title>"}) as env:
+        session_id = await env.create()
+        session = env.manager.sessions[session_id]
+        popup = await open_popup(env, session_id, f"{env.allowed}/second")
+
+        await env.manager.activate_tab(session_id, 1)
+
+        assert session.page is popup
