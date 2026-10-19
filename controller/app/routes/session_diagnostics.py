@@ -231,7 +231,9 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
 
     @router.get("/sessions/{session_id}/export-script")
     async def export_script(session_id: str) -> dict[str, Any]:
-        await manager.get_session(session_id)
+        # The record, not the live session: the script of a finished session is
+        # the one people want. It still refuses another operator's session.
+        await manager.get_session_record(session_id)
         return await export_session_script(
             session_id,
             manager.audit,
@@ -241,8 +243,11 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
 
     @router.get("/sessions/{session_id}/trace")
     async def get_trace(session_id: str) -> dict[str, Any]:
-        session = await manager.get_session(session_id)
-        trace_path = Path(str(session.trace_path)) if hasattr(session, "trace_path") else None
+        # trace.zip is written when the session closes, so this has to answer
+        # for a closed session: the record holds the path, live or stored.
+        record = await manager.get_session_record(session_id)
+        recorded_path = record.get("trace_path")
+        trace_path = Path(str(recorded_path)) if recorded_path else None
         if trace_path and trace_path.exists():
             return {
                 "session_id": session_id,

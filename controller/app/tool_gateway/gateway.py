@@ -1001,7 +1001,8 @@ class McpToolGateway:
     async def _export_script(self, payload: ExportScriptInput) -> dict[str, Any]:
         from ..playwright_export import export_session_script
 
-        await self.manager.get_session(payload.session_id)
+        # The record, not the live session: a finished session can be exported.
+        await self.manager.get_session_record(payload.session_id)
         return await export_session_script(
             payload.session_id,
             self.manager.audit,
