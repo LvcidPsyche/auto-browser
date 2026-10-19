@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 from pydantic import ValidationError
 
@@ -246,6 +248,60 @@ class UniversalVerifierAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result.passed)
         self.assertIn("schema", result.notes.lower())
+
+    async def _run_and_capture_child(self, adapter: UniversalVerifierAdapter, started: list) -> None:
+        contract = TaskContract(
+            id="task-uv-kill",
+            goal="uv child must not outlive the call",
+            postconditions=[{"kind": "url_contains", "value": "example.com"}],
+        )
+        original = asyncio.create_subprocess_exec
+
+        async def spy(*args, **kwargs):
+            process = await original(*args, **kwargs)
+            started.append(process)
+            return process
+
+        with mock.patch("app.harness.verifier.uv.asyncio.create_subprocess_exec", spy):
+            await adapter.verify(contract, {})
+
+    async def test_uv_child_is_killed_and_reaped_when_the_caller_cancels(self) -> None:
+        """A cancelled verify() (the harness wall-clock wait_for, shutdown) skipped
+        process.kill(): only the adapter's own timeout path killed the child."""
+        started: list = []
+        adapter = UniversalVerifierAdapter(
+            command=[sys.executable, "-c", "import time; time.sleep(120)"], timeout_seconds=300
+        )
+        task = asyncio.create_task(self._run_and_capture_child(adapter, started))
+        try:
+            deadline = asyncio.get_running_loop().time() + 30
+            while not started:
+                self.assertLess(asyncio.get_running_loop().time(), deadline, "child never started")
+                await asyncio.sleep(0.01)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            # returncode is only set once the child has exited and been reaped.
+            self.assertIsNotNone(started[0].returncode)
+        finally:
+            for process in started:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
+
+    async def test_uv_child_is_killed_on_its_own_timeout(self) -> None:
+        started: list = []
+        adapter = UniversalVerifierAdapter(
+            command=[sys.executable, "-c", "import time; time.sleep(120)"], timeout_seconds=1
+        )
+        try:
+            await self._run_and_capture_child(adapter, started)
+            self.assertIsNotNone(started[0].returncode)
+        finally:
+            for process in started:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
 
 
 class _StaticVerifier:
