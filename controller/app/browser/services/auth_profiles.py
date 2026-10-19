@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from ...audit import get_current_operator
-from ...session_ownership import verified_operator
+from ...session_ownership import may_use, verified_operator
 from ...utils import UTC, atomic_write_text, utc_now
 from ...witness import WitnessActionContext
 
@@ -38,6 +38,14 @@ _COPY_CHUNK_BYTES = 64 * 1024
 # per-save temp files (".<name>.<random>.tmp.json"). A process that died at the
 # wrong moment left them behind, and an export must not carry them off.
 _PLAINTEXT_LEFTOVER = re.compile(r"auth-state-[^/\\]*\.json|\.[^/\\]*\.tmp\.json")
+
+
+# Written beside the state a session saves in AUTH_ROOT/<session_id>/ when that
+# session has an owner. It outlives the session record and the process, so the
+# ownership of saved state does not depend on anything still being in memory.
+SESSION_OWNER_MARKER = ".owner.json"
+PROFILES_DIRNAME = "profiles"
+_FOREIGN_SESSION_STATE = "storage_state_path points into the saved auth state of another operator's session"
 
 
 def _skip_plaintext_leftovers(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
@@ -157,6 +165,8 @@ class BrowserAuthProfileService:
                     metadata={"error": witness_outcome.block_reason},
                 )
                 raise PermissionError(witness_outcome.block_reason or "Witness policy blocked save_storage_state")
+            # Marker first: state must never sit in the directory without it.
+            self.mark_session_auth_dir(session.auth_dir, session.owner)
             auth_info = await self.manager.auth_state.write_storage_state(session.context, safe_path)
             session.last_auth_state_path = Path(auth_info["path"]) if auth_info["path"] else None
             payload = {
@@ -574,7 +584,7 @@ class BrowserAuthProfileService:
         return True
 
     def root(self) -> Path:
-        root = Path(self.manager.settings.auth_root).resolve() / "profiles"
+        root = Path(self.manager.settings.auth_root).resolve() / PROFILES_DIRNAME
         root.mkdir(parents=True, exist_ok=True)
         return root
 
@@ -664,18 +674,89 @@ class BrowserAuthProfileService:
     def storage_state_source(self, relative_path: str) -> Path:
         """Resolve a create-session `storage_state_path`, with the owner check.
 
-        The path is relative to AUTH_ROOT, and auth profiles live under
-        AUTH_ROOT/profiles, so `profiles/<name>/state.json.enc` loads a profile
-        without naming it as `auth_profile` — which skipped `require_access`
-        and opened a browser logged in as the profile's owner. A path into a
-        profile directory is authorized exactly as that profile would be.
+        The path is relative to AUTH_ROOT, which holds two kinds of stored
+        logins besides loose files, and each is authorized as its owner's:
+
+        - Auth profiles live under AUTH_ROOT/profiles, so
+          `profiles/<name>/state.json.enc` loads a profile without naming it as
+          `auth_profile` — which skipped `require_access` and opened a browser
+          logged in as the profile's owner.
+        - A session saves its own state under AUTH_ROOT/<session_id>/, so
+          `<session_id>/state.json` did the same with a session's cookies. That
+          directory carries an owner marker (see mark_session_auth_dir);
+          directories without one are settled by require_session_record_access.
         """
         source = self.safe_auth_path(relative_path, must_exist=True)
         profile_root = Path(os.path.realpath(os.fspath(self.root())))
         if source.is_relative_to(profile_root) and source != profile_root:
             profile_name = source.relative_to(profile_root).parts[0]
             self.require_access(profile_name, action="opening a session from an auth profile")
+            return source
+        session_dir = self._session_auth_dir_of(source)
+        if session_dir is not None:
+            owner = self._read_session_dir_owner(session_dir)
+            if owner is not None and not may_use(owner):
+                raise PermissionError(_FOREIGN_SESSION_STATE)
         return source
+
+    async def require_session_record_access(self, source: Path) -> None:
+        """For state under a session's auth directory that has no owner marker.
+
+        State saved before the marker existed: its session record, live or
+        persisted, still says who owned it. With neither, nobody can be named
+        and the path stays open, as it was.
+        """
+        session_dir = self._session_auth_dir_of(source)
+        if session_dir is None or (session_dir / SESSION_OWNER_MARKER).exists():
+            return
+        owner = await self.manager.session_owner(session_dir.name)
+        if owner is not None and not may_use(owner):
+            raise PermissionError(_FOREIGN_SESSION_STATE)
+
+    def _session_auth_dir_of(self, source: Path) -> Path | None:
+        """AUTH_ROOT/<first component> for a file inside a session-style directory, else None."""
+        auth_root = Path(os.path.realpath(os.fspath(Path(self.manager.settings.auth_root).resolve())))
+        if not source.is_relative_to(auth_root):
+            return None
+        parts = source.relative_to(auth_root).parts
+        if len(parts) < 2 or parts[0] == PROFILES_DIRNAME:
+            return None
+        return auth_root / parts[0]
+
+    @staticmethod
+    def mark_session_auth_dir(auth_dir: Path, owner: str | None) -> None:
+        """Record who owns the state about to be written into a session's auth directory.
+
+        Unowned sessions (shared token, no token) record nothing, so those
+        deployments are unchanged.
+        """
+        if not owner:
+            return
+        auth_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(auth_dir / SESSION_OWNER_MARKER, json.dumps({"owner": owner}))
+
+    @staticmethod
+    def _read_session_dir_owner(session_dir: Path) -> str | None:
+        """The marker's owner, None when there is no marker.
+
+        A marker that exists but cannot be read raises: None means "no owner,
+        open to anyone", which a damaged file must not read as (the same rule
+        as read_metadata(strict=True) for profiles).
+        """
+        marker = session_dir / SESSION_OWNER_MARKER
+        if not marker.exists():
+            return None
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            payload = None
+        owner = payload.get("owner") if isinstance(payload, dict) else None
+        if isinstance(owner, str) and owner.strip():
+            return owner.strip()
+        raise PermissionError(
+            f"the owner marker in session auth directory '{session_dir.name}' is unreadable, so its owner "
+            f"cannot be checked; restore or delete {SESSION_OWNER_MARKER}"
+        )
 
     def safe_auth_path(self, relative_path: str, must_exist: bool = False) -> Path:
         root_str = os.path.realpath(os.fspath(Path(self.manager.settings.auth_root).resolve()))

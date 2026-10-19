@@ -120,6 +120,7 @@ class BrowserSessionService:
             source_path = self.manager.auth_profiles.resolve_state_path(auth_profile, must_exist=True)
         elif storage_state_path:
             source_path = self.manager.auth_profiles.storage_state_source(storage_state_path)
+            await self.manager.auth_profiles.require_session_record_access(source_path)
         if source_path is not None:
             context_kwargs["storage_state"] = self.manager.auth_state.prepare_for_context(source_path).storage_state
 
@@ -528,6 +529,7 @@ class BrowserSessionService:
             # Export through AuthStateManager so the state file is encrypted
             # at rest whenever an encryption key is configured.
             fork_auth_path = session.auth_dir / f"fork_{uuid4().hex[:8]}.json"
+            self.manager.auth_profiles.mark_session_auth_dir(session.auth_dir, session.owner)
             auth_info = await self.manager.auth_state.write_storage_state(session.context, fork_auth_path)
             current_url = session.page.url
 
