@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
@@ -8,6 +9,9 @@ from unittest.mock import patch
 
 from app.config import Settings
 from app.session_tunnel import IsolatedSessionTunnelBroker
+
+# A grace period no other sleep in the code under test uses, so a test can tell it apart.
+_GRACE = 0.123
 
 
 class FakeProcess:
@@ -179,6 +183,127 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             metadata = json.loads((root / "tunnels" / "sessions" / "session-2.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["status"], "active")
             await broker.release(tunnel)
+
+    async def _started_broker(self, root: Path, *, ports: int = 8) -> IsolatedSessionTunnelBroker:
+        ssh_root = root / "ssh"
+        ssh_root.mkdir(parents=True, exist_ok=True)
+        (ssh_root / "id_ed25519").write_text("dummy", encoding="utf-8")
+        (ssh_root / "known_hosts").write_text("dummy", encoding="utf-8")
+        settings = Settings(
+            _env_file=None,
+            ISOLATED_TUNNEL_ENABLED="true",
+            ISOLATED_TUNNEL_HOST="bastion.example.com",
+            ISOLATED_TUNNEL_USER="tunnel",
+            ISOLATED_TUNNEL_KEY_PATH=str(ssh_root / "id_ed25519"),
+            ISOLATED_TUNNEL_KNOWN_HOSTS_PATH=str(ssh_root / "known_hosts"),
+            ISOLATED_TUNNEL_INFO_ROOT=str(root / "tunnels" / "sessions"),
+            ISOLATED_TUNNEL_REMOTE_PORT_START=16181,
+            ISOLATED_TUNNEL_REMOTE_PORT_END=16181 + ports - 1,
+            ISOLATED_TUNNEL_STARTUP_GRACE_SECONDS=_GRACE,
+            ISOLATED_TUNNEL_INFO_INTERVAL_SECONDS=30,
+        )
+        broker = IsolatedSessionTunnelBroker(settings)
+        await broker.startup()
+        return broker
+
+    async def test_concurrent_provisions_wait_out_the_startup_grace_together(self) -> None:
+        """The lock was held across the grace-period sleep, so N provisions took N
+        grace periods. Counts how many are inside the grace sleep at once instead
+        of timing it: all four must be there together before any is released."""
+        real_sleep = asyncio.sleep
+        in_grace = 0
+        all_in_grace = asyncio.Event()
+
+        async def gated_sleep(delay, *args):
+            nonlocal in_grace
+            if delay != _GRACE:
+                return await real_sleep(delay, *args)
+            in_grace += 1
+            if in_grace == 4:
+                all_in_grace.set()
+            await all_in_grace.wait()
+
+        async def fake_exec(*args, **kwargs):
+            return FakeProcess()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            with (
+                patch("app.session_tunnel.asyncio.create_subprocess_exec", new=fake_exec),
+                patch("app.session_tunnel.asyncio.sleep", new=gated_sleep),
+            ):
+                provisions = [asyncio.create_task(broker.provision(f"session-{i}", local_port=6080)) for i in range(4)]
+                try:
+                    tunnels = await asyncio.wait_for(asyncio.gather(*provisions), timeout=10)
+                finally:
+                    for task in provisions:
+                        task.cancel()
+            self.assertEqual(len({t.remote_port for t in tunnels}), 4)
+            self.assertTrue(all(t.active for t in tunnels))
+            for tunnel in tunnels:
+                await broker.release(tunnel)
+
+    async def test_release_while_a_tunnel_is_starting_stops_it_and_fails_the_provision(self) -> None:
+        """With the lock no longer held through the grace period, release() and
+        shutdown() can reach a tunnel that is still starting."""
+        real_sleep = asyncio.sleep
+        in_grace = asyncio.Event()
+        end_grace = asyncio.Event()
+
+        async def gated_sleep(delay, *args):
+            if delay != _GRACE:
+                return await real_sleep(delay, *args)
+            in_grace.set()
+            await end_grace.wait()
+
+        processes: list[FakeProcess] = []
+
+        async def fake_exec(*args, **kwargs):
+            processes.append(FakeProcess())
+            return processes[-1]
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            with (
+                patch("app.session_tunnel.asyncio.create_subprocess_exec", new=fake_exec),
+                patch("app.session_tunnel.asyncio.sleep", new=gated_sleep),
+            ):
+                provision = asyncio.create_task(broker.provision("session-1", local_port=6080))
+                await asyncio.wait_for(in_grace.wait(), timeout=10)
+                starting = broker._tunnels["session-1"]
+                self.assertEqual(starting.status, "starting")
+
+                await broker.shutdown()
+                end_grace.set()
+                with self.assertRaisesRegex(RuntimeError, "released while it was starting"):
+                    await asyncio.wait_for(provision, timeout=10)
+
+            self.assertTrue(processes[0].terminated)
+            self.assertEqual(broker._tunnels, {})
+            self.assertEqual(broker._allocated_ports, set())
+            self.assertEqual(starting.status, "inactive")
+
+    async def test_failed_metadata_write_does_not_leak_the_log_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            built = []
+            real_build = broker._build_tunnel
+
+            def build(*args, **kwargs):
+                built.append(real_build(*args, **kwargs))
+                return built[-1]
+
+            def failing_write(tunnel, *, status):
+                raise OSError("disk full")
+
+            broker._build_tunnel = build  # type: ignore[method-assign]
+            broker._write_metadata = failing_write  # type: ignore[method-assign]
+
+            with self.assertRaisesRegex(OSError, "disk full"):
+                await broker.provision("session-1", local_port=6080)
+
+            self.assertIsNone(built[0].stderr_handle)
+            self.assertEqual(broker._allocated_ports, set())
 
 
 if __name__ == "__main__":

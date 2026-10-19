@@ -71,16 +71,20 @@ class IsolatedSessionTunnelBroker:
             return None
 
         self._validate_settings()
-        async with self._lock:
-            existing = self._tunnels.get(session_id)
-            if existing is not None:
-                return existing
-
-            last_error: str | None = None
-            for remote_port in range(
-                self.settings.isolated_tunnel_remote_port_start,
-                self.settings.isolated_tunnel_remote_port_end + 1,
-            ):
+        last_error: str | None = None
+        for remote_port in range(
+            self.settings.isolated_tunnel_remote_port_start,
+            self.settings.isolated_tunnel_remote_port_end + 1,
+        ):
+            # The lock covers choosing a port and starting autossh, not the
+            # startup grace period: held across that sleep, concurrent
+            # provisions queued behind each other one grace period apiece.
+            async with self._lock:
+                # Also a tunnel still starting: create_session provisions once per
+                # fresh session id, so a duplicate call is not a real path.
+                existing = self._tunnels.get(session_id)
+                if existing is not None:
+                    return existing
                 if remote_port in self._allocated_ports:
                     continue
                 tunnel = self._build_tunnel(
@@ -89,8 +93,10 @@ class IsolatedSessionTunnelBroker:
                     local_host=local_host or self.settings.isolated_tunnel_local_host,
                     local_port=local_port,
                 )
-                tunnel.stderr_handle = tunnel.log_path.open("ab", buffering=0)
+                # Before the log handle is opened: a metadata write that raises
+                # used to leave that handle open.
                 self._write_metadata(tunnel, status="starting")
+                tunnel.stderr_handle = tunnel.log_path.open("ab", buffering=0)
                 try:
                     tunnel.process = await asyncio.create_subprocess_exec(
                         "autossh",
@@ -103,47 +109,69 @@ class IsolatedSessionTunnelBroker:
                     self._write_metadata(tunnel, status="error")
                     tunnel.stderr_handle.close()
                     raise
+                # Reserved and visible while it starts, so a concurrent provision
+                # picks another port and release()/shutdown() can still find it.
+                self._allocated_ports.add(remote_port)
+                self._tunnels[session_id] = tunnel
 
-                try:
-                    await asyncio.sleep(self.settings.isolated_tunnel_startup_grace_seconds)
-                except BaseException:
-                    # A create cancelled during the grace period (the caller
-                    # gave up, shutdown) left autossh running with nothing
-                    # tracking it, holding its remote port on the bastion.
+            try:
+                await asyncio.sleep(self.settings.isolated_tunnel_startup_grace_seconds)
+            except BaseException:
+                # A create cancelled during the grace period (the caller
+                # gave up, shutdown) left autossh running with nothing
+                # tracking it, holding its remote port on the bastion.
+                # release() already did all of this if it got there first.
+                if not tunnel.released:
+                    # Bookkeeping first and synchronously, so a second cancel
+                    # during the wait below cannot leave the port reserved.
+                    self._forget_starting(tunnel)
                     process = tunnel.process
                     if process.returncode is None:
                         process.kill()
                         await asyncio.shield(process.wait())
                     tunnel.error = "provision_cancelled"
                     self._write_metadata(tunnel, status="error")
-                    tunnel.stderr_handle.close()
-                    tunnel.stderr_handle = None
-                    raise
+                    self._close_stderr(tunnel)
+                raise
+
+            async with self._lock:
+                if tunnel.released:
+                    # release() or shutdown() tore it down while it was starting;
+                    # it already stopped the process and freed the port.
+                    raise RuntimeError(f"session tunnel for {session_id} was released while it was starting")
                 if tunnel.process.returncode is not None:
+                    self._forget_starting(tunnel)
                     tunnel.error = self._tail_file(tunnel.log_path) or (
                         f"autossh exited early with code {tunnel.process.returncode}"
                     )
                     self._write_metadata(tunnel, status="error")
-                    if tunnel.stderr_handle is not None:
-                        tunnel.stderr_handle.close()
-                        tunnel.stderr_handle = None
+                    self._close_stderr(tunnel)
                     last_error = tunnel.error
                     continue
 
-                self._allocated_ports.add(remote_port)
-                self._tunnels[session_id] = tunnel
                 self._write_metadata(tunnel, status="active")
                 tunnel.heartbeat_task = asyncio.create_task(self._heartbeat(tunnel))
                 return tunnel
 
-            raise RuntimeError(
-                last_error
-                or (
-                    "No isolated tunnel ports were available in the configured range "
-                    f"{self.settings.isolated_tunnel_remote_port_start}-"
-                    f"{self.settings.isolated_tunnel_remote_port_end}."
-                )
+        raise RuntimeError(
+            last_error
+            or (
+                "No isolated tunnel ports were available in the configured range "
+                f"{self.settings.isolated_tunnel_remote_port_start}-"
+                f"{self.settings.isolated_tunnel_remote_port_end}."
             )
+        )
+
+    def _forget_starting(self, tunnel: IsolatedSessionTunnel) -> None:
+        self._allocated_ports.discard(tunnel.remote_port)
+        if self._tunnels.get(tunnel.session_id) is tunnel:
+            del self._tunnels[tunnel.session_id]
+
+    @staticmethod
+    def _close_stderr(tunnel: IsolatedSessionTunnel) -> None:
+        if tunnel.stderr_handle is not None:
+            tunnel.stderr_handle.close()
+            tunnel.stderr_handle = None
 
     async def release(self, tunnel: IsolatedSessionTunnel) -> None:
         async with self._lock:
