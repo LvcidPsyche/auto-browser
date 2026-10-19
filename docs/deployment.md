@@ -197,6 +197,15 @@ curl -fsS http://127.0.0.1:8000/maintenance/status | jq
 
 If `METRICS_ENABLED=false`, skip the `/metrics` check; the endpoint returns `404`.
 
+## Witness receipts: what a signature proves
+
+Each receipt is hash-chained to the one before it and signed with an Ed25519 key. The key is generated on first use in `<WITNESS_ROOT>/keys`, beside the receipts it signs. That decides what the signature can prove:
+
+- **It proves the receipts are consistent and were signed by that key.** `GET /sessions/{id}/witness/verify` and the `browser.verify_witness` tool report this: the hash walk, the anchor, and a `signatures` block. A chain with no signed receipt fails the `signatures` check, and so does an unsigned receipt after a signed one. Read `signatures.valid`; the top-level `valid` covers only the hash walk and the anchor.
+- **It does not prove anything against someone who controls the box.** Whoever can write the witness directory can also read the key, so they can edit receipts and sign the result. A bundle that verifies tells a recipient the receipts match the key in the bundle, not that the key was never in the wrong hands.
+
+For evidence that survives a compromised controller host, keep a head hash from before the compromise and check it when you verify: `python scripts/verify_witness_bundle.py bundle.json --expect-head <head_hash> --expect-key-id <key_id>`. The `head_hash` and `signing_key_id` come from `GET /sessions/{id}/witness/bundle` or from the verify result. Sending a copy of each receipt to a hosted Witness service (`WITNESS_REMOTE_URL`), or copying the key id and head somewhere the controller host cannot write, works as well. Without such a pin, a recipient can only check that the bundle is internally consistent.
+
 ## Common pitfalls and failure modes
 
 ### Browser session dies or Chromium crashes

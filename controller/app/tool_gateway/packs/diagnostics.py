@@ -51,7 +51,10 @@ def register(registry, gateway):
                 "if the log was altered, reordered, or truncated. Also returns a "
                 "'signatures' block: the hash chain alone only proves internal "
                 "consistency, while the Ed25519 signatures prove the receipts were "
-                "attested by this deployment's key."
+                "attested by this deployment's key; a chain with no signed receipt "
+                "fails that check. The key sits beside the receipts, so someone with "
+                "write access to this host can re-sign: for evidence that survives a "
+                "compromised host, compare the head hash against one obtained earlier."
             ),
             input_model=VerifyWitnessInput,
             handler=gateway._verify_witness,

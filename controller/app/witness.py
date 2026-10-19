@@ -478,6 +478,17 @@ class WitnessRecorder:
                 result["reason"] = "signature does not verify against the supplied public key"
                 return result
             result["signed"] += 1
+
+        if result["checked"] and not result["signed"]:
+            # Stripping every signature and recomputing the hashes and the anchor
+            # needs no key, only write access to the file, so a chain with no
+            # signed receipt attests to nothing. The loop above only catches a
+            # signature removed AFTER a signed one. Same rule, and wording, as
+            # scripts/verify_witness_bundle.py.
+            result["valid"] = False
+            result["reason"] = (
+                "no receipt is signed: the hashes are consistent, which anyone holding the receipts can produce"
+            )
         return result
 
     async def export_bundle(self, scope: str) -> dict[str, Any]:
