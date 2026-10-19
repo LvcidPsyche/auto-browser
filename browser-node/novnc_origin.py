@@ -18,6 +18,14 @@ reached by: loopback, or one listed in --auth-source. That source carries
 NOVNC_ALLOWED_ORIGINS and NOVNC_ALLOWED_HOSTS (space- or comma-separated):
 an entry with "://" is an origin to accept even when a proxy rewrote Host, and
 its host is allowed; a bare entry is a host name the takeover URL uses.
+
+The Origin check stops a page from opening its own WebSocket. It does not stop a
+page from framing http://127.0.0.1:6080/vnc.html: the framed noVNC page opens its
+WebSocket with noVNC's own Origin, which passes, and the attacker's page then
+sits around a live desktop. Importing this module therefore also makes
+websockify's HTTP responses forbid framing (X-Frame-Options and CSP
+frame-ancestors). A page can still navigate to noVNC or open it in a window, but
+it cannot embed it, and it cannot read it either way: that is cross-origin.
 """
 
 from __future__ import annotations
@@ -34,6 +42,37 @@ except ImportError:  # the controller's test suite imports this without websocki
 
 
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+NO_FRAMING_HEADERS = (
+    ("X-Frame-Options", "DENY"),
+    # Only frame-ancestors: a fuller policy would also govern noVNC's own scripts.
+    ("Content-Security-Policy", "frame-ancestors 'none'"),
+)
+
+
+def forbid_framing() -> bool:
+    """Add NO_FRAMING_HEADERS to every HTTP response websockify's handler sends.
+
+    Patches the base request handler class rather than ProxyRequestHandler, so it
+    holds however websockify was launched (module or script). Idempotent. Returns
+    False when websockify is not importable (the controller's test suite).
+    """
+    try:
+        from websockify.websockifyserver import WebSockifyRequestHandler
+    except ImportError:
+        return False
+    if getattr(WebSockifyRequestHandler.end_headers, "_forbids_framing", False):
+        return True
+    original = WebSockifyRequestHandler.end_headers
+
+    def end_headers(self):
+        for name, value in NO_FRAMING_HEADERS:
+            self.send_header(name, value)
+        original(self)
+
+    end_headers._forbids_framing = True  # type: ignore[attr-defined]
+    WebSockifyRequestHandler.end_headers = end_headers
+    return True
 
 
 def _host_name(netloc: str) -> str:
@@ -70,3 +109,6 @@ class SameOriginOnly:
         ):
             return
         raise InvalidOriginError(expected=sorted(self.allowed_hosts | self.extra_origins), actual=origin or None)
+
+
+forbid_framing()
