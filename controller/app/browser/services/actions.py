@@ -339,7 +339,7 @@ class BrowserActionService:
             # operator should not be asked to approve an upload of a file that
             # is not there, only for it to fail once they have. The direct
             # upload path already checks in this order.
-            self.manager.uploads.safe_path(decision.file_path or "", session=session)
+            await self.manager.uploads.safe_path(decision.file_path or "", session=session)
         approval = await self.require_decision_approval(
             session_id,
             decision,

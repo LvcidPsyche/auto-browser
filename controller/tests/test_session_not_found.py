@@ -107,7 +107,7 @@ class MissingFileMessageTests(_RealManagerTestCase):
 
     async def test_a_missing_upload_is_named(self) -> None:
         with self.assertRaises(FileNotFoundError) as caught:
-            self.manager.uploads.safe_path("receipt.pdf")
+            await self.manager.uploads.safe_path("receipt.pdf")
 
         self.assertIn("'receipt.pdf'", str(caught.exception))
         self.assertIn("UPLOAD_ROOT", str(caught.exception))

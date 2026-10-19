@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...approvals import held_for_execution
 from ...models import BrowserActionDecision
+from ...session_ownership import may_use
 
 if TYPE_CHECKING:
     from ...browser_manager import BrowserSession
@@ -26,7 +27,7 @@ class BrowserUploadService:
         element_id: str | None = None,
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
-        safe_path = self.safe_path(file_path, session=session)
+        safe_path = await self.safe_path(file_path, session=session)
         approval = await self.manager.actions.require_decision_approval(
             session_id,
             BrowserActionDecision(
@@ -65,7 +66,31 @@ class BrowserUploadService:
             await held.executed()
         return result
 
-    def safe_path(self, file_path: str, *, session: "BrowserSession" | None = None) -> Path:
+    async def safe_path(self, file_path: str, *, session: "BrowserSession" | None = None) -> Path:
+        """Resolve a staged file: inside UPLOAD_ROOT, and not in another operator's session directory.
+
+        A session may use its own directory (UPLOAD_ROOT/<session_id>/) and the
+        files directly in UPLOAD_ROOT, which every operator shares. The path
+        check alone would also let `<other_session_id>/file` through, since that
+        is inside UPLOAD_ROOT, so a directory belonging to another session is
+        refused unless the caller may use that session. The owner comes from the
+        session record, live or persisted, so the answer outlives the session.
+        Refused before the file is looked up, so its existence is not revealed.
+        """
+        candidate = self._resolve(file_path, session)
+        await self._require_directory_access(candidate, session)
+        if not os.path.exists(candidate):
+            if not os.path.isabs(file_path):
+                # Resolution fell back to the session's own directory, but the
+                # name may also point into another session's directory under
+                # UPLOAD_ROOT: answer that the same way whether or not it exists.
+                shared = os.path.realpath(os.path.join(self.manager.settings.upload_root, file_path))
+                await self._require_directory_access(Path(shared), session)
+            raise FileNotFoundError(_missing_upload(file_path))
+        return candidate
+
+    def _resolve(self, file_path: str, session: "BrowserSession" | None) -> Path:
+        """The path file_path names, confined to UPLOAD_ROOT; it may not exist."""
         root = Path(self.manager.settings.upload_root).resolve()
         allowed_roots = [root]
         if session is not None:
@@ -81,8 +106,6 @@ class BrowserUploadService:
                     break
             else:
                 raise PermissionError("file_path must stay inside upload root")
-            if not os.path.exists(candidate_str):
-                raise FileNotFoundError(_missing_upload(file_path))
             return Path(candidate_str)
 
         preferred_roots: list[Path] = []
@@ -106,10 +129,17 @@ class BrowserUploadService:
             if not candidate_str.startswith(root_prefix):
                 raise PermissionError("file_path must stay inside upload root")
 
-        if not os.path.exists(candidate_str):
-            raise FileNotFoundError(_missing_upload(file_path))
         return Path(candidate_str)
 
+    async def _require_directory_access(self, candidate: Path, session: "BrowserSession" | None) -> None:
+        if session is not None and candidate.is_relative_to(os.path.realpath(os.fspath(session.upload_dir))):
+            return
+        root = Path(os.path.realpath(os.fspath(self.manager.settings.upload_root)))
+        parts = candidate.relative_to(root).parts if candidate.is_relative_to(root) else ()
+        if len(parts) < 2:
+            return  # directly in UPLOAD_ROOT: shared with every operator
+        if not may_use(await self.manager.session_owner(parts[0])):
+            raise PermissionError("file_path must stay inside upload root")
 
 
 def _missing_upload(file_path: str) -> str:
