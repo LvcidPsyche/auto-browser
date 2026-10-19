@@ -128,6 +128,7 @@ class BrowserActionPipeline:
                 await context.manager._settle(session.page)
         except Exception as exc:
             logger.debug("failed to roll back blocked action navigation for session %s: %s", session.id, exc)
+        await self._leave_disallowed_page(context)
         failed = await self._failure_snapshot(context, label=f"blocked-{context.action_name}")
         await self._record_terminal_event(
             context,
@@ -138,6 +139,24 @@ class BrowserActionPipeline:
             approval_status="blocked",
         )
         return failed
+
+    @staticmethod
+    async def _leave_disallowed_page(context: ActionRunContext) -> None:
+        """Move a session that a blocked action left on a disallowed page to about:blank.
+
+        go_back only leaves when the page has an earlier history entry. After
+        location.replace() (or in a popup's first page) it has none, so the
+        rollback did nothing and the session stayed on the page the policy
+        refused, readable by the very next observe.
+        """
+        manager = context.manager
+        session = context.session
+        if not manager._page_off_list(session):
+            return
+        try:
+            await session.page.goto("about:blank")
+        except Exception as exc:
+            logger.warning("could not move session %s off a disallowed page: %s", session.id, exc)
 
     async def _handle_browser_action_error(
         self,
@@ -287,7 +306,16 @@ class BrowserActionPipeline:
         The page that just failed is often the one that cannot be read (closed,
         crashed, mid-navigation). A PlaywrightError here replaced the action's
         normalized error with a raw one and skipped its audit record.
+
+        A page the policy refuses is not read at all: its text and a screenshot
+        of it would go to the caller in the error, which is the leak the policy
+        exists to stop.
         """
+        if context.manager._page_off_list(context.session):
+            return {
+                "url": context.session.page.url,
+                "snapshot_error": "The page is on a host ALLOWED_HOSTS does not allow; its content is withheld.",
+            }
         try:
             return await context.manager._light_snapshot(context.session, label=label)
         except PlaywrightError as exc:
