@@ -119,6 +119,41 @@ class SessionStoreTests(unittest.IsolatedAsyncioTestCase):
         client.aclose.assert_awaited_once()
         self.assertEqual(missing_record.status, "closed")
 
+    async def _durable_with_stub_primary(self, **primary_get):
+        store = DurableSessionStore(file_root=self.root, redis_url=None, redis_prefix="auto-browser:test")
+        await store.startup()
+        redis = Mock()
+        redis.get = AsyncMock(**primary_get)
+        redis.upsert = AsyncMock()
+        store.redis_store = redis
+        store._primary = redis  # what startup() does when Redis answers
+        await store.file_store.upsert(_record("session-6", status="closed", live=False))
+        return store
+
+    async def test_durable_get_falls_back_to_file_record_when_redis_has_no_entry(self) -> None:
+        # An evicted key or a Redis restart without persistence must not make a
+        # closed session look unowned.
+        store = await self._durable_with_stub_primary(side_effect=KeyError("session-6"))
+
+        self.assertEqual((await store.get("session-6")).status, "closed")
+        with self.assertRaises(KeyError):
+            await store.get("missing")
+
+    async def test_durable_get_falls_back_to_file_record_when_redis_errors(self) -> None:
+        store = await self._durable_with_stub_primary(side_effect=ConnectionError("redis down"))
+
+        with self.assertLogs("app.session_store", level="WARNING") as logs:
+            record = await store.get("session-6")
+
+        self.assertEqual(record.id, "session-6")
+        self.assertTrue(any("redis down" in line for line in logs.output))
+
+    async def test_durable_get_prefers_the_redis_record(self) -> None:
+        redis_record = _record("session-6", status="active", live=True)
+        store = await self._durable_with_stub_primary(return_value=redis_record)
+
+        self.assertEqual((await store.get("session-6")).status, "active")
+
 
 class FileSessionStoreConcurrencyTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_upserts_of_one_record_all_succeed(self) -> None:
