@@ -360,6 +360,15 @@ session owner, so under named credentials (`API_BEARER_TOKENS`) such an approval
 the operator who asked and to nobody else: another operator cannot list, decide, reuse or
 spend it. `POST /approvals/{id}/execute` does not run it (the agent repeats the tool call).
 
+`workflow_profile` is the caller's argument, so by default governed approvals are the agent's
+choice. A deployment that wants them as a rule sets `MCP_FORCE_GOVERNED=true`: every tool
+with a governed kind then runs as `governed` whatever the call passed, with or without a
+session, and `fast` is no longer available for them. Tools without a governed kind (reads)
+are unchanged. It covers MCP tool calls only: the REST action routes and the built-in agent
+loop keep their own rules. It is off by default because an agent loop written for `fast`
+stalls on its first write until an operator approves. With `AUTONOMOUS_APPROVALS=true` the
+agent can approve its own call, which cancels the effect. See `docs/production-hardening.md`.
+
 ## Raw tool-call example
 
 If you want to see the shape of the tool surface without wiring up a full MCP client yet:

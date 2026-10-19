@@ -17,6 +17,8 @@ def _settings(**kwargs) -> MagicMock:
         "allowed_hosts": "*",
         "pii_scrub_enabled": True,
         "require_approval_for_uploads": True,
+        "api_bearer_tokens": "",
+        "mcp_force_governed": False,
     }
     defaults.update(kwargs)
     settings = MagicMock()
@@ -61,3 +63,28 @@ def test_confidential_not_less_strict() -> None:
     order = {"pass": 0, "warn": 1, "fail": 2}
 
     assert order[confidential.overall] >= order[normal.overall]
+
+
+def _governed_check(report):
+    return next((check for check in report.checks if check.name == "governed_approvals"), None)
+
+
+def test_governed_approvals_warn_in_multi_operator_mode_when_not_forced() -> None:
+    report = run_readiness_checks(_settings(api_bearer_tokens="alice:token-a,bob:token-b"))
+
+    check = _governed_check(report)
+    assert check is not None and check.status == "warn"
+    assert "MCP_FORCE_GOVERNED" in (check.fix or "")
+    assert report.overall == "warn"
+
+
+def test_governed_approvals_pass_in_multi_operator_mode_when_forced() -> None:
+    report = run_readiness_checks(_settings(api_bearer_tokens="alice:token-a,bob:token-b", mcp_force_governed=True))
+
+    check = _governed_check(report)
+    assert check is not None and check.status == "pass"
+
+
+def test_governed_approvals_are_not_flagged_with_one_credential() -> None:
+    for settings in (_settings(api_bearer_token="shared"), _settings(api_bearer_tokens="alice:token-a")):
+        assert _governed_check(run_readiness_checks(settings)) is None

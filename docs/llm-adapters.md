@@ -126,6 +126,10 @@ profile; that is a statement about maintenance cost, not about the gateway.
 `workflow_profile` defaults to `fast`. Use `governed` when an operator wants the
 agent to inspect first and require approval before write-sensitive actions.
 
+This is the profile of the built-in agent loop. It is separate from the `workflow_profile`
+an agent passes on an MCP tool call, which `MCP_FORCE_GOVERNED=true` can force to `governed`
+(see `docs/mcp-clients.md`); that setting does not change the built-in loop.
+
 ## Background jobs and resume
 
 Queued agent runs persist a compact checkpoint after every completed step. A

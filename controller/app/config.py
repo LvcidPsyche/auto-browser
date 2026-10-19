@@ -188,6 +188,10 @@ class Settings(BaseSettings):
     # Lets agents approve their own pending actions: MCP browser.approve_approval
     # and the built-in agent loop. Off, an operator approves every one.
     autonomous_approvals: bool = Field(False, alias="AUTONOMOUS_APPROVALS")
+    # Runs every MCP tool that has a governed_kind as `governed`, whatever
+    # workflow_profile the caller passed. Off, governed approvals are the
+    # calling agent's choice. See docs/production-hardening.md.
+    mcp_force_governed: bool = Field(False, alias="MCP_FORCE_GOVERNED")
     witness_enabled: bool = Field(True, alias="WITNESS_ENABLED")
     witness_protection_mode_default: Literal["normal", "confidential"] = Field(
         "normal",

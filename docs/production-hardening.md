@@ -41,6 +41,26 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   Run a separate controller per operator, or set `CDP_CONNECT_URL` at startup. With a
   single credential it is refused while live sessions still use the current browser,
   and the browser it replaces is disconnected.
+- Governed approvals are the calling agent's choice unless the server makes them its own:
+  `workflow_profile` is an argument the agent supplies and defaults to `fast`, so on a
+  multi-operator deployment an agent that leaves it out runs its writes without approval.
+  `MCP_FORCE_GOVERNED=true` runs every MCP tool that has a governed kind (16 in the full tool profile,
+  `browser.execute_action`, `browser.set_cookies` and `browser.delete_memory_profile` among
+  them) as `governed` whatever the caller passed, so an operator approves each one. It is
+  off by default because it stalls an existing agent loop on its first write. Readiness
+  (`GET /readiness`, `browser.readiness_check`) warns `governed_approvals` when more than one
+  operator credential is configured and it is off. What it covers and what it does not:
+  - It covers MCP tool calls. The REST action routes (`/sessions/{id}/actions/*`) take no
+    `workflow_profile`, so it does not change them: they ask for approval only for uploads and
+    for `post`, `payment`, `account_change` and `destructive` decisions, as before. The
+    built-in agent loop (`/agent/step`, `/agent/run`, queued and cron runs) carries its own
+    `workflow_profile` and is unchanged as well.
+  - `AUTONOMOUS_APPROVALS=true` lets the agent approve its own pending actions
+    (`browser.approve_approval`), so with it on the forcing only adds a step the agent
+    performs itself. Keep it off wherever `MCP_FORCE_GOVERNED` is meant to be a control.
+  - An approval of a tool that names no session (`browser.delete_memory_profile`,
+    `browser.cdp_attach`) is held in a controller-wide scope and belongs to the operator who
+    asked, as described in `docs/mcp-clients.md`.
 - Request-rate limiting with 429 responses and reset headers
 - Metrics endpoint for scraping and alert wiring
 - Automated retention cleanup for:
