@@ -52,7 +52,9 @@ def register(registry, gateway):
                 "'signatures' block: the hash chain alone only proves internal "
                 "consistency, while the Ed25519 signatures prove the receipts were "
                 "attested by this deployment's key; a chain with no signed receipt "
-                "fails that check. The key sits beside the receipts, so someone with "
+                "fails that check. The top-level 'valid' is true only when the hash "
+                "chain, the anchor and the signatures all pass; 'chain_valid' is the "
+                "hash chain and anchor alone. The key sits beside the receipts, so someone with "
                 "write access to this host can re-sign: for evidence that survives a "
                 "compromised host, compare the head hash against one obtained earlier."
             ),

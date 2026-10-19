@@ -804,12 +804,10 @@ class BrowserManager:
         return [item.model_dump() for item in receipts]
 
     async def verify_witness_chain(self, session_id: str) -> dict[str, Any]:
-        chain = await self.witness.verify(session_id)
         # A hash chain only proves internal consistency — anyone holding the file
-        # can rewrite it and recompute every hash. Report the signature result
-        # alongside so "valid: true" is never mistaken for "attested".
-        chain["signatures"] = await self.witness.verify_signatures(session_id)
-        return chain
+        # can rewrite it and recompute every hash, so "valid" includes the
+        # signatures and "valid: true" is never mistaken for "attested".
+        return await self.witness.verify_with_signatures(session_id)
 
     async def export_witness_bundle(self, session_id: str) -> dict[str, Any]:
         """Third-party-verifiable evidence bundle for a session."""

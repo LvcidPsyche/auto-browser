@@ -430,6 +430,21 @@ class WitnessRecorder:
         key = public_key_b64 or (self.signer.public_key_b64 if self.signer is not None else None)
         return await asyncio.to_thread(self._verify_signatures_sync, scope, self._path(scope), key)
 
+    async def verify_with_signatures(self, scope: str) -> dict[str, Any]:
+        """verify() and verify_signatures() under one verdict.
+
+        `valid` passes only when the hash walk, the anchor and the signatures all
+        do, so a client that reads one field cannot accept a chain whose
+        signatures were stripped. `chain_valid` keeps the hash-walk verdict alone.
+        """
+        chain = await self.verify(scope)
+        signatures = await self.verify_signatures(scope)
+        result = {**chain, "chain_valid": chain["valid"], "signatures": signatures}
+        if chain["valid"] and not signatures["valid"]:
+            result["valid"] = False
+            result["reason"] = f"signatures: {signatures['reason']}"
+        return result
+
     @staticmethod
     def _verify_signatures_sync(scope: str, path: Path, public_key_b64: str | None) -> dict[str, Any]:
         from .witness_signing import verify_signature
