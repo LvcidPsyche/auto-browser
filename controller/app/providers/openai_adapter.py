@@ -98,7 +98,7 @@ class OpenAIAdapter(BaseProviderAdapter):
             )
 
         model = model_override or self.settings.openai_model
-        mime_type, image_b64 = self.encode_image(observation["screenshot_path"])
+        image = self.encode_screenshot(observation)
         # The Responses API, not chat completions: current OpenAI models
         # (gpt-6.1-sol) refuse function tools on chat completions while they
         # reason, and cannot turn reasoning off. The request also used to send
@@ -123,7 +123,11 @@ class OpenAIAdapter(BaseProviderAdapter):
                                 previous_steps=previous_steps,
                             ),
                         },
-                        {"type": "input_image", "image_url": f"data:{mime_type};base64,{image_b64}"},
+                        *(
+                            [{"type": "input_image", "image_url": f"data:{image[0]};base64,{image[1]}"}]
+                            if image
+                            else []
+                        ),
                     ],
                 }
             ],
@@ -212,8 +216,7 @@ class OpenAIAdapter(BaseProviderAdapter):
                     str(schema_path),
                     "--output-last-message",
                     str(output_path),
-                    "--image",
-                    observation["screenshot_path"],
+                    *(["--image", observation["screenshot_path"]] if observation.get("screenshot_path") else []),
                     "-",
                 ]
             )
@@ -246,18 +249,15 @@ class OpenAIAdapter(BaseProviderAdapter):
             previous_steps=previous_steps,
             include_schema=False,
         )
-        mime_type, image_b64 = self.encode_image(observation["screenshot_path"])
-        response = await self._post_host_bridge_request(
-            {
-                "model": model,
-                "prompt": prompt,
-                "schema": self.strict_action_schema,
-                "screenshot": {
-                    "media_type": mime_type,
-                    "base64": image_b64,
-                },
-            }
-        )
+        image = self.encode_screenshot(observation)
+        bridge_request: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "schema": self.strict_action_schema,
+        }
+        if image:
+            bridge_request["screenshot"] = {"media_type": image[0], "base64": image[1]}
+        response = await self._post_host_bridge_request(bridge_request)
         raw_text = str(response.get("raw_text") or "").strip()
         if not raw_text:
             raise RuntimeError("OpenAI host bridge returned an empty response")

@@ -169,9 +169,9 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
                 ),
             }
         ]
-        if self.profile.supports_vision:
-            mime_type, image_b64 = self.encode_image(observation["screenshot_path"])
-            content.append({"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}})
+        image = self.encode_screenshot(observation) if self.profile.supports_vision else None
+        if image:
+            content.append({"type": "image_url", "image_url": {"url": f"data:{image[0]};base64,{image[1]}"}})
 
         # No temperature: reasoning models behind these endpoints (OpenRouter
         # serving an OpenAI model, for one) accept only their default, and

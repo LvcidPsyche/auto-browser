@@ -67,13 +67,13 @@ class GeminiAdapter(BaseProviderAdapter):
             )
 
         model = model_override or self.settings.gemini_model
-        mime_type, image_b64 = self.encode_image(observation["screenshot_path"])
+        image = self.encode_screenshot(observation)
         payload = {
             "contents": [
                 {
                     "role": "user",
                     "parts": [
-                        {"inlineData": {"mimeType": mime_type, "data": image_b64}},
+                        *([{"inlineData": {"mimeType": image[0], "data": image[1]}}] if image else []),
                         {
                             "text": self.build_text_prompt(
                                 goal=goal,

@@ -198,6 +198,19 @@ class BaseProviderAdapter(ABC):
         data = base64.b64encode(file_path.read_bytes()).decode("ascii")
         return mime_type, data
 
+    @classmethod
+    def encode_screenshot(cls, observation: dict[str, Any]) -> tuple[str, str] | None:
+        """The observation's screenshot as (mime, base64), or None when it has none.
+
+        observe(preset="text") returns `screenshot_path: None` (and that is the
+        default preset), so a missing screenshot is a normal observation, not an
+        error: the adapters send a text-only request instead of crashing.
+        """
+        path = observation.get("screenshot_path")
+        if not path:
+            return None
+        return cls.encode_image(path)
+
     @staticmethod
     def compact_observation(observation: dict[str, Any]) -> dict[str, Any]:
         interactables = []
