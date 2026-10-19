@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,15 @@ _MIN_CONFIDENCE = 30
 # without bound. Two orders of magnitude above the model-facing cap, which is
 # what matters: redaction must not be starved by a token budget.
 _REDACTION_BLOCK_CAP = 5000
+
+
+def tesseract_available() -> bool:
+    """Whether the tesseract binary pytesseract would run can be found.
+
+    It ships only in the Docker image. Screenshot PII redaction is driven by
+    OCR boxes, so without the binary screenshots go out unredacted.
+    """
+    return shutil.which(pytesseract.pytesseract.tesseract_cmd) is not None
 
 
 def _line_key(data: dict[str, Any], idx: int) -> list[int] | None:

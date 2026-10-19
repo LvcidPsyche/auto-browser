@@ -1,8 +1,17 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from app.readiness import run_readiness_checks
+
+
+@pytest.fixture(autouse=True)
+def _tesseract_installed():
+    """Whether the host has tesseract must not decide the other tests' outcome."""
+    with patch("app.readiness.tesseract_available", return_value=True):
+        yield
 
 
 def _settings(**kwargs) -> MagicMock:
@@ -79,7 +88,9 @@ def test_governed_approvals_warn_in_multi_operator_mode_when_not_forced() -> Non
 
 
 def test_governed_approvals_pass_in_multi_operator_mode_when_forced() -> None:
-    report = run_readiness_checks(_settings(api_bearer_tokens="alice:token-a,bob:token-b", force_governed_approvals=True))
+    report = run_readiness_checks(
+        _settings(api_bearer_tokens="alice:token-a,bob:token-b", force_governed_approvals=True)
+    )
 
     check = _governed_check(report)
     assert check is not None and check.status == "pass"
@@ -88,3 +99,46 @@ def test_governed_approvals_pass_in_multi_operator_mode_when_forced() -> None:
 def test_governed_approvals_are_not_flagged_with_one_credential() -> None:
     for settings in (_settings(api_bearer_token="shared"), _settings(api_bearer_tokens="alice:token-a")):
         assert _governed_check(run_readiness_checks(settings)) is None
+
+
+# ── Screenshot scrubbing needs tesseract ──────────────────────────────────
+
+
+def _check(report, name: str):
+    return next((check for check in report.checks if check.name == name), None)
+
+
+def test_warns_when_screenshot_scrubbing_is_on_but_tesseract_is_missing() -> None:
+    with patch("app.readiness.tesseract_available", return_value=False):
+        report = run_readiness_checks(_settings(pii_scrub_screenshot=True, ocr_enabled=True))
+
+    check = _check(report, "screenshot_scrubbing")
+    assert check is not None
+    assert check.status == "warn"
+    assert "tesseract" in check.message.lower()
+    assert check.fix
+    assert report.overall == "warn"
+
+
+def test_no_warning_when_tesseract_is_present() -> None:
+    with patch("app.readiness.tesseract_available", return_value=True):
+        report = run_readiness_checks(_settings(pii_scrub_screenshot=True, ocr_enabled=True))
+
+    assert _check(report, "screenshot_scrubbing").status == "pass"
+
+
+def test_warns_when_ocr_is_disabled_while_screenshot_scrubbing_is_on() -> None:
+    with patch("app.readiness.tesseract_available", return_value=True):
+        report = run_readiness_checks(_settings(pii_scrub_screenshot=True, ocr_enabled=False))
+
+    check = _check(report, "screenshot_scrubbing")
+    assert check.status == "warn"
+    assert "OCR_ENABLED" in check.message
+
+
+@pytest.mark.parametrize("overrides", [{"pii_scrub_screenshot": False}, {"pii_scrub_enabled": False}])
+def test_no_screenshot_check_when_screenshot_scrubbing_is_off(overrides: dict) -> None:
+    with patch("app.readiness.tesseract_available", return_value=False):
+        report = run_readiness_checks(_settings(ocr_enabled=True, **overrides))
+
+    assert _check(report, "screenshot_scrubbing") is None

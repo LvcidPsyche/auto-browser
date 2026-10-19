@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .auth_policy import credentials_for
+from .ocr import tesseract_available
 
 
 @dataclass
@@ -201,6 +202,36 @@ def run_readiness_checks(settings: Any, mode: str = "normal") -> ReadinessReport
                 fix="Set PII_SCRUB_ENABLED=true.",
             )
         )
+
+    # Screenshot redaction draws over OCR-detected words; with no OCR it leaves
+    # the image untouched and says nothing, so the gap is reported here.
+    if pii_enabled and getattr(settings, "pii_scrub_screenshot", True):
+        if not getattr(settings, "ocr_enabled", True):
+            checks.append(
+                ReadinessCheck(
+                    name="screenshot_scrubbing",
+                    status="warn",
+                    message="OCR_ENABLED=false: screenshots are NOT PII-scrubbed (redaction needs OCR boxes).",
+                    fix="Set OCR_ENABLED=true, or set PII_SCRUB_SCREENSHOT=false to make the gap explicit.",
+                )
+            )
+        elif not tesseract_available():
+            checks.append(
+                ReadinessCheck(
+                    name="screenshot_scrubbing",
+                    status="warn",
+                    message="tesseract is not installed: screenshots are NOT PII-scrubbed (redaction needs OCR boxes).",
+                    fix="Run the controller from the Docker image, which ships tesseract, or install tesseract-ocr.",
+                )
+            )
+        else:
+            checks.append(
+                ReadinessCheck(
+                    name="screenshot_scrubbing",
+                    status="pass",
+                    message="Screenshot PII scrubbing is enabled and tesseract is available.",
+                )
+            )
 
     require_upload_approval = getattr(settings, "require_approval_for_uploads", True)
     if require_upload_approval:
