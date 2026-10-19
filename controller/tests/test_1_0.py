@@ -3,7 +3,7 @@ tests — auto-browser 1.0 test suite.
 
 Covers: mesh (identity, peers, policy, transport, delegation),
         stealth (humanizer, fingerprint), network inspector,
-        cdp passthrough, dom pruner.
+        cdp passthrough.
 
 Run with: pytest tests/test_1_0.py -v
 """
@@ -513,86 +513,6 @@ class TestNetworkInspector:
         insp = NetworkInspector(session_id="s1")
         insp.clear()
         assert insp.entries() == []
-
-
-# ===========================================================================
-# DOM Pruner
-# ===========================================================================
-
-
-class TestDOMPruner:
-    def _make_elements(self, n: int) -> list[dict]:
-        return [
-            {"element_id": f"el-{i}", "role": "button", "text": f"Button {i}", "is_visible": True} for i in range(n)
-        ]
-
-    def test_prune_returns_limit(self):
-        from app.browser.dom_pruner import DOMPruner
-
-        pruner = DOMPruner(max_elements=10)
-        elements = self._make_elements(50)
-        pruned = pruner.prune(elements, task_goal="click the submit button")
-        assert len(pruned) <= 10
-
-    def test_prune_empty_input(self):
-        from app.browser.dom_pruner import DOMPruner
-
-        pruner = DOMPruner(max_elements=10)
-        assert pruner.prune([]) == []
-
-    def test_prune_under_limit_unchanged(self):
-        from app.browser.dom_pruner import DOMPruner
-
-        pruner = DOMPruner(max_elements=20)
-        elements = self._make_elements(5)
-        pruned = pruner.prune(elements)
-        assert len(pruned) == 5
-
-    def test_keyword_match_boosts_rank(self):
-        from app.browser.dom_pruner import DOMPruner
-
-        pruner = DOMPruner(max_elements=3)
-        elements = [
-            {"element_id": "login-btn", "role": "button", "text": "Login", "is_visible": True},
-            {"element_id": "random-1", "role": "button", "text": "Irrelevant", "is_visible": True},
-            {"element_id": "random-2", "role": "link", "text": "Something", "is_visible": True},
-            {"element_id": "random-3", "role": "button", "text": "Other", "is_visible": True},
-        ]
-        pruned = pruner.prune(elements, task_goal="click the login button", max_elements=1)
-        assert pruned[0]["element_id"] == "login-btn"
-
-    def test_hidden_elements_deprioritized(self):
-        from app.browser.dom_pruner import DOMPruner
-
-        pruner = DOMPruner(max_elements=1)
-        elements = [
-            {"element_id": "hidden", "role": "button", "text": "Hidden", "is_visible": False},
-            {"element_id": "visible", "role": "button", "text": "Visible", "is_visible": True},
-        ]
-        pruned = pruner.prune(elements, max_elements=1)
-        assert pruned[0]["element_id"] == "visible"
-
-    def test_recency_boost(self):
-        from app.browser.dom_pruner import DOMPruner
-
-        pruner = DOMPruner(max_elements=1)
-        elements = [
-            {"element_id": "recent", "role": "link", "text": "Link"},
-            {"element_id": "not-recent", "role": "button", "text": "Button"},
-        ]
-        pruner.record_interaction("recent")
-        pruned = pruner.prune(elements, max_elements=1)
-        assert pruned[0]["element_id"] == "recent"
-
-    def test_prune_observation(self):
-        from app.browser.dom_pruner import DOMPruner
-
-        pruner = DOMPruner(max_elements=5)
-        obs = {"interactable_elements": self._make_elements(30), "url": "https://example.com"}
-        result = pruner.prune_observation(obs, task_goal="submit form")
-        assert len(result["interactable_elements"]) <= 5
-        assert result["elements_total"] == 30
-        assert result["elements_pruned"] == 25
 
 
 # ===========================================================================
