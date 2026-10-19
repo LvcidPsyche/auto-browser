@@ -195,7 +195,9 @@ Or in a JSON client config, one entry per server:
 Search results point anywhere, and navigation is limited to `ALLOWED_HOSTS`,
 which defaults to `example.com` and localhost. List the domains the agent may
 open, or set `ALLOWED_HOSTS=*` on a deployment where open browsing is
-acceptable. A refused navigation names the host that was blocked.
+acceptable. A refused navigation names the host that was blocked. The list governs the
+top-level page: a page that moves itself to another host is sent back to `about:blank`,
+but iframes and subresources loaded from other hosts are not filtered.
 
 Keeping search as a separate server, not a tool inside Auto Browser, lets you
 choose the search provider and its API key independently, and keeps Auto

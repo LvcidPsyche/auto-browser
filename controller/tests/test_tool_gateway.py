@@ -55,6 +55,8 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             reject=AsyncMock(return_value={"id": "approval-1", "status": "rejected"}),
             execute_approval=AsyncMock(return_value={"approval": {"id": "approval-1", "status": "executed"}}),
             get_remote_access_info=lambda: {"active": False, "status": "inactive"},
+            _assert_url_allowed=Mock(),
+            _assert_page_allowed=Mock(),
             get_session=AsyncMock(return_value={"id": "session-1"}),
             verify_witness_chain=AsyncMock(
                 return_value={
@@ -965,7 +967,6 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.manager.enable_shadow_browse = AsyncMock(return_value={"enabled": True})
         self.manager.capture_screenshot = AsyncMock(return_value={"screenshot_path": "vision.png"})
         self.manager.get_pii_scrubber_status = lambda: {"enabled": True}
-        self.manager._assert_url_allowed = Mock()
         self.manager.audit = object()
         self.manager.settings.default_viewport_width = 1280
         self.manager.settings.default_viewport_height = 720

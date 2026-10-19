@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 ActionOperation = Callable[[], Awaitable[None]]
 
+# The only actions that may run while the page sits on a host ALLOWED_HOSTS refuses:
+# they are how a session gets off it. Everything else would act on, or read, that page.
+LEAVES_DISALLOWED_PAGE = frozenset({"navigate", "go_back"})
+
 
 @dataclass(slots=True)
 class ActionRunContext:
@@ -83,7 +87,15 @@ class BrowserActionPipeline:
                 witness_context=witness_context,
             ),
         )
-        before = await manager._light_snapshot(session, label=f"before-{context.action_name}")
+        if manager._page_off_list(session):
+            # Not read: the before-state goes to the audit log and the receipts, and
+            # _execute refuses every action but a way out of this page.
+            before = {
+                "url": session.page.url,
+                "snapshot_error": "The page is on a host ALLOWED_HOSTS does not allow; its content is not read.",
+            }
+        else:
+            before = await manager._light_snapshot(session, label=f"before-{context.action_name}")
         return ActionWitnessState(
             witness_context=witness_context,
             action_class=action_class,
@@ -94,6 +106,8 @@ class BrowserActionPipeline:
     async def _execute(self, context: ActionRunContext, witness_state: ActionWitnessState) -> None:
         manager = context.manager
         session = context.session
+        if context.action_name not in LEAVES_DISALLOWED_PAGE:
+            manager._assert_page_allowed(session)
         if witness_state.action_class != "read":
             await manager._ensure_witness_remote_ready(session, action=context.action_name)
         if witness_state.outcome.should_block:
@@ -340,6 +354,11 @@ class BrowserActionPipeline:
             return await manager._observation_payload(session, limit=20, screenshot_label=label)
         except PlaywrightError as exc:
             logger.info("post-action observation failed for session %s, retrying: %s", session.id, exc)
+        except PermissionError as exc:
+            # The page moved itself off ALLOWED_HOSTS after the action's own check.
+            # The action ran, so report it with the URL and nothing the page showed.
+            logger.warning("post-action observation withheld for session %s: %s", session.id, exc)
+            return {"url": session.page.url, "observation_error": str(exc)[:300]}
         try:
             await manager._settle(session.page)
             return await manager._observation_payload(session, limit=20, screenshot_label=label)
@@ -349,6 +368,9 @@ class BrowserActionPipeline:
                 "url": session.page.url,
                 "observation_error": f"Page changed while it was being observed; observe again. ({exc})"[:300],
             }
+        except PermissionError as exc:
+            logger.warning("post-action observation withheld for session %s: %s", session.id, exc)
+            return {"url": session.page.url, "observation_error": str(exc)[:300]}
 
     def _approval(
         self,

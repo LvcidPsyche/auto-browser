@@ -792,11 +792,13 @@ class McpToolGateway:
 
     async def _eval_js(self, payload: EvalJsInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
+        self.manager._assert_page_allowed(session)
         result = await session.page.evaluate(payload.expression)
         return {"session_id": payload.session_id, "result": result}
 
     async def _wait_for_selector(self, payload: WaitForSelectorInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
+        self.manager._assert_page_allowed(session)
         await session.page.wait_for_selector(
             payload.selector,
             timeout=payload.timeout_ms,
@@ -808,6 +810,7 @@ class McpToolGateway:
         # Bounded and paged: a page's serialized DOM is routinely megabytes, and
         # returned whole it overran the context of the model that asked for it.
         session = await self.manager.get_session(payload.session_id)
+        self.manager._assert_page_allowed(session)
         if payload.text_only:
             content = await session.page.evaluate(PAGE_TEXT_SCRIPT)
             kind = "text"
@@ -822,6 +825,7 @@ class McpToolGateway:
 
     async def _find_elements(self, payload: FindElementsInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
+        self.manager._assert_page_allowed(session)
         if payload.query is not None:
             evaluate = session.page.evaluate(
                 """([query, isRegex, context, limit]) => {
@@ -915,6 +919,7 @@ class McpToolGateway:
 
     async def _drag_drop(self, payload: DragDropInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
+        self.manager._assert_page_allowed(session)
 
         # Resolve source coordinates
         if payload.source_selector:
@@ -971,6 +976,7 @@ class McpToolGateway:
         if payload.storage_type not in {"local", "session"}:
             raise ValueError(f"Invalid storage_type: {payload.storage_type!r}")
         session = await self.manager.get_session(payload.session_id)
+        self.manager._assert_page_allowed(session)
         if payload.key:
             script = f"() => window.{payload.storage_type}Storage.getItem({payload.key!r})"
             value = await session.page.evaluate(script)
@@ -987,6 +993,7 @@ class McpToolGateway:
         if payload.storage_type not in {"local", "session"}:
             raise ValueError(f"Invalid storage_type: {payload.storage_type!r}")
         session = await self.manager.get_session(payload.session_id)
+        self.manager._assert_page_allowed(session)
         script = f"([k, v]) => window.{payload.storage_type}Storage.setItem(k, v)"
         await session.page.evaluate(script, [payload.key, payload.value])
         return {"session_id": payload.session_id, "key": payload.key, "set": True}

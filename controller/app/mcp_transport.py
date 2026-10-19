@@ -382,6 +382,7 @@ class McpHttpTransport:
 
             if resource == "dom":
                 session = await self.manager.get_session(session_id)
+                self.manager._assert_page_allowed(session)
                 html = await session.page.content()
                 return {"uri": uri, "mimeType": "text/html", "text": html}
 

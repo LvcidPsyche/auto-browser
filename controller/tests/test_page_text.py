@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -106,6 +106,7 @@ class GetHtmlPagingTests(unittest.IsolatedAsyncioTestCase):
             ensure_session_accessible=AsyncMock(),
             get_session=AsyncMock(return_value=SimpleNamespace(page=self.page)),
             require_governed_approval=AsyncMock(return_value=None),
+            _assert_page_allowed=Mock(),
         )
         self.gateway = McpToolGateway(
             manager=self.manager, orchestrator=SimpleNamespace(), job_queue=SimpleNamespace(), tool_profile="full"

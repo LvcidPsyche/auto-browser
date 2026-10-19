@@ -24,6 +24,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import urlparse
 
@@ -31,7 +32,22 @@ import pytest
 from playwright.async_api import async_playwright
 
 from app.action_errors import BrowserActionError
+from app.approvals import ApprovalRequiredError
+from app.browser.services.diagnostics import BrowserDiagnosticsService
 from app.browser_manager import BrowserManager
+from app.mcp_transport import McpHttpTransport
+from app.models import BrowserActionDecision
+from app.tool_gateway import McpToolGateway
+from app.tool_inputs import (
+    DragDropInput,
+    EvalJsInput,
+    FindElementsInput,
+    GetPageHtmlInput,
+    GetStorageInput,
+    SetStorageInput,
+    WaitForSelectorInput,
+)
+from app.utils import _BACKGROUND_TASKS
 from tests._chromium import chromium_executable, requires_chromium
 from tests.test_browser_manager_create_session import _settings
 
@@ -163,6 +179,13 @@ async def browser_env(
         server.server_close()
 
 
+def switch_off_page_guard(monkeypatch) -> None:
+    """Disable the framenavigated guard, to test what the rest of the code does without it."""
+    monkeypatch.setattr(
+        BrowserDiagnosticsService, "_on_frame_navigated", lambda self, session, page, frame: None, raising=False
+    )
+
+
 # ── H-4a: create_session ─────────────────────────────────────────────────────
 
 
@@ -197,7 +220,8 @@ async def open_popup(env: Env, session_id: str, url: str):
     return popup
 
 
-async def test_activate_tab_refuses_a_popup_on_a_disallowed_host(tmp_path: Path) -> None:
+async def test_activate_tab_refuses_a_popup_on_a_disallowed_host(tmp_path: Path, monkeypatch) -> None:
+    switch_off_page_guard(monkeypatch)  # the popup has to stay on the disallowed host for this test
     async with browser_env(tmp_path, {}) as env:
         session_id = await env.create()
         session = env.manager.sessions[session_id]
@@ -255,8 +279,9 @@ async def test_blocked_replace_in_a_popup_leaves_the_page_blank_and_the_snapshot
         assert SECRET not in str(observed)
 
 
-async def test_blocked_action_that_cannot_leave_the_page_withholds_its_content(tmp_path: Path) -> None:
+async def test_blocked_action_that_cannot_leave_the_page_withholds_its_content(tmp_path: Path, monkeypatch) -> None:
     """If even the move to about:blank fails, the 403 reports the URL and no page content."""
+    switch_off_page_guard(monkeypatch)  # it would try the same refused move and log the failure
     async with browser_env(tmp_path, {"/replace": REPLACE_PAGE}) as env:
         session_id, popup = await popup_with_replace_button(env)
         popup.goto = AsyncMock(side_effect=RuntimeError("navigation refused"))
@@ -282,3 +307,307 @@ async def test_blocked_navigation_where_history_exists_is_still_rolled_back(tmp_
         assert blocked.value.code == "browser_action_blocked"
         assert SECRET not in str(blocked.value.payload)
         assert env.manager.sessions[session_id].page.url == f"{env.allowed}/assign"
+
+
+# ── N-1: a page that navigates itself after the action has finished ──────────
+
+TIMER_PAGE = (
+    "<title>allowed</title><p>hello</p>"
+    "<script>window.later = (url) => setTimeout(() => { location.href = url; }, 100);</script>"
+)
+
+
+async def navigate_later(page, url: str) -> None:
+    await page.evaluate("(url) => window.later(url)", url)
+
+
+def audit_spy(env: Env) -> AsyncMock:
+    env.manager.audit.append = AsyncMock(wraps=env.manager.audit.append)
+    return env.manager.audit.append
+
+
+def blocked_events(spy: AsyncMock) -> list:
+    return [call for call in spy.call_args_list if call.kwargs.get("event_type") == "navigation_blocked"]
+
+
+async def test_page_that_navigates_itself_off_the_list_is_returned_to_blank(tmp_path: Path) -> None:
+    async with browser_env(tmp_path, {"/timer": TIMER_PAGE}) as env:
+        session_id = await env.create("/timer")
+        session = env.manager.sessions[session_id]
+        spy = audit_spy(env)
+
+        await navigate_later(session.page, f"{env.evil}/")
+
+        await wait_for(lambda: session.page.url == "about:blank", timeout=5)
+        observed = await env.manager.observe(session_id, preset="text")
+        assert SECRET not in str(observed)
+        (event,) = blocked_events(spy)
+        assert event.kwargs["status"] == "blocked"
+        assert event.kwargs["session_id"] == session_id
+        assert event.kwargs["details"]["url"].startswith(env.evil)
+        assert event.kwargs["details"]["source"] == "page"
+
+
+async def test_popup_that_navigates_itself_off_the_list_is_returned_to_blank(tmp_path: Path) -> None:
+    async with browser_env(tmp_path, {"/timer": TIMER_PAGE}) as env:
+        session_id = await env.create()
+        popup = await open_popup(env, session_id, f"{env.allowed}/timer")
+
+        await navigate_later(popup, f"{env.evil}/")
+
+        await wait_for(lambda: popup.url == "about:blank", timeout=5)
+
+
+async def test_guard_leaves_a_page_alone_that_is_back_on_an_allowed_url_by_the_time_it_gets_the_lock(
+    tmp_path: Path,
+) -> None:
+    """An action in flight holds the lock and handles its own navigations; the guard must not undo that."""
+    async with browser_env(tmp_path, {"/timer": TIMER_PAGE}) as env:
+        session_id = await env.create("/timer")
+        session = env.manager.sessions[session_id]
+        spy = audit_spy(env)
+
+        async with session.lock:
+            await navigate_later(session.page, f"{env.evil}/")
+            await wait_for(lambda: session.page.url.startswith(env.evil), timeout=5)
+            await session.page.goto(f"{env.allowed}/back")
+        await wait_for(lambda: not _BACKGROUND_TASKS, timeout=5)
+
+        assert session.page.url == f"{env.allowed}/back"
+        assert blocked_events(spy) == []
+
+
+async def test_guard_does_nothing_for_a_page_that_closed_while_it_waited(tmp_path: Path, caplog) -> None:
+    async with browser_env(tmp_path, {"/timer": TIMER_PAGE}) as env:
+        session_id = await env.create()
+        session = env.manager.sessions[session_id]
+        popup = await open_popup(env, session_id, f"{env.allowed}/timer")
+        spy = audit_spy(env)
+
+        async with session.lock:
+            await navigate_later(popup, f"{env.evil}/")
+            await wait_for(lambda: popup.url.startswith(env.evil), timeout=5)
+            await popup.close()
+        await wait_for(lambda: not _BACKGROUND_TASKS, timeout=5)
+
+        assert blocked_events(spy) == []
+        assert not [record for record in caplog.records if record.levelname == "ERROR"]
+
+
+@pytest.mark.parametrize("allowed_hosts, target", [("localhost", "allowed"), ("*", "evil")])
+async def test_self_navigation_the_list_permits_is_left_alone(tmp_path: Path, allowed_hosts: str, target: str) -> None:
+    async with browser_env(tmp_path, {"/timer": TIMER_PAGE}, allowed_hosts=allowed_hosts) as env:
+        session_id = await env.create("/timer")
+        session = env.manager.sessions[session_id]
+        spy = audit_spy(env)
+        destination = f"{env.allowed if target == 'allowed' else env.evil}/other"
+
+        await navigate_later(session.page, destination)
+        await wait_for(lambda: session.page.url == destination, timeout=5)
+        await env.manager.observe(session_id, preset="text")  # queues behind the lock, so after any guard task
+
+        assert session.page.url == destination
+        assert blocked_events(spy) == []
+
+
+# Every way the controller hands page content to a caller. With the guard off and the
+# page on a disallowed host, each must refuse before it reads anything.
+
+
+def _gateway(env: Env) -> McpToolGateway:
+    return McpToolGateway(manager=env.manager, orchestrator=SimpleNamespace(), job_queue=SimpleNamespace())
+
+
+READS = {
+    "observe-text": lambda env, sid: env.manager.observe(sid, preset="text"),
+    "observe-fast": lambda env, sid: env.manager.observe(sid, preset="fast"),
+    "observe-normal": lambda env, sid: env.manager.observe(sid, preset="normal"),
+    "observe-rich": lambda env, sid: env.manager.observe(sid, preset="rich"),
+    "screenshot": lambda env, sid: env.manager.capture_screenshot(sid),
+    "screenshot-diff": lambda env, sid: env.manager.screenshot_diff(sid),
+    "eval-js": lambda env, sid: _gateway(env)._eval_js(EvalJsInput(session_id=sid, expression="document.title")),
+    "wait-for-selector": lambda env, sid: _gateway(env)._wait_for_selector(
+        WaitForSelectorInput(session_id=sid, selector="p", state="attached")
+    ),
+    "get-html": lambda env, sid: _gateway(env)._get_html(GetPageHtmlInput(session_id=sid)),
+    "get-text": lambda env, sid: _gateway(env)._get_html(GetPageHtmlInput(session_id=sid, text_only=True)),
+    "find-by-query": lambda env, sid: _gateway(env)._find_elements(FindElementsInput(session_id=sid, query="SECRET")),
+    "find-by-selector": lambda env, sid: _gateway(env)._find_elements(FindElementsInput(session_id=sid, selector="p")),
+    "drag-drop": lambda env, sid: _gateway(env)._drag_drop(
+        DragDropInput(session_id=sid, source_selector="p", target_selector="p")
+    ),
+    "storage-get-key": lambda env, sid: _gateway(env)._get_local_storage(GetStorageInput(session_id=sid, key="k")),
+    "storage-get-all": lambda env, sid: _gateway(env)._get_local_storage(GetStorageInput(session_id=sid)),
+    "storage-set": lambda env, sid: _gateway(env)._set_local_storage(
+        SetStorageInput(session_id=sid, key="k", value="v")
+    ),
+}
+
+
+async def off_list_session(env: Env, monkeypatch) -> tuple[str, object]:
+    """A session whose page sits on the disallowed host, put there by the test, with the guard off."""
+    switch_off_page_guard(monkeypatch)
+    session_id = await env.create()
+    session = env.manager.sessions[session_id]
+    await session.page.goto(f"{env.evil}/")
+    return session_id, session
+
+
+@pytest.mark.parametrize("read", sorted(READS))
+async def test_reads_refuse_while_the_page_is_on_a_disallowed_host(tmp_path: Path, monkeypatch, read: str) -> None:
+    async with browser_env(tmp_path, {}) as env:
+        session_id, _ = await off_list_session(env, monkeypatch)
+
+        with pytest.raises(PermissionError, match="about:blank"):
+            await READS[read](env, session_id)
+
+
+async def test_mcp_dom_and_screenshot_resources_return_nothing_for_a_disallowed_page(
+    tmp_path: Path, monkeypatch
+) -> None:
+    async with browser_env(tmp_path, {}) as env:
+        session_id, _ = await off_list_session(env, monkeypatch)
+        transport = McpHttpTransport(tool_gateway=None, server_name="t", server_version="1", manager=env.manager)
+
+        assert await transport._read_resource(f"browser://{session_id}/dom") is None
+        assert await transport._read_resource(f"browser://{session_id}/screenshot") is None
+
+
+async def test_titles_of_a_disallowed_page_are_not_reported_in_summaries(tmp_path: Path, monkeypatch) -> None:
+    async with browser_env(tmp_path, {}) as env:
+        session_id, _ = await off_list_session(env, monkeypatch)
+
+        listed = [await env.manager.list_tabs(session_id), await env.manager.get_session_record(session_id)]
+
+        assert "EVIL-TITLE" not in str(listed)
+
+
+async def test_actions_other_than_navigation_are_refused_while_the_page_is_on_a_disallowed_host(
+    tmp_path: Path, monkeypatch
+) -> None:
+    async with browser_env(tmp_path, {}) as env:
+        session_id, session = await off_list_session(env, monkeypatch)
+        operation = AsyncMock()
+
+        with pytest.raises(BrowserActionError) as refused:
+            await env.manager._run_action(session, "type", {}, operation)
+
+        operation.assert_not_awaited()
+        assert refused.value.code == "browser_action_blocked"
+        assert SECRET not in str(refused.value.payload)
+        assert SECRET not in (session.artifact_dir / "actions.jsonl").read_text(encoding="utf-8")
+        assert session.page.url == "about:blank"
+
+
+async def test_reload_is_refused_while_the_page_is_on_a_disallowed_host(tmp_path: Path, monkeypatch) -> None:
+    async with browser_env(tmp_path, {}) as env:
+        session_id, session = await off_list_session(env, monkeypatch)
+        session.page.reload = AsyncMock()
+
+        with pytest.raises(BrowserActionError) as refused:
+            await env.manager.reload(session_id)
+
+        assert refused.value.code == "browser_action_blocked"
+        session.page.reload.assert_not_awaited()
+
+
+async def test_navigate_and_go_back_still_work_from_a_disallowed_page(tmp_path: Path, monkeypatch) -> None:
+    async with browser_env(tmp_path, {"/ok": "<title>ok</title><p>fine</p>"}) as env:
+        session_id, session = await off_list_session(env, monkeypatch)
+
+        went_back = await env.manager.go_back(session_id)
+        assert session.page.url == f"{env.allowed}/"
+        assert SECRET not in str(went_back)
+
+        await session.page.goto(f"{env.evil}/")
+        navigated = await env.manager.navigate(session_id, f"{env.allowed}/ok")
+        assert session.page.url == f"{env.allowed}/ok"
+        assert SECRET not in str(navigated)
+
+
+async def test_guard_does_nothing_for_a_session_that_closed_while_it_waited(tmp_path: Path) -> None:
+    async with browser_env(tmp_path, {"/timer": TIMER_PAGE}) as env:
+        session_id = await env.create("/timer")
+        session = env.manager.sessions[session_id]
+        spy = audit_spy(env)
+
+        async with session.lock:
+            await navigate_later(session.page, f"{env.evil}/")
+            await wait_for(lambda: session.page.url.startswith(env.evil), timeout=5)
+            del env.manager.sessions[session_id]  # what closing the session does first
+        await wait_for(lambda: not _BACKGROUND_TASKS, timeout=5)
+
+        assert session.page.url.startswith(env.evil), "the guard acted on a session that was already gone"
+        assert blocked_events(spy) == []
+
+
+async def test_an_iframe_on_another_host_is_not_filtered(tmp_path: Path, monkeypatch) -> None:
+    """Only the top-level page is held to the list: iframes and subresources are not."""
+    corrections = AsyncMock()
+    monkeypatch.setattr(BrowserDiagnosticsService, "_return_to_blank", corrections, raising=False)
+    framed = "<title>allowed</title><p>hello</p><iframe src='{EVIL}/'></iframe>"
+    async with browser_env(tmp_path, {"/framed": framed}) as env:
+        session_id = await env.create("/framed")
+        session = env.manager.sessions[session_id]
+        spy = audit_spy(env)
+
+        await wait_for(lambda: any(frame.url.startswith(env.evil) for frame in session.page.frames), timeout=5)
+        observed = await env.manager.observe(session_id, preset="text")
+
+        assert session.page.url == f"{env.allowed}/framed"
+        assert blocked_events(spy) == []
+        assert observed["url"] == f"{env.allowed}/framed"
+        corrections.assert_not_called()  # a subframe navigation does not even queue a correction
+
+
+async def test_an_action_whose_page_moves_off_the_list_after_its_check_reports_no_page_content(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The page leaves between the action's own check and its after-observation: the action ran, so it is reported."""
+    async with browser_env(tmp_path, {}) as env:
+        switch_off_page_guard(monkeypatch)
+        session_id = await env.create()
+        session = env.manager.sessions[session_id]
+
+        async def move_off_the_list(_session):
+            await session.page.goto(f"{env.evil}/")
+
+        env.manager._maybe_handle_totp = move_off_the_list
+
+        result = await env.manager.wait(session_id, 10)
+
+        assert SECRET not in str(result)
+        assert "ALLOWED_HOSTS" in result["after"]["observation_error"]
+
+
+async def test_light_snapshot_refuses_a_disallowed_page(tmp_path: Path, monkeypatch) -> None:
+    async with browser_env(tmp_path, {}) as env:
+        session_id, session = await off_list_session(env, monkeypatch)
+
+        env.manager.observation.page_summary = AsyncMock()
+
+        with pytest.raises(PermissionError, match="about:blank"):
+            await env.manager._light_snapshot(session, label="t")
+
+        # Refused before anything is read, not just because the screenshot beside it was.
+        env.manager.observation.page_summary.assert_not_called()
+
+
+async def test_saved_auth_profile_does_not_record_the_title_of_a_disallowed_page(tmp_path: Path, monkeypatch) -> None:
+    async with browser_env(tmp_path, {}) as env:
+        session_id, _ = await off_list_session(env, monkeypatch)
+
+        await env.manager.save_auth_profile(session_id, "p1")
+
+        assert (await env.manager.get_auth_profile("p1"))["metadata"]["saved_from_title"] == ""
+
+
+async def test_approval_request_does_not_carry_the_title_of_a_disallowed_page(tmp_path: Path, monkeypatch) -> None:
+    async with browser_env(tmp_path, {}) as env:
+        session_id, _ = await off_list_session(env, monkeypatch)
+        decision = BrowserActionDecision(action="click", reason="test", risk_category="post", selector="p")
+
+        with pytest.raises(ApprovalRequiredError) as raised:
+            await env.manager.actions.require_decision_approval(session_id, decision, approval_id=None)
+
+        assert "EVIL-TITLE" not in str(raised.value.payload)

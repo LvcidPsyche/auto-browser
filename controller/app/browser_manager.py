@@ -708,13 +708,34 @@ class BrowserManager:
             return
         self._assert_url_allowed(url)
 
-    def _page_off_list(self, session: BrowserSession) -> bool:
-        """Whether the session's active page is on a URL ALLOWED_HOSTS refuses."""
+    def _url_off_list(self, url: str) -> bool:
+        """Whether a page may not be at ``url`` under ALLOWED_HOSTS (see _assert_runtime_url_allowed)."""
         try:
-            self._assert_runtime_url_allowed(session.page.url)
+            self._assert_runtime_url_allowed(url)
         except PermissionError:
             return True
         return False
+
+    def _page_off_list(self, session: BrowserSession) -> bool:
+        """Whether the session's active page is on a URL ALLOWED_HOSTS refuses."""
+        return self._url_off_list(session.page.url)
+
+    def _assert_page_allowed(self, session: BrowserSession) -> None:
+        """Refuse to read a page that has landed on a host ALLOWED_HOSTS does not allow.
+
+        The list is enforced where the controller moves the page. A page can also
+        move itself after an action has finished (a timer, a late redirect), and
+        what it shows there must not reach a caller. The page guard in
+        diagnostics sends such a page to about:blank; this covers the moments
+        before it has, and every path that returns page content calls it first.
+        """
+        try:
+            self._assert_runtime_url_allowed(session.page.url)
+        except PermissionError as exc:
+            raise PermissionError(
+                f"The page navigated on its own to a host ALLOWED_HOSTS does not allow ({exc}) "
+                "and is being moved to about:blank. Try again in a moment."
+            ) from exc
 
     # ── Tabs ─────────────────────────────────────────────────────────────────
 

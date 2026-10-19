@@ -138,6 +138,10 @@ class BrowserTabService:
         # Every observation lists the tabs; fetch the titles together rather
         # than paying one browser round trip per open tab in turn.
         titles = await asyncio.gather(*(self._title(page) for page in pages))
+        # A tab on a host the list refuses is listed by URL only.
+        titles = [
+            "" if self.manager._url_off_list(getattr(page, "url", "")) else title for page, title in zip(pages, titles)
+        ]
         return [
             {
                 "index": index,

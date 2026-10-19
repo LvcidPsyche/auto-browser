@@ -70,6 +70,7 @@ def _make_manager(
         _capture_screenshot=AsyncMock(return_value={"path": "/tmp/shot.png", "url": "/artifacts/shot.png"}),
         _session_summary=AsyncMock(return_value={"id": "session-1"}),
         _current_takeover_url=MagicMock(return_value=None),
+        _assert_page_allowed=MagicMock(),
         remote_access=SimpleNamespace(session_info=MagicMock(return_value={})),
         tabs=SimpleNamespace(summaries=AsyncMock(return_value=[])),
         ocr=SimpleNamespace(extract_from_image=AsyncMock(return_value={"available": True, "blocks": []})),
