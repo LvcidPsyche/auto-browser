@@ -41,8 +41,10 @@ class FakeResponse:
         self.status = status
         self.headers = headers or {}
         self._body = body
+        self.body_calls = 0
 
     async def body(self) -> bytes:
+        self.body_calls += 1
         return self._body
 
 
@@ -174,6 +176,42 @@ class NetworkInspectorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(seen, [204])
         self.assertEqual(inspector.entries()[0]["response_body"], "{}")
+
+    async def test_body_is_not_read_for_binary_or_declared_oversize_responses(self) -> None:
+        # response.body() buffers the whole payload, so the decision to skip
+        # must come from the headers: a download read "just to be dropped" is
+        # the memory spike this guards against.
+        inspector = NetworkInspector("session-5", body_max_bytes=100)
+        cases = {
+            "binary": {"content-type": "video/mp4", "content-length": "50"},
+            "oversize": {"content-type": "application/json", "content-length": "5000"},
+        }
+        for name, headers in cases.items():
+            request = FakeRequest(url=f"https://example.com/{name}")
+            response = FakeResponse(request, headers=headers, body=b"x" * 50)
+            await inspector._handle_request(request)
+            await inspector._handle_response(response)
+            await inspector._handle_request_finished(request)
+            self.assertEqual(response.body_calls, 0, name)
+            self.assertIsNone(inspector.entries()[0]["response_body"], name)
+
+    async def test_body_is_read_when_length_is_declared_small_or_unknown(self) -> None:
+        inspector = NetworkInspector("session-6", body_max_bytes=100)
+        cases = {
+            "small": ({"content-type": "application/json", "content-length": "2"}, b"{}", "{}"),
+            "unknown-length": ({"content-type": "application/json"}, b"{}", "{}"),
+            # An undeclared length can only be checked after the read; still dropped.
+            "unknown-length-oversize": ({"content-type": "application/json"}, b"x" * 500, None),
+            "garbled-length": ({"content-type": "text/html", "content-length": "abc"}, b"<p>", "<p>"),
+        }
+        for name, (headers, body, expected) in cases.items():
+            request = FakeRequest(url=f"https://example.com/{name}")
+            response = FakeResponse(request, headers=headers, body=body)
+            await inspector._handle_request(request)
+            await inspector._handle_response(response)
+            await inspector._handle_request_finished(request)
+            self.assertEqual(response.body_calls, 1, name)
+            self.assertEqual(inspector.entries()[0]["response_body"], expected, name)
 
 
 if __name__ == "__main__":
