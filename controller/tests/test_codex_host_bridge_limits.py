@@ -36,7 +36,7 @@ def _load_bridge():
             del socketserver.UnixStreamServer
 
 
-bridge = _load_bridge()
+bridge = _load_bridge() if _SCRIPT.is_file() else None
 
 
 class _Service:
@@ -57,6 +57,7 @@ class _Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
         super().__init__(("127.0.0.1", 0), bridge.BridgeRequestHandler)
 
 
+@unittest.skipIf(bridge is None, "scripts/ is not shipped in the controller image")
 class BridgeBodyLimitTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service = _Service()
