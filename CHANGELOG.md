@@ -248,6 +248,14 @@ deployment that restricts it.
   doesn't have), `docs/llm-adapters.md` matches the current providers (OpenAI's Responses API,
   Claude's `tool_choice: auto`, async calls, the isolation modes), `ROADMAP.md` names the current
   release, and `SECURITY.md` lists all five published advisories.
+- **The dashboard says when a request failed.** Saving an auth profile, starting or reopening
+  a login session, approving or rejecting, cancelling, resuming or discarding an agent job,
+  removing a peer, and loading any table showed "Saved" or an empty list when the controller had
+  answered with an error or could not be reached. Each now shows the controller's own error
+  message, and one failing table no longer blanks the others.
+- **Audit views show who did what.** The dashboard's audit table and the session replay page read
+  `operator_id` and `data`, which no audit event has, so those columns were always blank. They now
+  show the event's operator id, and the replay page shows its details as JSON.
 
 ### Added
 
@@ -264,6 +272,9 @@ deployment that restricts it.
 
 - `download_url` from the auth profile export response. It pointed at `/auth-export/<archive>`,
   which no route serves; the archive is the file named by `archive_path` in the auth root.
+- `app.browser.dom_pruner` (`DOMPruner`). Nothing in the controller called it, and it read keys
+  that real observations don't have, so it pruned nothing. Only code importing it directly is
+  affected.
 
 ## [1.9.1] — 2026-10-05
 
