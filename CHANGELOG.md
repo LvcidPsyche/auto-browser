@@ -100,9 +100,11 @@ deployment that restricts it.
   Anyone who could write the witness directory could edit receipts, drop every signature,
   recompute the hashes and the anchor, and pass. Such a chain now fails with the reason
   `scripts/verify_witness_bundle.py` already gave. Unsigned receipts before the first signed one
-  still pass. A session recorded entirely before signing existed now reports
-  `signatures.valid: false`, which is accurate. The top-level `valid` still covers only the hash
-  walk and the anchor, so read `signatures.valid`. The new section in `docs/deployment.md` says
+  still pass. The top-level `valid` now passes only when the hash walk, the anchor and the
+  signatures all do, so a client that reads that one field can't accept a stripped chain. The
+  hash walk and anchor result alone moved to `chain_valid`. A session recorded entirely before
+  signing existed, or by a controller that couldn't load its signing key, now reports
+  `valid: false` with `chain_valid: true`, which is accurate. The new section in `docs/deployment.md` says
   what a signature can prove while the key sits beside the receipts, and how to pin a head hash
   for evidence that survives a compromised host.
 - **Governed tools that name no session ask for approval.** `browser.delete_memory_profile` and
