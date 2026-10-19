@@ -6,7 +6,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from app.audit import get_current_operator
 from app.cron_service import CronService
+from app.models import OperatorIdentity
+from app.session_ownership import acting_as
 
 
 class CronServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -211,6 +214,70 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.trigger_job(created["id"])
 
         self.assertEqual(service._active_runs, {})
+
+
+class CronTriggerIdentityTests(unittest.IsolatedAsyncioTestCase):
+    """A job fires as the operator who owns it, and an unowned job fires as nobody.
+
+    acting_as(None) is a no-op, so a manual trigger of an unowned job used to run
+    under the caller's identity and the session and agent job it created became
+    the caller's.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.seen: dict[str, tuple[str, str]] = {}
+
+        async def create_session(**_kwargs):
+            self.seen["session"] = _who()
+            return {"id": "session-1"}
+
+        async def enqueue_run(_session_id, _request):
+            self.seen["agent_job"] = _who()
+            return {"id": "agent-job-1"}
+
+        manager = MagicMock()
+        manager.create_session = create_session
+        queue = MagicMock()
+        queue.enqueue_run = enqueue_run
+        self.service = CronService(Path(self.tmp.name) / "crons.json", job_queue=queue, manager=manager)
+
+    async def test_unowned_job_triggered_by_a_named_operator_fires_as_nobody(self) -> None:
+        job = await self.service.create_job(name="shared", goal="check", webhook_enabled=True)
+        self.assertIsNone(job["owner"])
+
+        with acting_as(OperatorIdentity(id="bob", source="token")):
+            result = await self.service.trigger_job(job["id"])
+        self.assertTrue(result["triggered"])
+        self.assertEqual(self.seen, {"session": ("anonymous", "anonymous"), "agent_job": ("anonymous", "anonymous")})
+
+        self.seen.clear()
+        self.service._active_runs.clear()
+        with acting_as(OperatorIdentity(id="bob", source="token")):
+            await self.service.trigger_via_webhook(job["id"], job["webhook_key"])
+        self.assertEqual(self.seen["session"], ("anonymous", "anonymous"))
+
+    async def test_owned_job_still_fires_as_its_owner(self) -> None:
+        alice = OperatorIdentity(id="alice", source="token")
+        with acting_as(alice):
+            job = await self.service.create_job(name="mine", goal="check", webhook_enabled=True)
+        self.assertEqual(job["owner"], "alice")
+
+        # Via the webhook, which needs no operator of its own: the owner is restored.
+        await self.service.trigger_via_webhook(job["id"], job["webhook_key"])
+        self.assertEqual(self.seen, {"session": ("alice", "token"), "agent_job": ("alice", "token")})
+
+    async def test_unowned_job_with_no_operator_in_context_is_unchanged(self) -> None:
+        job = await self.service.create_job(name="plain", goal="check")
+
+        await self.service.trigger_job(job["id"])
+        self.assertEqual(self.seen["session"], ("anonymous", "anonymous"))
+
+
+def _who() -> tuple[str, str]:
+    operator = get_current_operator()
+    return operator.id, operator.source
 
 
 if __name__ == "__main__":
