@@ -10,17 +10,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytesseract
 import pytest
 from PIL import Image
 from pytesseract import TesseractNotFoundError
 
 from app.browser.services.observation import BrowserObservationService
 from app.browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
-from app.ocr import OCRExtractor
+from app.ocr import OCRExtractor, tesseract_available
 from app.pii_scrub import PiiScrubber
 
 LOGGER_NAME = "app.browser.services.observation"
@@ -150,3 +152,12 @@ async def test_with_tesseract_present_nothing_is_reported(
     assert "screenshot_pii_scrub" not in captured
     assert "screenshot_pii_scrub" not in observed
     assert _warnings(caplog) == []
+
+
+def test_tesseract_available_looks_up_the_binary_pytesseract_runs() -> None:
+    # The readiness check and the tests above patch this lookup; this pins what
+    # it does: a command that resolves on PATH counts, one that doesn't, doesn't.
+    with patch.object(pytesseract.pytesseract, "tesseract_cmd", "no-such-tesseract-binary-8f3a"):
+        assert tesseract_available() is False
+    with patch.object(pytesseract.pytesseract, "tesseract_cmd", sys.executable):
+        assert tesseract_available() is True
