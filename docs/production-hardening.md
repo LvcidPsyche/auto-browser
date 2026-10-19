@@ -35,6 +35,12 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   unowned and open to every operator. The audit log stays operator-wide, and
   the takeover desktop is shared by every session on a browser node; use
   `docker_ephemeral` isolation to give each session its own.
+- `browser.cdp_attach` swaps the one browser every session runs on, so it is refused
+  whenever more than one credential is configured (named credentials, or a named one
+  next to the shared token): the attached browser would be shared by every operator.
+  Run a separate controller per operator, or set `CDP_CONNECT_URL` at startup. With a
+  single credential it is refused while live sessions still use the current browser,
+  and the browser it replaces is disconnected.
 - Request-rate limiting with 429 responses and reset headers
 - Metrics endpoint for scraping and alert wiring
 - Automated retention cleanup for:
