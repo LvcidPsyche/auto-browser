@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,8 +50,23 @@ class FakeAsyncClient:
         return self.response
 
 
+def _provider_env_names() -> list[str]:
+    """Env names of every provider key, base URL and model: whatever the developer exported."""
+    attrs = [
+        attr
+        for profile in OPENAI_COMPATIBLE_PROFILES
+        for attr in (profile.api_key_attr, profile.base_url_attr, profile.model_attr)
+    ]
+    return [Settings.model_fields[attr].alias for attr in attrs]
+
+
 def _settings(**overrides) -> Settings:
-    settings = Settings(_env_file=None)
+    # _env_file=None only skips .env; a real OPENROUTER_API_KEY in the shell still
+    # reached Settings and made "not configured" tests fail on developer machines.
+    with patch.dict(os.environ):
+        for name in _provider_env_names():
+            os.environ.pop(name, None)
+        settings = Settings(_env_file=None)
     for key, value in overrides.items():
         setattr(settings, key, value)
     return settings
