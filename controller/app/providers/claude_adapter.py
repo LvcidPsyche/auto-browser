@@ -72,7 +72,7 @@ class ClaudeAdapter(BaseProviderAdapter):
             )
 
         model = model_override or self.settings.claude_model
-        mime_type, image_b64 = self.encode_image(observation["screenshot_path"])
+        image = self.encode_screenshot(observation)
         payload = {
             "model": model,
             "max_tokens": _MAX_TOKENS,
@@ -95,14 +95,11 @@ class ClaudeAdapter(BaseProviderAdapter):
                 {
                     "role": "user",
                     "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": mime_type,
-                                "data": image_b64,
-                            },
-                        },
+                        *(
+                            [{"type": "image", "source": {"type": "base64", "media_type": image[0], "data": image[1]}}]
+                            if image
+                            else []
+                        ),
                         {
                             "type": "text",
                             "text": self.build_text_prompt(

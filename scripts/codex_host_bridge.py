@@ -84,28 +84,33 @@ class CodexBridgeService:
             raise BridgeError("prompt is required", status_code=400)
         if not isinstance(schema, dict):
             raise BridgeError("schema must be a JSON object", status_code=400)
-        if not isinstance(screenshot, dict):
+        # Absent for a text-preset observation, which has no screenshot to send.
+        if screenshot is not None and not isinstance(screenshot, dict):
             raise BridgeError("screenshot must be an object", status_code=400)
 
         model = str(payload.get("model") or self.default_model or "").strip() or None
-        media_type = str(screenshot.get("media_type") or "image/png").strip() or "image/png"
-        image_base64 = str(screenshot.get("base64") or "").strip()
-        if not image_base64:
-            raise BridgeError("screenshot.base64 is required", status_code=400)
+        image_bytes: bytes | None = None
+        suffix = ".png"
+        if screenshot is not None:
+            media_type = str(screenshot.get("media_type") or "image/png").strip() or "image/png"
+            image_base64 = str(screenshot.get("base64") or "").strip()
+            if not image_base64:
+                raise BridgeError("screenshot.base64 is required", status_code=400)
 
-        try:
-            image_bytes = base64.b64decode(image_base64, validate=True)
-        except Exception as exc:  # pragma: no cover - defensive
-            raise BridgeError(f"invalid screenshot.base64: {exc}", status_code=400) from exc
+            try:
+                image_bytes = base64.b64decode(image_base64, validate=True)
+            except Exception as exc:  # pragma: no cover - defensive
+                raise BridgeError(f"invalid screenshot.base64: {exc}", status_code=400) from exc
 
-        suffix = mimetypes.guess_extension(media_type) or ".png"
+            suffix = mimetypes.guess_extension(media_type) or ".png"
         with tempfile.TemporaryDirectory(prefix="auto-browser-codex-") as tempdir:
             temp_root = Path(tempdir)
             schema_path = temp_root / "schema.json"
             output_path = temp_root / "decision.json"
             image_path = temp_root / f"screenshot{suffix}"
             schema_path.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
-            image_path.write_bytes(image_bytes)
+            if image_bytes is not None:
+                image_path.write_bytes(image_bytes)
 
             command = [self.codex_path]
             if model:
@@ -123,8 +128,7 @@ class CodexBridgeService:
                     str(schema_path),
                     "--output-last-message",
                     str(output_path),
-                    "--image",
-                    str(image_path),
+                    *(["--image", str(image_path)] if image_bytes is not None else []),
                     "-",
                 ]
             )
