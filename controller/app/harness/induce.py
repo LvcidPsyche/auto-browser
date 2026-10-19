@@ -203,7 +203,7 @@ def _render_skill_markdown(
     postconditions = "\n".join(f"- `{item.kind}`: {item.value}" for item in contract.postconditions)
     return f"""---
 name: {candidate.skill_id}
-description: {contract.goal}
+description: {_yaml_quote(contract.goal)}
 status: staging
 safety_class: {candidate.safety_class}
 contract_hash: {candidate.contract_hash}
@@ -235,6 +235,34 @@ verifier: {candidate.verifier_backend}
 
 Use `helper.py` as the generated replay helper. This candidate is staged and must be reviewed before promotion.
 """
+
+
+_YAML_ESCAPES = {'"': '\\"', "\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def _yaml_quote(value: str) -> str:
+    """A YAML double-quoted scalar that reads back as exactly ``value``.
+
+    The goal came from the caller and went into the front matter bare, so a
+    newline could add keys of its own (status, safety_class, a second name) and
+    an ordinary goal such as ``Open the page: log in`` made the file unparseable.
+    Everything outside printable ASCII is escaped, not just control characters:
+    YAML loaders treat U+0085, U+2028 and U+2029 as line breaks and refuse DEL
+    and the C1 range, so a bare JSON-style dump would not round-trip.
+    """
+    out: list[str] = []
+    for char in value:
+        if char in _YAML_ESCAPES:
+            out.append(_YAML_ESCAPES[char])
+        elif " " <= char <= "~":
+            out.append(char)
+        elif ord(char) <= 0xFF:
+            out.append(f"\\x{ord(char):02x}")
+        elif ord(char) <= 0xFFFF:
+            out.append(f"\\u{ord(char):04x}")
+        else:
+            out.append(f"\\U{ord(char):08x}")
+    return '"' + "".join(out) + '"'
 
 
 def _render_list(items: list[str]) -> str:
