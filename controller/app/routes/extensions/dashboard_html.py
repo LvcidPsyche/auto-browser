@@ -109,6 +109,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <h2>Agent Jobs</h2>
       <button class="refresh-btn" id="refresh-agent-jobs">↻ Refresh</button>
     </div>
+    <div class="section-note" id="agent-jobs-status"></div>
     <table><thead><tr>
       <th>Job ID</th><th>Kind</th><th>Status</th><th>Profile</th><th>Checkpoints</th><th>Timeline</th><th>Actions</th>
     </tr></thead><tbody id="agent-jobs-tbody"><tr><td colspan="7" class="empty">Loading...</td></tr></tbody></table>
@@ -120,6 +121,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <h2>Mesh Peers</h2>
       <button class="refresh-btn" id="refresh-peers">↻ Refresh</button>
     </div>
+    <div class="section-note" id="peers-status"></div>
     <table><thead><tr>
       <th>Node ID</th><th>Display Name</th><th>Endpoint</th><th>Last Seen</th><th>Grants</th><th>Actions</th>
     </tr></thead><tbody id="peers-tbody"><tr><td colspan="6" class="empty">No peers registered</td></tr></tbody></table>
@@ -221,27 +223,50 @@ const _authHeaders = () => {
   if (operatorName) headers['__OPERATOR_NAME_HEADER__'] = operatorName;
   return headers;
 };
-const api = (path, options = {}) => {
+// What the server said went wrong, as one line. FastAPI errors carry `detail` (a
+// string, a list of validation errors, or an object such as an approval-required
+// payload); a BrowserActionError body carries `error` and `code`.
+const errorText = (body, status) => {
+  if (body && typeof body === 'object') {
+    const d = body.detail;
+    if (typeof d === 'string' && d) return d;
+    if (Array.isArray(d) && d.length) {
+      return d.map((item) => (item && item.msg) ? item.msg : JSON.stringify(item)).join('; ');
+    }
+    if (d && typeof d === 'object') return String(d.message || d.error || JSON.stringify(d));
+    if (typeof body.error === 'string' && body.error) {
+      return typeof body.code === 'string' && body.code ? `${body.error} (${body.code})` : body.error;
+    }
+    if (typeof body.code === 'string' && body.code) return body.code;
+  }
+  return `request failed (HTTP ${status})`;
+};
+// Resolves with the parsed body of a successful request and rejects with an Error
+// carrying the server's own text otherwise, so no caller can mistake a failed
+// request for a done one. Callers show err.message.
+const api = async (path, options = {}) => {
   const headers = {..._authHeaders(), ...(options.headers || {})};
-  return fetch(path, {...options, headers})
-    .then(async r => {
-      if (r.status === 401) {
-        sessionStorage.removeItem('ab_token');
-        alert('Auth failed — token cleared. Reload and try again.');
-        throw new Error('unauthorized');
-      }
-      if (r.status === 400) {
-        const body = await r.json().catch(() => ({}));
-        if ((body.detail || '').includes('operator header')) {
-          sessionStorage.removeItem('ab_operator_id');
-          sessionStorage.removeItem('ab_operator_name');
-          alert('Operator identity missing. Reload and provide an operator id.');
-        }
-        throw new Error('bad_request');
-      }
-      return r.json();
-    })
-    .catch(e => ({}));
+  let r;
+  try {
+    r = await fetch(path, {...options, headers});
+  } catch (e) {
+    throw new Error('network error: ' + ((e && e.message) || 'request failed'));
+  }
+  if (r.status === 401) {
+    sessionStorage.removeItem('ab_token');
+    alert('Auth failed — token cleared. Reload and try again.');
+    throw new Error('unauthorized: token cleared, reload and try again');
+  }
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    if (r.status === 400 && String((body && body.detail) || '').includes('operator header')) {
+      sessionStorage.removeItem('ab_operator_id');
+      sessionStorage.removeItem('ab_operator_name');
+      alert('Operator identity missing. Reload and provide an operator id.');
+    }
+    throw new Error(errorText(body, r.status));
+  }
+  return r.json();
 };
 const apiPost = (path, payload = null) => {
   const options = {method: 'POST'};
@@ -307,6 +332,10 @@ const appendEmptyRow = (tbody, colspan, message) => {
   row.appendChild(cell);
   tbody.appendChild(row);
 };
+// A table whose endpoint failed says so; an empty-state row would claim there is nothing to show.
+const appendLoadError = (tbody, colspan, what, err) => {
+  appendEmptyRow(tbody, colspan, `Could not load ${what}: ${err.message}`);
+};
 const safeHttpUrl = (value) => {
   if (!value) return null;
   try {
@@ -317,19 +346,34 @@ const safeHttpUrl = (value) => {
 };
 
 async function loadAll() {
+  // Each loader reports its own failure, so one dead endpoint cannot blank the others.
   await Promise.all([loadIdentity(), loadApprovals(), loadSessions(), loadAgentJobs(), loadPeers(), loadAudit(), loadAuthProfiles()]);
 }
 
 async function loadIdentity() {
-  const d = await api('/mesh/identity');
-  document.getElementById('node-id').textContent = `Node: ${(d.node_id||'').slice(0,12)}...`;
+  const nodeEl = document.getElementById('node-id');
+  let d;
+  try {
+    d = await api('/mesh/identity');
+  } catch (err) {
+    nodeEl.textContent = `Node identity unavailable: ${err.message}`;
+    return;
+  }
+  nodeEl.textContent = `Node: ${(d.node_id||'').slice(0,12)}...`;
 }
 
 async function loadSessions() {
-  const d = await api('/sessions');
+  const tbody = document.getElementById('sessions-tbody');
+  let d;
+  try {
+    d = await api('/sessions');
+  } catch (err) {
+    document.getElementById('stat-sessions').textContent = '—';
+    appendLoadError(tbody, 6, 'sessions', err);
+    return;
+  }
   const sessions = d.sessions || d || [];
   document.getElementById('stat-sessions').textContent = sessions.filter?.(s=>s.status==='active').length||0;
-  const tbody = document.getElementById('sessions-tbody');
   if (!sessions.length) { appendEmptyRow(tbody, 6, 'No sessions'); return; }
   tbody.replaceChildren();
   sessions.forEach(s => {
@@ -395,28 +439,44 @@ const jobActionButton = (label, className, handler) => {
   return button;
 };
 
+async function changeAgentJob(jobId, verb, payload = null) {
+  const statusEl = document.getElementById('agent-jobs-status');
+  statusEl.textContent = '';
+  try {
+    await apiPost('/agent/jobs/' + encodeURIComponent(jobId) + '/' + verb, payload);
+  } catch (err) {
+    statusEl.textContent = `Could not ${verb} agent job ${jobId}: ${err.message}`;
+    return;
+  }
+  loadAgentJobs();
+}
+
 async function resumeAgentJob(jobId) {
-  const result = await apiPost('/agent/jobs/' + encodeURIComponent(jobId) + '/resume', {});
-  if (result && result.id) loadAgentJobs();
+  await changeAgentJob(jobId, 'resume', {});
 }
 
 async function discardAgentJob(jobId) {
   if (!confirm('Discard agent job ' + jobId + '?')) return;
-  const result = await apiPost('/agent/jobs/' + encodeURIComponent(jobId) + '/discard');
-  if (result && result.id) loadAgentJobs();
+  await changeAgentJob(jobId, 'discard');
 }
 
 async function cancelAgentJob(jobId) {
   if (!confirm('Cancel running agent job ' + jobId + '?')) return;
-  const result = await apiPost('/agent/jobs/' + encodeURIComponent(jobId) + '/cancel');
-  if (result && result.id) loadAgentJobs();
+  await changeAgentJob(jobId, 'cancel');
 }
 
 async function loadAgentJobs() {
-  const jobs = await api('/agent/jobs');
+  const tbody = document.getElementById('agent-jobs-tbody');
+  let jobs;
+  try {
+    jobs = await api('/agent/jobs');
+  } catch (err) {
+    document.getElementById('stat-agent-jobs').textContent = '—';
+    appendLoadError(tbody, 7, 'agent jobs', err);
+    return;
+  }
   const items = Array.isArray(jobs) ? jobs : [];
   document.getElementById('stat-agent-jobs').textContent = items.length;
-  const tbody = document.getElementById('agent-jobs-tbody');
   if (!items.length) { appendEmptyRow(tbody, 7, 'No agent jobs'); return; }
   tbody.replaceChildren();
   items.slice(0,50).forEach(job => {
@@ -492,18 +552,27 @@ async function decideApproval(approval, decision) {
     comment = prompt('Reason for rejecting (optional):', '');
     if (comment === null) return;
   }
-  const result = await apiPost(`/approvals/${encodeURIComponent(approvalId)}/${decision}`, {comment: comment || null});
-  statusEl.textContent = result && result.status
-    ? `Approval ${approvalId} ${result.status}.`
-    : `Could not ${decision} approval ${approvalId}: ${asText(result && result.detail, 'request failed')}.`;
+  try {
+    const result = await apiPost(`/approvals/${encodeURIComponent(approvalId)}/${decision}`, {comment: comment || null});
+    statusEl.textContent = `Approval ${approvalId} ${asText(result && result.status, 'updated')}.`;
+  } catch (err) {
+    statusEl.textContent = `Could not ${decision} approval ${approvalId}: ${err.message}`;
+  }
   loadApprovals();
 }
 
 async function loadApprovals() {
-  const d = await api('/approvals?status=pending');
+  const tbody = document.getElementById('approvals-tbody');
+  let d;
+  try {
+    d = await api('/approvals?status=pending');
+  } catch (err) {
+    document.getElementById('stat-approvals').textContent = '—';
+    appendLoadError(tbody, 6, 'approvals', err);
+    return;
+  }
   const items = Array.isArray(d) ? d : [];
   document.getElementById('stat-approvals').textContent = items.length;
-  const tbody = document.getElementById('approvals-tbody');
   if (!items.length) { appendEmptyRow(tbody, 6, 'No approvals waiting'); return; }
   tbody.replaceChildren();
   items.forEach(a => {
@@ -523,10 +592,17 @@ async function loadApprovals() {
 }
 
 async function loadPeers() {
-  const d = await api('/mesh/peers');
+  const tbody = document.getElementById('peers-tbody');
+  let d;
+  try {
+    d = await api('/mesh/peers');
+  } catch (err) {
+    document.getElementById('stat-peers').textContent = '—';
+    appendLoadError(tbody, 6, 'peers', err);
+    return;
+  }
   const peers = d.peers || [];
   document.getElementById('stat-peers').textContent = peers.length;
-  const tbody = document.getElementById('peers-tbody');
   if (!peers.length) { appendEmptyRow(tbody, 6, 'No peers registered'); return; }
   tbody.replaceChildren();
   peers.forEach(p => {
@@ -551,15 +627,29 @@ async function loadPeers() {
 
 async function removePeer(nodeId) {
   if (!confirm('Remove peer ' + nodeId + '?')) return;
-  await fetch('/mesh/peers/' + encodeURIComponent(nodeId), {method:'DELETE', headers: _authHeaders()});
+  const statusEl = document.getElementById('peers-status');
+  statusEl.textContent = '';
+  try {
+    await api('/mesh/peers/' + encodeURIComponent(nodeId), {method: 'DELETE'});
+  } catch (err) {
+    statusEl.textContent = `Could not remove peer ${nodeId}: ${err.message}`;
+    return;
+  }
   loadPeers();
 }
 
 async function loadAudit() {
-  const d = await api('/audit/events?limit=50');
+  const tbody = document.getElementById('audit-tbody');
+  let d;
+  try {
+    d = await api('/audit/events?limit=50');
+  } catch (err) {
+    document.getElementById('stat-audit').textContent = '—';
+    appendLoadError(tbody, 5, 'audit events', err);
+    return;
+  }
   const events = d.events || d || [];
   if (Array.isArray(events)) document.getElementById('stat-audit').textContent = events.length;
-  const tbody = document.getElementById('audit-tbody');
   if (!events.length) { appendEmptyRow(tbody, 5, 'No audit events'); return; }
   tbody.replaceChildren();
   events.slice(0,50).forEach(e => {
@@ -627,7 +717,7 @@ async function loadReplay() {
   try {
     job = await api(`/agent/jobs/${encodeURIComponent(jobId)}`);
   } catch (err) {
-    statusEl.textContent = `Could not load job ${jobId}.`;
+    statusEl.textContent = `Could not load job ${jobId}: ${err.message}`;
     return;
   }
   const result = job.result || job;
@@ -670,7 +760,11 @@ async function loadReplay() {
       });
     }
   } catch (err) {
-    /* approvals are best-effort in replay */
+    // The run's actions and screenshots still replay; say the approvals are missing.
+    const note = document.createElement('div');
+    note.className = 'empty';
+    note.textContent = `Could not load approvals: ${err.message}`;
+    out.appendChild(note);
   }
 
   renderReplayScreenshots(steps);
@@ -697,7 +791,7 @@ async function wizardStart() {
   try {
     session = await apiPost('/sessions', body);
   } catch (err) {
-    statusEl.textContent = 'Could not start a login session.';
+    statusEl.textContent = `Could not start a login session: ${err.message}`;
     return;
   }
   wizardSessionId = session.id || session.session_id || null;
@@ -730,7 +824,7 @@ async function wizardSave() {
     await apiPost(`/sessions/${encodeURIComponent(wizardSessionId)}/auth-profiles`,
       { profile_name: name });
   } catch (err) {
-    statusEl.textContent = 'Could not save the auth profile (is the login complete?).';
+    statusEl.textContent = `Could not save the auth profile: ${err.message}`;
     return;
   }
   statusEl.textContent = `Saved auth profile "${name}".`;
@@ -742,6 +836,7 @@ async function loadAuthProfiles() {
   try {
     profiles = await api('/auth-profiles');
   } catch (err) {
+    document.getElementById('wizard-status').textContent = `Could not load saved profiles: ${err.message}`;
     return;
   }
   const list = Array.isArray(profiles) ? profiles : (profiles.profiles || []);
@@ -768,7 +863,7 @@ async function wizardReopen() {
   try {
     session = await apiPost('/sessions', { name: `reopen-${name}`, auth_profile: name });
   } catch (err) {
-    statusEl.textContent = 'Could not reopen a session from that profile.';
+    statusEl.textContent = `Could not reopen a session from that profile: ${err.message}`;
     return;
   }
   const sid = session.id || session.session_id || '';
