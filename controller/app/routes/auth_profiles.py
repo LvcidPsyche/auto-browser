@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
 from ..models import ImportAuthProfileRequest, SaveAuthProfileRequest, SaveStorageStateRequest
-from ._utils import internal_error, require_safe_segment
+from ._utils import require_safe_segment, typed_route_errors
 
 logger = logging.getLogger(__name__)
 
@@ -52,16 +52,8 @@ def create_auth_profiles_router(*, manager: Any, settings: Any) -> APIRouter:
     @router.get("/auth-profiles/{profile_name}/export")
     async def export_auth_profile(profile_name: str):
         safe_profile_name = require_safe_segment(profile_name, field="profile_name")
-        try:
+        with typed_route_errors(logger, "auth profile export failed for profile %s", profile_name):
             result = await manager.export_auth_profile(safe_profile_name)
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="Not found") from None
-        except PermissionError:
-            # Must precede the catch-all below, which would otherwise turn a
-            # refusal to hand over someone else's cookies into a 500.
-            raise HTTPException(status_code=403, detail="Not permitted") from None
-        except Exception:
-            raise internal_error(logger, "auth profile export failed for profile %s", profile_name) from None
 
         auth_root = Path(settings.auth_root).resolve()
         archive_name = str(result["archive_name"])
@@ -84,13 +76,10 @@ def create_auth_profiles_router(*, manager: Any, settings: Any) -> APIRouter:
 
     @router.post("/auth-profiles/import")
     async def import_auth_profile(payload: ImportAuthProfileRequest) -> dict[str, Any]:
-        try:
-            return await manager.import_auth_profile(payload.archive_path, overwrite=payload.overwrite)
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="Not found") from None
-        except FileExistsError:
-            raise HTTPException(status_code=409, detail="Conflict") from None
-        except Exception:
-            raise internal_error(logger, "auth profile import failed") from None
+        with typed_route_errors(logger, "auth profile import failed"):
+            try:
+                return await manager.import_auth_profile(payload.archive_path, overwrite=payload.overwrite)
+            except FileExistsError:
+                raise HTTPException(status_code=409, detail="Conflict") from None
 
     return router

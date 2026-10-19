@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from logging import Logger
 
 from fastapi import HTTPException, Request
+
+from ..action_errors import BrowserActionError
 
 _SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -40,3 +44,38 @@ OFF_LIST_TAB_DETAIL = "That tab is on a host ALLOWED_HOSTS does not allow."
 def internal_error(logger: Logger, message: str, *args: object) -> HTTPException:
     logger.exception(message, *args)
     return HTTPException(status_code=500, detail="Internal error")
+
+
+@contextmanager
+def typed_route_errors(logger: Logger, message: str, *args: object) -> Iterator[None]:
+    """Answer a manager call's typed errors as themselves; log and hide the rest.
+
+    A route that ends in ``except Exception: raise internal_error(...)`` catches
+    before the app-level handlers in app/main.py run, so an unknown session or a
+    ``BrowserActionError`` (a timeout, a missing element) came back as a 500
+    "Internal error" and hid the ``code`` agents act on. Run the route body in
+    this instead:
+
+    - ``HTTPException`` (``ApprovalRequiredError`` included), ``BrowserActionError``
+      and ``KeyError`` (``SessionNotFoundError`` included) pass through to the
+      app handlers, which keep their status, ``code`` and payload.
+    - ``PermissionError`` -> 403, ``ValueError`` -> 400, ``FileNotFoundError`` -> 404.
+      The texts are fixed: the exceptions' own messages can carry hosts and paths.
+    - Anything else is logged with *message* and answers 500 "Internal error".
+
+    A route that maps an error differently on purpose (a 409 for a refused
+    approval, the host-specific 403) catches it inside the ``with``: the
+    HTTPException it raises passes through here untouched.
+    """
+    try:
+        yield
+    except (HTTPException, BrowserActionError, KeyError):
+        raise
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Not permitted") from None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid request") from None
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Not found") from None
+    except Exception:
+        raise internal_error(logger, message, *args) from None
