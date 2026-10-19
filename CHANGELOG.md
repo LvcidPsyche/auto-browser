@@ -29,6 +29,13 @@ export fix below.
   without it (made without named credentials, by an earlier release, or copied in from another
   box) import as before. The importer never becomes the owner: a profile keeps the owner
   recorded in its archive.
+- **`browser.cdp_attach` is refused when more than one operator credential is configured.** It
+  replaced the one browser every session runs on, so under `API_BEARER_TOKENS` any operator could
+  attach a Chrome they control and every session any operator created afterwards ran on it, open
+  to their own CDP connection. Run a controller per operator, or set `CDP_CONNECT_URL` at startup.
+  With a single credential (or none) nothing changes except that attach is now refused while live
+  sessions still use the current browser (close them first), and the browser it replaces is
+  disconnected instead of leaking.
 
 ### Removed
 
