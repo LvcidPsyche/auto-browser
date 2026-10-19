@@ -213,12 +213,16 @@ class BrowserSessionService:
                     logger.warning("session created hook failed for %s: %s", session_id, exc)
 
             if start_url:
-                await page.goto(start_url, wait_until="domcontentloaded")
-                await self.manager._settle(page)
-                # The check navigate() makes after the page loads: an allowlisted
-                # start URL can redirect somewhere that is not. Raising here rolls
-                # the session back below, so no live session is left on that host.
-                self.manager._assert_runtime_url_allowed(page.url)
+                # The lock keeps the page guard (diagnostics) from moving the page to
+                # about:blank between the load and the check: that would turn a
+                # refused redirect into a session parked on a blank page.
+                async with session.lock:
+                    await page.goto(start_url, wait_until="domcontentloaded")
+                    await self.manager._settle(page)
+                    # The check navigate() makes after the page loads: an allowlisted
+                    # start URL can redirect somewhere that is not. Raising here rolls
+                    # the session back below, so no live session is left on that host.
+                    self.manager._assert_runtime_url_allowed(page.url)
 
             await self.manager._maybe_provision_session_tunnel(session)
             if memory is not None:
@@ -652,12 +656,15 @@ class BrowserSessionService:
             "note": "Headed Chrome launched. Close the original session when done debugging.",
         }
 
-    @staticmethod
-    async def _page_snapshot(session: "BrowserSession") -> tuple[str, str, bool]:
+    async def _page_snapshot(self, session: "BrowserSession") -> tuple[str, str, bool]:
         page = session.page
         is_closed = getattr(page, "is_closed", None)
         if callable(is_closed) and is_closed():
             return "", "", False
+        # Every session summary carries the title: a page that has moved itself
+        # off ALLOWED_HOSTS reports its URL, not what it shows.
+        if self.manager._url_off_list(page.url):
+            return page.url, "", True
         try:
             return page.url, await asyncio.wait_for(page.title(), timeout=PAGE_TITLE_TIMEOUT_SECONDS), True
         except TimeoutError:

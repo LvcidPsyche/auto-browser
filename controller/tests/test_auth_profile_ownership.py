@@ -57,6 +57,7 @@ class AuthProfileOwnershipTests(unittest.TestCase):
         manager = SimpleNamespace(
             settings=SimpleNamespace(auth_root=str(self.root), auth_state_encryption_key=None),
             auth_state=StubAuthState(),
+            _page_off_list=lambda session: False,
         )
         self.service = BrowserAuthProfileService(manager)
         self._operator_token = None

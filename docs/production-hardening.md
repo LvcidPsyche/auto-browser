@@ -17,7 +17,7 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   - `AUTH_STATE_ENCRYPTION_KEY`
   - `REQUIRE_AUTH_STATE_ENCRYPTION=true`
   - `CONTROLLER_ALLOWED_HOSTS` configured for the controller ingress hostnames
-  - `ALLOWED_HOSTS` naming the sites the browser may visit (not `*`)
+  - `ALLOWED_HOSTS` naming the sites the browser's top-level page may visit (not `*`); iframes and subresources from other hosts are not filtered
   - `SHARE_TOKEN_SECRET`, so share links survive a restart
   - request rate limiting enabled
 - Operator identity is only authentication when it comes from a named

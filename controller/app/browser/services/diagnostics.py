@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from playwright.async_api import Error as PlaywrightError
+
 from ...action_errors import SessionNotFoundError
 from ...downloads import DownloadCaptureService
 from ...pii_scrub import PiiScrubber
@@ -140,6 +142,47 @@ class BrowserDiagnosticsService:
         )
         page.on("download", lambda download: spawn_background_task(self.manager._handle_download(session, download)))
         page.on("close", lambda _page: self._on_page_closed(session, page))
+        page.on("framenavigated", lambda frame: self._on_frame_navigated(session, page, frame))
+
+    def _on_frame_navigated(self, session: "BrowserSession", page: "Page", frame: Any) -> None:
+        """Send a page that has moved itself off ALLOWED_HOSTS back to about:blank.
+
+        The list is checked where the controller moves a page, so a page that
+        navigates itself afterwards (a timer, a late redirect, a popup's own
+        script) stayed on the disallowed host and the next observe returned its
+        content. Only the top-level frame counts: iframes and subresources from
+        other hosts are not filtered. Playwright's route() is not used for this,
+        since it would put a Python round trip on every subresource request.
+        """
+        if frame.parent_frame is not None or not self.manager._url_off_list(frame.url):
+            return
+        spawn_background_task(self._return_to_blank(session, page))
+
+    async def _return_to_blank(self, session: "BrowserSession", page: "Page") -> None:
+        # The session lock is what an action in flight holds. That action checks
+        # where the page landed and handles it itself, so by the time this gets the
+        # lock the page may already be somewhere allowed again.
+        async with session.lock:
+            if self.manager.sessions.get(session.id) is not session:
+                logger.debug("session %s closed before its off-list navigation was corrected", session.id)
+                return
+            url = page.url
+            if not self.manager._url_off_list(url):
+                return
+            try:
+                await page.goto("about:blank")
+            except PlaywrightError:
+                if page.is_closed():
+                    logger.debug("page for session %s closed while it was moved off %s", session.id, url)
+                    return
+                raise
+            await self.manager.audit.append(
+                event_type="navigation_blocked",
+                status="blocked",
+                action="navigate",
+                session_id=session.id,
+                details={"url": url, "source": "page"},
+            )
 
     @staticmethod
     def _on_page_closed(session: "BrowserSession", page: "Page") -> None:

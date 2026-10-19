@@ -84,6 +84,7 @@ class BrowserObservationService:
         screenshot_label: str = "observe",
         preset: str | None = None,
     ) -> dict[str, Any]:
+        self.manager._assert_page_allowed(session)
         if preset is None:
             preset = self.manager.settings.perception_preset_default
         if preset not in ("text", "fast", "normal", "rich"):
@@ -223,6 +224,7 @@ class BrowserObservationService:
         return screenshot
 
     async def light_snapshot(self, session: "BrowserSession", *, label: str) -> dict[str, Any]:
+        self.manager._assert_page_allowed(session)
         # The before/after snapshot of every action. Redacting it runs OCR twice
         # per action, the largest cost an action has; PII_SCRUB_ACTION_SCREENSHOTS
         # =false trades that redaction for speed and leaves observations redacted.
@@ -243,6 +245,8 @@ class BrowserObservationService:
         }
 
     async def capture_session_screenshot(self, session: "BrowserSession", label: str) -> dict[str, str]:
+        # Every screenshot (observe, capture, diff, the action snapshots) comes through here.
+        self.manager._assert_page_allowed(session)
         return await self.manager.artifacts.capture_screenshot(session, label)
 
     def trace_payload(self, session: "BrowserSession") -> dict[str, Any]:

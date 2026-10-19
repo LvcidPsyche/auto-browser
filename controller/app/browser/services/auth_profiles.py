@@ -225,7 +225,7 @@ class BrowserAuthProfileService:
             "last_saved_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "saved_from_session_id": session.id,
             "saved_from_url": session.page.url,
-            "saved_from_title": await session.page.title(),
+            "saved_from_title": "" if self.manager._page_off_list(session) else await session.page.title(),
             "platform": self.current_platform(session),
         }
         if owner:

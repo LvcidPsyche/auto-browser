@@ -512,7 +512,7 @@ class BrowserActionService:
     async def _approval_observation(self, session: "BrowserSession") -> dict[str, Any]:
         return {
             "url": session.page.url,
-            "title": await session.page.title(),
+            "title": "" if self.manager._page_off_list(session) else await session.page.title(),
             "takeover_url": self.manager._current_takeover_url(session),
             "remote_access": self.manager.remote_access.session_info(session),
             "isolation": self.manager.session_lifecycle.isolation_payload(session),
