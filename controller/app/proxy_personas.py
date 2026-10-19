@@ -23,10 +23,11 @@ Persona file format (JSON at PROXY_PERSONA_FILE path):
 
 API:
   list_personas()              → list of persona summaries (no passwords)
-  get_persona(name)            → full persona with credentials
+  get_persona(name)            → one persona summary (no password), same shape as the list
   set_persona(name, **kwargs)  → create or update a persona
   delete_persona(name)         → remove a persona
-  resolve_proxy(name)          → {server, username, password} ready for Playwright
+  resolve_proxy(name)          → {server, username, password} ready for Playwright; the only
+                                 way to read a stored password, for session creation
 """
 
 from __future__ import annotations
@@ -106,28 +107,30 @@ class ProxyPersonaStore:
 
     # ── Public API ──────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _summary(name: str, persona: dict[str, Any]) -> dict[str, Any]:
+        """A persona as the API shows it: the password is never part of it."""
+        return {
+            "name": name,
+            "server": persona.get("server", ""),
+            "username": persona.get("username"),
+            "has_password": bool(persona.get("password")),
+            "description": persona.get("description", ""),
+        }
+
     def list_personas(self) -> list[dict[str, Any]]:
         """Return all personas with passwords masked."""
-        data = self._load()
-        return [
-            {
-                "name": name,
-                "server": persona.get("server", ""),
-                "username": persona.get("username"),
-                "has_password": bool(persona.get("password")),
-                "description": persona.get("description", ""),
-            }
-            for name, persona in sorted(data.items())
-        ]
+        return [self._summary(name, persona) for name, persona in sorted(self._load().items())]
 
     def get_persona(self, name: str) -> dict[str, Any]:
-        """Return a persona by name. Raises KeyError if not found."""
+        """Return one persona with the password masked. Raises KeyError if not found."""
+        return self._summary(name, self._persona_with_password(name))
+
+    def _persona_with_password(self, name: str) -> dict[str, Any]:
         data = self._load()
         if name not in data:
             raise KeyError(f"Proxy persona not found: {name!r}")
-        persona = dict(data[name])
-        persona["name"] = name
-        return persona
+        return data[name]
 
     def set_persona(
         self,
@@ -151,13 +154,7 @@ class ProxyPersonaStore:
         data = self._load()
         data[normalized_name] = normalized_persona
         self._save(data)
-        return {
-            "name": normalized_name,
-            "server": normalized_persona["server"],
-            "username": normalized_persona["username"],
-            "has_password": bool(normalized_persona["password"]),
-            "description": normalized_persona["description"],
-        }
+        return self._summary(normalized_name, normalized_persona)
 
     def delete_persona(self, name: str) -> bool:
         """Delete a persona. Returns True if deleted, False if not found."""
@@ -173,7 +170,7 @@ class ProxyPersonaStore:
 
         Returns: {"server": str, "username": str | None, "password": str | None}
         """
-        persona = self.get_persona(name)
+        persona = self._persona_with_password(name)
         result: dict[str, Any] = {"server": persona["server"]}
         if persona.get("username"):
             result["username"] = persona["username"]
