@@ -6,10 +6,9 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import ValidationError
 
-from ..approvals import ApprovalRequiredError
 from ..models import ApprovalDecisionRequest
 from ..tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, TriggerCronJobInput
-from ._utils import internal_error
+from ._utils import typed_route_errors
 
 logger = logging.getLogger(__name__)
 
@@ -70,16 +69,11 @@ def create_operations_router(
 
     @router.post("/approvals/{approval_id}/execute")
     async def execute_approval(approval_id: str) -> dict[str, Any]:
-        try:
-            return await manager.execute_approval(approval_id)
-        except ApprovalRequiredError:
-            raise
-        except PermissionError:
-            raise HTTPException(status_code=409, detail="Conflict") from None
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid request") from None
-        except Exception:
-            raise internal_error(logger, "approval execution failed for approval %s", approval_id) from None
+        with typed_route_errors(logger, "approval execution failed for approval %s", approval_id):
+            try:
+                return await manager.execute_approval(approval_id)
+            except PermissionError:
+                raise HTTPException(status_code=409, detail="Conflict") from None
 
     @router.get("/pii-scrubber")
     async def get_pii_scrubber() -> dict[str, Any]:
