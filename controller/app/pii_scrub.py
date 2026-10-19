@@ -379,6 +379,31 @@ def _word_box(block: dict[str, Any]) -> tuple[int, int, int, int] | None:
 # ── Network payload scrubber ───────────────────────────────────────────────
 
 
+_TEXT_TYPE_MARKERS = ("json", "text", "form", "xml", "javascript", "graphql", "yaml", "html")
+_BINARY_MAJOR_TYPES = ("image/", "audio/", "video/", "font/")
+_BINARY_MEDIA_TYPES = frozenset(
+    {
+        "application/octet-stream",
+        "application/pdf",
+        "application/zip",
+        "application/gzip",
+        "application/x-gzip",
+        "application/x-tar",
+        "application/protobuf",
+        "application/x-protobuf",
+        "application/vnd.google.protobuf",
+        "application/msgpack",
+        "application/x-msgpack",
+        "application/wasm",
+    }
+)
+
+
+def _is_binary_content_type(content_type: str) -> bool:
+    media_type = content_type.split(";", 1)[0].strip()
+    return media_type.startswith(_BINARY_MAJOR_TYPES) or media_type in _BINARY_MEDIA_TYPES
+
+
 def scrub_network_body(
     body: str | bytes | None,
     content_type: str = "",
@@ -388,21 +413,28 @@ def scrub_network_body(
     """
     Scrub PII from a network request/response body.
 
-    Only processes text-like content types (JSON, form, HTML, plain text).
-    Binary content is returned unchanged.
+    A body is text when its content type names text (JSON, form, HTML, XML,
+    YAML, ...). When the type is missing or unrecognised (a fetch with a string
+    body sends none; a custom vendor type says nothing) the body counts as text
+    if it is valid UTF-8, so the type header cannot decide whether a secret is
+    stored. A known binary type, or bytes that are not valid UTF-8, come back
+    unchanged.
     """
     if body is None:
         return body, []
 
     ct = content_type.lower()
-    is_text = any(marker in ct for marker in ("json", "text", "form", "xml", "javascript", "graphql"))
-    if not is_text:
-        return body, []
-
-    try:
+    if any(marker in ct for marker in _TEXT_TYPE_MARKERS):
         text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
-    except Exception:
+    elif _is_binary_content_type(ct):
         return body, []
+    elif isinstance(body, bytes):
+        try:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError:
+            return body, []
+    else:
+        text = body
 
     result = scrub_text(text, replacement=replacement, enabled_patterns=enabled_patterns)
     if not result.scrubbed:
