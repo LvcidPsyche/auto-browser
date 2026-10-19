@@ -181,6 +181,11 @@ deployment that restricts it.
   `code` and `retryable` when the controller sent them, so a graph can tell a missing session from
   a bad selector. Building `AutoBrowserTool` without `langchain-core` now raises an `ImportError`
   naming `pip install "auto-browser-langchain[langchain]"` instead of "takes no arguments".
+- **MCP tool results that are lists no longer break strict clients.** Over the streamable MCP
+  transport, a tool whose result is a list or a scalar (`browser.list_sessions`, for one) was
+  sent with that value as `structuredContent`, which the MCP spec requires to be an object, so
+  clients that validate the response rejected it. Such results now carry only the text block,
+  which already held the same JSON. Thanks to @sean0407 (#192).
 
 ### Added
 
