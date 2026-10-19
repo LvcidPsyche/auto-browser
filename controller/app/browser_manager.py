@@ -103,6 +103,11 @@ class BrowserSession:
     browser_node_name: str = "browser-node"
     isolation_mode: str = "shared_browser_node"
     browser: Browser | None = None
+    # True only for a browser this session alone holds (an isolated runtime's, or a
+    # shadow-browse window), the one close_session may close. The shared node's
+    # browser outlives any one session, and manager.browser can be swapped by
+    # cdp_attach, so identity against manager.browser cannot tell the two apart.
+    owns_browser: bool = False
     runtime: IsolatedBrowserRuntime | None = None
     tunnel: IsolatedSessionTunnel | None = None
     shared_takeover_surface: bool = True

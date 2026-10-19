@@ -94,9 +94,7 @@ class BrowserRuntimeService:
         does not depend on the shared one.
         """
         manager = self.manager
-        shared = sum(
-            1 for session in manager.sessions.values() if session.browser is None or session.browser is manager.browser
-        )
+        shared = sum(1 for session in manager.sessions.values() if not session.owns_browser)
         return shared + manager.session_lifecycle._creating
 
     @staticmethod
