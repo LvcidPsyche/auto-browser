@@ -185,7 +185,19 @@ class DurableSessionStore:
         return await self._primary.list()
 
     async def get(self, session_id: str) -> SessionRecord:
-        return await self._primary.get(session_id)
+        if self._primary is self.file_store:
+            return await self.file_store.get(session_id)
+        # upsert() writes the file record first, so it is the durable copy. A
+        # Redis restart without persistence, an evicted key or a dropped
+        # connection must not make a closed session look unowned to another
+        # operator's ownership check.
+        try:
+            return await self._primary.get(session_id)
+        except KeyError:
+            pass
+        except Exception as exc:
+            logger.warning("redis session read failed for %s, using file record: %s", session_id, exc)
+        return await self.file_store.get(session_id)
 
     async def upsert(self, record: SessionRecord) -> None:
         await self.file_store.upsert(record)
