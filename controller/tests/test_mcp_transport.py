@@ -198,6 +198,36 @@ class McpTransportTests(unittest.TestCase):
         self.assertEqual(called.name, "browser.observe")
         self.assertEqual(called.arguments, {"session_id": "session-1"})
 
+    def test_tools_call_omits_non_object_structured_content_for_2025_protocol(self) -> None:
+        expected = [{"id": "session-1", "status": "active"}]
+        self.gateway.call_tool.return_value = McpToolCallResponse(
+            content=[McpToolCallContent(text=json.dumps(expected))],
+            structuredContent=expected,
+            isError=False,
+        )
+        session_id, protocol_version = self._initialize()
+        self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version},
+            json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+        )
+
+        response = self.client.post(
+            "/mcp",
+            headers={MCP_SESSION_HEADER: session_id, MCP_PROTOCOL_HEADER: protocol_version},
+            json={
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "browser.list_sessions", "arguments": {}},
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        result = response.json()["result"]
+        self.assertNotIn("structuredContent", result)
+        self.assertEqual(json.loads(result["content"][0]["text"]), expected)
+
     def test_delete_tears_down_session(self) -> None:
         session_id, protocol_version = self._initialize()
         self.client.post(
