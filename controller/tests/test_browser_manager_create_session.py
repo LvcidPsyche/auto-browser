@@ -48,6 +48,8 @@ class FakeContext:
         self.on = unittest.mock.Mock()
         self.close = AsyncMock()
         self.new_page = AsyncMock(return_value=page)
+        self.set_default_timeout = unittest.mock.Mock()
+        self.add_init_script = AsyncMock()
 
 
 class FakeBrowser:

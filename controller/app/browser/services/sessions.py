@@ -145,10 +145,13 @@ class BrowserSessionService:
             if self.manager.settings.enable_tracing:
                 await context.tracing.start(screenshots=True, snapshots=True, sources=False)
 
-            page = await context.new_page()
-            page.set_default_timeout(self.manager.settings.action_timeout_ms)
+            # On the context, before the first page exists: set on the first page
+            # alone, tabs opened later and popups got neither the stealth patches
+            # nor this timeout (they waited Playwright's 30 s default).
+            context.set_default_timeout(self.manager.settings.action_timeout_ms)
             if self.manager.settings.stealth_enabled:
-                await apply_stealth(page)
+                await apply_stealth(context)
+            page = await context.new_page()
             session = BrowserSession(
                 id=session_id,
                 name=name or f"session-{session_id}",
@@ -605,10 +608,11 @@ class BrowserSessionService:
         )
         try:
             context = await headed_browser.new_context(**context_kwargs)
-            page = await context.new_page()
-            page.set_default_timeout(manager.settings.action_timeout_ms)
+            # On the context, as in create_session: every tab and popup needs both.
+            context.set_default_timeout(manager.settings.action_timeout_ms)
             if manager.settings.stealth_enabled:
-                await apply_stealth(page)
+                await apply_stealth(context)
+            page = await context.new_page()
 
             shadow_session = BrowserSession(
                 id=shadow_session_id,

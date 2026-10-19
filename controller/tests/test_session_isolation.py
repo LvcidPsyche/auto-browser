@@ -112,6 +112,9 @@ class FakeContext:
     async def new_page(self):
         return FakePage()
 
+    def set_default_timeout(self, timeout_ms: int) -> None:
+        return None
+
     async def close(self) -> None:
         return None
 

@@ -508,6 +508,9 @@ async def test_cancelled_create_releases_what_it_acquired(tmp_path: Path) -> Non
     started = asyncio.Event()
 
     class _Context:
+        def set_default_timeout(self, _timeout_ms: int) -> None:
+            pass
+
         async def new_page(self):
             started.set()
             await asyncio.Event().wait()
