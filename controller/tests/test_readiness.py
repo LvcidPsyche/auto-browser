@@ -18,7 +18,7 @@ def _settings(**kwargs) -> MagicMock:
         "pii_scrub_enabled": True,
         "require_approval_for_uploads": True,
         "api_bearer_tokens": "",
-        "mcp_force_governed": False,
+        "force_governed_approvals": False,
     }
     defaults.update(kwargs)
     settings = MagicMock()
@@ -74,12 +74,12 @@ def test_governed_approvals_warn_in_multi_operator_mode_when_not_forced() -> Non
 
     check = _governed_check(report)
     assert check is not None and check.status == "warn"
-    assert "MCP_FORCE_GOVERNED" in (check.fix or "")
+    assert "FORCE_GOVERNED_APPROVALS" in (check.fix or "")
     assert report.overall == "warn"
 
 
 def test_governed_approvals_pass_in_multi_operator_mode_when_forced() -> None:
-    report = run_readiness_checks(_settings(api_bearer_tokens="alice:token-a,bob:token-b", mcp_force_governed=True))
+    report = run_readiness_checks(_settings(api_bearer_tokens="alice:token-a,bob:token-b", force_governed_approvals=True))
 
     check = _governed_check(report)
     assert check is not None and check.status == "pass"

@@ -44,20 +44,24 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
 - Governed approvals are the calling agent's choice unless the server makes them its own:
   `workflow_profile` is an argument the agent supplies and defaults to `fast`, so on a
   multi-operator deployment an agent that leaves it out runs its writes without approval.
-  `MCP_FORCE_GOVERNED=true` runs every MCP tool that has a governed kind (16 in the full tool profile,
-  `browser.execute_action`, `browser.set_cookies` and `browser.delete_memory_profile` among
-  them) as `governed` whatever the caller passed, so an operator approves each one. It is
-  off by default because it stalls an existing agent loop on its first write. Readiness
+  `FORCE_GOVERNED_APPROVALS=true` takes the choice away. It is off by default because it
+  stalls an existing agent loop on its first write until an operator approves. Readiness
   (`GET /readiness`, `browser.readiness_check`) warns `governed_approvals` when more than one
   operator credential is configured and it is off. What it covers and what it does not:
-  - It covers MCP tool calls. The REST action routes (`/sessions/{id}/actions/*`) take no
-    `workflow_profile`, so it does not change them: they ask for approval only for uploads and
-    for `post`, `payment`, `account_change` and `destructive` decisions, as before. The
-    built-in agent loop (`/agent/step`, `/agent/run`, queued and cron runs) carries its own
-    `workflow_profile` and is unchanged as well.
+  - It covers every MCP tool call that has a governed kind (16 in the full tool profile,
+    `browser.execute_action`, `browser.set_cookies` and `browser.delete_memory_profile` among
+    them) and every step of the agent loop: MCP-queued steps and runs (`browser.queue_agent_step`,
+    `browser.queue_agent_run`), REST `/agent/step` and `/agent/run`, and cron runs. Each runs as
+    `governed` whatever `workflow_profile` the request carried, so an operator approves each write.
+  - It does not cover the REST action routes (`/sessions/{id}/actions/*`). They take no
+    `workflow_profile` and ask for approval only for uploads and for `post`, `payment`,
+    `account_change` and `destructive` decisions, as before. An agent holding a bearer token can
+    call them directly. The setting is a control on agents that act through MCP tools and the
+    agent loop; it is not a sandbox for a token holder.
   - `AUTONOMOUS_APPROVALS=true` lets the agent approve its own pending actions
-    (`browser.approve_approval`), so with it on the forcing only adds a step the agent
-    performs itself. Keep it off wherever `MCP_FORCE_GOVERNED` is meant to be a control.
+    (`browser.approve_approval`, and the agent loop itself), so with it on the forcing only adds
+    a step the agent performs itself. Keep it off wherever `FORCE_GOVERNED_APPROVALS` is meant
+    to be a control.
   - An approval of a tool that names no session (`browser.delete_memory_profile`,
     `browser.cdp_attach`) is held in a controller-wide scope and belongs to the operator who
     asked, as described in `docs/mcp-clients.md`.

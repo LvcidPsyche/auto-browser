@@ -45,6 +45,7 @@ class BrowserOrchestrator:
         workflow_profile: WorkflowProfile = "fast",
         previous_steps: list[AgentStepResult] | None = None,
     ) -> AgentStepResult:
+        workflow_profile = self._effective_profile(workflow_profile)
         adapter = self.registry.get(provider_name)
         model_name = provider_model or adapter.default_model
         session = await self.manager.get_session(session_id)
@@ -179,6 +180,7 @@ class BrowserOrchestrator:
         workflow_profile: WorkflowProfile = "fast",
         on_step: Callable[[int, AgentStepResult], Awaitable[None]] | None = None,
     ) -> AgentRunResult:
+        workflow_profile = self._effective_profile(workflow_profile)
         steps: list[AgentStepResult] = []
         final_status = "max_steps_reached"
         adapter = self.registry.get(provider_name)
@@ -243,6 +245,16 @@ class BrowserOrchestrator:
         )
         await self._append_agent_log(session_id, "agent_runs.jsonl", payload.model_dump())
         return payload
+
+    def _effective_profile(self, workflow_profile: WorkflowProfile) -> WorkflowProfile:
+        """``governed`` whatever the request says, when FORCE_GOVERNED_APPROVALS is on.
+
+        The profile comes from the request: a caller of the REST /agent routes,
+        the MCP queue tools or a cron job picks it, and it defaults to fast. A
+        server that opted in to forced approvals decides instead, so the step's
+        hints, its approvals and its result all see governed.
+        """
+        return "governed" if self.manager.settings.force_governed_approvals else workflow_profile
 
     async def _observe(self, session_id: str, limit: int) -> dict[str, Any]:
         try:

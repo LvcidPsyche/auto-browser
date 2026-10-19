@@ -222,12 +222,12 @@ def run_readiness_checks(settings: Any, mode: str = "normal") -> ReadinessReport
         )
 
     if len(credentials_for(settings)) > 1:
-        if getattr(settings, "mcp_force_governed", False):
+        if getattr(settings, "force_governed_approvals", False):
             checks.append(
                 ReadinessCheck(
                     name="governed_approvals",
                     status="pass",
-                    message="MCP_FORCE_GOVERNED=true: MCP write tools need an operator's approval.",
+                    message="FORCE_GOVERNED_APPROVALS=true: MCP write tools and the agent loop need an operator's approval.",
                 )
             )
         else:
@@ -238,11 +238,11 @@ def run_readiness_checks(settings: Any, mode: str = "normal") -> ReadinessReport
                     message=(
                         "Several operator credentials are configured, but governed approvals are each "
                         "caller's choice: an agent that omits workflow_profile=governed runs its writes "
-                        "without approval."
+                        "(MCP tools and the agent loop) without approval."
                     ),
                     fix=(
-                        "Set MCP_FORCE_GOVERNED=true to require approval for every MCP write tool, "
-                        "and leave AUTONOMOUS_APPROVALS off."
+                        "Set FORCE_GOVERNED_APPROVALS=true to require approval for every MCP write tool "
+                        "and every agent-loop write, and leave AUTONOMOUS_APPROVALS off."
                     ),
                 )
             )
