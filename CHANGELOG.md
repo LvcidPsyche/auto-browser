@@ -6,10 +6,9 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
-Most of these matter only if you run the controller with named credentials
-(`API_BEARER_TOKENS`). Single-operator and shared-token (`API_BEARER_TOKEN`) deployments see three
-changes: the export fix, `browser.cdp_attach` refusing while live sessions use the current browser,
-and `GET /proxy-personas/{name}` no longer returning the proxy password.
+Many of these matter only if you run the controller with named credentials
+(`API_BEARER_TOKENS`); each entry says who it affects. The `ALLOWED_HOSTS` entries apply to every
+deployment that restricts it.
 
 - **Saved session auth state is owned by the session's operator.** `storage_state_path` is
   relative to the auth root, so another operator could name `<session id>/state.json` and open a
@@ -72,6 +71,29 @@ and `GET /proxy-personas/{name}` no longer returning the proxy password.
   persona, plaintext password included, to any caller with an API token; it now answers the same
   shape as the list (`has_password`). Session creation with `proxy_persona` is unchanged. This
   applies to every deployment.
+- **Session creation checks where the start URL ended up.** It checked the URL it was given but
+  not the page it landed on, so an allowed start URL that redirected to a host outside
+  `ALLOWED_HOSTS` left a live session there. It now refuses and rolls the session back.
+- **Switching to a tab on a disallowed host is refused.** `activate_tab` made any open tab the
+  session's page, including a popup a page had opened onto a host the list refuses. It now
+  refuses before the active page changes (REST: 403).
+- **A blocked action that can't be rolled back no longer leaves the session, or its error, on the
+  disallowed page.** After `location.replace()`, or in a popup's first page, there is no history
+  entry, so going back did nothing: the session stayed on the refused page and the 403 carried
+  its text and a screenshot. The session now moves to `about:blank`, and the error reports only
+  the URL.
+- **`browser.set_cookies` is held to `ALLOWED_HOSTS`.** It added cookies for any domain, so a
+  caller confined to one site could plant a cookie on another. Each cookie's `url` or `domain` is
+  checked first, and one disallowed cookie refuses the whole call.
+- **`ALLOWED_HOSTS` holds after an action, not only at it.** A page that navigated itself later
+  (a timer, a late redirect, a popup's own script) stayed on the disallowed host, and `observe`
+  returned its title and text. Every page the session owns now has a listener that sends a
+  top-level page that lands off the list back to `about:blank` and records a `navigation_blocked`
+  audit event. Until it has, observe, screenshots, action snapshots, the page-reading MCP tools
+  and the DOM resource refuse (REST: 403), actions other than `navigate` and `go_back` are
+  refused, and summaries leave the page title empty. The list governs the top-level page only:
+  iframes and subresources from other hosts are not filtered, and raw CDP passthrough is
+  unchanged.
 
 ### Removed
 
