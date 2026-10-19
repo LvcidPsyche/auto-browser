@@ -29,6 +29,14 @@ async def require_session_access(request: Request) -> None:
         await manager.ensure_session_accessible(session_id)
 
 
+# Fixed texts for a page or tab ALLOWED_HOSTS refuses. The PermissionError behind
+# them names the host; these routes answer generically everywhere else.
+OFF_LIST_PAGE_DETAIL = (
+    "The page is on a host ALLOWED_HOSTS does not allow and is being moved to about:blank. Try again in a moment."
+)
+OFF_LIST_TAB_DETAIL = "That tab is on a host ALLOWED_HOSTS does not allow."
+
+
 def internal_error(logger: Logger, message: str, *args: object) -> HTTPException:
     logger.exception(message, *args)
     return HTTPException(status_code=500, detail="Internal error")
