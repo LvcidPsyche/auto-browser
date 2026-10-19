@@ -346,6 +346,20 @@ The full profile also exposes the convergence harness:
 
 Use `workflow_profile=governed` when starting convergence against a live browser session. `harness.graduate` writes only a staged candidate; promotion to the production skill corpus remains a separate governed review step.
 
+### Governed approvals on tool calls
+
+Pass `workflow_profile=governed` on a tool call (it defaults to `fast`) and every tool that
+writes asks for an operator's approval first: the call returns `approval_required` with an
+`approval_id`, an operator approves it, and the agent repeats the same call with that
+`approval_id`. An approval covers exactly one call with exactly those arguments.
+
+A governed tool that names no session (`browser.delete_memory_profile`, `browser.cdp_attach`)
+is approved in a controller-wide scope: the approval's `session_id` is `controller`, and
+`GET /approvals?session_id=controller` lists the ones you may see. With no session there is no
+session owner, so under named credentials (`API_BEARER_TOKENS`) such an approval belongs to
+the operator who asked and to nobody else: another operator cannot list, decide, reuse or
+spend it. `POST /approvals/{id}/execute` does not run it (the agent repeats the tool call).
+
 ## Raw tool-call example
 
 If you want to see the shape of the tool surface without wiring up a full MCP client yet:

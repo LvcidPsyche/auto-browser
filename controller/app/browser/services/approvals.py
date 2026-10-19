@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...approvals import held_for_execution
+from ...approvals import CONTROLLER_SCOPE, held_for_execution
 from ...models import ApprovalDecider, ApprovalRecord
 from ...session_ownership import may_use
 from ...witness import WitnessApproval
@@ -19,16 +19,32 @@ class BrowserApprovalService:
         session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         approvals = await self.manager.approvals.list(status=status, session_id=session_id)
-        owners = {item.session_id: await self.manager.session_owner(item.session_id) for item in approvals}
-        return [approval.model_dump() for approval in approvals if may_use(owners[approval.session_id])]
+        # One lookup per session, not per approval: a session can hold many.
+        session_owners = {
+            session: await self.manager.session_owner(session)
+            for session in {item.session_id for item in approvals if item.session_id != CONTROLLER_SCOPE}
+        }
+        return [
+            approval.model_dump()
+            for approval in approvals
+            if may_use(
+                approval.owner if approval.session_id == CONTROLLER_SCOPE else session_owners[approval.session_id]
+            )
+        ]
 
     async def get(self, approval_id: str) -> dict[str, Any]:
         return (await self._accessible(approval_id)).model_dump()
 
+    async def _owner_of(self, approval: ApprovalRecord) -> str | None:
+        """Who may use an approval: its session's owner, or for one with no session, who asked."""
+        if approval.session_id == CONTROLLER_SCOPE:
+            return approval.owner
+        return await self.manager.session_owner(approval.session_id)
+
     async def _accessible(self, approval_id: str) -> ApprovalRecord:
         """An approval of another operator's session answers as if it did not exist."""
         approval = await self.manager.approvals.get(approval_id)
-        if not may_use(await self.manager.session_owner(approval.session_id)):
+        if not may_use(await self._owner_of(approval)):
             raise KeyError(approval_id)
         return approval
 
@@ -108,6 +124,13 @@ class BrowserApprovalService:
         approval = await self._accessible(approval_id)
         if approval.status != "approved":
             raise PermissionError(f"approval {approval_id} is not approved")
+        if approval.session_id == CONTROLLER_SCOPE:
+            # It authorises a tool call the agent makes itself, passing the id
+            # back; there is no session for the server to replay it in.
+            raise PermissionError(
+                f"approval {approval_id} is a controller-wide approval: the agent runs the approved tool "
+                "call again with this approval_id; it cannot be executed here"
+            )
 
         decision = self.manager.approvals.executable_action(approval)
         # Claimed here, for the approval's own kind: execute_decision only

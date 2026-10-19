@@ -543,6 +543,10 @@ class ApprovalRecord(BaseModel):
     decided_via: ApprovalDecider | None = None
     approved_expires_at: str | None = None
     executed_at: str | None = None
+    # The token-verified operator who asked (None when unowned). A session
+    # approval is governed by the session's owner; this is what governs one in
+    # CONTROLLER_SCOPE, which has no session to ask.
+    owner: str | None = None
 
 
 class ApprovalDecisionRequest(StrictInputModel):
