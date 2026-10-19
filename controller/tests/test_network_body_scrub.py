@@ -79,6 +79,17 @@ def test_yaml_content_types_are_text() -> None:
         assert hits
 
 
+@pytest.mark.parametrize("content_type", ["application/yaml", "application/html"])
+def test_a_text_type_is_scrubbed_even_when_the_bytes_are_not_utf8(content_type: str) -> None:
+    # The UTF-8 fallback covers an untyped body; a type that names text is what
+    # covers one in another encoding (a Latin-1 YAML file), which the fallback
+    # would leave verbatim.
+    latin1 = "café: ".encode("latin-1") + SECRET_EMAIL.encode()
+    scrubbed, hits = scrub_network_body(latin1, content_type, enabled_patterns={"email"})
+    assert SECRET_EMAIL.encode() not in scrubbed
+    assert hits
+
+
 async def test_response_with_an_html_type_that_has_no_text_marker_is_scrubbed() -> None:
     """The response path stores a body when the type names html, but the scrubber's
     own list did not: `application/html` was stored verbatim."""
