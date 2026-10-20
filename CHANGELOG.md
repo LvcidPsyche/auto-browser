@@ -2,7 +2,40 @@
 
 All notable changes to auto-browser are documented here.
 
-## [Unreleased]
+## [1.10.0] — 2026-10-19
+
+A security update and correctness pass over 1.9.1: every finding was reproduced before it was
+fixed. The client, LangChain and MCP bridge packages change too: see the client SDK, LangChain
+and MCP bridge entries.
+
+**If you verify witness chains, restrict `ALLOWED_HOSTS` or use `workflow_profile=governed`, read
+the upgrade notes first.**
+
+Upgrade notes:
+- **Witness `valid` now covers the signatures.** `GET /sessions/{id}/witness/verify` and
+  `browser.verify_witness` pass `valid` only when the hash walk, the anchor and the signatures
+  all pass; the hash walk and anchor alone are now `chain_valid`. A session recorded entirely
+  before signing, or by a controller without its signing key, reports `valid: false`.
+- **`ALLOWED_HOSTS` is enforced where a page ends up.** A start URL that redirects off the list,
+  a switch to a tab on a refused host, a cookie for another domain, and a page that later
+  navigates itself off the list are now refused or sent back to `about:blank`.
+- **Under `workflow_profile=governed`, `browser.delete_memory_profile` and `browser.cdp_attach`
+  ask for approval**, held under `session_id: "controller"`. `browser.cdp_attach` is also
+  refused when more than one operator credential is configured, and while live sessions still
+  use the current browser.
+- **`REQUEST_RATE_LIMIT_EXEMPT_PATHS` entries match one path exactly** (`/artifacts` stays a
+  tree). If you exempted a sub-path by listing its parent, list the sub-path itself.
+- **`STEALTH_ENABLED=true` now applies its patches**, so sessions with it on present differently
+  to sites.
+- **REST errors carry their real status.** Routes that answered 500 for an unknown session, a
+  timeout or a missing element now answer 404, 403, 400 or the action error's own status, with
+  its `code`.
+- **If you run `scripts/codex_host_bridge.py` on the host, update it.** An older bridge answers
+  400 to a text-only observation, and the new one caps request bodies and read time.
+- **The client SDK raises `ValueError` for the ids `""`, `.` and `..`**, and the LangChain
+  `AutoBrowserNode` raises `AutoBrowserToolError` when a tool call fails.
+- **Removed:** `download_url` from the auth profile export response, and
+  `app.browser.dom_pruner`.
 
 ### Security
 
@@ -104,9 +137,9 @@ deployment that restricts it.
   signatures all do, so a client that reads that one field can't accept a stripped chain. The
   hash walk and anchor result alone moved to `chain_valid`. A session recorded entirely before
   signing existed, or by a controller that couldn't load its signing key, now reports
-  `valid: false` with `chain_valid: true`, which is accurate. The new section in `docs/deployment.md` says
-  what a signature can prove while the key sits beside the receipts, and how to pin a head hash
-  for evidence that survives a compromised host.
+  `valid: false` with `chain_valid: true`, which is accurate. The new section in
+  `docs/deployment.md` says what a signature can prove while the key sits beside the receipts,
+  and how to pin a head hash for evidence that survives a compromised host.
 - **Governed tools that name no session ask for approval.** `browser.delete_memory_profile` and
   `browser.cdp_attach` ran unapproved even under `workflow_profile=governed`, because the approval
   needed a session to belong to. They now return `approval_required` like every other governed
@@ -236,9 +269,10 @@ deployment that restricts it.
   and it no longer spends rate-limit budget. Every other answer is unchanged.
 - **`/healthz/deep` is rate-limited.** An entry in `REQUEST_RATE_LIMIT_EXEMPT_PATHS` exempted
   everything under it, so the deep health probe, which opens a browser context and renders a page
-  on every call, was unlimited for a token holder. Entries now match one path exactly; `/artifacts` stays exempt as a tree, because
-  the UI loads many files from it. If you exempted a sub-path by listing its parent, list the
-  sub-path itself. `/docs/oauth2-redirect` is now counted.
+  on every call, was unlimited for a token holder. Entries now match one path exactly;
+  `/artifacts` stays exempt as a tree, because the UI loads many files from it. If you exempted
+  a sub-path by listing its parent, list the sub-path itself. `/docs/oauth2-redirect` is now
+  counted.
 - **An open share link no longer slows the session it shows.** The share page polls every 5 s,
   and each poll ran a full observation (DOM, accessibility tree, OCR) under the session lock and
   kept the screenshot for good, so the agent waited on the viewer and the artifact directory
@@ -282,6 +316,11 @@ deployment that restricts it.
 - **A network hook whose pattern contains `/` can be removed.** `DELETE
   /sessions/{id}/network/hooks/{pattern}` never matched a pattern such as `*/api/*`. A Host header
   such as `[::1]evil.com` is also no longer read as loopback.
+
+### Changed
+
+- Controller dependencies: FastAPI `>=0.143.2,<0.144` (#177, #183), Starlette 1.8.0 and
+  pydantic-settings 2.16.0 (#191); ruff 0.17.1 for development.
 
 ### Added
 

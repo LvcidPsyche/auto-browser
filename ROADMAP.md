@@ -2,7 +2,7 @@
 
 This is the near-term direction for Auto Browser.
 
-## Now (current in v1.9.1)
+## Now (current in v1.10.0)
 
 - Ed25519-signed Witness receipt chains — each receipt attests to itself and its whole history, and an exported bundle verifies anywhere via `scripts/verify_witness_bundle.py`, which imports nothing from this project
 - `text` observation preset — accessibility outline, extracted text, and interactables with no screenshot and no OCR
@@ -12,7 +12,7 @@ This is the near-term direction for Auto Browser.
 - stable local-first browser control
 - reusable auth profiles + import/export
 - human takeover via noVNC
-- approvals and audit trails
+- approvals and audit trails, and `FORCE_GOVERNED_APPROVALS` to make governed approvals the server's rule for MCP tools and the agent loop
 - Witness receipts with on-demand hash-chain verification and Ed25519 signatures (REST + MCP), plus third-party-verifiable evidence bundles
 - MCP transport + REST API with 70+ tools: a 20-tool curated profile with compact results, and the full profile
 - screenshots returned to MCP clients as images, and `browser.read_download` for reading a downloaded CSV, JSON or text file
@@ -42,6 +42,7 @@ This is the near-term direction for Auto Browser.
 
 ## Recently Shipped
 
+- v1.10.0 a security update and correctness pass: saved auth state, exports, harness runs, memory profiles and uploads owned by their operator under named credentials, `ALLOWED_HOSTS` enforced wherever a page ends up, witness verification that rejects stripped signatures, a working Playwright export and stealth mode, and an opt-in `FORCE_GOVERNED_APPROVALS`
 - v1.9.1 prebuilt controller and browser-node images on GHCR (`docker-compose.images.yml`), with an SBOM and a build-provenance attestation on each
 - v1.9.0 a security and correctness pass from a maintainer review: sessions no longer shared between operators under named credentials, every `.env` setting now reaches the controller, governed approvals that run, the Claude and OpenAI providers working again on current models, wider PII scrubbing, an opt-in `AUTONOMOUS_APPROVALS` mode, and releases that publish only commits on `main`
 - v1.8.1 reliability, speed and polish passes (sessions and stores that no longer leak or lose writes, a stdio bridge that survives controller restarts, operator ids from every client, fewer browser round trips) and fixes from a private security review
