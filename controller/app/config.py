@@ -278,7 +278,7 @@ class Settings(BaseSettings):
 
     minimax_api_key: str | None = Field(None, alias="MINIMAX_API_KEY")
     minimax_base_url: str = Field("https://api.minimax.io/v1", alias="MINIMAX_BASE_URL")
-    minimax_model: str = Field("MiniMax-M3", alias="MINIMAX_MODEL")
+    minimax_model: str = Field("MiniMax-M3.1-Flash", alias="MINIMAX_MODEL")
 
     openai_compatible_api_key: str | None = Field(None, alias="OPENAI_COMPATIBLE_API_KEY")
     openai_compatible_base_url: str = Field("", alias="OPENAI_COMPATIBLE_BASE_URL")

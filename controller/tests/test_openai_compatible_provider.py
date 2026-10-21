@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
+
 from app.config import Settings
 from app.provider_registry import ProviderRegistry
 from app.providers.openai_compatible import (
@@ -137,9 +139,60 @@ class OpenAICompatibleProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.decision.action, "done")
         self.assertEqual(decision.provider, "minimax")
         sent = fake.calls[0]["json"]
-        self.assertEqual(sent["model"], "MiniMax-M3")
+        self.assertEqual(sent["model"], "MiniMax-M3.1-Flash")
         self.assertIn("image_url", [c["type"] for c in sent["messages"][1]["content"]])
         self.assertEqual(fake.calls[0]["url"], "https://api.minimax.io/v1/chat/completions")
+
+    async def test_minimax_serialized_request_preserves_model_overrides(self):
+        cases = (
+            ({}, None, "MiniMax-M3.1-Flash"),
+            ({"MINIMAX_MODEL": "MiniMax-M3"}, None, "MiniMax-M3"),
+            ({"MINIMAX_MODEL": "MiniMax-M2.5"}, None, "MiniMax-M2.5"),
+            ({"MINIMAX_MODEL": "custom-saved-model"}, None, "custom-saved-model"),
+            ({"MINIMAX_MODEL": "MiniMax-M3"}, "MiniMax-M3.1-Flash", "MiniMax-M3.1-Flash"),
+            ({}, "MiniMax-M3", "MiniMax-M3"),
+            ({}, "MiniMax-M2.5", "MiniMax-M2.5"),
+            ({}, "custom-request-model", "custom-request-model"),
+            ({"MINIMAX_BASE_URL": "https://custom.example/v1/"}, "custom-model", "custom-model"),
+        )
+        for env, override, expected_model in cases:
+            with self.subTest(env=env, override=override):
+                with patch.dict(os.environ, {"MINIMAX_API_KEY": "test-key", **env}, clear=True):
+                    settings = Settings(_env_file=None)
+                registry = ProviderRegistry(settings)
+                adapter = registry.get("minimax")
+                info = next(info for info in registry.list() if info.provider == "minimax")
+                self.assertEqual(info.model, settings.minimax_model)
+                requests = []
+
+                def respond(request):
+                    requests.append(request)
+                    return httpx.Response(
+                        200, json=_tool_call_response({"action": "done", "reason": "complete"}).json()
+                    )
+
+                client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+                with patch("app.providers.base.httpx.AsyncClient", return_value=client):
+                    decision = await adapter.decide(
+                        goal="Finish the task", observation=self._observation(), model_override=override
+                    )
+                self.assertEqual(decision.decision.action, "done")
+                self.assertEqual(len(requests), 1)
+                request = requests[0]
+                self.assertEqual(request.method, "POST")
+                self.assertEqual(str(request.url), settings.minimax_base_url.rstrip("/") + "/chat/completions")
+                self.assertEqual(request.headers["Authorization"], "Bearer test-key")
+                sent = json.loads(request.content)
+                self.assertEqual(sent["model"], expected_model)
+                self.assertEqual(sent["tools"][0]["function"]["name"], "browser_action")
+                self.assertEqual(sent["tool_choice"]["function"]["name"], "browser_action")
+                content = sent["messages"][1]["content"]
+                self.assertEqual([part["type"] for part in content], ["text", "image_url"])
+                self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+                # Keep the provider's adaptive-thinking/effort defaults; do not send
+                # unsupported Flash controls or impose them on explicit legacy models.
+                for field in ("thinking", "reasoning_effort", "reasoning_split", "service_tier", "temperature"):
+                    self.assertNotIn(field, sent)
 
     async def test_decide_falls_back_to_content_when_no_tool_call(self):
         adapter = self._adapter("openrouter", openrouter_api_key="k", openrouter_model="anthropic/claude-3.7-sonnet")

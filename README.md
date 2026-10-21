@@ -306,7 +306,7 @@ a single generic **OpenAI-compatible** adapter drives any model reachable over a
 | `openrouter` | one key → ~every frontier model (Claude, GPT, Gemini, Grok, DeepSeek, Llama, Mistral, Qwen, …) |
 | `xai` | Grok |
 | `deepseek` | DeepSeek (text-only; driven from the DOM/accessibility outline) |
-| `minimax` | MiniMax |
+| `minimax` | MiniMax-M3.1-Flash (default); set `MINIMAX_MODEL=MiniMax-M3` to use MiniMax-M3 |
 | `openai_compatible` | any custom base URL — self-hosted Ollama / vLLM / LM Studio, Azure OpenAI, Together, Groq, Fireworks, … |
 
 Vision (screenshots) is used for every provider except text-only ones. See `.env.example` for
