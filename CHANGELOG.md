@@ -13,6 +13,12 @@ All notable changes to auto-browser are documented here.
   `screenshot_scrubbing` as `fail` instead of `warn`. An action that already ran is still reported and
   recorded (action log, audit event, witness receipt), with `observation_error` in place of the image.
 
+### Changed
+
+- **The stealth fingerprint layer is canvas noise only, and says so.** Its WebGL1 `getParameter`
+  wrapper returned the real value for every parameter, so it changed nothing except the function's
+  `toString()`; it and its unused seed are removed. WebGL values are reported as the browser has them.
+
 ### Fixed
 
 - **`STEALTH_PROFILE` is read through settings.** `STEALTH_ENABLED` came from `.env`, but the
