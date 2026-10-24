@@ -6,6 +6,11 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **`STEALTH_PROFILE` is read through settings.** `STEALTH_ENABLED` came from `.env`, but the
+  profile was read straight from the process environment, so a run outside Docker with both set in
+  `.env` kept the fingerprint profile off. `STEALTH_PROFILE` (`off`, `light` or `aggressive`; any
+  other value is rejected at startup) is now a setting, and the compose `environment:` block passes
+  it next to `STEALTH_ENABLED`.
 - **`CURATOR_ENABLED` no longer sends a placeholder transcript to the model.** With the setting on
   and a provider key present, every closed session started a background review that sent the model
   a fixed placeholder string instead of a transcript, and could write what came back to
