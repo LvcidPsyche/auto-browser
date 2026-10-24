@@ -3,7 +3,7 @@
 #   docker compose -f docker-compose.yml -f docker-compose.images.yml up -d
 #
 # AUTO_BROWSER_IMAGE_TAG picks the version: `latest` (default, the newest release), a release
-# such as `1.10.0`, or `edge` (the current main branch). The controller image is built without
+# such as `1.10.1`, or `edge` (the current main branch). The controller image is built without
 # the agent CLIs; `*_AUTH_MODE=cli` needs a local build with INSTALL_AGENT_CLIS=true.
 services:
   browser-node:

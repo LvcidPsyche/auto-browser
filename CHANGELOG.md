@@ -2,7 +2,15 @@
 
 All notable changes to auto-browser are documented here.
 
-## [Unreleased]
+## [1.10.1] — 2026-10-24
+
+A dependency and release-process update over 1.10.0. The client, LangChain and MCP bridge
+packages change only in version; the Docker images are rebuilt with the updated dependencies.
+
+### Changed
+
+- Controller dependencies: Pillow 13.0.0 (#208). The GHCR images for 1.10.0 were built before
+  that bump, so `latest`, `1.10` and `1.10.1` now carry it.
 
 ### Fixed
 

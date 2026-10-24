@@ -3,4 +3,4 @@
 from .client import AutoBrowserClient, AutoBrowserError
 
 __all__ = ["AutoBrowserClient", "AutoBrowserError"]
-__version__ = "1.10.0"
+__version__ = "1.10.1"
