@@ -15,6 +15,10 @@ All notable changes to auto-browser are documented here.
 
 ### Changed
 
+- **The harness's programmatic verifier tests every `url_matches` pattern in one child process.** It
+  started one Python process per pattern (about 180 ms each on Windows). A verification now starts one,
+  and another only after a pattern that outlasts the timeout; each stuck pattern still times out on
+  its own and the others keep their verdicts.
 - **The stealth fingerprint layer is canvas noise only, and says so.** Its WebGL1 `getParameter`
   wrapper returned the real value for every parameter, so it changed nothing except the function's
   `toString()`; it and its unused seed are removed. WebGL values are reported as the browser has them.
