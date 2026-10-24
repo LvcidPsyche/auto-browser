@@ -126,3 +126,13 @@ def test_the_controller_reads_every_setting_in_dotenv() -> None:
     """
     controller = COMPOSE.read_text(encoding="utf-8").split("\n  controller:\n", 1)[1].split("\n  reverse-ssh:\n", 1)[0]
     assert re.search(r"env_file:\s*\n\s*- path: \.env\s*\n\s*required: false", controller), controller[:400]
+
+
+def test_compose_passes_the_mcp_tool_selection_to_the_controller() -> None:
+    """Both settings reach the container on the main deploy path, with config.py's defaults.
+
+    `environment:` overrides env_file and passes the operator's shell value, so a
+    key listed for one setting and not the other would split them.
+    """
+    assert _compose_default("MCP_TOOL_PROFILE") == Settings(_env_file=None).mcp_tool_profile == "curated"
+    assert _compose_default("MCP_TOOL_PACKS") == Settings(_env_file=None).mcp_tool_packs == ""
