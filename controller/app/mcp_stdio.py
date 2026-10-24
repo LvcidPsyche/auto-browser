@@ -152,7 +152,8 @@ class StdioMcpBridge:
 
         request_id = payload.get("id")
         method = payload.get("method")
-        if method in _SUBSCRIPTION_METHODS:
+        # A list or object method is unhashable: leave it to the controller, which rejects it.
+        if isinstance(method, str) and method in _SUBSCRIPTION_METHODS:
             if request_id is None:
                 return None
             return self._jsonrpc_error(

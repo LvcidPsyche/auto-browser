@@ -319,6 +319,22 @@ class BridgeProtocolTests(unittest.TestCase):
                 self.assertEqual(lines[0]["error"]["code"], -32601)
                 self.assertEqual(client.posts, [])
 
+    def test_a_non_string_method_does_not_stop_the_bridge(self) -> None:
+        # An unhashable method made the subscription lookup raise TypeError out of
+        # run(), closing the session; it must reach the controller, which answers it.
+        for method in ([], {}):
+            with self.subTest(method=method):
+                client = FakeHttpMcpClient()
+                lines = self._run(
+                    client,
+                    json.dumps({"jsonrpc": "2.0", "id": 1, "method": method})
+                    + "\n"
+                    + json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+                    + "\n",
+                )
+                self.assertEqual([line["id"] for line in lines], [1, 2])
+                self.assertEqual(client.posts[0]["payload"]["method"], method)
+
     def test_notifications_produce_no_response(self) -> None:
         client = FakeHttpMcpClient()
         lines = self._run(client, json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
