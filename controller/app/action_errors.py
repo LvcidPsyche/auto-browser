@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+# PII_SCRUB_SCREENSHOT_STRICT refused to return a screenshot it could not scrub.
+SCREENSHOT_WITHHELD = "screenshot_withheld"
+
 
 class BrowserActionError(Exception):
     def __init__(

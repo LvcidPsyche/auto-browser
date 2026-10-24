@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from ... import events as _events
-from ...action_errors import BrowserActionError
+from ...action_errors import SCREENSHOT_WITHHELD, BrowserActionError
 from ...browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
 from ..aria_outline import outline_from_aria_snapshot, unavailable_outline
 
@@ -353,7 +353,7 @@ class BrowserObservationService:
             f"Screenshot withheld: PII_SCRUB_SCREENSHOT_STRICT is on and the screenshot could not be "
             f"PII-scrubbed ({reason}). Run the controller from the Docker image, which ships tesseract, "
             "or set PII_SCRUB_SCREENSHOT_STRICT=false.",
-            code="screenshot_withheld",
+            code=SCREENSHOT_WITHHELD,
             status_code=503,
             retryable=False,
         )
