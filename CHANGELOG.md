@@ -12,6 +12,11 @@ All notable changes to auto-browser are documented here.
   `skills-staging`. Nothing builds a session transcript yet, so the review is not started at all:
   startup logs that the setting is reserved, and `.env.example` says so. The adapter setup and the
   setting itself are unchanged.
+- **A screenshot whose redaction fails is reported as failed, not as redacted.** When Pillow could
+  not process the image, `scrub_screenshot` returned the original bytes with the matches attached,
+  the caller audited `pii_redaction` as `ok`, and the result carried no sign of it. The function now
+  raises, the result carries `screenshot_pii_scrub: {"applied": false, "reason": "redaction_failed"}`
+  (the field used when OCR is unavailable), and the audit event has status `failed`.
 
 ## [1.10.1] — 2026-10-24
 
