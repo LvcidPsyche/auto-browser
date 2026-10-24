@@ -6,6 +6,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from pydantic import ValidationError
+
+from app.config import Settings
 from app.startup import extensions
 
 
@@ -55,6 +58,47 @@ class StartupExtensionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(app.state, "workflow_engine"))
         curator.assert_called_once_with(app)
         app.state.browser_manager.register_extension_hooks.assert_called_once()
+
+    async def _create_session(self, **settings_kwargs) -> AsyncMock:
+        manager = FakeManager()
+        manager.sessions["session-1"] = SimpleNamespace(network_inspector=object())
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                browser_manager=manager,
+                network_inspectors={},
+                cdp_sessions={},
+                settings=Settings(_env_file=None, **settings_kwargs),
+            )
+        )
+        page = SimpleNamespace(context=object())
+        with (
+            patch("app.cdp.passthrough.CDPPassthrough.from_page", new=AsyncMock(return_value="cdp")),
+            patch("app.stealth.fingerprint.apply_fingerprint", new=AsyncMock()) as apply,
+        ):
+            await extensions.on_session_created(app, "session-1", page)
+        return apply
+
+    async def test_stealth_profile_comes_from_settings_not_os_environ(self) -> None:
+        # A host run reads STEALTH_ENABLED and STEALTH_PROFILE from .env through
+        # Settings; os.environ is empty in that case.
+        apply = await self._create_session(STEALTH_ENABLED="true", STEALTH_PROFILE="light")
+
+        apply.assert_awaited_once()
+        self.assertEqual(apply.await_args.args[1].profile, "light")
+
+    async def test_stealth_profile_off_or_disabled_applies_no_fingerprint(self) -> None:
+        for kwargs in (
+            {"STEALTH_ENABLED": "true", "STEALTH_PROFILE": "off"},
+            {"STEALTH_ENABLED": "true"},
+            {"STEALTH_ENABLED": "false", "STEALTH_PROFILE": "aggressive"},
+        ):
+            with self.subTest(**kwargs):
+                apply = await self._create_session(**kwargs)
+                apply.assert_not_awaited()
+
+    def test_stealth_profile_rejects_unknown_values(self) -> None:
+        with self.assertRaises(ValidationError):
+            Settings(_env_file=None, STEALTH_PROFILE="stealthy")
 
     async def test_mesh_gateway_adapts_mcp_response_and_marks_errors(self) -> None:
         gateway = AsyncMock()

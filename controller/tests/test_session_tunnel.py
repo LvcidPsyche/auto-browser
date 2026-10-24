@@ -284,6 +284,138 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(broker._allocated_ports, set())
             self.assertEqual(starting.status, "inactive")
 
+    async def test_provision_cancelled_while_autossh_is_starting_closes_the_log_and_marks_error(self) -> None:
+        started = asyncio.Event()
+
+        async def hanging_exec(*args, **kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            built = []
+            real_build = broker._build_tunnel
+
+            def build(*args, **kwargs):
+                built.append(real_build(*args, **kwargs))
+                return built[-1]
+
+            broker._build_tunnel = build  # type: ignore[method-assign]
+            with patch("app.session_tunnel.asyncio.create_subprocess_exec", new=hanging_exec):
+                provision = asyncio.create_task(broker.provision("session-1", local_port=6080))
+                await asyncio.wait_for(started.wait(), timeout=10)
+                provision.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await provision
+
+            tunnel = built[0]
+            self.assertTrue(tunnel.stderr_handle.closed)
+            metadata = json.loads(tunnel.info_path.read_text(encoding="utf-8"))
+            self.assertEqual(metadata["status"], "error")
+            tunnel.log_path.unlink()  # a leaked handle blocks this on Windows
+            self.assertEqual(broker._tunnels, {})
+            self.assertEqual(broker._allocated_ports, set())
+
+    async def test_provision_cancelled_waiting_for_the_lock_after_the_grace_period_stops_autossh(self) -> None:
+        real_sleep = asyncio.sleep
+        in_grace = asyncio.Event()
+        end_grace = asyncio.Event()
+
+        async def gated_sleep(delay, *args):
+            if delay != _GRACE:
+                return await real_sleep(delay, *args)
+            in_grace.set()
+            await end_grace.wait()
+
+        processes: list[FakeProcess] = []
+
+        async def fake_exec(*args, **kwargs):
+            processes.append(FakeProcess())
+            return processes[-1]
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            with (
+                patch("app.session_tunnel.asyncio.create_subprocess_exec", new=fake_exec),
+                patch("app.session_tunnel.asyncio.sleep", new=gated_sleep),
+            ):
+                provision = asyncio.create_task(broker.provision("session-1", local_port=6080))
+                await asyncio.wait_for(in_grace.wait(), timeout=10)
+                starting = broker._tunnels["session-1"]
+
+                await broker._lock.acquire()
+                try:
+                    end_grace.set()
+                    for _ in range(5):  # let provision run up to the lock wait
+                        await real_sleep(0)
+                    provision.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await provision
+                finally:
+                    broker._lock.release()
+
+            self.assertTrue(processes[0].killed)
+            self.assertEqual(broker._tunnels, {})
+            self.assertEqual(broker._allocated_ports, set())
+            self.assertEqual(starting.status, "error")
+            self.assertIsNone(starting.stderr_handle)
+
+    async def test_release_cancelled_during_a_slow_heartbeat_is_cancelled(self) -> None:
+        """release() absorbed any CancelledError while it waited for the heartbeat
+        task, its own cancellation included, and carried on as if not cancelled."""
+        heartbeat_cancelled = asyncio.Event()
+        let_heartbeat_die = asyncio.Event()
+
+        async def slow_to_die() -> None:
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                heartbeat_cancelled.set()
+                await let_heartbeat_die.wait()
+                raise
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            tunnel = broker._build_tunnel("session-1", remote_port=16181, local_host="h", local_port=6080)
+            tunnel.process = FakeProcess()
+            heartbeat = asyncio.create_task(slow_to_die())
+            await asyncio.sleep(0)
+            tunnel.heartbeat_task = heartbeat
+
+            release = asyncio.create_task(broker.release(tunnel))
+            await asyncio.wait_for(heartbeat_cancelled.wait(), timeout=10)
+            release.cancel()
+            let_heartbeat_die.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(release, timeout=10)
+            self.assertTrue(release.cancelled())
+            await asyncio.wait({heartbeat})
+
+    async def test_release_cancelled_while_waiting_for_the_heartbeat_still_tears_down(self) -> None:
+        """release() sets `released` first, so nothing else will stop the tunnel. A
+        cancel that lands while it waits for the heartbeat, even one that dies at
+        once, must not leave autossh running, its port reserved or its log open."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            tunnel = broker._build_tunnel("session-1", remote_port=16181, local_host="h", local_port=6080)
+            tunnel.process = FakeProcess()
+            tunnel.stderr_handle = tunnel.log_path.open("ab")
+            broker._tunnels["session-1"] = tunnel
+            broker._allocated_ports.add(16181)
+            tunnel.heartbeat_task = asyncio.create_task(asyncio.sleep(3600))
+
+            release = asyncio.create_task(broker.release(tunnel))
+            await asyncio.sleep(0)  # release() takes the lock and waits for the heartbeat
+            release.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await release
+
+            self.assertTrue(tunnel.process.terminated)
+            self.assertEqual(broker._allocated_ports, set())
+            self.assertEqual(broker._tunnels, {})
+            self.assertIsNone(tunnel.stderr_handle)
+            self.assertEqual(json.loads(tunnel.info_path.read_text(encoding="utf-8"))["status"], "inactive")
+
     async def test_failed_metadata_write_does_not_leak_the_log_handle(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             broker = await self._started_broker(Path(tempdir))
