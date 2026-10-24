@@ -177,6 +177,9 @@ async def _regex_search_child(patterns: list[str], text: str, *, timeout: float)
         stderr=asyncio.subprocess.PIPE,
     )
     finished: list[bool] = []
+    # Drained alongside stdout: re warns on stderr while it compiles (a nested
+    # set, say), and a child blocked on a full stderr pipe looks like a stuck pattern.
+    stderr_reader = asyncio.ensure_future(process.stderr.read())
     try:
         process.stdin.write(json.dumps({"patterns": patterns, "text": text}).encode("utf-8"))
         process.stdin.close()
@@ -193,15 +196,17 @@ async def _regex_search_child(patterns: list[str], text: str, *, timeout: float)
             process.kill()
         except ProcessLookupError:
             pass  # exited between the wait ending and the kill
-        await process.communicate()
+        await process.stdout.read()
+        await stderr_reader
+        await process.wait()
         if isinstance(exc, asyncio.TimeoutError):
             # Stuck only if a pattern was still unanswered (not merely slow to exit).
             return finished, len(finished) < len(patterns)
         raise
+    stderr = await stderr_reader
     if process.returncode != 0:
         # Patterns are compiled when the contract is built, so this is not a bad
         # pattern; fail loudly rather than guess a verdict.
-        stderr = await process.stderr.read()
         raise RuntimeError(
             f"regex worker failed (code {process.returncode}): {stderr.decode('utf-8', 'replace')[-500:]}"
         )

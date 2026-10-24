@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from app.harness import EvidenceRequirement, ForbiddenState, Postcondition, TaskContract
 from app.harness.verifier.base import EnsembleVerifier, VerificationResult
-from app.harness.verifier.programmatic import ProgrammaticVerifier
+from app.harness.verifier.programmatic import ProgrammaticVerifier, _regex_search_many
 from app.harness.verifier.uv import UniversalVerifierAdapter
 
 
@@ -487,6 +487,22 @@ class ProgrammaticRegexTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result.forbidden_state_hits, ["forbidden[0]:url_matches:(?:a+)+$", "forbidden[1]:url_matches:a!"]
         )
+
+    async def test_warnings_on_the_childs_stderr_do_not_stall_it(self) -> None:
+        # "[[]" warns FutureWarning (possible nested set) once per occurrence on the
+        # child's stderr. Undrained, a few patterns' worth fills the pipe, the child
+        # blocks writing, and fast patterns come back as timeouts.
+        patterns = ["(?:" + "." * i + "[[]" * 1300 + ")" for i in range(3)]
+
+        results = await _regex_search_many(patterns, "[" * 1400, timeout=2.0)
+
+        self.assertEqual(results, [True, True, True])
+
+    async def test_a_failing_worker_raises_with_its_stderr(self) -> None:
+        worker = "import sys\nsys.stderr.write('worker broke')\nsys.exit(3)\n"
+        with mock.patch("app.harness.verifier.programmatic._REGEX_WORKER", worker):
+            with self.assertRaisesRegex(RuntimeError, r"code 3\).*worker broke"):
+                await _regex_search_many([r"a"], "a", timeout=5.0)
 
     async def test_regex_child_is_killed_when_the_caller_cancels(self) -> None:
         started: list = []
