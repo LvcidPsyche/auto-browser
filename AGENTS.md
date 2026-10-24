@@ -18,6 +18,9 @@ make release-audit   # launch-prep audit; run before any release PR
 - `make test-local` runs from `controller/` on purpose: pydantic-settings reads `.env` from the
   working directory, and a developer's root `.env` turns on auth the tests don't send (~138
   false 400s). If you invoke the tests yourself, run them from `controller/` too.
+  `controller/tests/__init__.py` also clears every variable `Settings` reads and stops it
+  reading `.env`, so a developer's setup no longer changes results; the working directory is the
+  second line of defence.
 - Test-suite defaults belong in `controller/tests/__init__.py`, not `conftest.py`: the
   controller image ships `tests/__init__.py`, so a conftest-only default passes on the host and
   fails in Docker.
