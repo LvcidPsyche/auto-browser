@@ -28,6 +28,7 @@ def _settings(**kwargs) -> MagicMock:
         "require_approval_for_uploads": True,
         "api_bearer_tokens": "",
         "force_governed_approvals": False,
+        "pii_scrub_screenshot_strict": False,
     }
     defaults.update(kwargs)
     settings = MagicMock()
@@ -134,6 +135,35 @@ def test_warns_when_ocr_is_disabled_while_screenshot_scrubbing_is_on() -> None:
     check = _check(report, "screenshot_scrubbing")
     assert check.status == "warn"
     assert "OCR_ENABLED" in check.message
+
+
+def test_strict_mode_fails_when_tesseract_is_missing() -> None:
+    with patch("app.readiness.tesseract_available", return_value=False):
+        report = run_readiness_checks(
+            _settings(pii_scrub_screenshot=True, pii_scrub_screenshot_strict=True, ocr_enabled=True)
+        )
+
+    check = _check(report, "screenshot_scrubbing")
+    assert check.status == "fail"
+    assert "PII_SCRUB_SCREENSHOT_STRICT" in check.message
+    assert report.overall == "fail"
+
+
+def test_strict_mode_fails_when_ocr_is_disabled() -> None:
+    report = run_readiness_checks(
+        _settings(pii_scrub_screenshot=True, pii_scrub_screenshot_strict=True, ocr_enabled=False)
+    )
+
+    assert _check(report, "screenshot_scrubbing").status == "fail"
+    assert report.overall == "fail"
+
+
+def test_strict_mode_passes_when_scrubbing_can_run() -> None:
+    report = run_readiness_checks(
+        _settings(pii_scrub_screenshot=True, pii_scrub_screenshot_strict=True, ocr_enabled=True)
+    )
+
+    assert _check(report, "screenshot_scrubbing").status == "pass"
 
 
 @pytest.mark.parametrize("overrides", [{"pii_scrub_screenshot": False}, {"pii_scrub_enabled": False}])

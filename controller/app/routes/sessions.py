@@ -88,11 +88,13 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
 
     @router.get("/sessions/{session_id}/downloads")
     async def list_downloads(session_id: str) -> list[dict[str, Any]]:
-        return await manager.list_downloads(session_id)
+        with typed_route_errors(logger, "list downloads failed for session %s", session_id):
+            return await manager.list_downloads(session_id)
 
     @router.get("/sessions/{session_id}/tabs")
     async def list_tabs(session_id: str) -> list[dict[str, Any]]:
-        return await manager.list_tabs(session_id)
+        with typed_route_errors(logger, "list tabs failed for session %s", session_id):
+            return await manager.list_tabs(session_id)
 
     @router.post("/sessions/{session_id}/tabs/activate")
     async def activate_tab(session_id: str, payload: TabIndexRequest) -> dict[str, Any]:
@@ -223,26 +225,24 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
 
     @router.post("/sessions/{session_id}/takeover")
     async def request_human_takeover(session_id: str, payload: HumanTakeoverRequest) -> dict[str, Any]:
-        return await manager.request_human_takeover(session_id, payload.reason)
+        with typed_route_errors(logger, "takeover request failed for session %s", session_id):
+            return await manager.request_human_takeover(session_id, payload.reason)
 
     @router.delete("/sessions/{session_id}")
     async def close_session(session_id: str) -> dict[str, Any]:
-        return await manager.close_session(session_id)
+        with typed_route_errors(logger, "close failed for session %s", session_id):
+            return await manager.close_session(session_id)
 
     @router.post("/sessions/{session_id}/fork")
     async def fork_session(session_id: str, name: str | None = None, start_url: str | None = None) -> dict[str, Any]:
         # Query parameters skip the request models every other route uses, so
         # the URL gets the same validation here.
-        try:
+        with typed_route_errors(logger, "fork failed for session %s", session_id):
             if start_url is not None:
                 start_url = validate_url(start_url, field_name="start_url", allowed_schemes=HTTP_URL_SCHEMES)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid request") from None
-        try:
-            return await manager.fork_session(session_id, name=name, start_url=start_url)
-        except PermissionError:
-            raise HTTPException(status_code=403, detail="Not permitted") from None
-        except RuntimeError:
-            raise HTTPException(status_code=409, detail="Conflict") from None
+            try:
+                return await manager.fork_session(session_id, name=name, start_url=start_url)
+            except RuntimeError:
+                raise HTTPException(status_code=409, detail="Conflict") from None
 
     return router

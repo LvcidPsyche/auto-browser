@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from app.harness import EvidenceRequirement, ForbiddenState, Postcondition, TaskContract
 from app.harness.verifier.base import EnsembleVerifier, VerificationResult
-from app.harness.verifier.programmatic import ProgrammaticVerifier
+from app.harness.verifier.programmatic import ProgrammaticVerifier, _regex_search_many
 from app.harness.verifier.uv import UniversalVerifierAdapter
 
 
@@ -380,6 +380,129 @@ class ProgrammaticRegexTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.passed)
         self.assertEqual(result.forbidden_state_hits, [f"forbidden[0]:url_matches:{self.CATASTROPHIC}"])
         self.assertEqual(result.details["regex_timeouts"], result.forbidden_state_hits)
+
+    def _many(self, postconditions: list[str], forbidden: list[str] | None = None) -> TaskContract:
+        return TaskContract(
+            id="task-regex-many",
+            goal="regex handling",
+            postconditions=[Postcondition(kind="url_matches", value=value) for value in postconditions],
+            forbidden_states=[ForbiddenState(kind="url_matches", value=value) for value in forbidden or []],
+        )
+
+    @staticmethod
+    def _count_spawns() -> tuple[list, object]:
+        started: list = []
+        original = asyncio.create_subprocess_exec
+
+        async def spy(*args, **kwargs):
+            process = await original(*args, **kwargs)
+            started.append(process)
+            return process
+
+        return started, mock.patch("app.harness.verifier.programmatic.asyncio.create_subprocess_exec", spy)
+
+    async def test_every_url_matches_pattern_is_tested_in_one_child(self) -> None:
+        trace = {
+            "final_observation": {"url": "https://shop.example.com/checkout?id=42"},
+            "evidence_kinds": ["trace", "actions"],
+        }
+        started, patched = self._count_spawns()
+
+        with patched:
+            result = await ProgrammaticVerifier().verify(
+                self._many([r"checkout\?id=\d+", r"shop\.example"], forbidden=[r"admin"]), trace
+            )
+
+        self.assertTrue(result.passed)
+        self.assertEqual(len(started), 1)
+
+    async def test_results_keep_their_condition_when_patterns_share_a_child(self) -> None:
+        trace = {"final_observation": {"url": "https://shop.example.com/checkout?id=42"}, "evidence_kinds": []}
+        contract = TaskContract(
+            id="task-order",
+            goal="order",
+            postconditions=[
+                Postcondition(kind="url_matches", value=r"checkout"),
+                Postcondition(kind="url_contains", value="example"),
+                Postcondition(kind="url_matches", value=r"cart"),
+                Postcondition(kind="url_matches", value=r"id=\d+"),
+            ],
+            forbidden_states=[
+                ForbiddenState(kind="url_matches", value=r"admin"),
+                ForbiddenState(kind="url_matches", value=r"shop"),
+            ],
+        )
+
+        result = await ProgrammaticVerifier().verify(contract, trace)
+
+        self.assertEqual(result.failed_postconditions, ["postcondition[2]:url_matches:cart"])
+        self.assertEqual(
+            result.satisfied_postconditions,
+            [
+                "postcondition[0]:url_matches:checkout",
+                "postcondition[1]:url_contains:example",
+                "postcondition[3]:url_matches:id=\\d+",
+            ],
+        )
+        self.assertEqual(result.forbidden_state_hits, ["forbidden[1]:url_matches:shop"])
+        self.assertEqual(result.details["regex_timeouts"], [])
+
+    async def test_a_stuck_pattern_times_out_alone_and_the_rest_still_run(self) -> None:
+        trace = {"final_observation": {"url": self.CATASTROPHIC_URL}, "evidence_kinds": []}
+        started, patched = self._count_spawns()
+        verifier = ProgrammaticVerifier(regex_timeout_seconds=0.5)
+
+        with patched:
+            result = await verifier.verify(
+                self._many([r"^a+!$", self.CATASTROPHIC, r"a!"], forbidden=[r"nomatch"]), trace
+            )
+
+        key = f"postcondition[1]:url_matches:{self.CATASTROPHIC}"
+        self.assertEqual(result.details["regex_timeouts"], [key])
+        self.assertEqual(result.failed_postconditions, [key])
+        # The pattern before the stuck one and the ones after it keep their own verdicts.
+        self.assertEqual(
+            result.satisfied_postconditions,
+            ["postcondition[0]:url_matches:^a+!$", "postcondition[2]:url_matches:a!"],
+        )
+        self.assertEqual(result.forbidden_state_hits, [])
+        # One child until the stuck pattern, one for everything after it.
+        self.assertEqual(len(started), 2)
+        for process in started:
+            self.assertIsNotNone(process.returncode)
+
+    async def test_each_stuck_pattern_gets_its_own_timeout(self) -> None:
+        trace = {"final_observation": {"url": self.CATASTROPHIC_URL}, "evidence_kinds": []}
+        verifier = ProgrammaticVerifier(regex_timeout_seconds=0.5)
+
+        result = await verifier.verify(self._many([self.CATASTROPHIC], forbidden=[r"(?:a+)+$", r"a!"]), trace)
+
+        self.assertEqual(
+            result.details["regex_timeouts"],
+            [
+                f"postcondition[0]:url_matches:{self.CATASTROPHIC}",
+                "forbidden[0]:url_matches:(?:a+)+$",
+            ],
+        )
+        self.assertEqual(
+            result.forbidden_state_hits, ["forbidden[0]:url_matches:(?:a+)+$", "forbidden[1]:url_matches:a!"]
+        )
+
+    async def test_warnings_on_the_childs_stderr_do_not_stall_it(self) -> None:
+        # "[[]" warns FutureWarning (possible nested set) once per occurrence on the
+        # child's stderr. Undrained, a few patterns' worth fills the pipe, the child
+        # blocks writing, and fast patterns come back as timeouts.
+        patterns = ["(?:" + "." * i + "[[]" * 1300 + ")" for i in range(3)]
+
+        results = await _regex_search_many(patterns, "[" * 1400, timeout=2.0)
+
+        self.assertEqual(results, [True, True, True])
+
+    async def test_a_failing_worker_raises_with_its_stderr(self) -> None:
+        worker = "import sys\nsys.stderr.write('worker broke')\nsys.exit(3)\n"
+        with mock.patch("app.harness.verifier.programmatic._REGEX_WORKER", worker):
+            with self.assertRaisesRegex(RuntimeError, r"code 3\).*worker broke"):
+                await _regex_search_many([r"a"], "a", timeout=5.0)
 
     async def test_regex_child_is_killed_when_the_caller_cancels(self) -> None:
         started: list = []
