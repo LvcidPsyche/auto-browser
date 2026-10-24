@@ -51,7 +51,6 @@ __all__ = [
     "ExecuteApprovalInput",
     "ExportScriptInput",
     "FindElementsInput",
-    "ForkCdpInput",
     "ForkSessionInput",
     "GetCookiesInput",
     "GetNetworkLogInput",
@@ -90,7 +89,6 @@ __all__ = [
     "TabActionInput",
     "TakeoverInput",
     "TriggerCronJobInput",
-    "ValidateShareTokenInput",
     "VisionFindInput",
     "WaitForSelectorInput",
     "GetMemoryProfileInput",
@@ -549,24 +547,6 @@ class CdpAttachInput(StrictInputModel):
         return validate_url(value, field_name="cdp_url", allowed_schemes=CDP_URL_SCHEMES)
 
 
-class ForkCdpInput(StrictInputModel):
-    cdp_url: str = Field(min_length=1, max_length=500)
-    name: str | None = Field(default=None, max_length=200)
-    start_url: str | None = Field(default=None, max_length=2000)
-
-    @field_validator("cdp_url")
-    @classmethod
-    def validate_cdp_url(cls, value: str) -> str:
-        return validate_url(value, field_name="cdp_url", allowed_schemes=CDP_URL_SCHEMES)
-
-    @field_validator("start_url")
-    @classmethod
-    def validate_start_url(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return validate_url(value, field_name="start_url", allowed_schemes=HTTP_URL_SCHEMES)
-
-
 class VisionFindInput(SessionIdInput):
     description: str = Field(min_length=1, max_length=500)
     take_screenshot: bool = True
@@ -574,10 +554,6 @@ class VisionFindInput(SessionIdInput):
 
 class ShareSessionInput(SessionIdInput):
     ttl_minutes: int = Field(default=60, ge=1, le=1440, description="How long the share link works.")
-
-
-class ValidateShareTokenInput(StrictInputModel):
-    token: str = Field(min_length=1, max_length=500)
 
 
 class ShadowBrowseInput(SessionIdInput):

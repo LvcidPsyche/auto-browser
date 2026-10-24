@@ -373,6 +373,72 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("snapshot_error", ctx.exception.details["snapshot"])
         self.manager.audit.append.assert_awaited()
 
+    @staticmethod
+    def _withheld() -> BrowserActionError:
+        return BrowserActionError(
+            "Screenshot withheld: PII_SCRUB_SCREENSHOT_STRICT is on (ocr_unavailable).",
+            code="screenshot_withheld",
+            status_code=503,
+            retryable=False,
+        )
+
+    async def test_a_withheld_post_action_screenshot_still_reports_and_records_the_action(self) -> None:
+        # Strict mode withholds the after-screenshot of an action that already ran.
+        # Failing the call then skipped the action's log, audit event and receipt,
+        # and a caller would retry an action that had run.
+        before = {"url": "https://example.com", "title": "Before"}
+        allowed = SimpleNamespace(should_block=False, block_reason=None, require_approval=False)
+        self.manager.witness_policy.evaluate_action = Mock(return_value=allowed)
+        self.manager._light_snapshot = AsyncMock(return_value=before)
+        self.manager._settle = AsyncMock()  # type: ignore[method-assign]
+        self.manager._ensure_witness_remote_ready = AsyncMock()  # type: ignore[method-assign]
+        self.manager._check_bot_challenge = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        destroyed = PlaywrightError("Execution context was destroyed, most likely because of a navigation")
+        clicks = []
+
+        async def click() -> None:
+            clicks.append(1)
+
+        # Withheld on the first observation, and on the retry after a late navigation.
+        for observations in ([self._withheld()], [destroyed, self._withheld()]):
+            with self.subTest(observations=len(observations)):
+                self.manager.audit.append.reset_mock()
+                self.manager._record_witness_receipt.reset_mock()
+                self.manager._observation_payload = AsyncMock(side_effect=observations)  # type: ignore[method-assign]
+
+                result = await BrowserManager._run_action(
+                    self.manager, self.session, "click", {"selector": "#pay"}, click
+                )
+
+                self.assertEqual(result["action"], "click")
+                self.assertIn("withheld", result["after"]["observation_error"])
+                self.assertNotIn("screenshot_path", result["after"])
+                statuses = [
+                    call.kwargs["status"]
+                    for call in self.manager.audit.append.await_args_list
+                    if call.kwargs.get("event_type") == "browser_action"
+                ]
+                self.assertEqual(statuses, ["ok"])
+                self.manager._record_witness_receipt.assert_awaited_once()
+        self.assertEqual(len(clicks), 2)
+
+    async def test_a_withheld_failure_snapshot_keeps_the_actions_own_error(self) -> None:
+        before = {"url": "https://example.com", "title": "Before"}
+        allowed = SimpleNamespace(should_block=False, block_reason=None, require_approval=False)
+        self.manager.witness_policy.evaluate_action = Mock(return_value=allowed)
+        self.manager._light_snapshot = AsyncMock(side_effect=[before, self._withheld()])
+        self.manager._ensure_witness_remote_ready = AsyncMock()  # type: ignore[method-assign]
+
+        async def crash() -> None:
+            raise PlaywrightError("Target crashed")
+
+        with self.assertRaises(BrowserActionError) as ctx:
+            await BrowserManager._run_action(self.manager, self.session, "click", {"selector": "#go"}, crash)
+
+        self.assertEqual(ctx.exception.code, "browser_action_failed")
+        self.assertIn("withheld", ctx.exception.details["snapshot"]["snapshot_error"])
+        self.manager.audit.append.assert_awaited()
+
     async def test_remote_access_metadata_and_isolated_takeover_resolution(self) -> None:
         info_path = Path(self.manager.settings.remote_access_info_path)
         info_path.parent.mkdir(parents=True, exist_ok=True)

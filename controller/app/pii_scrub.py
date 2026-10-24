@@ -275,6 +275,10 @@ def scrub_screenshot(
     Redact PII from a PNG screenshot by drawing opaque black boxes
     over the OCR words it is written in.
 
+    Raises whatever Pillow raises when the image cannot be decoded, drawn on or
+    encoded, after logging it; the original bytes are never returned alongside
+    hits, because that reads as a redaction that happened.
+
     OCR reports one block per word, and each word used to be scrubbed on its
     own, so nothing containing a space ever matched: "(555) 123-4567", a card
     number in groups. Words are now joined into the line OCR found them on
@@ -340,8 +344,10 @@ def scrub_screenshot(
         img.save(buf, format="PNG")
         return buf.getvalue(), all_hits
     except Exception as exc:
+        # Returning the original bytes with the hits attached would read as a
+        # successful redaction to the caller. Let it decide what to report.
         logger.warning("screenshot PII redaction failed: %s", exc)
-        return image_bytes, all_hits
+        raise
 
 
 def _ocr_lines(blocks: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -491,6 +497,7 @@ class PiiScrubber:
         replacement: str = DEFAULT_REPLACEMENT,
         enabled_patterns: set[str] | None = None,
         audit_report: bool = True,
+        screenshot_strict: bool = False,
     ):
         self.enabled = enabled
         self.screenshot_enabled = screenshot_enabled and enabled
@@ -499,6 +506,8 @@ class PiiScrubber:
         self.replacement = replacement
         self.enabled_patterns = enabled_patterns  # None = all patterns active
         self.audit_report = audit_report
+        # Read by the observation service: withhold a screenshot that cannot be scrubbed.
+        self.screenshot_strict = screenshot_strict
 
     @classmethod
     def from_settings(cls, settings: Any) -> "PiiScrubber":
@@ -509,6 +518,7 @@ class PiiScrubber:
         console = getattr(settings, "pii_scrub_console", True)
         replacement = getattr(settings, "pii_scrub_replacement", DEFAULT_REPLACEMENT)
         audit = getattr(settings, "pii_scrub_audit_report", True)
+        strict = getattr(settings, "pii_scrub_screenshot_strict", False) is True
 
         raw_patterns = getattr(settings, "pii_scrub_patterns", "")
         patterns: set[str] | None = None
@@ -536,6 +546,7 @@ class PiiScrubber:
             replacement=replacement,
             enabled_patterns=patterns,
             audit_report=audit,
+            screenshot_strict=strict,
         )
 
     # ── Public API ──────────────────────────────────────────────────────────
