@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import os
 import shutil
 import subprocess
@@ -32,6 +33,9 @@ LAUNCH_FILES = [
     "scripts/doctor.sh",
     "scripts/mcp_stdio_bridge.py",
 ]
+# Every directory release.yml builds, plus the controller (not published yet).
+WHEEL_PACKAGES = ("controller", "client", "integrations/langchain", "packaging/auto-browser-mcp")
+MCP_CONSOLE_SCRIPT = "auto_browser_client.mcp_bridge:main"
 SECRET_PATTERN = (
     r"sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{20,}|ghp_[A-Za-z0-9]{20,}|"
     r"github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}"
@@ -85,9 +89,10 @@ def main() -> int:
     print("Building and inspecting Python wheels...")
     with tempfile.TemporaryDirectory(prefix="auto-browser-wheelhouse-") as temp_dir:
         wheelhouse = Path(temp_dir)
-        for package_dir in ("controller", "client", "integrations/langchain"):
+        for package_dir in WHEEL_PACKAGES:
             _run([PYTHON, "-m", "build", "--wheel", "--outdir", str(wheelhouse), package_dir])
         _inspect_controller_wheel(wheelhouse)
+        _inspect_mcp_wheel(wheelhouse)
 
     print("Running controller tests with coverage gate...")
     env = os.environ.copy()
@@ -161,6 +166,33 @@ def _inspect_controller_wheel(wheelhouse: Path) -> None:
     if forbidden:
         sample = ", ".join(forbidden[:5])
         raise SystemExit(f"Controller wheel still includes extracted social/Veo3 modules: {sample}")
+
+
+def _inspect_mcp_wheel(wheelhouse: Path) -> None:
+    """The metapackage ships no code: it only depends on the client and re-declares its script."""
+    wheels = sorted(wheelhouse.glob("auto_browser_mcp-*.whl"))
+    if not wheels:
+        raise SystemExit("MCP metapackage wheel was not built")
+    with zipfile.ZipFile(wheels[-1]) as archive:
+        names = archive.namelist()
+        modules = [name for name in names if name.endswith(".py")]
+        if modules:
+            raise SystemExit("MCP metapackage wheel must not contain Python modules: " + ", ".join(modules[:5]))
+        metadata = _read_dist_info(archive, names, "METADATA")
+        entry_points = _read_dist_info(archive, names, "entry_points.txt")
+    if not any(line.startswith("Requires-Dist: auto-browser-client") for line in metadata.splitlines()):
+        raise SystemExit("MCP metapackage wheel is missing Requires-Dist: auto-browser-client")
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.optionxform = str  # script names are case-sensitive
+    parser.read_string(entry_points)
+    script = parser.get("console_scripts", "auto-browser-mcp", fallback=None)
+    if script != MCP_CONSOLE_SCRIPT:
+        raise SystemExit(f"MCP metapackage wheel must map auto-browser-mcp to {MCP_CONSOLE_SCRIPT}, found {script!r}")
+
+
+def _read_dist_info(archive: zipfile.ZipFile, names: list[str], filename: str) -> str:
+    matches = [name for name in names if name.endswith(f".dist-info/{filename}")]
+    return archive.read(matches[0]).decode("utf-8") if matches else ""
 
 
 def _require(command: str) -> None:
