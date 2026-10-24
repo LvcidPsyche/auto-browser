@@ -100,6 +100,23 @@ def test_env_example_model_matches_settings(key: str, attr: str) -> None:
     )
 
 
+def test_browser_node_healthcheck_reads_the_endpoint_file_from_the_container() -> None:
+    """The healthcheck must expand BROWSER_WS_ENDPOINT_FILE inside the container.
+
+    Compose interpolates `${VAR}` in the whole file from the project `.env`
+    before the container starts. `.env.example` sets the controller's path
+    (`/data/browser-profile/...`), which does not exist in browser-node (its
+    volume is mounted at `/data/profile`), so an unescaped `${VAR:-...}` in the
+    healthcheck baked in the wrong path: `test -s` failed on every run,
+    browser-node never became healthy and the controller never started.
+    `$${VAR}` reaches the container's shell untouched.
+    """
+    text = COMPOSE.read_text(encoding="utf-8")
+    assert "test -s" in text, "healthcheck moved; update this test"
+    unescaped = re.findall(r"(?<!\$)\$\{BROWSER_WS_ENDPOINT_FILE\b", text)
+    assert unescaped == [], "escape the healthcheck's ${BROWSER_WS_ENDPOINT_FILE...} as $${...}"
+
+
 def test_the_controller_reads_every_setting_in_dotenv() -> None:
     """Settings in .env must reach the controller, not only the keys compose lists.
 

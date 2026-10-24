@@ -9,6 +9,7 @@ screenshot scrubbing on used to hand out raw screenshots with no sign of it.
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import sys
 from pathlib import Path
@@ -20,7 +21,8 @@ import pytest
 from PIL import Image
 from pytesseract import TesseractNotFoundError
 
-from app.browser.services.observation import BrowserObservationService
+from app.action_errors import BrowserActionError
+from app.browser.services.observation import BrowserObservationService, _scrub_disclosure
 from app.browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
 from app.ocr import OCRExtractor, tesseract_available
 from app.pii_scrub import PiiScrubber
@@ -56,7 +58,7 @@ def _session() -> SimpleNamespace:
     )
 
 
-def _service(tmp_path: Path, *, ocr_enabled: bool = True) -> BrowserObservationService:
+def _service(tmp_path: Path, *, ocr_enabled: bool = True, strict: bool = False) -> BrowserObservationService:
     shot = tmp_path / "shot.png"
     Image.new("RGB", (40, 20), "white").save(shot)
     session = _session()
@@ -66,7 +68,9 @@ def _service(tmp_path: Path, *, ocr_enabled: bool = True) -> BrowserObservationS
             perception_preset_default="normal",
             pii_scrub_action_screenshots=True,
         ),
-        pii_scrubber=PiiScrubber(screenshot_enabled=True, audit_report=False),
+        pii_scrubber=PiiScrubber(
+            screenshot_enabled=True, audit_report=False, **({"screenshot_strict": True} if strict else {})
+        ),
         ocr=OCRExtractor(enabled=ocr_enabled, language="eng", max_blocks=20, text_limit=2000),
         _capture_screenshot=AsyncMock(return_value={"path": str(shot), "url": "/artifacts/shot.png"}),
         _session_summary=AsyncMock(return_value={"id": session.id}),
@@ -154,6 +158,71 @@ async def test_with_tesseract_present_nothing_is_reported(
     assert _warnings(caplog) == []
 
 
+# ── PII_SCRUB_SCREENSHOT_STRICT: withhold instead of warn ─────────────────
+
+
+async def test_strict_mode_withholds_a_screenshot_it_cannot_scrub(tmp_path: Path, no_tesseract: None) -> None:
+    service = _service(tmp_path, strict=True)
+
+    with pytest.raises(BrowserActionError) as raised:
+        await service.capture_screenshot("session-1")
+
+    assert raised.value.code == "screenshot_withheld"
+    assert "PII_SCRUB_SCREENSHOT_STRICT" in raised.value.message
+    assert not (tmp_path / "shot.png").exists()
+
+
+async def test_strict_mode_withholds_when_ocr_is_disabled(tmp_path: Path) -> None:
+    service = _service(tmp_path, ocr_enabled=False, strict=True)
+
+    with pytest.raises(BrowserActionError):
+        await service.capture_screenshot("session-1")
+
+    assert not (tmp_path / "shot.png").exists()
+
+
+async def test_strict_mode_withholds_from_observe_and_action_snapshots_too(tmp_path: Path, no_tesseract: None) -> None:
+    service = _service(tmp_path, strict=True)
+    session = service.manager.session
+
+    with pytest.raises(BrowserActionError):
+        await service.observation_payload(session, preset="normal")
+    with pytest.raises(BrowserActionError):
+        await service.light_snapshot(session, label="before-click")
+
+
+async def test_strict_mode_changes_nothing_when_tesseract_is_present(
+    tmp_path: Path, tesseract_present: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    service = _service(tmp_path, strict=True)
+
+    captured = await service.capture_screenshot("session-1")
+
+    assert "screenshot_pii_scrub" not in captured
+    assert (tmp_path / "shot.png").exists()
+
+
+async def test_non_strict_mode_still_returns_the_screenshot(tmp_path: Path, no_tesseract: None) -> None:
+    service = _service(tmp_path, strict=False)
+
+    result = await service.capture_screenshot("session-1")
+
+    assert result["screenshot_pii_scrub"] == {"applied": False, "reason": "tesseract_not_found"}
+    assert (tmp_path / "shot.png").exists()
+
+
+def test_the_setting_defaults_off_and_reaches_the_scrubber(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.config import Settings
+
+    assert Settings(_env_file=None).pii_scrub_screenshot_strict is False
+    assert PiiScrubber.from_settings(Settings(_env_file=None)).screenshot_strict is False
+
+    monkeypatch.setenv("PII_SCRUB_SCREENSHOT_STRICT", "true")
+    settings = Settings(_env_file=None)
+    assert settings.pii_scrub_screenshot_strict is True
+    assert PiiScrubber.from_settings(settings).screenshot_strict is True
+
+
 def test_tesseract_available_looks_up_the_binary_pytesseract_runs() -> None:
     # The readiness check and the tests above patch this lookup; this pins what
     # it does: a command that resolves on PATH counts, one that doesn't, doesn't.
@@ -161,3 +230,57 @@ def test_tesseract_available_looks_up_the_binary_pytesseract_runs() -> None:
         assert tesseract_available() is False
     with patch.object(pytesseract.pytesseract, "tesseract_cmd", sys.executable):
         assert tesseract_available() is True
+
+
+# ── Redaction that fails while it runs ─────────────────────────────────────
+
+_EMAIL_BLOCKS = [{"x": 1, "y": 1, "width": 4, "height": 4, "text": "ops@example.com"}]
+
+
+def _scrub_service(tmp_path: Path, image: bytes) -> tuple[BrowserObservationService, dict[str, str], AsyncMock]:
+    service = _service(tmp_path)
+    service.manager.pii_scrubber = PiiScrubber(screenshot_enabled=True, audit_report=True)
+    service.manager.audit = SimpleNamespace(append=AsyncMock())
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(image)
+    return service, {"path": str(shot), "url": "/artifacts/shot.png"}, service.manager.audit.append
+
+
+async def test_a_failed_redaction_is_reported_and_never_audited_as_ok(tmp_path: Path) -> None:
+    service, screenshot, audit = _scrub_service(tmp_path, b"not-a-png")
+    ocr = {"available": True, "redaction_blocks": _EMAIL_BLOCKS}
+
+    await service._scrub_screenshot_if_needed(service.manager.session, screenshot, ocr)
+
+    assert Path(screenshot["path"]).read_bytes() == b"not-a-png"
+    assert screenshot["pii_scrub_skipped"] == "redaction_failed"
+    assert _scrub_disclosure(screenshot) == {"screenshot_pii_scrub": {"applied": False, "reason": "redaction_failed"}}
+    assert [call.kwargs["status"] for call in audit.await_args_list] == ["failed"]
+    assert audit.await_args.kwargs["event_type"] == "pii_redaction"
+
+
+async def test_a_successful_redaction_is_still_audited_as_ok(tmp_path: Path) -> None:
+    image = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(image, format="PNG")
+    service, screenshot, audit = _scrub_service(tmp_path, image.getvalue())
+    ocr = {"available": True, "redaction_blocks": _EMAIL_BLOCKS}
+
+    await service._scrub_screenshot_if_needed(service.manager.session, screenshot, ocr)
+
+    assert Path(screenshot["path"]).read_bytes() != image.getvalue()
+    assert "pii_scrub_skipped" not in screenshot
+    assert [call.kwargs["status"] for call in audit.await_args_list] == ["ok"]
+
+
+async def test_strict_mode_withholds_a_screenshot_whose_redaction_failed(tmp_path: Path) -> None:
+    service, screenshot, audit = _scrub_service(tmp_path, b"not-a-png")
+    service.manager.pii_scrubber.screenshot_strict = True
+    ocr = {"available": True, "redaction_blocks": _EMAIL_BLOCKS}
+
+    with pytest.raises(BrowserActionError) as raised:
+        await service._scrub_screenshot_if_needed(service.manager.session, screenshot, ocr)
+
+    assert raised.value.code == "screenshot_withheld"
+    assert "redaction_failed" in raised.value.message
+    assert not Path(screenshot["path"]).exists()
+    assert [call.kwargs["status"] for call in audit.await_args_list] == ["failed"]

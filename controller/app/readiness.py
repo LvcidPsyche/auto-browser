@@ -205,13 +205,17 @@ def run_readiness_checks(settings: Any, mode: str = "normal") -> ReadinessReport
 
     # Screenshot redaction draws over OCR-detected words; with no OCR it leaves
     # the image untouched and says nothing, so the gap is reported here.
+    # With PII_SCRUB_SCREENSHOT_STRICT the gap is a failure: those screenshots are withheld.
     if pii_enabled and getattr(settings, "pii_scrub_screenshot", True):
+        strict = getattr(settings, "pii_scrub_screenshot_strict", False) is True
+        gap_status = "fail" if strict else "warn"
+        gap_effect = "are withheld (PII_SCRUB_SCREENSHOT_STRICT=true)" if strict else "are NOT PII-scrubbed"
         if not getattr(settings, "ocr_enabled", True):
             checks.append(
                 ReadinessCheck(
                     name="screenshot_scrubbing",
-                    status="warn",
-                    message="OCR_ENABLED=false: screenshots are NOT PII-scrubbed (redaction needs OCR boxes).",
+                    status=gap_status,
+                    message=f"OCR_ENABLED=false: screenshots {gap_effect} (redaction needs OCR boxes).",
                     fix="Set OCR_ENABLED=true, or set PII_SCRUB_SCREENSHOT=false to make the gap explicit.",
                 )
             )
@@ -219,8 +223,8 @@ def run_readiness_checks(settings: Any, mode: str = "normal") -> ReadinessReport
             checks.append(
                 ReadinessCheck(
                     name="screenshot_scrubbing",
-                    status="warn",
-                    message="tesseract is not installed: screenshots are NOT PII-scrubbed (redaction needs OCR boxes).",
+                    status=gap_status,
+                    message=f"tesseract is not installed: screenshots {gap_effect} (redaction needs OCR boxes).",
                     fix="Run the controller from the Docker image, which ships tesseract, or install tesseract-ocr.",
                 )
             )
