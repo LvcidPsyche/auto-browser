@@ -64,6 +64,9 @@ class ToolSelection:
     # actually took out (removing a pack that was never in is a no-op).
     added: frozenset[str]
     turned_off: frozenset[str]
+    # Every pack MCP_TOOL_PACKS removes, taken out or not: adding one of these
+    # does not serve it while the removal stays.
+    removed: frozenset[str]
 
     def describe(self) -> str:
         """The selection as the operator configured it, for the startup log."""
@@ -129,6 +132,7 @@ def resolve_tool_selection(profile: str, packs: str = "") -> ToolSelection:
         packs=frozenset(selected),
         added=frozenset(adds - base - removes),
         turned_off=frozenset(wanted & removes),
+        removed=frozenset(removes),
     )
 
 
@@ -142,6 +146,15 @@ def withheld_tool_message(name: str, pack: str, selection: ToolSelection, served
         return (
             f"{name} is in the {pack} tool pack, which MCP_TOOL_PACKS turns off on this controller. "
             f"To use it, remove -{pack} from MCP_TOOL_PACKS."
+        )
+    if pack in selection.removed:
+        # Never in the profile and removed as well: the removal wins over an
+        # addition, so serving the pack takes both changes.
+        return (
+            f"{name} is in the {pack} tool pack, which this controller does not serve: the {selection.profile} "
+            f"profile does not include it, and MCP_TOOL_PACKS removes it. To use it, remove -{pack} from "
+            f"MCP_TOOL_PACKS and either add {pack} to it or set MCP_TOOL_PROFILE={smallest_profile_with(pack)} "
+            "on the controller."
         )
     message = (
         f"{name} is in the {pack} tool pack, which this controller does not serve "

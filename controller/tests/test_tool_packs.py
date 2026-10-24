@@ -303,11 +303,14 @@ class SelectionTests(unittest.TestCase):
                 self.assertEqual(selection.packs, frozenset({"browse"}))
                 self.assertEqual(selection.added, frozenset())
                 self.assertEqual(selection.turned_off, frozenset({"tabs"}))
+                self.assertEqual(selection.removed, frozenset({"tabs"}))
         # Removing a pack the selection lacks changes nothing, and is not
-        # reported as something MCP_TOOL_PACKS turned off.
+        # reported as something MCP_TOOL_PACKS turned off; it is still removed,
+        # so adding the pack later does not serve it.
         selection = resolve_tool_selection("lean", "-harness")
         self.assertEqual(selection.packs, frozenset({"browse"}))
         self.assertEqual(selection.turned_off, frozenset())
+        self.assertEqual(selection.removed, frozenset({"harness"}))
         # Adding a pack twice, or one the profile has, adds it once or not at all.
         selection = resolve_tool_selection("lean", "tabs,tabs,browse")
         self.assertEqual(selection.packs, frozenset({"browse", "tabs"}))
@@ -520,11 +523,36 @@ class WithheldToolTests(unittest.IsolatedAsyncioTestCase):
         manager.create_session.assert_awaited_once()
 
     async def test_a_pack_turned_off_says_which_removal_to_drop(self) -> None:
-        self.assertEqual(
-            await self._error("browser.eval_js", tool_packs="-scripting"),
-            "browser.eval_js is in the scripting tool pack, which MCP_TOOL_PACKS turns off on this controller. "
-            "To use it, remove -scripting from MCP_TOOL_PACKS.",
-        )
+        cases = [
+            (
+                # Removed from the profile: dropping the removal serves it.
+                {"tool_packs": "-scripting"},
+                "browser.eval_js",
+                "browser.eval_js is in the scripting tool pack, which MCP_TOOL_PACKS turns off on this controller. "
+                "To use it, remove -scripting from MCP_TOOL_PACKS.",
+            ),
+            (
+                # Added and removed: the removal wins, and dropping it serves the pack.
+                {"tool_profile": "lean", "tool_packs": "tabs,-tabs"},
+                "browser.list_tabs",
+                "browser.list_tabs is in the tabs tool pack, which MCP_TOOL_PACKS turns off on this controller. "
+                "To use it, remove -tabs from MCP_TOOL_PACKS.",
+            ),
+            (
+                # Removed but never in the profile: adding the pack alone would
+                # not serve it, since the removal wins, so name both changes.
+                {"tool_profile": "lean", "tool_packs": "-tabs"},
+                "browser.list_tabs",
+                "browser.list_tabs is in the tabs tool pack, which this controller does not serve: the lean profile "
+                "does not include it, and MCP_TOOL_PACKS removes it. To use it, remove -tabs from MCP_TOOL_PACKS "
+                "and either add tabs to it or set MCP_TOOL_PROFILE=curated on the controller.",
+            ),
+        ]
+        for kwargs, name, expected in cases:
+            with self.subTest(**kwargs):
+                text = await self._error(name, **kwargs)
+                self.assertEqual(text, expected)
+                self.assertNotIn("MCP_TOOL_PACKS=", text)
 
     async def test_the_no_session_error_names_only_served_tools(self) -> None:
         cases = [
