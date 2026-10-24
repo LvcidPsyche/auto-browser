@@ -93,7 +93,7 @@ Every release is also published to GHCR, so you can skip the build:
 docker compose -f docker-compose.yml -f docker-compose.images.yml up -d
 ```
 
-`AUTO_BROWSER_IMAGE_TAG` picks the version: `latest` (the default), a release such as `1.10.0`, or
+`AUTO_BROWSER_IMAGE_TAG` picks the version: `latest` (the default), a release such as `1.10.1`, or
 `edge` for the current `main`. The images are linux/amd64, and each carries an SBOM and a build
 provenance attestation (`gh attestation verify oci://ghcr.io/lvcidpsyche/auto-browser-controller:latest -R LvcidPsyche/auto-browser`).
 The controller image leaves out the agent CLIs; for `*_AUTH_MODE=cli`, build from source with
@@ -136,6 +136,11 @@ curl -s http://127.0.0.1:8000/sessions/<session-id>/observe | jq
 ```
 
 ## Recent Changes
+
+**1.10.1**
+
+- **Rebuilt Docker images** with updated dependencies (Pillow 13.0.0). Image tags now publish only
+  from a `main` commit whose CI run succeeded.
 
 **1.10.0**
 

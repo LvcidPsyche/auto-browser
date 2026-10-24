@@ -2,7 +2,7 @@
 
 This is the near-term direction for Auto Browser.
 
-## Now (current in v1.10.0)
+## Now (current in v1.10.1)
 
 - Ed25519-signed Witness receipt chains — each receipt attests to itself and its whole history, and an exported bundle verifies anywhere via `scripts/verify_witness_bundle.py`, which imports nothing from this project
 - `text` observation preset — accessibility outline, extracted text, and interactables with no screenshot and no OCR
@@ -42,6 +42,7 @@ This is the near-term direction for Auto Browser.
 
 ## Recently Shipped
 
+- v1.10.1 a dependency update: the Docker images are rebuilt with Pillow 13.0.0, and image tags publish only from a `main` commit whose CI run succeeded
 - v1.10.0 a security update and correctness pass: saved auth state, exports, harness runs, memory profiles and uploads owned by their operator under named credentials, `ALLOWED_HOSTS` enforced wherever a page ends up, witness verification that rejects stripped signatures, a working Playwright export and stealth mode, and an opt-in `FORCE_GOVERNED_APPROVALS`
 - v1.9.1 prebuilt controller and browser-node images on GHCR (`docker-compose.images.yml`), with an SBOM and a build-provenance attestation on each
 - v1.9.0 a security and correctness pass from a maintainer review: sessions no longer shared between operators under named credentials, every `.env` setting now reaches the controller, governed approvals that run, the Claude and OpenAI providers working again on current models, wider PII scrubbing, an opt-in `AUTONOMOUS_APPROVALS` mode, and releases that publish only commits on `main`
