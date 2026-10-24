@@ -88,7 +88,7 @@ class StartupExtensionsTests(unittest.IsolatedAsyncioTestCase):
         approval = await call("browser.click", {}, "session-1")
         self.assertNotIn("_mesh_error", approval)
 
-    async def test_session_lifecycle_tracks_network_cdp_and_curator(self) -> None:
+    async def test_session_lifecycle_tracks_network_and_cdp_without_a_curator_call(self) -> None:
         manager = FakeManager()
         session = SimpleNamespace(network_inspector=object())
         manager.sessions["session-1"] = session
@@ -117,7 +117,10 @@ class StartupExtensionsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(app.state.network_inspectors, {})
         self.assertEqual(app.state.cdp_sessions, {})
-        spawn.assert_called_once()
+        # The curator has no session transcript to review yet, so a closed session
+        # must not start a background review or spend a model call.
+        spawn.assert_not_called()
+        curator.complete.assert_not_awaited()
 
 
 if __name__ == "__main__":
