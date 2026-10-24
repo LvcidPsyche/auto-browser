@@ -13,6 +13,36 @@ import os
 import shutil
 import tempfile
 
+from app.config import Settings
+
+
+def _settings_variable_names() -> set[str]:
+    """Every environment variable name `Settings` reads, upper-cased.
+
+    That is each field's `alias` and every string in its `validation_alias`
+    (an `AliasChoices` such as APP_ENV / ENVIRONMENT); a field with neither is
+    read by its own name. `Settings` matches names case-insensitively.
+    """
+    names: set[str] = set()
+    for field_name, field in Settings.model_fields.items():
+        declared = [field.alias, *getattr(field.validation_alias, "choices", [field.validation_alias])]
+        strings = [name for name in declared if isinstance(name, str)]
+        names.update(name.upper() for name in (strings or [field_name]))
+    return names
+
+
+# The suite's results must not depend on the developer's setup. `Settings` reads
+# exported variables and then a `.env` in the working directory; `make test`
+# feeds the container's environment from `.env` (compose `env_file`), and a host
+# run from `controller/` reads the file itself. Either way a developer's tokens,
+# allowed hosts or REQUIRE_OPERATOR_ID changed what tests saw. Clear every name
+# `Settings` reads and stop it reading `.env`; the defaults below then apply, and
+# tests that need a value pass it to `Settings(...)` or set it themselves.
+_SETTINGS_VARIABLES = _settings_variable_names()
+for _variable in [name for name in os.environ if name.upper() in _SETTINGS_VARIABLES]:
+    del os.environ[_variable]
+Settings.model_config = {**Settings.model_config, "env_file": None}
+
 # Every data root defaults to /data/..., and tests that build Settings without
 # overriding a root wrote there: on a host, the real /data (C:\data on Windows);
 # under `make test`, which mounts ./data, the developer's own audit log and

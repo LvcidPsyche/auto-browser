@@ -2,8 +2,8 @@
 stealth.fingerprint — Browser fingerprint randomization at launch time.
 
 Applied via Playwright's add_init_script() so it runs before any page JS.
-Covers: webdriver flag, canvas noise, WebGL noise, user-agent cycling,
-timezone/locale consistency per session.
+Covers: webdriver flag, canvas noise (only; WebGL is left as the browser reports it),
+user-agent cycling, timezone/locale consistency per session.
 """
 
 from __future__ import annotations
@@ -79,7 +79,6 @@ class FingerprintConfig:
         self.locale: str = rng.choice(_LOCALES)
         # Small random canvas noise seed (0-255)
         self.canvas_noise_seed: int = rng.randint(0, 255)
-        self.webgl_noise_seed: int = rng.randint(0, 255)
         self.profile = profile
 
     def playwright_context_kwargs(self) -> dict:
@@ -93,7 +92,6 @@ class FingerprintConfig:
     def init_script(self) -> str:
         """JS snippet injected before every page load."""
         noise_seed = self.canvas_noise_seed
-        webgl_seed = self.webgl_noise_seed
 
         return f"""
 (function() {{
@@ -125,19 +123,7 @@ class FingerprintConfig:
         return imageData;
     }};
 
-    // 4. WebGL renderer noise
-    const _webgl_seed = {webgl_seed};
-    const _getParam = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function(param) {{
-        // RENDERER and VENDOR — slightly scramble
-        if (param === 37445 || param === 37446) {{
-            const orig = _getParam.apply(this, [param]);
-            return orig;  // keep real value; noise is in canvas layer above
-        }}
-        return _getParam.apply(this, [param]);
-    }};
-
-    // 5. Remove common automation artifacts
+    // 4. Remove common automation artifacts
     delete window.__selenium_unwrapped;
     delete window.__webdriver_script_fn;
     delete window.__driver_evaluate;

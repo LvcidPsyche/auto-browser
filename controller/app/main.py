@@ -119,9 +119,12 @@ async def legacy_ui_redirect(_: Request, rest_of_path: str = "") -> RedirectResp
 
 
 @app.exception_handler(KeyError)
-async def handle_key_not_found(_: Request, exc: KeyError) -> JSONResponse:
+async def handle_key_not_found(request: Request, exc: KeyError) -> JSONResponse:
     if isinstance(exc, SessionNotFoundError):
         return JSONResponse(status_code=404, content={"detail": exc.message, "code": exc.code})
+    # A plain KeyError is either an unknown id a service chose to raise as one or a bug
+    # reaching the client as a 404; the log line is the only way to tell them apart.
+    logger.warning("unmapped KeyError on %s %s", request.method, request.url.path, exc_info=exc)
     key = exc.args[0] if exc.args else "unknown"
     return JSONResponse(status_code=404, content={"detail": f"Not found: {key}"})
 
