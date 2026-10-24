@@ -17,6 +17,9 @@ revoking has to be reliable:
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import logging
 import os
@@ -31,10 +34,29 @@ logger = logging.getLogger(__name__)
 
 # (modification time in ns, size, identity) of the file as last seen.
 _Signature = tuple[int, int, int]
+ED25519_PUBLIC_KEY_BYTES = 32
 
 
 def _signature_of(stat: os.stat_result) -> _Signature:
     return (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+
+
+def _check_entry(key: str, peer: PeerRecord) -> None:
+    """A node_id is the SHA-256 of the node's Ed25519 key, as /mesh/identity reports both.
+
+    Before 1.10.2 any API credential could post a key of its own under a known node_id; an entry
+    that went through that keeps the id and grants a review would recognise, but not this.
+    """
+    try:
+        raw = base64.b64decode(peer.pubkey_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise ValueError(f"{key}: pubkey_b64 is not base64") from None
+    if len(raw) != ED25519_PUBLIC_KEY_BYTES:
+        raise ValueError(f"{key}: pubkey_b64 is not a {ED25519_PUBLIC_KEY_BYTES}-byte Ed25519 public key")
+    if peer.node_id != hashlib.sha256(raw).hexdigest():
+        raise ValueError(f"{key}: node_id is not the SHA-256 of pubkey_b64 (lower-case hex)")
+    if key != peer.node_id:
+        raise ValueError(f"{key}: the entry is filed under a key other than its node_id")
 
 
 class PeerRegistryFile:
@@ -87,6 +109,8 @@ class PeerRegistryFile:
             if not isinstance(raw, dict):
                 raise ValueError("the top level must be an object keyed by node_id")
             peers = {key: PeerRecord(**value) for key, value in raw.items()}
+            for key, peer in peers.items():
+                _check_entry(key, peer)
         except (TypeError, ValueError) as exc:
             self._fail_closed(f"the peers file has an invalid entry ({exc})", signature)
             return
@@ -139,6 +163,7 @@ class PeerRegistryFile:
 
     def add(self, peer: PeerRecord) -> None:
         """Write a peer into the file. The controller never calls this: tests and host tooling do."""
+        _check_entry(peer.node_id, peer)
         self._reload_if_changed()
         self._peers[peer.node_id] = peer
         self._save()
