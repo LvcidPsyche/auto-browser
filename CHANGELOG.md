@@ -6,6 +6,13 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **More session routes answer a bad request or a refusal as itself, not as a 500.** `GET
+  /sessions/{id}/downloads`, `/tabs`, `/audit`, `/witness`, `/witness/verify` and `/witness/bundle`,
+  `POST /sessions/{id}/takeover`, `POST /sessions/{id}/storage-state`, `DELETE /sessions/{id}` and
+  `POST /sessions/{id}/fork` now use the same mapping as the other session routes: a refused
+  request is 403, an invalid one is 400, and a failure the route does not expect is logged and
+  answers 500 "Internal error". A `KeyError` that is not an unknown session still answers 404 but is
+  now logged as a warning, so a bug that surfaces as "Not found" can be traced.
 - **`CURATOR_ENABLED` no longer sends a placeholder transcript to the model.** With the setting on
   and a provider key present, every closed session started a background review that sent the model
   a fixed placeholder string instead of a transcript, and could write what came back to
