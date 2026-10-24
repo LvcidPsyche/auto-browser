@@ -212,6 +212,29 @@ def test_canvas_noise_is_applied_once_however_often_getcontext_is_called() -> No
 
 
 @requires_chromium
+def test_fingerprint_script_leaves_webgl_untouched() -> None:
+    from playwright.async_api import async_playwright
+
+    config = FingerprintConfig(CANVAS_SESSION_ID, "light")
+
+    async def run() -> bool:
+        async with async_playwright() as playwright:
+            browser = await _launch(playwright)
+            try:
+                context = await browser.new_context()
+                await context.add_init_script(config.init_script())
+                page = await context.new_page()
+                await page.goto(BLANK)
+                return await page.evaluate(
+                    "() => WebGLRenderingContext.prototype.getParameter.toString().includes('[native code]')"
+                )
+            finally:
+                await browser.close()
+
+    assert asyncio.run(run()) is True
+
+
+@requires_chromium
 def test_both_stealth_scripts_on_one_page_do_not_fight() -> None:
     """STEALTH_PROFILE=light adds the fingerprint script to the base one. Both patch
     navigator.webdriver, canvas reads and WebGL; neither may throw or undo the other,

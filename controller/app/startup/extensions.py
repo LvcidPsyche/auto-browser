@@ -278,7 +278,7 @@ async def on_session_created(app, session_id: str, page) -> None:
 
     try:
         settings = getattr(app.state, "settings", None)
-        stealth_profile = os.environ.get("STEALTH_PROFILE", "off")
+        stealth_profile = getattr(settings, "stealth_profile", "off")
         if getattr(settings, "stealth_enabled", False) and stealth_profile != "off":
             from app.stealth.fingerprint import FingerprintConfig, apply_fingerprint
 
