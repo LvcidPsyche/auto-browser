@@ -30,8 +30,23 @@ from __future__ import annotations
 import io
 import logging
 import re
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
+
+from .pii_cards import CARD_SHAPE, card_spans
+from .pii_secret_fields import SECRET_NAME_HINT, form_secret_values, json_secret_values
+from .pii_views import (
+    Found,
+    Span,
+    decode_form,
+    decode_json_escapes,
+    decode_json_token_escapes,
+    inside_any,
+    merge_found,
+    merge_spans,
+    replace_spans,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +57,20 @@ DEFAULT_REPLACEMENT = "[REDACTED]"
 # Each entry: (name, compiled_regex)
 # Patterns are ordered from most-specific to least-specific to avoid
 # double-redaction artifacts.
+
+_API_KEY_VALUE_CHARS = r"A-Za-z0-9\-._~+/!@#$%^&*()"
+
+
+def _api_key_param(value_chars: str) -> str:
+    return (
+        r"(?i)(?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|"
+        r"client[_-]?secret|app[_-]?secret|secret[_-]?key|private[_-]?key|"
+        r"x-api-key|access_key|refresh_token|id_token|session_token|"
+        r"auth_secret|webhook_secret|signing_secret|consumer_secret|"
+        r"oauth_token|oauth_secret)"
+        r'\s*[=:]\s*["\']?([' + value_chars + r']{8,})["\']?'
+    )
+
 
 _RAW_PATTERNS: list[tuple[str, str]] = [
     # AWS access key IDs: AKIA / ASIA / AROA / AIDA / AIPA / ANPA / ANVA / APKA
@@ -95,15 +124,7 @@ _RAW_PATTERNS: list[tuple[str, str]] = [
         r"(?:(?s:.*?)-----END\s+\1-----|(?s:.*))",
     ),
     # Generic API key / token / secret / password in query params or JSON fields
-    (
-        "api_key_param",
-        r"(?i)(?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|"
-        r"client[_-]?secret|app[_-]?secret|secret[_-]?key|private[_-]?key|"
-        r"x-api-key|access_key|refresh_token|id_token|session_token|"
-        r"auth_secret|webhook_secret|signing_secret|consumer_secret|"
-        r"oauth_token|oauth_secret)"
-        r'\s*[=:]\s*["\']?([A-Za-z0-9\-._~+/!@#$%^&*()]{8,})["\']?',
-    ),
+    ("api_key_param", _api_key_param(_API_KEY_VALUE_CHARS)),
     # Password fields in JSON or form data
     (
         "password_field",
@@ -111,11 +132,12 @@ _RAW_PATTERNS: list[tuple[str, str]] = [
         r'confirm_password)"?\s*[=:]\s*["\']?([^\s"\'&]{4,})["\']?',
     ),
     # Credit card numbers: 13-19 digits, with or without space/dash grouping.
-    # The regex only finds the shape; _looks_like_card checks the issuer prefix
-    # and Luhn. The previous pattern promised separators in its comment but
-    # matched contiguous digits only, so "4111 1111 1111 1111" — how a card
-    # number is usually shown — was never redacted.
-    ("credit_card", r"(?<![\d-])(?:\d[ -]?){12,18}\d(?![\d-])"),
+    # The regex only finds the shape; pii_cards.card_spans checks the issuer
+    # prefix and Luhn, and finds the card in a run of digit groups. The previous
+    # pattern promised separators in its comment but matched contiguous digits
+    # only, so "4111 1111 1111 1111" — how a card number is usually shown — was
+    # never redacted.
+    ("credit_card", CARD_SHAPE),
     # US SSN: ###-##-####
     ("ssn", r"\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b"),
     # Email addresses. The local part starts where a run of local-part
@@ -154,57 +176,53 @@ _RAW_PATTERNS: list[tuple[str, str]] = [
 
 _COMPILED: dict[str, re.Pattern[str]] = {name: re.compile(pattern) for name, pattern in _RAW_PATTERNS}
 
+# The patterns as a form or a query reads them. An api_key_param value runs on through a literal `&`, but
+# there `&` starts the next parameter (a `&` inside a value is written `%26`), and the match used to
+# take the next name with it: `api_key=abcdefgh&password=x` left `[REDACTED]=x`.
+_FORM_COMPILED = {**_COMPILED, "api_key_param": re.compile(_api_key_param(_API_KEY_VALUE_CHARS.replace("&", "")))}
+
+# In a form or a query these two redact the value and keep the name, as the pass by name does: the name
+# stays a name for the next pass to read, and the stored form still says which field it was.
+_FORM_VALUE_ONLY = frozenset({"api_key_param", "password_field"})
+
+# In JSON these five redact the value and nothing around it. Their matches take an optional quote after
+# the value (and password_field and api_key_param a name with its quotes before it, gcp_sa_key its own
+# name and both quotes), which in a JSON string is the closing quote: whole-match redaction left
+# `"next":"...?[REDACTED],"n":1`, no longer JSON.
+_JSON_VALUE_ONLY = frozenset({"api_key_param", "password_field", "azure_secret", "generic_b64_secret", "gcp_sa_key"})
+
 # Pattern display order (for reports)
 ALL_PATTERN_NAMES = [name for name, _ in _RAW_PATTERNS]
 _NOISY_PATTERNS = {"generic_hex_token"}
 
 
-# ── Luhn check for credit card validation ─────────────────────────────────
+def _part_to_redact(name: str, match: re.Match[str], value_only: frozenset[str]) -> Span:
+    """The stretch of a pattern's match that is to go, as positions in the text matched."""
+    if name in value_only:
+        return match.span(1)
+    return match.span()
 
 
-def _luhn_check(number: str) -> bool:
-    """Return True if number passes Luhn algorithm."""
-    digits = [int(d) for d in number if d.isdigit()]
-    if len(digits) < 13:
-        return False
-    total = 0
-    reverse = digits[::-1]
-    for i, d in enumerate(reverse):
-        if i % 2 == 1:
-            d *= 2
-            if d > 9:
-                d -= 9
-        total += d
-    return total % 10 == 0
-
-
-# Issuer prefixes: Visa, Mastercard (51-55 and 2221-2720), Amex, Diners,
-# Discover, JCB and the older 2131/1800 ranges — the set the previous pattern
-# spelled out inline.
-_CARD_PREFIX = re.compile(
-    r"4|5[1-5]|2(?:22[1-9]|2[3-9]\d|[3-6]\d{2}|7[01]\d|720)|3[47]|3(?:0[0-5]|[68])|6(?:011|5)|35|2131|1800"
-)
-
-
-def _looks_like_card(candidate: str) -> bool:
-    digits = re.sub(r"\D", "", candidate)
-    return 13 <= len(digits) <= 19 and _CARD_PREFIX.match(digits) is not None and _luhn_check(digits)
-
-
-def find_pii_spans(text: str, enabled_patterns: set[str] | None = None) -> list[tuple[int, int, str]]:
+def find_pii_spans(
+    text: str, enabled_patterns: set[str] | None = None, form: bool = False, json: bool = False
+) -> list[tuple[int, int, str]]:
     """(start, end, pattern) of every PII match in `text`, as positions in `text` itself.
 
     scrub_text rewrites as it goes, so the offsets it reports belong to a
     partly redacted string; redacting pixels needs positions in the original.
+    `form` reads `text` as a form or a query (see `_FORM_COMPILED`), `json` as JSON, where five
+    patterns redact only their value (see `_JSON_VALUE_ONLY`).
     """
+    value_only = _FORM_VALUE_ONLY if form else _JSON_VALUE_ONLY if json else frozenset()
     spans: list[tuple[int, int, str]] = []
-    for name, pattern in _COMPILED.items():
+    for name, pattern in (_FORM_COMPILED if form else _COMPILED).items():
         if enabled_patterns is not None and name not in enabled_patterns:
             continue
+        if name == "credit_card":
+            spans += [(start, end, name) for start, end in card_spans(text)]
+            continue
         for match in pattern.finditer(text):
-            if name == "credit_card" and not _looks_like_card(match.group(0)):
-                continue
-            spans.append((match.start(), match.end(), name))
+            spans.append((*_part_to_redact(name, match, value_only), name))
     return spans
 
 
@@ -221,6 +239,20 @@ class ScrubResult:
         return bool(self.hits)
 
 
+def _hit_record(
+    pattern: str, offset: int, matched: str, value_only: frozenset[str] = _FORM_VALUE_ONLY
+) -> dict[str, Any]:
+    # A match of these is the value itself, so they show no preview, wherever they match (in text, the
+    # two of a form; in JSON, the five of `_JSON_VALUE_ONLY`).
+    secret = pattern in value_only
+    return {
+        "pattern": pattern,
+        "offset": offset,
+        "length": len(matched),
+        "preview": matched[:6] + "…" if len(matched) > 6 and not secret else "…",
+    }
+
+
 def scrub_text(
     text: str,
     replacement: str = DEFAULT_REPLACEMENT,
@@ -232,30 +264,37 @@ def scrub_text(
     `enabled_patterns` can restrict which pattern names are applied.
     If None, all patterns are active.
     """
+    return _scrub_with(text, replacement, enabled_patterns, form=False)
+
+
+def _scrub_with(text: str, replacement: str, enabled_patterns: set[str] | None, form: bool) -> ScrubResult:
+    """scrub_text, reading `text` as a form or a query when `form` is set (see `_FORM_COMPILED`)."""
     if not text:
         return ScrubResult(text=text)
 
     hits: list[dict[str, Any]] = []
     result = text
+    encoded = urllib.parse.quote_plus(replacement)
+    value_only = _FORM_VALUE_ONLY if form else frozenset()
 
-    for name, pattern in _COMPILED.items():
+    for name, pattern in (_FORM_COMPILED if form else _COMPILED).items():
         if enabled_patterns is not None and name not in enabled_patterns:
             continue
 
+        if name == "credit_card":
+            spans = card_spans(result)
+            hits += [_hit_record(name, start, result[start:end]) for start, end in spans]
+            result = replace_spans(result, spans, replacement)
+            continue
+
         def _replace(m: re.Match, _name: str = name) -> str:  # noqa: B023
+            span = _part_to_redact(_name, m, value_only)
             matched = m.group(0)
-            # Extra validation for credit cards
-            if _name == "credit_card" and not _looks_like_card(matched):
-                return matched
-            hits.append(
-                {
-                    "pattern": _name,
-                    "offset": m.start(),
-                    "length": len(matched),
-                    "preview": matched[:6] + "…" if len(matched) > 6 else "…",
-                }
-            )
-            return replacement
+            start, end = span[0] - m.start(), span[1] - m.start()
+            hits.append(_hit_record(_name, span[0], matched[start:end]))
+            # A value left standing beside its name is written as a form value; the rest are as they were.
+            kept = encoded if _name in value_only else replacement
+            return matched[:start] + kept + matched[end:]
 
         result = pattern.sub(_replace, result)
 
@@ -442,12 +481,125 @@ def scrub_network_body(
     else:
         text = body
 
-    result = scrub_text(text, replacement=replacement, enabled_patterns=enabled_patterns)
+    result = _scrub_typed_text(text, ct, replacement, enabled_patterns)
     if not result.scrubbed:
         return body, []
 
     scrubbed = result.text.encode("utf-8") if isinstance(body, bytes) else result.text
     return scrubbed, result.hits
+
+
+def _scrub_typed_text(text: str, content_type: str, replacement: str, enabled_patterns: set[str] | None) -> ScrubResult:
+    if "urlencoded" in content_type:
+        return _scrub_pairs(text, replacement, enabled_patterns)
+    if "json" in content_type or "javascript" in content_type:
+        return _scrub_json_text(text, replacement, enabled_patterns)
+    return scrub_text(text, replacement, enabled_patterns)
+
+
+def _secret_names_apply(text: str, enabled_patterns: set[str] | None) -> bool:
+    """Whether to look for values that are secrets by name: the pattern that reports them is on, and `text`
+    holds a word that could be part of such a name."""
+    return (enabled_patterns is None or "password_field" in enabled_patterns) and bool(SECRET_NAME_HINT.search(text))
+
+
+def _not_covered(found: list[Found], by_name: list[Found]) -> list[Found]:
+    """The values found by name that no pattern's match already holds whole, so none is reported twice."""
+    covered = merge_spans((start, end) for start, end, _ in found)
+    return [item for item in by_name if not inside_any(covered, item[0], item[1])]
+
+
+def _scrub_pairs(text: str, replacement: str, enabled_patterns: set[str] | None, anchor: str = "") -> ScrubResult:
+    """Scrub an urlencoded `key=value&...` string as it arrived, then as its decoded view.
+
+    The raw pass comes first: a pattern can match characters that decoding changes (the `+` in a base64
+    token). The decoded view then shows `ops%40example.com` and `4111+1111+1111+1111` as the email and
+    the card they are, and each match is redacted in the raw text, so bytes outside a match are never
+    rewritten. A parameter whose name says it is a secret loses its whole value, since
+    `user[password]=...` matches no pattern, and `api_key_param` and `password_field` also leave the name
+    standing (see `_FORM_COMPILED`). `anchor` is what precedes `text` where it came from (`?` for
+    a URL query), which `oauth_code` anchors on in the raw pass; the decoded view has no such anchor, so
+    a parameter named `co%64e` is not recognised. The cost is two runs of the pattern set over the text,
+    whatever the number of pairs.
+    """
+    plain = _scrub_with(anchor + text, replacement, enabled_patterns, form=True)
+    text = plain.text.removeprefix(anchor)
+    view = decode_form(text)
+    found: list[Found] = []
+    if view.changed:
+        for start, end, name in find_pii_spans(view.text, enabled_patterns, form=True):
+            if name in _FORM_VALUE_ONLY and view.text[start:end] == replacement:
+                continue  # the raw pass kept the name and redacted this value
+            raw_start, raw_end = view.to_raw(start, end)
+            found.append((raw_start, raw_end, _hit_record(name, raw_start, view.text[start:end])))
+    if _secret_names_apply(view.text, enabled_patterns):
+        found += _not_covered(found, form_secret_values(text, replacement))
+    if not found:
+        return ScrubResult(text=text, hits=plain.hits)
+    spans = merge_spans((start, end) for start, end, _ in found)
+    return ScrubResult(
+        text=replace_spans(text, spans, urllib.parse.quote_plus(replacement)),
+        hits=plain.hits + [hit for _, _, hit in found],
+    )
+
+
+def _scrub_json_text(text: str, replacement: str, enabled_patterns: set[str] | None) -> ScrubResult:
+    """Scrub JSON or JavaScript text as it arrived and with its u-escapes written out, and redact them all.
+
+    No single view is enough. Written out, an escaped space or `&` ends the `password` match that the
+    escaped text carries through to the end of the value; escaped, a `/` or a space splits a token that
+    the written-out text holds whole; and a field name such as `pass\\u0077ord` is only readable once
+    its escapes are written out while the value's `\\u0020` has to stay escaped. So the text is matched
+    as it arrived, with every escape written out, and with only the token-character escapes written out.
+    Every match is redacted in the text as it arrived, so escapes that matched nothing are left as they
+    are and the JSON around a match stays JSON. A text with no escape worth writing out is matched as it
+    arrived alone, and by the same route: rewriting it first, as `scrub_text` does, lets a match that
+    takes a quote or two with it change which quotes open a string, and the member scan then misreads
+    the rest of the body. Five patterns redact only their value (see `_JSON_VALUE_ONLY`).
+    """
+    view = decode_json_escapes(text)
+    found: list[Found] = []
+    for start, end, name in find_pii_spans(text, enabled_patterns, json=True):
+        span = view.snap(start, end)
+        found.append((*span, _hit_record(name, span[0], text[start:end], _JSON_VALUE_ONLY)))
+    if view.changed:
+        token_view = decode_json_token_escapes(text)
+        # The token view is the raw text when no token character is escaped, and the full view when only
+        # token characters are: either way it holds nothing the other two do not, so it is not matched again.
+        for decoded in (view, token_view) if token_view.text not in (text, view.text) else (view,):
+            for start, end, name in find_pii_spans(decoded.text, enabled_patterns, json=True):
+                span = decoded.to_raw(start, end)
+                found.append((*span, _hit_record(name, span[0], decoded.text[start:end], _JSON_VALUE_ONLY)))
+    if _secret_names_apply(view.text, enabled_patterns):
+        found += _not_covered(found, json_secret_values(text, replacement))
+    if not found:
+        return ScrubResult(text=text)
+    spans, hits = merge_found(found)
+    return ScrubResult(text=replace_spans(text, spans, replacement), hits=hits)
+
+
+def scrub_url_query(
+    url: str,
+    replacement: str = DEFAULT_REPLACEMENT,
+    enabled_patterns: set[str] | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Scrub the keys and values of a URL's query string and of its fragment; the rest of the URL is left as it is.
+
+    An OAuth implicit grant and an OIDC fragment response put `access_token` and `id_token` in the fragment
+    as `key=value&...`, so it is read as the query is. (The name is older than the fragment.)
+    """
+    head, hash_mark, fragment = url.partition("#")
+    path, question_mark, query = head.partition("?")
+    hits: list[dict[str, Any]] = []
+    if query:
+        scrubbed_query = _scrub_pairs(query, replacement, enabled_patterns, anchor="?")
+        query, hits = scrubbed_query.text, hits + scrubbed_query.hits
+    if fragment:
+        scrubbed_fragment = _scrub_pairs(fragment, replacement, enabled_patterns, anchor="#")
+        fragment, hits = scrubbed_fragment.text, hits + scrubbed_fragment.hits
+    if not hits:
+        return url, []
+    return f"{path}{question_mark}{query}{hash_mark}{fragment}", hits
 
 
 # ── Console log scrubber ───────────────────────────────────────────────────
@@ -570,6 +722,12 @@ class PiiScrubber:
         if not self.network_enabled:
             return body, []
         return scrub_network_body(body, content_type, self.replacement, self.enabled_patterns)
+
+    def url(self, value: str) -> tuple[str, list[dict[str, Any]]]:
+        """Scrub the query string of a request URL."""
+        if not self.network_enabled:
+            return value, []
+        return scrub_url_query(value, self.replacement, self.enabled_patterns)
 
     def console(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Scrub PII from console log messages."""

@@ -77,6 +77,24 @@ All notable changes to auto-browser are documented here.
   tries at most 20 names, and raises the underlying error, which the background download handler
   logs.
 
+### Security
+
+- **Network inspector: URL-encoded form bodies, JSON string escapes and URL query strings are now
+  scrubbed, and a body the scrubber cannot process is withheld instead of stored.** With network
+  capture on (the default), `PII_SCRUB_NETWORK` had matched raw text only, so these were stored
+  verbatim in the per-session network log (GHSA-3pwm-j9pq-4r6q). Network hooks match the stored
+  URL, which is now redacted, so a hook registered on a query value (for example
+  `*email=ops%40example.com`) no longer fires; one on the path or a parameter name still does.
+  A JSON member whose name marks a secret (`pass`, `db_pass` and `page_token` do; a paging cursor such as
+  `next_page_token` does not) is redacted whether or not the body has escapes, a redaction in JSON keeps
+  the body valid (the exceptions: a `Cookie:` line inside a string, a private-key block with no `END`
+  line, and a value that is not a string, such as `true` or `12345678`, under a name the password
+  pattern knows, such as `"pass": true`), and the fragment of a URL, `Referer` or `Location` is scrubbed like its query. The URL of a
+  failed request, which `get_request_failures` and every observation returned as the page asked for it,
+  is scrubbed the same way. Playwright traces (`ENABLE_TRACING`, on by default) still record URLs,
+  headers and bodies as they are: set `ENABLE_TRACING=false` to stop recording them.
+  `docs/deployment.md` lists what the inspector still stores as it is.
+
 ## [1.10.1] — 2026-10-24
 
 A dependency and release-process update over 1.10.0. The client, LangChain and MCP bridge

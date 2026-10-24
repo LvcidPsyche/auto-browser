@@ -81,7 +81,7 @@ def test_network_body_scrubs_text_and_leaves_binary_unchanged() -> None:
     )
     unchanged, no_hits = scrub_network_body(b"\x00\x01secret", "application/octet-stream")
 
-    assert scrubbed == b"{[REDACTED]}"
+    assert scrubbed == b'{"password":"[REDACTED]"}'
     assert hits[0]["pattern"] == "password_field"
     assert unchanged == b"\x00\x01secret"
     assert no_hits == []
