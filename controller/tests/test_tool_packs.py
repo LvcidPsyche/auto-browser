@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from app.app_factory import build_controller_services
 from app.config import Settings
+from app.models import McpToolCallRequest
 from app.tool_gateway import McpToolGateway, ToolRegistry, ToolSpec
 from app.tool_gateway.gateway import IMPLICIT_SESSION_CREATE_TOOLS
 from app.tool_gateway.packs import register_all
@@ -394,3 +395,114 @@ class GatewaySelectionTests(unittest.TestCase):
         # A typo in the packs stops the controller before it serves anything.
         with self.assertRaisesRegex(ValueError, r"^MCP_TOOL_PACKS: 'tab' is not a tool pack"):
             build_controller_services(Settings(MCP_TOOL_PACKS="tab"), version="test")
+
+
+class WithheldToolTests(unittest.IsolatedAsyncioTestCase):
+    async def _call(self, name: str, manager=None, **kwargs):
+        manager = manager or _manager()
+        return await _gateway(manager, **kwargs).call_tool(McpToolCallRequest(name=name, arguments={}))
+
+    async def _error(self, name: str, **kwargs) -> str:
+        manager = _manager(get_console_messages=AsyncMock(), list_tabs=AsyncMock())
+        response = await self._call(name, manager, **kwargs)
+        self.assertTrue(response.isError)
+        text = response.content[0].text
+        self.assertEqual(response.structuredContent, {"error": text})
+        # Refused before the handler runs, and without opening a session.
+        manager.get_console_messages.assert_not_awaited()
+        manager.list_tabs.assert_not_awaited()
+        manager.create_session.assert_not_awaited()
+        return text
+
+    async def test_a_tool_outside_the_profile_names_its_pack_and_the_profile_that_has_it(self) -> None:
+        cases = [
+            (
+                {},
+                "browser.get_console",
+                "browser.get_console is in the devtools tool pack, which this controller does not serve (it serves "
+                "the curated profile). To use it, add devtools to MCP_TOOL_PACKS or set MCP_TOOL_PROFILE=full on "
+                "the controller.",
+            ),
+            (
+                {"tool_profile": "lean"},
+                "browser.list_tabs",
+                "browser.list_tabs is in the tabs tool pack, which this controller does not serve (it serves the "
+                "lean profile). To use it, add tabs to MCP_TOOL_PACKS or set MCP_TOOL_PROFILE=curated on the "
+                "controller.",
+            ),
+            (
+                {"tool_profile": "lean", "tool_packs": "tabs"},
+                "browser.get_console",
+                "browser.get_console is in the devtools tool pack, which this controller does not serve (it serves "
+                "the lean profile). To use it, add devtools to MCP_TOOL_PACKS or set MCP_TOOL_PROFILE=full on the "
+                "controller.",
+            ),
+        ]
+        for kwargs, name, expected in cases:
+            with self.subTest(name=name, **kwargs):
+                text = await self._error(name, **kwargs)
+                self.assertEqual(text, expected)
+                # Agents and mesh peers read this: it never echoes the operator's setting.
+                self.assertNotIn("MCP_TOOL_PACKS=", text)
+
+    async def test_create_session_on_lean_points_at_observe(self) -> None:
+        self.assertEqual(
+            await self._error("browser.create_session", tool_profile="lean"),
+            "browser.create_session is in the sessions tool pack, which this controller does not serve (it serves "
+            "the lean profile). To use it, add sessions to MCP_TOOL_PACKS or set MCP_TOOL_PROFILE=curated on the "
+            "controller. Without it, browser.observe creates a session when none is live.",
+        )
+        # Without browse there is no observe to point at, and create_session is served.
+        manager = _manager()
+        response = await self._call("browser.create_session", manager, tool_packs="-browse")
+        self.assertFalse(response.isError, response.content[0].text)
+        manager.create_session.assert_awaited_once()
+
+    async def test_a_pack_turned_off_says_which_removal_to_drop(self) -> None:
+        self.assertEqual(
+            await self._error("browser.eval_js", tool_packs="-scripting"),
+            "browser.eval_js is in the scripting tool pack, which MCP_TOOL_PACKS turns off on this controller. "
+            "To use it, remove -scripting from MCP_TOOL_PACKS.",
+        )
+
+    async def test_the_no_session_error_names_only_served_tools(self) -> None:
+        cases = [
+            (
+                {},
+                "browser.close_session",
+                "browser.close_session needs a session and none are live — create one with browser.create_session "
+                "(or call an observe/act tool, which creates one on demand).",
+            ),
+            (
+                {"tool_profile": "lean"},
+                "browser.close_session",
+                "browser.close_session needs a session and none are live — call browser.observe, which creates one "
+                "on demand.",
+            ),
+            (
+                {"tool_profile": "lean", "tool_packs": "-browse,tabs"},
+                "browser.list_tabs",
+                "browser.list_tabs needs a session and none are live.",
+            ),
+            (
+                {"tool_profile": "lean", "tool_packs": "-browse,tabs,wait"},
+                "browser.list_tabs",
+                "browser.list_tabs needs a session and none are live — call browser.wait_for_selector, which "
+                "creates one on demand.",
+            ),
+        ]
+        for kwargs, name, expected in cases:
+            with self.subTest(**kwargs):
+                manager = _manager()
+                response = await self._call(name, manager, **kwargs)
+                self.assertTrue(response.isError)
+                self.assertEqual(response.structuredContent["code"], "no_session")
+                self.assertEqual(response.structuredContent["error"], expected)
+                manager.create_session.assert_not_awaited()
+
+    async def test_unknown_tools_are_still_unknown(self) -> None:
+        for kwargs in ({"tool_profile": "lean"}, {}):
+            with self.subTest(**kwargs):
+                self.assertEqual(
+                    await self._error("browser.no_such_tool", **kwargs), "Unknown tool: browser.no_such_tool"
+                )
