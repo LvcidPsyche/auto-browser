@@ -67,6 +67,8 @@ class ToolSelection:
     # Every pack MCP_TOOL_PACKS removes, taken out or not: adding one of these
     # does not serve it while the removal stays.
     removed: frozenset[str]
+    # Every pack MCP_TOOL_PACKS names to add, whether or not the profile has it.
+    requested: frozenset[str]
 
     def describe(self) -> str:
         """The selection as the operator configured it, for the startup log."""
@@ -133,6 +135,7 @@ def resolve_tool_selection(profile: str, packs: str = "") -> ToolSelection:
         added=frozenset(adds - base - removes),
         turned_off=frozenset(wanted & removes),
         removed=frozenset(removes),
+        requested=frozenset(adds),
     )
 
 

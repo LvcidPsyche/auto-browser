@@ -315,6 +315,7 @@ class SelectionTests(unittest.TestCase):
         selection = resolve_tool_selection("lean", "tabs,tabs,browse")
         self.assertEqual(selection.packs, frozenset({"browse", "tabs"}))
         self.assertEqual(selection.added, frozenset({"tabs"}))
+        self.assertEqual(selection.requested, frozenset({"tabs", "browse"}))
         # Items are trimmed and empty ones skipped; the log shows them as parsed.
         selection = resolve_tool_selection("lean", " tabs , ,downloads ")
         self.assertEqual(selection.packs, frozenset({"browse", "tabs", "downloads"}))
@@ -418,20 +419,31 @@ class GatewaySelectionTests(unittest.TestCase):
         self.assertEqual(len(names), 19)
 
     def test_adding_vision_without_a_vision_model_warns(self) -> None:
-        with self.assertLogs("app.tool_gateway.gateway", level="WARNING") as logs:
-            gateway = _gateway(tool_profile="lean", tool_packs="vision")
-        self.assertEqual(
-            logs.output,
-            [
-                "WARNING:app.tool_gateway.gateway:MCP_TOOL_PACKS adds vision, but no vision model is configured "
-                "(set ANTHROPIC_API_KEY): browser.find_by_vision is not listed"
-            ],
-        )
-        self.assertEqual(_names(gateway), LEAN)
-        # The default profile has vision too; without a key it drops out
-        # quietly, as it always has.
-        with self.assertNoLogs("app.tool_gateway.gateway", level="WARNING"):
-            _gateway()
+        # Naming vision in MCP_TOOL_PACKS asks for it, whether or not the
+        # profile already has it, so its absence is worth a warning.
+        for profile in ("lean", "curated", "full"):
+            with self.subTest(profile=profile):
+                with self.assertLogs("app.tool_gateway.gateway", level="WARNING") as logs:
+                    gateway = _gateway(tool_profile=profile, tool_packs="vision")
+                self.assertEqual(
+                    logs.output,
+                    [
+                        "WARNING:app.tool_gateway.gateway:MCP_TOOL_PACKS adds vision, but no vision model is "
+                        "configured (set ANTHROPIC_API_KEY): browser.find_by_vision is not listed"
+                    ],
+                )
+                self.assertNotIn("browser.find_by_vision", _names(gateway))
+        # Not named, or named and removed, or served: quiet. Curated and full
+        # have vision without naming it; without a key it drops out quietly,
+        # as it always has.
+        for kwargs in (
+            {},
+            {"tool_profile": "full"},
+            {"tool_packs": "vision,-vision"},
+            {"tool_profile": "lean", "tool_packs": "vision,-vision"},
+        ):
+            with self.subTest(**kwargs), self.assertNoLogs("app.tool_gateway.gateway", level="WARNING"):
+                _gateway(**kwargs)
         with self.assertNoLogs("app.tool_gateway.gateway", level="WARNING"):
             gateway = _gateway(tool_profile="lean", tool_packs="vision", vision_targeter=object())
         self.assertEqual(_names(gateway), [*LEAN, "browser.find_by_vision"])

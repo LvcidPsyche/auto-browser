@@ -200,7 +200,7 @@ class McpToolGateway:
         register_all(self._registry, self)
         if self.vision_targeter is None:
             self._registry.unregister("browser.find_by_vision")
-            if "vision" in self.tool_selection.added:
+            if "vision" in self.tool_selection.requested and "vision" in self.tool_selection.packs:
                 logger.warning(
                     "MCP_TOOL_PACKS adds vision, but no vision model is configured (set ANTHROPIC_API_KEY): "
                     "browser.find_by_vision is not listed"
