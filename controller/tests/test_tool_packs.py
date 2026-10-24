@@ -8,13 +8,50 @@ every registered tool.
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
-from app.tool_gateway import ToolRegistry, ToolSpec
+from app.app_factory import build_controller_services
+from app.config import Settings
+from app.tool_gateway import McpToolGateway, ToolRegistry, ToolSpec
+from app.tool_gateway.gateway import IMPLICIT_SESSION_CREATE_TOOLS
 from app.tool_gateway.packs import register_all
 from app.tool_gateway.selection import DEFAULT_PROFILE, PACKS, PROFILES, resolve_tool_selection, smallest_profile_with
 from app.tool_inputs import EmptyInput
 
+LEAN = [
+    "browser.observe",
+    "browser.screenshot",
+    "browser.execute_action",
+    "browser.request_human_takeover",
+    "browser.close_session",
+    "browser.get_html",
+    "browser.find_elements",
+]
+# In the order tools/list returns them: clients and prompt caches key on it.
+CURATED = [
+    "browser.create_session",
+    "browser.list_sessions",
+    "browser.get_session",
+    "browser.observe",
+    "browser.screenshot",
+    "browser.list_auth_profiles",
+    "browser.list_downloads",
+    "browser.read_download",
+    "browser.list_tabs",
+    "browser.activate_tab",
+    "browser.close_tab",
+    "browser.execute_action",
+    "browser.save_auth_profile",
+    "browser.request_human_takeover",
+    "browser.close_session",
+    "browser.fork_session",
+    "browser.eval_js",
+    "browser.wait_for_selector",
+    "browser.get_html",
+    "browser.find_elements",
+]
+TABS = ["browser.list_tabs", "browser.activate_tab", "browser.close_tab"]
 CURATED_PACKS = ("browse", "sessions", "tabs", "downloads", "auth_profiles", "wait", "scripting", "vision")
 # Every tool's pack. Moving a tool changes what operators' selections serve, so
 # it is a deliberate edit here and in the docs table, never a side effect.
@@ -102,6 +139,29 @@ def _all_specs() -> dict[str, ToolSpec]:
     registry = ToolRegistry(tool_profile="full", experimental_enabled=lambda _: True)
     register_all(registry, MagicMock())
     return registry.tools
+
+
+def _manager(**overrides):
+    return SimpleNamespace(
+        settings=SimpleNamespace(force_governed_approvals=False),
+        ensure_session_accessible=AsyncMock(),
+        list_sessions=AsyncMock(return_value=[]),
+        create_session=AsyncMock(return_value={"id": "session-1"}),
+        **overrides,
+    )
+
+
+def _gateway(manager=None, **kwargs) -> McpToolGateway:
+    return McpToolGateway(
+        manager=manager or _manager(),
+        orchestrator=SimpleNamespace(),
+        job_queue=SimpleNamespace(),
+        **kwargs,
+    )
+
+
+def _names(gateway: McpToolGateway) -> list[str]:
+    return [tool["name"] for tool in gateway.list_tools()]
 
 
 class SelectionTests(unittest.TestCase):
@@ -234,3 +294,103 @@ class PackCatalogTests(unittest.TestCase):
         self.assertEqual(registry.withheld_pack("browser.list_tabs"), "tabs")
         self.assertIsNone(registry.withheld_pack("browser.observe"))
         self.assertIsNone(registry.withheld_pack("browser.nope"))
+
+
+class GatewaySelectionTests(unittest.TestCase):
+    def test_curated_names_and_order_are_unchanged(self) -> None:
+        self.assertEqual(_names(_gateway()), CURATED)
+        self.assertEqual(_names(_gateway(tool_profile="curated")), CURATED)
+        self.assertEqual(_names(_gateway(tool_profile="")), CURATED)
+        # find_by_vision registers last of the curated tools.
+        self.assertEqual(_names(_gateway(vision_targeter=object())), [*CURATED, "browser.find_by_vision"])
+
+    def test_full_serves_every_tool_in_registration_order(self) -> None:
+        every = list(_all_specs())
+        self.assertEqual(len(every), 75)
+        self.assertEqual(_names(_gateway(tool_profile="full", vision_targeter=object())), every)
+        self.assertEqual(
+            _names(_gateway(tool_profile="full")), [name for name in every if name != "browser.find_by_vision"]
+        )
+
+    def test_lean_serves_the_browsing_loop(self) -> None:
+        self.assertEqual(_names(_gateway(tool_profile="lean")), LEAN)
+        self.assertLessEqual(set(LEAN), set(CURATED))
+
+    def test_every_lean_tool_that_observes_acts_or_reads_can_start_a_session(self) -> None:
+        # Lean has no create_session: these open one when none is live.
+        self.assertLessEqual(
+            {
+                "browser.observe",
+                "browser.execute_action",
+                "browser.screenshot",
+                "browser.get_html",
+                "browser.find_elements",
+            },
+            IMPLICIT_SESSION_CREATE_TOOLS,
+        )
+
+    def test_packs_add_to_the_profile_in_registration_order(self) -> None:
+        gateway = _gateway(tool_profile="lean", tool_packs="tabs")
+        self.assertEqual(
+            _names(gateway),
+            [
+                "browser.observe",
+                "browser.screenshot",
+                *TABS,
+                "browser.execute_action",
+                "browser.request_human_takeover",
+                "browser.close_session",
+                "browser.get_html",
+                "browser.find_elements",
+            ],
+        )
+        self.assertEqual(gateway.tool_selection.added, frozenset({"tabs"}))
+        self.assertEqual(gateway.tool_profile, "lean")
+
+    def test_a_minus_removes_a_pack(self) -> None:
+        names = _names(_gateway(tool_packs="-scripting"))
+        self.assertEqual(names, [name for name in CURATED if name != "browser.eval_js"])
+        self.assertEqual(len(names), 19)
+
+    def test_adding_vision_without_a_vision_model_warns(self) -> None:
+        with self.assertLogs("app.tool_gateway.gateway", level="WARNING") as logs:
+            gateway = _gateway(tool_profile="lean", tool_packs="vision")
+        self.assertEqual(
+            logs.output,
+            [
+                "WARNING:app.tool_gateway.gateway:MCP_TOOL_PACKS adds vision, but no vision model is configured "
+                "(set ANTHROPIC_API_KEY): browser.find_by_vision is not listed"
+            ],
+        )
+        self.assertEqual(_names(gateway), LEAN)
+        # The default profile has vision too; without a key it drops out
+        # quietly, as it always has.
+        with self.assertNoLogs("app.tool_gateway.gateway", level="WARNING"):
+            _gateway()
+        with self.assertNoLogs("app.tool_gateway.gateway", level="WARNING"):
+            gateway = _gateway(tool_profile="lean", tool_packs="vision", vision_targeter=object())
+        self.assertEqual(_names(gateway), [*LEAN, "browser.find_by_vision"])
+
+    def test_the_startup_log_names_the_selection(self) -> None:
+        with self.assertLogs("app.tool_gateway.gateway", level="INFO") as logs:
+            _gateway(tool_profile="lean", tool_packs="tabs")
+            _gateway()
+        self.assertEqual(
+            logs.output,
+            [
+                "INFO:app.tool_gateway.gateway:MCP tools: lean profile with MCP_TOOL_PACKS=tabs, 10 tools listed",
+                "INFO:app.tool_gateway.gateway:MCP tools: curated profile, 20 tools listed",
+            ],
+        )
+
+    def test_settings_reach_the_gateway(self) -> None:
+        services = build_controller_services(Settings(MCP_TOOL_PROFILE="lean", MCP_TOOL_PACKS="tabs"), version="test")
+        self.assertEqual(set(_names(services.tool_gateway)), {*LEAN, *TABS})
+        # A typo in the profile serves curated, as it always did, and says so.
+        with self.assertLogs("app.tool_gateway.selection", level="WARNING") as logs:
+            services = build_controller_services(Settings(MCP_TOOL_PROFILE="leen"), version="test")
+        self.assertIn("MCP_TOOL_PROFILE='leen' is not a tool profile (did you mean lean?)", logs.output[0])
+        self.assertEqual(_names(services.tool_gateway), CURATED)
+        # A typo in the packs stops the controller before it serves anything.
+        with self.assertRaisesRegex(ValueError, r"^MCP_TOOL_PACKS: 'tab' is not a tool pack"):
+            build_controller_services(Settings(MCP_TOOL_PACKS="tab"), version="test")

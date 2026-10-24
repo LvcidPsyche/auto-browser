@@ -172,6 +172,7 @@ class McpToolGateway:
         orchestrator,
         job_queue,
         tool_profile: str = "curated",
+        tool_packs: str = "",
         cron_service=None,
         share_manager=None,
         proxy_store=None,
@@ -182,7 +183,6 @@ class McpToolGateway:
         self.manager = manager
         self.orchestrator = orchestrator
         self.job_queue = job_queue
-        self.tool_profile = "full" if tool_profile == "full" else "curated"
         self.cron_service = cron_service
         self.share_manager = share_manager
         self.proxy_store = proxy_store
@@ -190,13 +190,22 @@ class McpToolGateway:
         self.harness_service = harness_service
         self.metrics = metrics
         self._registry = ToolRegistry(
-            tool_profile=self.tool_profile,
+            tool_profile=tool_profile,
+            tool_packs=tool_packs,
             experimental_enabled=self._experimental_enabled,
         )
+        self.tool_selection = self._registry.selection
+        self.tool_profile = self.tool_selection.profile
         register_all(self._registry, self)
         if self.vision_targeter is None:
             self._registry.unregister("browser.find_by_vision")
+            if "vision" in self.tool_selection.added:
+                logger.warning(
+                    "MCP_TOOL_PACKS adds vision, but no vision model is configured (set ANTHROPIC_API_KEY): "
+                    "browser.find_by_vision is not listed"
+                )
         self._tools = self._registry.tools
+        logger.info("MCP tools: %s, %d tools listed", self.tool_selection.describe(), len(self._tools))
 
     def _experimental_enabled(self, name: str | None) -> bool:
         return name is None

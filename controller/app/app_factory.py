@@ -93,6 +93,7 @@ def build_controller_services(settings: Settings, *, version: str) -> Controller
         orchestrator=orchestrator,
         job_queue=job_queue,
         tool_profile=settings.mcp_tool_profile,
+        tool_packs=settings.mcp_tool_packs,
         cron_service=cron_service,
         share_manager=share_manager,
         proxy_store=proxy_store,

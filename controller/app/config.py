@@ -84,7 +84,10 @@ class Settings(BaseSettings):
     require_operator_id: bool = Field(False, alias="REQUIRE_OPERATOR_ID")
     mcp_allowed_origins: str = Field("", alias="MCP_ALLOWED_ORIGINS")
     controller_allowed_hosts: str = Field("", alias="CONTROLLER_ALLOWED_HOSTS")
+    # lean, curated or full; MCP_TOOL_PACKS adds packs (name) or removes them (-name) on top. Both are
+    # checked when the tool gateway is built: an unknown pack stops startup, an unknown profile warns.
     mcp_tool_profile: str = Field("curated", alias="MCP_TOOL_PROFILE")
+    mcp_tool_packs: str = Field("", alias="MCP_TOOL_PACKS")
     metrics_enabled: bool = Field(True, alias="METRICS_ENABLED")
     session_isolation_mode: str = Field("shared_browser_node", alias="SESSION_ISOLATION_MODE")
     isolated_browser_image: str = Field(
