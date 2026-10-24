@@ -4,6 +4,21 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **`PII_SCRUB_SCREENSHOT_STRICT` (default `false`).** With screenshot scrubbing on, a screenshot that
+  cannot be scrubbed (no OCR to drive it: tesseract missing or `OCR_ENABLED=false`; or a redaction that
+  fails) used to be returned unscrubbed with a warning. In strict mode the image is deleted and the call
+  fails with `screenshot_withheld` (HTTP 503); with OCR unavailable, `/readiness` also reports
+  `screenshot_scrubbing` as `fail` instead of `warn`. An action that already ran is still reported and
+  recorded (action log, audit event, witness receipt), with `observation_error` in place of the image.
+
+### Changed
+
+- **The stealth fingerprint layer is canvas noise only, and says so.** Its WebGL1 `getParameter`
+  wrapper returned the real value for every parameter, so it changed nothing except the function's
+  `toString()`; it and its unused seed are removed. WebGL values are reported as the browser has them.
+
 ### Fixed
 
 - **More session routes answer a bad request or a refusal as itself, not as a 500.** `GET
@@ -13,12 +28,34 @@ All notable changes to auto-browser are documented here.
   request is 403, an invalid one is 400, and a failure the route does not expect is logged and
   answers 500 "Internal error". A `KeyError` that is not an unknown session still answers 404 but is
   now logged as a warning, so a bug that surfaces as "Not found" can be traced.
+- **`STEALTH_PROFILE` is read through settings.** `STEALTH_ENABLED` came from `.env`, but the
+  profile was read straight from the process environment, so a run outside Docker with both set in
+  `.env` kept the fingerprint profile off. `STEALTH_PROFILE` (`off`, `light` or `aggressive`; any
+  other value is rejected at startup) is now a setting, and the compose `environment:` block passes
+  it next to `STEALTH_ENABLED`.
+- **`docker compose up` no longer stalls on an unhealthy `browser-node` after `cp .env.example .env`.**
+  Compose filled `${BROWSER_WS_ENDPOINT_FILE}` in the `browser-node` healthcheck from the project
+  `.env`, where `.env.example` set the controller's path (`/data/browser-profile/...`). That path does
+  not exist inside `browser-node` (its profile is at `/data/profile`), so the check failed on every
+  run and the controller, which waits for a healthy `browser-node`, never started. The healthcheck
+  now expands the variable inside the container, and `.env.example` ships the line commented out
+  because compose sets the path per service.
 - **`CURATOR_ENABLED` no longer sends a placeholder transcript to the model.** With the setting on
   and a provider key present, every closed session started a background review that sent the model
   a fixed placeholder string instead of a transcript, and could write what came back to
   `skills-staging`. Nothing builds a session transcript yet, so the review is not started at all:
   startup logs that the setting is reserved, and `.env.example` says so. The adapter setup and the
   setting itself are unchanged.
+- **A screenshot whose redaction fails is reported as failed, not as redacted.** When Pillow could
+  not process the image, `scrub_screenshot` returned the original bytes with the matches attached,
+  the caller audited `pii_redaction` as `ok`, and the result carried no sign of it. The function now
+  raises, the result carries `screenshot_pii_scrub: {"applied": false, "reason": "redaction_failed"}`
+  (the field used when OCR is unavailable), and the audit event has status `failed`.
+- **A failing disk no longer hangs a download capture.** Reserving a file name for a captured
+  download retried forever on any error other than "name already exists" (disk or quota full,
+  read-only or mis-owned volume), blocking the event loop. It now tries a generated name once,
+  tries at most 20 names, and raises the underlying error, which the background download handler
+  logs.
 
 ## [1.10.1] — 2026-10-24
 

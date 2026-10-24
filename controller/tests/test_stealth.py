@@ -180,6 +180,16 @@ class FingerprintTests(unittest.TestCase):
         self.assertIn("webdriver", script)
         self.assertIn(str(cfg.canvas_noise_seed), script)
 
+    def test_init_script_does_not_wrap_webgl(self) -> None:
+        # The old WebGL1 wrapper returned the real value for every parameter, so it
+        # changed nothing except the function's toString(). Canvas noise is all the
+        # fingerprint layer does; a half-spoofed renderer would be its own tell.
+        cfg = FingerprintConfig("session-1")
+        script = cfg.init_script()
+        self.assertNotIn("WebGL", script)
+        self.assertNotIn("_webgl_seed", script)
+        self.assertFalse(hasattr(cfg, "webgl_noise_seed"))
+
 
 if __name__ == "__main__":
     unittest.main()
