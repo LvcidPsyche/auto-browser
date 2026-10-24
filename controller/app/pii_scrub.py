@@ -497,6 +497,7 @@ class PiiScrubber:
         replacement: str = DEFAULT_REPLACEMENT,
         enabled_patterns: set[str] | None = None,
         audit_report: bool = True,
+        screenshot_strict: bool = False,
     ):
         self.enabled = enabled
         self.screenshot_enabled = screenshot_enabled and enabled
@@ -505,6 +506,8 @@ class PiiScrubber:
         self.replacement = replacement
         self.enabled_patterns = enabled_patterns  # None = all patterns active
         self.audit_report = audit_report
+        # Read by the observation service: withhold a screenshot that cannot be scrubbed.
+        self.screenshot_strict = screenshot_strict
 
     @classmethod
     def from_settings(cls, settings: Any) -> "PiiScrubber":
@@ -515,6 +518,7 @@ class PiiScrubber:
         console = getattr(settings, "pii_scrub_console", True)
         replacement = getattr(settings, "pii_scrub_replacement", DEFAULT_REPLACEMENT)
         audit = getattr(settings, "pii_scrub_audit_report", True)
+        strict = getattr(settings, "pii_scrub_screenshot_strict", False) is True
 
         raw_patterns = getattr(settings, "pii_scrub_patterns", "")
         patterns: set[str] | None = None
@@ -542,6 +546,7 @@ class PiiScrubber:
             replacement=replacement,
             enabled_patterns=patterns,
             audit_report=audit,
+            screenshot_strict=strict,
         )
 
     # ── Public API ──────────────────────────────────────────────────────────

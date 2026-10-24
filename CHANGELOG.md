@@ -4,6 +4,15 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **`PII_SCRUB_SCREENSHOT_STRICT` (default `false`).** With screenshot scrubbing on, a screenshot that
+  cannot be scrubbed (no OCR to drive it: tesseract missing or `OCR_ENABLED=false`; or a redaction that
+  fails) used to be returned unscrubbed with a warning. In strict mode the image is deleted and the call
+  fails with `screenshot_withheld` (HTTP 503); with OCR unavailable, `/readiness` also reports
+  `screenshot_scrubbing` as `fail` instead of `warn`. An action that already ran is still reported and
+  recorded (action log, audit event, witness receipt), with `observation_error` in place of the image.
+
 ### Fixed
 
 - **`docker compose up` no longer stalls on an unhealthy `browser-node` after `cp .env.example .env`.**
