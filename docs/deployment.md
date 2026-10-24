@@ -191,10 +191,16 @@ docker compose -f docker-compose.yml -f docker-compose.isolation.yml up -d --bui
 ```bash
 curl -fsS http://127.0.0.1:8000/healthz | jq
 curl -fsS http://127.0.0.1:8000/readyz | jq
-curl -fsS http://127.0.0.1:8000/metrics | head
-curl -fsS http://127.0.0.1:8000/maintenance/status | jq
+
+# The rest need the bearer token, and with REQUIRE_OPERATOR_ID=true an operator id
+# (/metrics takes the token only). Export API_BEARER_TOKEN from .env first.
+AUTH=(-H "Authorization: Bearer $API_BEARER_TOKEN" -H "X-Operator-Id: ops")
+curl -fsS "${AUTH[@]}" http://127.0.0.1:8000/readiness | jq
+curl -fsS "${AUTH[@]}" http://127.0.0.1:8000/metrics | head
+curl -fsS "${AUTH[@]}" http://127.0.0.1:8000/maintenance/status | jq
 ```
 
+`/readiness` answers `503` when a check fails, so `-f` prints nothing; drop `-f` to see which check.
 If `METRICS_ENABLED=false`, skip the `/metrics` check; the endpoint returns `404`.
 
 ## Witness receipts: what a signature proves
@@ -212,7 +218,7 @@ For evidence that survives a compromised controller host, keep a head hash from 
 
 **Scrubbed**
 
-- **Screenshots** (`observe`, `capture_screenshot` and the before/after action snapshots): matching words are painted over using OCR boxes. This needs the `tesseract` binary, which only the Docker image ships. Outside Docker, or with `OCR_ENABLED=false`, screenshots are returned **unscrubbed**: `/readyz` reports a `screenshot_scrubbing` warning, the controller logs one warning, and each result carries `screenshot_pii_scrub: {"applied": false, "reason": ...}`. A redaction that fails while it runs (an image Pillow cannot process) is reported the same way, with reason `redaction_failed`, and audited as `failed`, not `ok`. OCR is also best-effort, so small or low-contrast text can be missed.
+- **Screenshots** (`observe`, `capture_screenshot` and the before/after action snapshots): matching words are painted over using OCR boxes. This needs the `tesseract` binary, which only the Docker image ships. Outside Docker, or with `OCR_ENABLED=false`, screenshots are returned **unscrubbed**: `/readiness` reports a `screenshot_scrubbing` warning, the controller logs one warning, and each result carries `screenshot_pii_scrub: {"applied": false, "reason": ...}`. A redaction that fails while it runs (an image Pillow cannot process) is reported the same way, with reason `redaction_failed`, and audited as `failed`, not `ok`. OCR is also best-effort, so small or low-contrast text can be missed.
   Set `PII_SCRUB_SCREENSHOT_STRICT=true` to withhold instead: when a screenshot cannot be scrubbed (OCR unavailable, or a redaction that fails) it is deleted and the call fails with code `screenshot_withheld` (HTTP 503), and with OCR unavailable `/readiness` reports `screenshot_scrubbing` as `fail` rather than `warn`. `PII_SCRUB_ACTION_SCREENSHOTS=false` still leaves the before/after action snapshots unredacted, by choice. An action whose after-screenshot is withheld has still run: it is reported and recorded, with `observation_error` in place of the image. The default is `false`.
 - **Network inspector bodies**: request and response bodies stored by the network inspector. Text bodies are scrubbed whatever their content type says; binary content types and bytes that are not UTF-8 are stored as they are. Headers such as `Authorization` and `Cookie` are masked separately.
 - **Console messages** returned by `get_console_messages`.
