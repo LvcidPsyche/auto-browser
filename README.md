@@ -199,11 +199,13 @@ Servers, then View raw config), or in `~/.gemini/config/mcp_config.json`. It rea
 Cursor, VS Code, bearer tokens, and pairing Auto Browser with a web-search MCP
 server are covered in [`docs/mcp-clients.md`](./docs/mcp-clients.md).
 
-The default MCP tool profile is `curated`: the 20 tools a browsing agent needs (sessions, observe and screenshot, `execute_action`, page and download reading, tabs, auth profiles, human takeover). Every listed tool costs the model context on every request, so the diagnostics, audit, harness, and admin tools are in the full profile. To expose them, set:
+The default MCP tool profile is `curated`: the 20 tools a browsing agent needs (sessions, observe and screenshot, `execute_action`, page and download reading, tabs, auth profiles, human takeover). Every listed tool costs the model context on every request, so the diagnostics, audit, harness, and admin tools are in the full profile. To expose everything, set:
 
 ```bash
 MCP_TOOL_PROFILE=full
 ```
+
+`MCP_TOOL_PROFILE=lean` serves just the 7-tool browsing loop (observe, screenshot, `execute_action`, `get_html`, `find_elements`, human takeover, close), and `MCP_TOOL_PACKS` adds or removes named packs on top of any profile, e.g. `MCP_TOOL_PACKS=tabs,downloads` or `-scripting`. The pack table is in [`docs/mcp-clients.md`](./docs/mcp-clients.md#mcp-tool-profiles-and-packs).
 
 Raw tool-call example:
 
@@ -242,7 +244,7 @@ Start with [`docs/convergence-harness.md`](./docs/convergence-harness.md). A det
 python -m controller.harness.run --contract evals/contracts/example_read.json --mock-final-url https://example.com --mock-final-text "Example Domain"
 ```
 
-For MCP clients, set `MCP_TOOL_PROFILE=full` to expose the `harness.*` tools.
+For MCP clients, set `MCP_TOOL_PROFILE=full` (or `MCP_TOOL_PACKS=harness` on top of curated) to expose the `harness.*` tools.
 
 ## Security and Compliance
 

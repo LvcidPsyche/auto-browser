@@ -39,6 +39,16 @@ Upgrade notes:
 
 ### Added
 
+- **A `lean` MCP tool profile, and tool packs you compose by name.** Every MCP tool now belongs to one
+  of 21 packs (`browse`, `sessions`, `tabs`, `downloads`, `devtools`, `harness`, …), and a profile is a
+  list of packs. `MCP_TOOL_PROFILE=lean` serves only `browse`: `browser.observe`, `browser.screenshot`,
+  `browser.execute_action`, `browser.get_html`, `browser.find_elements`, `browser.request_human_takeover`
+  and `browser.close_session`, about 12 KB of `tools/list` against curated's 25 KB.
+  `MCP_TOOL_PACKS=tabs,downloads` adds packs to any profile and `-scripting` removes one; an unknown pack
+  name stops the controller at startup, with the valid names in the error. `curated` (still the default)
+  and `full` list the same tools, in the same order, with the same descriptors as before. The
+  `initialize` instructions name only the tools the controller serves, the startup log says what is
+  served, and the pack table is in `docs/mcp-clients.md`.
 - **`PII_SCRUB_SCREENSHOT_STRICT` (default `false`).** With screenshot scrubbing on, a screenshot that
   cannot be scrubbed (no OCR to drive it: tesseract missing or `OCR_ENABLED=false`; or a redaction that
   fails) used to be returned unscrubbed with a warning. In strict mode the image is deleted and the call
@@ -48,6 +58,15 @@ Upgrade notes:
 
 ### Changed
 
+- **An unrecognised `MCP_TOOL_PROFILE` now logs a warning.** Any value other than `full` used to mean
+  `curated` without a word, `FULL`, `full ` and `leen` included. It still serves `curated`, and the
+  startup log now says so and names the closest profile:
+  `MCP_TOOL_PROFILE='leen' is not a tool profile (did you mean lean?); serving curated. Use lean, curated or full.`
+  Unset or empty still means `curated`, silently.
+- **A call to a tool outside the selection names its pack.** It used to say the tool "is in the full MCP
+  tool profile"; it now says, for example, `browser.get_console is in the devtools tool pack, which this
+  controller does not serve (it serves the curated profile). To use it, add devtools to MCP_TOOL_PACKS or
+  set MCP_TOOL_PROFILE=full on the controller.`
 - **The harness's programmatic verifier tests every `url_matches` pattern in one child process.** It
   started one Python process per pattern (about 180 ms each on Windows). A verification now starts one,
   and another only after a pattern that outlasts the timeout; each stuck pattern still times out on
