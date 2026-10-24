@@ -21,6 +21,13 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **More session routes answer a bad request or a refusal as itself, not as a 500.** `GET
+  /sessions/{id}/downloads`, `/tabs`, `/audit`, `/witness`, `/witness/verify` and `/witness/bundle`,
+  `POST /sessions/{id}/takeover`, `POST /sessions/{id}/storage-state`, `DELETE /sessions/{id}` and
+  `POST /sessions/{id}/fork` now use the same mapping as the other session routes: a refused
+  request is 403, an invalid one is 400, and a failure the route does not expect is logged and
+  answers 500 "Internal error". A `KeyError` that is not an unknown session still answers 404 but is
+  now logged as a warning, so a bug that surfaces as "Not found" can be traced.
 - **`STEALTH_PROFILE` is read through settings.** `STEALTH_ENABLED` came from `.env`, but the
   profile was read straight from the process environment, so a run outside Docker with both set in
   `.env` kept the fingerprint profile off. `STEALTH_PROFILE` (`off`, `light` or `aggressive`; any
