@@ -2,7 +2,16 @@
 
 All notable changes to auto-browser are documented here.
 
-## [Unreleased]
+## [1.11.0] — 2026-10-24
+
+A controller feature release over 1.10.2: a `lean` MCP tool profile and tool packs. The client,
+LangChain and MCP bridge packages change only in version; update the controller image to get it.
+
+Upgrade notes: nothing changes for a controller that doesn't set `MCP_TOOL_PACKS` and keeps
+`MCP_TOOL_PROFILE` at `curated` or `full`. Those two serve the same tools, in the same order, with
+the same descriptors as 1.10.2. A misspelt `MCP_TOOL_PROFILE` still serves `curated`, but now logs a
+warning. The error text for a call to a tool the controller doesn't serve has changed (below). Update
+anything that matches the old text.
 
 ### Added
 
