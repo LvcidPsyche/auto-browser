@@ -182,7 +182,17 @@ class DurableSessionStore:
             await self.redis_store.shutdown()
 
     async def list(self) -> list[SessionRecord]:
-        return await self._primary.list()
+        if self._primary is self.file_store:
+            return await self.file_store.list()
+        # Same reasoning as get(): the file records are the durable copy, so an
+        # empty or unreachable Redis must not hide closed sessions or turn the
+        # listing into an error. Redis records win for an id both stores hold.
+        records = {record.id: record for record in await self.file_store.list()}
+        try:
+            records.update({record.id: record for record in await self._primary.list()})
+        except Exception as exc:
+            logger.warning("redis session listing failed, using file records: %s", exc)
+        return sorted(records.values(), key=lambda item: (item.created_at, item.id), reverse=True)
 
     async def get(self, session_id: str) -> SessionRecord:
         if self._primary is self.file_store:

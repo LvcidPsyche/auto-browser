@@ -70,6 +70,42 @@ class SessionStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await store.get("session-3")).status, "interrupted")
         await store.shutdown()
 
+    async def _durable_with_fake_redis(self, *, redis_list: AsyncMock) -> DurableSessionStore:
+        store = DurableSessionStore(file_root=self.root, redis_url=None, redis_prefix="auto-browser:test")
+        await store.startup()
+        redis = Mock()
+        redis.list = redis_list
+        store.redis_store = redis
+        store._primary = redis
+        return store
+
+    async def test_durable_list_falls_back_to_the_file_store_when_redis_is_empty(self) -> None:
+        # A Redis restart without persistence loses its index; get() already falls
+        # back to the file record, so list() must too.
+        store = await self._durable_with_fake_redis(redis_list=AsyncMock(return_value=[]))
+        await store.file_store.upsert(_record("session-1", status="closed", live=False))
+
+        self.assertEqual([record.id for record in await store.list()], ["session-1"])
+
+    async def test_durable_list_falls_back_to_the_file_store_when_redis_raises(self) -> None:
+        store = await self._durable_with_fake_redis(redis_list=AsyncMock(side_effect=ConnectionError("dropped")))
+        await store.file_store.upsert(_record("session-1", status="closed", live=False))
+
+        with self.assertLogs("app.session_store", level="WARNING"):
+            records = await store.list()
+        self.assertEqual([record.id for record in records], ["session-1"])
+
+    async def test_durable_list_merges_redis_and_file_records_with_redis_winning(self) -> None:
+        redis_a = _record("session-1", status="active", live=True)
+        store = await self._durable_with_fake_redis(redis_list=AsyncMock(return_value=[redis_a]))
+        await store.file_store.upsert(_record("session-1", status="closed", live=False))
+        await store.file_store.upsert(_record("session-2", status="closed", live=False))
+
+        records = await store.list()
+
+        self.assertEqual([record.id for record in records], ["session-2", "session-1"])
+        self.assertEqual({record.id: record.status for record in records}["session-1"], "active")
+
     async def test_redis_store_uses_indexed_records_and_transactional_upsert(self) -> None:
         record = _record("session-4")
         missing_record = _record("session-5", status="closed", live=False)

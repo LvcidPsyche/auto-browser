@@ -21,6 +21,17 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **`GET /sessions` still lists closed sessions when Redis is empty or unreachable.** Reading one
+  session already fell back to the file record, but the listing asked only Redis, so a Redis restart
+  without persistence hid every closed session and a dropped connection turned the listing into an
+  error. The listing now merges the file records with Redis (Redis wins for an id in both) and falls
+  back to the file records, with a warning, if Redis fails.
+- **A cancelled session create no longer leaves its isolated tunnel behind.** Cancelling while
+  autossh was starting, or while waiting for the tunnel lock after the startup grace period, left
+  the log file open or autossh running and its remote port reserved. Both now stop the process and
+  mark the tunnel as errored. A cancelled release still stops autossh, frees the port and closes
+  the log before the cancel goes through; it used to be swallowed while release waited for the
+  tunnel's heartbeat task.
 - **More session routes answer a bad request or a refusal as itself, not as a 500.** `GET
   /sessions/{id}/downloads`, `/tabs`, `/audit`, `/witness`, `/witness/verify` and `/witness/bundle`,
   `POST /sessions/{id}/takeover`, `POST /sessions/{id}/storage-state`, `DELETE /sessions/{id}` and
