@@ -191,6 +191,7 @@ docker compose -f docker-compose.yml -f docker-compose.isolation.yml up -d --bui
 ```bash
 curl -fsS http://127.0.0.1:8000/healthz | jq
 curl -fsS http://127.0.0.1:8000/readyz | jq
+curl -fsS http://127.0.0.1:8000/readiness | jq
 curl -fsS http://127.0.0.1:8000/metrics | head
 curl -fsS http://127.0.0.1:8000/maintenance/status | jq
 ```
@@ -212,7 +213,7 @@ For evidence that survives a compromised controller host, keep a head hash from 
 
 **Scrubbed**
 
-- **Screenshots** (`observe`, `capture_screenshot` and the before/after action snapshots): matching words are painted over using OCR boxes. This needs the `tesseract` binary, which only the Docker image ships. Outside Docker, or with `OCR_ENABLED=false`, screenshots are returned **unscrubbed**: `/readyz` reports a `screenshot_scrubbing` warning, the controller logs one warning, and each result carries `screenshot_pii_scrub: {"applied": false, "reason": ...}`. OCR is also best-effort, so small or low-contrast text can be missed.
+- **Screenshots** (`observe`, `capture_screenshot` and the before/after action snapshots): matching words are painted over using OCR boxes. This needs the `tesseract` binary, which only the Docker image ships. Outside Docker, or with `OCR_ENABLED=false`, screenshots are returned **unscrubbed**: `/readiness` reports a `screenshot_scrubbing` warning, the controller logs one warning, and each result carries `screenshot_pii_scrub: {"applied": false, "reason": ...}`. OCR is also best-effort, so small or low-contrast text can be missed.
 - **Network inspector bodies**: request and response bodies stored by the network inspector. Text bodies are scrubbed whatever their content type says; binary content types and bytes that are not UTF-8 are stored as they are. Headers such as `Authorization` and `Cookie` are masked separately.
 - **Console messages** returned by `get_console_messages`.
 

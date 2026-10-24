@@ -94,7 +94,9 @@ def _check_key(bundle: dict[str, Any], expect_key_id: str | None, failures: list
     return public_key, key_id
 
 
-def _check_chain(receipts: list[dict[str, Any]], public_key: str | None, key_id: str | None, failures: list[str]) -> tuple[int, int]:
+def _check_chain(
+    receipts: list[dict[str, Any]], public_key: str | None, key_id: str | None, failures: list[str]
+) -> tuple[int, int]:
     previous: str | None = None
     signed = unsigned = 0
     for index, receipt in enumerate(receipts):
@@ -142,7 +144,9 @@ def verify_bundle(
 
     head = receipts[-1].get("chain_hash") if receipts else None
     if bundle.get("head_hash") != head:
-        failures.append(f"bundle claims head {bundle.get('head_hash')} but its receipts end at {head} — receipts missing")
+        failures.append(
+            f"bundle claims head {bundle.get('head_hash')} but its receipts end at {head} — receipts missing"
+        )
     if "receipt_count" in bundle and bundle["receipt_count"] != len(receipts):
         failures.append(f"bundle claims {bundle['receipt_count']} receipts but carries {len(receipts)}")
     if expect_head and head != expect_head:
@@ -185,7 +189,10 @@ def main(argv: list[str]) -> int:
         return 2
 
     if not isinstance(bundle, dict) or bundle.get("format") != "auto-browser-witness-bundle":
-        print(f"not a witness bundle: format={bundle.get('format') if isinstance(bundle, dict) else None!r}", file=sys.stderr)
+        print(
+            f"not a witness bundle: format={bundle.get('format') if isinstance(bundle, dict) else None!r}",
+            file=sys.stderr,
+        )
         return 2
 
     result = verify_bundle(
@@ -212,7 +219,9 @@ def main(argv: list[str]) -> int:
         print("RESULT: VERIFIED (UNSIGNED — consistent hashes only, not evidence of who wrote them)")
         return 0
     print("RESULT: VERIFIED")
-    print("Compare signing_key_id and head_hash with values obtained independently, or pass --expect-key-id/--expect-head.")
+    print(
+        "Compare signing_key_id and head_hash with values obtained independently, or pass --expect-key-id/--expect-head."
+    )
     return 0
 
 
