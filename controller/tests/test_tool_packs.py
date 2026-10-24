@@ -7,12 +7,22 @@ every registered tool.
 
 from __future__ import annotations
 
+import json
+import re
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+# At module level: with postponed annotations, a Request imported inside the
+# test leaves FastAPI unable to resolve the route parameter (a 422).
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
+
 from app.app_factory import build_controller_services
 from app.config import Settings
+from app.mcp_instructions import SERVER_INSTRUCTIONS, server_instructions
+from app.mcp_transport import McpHttpTransport
 from app.models import McpToolCallRequest
 from app.tool_gateway import McpToolGateway, ToolRegistry, ToolSpec
 from app.tool_gateway.gateway import IMPLICIT_SESSION_CREATE_TOOLS
@@ -54,6 +64,34 @@ CURATED = [
 ]
 TABS = ["browser.list_tabs", "browser.activate_tab", "browser.close_tab"]
 CURATED_PACKS = ("browse", "sessions", "tabs", "downloads", "auth_profiles", "wait", "scripting", "vision")
+# What the session_id and detail arguments name; a selection without the
+# sessions pack serves tools whose schemas mention them (see the docs).
+SESSION_LOOKUPS = {"browser.create_session", "browser.list_sessions", "browser.get_session"}
+TOOL_NAME = re.compile(r"\b(?:browser|harness)\.[a-z_]+")
+# The initialize instructions every release before packs sent, copied from
+# mcp_transport.py rather than derived, so curated and full stay byte-identical.
+CURATED_INSTRUCTIONS = (
+    "Auto Browser drives a real, supervised Chromium session. Typical loop: browser.observe "
+    "(it creates a session when none is live) to get interactables and their element_id values, "
+    "then browser.execute_action with an element_id; its result reports what changed and the page "
+    "after the action. Without vision, use observe preset='text'; to look at the page, "
+    "browser.screenshot returns an image. To read content, use browser.get_html with "
+    "text_only=true (paged), browser.find_elements with a query, and browser.read_download for "
+    "downloaded files. Navigation is limited to the hosts the operator allows. Some actions return "
+    "status approval_required with an approval_id: ask the operator to approve it (their dashboard "
+    "is at /dashboard on this controller), then retry with approval_id. For logins, CAPTCHAs or "
+    "anything a person should do, call browser.request_human_takeover."
+)
+LEAN_INSTRUCTIONS = CURATED_INSTRUCTIONS.replace(
+    "text_only=true (paged), browser.find_elements with a query, and browser.read_download for downloaded files.",
+    "text_only=true (paged) and browser.find_elements with a query.",
+)
+# The sentences that name no tool, which every selection keeps.
+TOOL_FREE_INSTRUCTIONS = (
+    "Auto Browser drives a real, supervised Chromium session. Navigation is limited to the hosts the operator "
+    "allows. Some actions return status approval_required with an approval_id: ask the operator to approve it "
+    "(their dashboard is at /dashboard on this controller), then retry with approval_id."
+)
 # Every tool's pack. Moving a tool changes what operators' selections serve, so
 # it is a deliberate edit here and in the docs table, never a side effect.
 PACK_OF = {
@@ -163,6 +201,25 @@ def _gateway(manager=None, **kwargs) -> McpToolGateway:
 
 def _names(gateway: McpToolGateway) -> list[str]:
     return [tool["name"] for tool in gateway.list_tools()]
+
+
+def _selections():
+    """Labelled gateway arguments: the profiles, and every pack added to lean and removed from full."""
+    yield "lean", {"tool_profile": "lean"}
+    yield "curated", {}
+    yield "curated+vision", {"vision_targeter": object()}
+    yield "full", {"tool_profile": "full"}
+    yield "full+vision", {"tool_profile": "full", "vision_targeter": object()}
+    for pack in PACKS:
+        yield f"lean+{pack}", {"tool_profile": "lean", "tool_packs": pack, "vision_targeter": object()}
+        yield f"full-{pack}", {"tool_profile": "full", "tool_packs": f"-{pack}", "vision_targeter": object()}
+
+
+def _dangling(gateway: McpToolGateway) -> set[str]:
+    """Tools the served descriptors name that this gateway does not serve."""
+    tools = gateway.list_tools()
+    served = {tool["name"] for tool in tools}
+    return {name for tool in tools for name in TOOL_NAME.findall(json.dumps(tool))} - served
 
 
 class SelectionTests(unittest.TestCase):
@@ -506,3 +563,103 @@ class WithheldToolTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     await self._error("browser.no_such_tool", **kwargs), "Unknown tool: browser.no_such_tool"
                 )
+
+
+class ModelFacingTextTests(unittest.TestCase):
+    def test_curated_and_full_instructions_are_unchanged(self) -> None:
+        self.assertEqual(len(CURATED_INSTRUCTIONS), 867)
+        self.assertEqual(SERVER_INSTRUCTIONS, CURATED_INSTRUCTIONS)
+        self.assertEqual(server_instructions(set(CURATED)), CURATED_INSTRUCTIONS)
+        self.assertEqual(server_instructions(set(_all_specs())), CURATED_INSTRUCTIONS)
+
+    def test_lean_instructions_read_with_html_and_find_only(self) -> None:
+        self.assertEqual(server_instructions(set(LEAN)), LEAN_INSTRUCTIONS)
+        self.assertIn(
+            "To read content, use browser.get_html with text_only=true (paged) and browser.find_elements with a query.",
+            LEAN_INSTRUCTIONS,
+        )
+        self.assertNotIn("read_download", LEAN_INSTRUCTIONS)
+
+    def test_instructions_name_only_served_tools(self) -> None:
+        for label, kwargs in _selections():
+            served = set(_names(_gateway(**kwargs)))
+            text = server_instructions(served)
+            with self.subTest(label):
+                named = set(TOOL_NAME.findall(text))
+                self.assertLessEqual(named, served)
+                if "browser.observe" in served:
+                    self.assertGreaterEqual(len(named), 6)
+        # Without browse, only the tool-free sentences and the readers still served.
+        self.assertEqual(
+            server_instructions(set(_names(_gateway(tool_packs="-browse")))),
+            TOOL_FREE_INSTRUCTIONS.replace(
+                " Navigation", " To read content, use browser.read_download for downloaded files. Navigation"
+            ),
+        )
+        # With no reader at all, the reading sentence goes rather than reading "use ."
+        no_readers = server_instructions(set(_names(_gateway(tool_profile="lean", tool_packs="-browse,tabs"))))
+        self.assertEqual(no_readers, TOOL_FREE_INSTRUCTIONS)
+
+    def test_descriptors_name_only_served_tools(self) -> None:
+        # A description that names a tool the controller does not serve sends
+        # the model nowhere. Curated and full never do. A selection without
+        # sessions keeps the shared session_id and detail text, which names
+        # the session lookups (pinned exactly; see the docs).
+        for label, kwargs in _selections():
+            dangling = _dangling(_gateway(**kwargs))
+            with self.subTest(label):
+                self.assertLessEqual({PACK_OF[name] for name in dangling}, set(CURATED_PACKS))
+                if label.startswith("lean+") and label not in ("lean+sessions", "lean+auth_admin"):
+                    self.assertLessEqual(dangling, SESSION_LOOKUPS)
+        for label, kwargs in (("curated", {}), ("curated+vision", {"vision_targeter": object()})):
+            with self.subTest(label):
+                self.assertEqual(_dangling(_gateway(**kwargs)), set())
+        for label, kwargs in (("full", {"tool_profile": "full"}), ("full+vision", {"tool_profile": "full"})):
+            with self.subTest(label):
+                self.assertEqual(_dangling(_gateway(**kwargs, vision_targeter=object())), set())
+        self.assertEqual(_dangling(_gateway(tool_profile="lean")), SESSION_LOOKUPS)
+        # create_session's auth_profile argument names the auth_profiles pack.
+        self.assertEqual(
+            _dangling(_gateway(tool_profile="lean", tool_packs="sessions")), {"browser.list_auth_profiles"}
+        )
+        self.assertEqual(
+            _dangling(_gateway(tool_profile="lean", tool_packs="auth_admin")),
+            {*SESSION_LOOKUPS, "browser.list_auth_profiles", "browser.save_auth_profile"},
+        )
+
+
+class InitializeTests(unittest.TestCase):
+    def _initialize(self, gateway: McpToolGateway) -> dict:
+        with tempfile.TemporaryDirectory() as tempdir:
+            transport = McpHttpTransport(
+                tool_gateway=gateway,
+                server_name="auto-browser",
+                server_version="test",
+                session_store_path=f"{tempdir}/mcp-sessions.json",
+            )
+            app = FastAPI()
+
+            @app.post("/mcp")
+            async def post_mcp(request: Request):
+                return await transport.handle_post_request(request)
+
+            response = TestClient(app).post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {"protocolVersion": "2025-11-25", "clientInfo": {"name": "t", "version": "1"}},
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()["result"]
+
+    def test_initialize_sends_instructions_for_the_served_tools(self) -> None:
+        lean = self._initialize(_gateway(tool_profile="lean"))
+        self.assertEqual(lean["instructions"], LEAN_INSTRUCTIONS)
+        curated = self._initialize(_gateway())
+        self.assertEqual(curated["instructions"], CURATED_INSTRUCTIONS)
+        # The selection is fixed at startup: no tools/list_changed to announce.
+        self.assertEqual(lean["capabilities"]["tools"], {})
+        self.assertEqual(curated["capabilities"]["tools"], {})

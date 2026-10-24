@@ -232,7 +232,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         # that the default profile does not list would send agents nowhere.
         import re
 
-        from app.mcp_transport import SERVER_INSTRUCTIONS
+        from app.mcp_instructions import SERVER_INSTRUCTIONS
 
         named = set(re.findall(r"browser\.[a-z_]+", SERVER_INSTRUCTIONS))
         curated = {tool["name"] for tool in self.gateway.list_tools()}
