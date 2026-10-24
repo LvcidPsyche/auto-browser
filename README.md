@@ -286,6 +286,7 @@ For deployment details, hosted Witness notes, CLI auth modes, and reverse-SSH gu
 
 - [`docs/deployment.md`](./docs/deployment.md)
 - [`docs/production-hardening.md`](./docs/production-hardening.md)
+- [`docs/session-isolation-audit.md`](./docs/session-isolation-audit.md): what each isolation mode does and does not separate
 
 ## Architecture at a Glance
 
@@ -359,6 +360,7 @@ Core components:
 | run the curl-first examples | [`examples/README.md`](./examples/README.md) |
 | deploy on a trusted host | [`docs/deployment.md`](./docs/deployment.md) |
 | review production constraints | [`docs/production-hardening.md`](./docs/production-hardening.md) |
+| see what session isolation does and does not separate | [`docs/session-isolation-audit.md`](./docs/session-isolation-audit.md) |
 | run the convergence harness | [`docs/convergence-harness.md`](./docs/convergence-harness.md) |
 | inspect release history | [`CHANGELOG.md`](./CHANGELOG.md) |
 | see where the project is headed | [`ROADMAP.md`](./ROADMAP.md) |

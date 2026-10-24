@@ -35,10 +35,8 @@ def create_auth_profiles_router(*, manager: Any, settings: Any) -> APIRouter:
 
     @router.post("/sessions/{session_id}/storage-state")
     async def save_storage_state(session_id: str, payload: SaveStorageStateRequest) -> dict[str, Any]:
-        try:
+        with typed_route_errors(logger, "save storage state failed for session %s", session_id):
             return await manager.save_storage_state(session_id, payload.path)
-        except PermissionError:
-            raise HTTPException(status_code=403, detail="Not permitted") from None
 
     @router.post("/sessions/{session_id}/auth-profiles")
     async def save_auth_profile(session_id: str, payload: SaveAuthProfileRequest) -> dict[str, Any]:

@@ -8,7 +8,7 @@ from typing import Any
 from playwright.async_api import Error as PlaywrightError
 
 from .. import events as _events
-from ..action_errors import BrowserActionError
+from ..action_errors import SCREENSHOT_WITHHELD, BrowserActionError
 from ..utils import utc_now
 from ..witness import WitnessApproval
 
@@ -335,6 +335,12 @@ class BrowserActionPipeline:
         except PlaywrightError as exc:
             logger.warning("failure snapshot unavailable for session %s: %s", context.session.id, exc)
             return {"url": context.session.page.url, "snapshot_error": str(exc)[:300]}
+        except BrowserActionError as exc:
+            # PII_SCRUB_SCREENSHOT_STRICT withheld the snapshot; the action's own
+            # error is the one to report.
+            if exc.code != SCREENSHOT_WITHHELD:
+                raise
+            return {"url": context.session.page.url, "snapshot_error": exc.message[:300]}
 
     @staticmethod
     async def _after_observation(context: ActionRunContext) -> dict[str, Any]:
@@ -359,6 +365,13 @@ class BrowserActionPipeline:
             # The action ran, so report it with the URL and nothing the page showed.
             logger.warning("post-action observation withheld for session %s: %s", session.id, exc)
             return {"url": session.page.url, "observation_error": str(exc)[:300]}
+        except BrowserActionError as exc:
+            # PII_SCRUB_SCREENSHOT_STRICT withheld the screenshot. The action ran,
+            # so it is reported and recorded the same way, without the image.
+            if exc.code != SCREENSHOT_WITHHELD:
+                raise
+            logger.warning("post-action screenshot withheld for session %s: %s", session.id, exc.message)
+            return {"url": session.page.url, "observation_error": exc.message[:300]}
         try:
             await manager._settle(session.page)
             return await manager._observation_payload(session, limit=20, screenshot_label=label)
@@ -371,6 +384,11 @@ class BrowserActionPipeline:
         except PermissionError as exc:
             logger.warning("post-action observation withheld for session %s: %s", session.id, exc)
             return {"url": session.page.url, "observation_error": str(exc)[:300]}
+        except BrowserActionError as exc:
+            if exc.code != SCREENSHOT_WITHHELD:
+                raise
+            logger.warning("post-action screenshot withheld for session %s: %s", session.id, exc.message)
+            return {"url": session.page.url, "observation_error": exc.message[:300]}
 
     def _approval(
         self,

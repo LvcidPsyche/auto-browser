@@ -73,6 +73,23 @@ SESSION_ROUTES = [
     Route("post", f"/sessions/{SID}/actions/reload", None, "reload"),
     Route("post", f"/sessions/{SID}/actions/go-back", None, "go_back"),
     Route("post", f"/sessions/{SID}/actions/go-forward", None, "go_forward"),
+    Route("get", f"/sessions/{SID}/downloads", None, "list_downloads"),
+    Route("get", f"/sessions/{SID}/tabs", None, "list_tabs"),
+    Route("post", f"/sessions/{SID}/takeover", {"reason": "check the page"}, "request_human_takeover"),
+    Route("delete", f"/sessions/{SID}", None, "close_session"),
+    # A RuntimeError from fork_session is a state conflict on purpose.
+    Route("post", f"/sessions/{SID}/fork", None, "fork_session", runtime=(409, "Conflict")),
+    Route("post", f"/sessions/{SID}/storage-state", {"path": "state.json"}, "save_storage_state"),
+]
+
+# Records of a session: they outlive it, so an id that never existed answers an
+# empty 200 rather than a 404. The error mapping is the same as for live sessions.
+RECORD_ROUTES = [
+    # The manager's audit log is a service object: "audit.list" is manager.audit.list.
+    Route("get", f"/sessions/{SID}/audit", None, "audit.list"),
+    Route("get", f"/sessions/{SID}/witness", None, "list_witness_receipts"),
+    Route("get", f"/sessions/{SID}/witness/verify", None, "verify_witness_chain"),
+    Route("get", f"/sessions/{SID}/witness/bundle", None, "export_witness_bundle"),
 ]
 
 # Routes with a broad catch-all that are not addressed by a session id.
@@ -85,7 +102,7 @@ OTHER_ROUTES = [
     Route("post", "/auth-profiles/import", {"archive_path": "a.tgz"}, "import_auth_profile"),
 ]
 
-ALL_ROUTES = SESSION_ROUTES + OTHER_ROUTES
+ALL_ROUTES = SESSION_ROUTES + RECORD_ROUTES + OTHER_ROUTES
 
 
 @pytest.fixture(scope="module")
@@ -123,7 +140,11 @@ def _call(client: TestClient, route: Route):
 
 
 def _raising(route: Route, exc: BaseException):
-    return patch.object(main_module.manager, route.method, new=AsyncMock(side_effect=exc))
+    *owners, name = route.method.split(".")
+    target = main_module.manager
+    for owner in owners:
+        target = getattr(target, owner)
+    return patch.object(target, name, new=AsyncMock(side_effect=exc))
 
 
 @pytest.mark.parametrize("route", SESSION_ROUTES, ids=lambda r: r.id)
@@ -136,7 +157,7 @@ def test_unknown_session_is_404_with_its_code(client: TestClient, route: Route) 
     assert body["detail"] == SessionNotFoundError(SID).message
 
 
-@pytest.mark.parametrize("route", SESSION_ROUTES, ids=lambda r: r.id)
+@pytest.mark.parametrize("route", SESSION_ROUTES + RECORD_ROUTES, ids=lambda r: r.id)
 def test_closed_session_is_404_and_says_it_is_closed(client: TestClient, route: Route) -> None:
     exc = SessionNotFoundError(SID, status="closed")
     with _raising(route, exc):
@@ -230,6 +251,29 @@ def test_unknown_approval_is_404(client: TestClient) -> None:
     response = client.post("/approvals/nope/execute")
     assert response.status_code == 404, response.text
     assert response.json() == {"detail": "Not found: nope"}
+
+
+def test_unmapped_key_error_is_404_and_logged(client: TestClient, caplog: pytest.LogCaptureFixture) -> None:
+    # A plain KeyError from a bug looks the same to the client as an unknown id,
+    # so the handler is the only place it can be told apart.
+    route = SESSION_ROUTES[0]
+    with caplog.at_level(logging.WARNING, logger="app.main"), _raising(route, KeyError("internal_dict_key")):
+        response = _call(client, route)
+    assert response.status_code == 404, response.text
+    assert response.json() == {"detail": "Not found: internal_dict_key"}
+    logged = [r for r in caplog.records if r.name == "app.main" and r.levelno == logging.WARNING]
+    assert logged, "an unmapped KeyError was answered 404 without a log line"
+    assert "unmapped KeyError" in logged[0].getMessage()
+    assert logged[0].exc_info and logged[0].exc_info[0] is KeyError
+
+
+def test_unknown_session_is_not_logged_as_an_unmapped_key_error(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="app.main"):
+        response = _call(client, SESSION_ROUTES[0])
+    assert response.status_code == 404, response.text
+    assert [r for r in caplog.records if r.name == "app.main"] == []
 
 
 def test_import_conflict_stays_409(client: TestClient) -> None:

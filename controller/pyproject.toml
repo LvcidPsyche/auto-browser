@@ -39,8 +39,31 @@ line-length = 120
 target-version = "py311"
 
 [tool.ruff.lint]
-# Enforce syntax errors, unused imports, and import sorting
-select = ["E9", "F", "I"]
+# Syntax errors, unused names, import sorting, and the flake8-bandit security rules (S).
+# Every S hit that is deliberate is listed below with its reason. Nothing may pass
+# `--select` on the command line: it replaces this list.
+select = ["E9", "F", "I", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert, use throwaway passwords/tokens and fixed temp paths, and run
+# fixed-argument subprocesses and local URLs.
+"tests/**" = ["S101", "S104", "S105", "S106", "S107", "S108", "S110", "S310", "S603"]
+# Humanized timing/jitter and user-agent choice: unpredictability for realism, not secrecy.
+"app/browser/services/actions.py" = ["S311"]
+"app/stealth/*.py" = ["S311"]
+"app/config.py" = ["S311"]
+# 0.0.0.0 here is a value compared against or handed to the browser-node container, or listed
+# as a local-only host; the controller does not bind a socket to it.
+"app/runtime_policy.py" = ["S104"]
+"app/session_isolation.py" = ["S104"]
+"app/browser/services/remote_access.py" = ["S104"]
+# urlopen on the base URL the operator configured for their own controller.
+"app/mcp_stdio.py" = ["S310"]
+"app/agent_eval.py" = ["S310"]
+# A stored record or metadata file that cannot be parsed is skipped, not fatal.
+"app/mcp_transport.py" = ["S112"]
+"app/memory_manager.py" = ["S112"]
+"app/session_tunnel.py" = ["S112"]
 
 [tool.mypy]
 python_version = "3.11"

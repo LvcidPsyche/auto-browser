@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -104,7 +103,9 @@ class IsolatedSessionTunnelBroker:
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=tunnel.stderr_handle,
                     )
-                except Exception:
+                except BaseException:
+                    # BaseException: a create cancelled while autossh is starting
+                    # must not leave the log handle open or the metadata "starting".
                     tunnel.error = "autossh_start_failed"
                     self._write_metadata(tunnel, status="error")
                     tunnel.stderr_handle.close()
@@ -120,38 +121,33 @@ class IsolatedSessionTunnelBroker:
                 # A create cancelled during the grace period (the caller
                 # gave up, shutdown) left autossh running with nothing
                 # tracking it, holding its remote port on the bastion.
-                # release() already did all of this if it got there first.
-                if not tunnel.released:
-                    # Bookkeeping first and synchronously, so a second cancel
-                    # during the wait below cannot leave the port reserved.
-                    self._forget_starting(tunnel)
-                    process = tunnel.process
-                    if process.returncode is None:
-                        process.kill()
-                        await asyncio.shield(process.wait())
-                    tunnel.error = "provision_cancelled"
-                    self._write_metadata(tunnel, status="error")
-                    self._close_stderr(tunnel)
+                await self._abort_starting(tunnel, "provision_cancelled")
                 raise
 
-            async with self._lock:
-                if tunnel.released:
-                    # release() or shutdown() tore it down while it was starting;
-                    # it already stopped the process and freed the port.
-                    raise RuntimeError(f"session tunnel for {session_id} was released while it was starting")
-                if tunnel.process.returncode is not None:
-                    self._forget_starting(tunnel)
-                    tunnel.error = self._tail_file(tunnel.log_path) or (
-                        f"autossh exited early with code {tunnel.process.returncode}"
-                    )
-                    self._write_metadata(tunnel, status="error")
-                    self._close_stderr(tunnel)
-                    last_error = tunnel.error
-                    continue
+            try:
+                async with self._lock:
+                    if tunnel.released:
+                        # release() or shutdown() tore it down while it was starting;
+                        # it already stopped the process and freed the port.
+                        raise RuntimeError(f"session tunnel for {session_id} was released while it was starting")
+                    if tunnel.process.returncode is not None:
+                        self._forget_starting(tunnel)
+                        tunnel.error = self._tail_file(tunnel.log_path) or (
+                            f"autossh exited early with code {tunnel.process.returncode}"
+                        )
+                        self._write_metadata(tunnel, status="error")
+                        self._close_stderr(tunnel)
+                        last_error = tunnel.error
+                        continue
 
-                self._write_metadata(tunnel, status="active")
-                tunnel.heartbeat_task = asyncio.create_task(self._heartbeat(tunnel))
-                return tunnel
+                    self._write_metadata(tunnel, status="active")
+                    tunnel.heartbeat_task = asyncio.create_task(self._heartbeat(tunnel))
+                    return tunnel
+            except BaseException:
+                # Cancelled while waiting for the lock, or a failed metadata write:
+                # autossh is running and tracked, and nothing else will stop it.
+                await self._abort_starting(tunnel, "provision_failed")
+                raise
 
         raise RuntimeError(
             last_error
@@ -161,6 +157,21 @@ class IsolatedSessionTunnelBroker:
                 f"{self.settings.isolated_tunnel_remote_port_end}."
             )
         )
+
+    async def _abort_starting(self, tunnel: IsolatedSessionTunnel, reason: str) -> None:
+        """Stop a tunnel provision() gave up on, unless release() already did."""
+        if tunnel.released:
+            return
+        # Bookkeeping first and synchronously, so a second cancel during the
+        # wait below cannot leave the port reserved.
+        self._forget_starting(tunnel)
+        process = tunnel.process
+        if process.returncode is None:
+            process.kill()
+            await asyncio.shield(process.wait())
+        tunnel.error = reason
+        self._write_metadata(tunnel, status="error")
+        self._close_stderr(tunnel)
 
     def _forget_starting(self, tunnel: IsolatedSessionTunnel) -> None:
         self._allocated_ports.discard(tunnel.remote_port)
@@ -176,29 +187,46 @@ class IsolatedSessionTunnelBroker:
     async def release(self, tunnel: IsolatedSessionTunnel) -> None:
         async with self._lock:
             tunnel.released = True
-            if tunnel.heartbeat_task is not None:
-                tunnel.heartbeat_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await tunnel.heartbeat_task
-                tunnel.heartbeat_task = None
-
-            process = tunnel.process
-            if process is not None and process.returncode is None:
-                process.terminate()
+            # Once `released` is set nothing else stops this tunnel, so a cancel
+            # aimed at release() (a close that gave up, shutdown) must not end the
+            # teardown halfway: autossh would keep running and hold its remote
+            # port. Finish it under the lock, then let the cancel through.
+            teardown = asyncio.create_task(self._teardown(tunnel))
+            cancelled: asyncio.CancelledError | None = None
+            while not teardown.done():
                 try:
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
+                    await asyncio.shield(teardown)
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+            teardown.result()
+            if cancelled is not None:
+                raise cancelled
 
-            tunnel.status = "inactive"
-            tunnel.error = None
-            self._write_metadata(tunnel, status="inactive")
-            self._allocated_ports.discard(tunnel.remote_port)
-            self._tunnels.pop(tunnel.session_id, None)
-            if tunnel.stderr_handle is not None:
-                tunnel.stderr_handle.close()
-                tunnel.stderr_handle = None
+    async def _teardown(self, tunnel: IsolatedSessionTunnel) -> None:
+        if tunnel.heartbeat_task is not None:
+            tunnel.heartbeat_task.cancel()
+            # wait(), not await: awaiting the task and suppressing CancelledError
+            # would also swallow a cancel aimed at this task.
+            await asyncio.wait({tunnel.heartbeat_task})
+            tunnel.heartbeat_task = None
+
+        process = tunnel.process
+        if process is not None and process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+
+        tunnel.status = "inactive"
+        tunnel.error = None
+        self._write_metadata(tunnel, status="inactive")
+        self._allocated_ports.discard(tunnel.remote_port)
+        self._tunnels.pop(tunnel.session_id, None)
+        if tunnel.stderr_handle is not None:
+            tunnel.stderr_handle.close()
+            tunnel.stderr_handle = None
 
     def describe(self, tunnel: IsolatedSessionTunnel | None) -> dict[str, Any] | None:
         if tunnel is None:
