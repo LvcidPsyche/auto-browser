@@ -12,6 +12,11 @@ All notable changes to auto-browser are documented here.
   `skills-staging`. Nothing builds a session transcript yet, so the review is not started at all:
   startup logs that the setting is reserved, and `.env.example` says so. The adapter setup and the
   setting itself are unchanged.
+- **A failing disk no longer hangs a download capture.** Reserving a file name for a captured
+  download retried forever on any error other than "name already exists" (disk or quota full,
+  read-only or mis-owned volume), blocking the event loop. It now tries a generated name once,
+  tries at most 20 names, and raises the underlying error, which the background download handler
+  logs.
 
 ## [1.10.1] — 2026-10-24
 
