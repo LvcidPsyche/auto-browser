@@ -12,7 +12,7 @@ import re
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 # At module level: with postponed annotations, a Request imported inside the
 # test leaves FastAPI unable to resolve the route parameter (a 422).
@@ -613,6 +613,41 @@ class WithheldToolTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     await self._error("browser.no_such_tool", **kwargs), "Unknown tool: browser.no_such_tool"
                 )
+
+
+class LeanSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_each_lean_starter_opens_a_session_when_none_is_live(self) -> None:
+        # Lean serves no create_session, so an agent's first call has to open
+        # one: each of these creates a session and runs against it.
+        page = SimpleNamespace(evaluate=AsyncMock(return_value="page text"), content=AsyncMock(return_value="<p/>"))
+        calls = {
+            "browser.observe": ({}, "observe"),
+            "browser.execute_action": (
+                {"action": {"action": "navigate", "url": "https://example.com", "reason": "open the page"}},
+                "execute_decision",
+            ),
+            "browser.screenshot": ({}, "capture_screenshot"),
+            "browser.get_html": ({"text_only": True}, "get_session"),
+            "browser.find_elements": ({"selector": "a"}, "get_session"),
+        }
+        self.assertEqual(set(calls), set(LEAN) & IMPLICIT_SESSION_CREATE_TOOLS)
+        for name, (arguments, method) in calls.items():
+            with self.subTest(name):
+                manager = _manager(
+                    observe=AsyncMock(return_value={"url": "https://example.com"}),
+                    execute_decision=AsyncMock(return_value={"action": "navigate"}),
+                    capture_screenshot=AsyncMock(return_value={"screenshot_url": "/artifacts/session-1/shot.png"}),
+                    get_session=AsyncMock(return_value=SimpleNamespace(page=page)),
+                    _assert_page_allowed=Mock(),
+                )
+                response = await _gateway(manager, tool_profile="lean").call_tool(
+                    McpToolCallRequest(name=name, arguments=arguments)
+                )
+                self.assertFalse(response.isError, response.content[0].text)
+                manager.create_session.assert_awaited_once_with()
+                # The handler ran against the session just created.
+                self.assertEqual(getattr(manager, method).await_args.args[0], "session-1")
+                manager.ensure_session_accessible.assert_awaited_once_with("session-1")
 
 
 class ModelFacingTextTests(unittest.TestCase):
