@@ -548,7 +548,7 @@ class BaseProviderAdapter(ABC):
     def _safe_json(response: httpx.Response) -> dict[str, Any] | None:
         try:
             payload = response.json()
-        except Exception:
+        except ValueError:
             return None
         return payload if isinstance(payload, dict) else None
 
