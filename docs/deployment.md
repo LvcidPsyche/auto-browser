@@ -191,11 +191,16 @@ docker compose -f docker-compose.yml -f docker-compose.isolation.yml up -d --bui
 ```bash
 curl -fsS http://127.0.0.1:8000/healthz | jq
 curl -fsS http://127.0.0.1:8000/readyz | jq
-curl -fsS http://127.0.0.1:8000/readiness | jq
-curl -fsS http://127.0.0.1:8000/metrics | head
-curl -fsS http://127.0.0.1:8000/maintenance/status | jq
+
+# The rest need the bearer token, and with REQUIRE_OPERATOR_ID=true an operator id
+# (/metrics takes the token only). Export API_BEARER_TOKEN from .env first.
+AUTH=(-H "Authorization: Bearer $API_BEARER_TOKEN" -H "X-Operator-Id: ops")
+curl -fsS "${AUTH[@]}" http://127.0.0.1:8000/readiness | jq
+curl -fsS "${AUTH[@]}" http://127.0.0.1:8000/metrics | head
+curl -fsS "${AUTH[@]}" http://127.0.0.1:8000/maintenance/status | jq
 ```
 
+`/readiness` answers `503` when a check fails, so `-f` prints nothing; drop `-f` to see which check.
 If `METRICS_ENABLED=false`, skip the `/metrics` check; the endpoint returns `404`.
 
 ## Witness receipts: what a signature proves
