@@ -64,7 +64,7 @@ def main() -> int:
     print("Running lint...")
     # Repo-wide, like `make lint`: a path list here skipped client/ and
     # integrations/, two of the three packages a release publishes.
-    _run([PYTHON, "-m", "ruff", "check", ".", "--select", "E9,F,I"])
+    _run([PYTHON, "-m", "ruff", "check", "."])
 
     print("Checking version, Playwright-pin and bridge parity...")
     for check in ("check_version_parity.py", "check_playwright_pins.py", "check_bridge_parity.py"):

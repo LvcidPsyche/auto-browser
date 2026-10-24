@@ -14,7 +14,10 @@ services:
     # a wedged or dead Chromium reported healthy for as long as noVNC survived
     # — and the controller's depends_on: service_healthy gate passed anyway.
     #   1. endpoint file non-empty — server.mjs writes it once it is listening,
-    #      and entrypoint.sh removes it on every start
+    #      and entrypoint.sh removes it on every start. The variable is written
+    #      `$${...}` so the container expands it from its own environment; an
+    #      unescaped `${...}` is filled in by compose from the host `.env`,
+    #      where the same name holds the controller's path, not this one
     #   2. :9223 accepts a connection — no -f, because the Playwright server
     #      answers a plain GET with an HTTP error; only connection refusal
     #      (curl exit 7) should fail the check
@@ -24,7 +27,7 @@ services:
       test:
         - CMD-SHELL
         - >-
-          test -s "${BROWSER_WS_ENDPOINT_FILE:-/data/profile/browser-ws-endpoint.txt}"
+          test -s "$${BROWSER_WS_ENDPOINT_FILE:-/data/profile/browser-ws-endpoint.txt}"
           && curl -s --max-time 3 -o /dev/null http://127.0.0.1:${PLAYWRIGHT_SERVER_PORT:-9223}/
           && curl -fsS --max-time 3 http://127.0.0.1:6080/ >/dev/null
       interval: 10s

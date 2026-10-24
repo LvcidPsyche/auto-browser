@@ -11,6 +11,25 @@ line-length = 120
 target-version = "py311"
 
 [lint]
-# The gate is deliberately narrow: syntax errors, undefined/unused names, and
-# import order. Widening it is a separate decision from widening the scope.
-select = ["E9", "F", "I"]
+# Syntax errors, undefined/unused names, import order, and the flake8-bandit
+# security rules (S). Every S hit that is deliberate is listed below with its
+# reason, so a new one in the same place is a decision, not noise.
+#
+# Nothing may pass `--select` on the command line: it replaces this list
+# (`make lint` and scripts/release_audit.py rely on it).
+select = ["E9", "F", "I", "S"]
+
+[lint.per-file-ignores]
+# Tests assert, use throwaway passwords/tokens and fixed temp paths, and run
+# fixed-argument subprocesses and local URLs.
+"**/tests/**" = ["S101", "S104", "S105", "S106", "S107", "S108", "S110", "S310", "S603"]
+# Repo tooling runs fixed git/docker/python commands (no shell, no user input)
+# from the checkout, found on PATH.
+"scripts/**" = ["S603", "S607"]
+# SECRET_PATTERN is the regex the secret scan greps for, not a credential.
+"scripts/release_audit.py" = ["S105"]
+# urlopen on the base URL the operator configured (http/https endpoint of their
+# own controller), same as the controller's copy of the bridge.
+"client/auto_browser_client/mcp_bridge.py" = ["S310"]
+# A malformed server-sent event line is skipped; the stream carries on.
+"client/auto_browser_client/client.py" = ["S110"]

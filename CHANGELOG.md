@@ -6,6 +6,13 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **`docker compose up` no longer stalls on an unhealthy `browser-node` after `cp .env.example .env`.**
+  Compose filled `${BROWSER_WS_ENDPOINT_FILE}` in the `browser-node` healthcheck from the project
+  `.env`, where `.env.example` set the controller's path (`/data/browser-profile/...`). That path does
+  not exist inside `browser-node` (its profile is at `/data/profile`), so the check failed on every
+  run and the controller, which waits for a healthy `browser-node`, never started. The healthcheck
+  now expands the variable inside the container, and `.env.example` ships the line commented out
+  because compose sets the path per service.
 - **`CURATOR_ENABLED` no longer sends a placeholder transcript to the model.** With the setting on
   and a provider key present, every closed session started a background review that sent the model
   a fixed placeholder string instead of a transcript, and could write what came back to
@@ -17,6 +24,11 @@ All notable changes to auto-browser are documented here.
   the caller audited `pii_redaction` as `ok`, and the result carried no sign of it. The function now
   raises, the result carries `screenshot_pii_scrub: {"applied": false, "reason": "redaction_failed"}`
   (the field used when OCR is unavailable), and the audit event has status `failed`.
+- **A failing disk no longer hangs a download capture.** Reserving a file name for a captured
+  download retried forever on any error other than "name already exists" (disk or quota full,
+  read-only or mis-owned volume), blocking the event loop. It now tries a generated name once,
+  tries at most 20 names, and raises the underlying error, which the background download handler
+  logs.
 
 ## [1.10.1] — 2026-10-24
 
