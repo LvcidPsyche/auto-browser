@@ -563,11 +563,17 @@ class BrowserSessionService:
             current_url = session.page.url
 
         # Create the new session using the forked state
-        forked = await self.manager.create_session(
-            name=name or f"fork-of-{session.name}",
-            start_url=start_url or current_url,
-            storage_state_path=auth_info["path"],
-        )
+        try:
+            forked = await self.manager.create_session(
+                name=name or f"fork-of-{session.name}",
+                start_url=start_url or current_url,
+                storage_state_path=auth_info["path"],
+            )
+        finally:
+            # The new context has read the state by now, or never will: a copy left
+            # behind is the source session's cookies, plaintext without a key, on
+            # disk long after both sessions close.
+            Path(auth_info["path"]).unlink(missing_ok=True)
         forked["forked_from"] = session_id
         await self.manager.audit.append(
             event_type="session_forked",

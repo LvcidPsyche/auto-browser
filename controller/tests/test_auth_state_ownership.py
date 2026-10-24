@@ -109,15 +109,28 @@ class SessionAuthStateOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(created["owner"], "alice")
 
     async def test_a_forked_session_state_is_owned_too(self) -> None:
+        # The fork's state file exists only while the new session loads it (NAV-02),
+        # so Bob tries it in exactly that window.
         session_id = await self._alice_saves_state()
+        create = self.manager.create_session
+        refused: list[str] = []
+
+        async def bob_tries_first(**kwargs):
+            relative = Path(kwargs["storage_state_path"]).relative_to(self.root / "auth").as_posix()
+            try:
+                with acting_as(BOB):
+                    await create(name="from-path", storage_state_path=relative)
+            except PermissionError:
+                refused.append(relative)
+            return await create(**kwargs)
+
+        self.manager.create_session = AsyncMock(side_effect=bob_tries_first)  # type: ignore[method-assign]
         with acting_as(ALICE):
             forked = await self.manager.fork_session(session_id)
-        self.assertEqual(forked["owner"], "alice")
-        fork_files = sorted(p.name for p in (self.root / "auth" / session_id).glob("fork_*"))
-        self.assertTrue(fork_files)
 
-        with self.assertRaises(PermissionError):
-            await self._create_from(BOB, f"{session_id}/{fork_files[0]}")
+        self.assertEqual(forked["owner"], "alice")
+        self.assertEqual(len(refused), 1)
+        self.assertRegex(refused[0], rf"^{session_id}/fork_")
 
     async def test_a_damaged_marker_does_not_read_as_unowned(self) -> None:
         session_id = await self._alice_saves_state()
