@@ -4,6 +4,13 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **`PII_SCRUB_SCREENSHOT_STRICT` (default `false`).** With screenshot scrubbing on and no OCR to drive it
+  (tesseract missing, or `OCR_ENABLED=false`), screenshots used to be returned unscrubbed with a warning.
+  In strict mode the image is deleted, the call fails with `screenshot_withheld` (HTTP 503), and
+  `/readiness` reports `screenshot_scrubbing` as `fail` instead of `warn`.
+
 ### Fixed
 
 - **`CURATOR_ENABLED` no longer sends a placeholder transcript to the model.** With the setting on

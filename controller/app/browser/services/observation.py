@@ -4,9 +4,10 @@ import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from ... import events as _events
+from ...action_errors import BrowserActionError
 from ...browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
 from ..aria_outline import outline_from_aria_snapshot, unavailable_outline
 
@@ -344,6 +345,19 @@ class BrowserObservationService:
         # 20,000 links), so it is parsed off the event loop other sessions share.
         return await asyncio.to_thread(outline_from_aria_snapshot, snapshot or "")
 
+    @staticmethod
+    def _withhold_screenshot(screenshot: dict[str, str], reason: str) -> NoReturn:
+        """PII_SCRUB_SCREENSHOT_STRICT: delete the unscrubbed image and fail the call."""
+        Path(screenshot["path"]).unlink(missing_ok=True)
+        raise BrowserActionError(
+            f"Screenshot withheld: PII_SCRUB_SCREENSHOT_STRICT is on and the screenshot could not be "
+            f"PII-scrubbed ({reason}). Run the controller from the Docker image, which ships tesseract, "
+            "or set PII_SCRUB_SCREENSHOT_STRICT=false.",
+            code="screenshot_withheld",
+            status_code=503,
+            retryable=False,
+        )
+
     async def _scrub_screenshot_if_needed(
         self,
         session: "BrowserSession",
@@ -358,6 +372,8 @@ class BrowserObservationService:
             # captured. Say so in the result, and in the log once per reason:
             # outside Docker this is every screenshot.
             reason = ocr.get("error") or ("ocr_disabled" if ocr.get("enabled") is False else "ocr_unavailable")
+            if getattr(pii_scrubber, "screenshot_strict", False) is True:
+                self._withhold_screenshot(screenshot, reason)
             screenshot["pii_scrub_skipped"] = reason
             if reason not in self._warned_unscrubbed:
                 self._warned_unscrubbed.add(reason)

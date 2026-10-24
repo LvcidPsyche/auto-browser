@@ -213,6 +213,7 @@ For evidence that survives a compromised controller host, keep a head hash from 
 **Scrubbed**
 
 - **Screenshots** (`observe`, `capture_screenshot` and the before/after action snapshots): matching words are painted over using OCR boxes. This needs the `tesseract` binary, which only the Docker image ships. Outside Docker, or with `OCR_ENABLED=false`, screenshots are returned **unscrubbed**: `/readyz` reports a `screenshot_scrubbing` warning, the controller logs one warning, and each result carries `screenshot_pii_scrub: {"applied": false, "reason": ...}`. OCR is also best-effort, so small or low-contrast text can be missed.
+  Set `PII_SCRUB_SCREENSHOT_STRICT=true` to withhold instead: when OCR is unavailable the screenshot is deleted, the call fails with code `screenshot_withheld` (HTTP 503), and `/readiness` reports `screenshot_scrubbing` as `fail` rather than `warn`. It covers the missing-OCR case only; the default is `false`.
 - **Network inspector bodies**: request and response bodies stored by the network inspector. Text bodies are scrubbed whatever their content type says; binary content types and bytes that are not UTF-8 are stored as they are. Headers such as `Authorization` and `Cookie` are masked separately.
 - **Console messages** returned by `get_console_messages`.
 
