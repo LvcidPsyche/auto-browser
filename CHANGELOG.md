@@ -15,6 +15,11 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **`STEALTH_PROFILE` is read through settings.** `STEALTH_ENABLED` came from `.env`, but the
+  profile was read straight from the process environment, so a run outside Docker with both set in
+  `.env` kept the fingerprint profile off. `STEALTH_PROFILE` (`off`, `light` or `aggressive`; any
+  other value is rejected at startup) is now a setting, and the compose `environment:` block passes
+  it next to `STEALTH_ENABLED`.
 - **`docker compose up` no longer stalls on an unhealthy `browser-node` after `cp .env.example .env`.**
   Compose filled `${BROWSER_WS_ENDPOINT_FILE}` in the `browser-node` healthcheck from the project
   `.env`, where `.env.example` set the controller's path (`/data/browser-profile/...`). That path does

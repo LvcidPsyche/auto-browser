@@ -294,6 +294,7 @@ class Settings(BaseSettings):
 
     # Stealth / anti-bot
     stealth_enabled: bool = Field(False, alias="STEALTH_ENABLED")
+    stealth_profile: Literal["off", "light", "aggressive"] = Field("off", alias="STEALTH_PROFILE")
     # Defaults to the single authoritative pool in stealth.fingerprint so the
     # context-level UA and the fingerprint layer cannot drift apart.
     user_agent_pool: str = Field(
