@@ -6,6 +6,13 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **`docker compose up` no longer stalls on an unhealthy `browser-node` after `cp .env.example .env`.**
+  Compose filled `${BROWSER_WS_ENDPOINT_FILE}` in the `browser-node` healthcheck from the project
+  `.env`, where `.env.example` set the controller's path (`/data/browser-profile/...`). That path does
+  not exist inside `browser-node` (its profile is at `/data/profile`), so the check failed on every
+  run and the controller, which waits for a healthy `browser-node`, never started. The healthcheck
+  now expands the variable inside the container, and `.env.example` ships the line commented out
+  because compose sets the path per service.
 - **`CURATOR_ENABLED` no longer sends a placeholder transcript to the model.** With the setting on
   and a provider key present, every closed session started a background review that sent the model
   a fixed placeholder string instead of a transcript, and could write what came back to
