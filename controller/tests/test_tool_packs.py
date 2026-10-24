@@ -661,12 +661,18 @@ class ModelFacingTextTests(unittest.TestCase):
                 self.assertLessEqual({PACK_OF[name] for name in dangling}, set(CURATED_PACKS))
                 if label.startswith("lean+") and label not in ("lean+sessions", "lean+auth_admin"):
                     self.assertLessEqual(dangling, SESSION_LOOKUPS)
-        for label, kwargs in (("curated", {}), ("curated+vision", {"vision_targeter": object()})):
+        # The four selections deployments serve today, each with and without a
+        # vision model: find_by_vision drops out without one.
+        for label, kwargs in (
+            ("curated", {}),
+            ("curated+vision", {"vision_targeter": object()}),
+            ("full", {"tool_profile": "full"}),
+            ("full+vision", {"tool_profile": "full", "vision_targeter": object()}),
+        ):
             with self.subTest(label):
-                self.assertEqual(_dangling(_gateway(**kwargs)), set())
-        for label, kwargs in (("full", {"tool_profile": "full"}), ("full+vision", {"tool_profile": "full"})):
-            with self.subTest(label):
-                self.assertEqual(_dangling(_gateway(**kwargs, vision_targeter=object())), set())
+                gateway = _gateway(**kwargs)
+                self.assertEqual("browser.find_by_vision" in _names(gateway), "vision_targeter" in kwargs)
+                self.assertEqual(_dangling(gateway), set())
         self.assertEqual(_dangling(_gateway(tool_profile="lean")), SESSION_LOOKUPS)
         # create_session's auth_profile argument names the auth_profiles pack.
         self.assertEqual(
