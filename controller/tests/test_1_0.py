@@ -81,13 +81,18 @@ class TestMeshIdentity:
 
 
 class TestMeshPeers:
-    def _make_peer(self, node_id: str = "abc123"):
+    def _make_peer(self, name: str = "abc123"):
+        """A peer whose node_id is its key's SHA-256, which the peers file requires."""
+        import base64
+        import hashlib
+
         from app.mesh.models import PeerRecord
 
+        key = hashlib.sha256(name.encode()).digest()
         return PeerRecord(
-            node_id=node_id,
-            pubkey_b64="A" * 44,
-            endpoint=f"https://node-{node_id}.example.com",
+            node_id=hashlib.sha256(key).hexdigest(),
+            pubkey_b64=base64.b64encode(key).decode(),
+            endpoint=f"https://node-{name}.example.com",
         )
 
     def test_add_and_get(self, tmp_path):
@@ -138,12 +143,13 @@ class TestMeshPeers:
         reg1.add(self._make_peer("node1"))
         # Another instance writes
         reg2 = PeerRegistryFile(path)
-        reg2.add(self._make_peer("node2"))
+        node2 = self._make_peer("node2")
+        reg2.add(node2)
         # Force mtime change
         time.sleep(0.01)
         path.touch()
         # reg1 should pick up the new peer
-        assert reg1.get_optional("node2") is not None
+        assert reg1.get_optional(node2.node_id) is not None
 
 
 # ===========================================================================

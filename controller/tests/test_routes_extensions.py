@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import unittest
 from types import SimpleNamespace
 
@@ -110,13 +112,20 @@ class RoutesExtensionsTests(unittest.TestCase):
 
         # Peers come from the peers file, not from the API: the registry is seeded directly, and
         # the HTTP views only read it (see tests/test_mesh_peer_registration.py).
+        key = bytes(range(32))
+        peer_id = hashlib.sha256(key).hexdigest()  # a node_id is its key's hash
         client.app.state.peer_registry.add(
-            PeerRecord(node_id="peer-1", pubkey_b64="pub", endpoint="https://peer.example.com", display_name="Peer")
+            PeerRecord(
+                node_id=peer_id,
+                pubkey_b64=base64.b64encode(key).decode(),
+                endpoint="https://peer.example.com",
+                display_name="Peer",
+            )
         )
-        self.assertEqual(client.get("/mesh/peers").json()["peers"][0]["node_id"], "peer-1")
+        self.assertEqual(client.get("/mesh/peers").json()["peers"][0]["node_id"], peer_id)
         self.assertEqual(client.post("/mesh/peers", json={"node_id": "peer-2", "pubkey_b64": "pub"}).status_code, 405)
-        self.assertIn(client.delete("/mesh/peers/peer-1").status_code, (404, 405))
-        self.assertEqual([p["node_id"] for p in client.get("/mesh/peers").json()["peers"]], ["peer-1"])
+        self.assertIn(client.delete(f"/mesh/peers/{peer_id}").status_code, (404, 405))
+        self.assertEqual([p["node_id"] for p in client.get("/mesh/peers").json()["peers"]], [peer_id])
         self.assertEqual(client.get("/mesh/identity").json()["node_id"], "node-1")
 
         self.assertEqual(client.get("/sessions/session-1/cdp/element?selector=button").json()["selector"], "button")

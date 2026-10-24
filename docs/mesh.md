@@ -51,8 +51,10 @@ The file is a JSON object keyed by `node_id`; the key and the entry's own `node_
   with no matching grant a request is rejected.
 - `url_allowlist`, `require_approval`, `max_invocations_per_hour` (0 = unlimited) and
   `expires_at` (Unix time, 0 = never) are optional.
-- Use the `node_id` and `pubkey_b64` the peer's own `/mesh/identity` reports. The signature is
-  checked against the pinned `pubkey_b64`, so a wrong key means every request is refused.
+- Use the `node_id` and `pubkey_b64` the peer's own `/mesh/identity` reports, exactly as it reports
+  them. A `node_id` is the SHA-256 of the 32-byte key, in lower-case hex, and an entry where it is
+  not (or whose key is not that base64) makes the whole file invalid, as below. The signature is
+  checked against the pinned `pubkey_b64`.
 - The controller only reads the file and never writes it. The `last_seen` that `GET /mesh/peers`
   and the dashboard show is kept in memory (it starts again from the file's value after a
   restart). Replace the file atomically (write a temporary file in the same directory, then rename
@@ -100,9 +102,18 @@ peer's grants decide whether the request may run. A request that fails one of th
 dashboard no longer has a Remove button. To keep a peer you registered through them:
 
 1. Read `MESH_PEERS_PATH` (default `/data/mesh/peers.json`). It already holds every peer that was
-   registered over HTTP, in the format above, so existing peers keep working with no action.
+   registered over HTTP, in the format above.
 2. Check the list. Anyone with an API token could add entries before this release, so remove
-   any `node_id` you do not recognise and review each peer's `grants`.
-3. From now on add, change and remove peers by editing that file, as above.
+   any `node_id` you do not recognise and review each peer's `grants`. They could also replace the
+   key of a peer you do recognise, so compare each `pubkey_b64` with what that peer's own
+   `/mesh/identity` reports.
+3. Check that every entry is valid for this release, because one invalid entry turns every peer
+   away: each `node_id` must be the SHA-256 of its key, in lower-case hex, and each key must be
+   written exactly as `/mesh/identity` reports it. Earlier releases did not check this, so an entry
+   with a name of your choosing as its `node_id`, or a key with stray characters, used to work and
+   now does not. A peer that runs auto-browser signs as its own `/mesh/identity` `node_id`, so
+   register it under that. The `mesh.peers:` warning names the first entry that fails and why; a
+   mismatch says the pair does not fit together, not who changed it.
+4. From now on add, change and remove peers by editing that file, as above.
 
 Scripts that called the removed routes must write the file instead.
