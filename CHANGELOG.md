@@ -91,9 +91,20 @@ All notable changes to auto-browser are documented here.
   line, and a value that is not a string, such as `true` or `12345678`, under a name the password
   pattern knows, such as `"pass": true`), and the fragment of a URL, `Referer` or `Location` is scrubbed like its query. The URL of a
   failed request, which `get_request_failures` and every observation returned as the page asked for it,
-  is scrubbed the same way. Playwright traces (`ENABLE_TRACING`, on by default) still record URLs,
-  headers and bodies as they are: set `ENABLE_TRACING=false` to stop recording them.
+  is scrubbed the same way. Playwright traces still record URLs, headers, bodies and typed text as they
+  are, and are now off by default (below).
   `docs/deployment.md` lists what the inspector still stores as it is.
+- Playwright tracing is now off by default (`ENABLE_TRACING=false` in the settings, `.env.example` and
+  the compose file). A session's `trace.zip` holds every request header (`Authorization` and `Cookie`
+  included), the request and response bodies, and the text typed into the page, passwords included,
+  none of it scrubbed, and every session wrote one when it closed. Set `ENABLE_TRACING=true` to record
+  traces again; traces written before this release stay on disk under `ARTIFACT_ROOT` until you delete
+  them (GHSA-3pwm-j9pq-4r6q).
+- `fork_session` no longer leaves the source session's cookies on disk. It exported them to
+  `AUTH_ROOT/<session_id>/fork_<id>.json` (plaintext unless `AUTH_STATE_ENCRYPTION_KEY` is set) for the
+  new session to load, and never deleted the file; the file is now removed as soon as the new session
+  has loaded it or failed to. Files left by earlier forks stay until you delete them
+  (GHSA-3pwm-j9pq-4r6q).
 
 ## [1.10.1] — 2026-10-24
 
