@@ -7,7 +7,7 @@ This is the recommended deployment shape for a **single-tenant, trusted-operator
 - Auto Browser controller + browser node on one private host
 - Front the controller and takeover UI with **Cloudflare Access** or **Tailscale**
 - Keep published ports bound to `127.0.0.1`
-- Use `docker_ephemeral` session isolation if the operator may touch multiple accounts/workflows
+- Use `docker_ephemeral` session isolation if the operator may touch multiple accounts/workflows (what each mode separates, and what it does not: [session-isolation-audit.md](./session-isolation-audit.md))
 
 ## Required production settings
 
