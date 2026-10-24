@@ -275,6 +275,10 @@ def scrub_screenshot(
     Redact PII from a PNG screenshot by drawing opaque black boxes
     over the OCR words it is written in.
 
+    Raises whatever Pillow raises when the image cannot be decoded, drawn on or
+    encoded, after logging it; the original bytes are never returned alongside
+    hits, because that reads as a redaction that happened.
+
     OCR reports one block per word, and each word used to be scrubbed on its
     own, so nothing containing a space ever matched: "(555) 123-4567", a card
     number in groups. Words are now joined into the line OCR found them on
@@ -340,8 +344,10 @@ def scrub_screenshot(
         img.save(buf, format="PNG")
         return buf.getvalue(), all_hits
     except Exception as exc:
+        # Returning the original bytes with the hits attached would read as a
+        # successful redaction to the caller. Let it decide what to report.
         logger.warning("screenshot PII redaction failed: %s", exc)
-        return image_bytes, all_hits
+        raise
 
 
 def _ocr_lines(blocks: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:

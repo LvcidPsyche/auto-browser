@@ -7,6 +7,9 @@ from uuid import uuid4
 from .artifacts import SessionArtifactService
 from .utils import utc_now
 
+# Name attempts before `_reserve` gives up. It runs on the event loop.
+_RESERVE_ATTEMPTS = 20
+
 
 class DownloadCaptureService:
     def __init__(self, artifacts: SessionArtifactService) -> None:
@@ -58,7 +61,8 @@ class DownloadCaptureService:
         """
         directory.mkdir(parents=True, exist_ok=True)
         candidate = directory / filename
-        while True:
+        renamed = False
+        for _ in range(_RESERVE_ATTEMPTS):
             try:
                 candidate.open("xb").close()
                 return candidate
@@ -67,9 +71,15 @@ class DownloadCaptureService:
                 candidate = directory / f"{stem}-{uuid4().hex[:8]}{Path(filename).suffix}"
             except OSError:
                 # A name the filesystem refuses (too long, say) failed the save
-                # before; a generated one keeps the download.
+                # before; a generated one keeps the download. One fallback only:
+                # an error that survives it (no space, read-only volume, no
+                # permission) is not about the name, so it is raised.
+                if renamed:
+                    raise
+                renamed = True
                 filename = f"download-{uuid4().hex}"
                 candidate = directory / filename
+        raise FileExistsError(f"could not reserve a free name in {directory} after {_RESERVE_ATTEMPTS} attempts")
 
     @staticmethod
     def _bounded_append(items: list[Any], value: Any, limit: int) -> None:

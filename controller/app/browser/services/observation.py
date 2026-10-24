@@ -398,13 +398,33 @@ class BrowserObservationService:
             scrubbed_bytes, hits = await asyncio.to_thread(pii_scrubber.screenshot, raw_bytes, blocks)
             if hits:
                 scrubbed_path.write_bytes(scrubbed_bytes)
-                if pii_scrubber.audit_report:
-                    await self.manager.audit.append(
-                        event_type="pii_redaction",
-                        status="ok",
-                        action="screenshot_scrub",
-                        session_id=session.id,
-                        details=pii_scrubber.build_audit_report(session.id, "screenshot", hits),
-                    )
         except Exception as exc:
+            # The file on disk is still the unredacted capture. Say so in the
+            # result, the way the OCR-unavailable path does, and audit a failure,
+            # not a redaction.
             logger.warning("screenshot PII redaction error for session %s: %s", session.id, exc)
+            screenshot["pii_scrub_skipped"] = "redaction_failed"
+            await self._audit_screenshot_scrub(
+                session, "failed", {"event": "pii_redaction", "layer": "screenshot", "reason": "redaction_failed"}
+            )
+            if getattr(pii_scrubber, "screenshot_strict", False) is True:
+                self._withhold_screenshot(screenshot, "redaction_failed")
+            return
+        if hits:
+            await self._audit_screenshot_scrub(
+                session, "ok", pii_scrubber.build_audit_report(session.id, "screenshot", hits)
+            )
+
+    async def _audit_screenshot_scrub(self, session: "BrowserSession", status: str, details: dict[str, Any]) -> None:
+        if not self.manager.pii_scrubber.audit_report:
+            return
+        try:
+            await self.manager.audit.append(
+                event_type="pii_redaction",
+                status=status,
+                action="screenshot_scrub",
+                session_id=session.id,
+                details=details,
+            )
+        except Exception as exc:
+            logger.warning("screenshot PII audit error for session %s: %s", session.id, exc)
