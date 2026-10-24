@@ -88,6 +88,7 @@ from ..tool_inputs import (
 )
 from .packs import register_all
 from .registry import ToolRegistry, ToolSpec
+from .selection import withheld_tool_message
 
 logger = logging.getLogger(__name__)
 
@@ -100,16 +101,16 @@ FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS = 10.0
 # session is live — the first call an agent makes is almost always one of these.
 # Everything else resolves an omitted session_id only when exactly one session
 # is live; creating a session as a side effect of, say, close_tab helps nobody.
-IMPLICIT_SESSION_CREATE_TOOLS = frozenset(
-    {
-        "browser.execute_action",
-        "browser.observe",
-        "browser.find_elements",
-        "browser.screenshot",
-        "browser.get_html",
-        "browser.wait_for_selector",
-    }
+# In the order the no_session error suggests them when create_session is not served.
+SESSION_STARTER_TOOLS = (
+    "browser.observe",
+    "browser.execute_action",
+    "browser.get_html",
+    "browser.find_elements",
+    "browser.screenshot",
+    "browser.wait_for_selector",
 )
+IMPLICIT_SESSION_CREATE_TOOLS = frozenset(SESSION_STARTER_TOOLS)
 
 
 # Characters of a governed tool call's arguments shown to the approving operator.
@@ -172,6 +173,7 @@ class McpToolGateway:
         orchestrator,
         job_queue,
         tool_profile: str = "curated",
+        tool_packs: str = "",
         cron_service=None,
         share_manager=None,
         proxy_store=None,
@@ -182,7 +184,6 @@ class McpToolGateway:
         self.manager = manager
         self.orchestrator = orchestrator
         self.job_queue = job_queue
-        self.tool_profile = "full" if tool_profile == "full" else "curated"
         self.cron_service = cron_service
         self.share_manager = share_manager
         self.proxy_store = proxy_store
@@ -190,13 +191,22 @@ class McpToolGateway:
         self.harness_service = harness_service
         self.metrics = metrics
         self._registry = ToolRegistry(
-            tool_profile=self.tool_profile,
+            tool_profile=tool_profile,
+            tool_packs=tool_packs,
             experimental_enabled=self._experimental_enabled,
         )
+        self.tool_selection = self._registry.selection
+        self.tool_profile = self.tool_selection.profile
         register_all(self._registry, self)
         if self.vision_targeter is None:
             self._registry.unregister("browser.find_by_vision")
+            if "vision" in self.tool_selection.requested and "vision" in self.tool_selection.packs:
+                logger.warning(
+                    "MCP_TOOL_PACKS adds vision, but no vision model is configured (set ANTHROPIC_API_KEY): "
+                    "browser.find_by_vision is not listed"
+                )
         self._tools = self._registry.tools
+        logger.info("MCP tools: %s, %d tools listed", self.tool_selection.describe(), len(self._tools))
 
     def _experimental_enabled(self, name: str | None) -> bool:
         return name is None
@@ -234,11 +244,9 @@ class McpToolGateway:
     async def _call_tool(self, payload: McpToolCallRequest) -> McpToolCallResponse:
         spec = self._registry.get(payload.name)
         if spec is None:
-            if "full" in self._registry.profiles_offering(payload.name):
-                return self._error_response(
-                    f"{payload.name} is in the full MCP tool profile, and this controller serves the "
-                    f"{self.tool_profile} profile. Set MCP_TOOL_PROFILE=full on the controller to use it."
-                )
+            pack = self._registry.withheld_pack(payload.name)
+            if pack is not None:
+                return self._error_response(withheld_tool_message(payload.name, pack, self.tool_selection, self._tools))
             return self._error_response(self._unknown_tool_message(payload.name))
 
         try:
@@ -461,9 +469,7 @@ class McpToolGateway:
                 created = await self.manager.create_session()
                 return arguments.model_copy(update={"session_id": created["id"]})
             raise BrowserActionError(
-                f"{spec.name} needs a session and none are live — create one with "
-                "browser.create_session (or call an observe/act tool, which creates "
-                "one on demand).",
+                f"{spec.name} needs a session and none are live{self._no_session_hint()}",
                 code="no_session",
                 action=spec.name,
             )
@@ -473,6 +479,19 @@ class McpToolGateway:
             code="ambiguous_session",
             action=spec.name,
         )
+
+    def _no_session_hint(self) -> str:
+        """How to get a session, naming only tools this controller serves (lean has no create_session)."""
+        starter = next((name for name in SESSION_STARTER_TOOLS if name in self._tools), None)
+        if "browser.create_session" in self._tools:
+            if starter is None:
+                return " — create one with browser.create_session."
+            return (
+                " — create one with browser.create_session (or call an observe/act tool, which creates one on demand)."
+            )
+        if starter is None:
+            return "."
+        return f" — call {starter}, which creates one on demand."
 
     @staticmethod
     def _tool_response_meta(

@@ -24,6 +24,7 @@ def register(registry, gateway):
             ),
             input_model=EvalJsInput,
             handler=gateway._eval_js,
+            pack="scripting",
             governed_kind="write",
         ),
         ToolSpec(
@@ -35,6 +36,7 @@ def register(registry, gateway):
             ),
             input_model=WaitForSelectorInput,
             handler=gateway._wait_for_selector,
+            pack="wait",
         ),
         ToolSpec(
             name="browser.get_html",
@@ -46,6 +48,7 @@ def register(registry, gateway):
             ),
             input_model=GetPageHtmlInput,
             handler=gateway._get_html,
+            pack="browse",
         ),
         ToolSpec(
             name="browser.find_elements",
@@ -59,6 +62,7 @@ def register(registry, gateway):
             ),
             input_model=FindElementsInput,
             handler=gateway._find_elements,
+            pack="browse",
         ),
         ToolSpec(
             name="browser.drag_drop",
@@ -69,7 +73,7 @@ def register(registry, gateway):
             ),
             input_model=DragDropInput,
             handler=gateway._drag_drop,
-            profiles=("full",),
+            pack="advanced_actions",
             governed_kind="write",
         ),
         ToolSpec(
@@ -77,7 +81,7 @@ def register(registry, gateway):
             description="Resize the browser viewport to the specified width and height.",
             input_model=SetViewportInput,
             handler=gateway._set_viewport,
-            profiles=("full",),
+            pack="advanced_actions",
         ),
         ToolSpec(
             name="browser.find_by_vision",
@@ -88,6 +92,7 @@ def register(registry, gateway):
             ),
             input_model=VisionFindInput,
             handler=gateway._find_by_vision,
+            pack="vision",
         ),
     ]:
         registry.register(spec)

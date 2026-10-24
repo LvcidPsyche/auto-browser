@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable
 from pydantic import BaseModel
 
 from ..models import McpToolDescriptor
+from .selection import PACKS, resolve_tool_selection
 
 READ_ONLY_TOOL_NAMES = {
     "browser.get_auth_profile",
@@ -97,7 +98,8 @@ class ToolSpec:
     description: str
     input_model: type[BaseModel]
     handler: Callable[[BaseModel], Awaitable[dict[str, Any] | list[dict[str, Any]]]]
-    profiles: tuple[str, ...] = ("curated", "full")
+    # The one tool pack (selection.PACKS) this tool belongs to; profiles are lists of packs.
+    pack: str
     experimental: str | None = None
     governed_kind: str | None = None
     read_only_hint: bool | None = None
@@ -145,18 +147,21 @@ class ToolRegistry:
         *,
         tool_profile: str,
         experimental_enabled: Callable[[str | None], bool],
+        tool_packs: str = "",
     ) -> None:
-        self.tool_profile = "full" if tool_profile == "full" else "curated"
+        self.selection = resolve_tool_selection(tool_profile, tool_packs)
         self._experimental_enabled = experimental_enabled
         self._tools: dict[str, ToolSpec] = {}
-        # Tools that exist but not in this profile, so a call to one can say
-        # how to enable it instead of claiming the tool does not exist.
-        self._other_profile_tools: dict[str, tuple[str, ...]] = {}
+        # Tools that exist but are outside this selection, by pack, so a call to
+        # one can say how to enable it instead of claiming it does not exist.
+        self._withheld: dict[str, str] = {}
         self._descriptor_cache_json: str | None = None
 
     def register(self, spec: ToolSpec) -> None:
-        if self.tool_profile not in spec.profiles:
-            self._other_profile_tools[spec.name] = spec.profiles
+        if spec.pack not in PACKS:
+            raise ValueError(f"{spec.name} names an unknown tool pack: {spec.pack!r}")
+        if spec.pack not in self.selection.packs:
+            self._withheld[spec.name] = spec.pack
             return
         if not self._experimental_enabled(spec.experimental):
             return
@@ -175,9 +180,9 @@ class ToolRegistry:
     def get(self, name: str) -> ToolSpec | None:
         return self._tools.get(name)
 
-    def profiles_offering(self, name: str) -> tuple[str, ...]:
-        """The profiles a tool missing from this one belongs to; empty for an unknown name."""
-        return self._other_profile_tools.get(name, ())
+    def withheld_pack(self, name: str) -> str | None:
+        """The pack of a tool this selection leaves out; None for a served or unknown name."""
+        return self._withheld.get(name)
 
     def list_tools(self) -> list[dict[str, Any]]:
         if self._descriptor_cache_json is None:

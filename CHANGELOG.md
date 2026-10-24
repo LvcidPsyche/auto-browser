@@ -2,6 +2,33 @@
 
 All notable changes to auto-browser are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **A `lean` MCP tool profile, and tool packs you compose by name.** Every MCP tool now belongs to one
+  of 21 packs (`browse`, `sessions`, `tabs`, `downloads`, `devtools`, `harness`, …), and a profile is a
+  list of packs. `MCP_TOOL_PROFILE=lean` serves only `browse`: `browser.observe`, `browser.screenshot`,
+  `browser.execute_action`, `browser.get_html`, `browser.find_elements`, `browser.request_human_takeover`
+  and `browser.close_session`, about 12 KB of `tools/list` against curated's 25 KB.
+  `MCP_TOOL_PACKS=tabs,downloads` adds packs to any profile and `-scripting` removes one; an unknown pack
+  name stops the controller at startup, with the valid names in the error. `curated` (still the default)
+  and `full` list the same tools, in the same order, with the same descriptors as before. The
+  `initialize` instructions name only the tools the controller serves, the startup log says what is
+  served, and the pack table is in `docs/mcp-clients.md`.
+
+### Changed
+
+- **An unrecognised `MCP_TOOL_PROFILE` now logs a warning.** Any value other than `full` used to mean
+  `curated` without a word, `FULL`, `full ` and `leen` included. It still serves `curated`, and the
+  startup log now says so and, when one is close, names the closest profile:
+  `MCP_TOOL_PROFILE='leen' is not a tool profile (did you mean lean?); serving curated. Use lean, curated or full.`
+  Unset, empty or blank still means `curated`, silently.
+- **A call to a tool outside the selection names its pack.** It used to say the tool "is in the full MCP
+  tool profile"; it now says, for example, `browser.get_console is in the devtools tool pack, which this
+  controller does not serve (it serves the curated profile). To use it, add devtools to MCP_TOOL_PACKS or
+  set MCP_TOOL_PROFILE=full on the controller.`
+
 ## [1.10.2] — 2026-10-24
 
 A security release over 1.10.1, with three advisories: GHSA-3pwm-j9pq-4r6q (PII scrubbing,

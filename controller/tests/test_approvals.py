@@ -288,6 +288,7 @@ class GovernedToolCallBindingTests(unittest.IsolatedAsyncioTestCase):
             description="",
             input_model=EvalJsInput,
             handler=AsyncMock(),
+            pack="scripting",
             governed_kind="write",
         )
         approved, _ = McpToolGateway._governed_call_decision(

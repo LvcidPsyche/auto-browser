@@ -11,7 +11,7 @@ def register(registry, gateway):
             description=("Get all cookies for the current session context. Optionally filter by URL(s)."),
             input_model=GetCookiesInput,
             handler=gateway._get_cookies,
-            profiles=("full",),
+            pack="storage",
         ),
         ToolSpec(
             name="browser.set_cookies",
@@ -21,7 +21,7 @@ def register(registry, gateway):
             ),
             input_model=SetCookiesInput,
             handler=gateway._set_cookies,
-            profiles=("full",),
+            pack="storage",
             governed_kind="account_change",
         ),
         ToolSpec(
@@ -29,14 +29,14 @@ def register(registry, gateway):
             description=("Read a key (or all keys) from localStorage or sessionStorage in the current page context."),
             input_model=GetStorageInput,
             handler=gateway._get_local_storage,
-            profiles=("full",),
+            pack="storage",
         ),
         ToolSpec(
             name="browser.set_local_storage",
             description=("Write a key-value pair to localStorage or sessionStorage in the current page context."),
             input_model=SetStorageInput,
             handler=gateway._set_local_storage,
-            profiles=("full",),
+            pack="storage",
             governed_kind="account_change",
         ),
     ]:

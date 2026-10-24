@@ -21,7 +21,7 @@ def register(registry, gateway):
             ),
             input_model=EmptyInput,
             handler=gateway._list_proxy_personas,
-            profiles=("full",),
+            pack="proxies",
         ),
         ToolSpec(
             name="browser.create_proxy_persona",
@@ -31,21 +31,21 @@ def register(registry, gateway):
             ),
             input_model=CreateProxyPersonaInput,
             handler=gateway._create_proxy_persona,
-            profiles=("full",),
+            pack="proxies",
         ),
         ToolSpec(
             name="browser.delete_proxy_persona",
             description="Delete a named proxy persona.",
             input_model=ProxyPersonaNameInput,
             handler=gateway._delete_proxy_persona,
-            profiles=("full",),
+            pack="proxies",
         ),
         ToolSpec(
             name="browser.list_cron_jobs",
             description="List all configured cron / webhook trigger jobs.",
             input_model=EmptyInput,
             handler=gateway._list_cron_jobs,
-            profiles=("full",),
+            pack="cron",
         ),
         ToolSpec(
             name="browser.create_cron_job",
@@ -56,21 +56,21 @@ def register(registry, gateway):
             ),
             input_model=CreateCronJobInput,
             handler=gateway._create_cron_job,
-            profiles=("full",),
+            pack="cron",
         ),
         ToolSpec(
             name="browser.delete_cron_job",
             description="Delete a cron / webhook trigger job.",
             input_model=CronJobIdInput,
             handler=gateway._delete_cron_job,
-            profiles=("full",),
+            pack="cron",
         ),
         ToolSpec(
             name="browser.trigger_cron_job",
             description="Immediately trigger a cron job (internal - no webhook auth required).",
             input_model=CronJobIdInput,
             handler=gateway._trigger_cron_job,
-            profiles=("full",),
+            pack="cron",
         ),
     ]:
         registry.register(spec)

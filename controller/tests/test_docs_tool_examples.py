@@ -22,10 +22,14 @@ from pydantic import ValidationError
 
 from app.tool_gateway import ToolRegistry
 from app.tool_gateway.packs import register_all
+from app.tool_gateway.selection import PACKS, smallest_profile_with
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CURL_BODY = re.compile(r"-d '(\{.*?\})'", re.S)
 QUOTED_TOOL_NAME = re.compile(r"""['"]((?:browser|harness)\.[a-z_]+)['"]""")
+# A row of the pack table in docs/mcp-clients.md: pack, smallest profile, what it is for, its tools.
+PACK_ROW = re.compile(r"^\| `([a-z_]+)` \| (lean|curated|full) \| [^|]* \| (.*) \|$", re.M)
+BACKTICKED_TOOL = re.compile(r"`((?:browser|harness)\.[a-z_]+)`")
 
 
 def _markdown_files() -> list[Path]:
@@ -82,3 +86,15 @@ class DocsToolExamplesTests(unittest.TestCase):
                         self.fail(f"{where} arguments do not validate: {exc}")
                 checked += 1
         self.assertGreater(checked, 0, "found no documented tool calls; the pattern has drifted")
+
+    def test_the_pack_table_matches_the_registry(self) -> None:
+        # Operators compose MCP_TOOL_PACKS from this table; a tool moved
+        # between packs, or a new pack, has to show up in it.
+        rows = PACK_ROW.findall((REPO_ROOT / "docs" / "mcp-clients.md").read_text(encoding="utf-8"))
+        self.assertEqual([pack for pack, _, _ in rows], list(PACKS))
+        for pack, profile, tools in rows:
+            with self.subTest(pack):
+                self.assertEqual(profile, smallest_profile_with(pack))
+                self.assertEqual(
+                    BACKTICKED_TOOL.findall(tools), [name for name, spec in self.tools.items() if spec.pack == pack]
+                )

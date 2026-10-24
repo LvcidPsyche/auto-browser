@@ -15,6 +15,7 @@ def register(registry, gateway):
             ),
             input_model=ForkSessionInput,
             handler=gateway._fork_session,
+            pack="sessions",
         ),
         ToolSpec(
             name="browser.cdp_attach",
@@ -30,7 +31,7 @@ def register(registry, gateway):
             ),
             input_model=CdpAttachInput,
             handler=gateway._cdp_attach,
-            profiles=("full",),
+            pack="session_admin",
             governed_kind="account_change",
         ),
         ToolSpec(
@@ -42,7 +43,7 @@ def register(registry, gateway):
             ),
             input_model=ShareSessionInput,
             handler=gateway._share_session,
-            profiles=("full",),
+            pack="session_admin",
             governed_kind="write",
         ),
         ToolSpec(
@@ -54,7 +55,7 @@ def register(registry, gateway):
             ),
             input_model=ShadowBrowseInput,
             handler=gateway._enable_shadow_browse,
-            profiles=("full",),
+            pack="session_admin",
             governed_kind="write",
         ),
     ]:
