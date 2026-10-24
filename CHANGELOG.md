@@ -23,6 +23,20 @@ All notable changes to auto-browser are documented here.
   wrapper returned the real value for every parameter, so it changed nothing except the function's
   `toString()`; it and its unused seed are removed. WebGL values are reported as the browser has them.
 
+### Removed
+
+- **`POST /mesh/peers` and `DELETE /mesh/peers/{node_id}`; mesh peers are managed in the peers
+  file.** `/mesh/receive` does not use the bearer token, so registering a peer grants it access
+  to the tool gateway, and any API credential could register one (with any key and grants,
+  replacing an existing peer's entry too) and keep it after the credential was revoked. Only
+  mesh users (`MESH_ENABLED=true`) are affected. **Migrating:** the file `MESH_PEERS_PATH`
+  names (default `/data/mesh/peers.json`) already holds every peer registered over HTTP, so
+  existing peers keep working. Review it, since anyone with an API token could add entries
+  before this release, then add, change and remove peers by editing it; the controller
+  re-reads it when it changes. `GET /mesh/peers` and `GET /mesh/identity` stay, and the
+  dashboard's mesh list no longer has a Remove button. See the new `docs/mesh.md` for the file
+  format.
+
 ### Fixed
 
 - **The stdio MCP bridge no longer advertises `resources.subscribe`.** The bridge only POSTs and never
@@ -60,6 +74,48 @@ All notable changes to auto-browser are documented here.
   run and the controller, which waits for a healthy `browser-node`, never started. The healthcheck
   now expands the variable inside the container, and `.env.example` ships the line commented out
   because compose sets the path per service.
+- **Revoking a mesh peer by editing the peers file works reliably.** Deleting the file, or
+  saving one that did not parse, left every peer in memory, and the controller rewrote the file
+  each time it recorded `last_seen`, which could put a removed peer back or overwrite an edit made
+  at the same moment. A missing file is now an empty registry; a file that cannot be read, is not
+  valid JSON or has any invalid entry accepts no peer at all (the whole file is refused) and
+  logs a `mesh.peers:` warning; `last_seen` is kept in memory and the controller never writes the
+  file; and the file is checked on every request, so an edit is seen by the next one. Replace the
+  file by rename, and in Docker mount its directory rather than the file; `docs/mesh.md` lists
+  the changes that are not noticed. A request already past
+  the sender check is not cancelled. `docs/mesh.md` says exactly what an edit does.
+- **Mesh envelopes with a NaN timestamp are refused.** The timestamp window was written so a NaN
+  passed it. A correctly signed envelope from a registered peer carrying one was accepted at any
+  time. It now counts as outside the window, for requests and for replies.
+- **`/artifacts` checks the owner of the file a path resolves to.** The mount took the session id
+  from the first component of the path as typed, so a path that starts with `..` and comes back
+  into the artifact root was judged as a session nobody owns and could be served to another
+  operator. The session is now the first component of the resolved file, so every spelling, and
+  a link from one session directory into another, is judged by the owner of what is actually
+  served. With named credentials (`API_BEARER_TOKENS`), a path whose first component is not a
+  session with a stored record (a directory whose record is gone, a file dropped into the
+  artifact root) is not served to anyone; deployments without named credentials are unchanged.
+- **Proxy personas belong to the operator who saved them.** With named credentials, any
+  operator could list, read the server and username of, overwrite or delete another operator's
+  persona, and open a session through it with that operator's stored proxy password. The same
+  rule as memory profiles now applies over HTTP and MCP: a persona records the token-verified
+  operator who first saved it (an `"owner"` key in `PROXY_PERSONA_FILE`), and to every other
+  caller it is missing; overwriting its name answers 409. **Upgrading:** personas that were
+  saved before this release have no owner and stay open to every operator, exactly as before
+  (shared-token deployments are unaffected). The controller logs a warning at startup when
+  named credentials are set and such personas exist, naming how many there are, and a second one
+  for any entry whose `"owner"` is an empty string, which counts as no owner. Until an owner is
+  added, any operator can overwrite or delete the persona too, not only use it. To make one
+  private, add `"owner": "<operator id>"` to its entry in the file. A save by a release before this one
+  drops the `"owner"` keys, so do not roll back and save.
+- **Files that hold credentials are written owner-only.** The stores wrote every file as
+  `0666 & ~umask`, so a `0600` file became `0644` the next time it was saved, and a new
+  credentials file was created `0644` under the default umask. `atomic_write_text` now keeps the
+  mode a file already has and takes an explicit `mode=`; the proxy persona file, the cron store
+  (webhook keys), encrypted auth state, session records, approvals, agent jobs and the MCP
+  session store ask for `0600`. A file written by an earlier release is tightened the next time
+  it is saved. A backup job or second container that reads these files from the data volume as
+  a different user must now run as the controller's user (or `chmod` after each save).
 - **`CURATOR_ENABLED` no longer sends a placeholder transcript to the model.** With the setting on
   and a provider key present, every closed session started a background review that sent the model
   a fixed placeholder string instead of a transcript, and could write what came back to

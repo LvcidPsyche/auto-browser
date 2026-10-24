@@ -62,31 +62,11 @@ async def mesh_list_peers(request: Request):
     return {"peers": [p.model_dump() for p in peers.all()]}
 
 
-@mesh_router.post("/peers")
-async def mesh_add_peer(body: dict[str, Any], request: Request):
-    from app.mesh import PeerRecord
-
-    peers = getattr(request.app.state, "peer_registry", None)
-    if peers is None:
-        raise HTTPException(503, "Mesh not initialized")
-    try:
-        peer = PeerRecord(**body)
-    except Exception:
-        logger.debug("invalid mesh peer record", exc_info=True)
-        raise HTTPException(422, "Invalid peer record")
-    peers.add(peer)
-    return {"status": "added", "node_id": peer.node_id}
-
-
-@mesh_router.delete("/peers/{node_id}")
-async def mesh_remove_peer(node_id: str, request: Request):
-    peers = getattr(request.app.state, "peer_registry", None)
-    if peers is None:
-        raise HTTPException(503, "Mesh not initialized")
-    removed = peers.remove(node_id)
-    if not removed:
-        raise HTTPException(404, f"Peer {node_id!r} not found")
-    return {"status": "removed", "node_id": node_id}
+# Peers are not administered over HTTP. /mesh/receive skips the bearer token and trusts any sender
+# in the registry, so registering a peer grants it tool access: an API route for it would let any
+# credential mint a standing, token-free way in that survives revoking that credential. The host
+# operator edits the file MESH_PEERS_PATH names instead (see docs/mesh.md); it is re-read when it
+# changes.
 
 
 @mesh_router.get("/identity")

@@ -93,6 +93,8 @@ def create_operations_router(
                 password=payload.password,
                 description=payload.description,
             )
+        except PermissionError:
+            raise HTTPException(status_code=409, detail="Conflict") from None
         except (ValueError, RuntimeError):
             raise HTTPException(status_code=400, detail="Invalid request") from None
 

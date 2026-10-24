@@ -17,7 +17,7 @@ from . import events as _events
 from .audit import get_current_operator
 from .models import McpToolCallRequest, OperatorIdentity
 from .session_ownership import ANONYMOUS, acting_as, may_use
-from .utils import atomic_write_text, utc_now
+from .utils import PRIVATE_FILE_MODE, atomic_write_text, utc_now
 
 JSONRPC_VERSION = "2.0"
 MCP_SESSION_HEADER = "MCP-Session-Id"
@@ -738,7 +738,11 @@ class McpHttpTransport:
         self._evict_stale_sessions()
         self._session_store_path.parent.mkdir(parents=True, exist_ok=True)
         payload = [asdict(session) for session in self._sessions.values()]
-        atomic_write_text(self._session_store_path, json.dumps(payload, ensure_ascii=False, indent=2))
+        atomic_write_text(
+            self._session_store_path,
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            mode=PRIVATE_FILE_MODE,
+        )
 
     @staticmethod
     def _coerce_dict(value: Any) -> dict[str, Any]:

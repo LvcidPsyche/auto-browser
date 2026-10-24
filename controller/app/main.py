@@ -10,10 +10,12 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 from .action_errors import BrowserActionError, SessionNotFoundError
 from .app_factory import build_controller_services, create_controller_app
+from .auth_policy import has_named_credentials
 from .compliance import apply_compliance_template, write_compliance_manifest
 from .config import get_settings
 from .middleware import install_controller_http_middleware
 from .middleware.hosts import install_controller_host_middleware
+from .proxy_personas import warn_about_ownerless_personas
 from .routes.agent import create_agent_router
 from .routes.auth_profiles import create_auth_profiles_router
 from .routes.mcp import create_mcp_router
@@ -70,6 +72,7 @@ async def lifespan(application: FastAPI):
         raise RuntimeError("Invalid runtime policy:\n- " + "\n- ".join(policy_report.errors))
     for warning in policy_report.warnings:
         logger.warning("runtime policy warning: %s", warning)
+    warn_about_ownerless_personas(proxy_store, named_tokens=has_named_credentials(settings))
     await manager.startup()
     await job_queue.startup()
     await cron_service.startup()

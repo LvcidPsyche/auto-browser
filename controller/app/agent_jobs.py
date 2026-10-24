@@ -19,7 +19,7 @@ from .models import (
     OperatorIdentity,
 )
 from .session_ownership import acting_as, may_use
-from .utils import atomic_write_text, record_path, utc_now
+from .utils import PRIVATE_FILE_MODE, atomic_write_text, record_path, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -226,7 +226,7 @@ class AgentJobStore:
 
     def _write_sync(self, record: AgentJobRecord) -> None:
         path = record_path(self.root, record.id, ".json")
-        atomic_write_text(path, record.model_dump_json(indent=2))
+        atomic_write_text(path, record.model_dump_json(indent=2), mode=PRIVATE_FILE_MODE)
 
 
 RESUME_CONTEXT_PREFIX = "Resuming background agent job"

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+import stat
 import tempfile
 import time
 from collections.abc import Coroutine
@@ -22,10 +23,13 @@ UTC = timezone.utc
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 
-# mkstemp creates 0600 files; atomic_write_text widens them to what a plain
-# open() would have made, so files keep the permissions they had before.
+# mkstemp creates 0600 files; atomic_write_text gives the file the mode it should
+# have (see _target_mode) before it replaces the target.
 _UMASK = os.umask(0)
 os.umask(_UMASK)
+
+# What stores that hold credentials, tokens or typed text ask atomic_write_text for.
+PRIVATE_FILE_MODE = 0o600
 
 _RECORD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
@@ -43,7 +47,23 @@ def record_path(root: Path, record_id: str, suffix: str) -> Path:
     return root / f"{record_id}{suffix}"
 
 
-def atomic_write_text(path: Path, text: str) -> None:
+def _target_mode(path: Path, mode: int | None) -> int:
+    """The permission bits the replacement of ``path`` gets.
+
+    An explicit ``mode`` wins, so a store that holds secrets can ask for 0600 and
+    tighten a file an older release left wider. Otherwise the file keeps the mode
+    it has (a 0600 file must not become 0644 because it was saved again), and a
+    file that does not exist yet gets what a plain open() would have made.
+    """
+    if mode is not None:
+        return mode & 0o777
+    try:
+        return stat.S_IMODE(os.stat(path).st_mode) & 0o777
+    except FileNotFoundError:
+        return 0o666 & ~_UMASK
+
+
+def atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None:
     """Replace ``path`` with ``text`` so readers only ever see a whole file.
 
     Each call writes to its own temp file in the target directory. The stores
@@ -52,12 +72,17 @@ def atomic_write_text(path: Path, text: str) -> None:
     rename moved the other's temp file away, failing it with FileNotFoundError,
     or both wrote into the same temp file and a torn mix of the two was renamed
     into place. The temp name keeps a ``.tmp`` suffix so ``*.json`` globs skip it.
+
+    ``mode`` sets the file's permission bits (pass ``PRIVATE_FILE_MODE`` for
+    anything that holds a credential, token or typed text). Without it the
+    file keeps the mode it already has.
     """
+    target_mode = _target_mode(path, mode)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
-        os.chmod(tmp_name, 0o666 & ~_UMASK)
+        os.chmod(tmp_name, target_mode)
         # Windows refuses the rename while another process has the target
         # open; that clears within milliseconds, so retry briefly.
         for attempt in range(5):

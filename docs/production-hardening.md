@@ -29,8 +29,9 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
 - Under named credentials, sessions and auth profiles belong to the operator
   who created them. Another operator's session is left out of listings and
   answers like a session that does not exist, together with its approvals,
-  agent jobs, cron jobs and `/artifacts` files. Agent jobs run as the operator
-  who queued them, and cron jobs fire as their creator, opening only the auth
+  agent jobs, cron jobs and `/artifacts` files; nothing under `/artifacts` that
+  is not inside a session directory with a stored record is served to anyone.
+  Agent jobs run as the operator who queued them, and cron jobs fire as their creator, opening only the auth
   profiles their creator may open. Sessions created under the shared token are
   unowned and open to every operator. The audit log stays operator-wide, and
   the takeover desktop is shared by every session on a browser node; use

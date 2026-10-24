@@ -156,6 +156,11 @@ def credentials_for(settings: Any) -> tuple[Credential, ...]:
     )
 
 
+def has_named_credentials(settings: Any) -> bool:
+    """True when operators can be told apart: at least one credential proves who holds it."""
+    return any(credential.verifies_identity for credential in credentials_for(settings))
+
+
 def match_credential(credentials: Sequence[Credential], authorization: str) -> Credential | None:
     """The credential this request presented, or None.
 
