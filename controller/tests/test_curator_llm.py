@@ -152,3 +152,8 @@ class CuratorOptInTests(unittest.TestCase):
 
     def test_on_when_asked_for(self) -> None:
         self.assertIsNotNone(self._init(Settings(_env_file=None, CURATOR_ENABLED=True)))
+
+    def test_enabling_says_the_review_is_not_wired(self) -> None:
+        with self.assertLogs("app.startup.extensions", level="WARNING") as captured:
+            self._init(Settings(_env_file=None, CURATOR_ENABLED=True))
+        self.assertTrue(any("no model call" in line for line in captured.output), captured.output)

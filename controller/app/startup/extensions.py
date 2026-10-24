@@ -61,7 +61,14 @@ def _init_curator(app) -> None:
         adapter = build_curator_adapter()
         app.state.curator_adapter = adapter
         if adapter is not None and adapter.ready:
-            logger.info("startup.curator: %s adapter ready (model=%s)", adapter.provider, adapter.model)
+            # The post-session review has no transcript to send yet: it used to send a
+            # placeholder string on every session close, so the call is not made at all.
+            logger.warning(
+                "startup.curator: %s adapter ready (model=%s), but the post-session review is not "
+                "wired to a session transcript yet, so no model call is made on session close",
+                adapter.provider,
+                adapter.model,
+            )
         else:
             logger.info("startup.curator: no API key — degraded mode (raw-skill passthrough only)")
     except Exception as exc:
@@ -289,44 +296,9 @@ def _release_session_state(app, session_id: str) -> None:
 
 
 async def on_session_closed(app, session_id: str) -> None:
-    """Called when a browser session is closed. Cleans up per-session resources."""
+    """Called when a browser session is closed. Cleans up per-session resources.
+
+    No curator review runs here: nothing builds a session transcript yet, and the
+    review used to send a placeholder string to the model on every close.
+    """
     _release_session_state(app, session_id)
-
-    # Post-session Curator review.
-    # Fire-and-forget — never blocks session close, never raises.
-    try:
-        curator = getattr(app.state, "curator_adapter", None)
-        if curator is not None and getattr(curator, "ready", False):
-            from ..utils import spawn_background_task
-
-            spawn_background_task(_curator_review_session(app, session_id, curator))
-    except Exception as exc:
-        logger.debug("on_session_closed: curator review skipped — %s", exc)
-
-
-async def _curator_review_session(app, session_id: str, curator) -> None:
-    """
-    Curator reviews the session's audit trail and optionally drafts a skill
-    into /data/skills-staging/<session_id>/. Errors are swallowed; this hook
-    must never disturb the foreground close path.
-    """
-    try:
-        from pathlib import Path
-
-        staging = Path(os.environ.get("SKILLS_STAGING_ROOT", "/data/skills-staging")) / session_id
-        staging.mkdir(parents=True, exist_ok=True)
-        # Build a lightweight transcript stub — callers that wire a richer
-        # audit hook can override this path.
-        transcript = f"Session {session_id}: (audit-trail transcript would go here)"
-        synthesis_prompt = (
-            "You are a Skills Curator. Given a browser-agent session transcript,"
-            " write a short reusable `interaction-skill` markdown snippet (title,"
-            " when-to-use, steps) if-and-only-if the session contains a repeatable"
-            " pattern worth saving. Otherwise, reply exactly: NO_SKILL."
-        )
-        reply = await curator.complete(prompt=transcript, system=synthesis_prompt)
-        if reply and reply.strip() != "NO_SKILL":
-            (staging / "draft.md").write_text(reply)
-            logger.info("curator: drafted staging skill for session %s", session_id)
-    except Exception as exc:  # pragma: no cover — defensive, fire-and-forget
-        logger.debug("curator review failed for session %s: %s", session_id, exc)
