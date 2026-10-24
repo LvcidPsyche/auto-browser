@@ -201,11 +201,12 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
         limit: int = 200,
         event_type: str | None = None,
     ) -> dict[str, Any]:
-        events = await manager.audit.list(
-            session_id=session_id,
-            limit=min(limit, 5000),
-            event_type=event_type or None,
-        )
+        with typed_route_errors(logger, "audit listing failed for session %s", session_id):
+            events = await manager.audit.list(
+                session_id=session_id,
+                limit=min(limit, 5000),
+                event_type=event_type or None,
+            )
         return {
             "session_id": session_id,
             "count": len(events),
@@ -214,7 +215,8 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
 
     @router.get("/sessions/{session_id}/witness")
     async def get_session_witness(session_id: str, limit: int = 100) -> dict[str, Any]:
-        receipts = await manager.list_witness_receipts(session_id, limit=min(limit, 5000))
+        with typed_route_errors(logger, "witness listing failed for session %s", session_id):
+            receipts = await manager.list_witness_receipts(session_id, limit=min(limit, 5000))
         return {
             "session_id": session_id,
             "count": len(receipts),
@@ -223,7 +225,8 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
 
     @router.get("/sessions/{session_id}/witness/verify")
     async def verify_session_witness(session_id: str) -> dict[str, Any]:
-        return await manager.verify_witness_chain(session_id)
+        with typed_route_errors(logger, "witness verification failed for session %s", session_id):
+            return await manager.verify_witness_chain(session_id)
 
     @router.get("/sessions/{session_id}/witness/bundle")
     async def export_session_witness_bundle(session_id: str) -> dict[str, Any]:
@@ -233,7 +236,8 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
         nothing from this project — that independence is what makes a receipt
         evidence rather than an assertion about itself.
         """
-        return await manager.export_witness_bundle(session_id)
+        with typed_route_errors(logger, "witness bundle export failed for session %s", session_id):
+            return await manager.export_witness_bundle(session_id)
 
     @router.get("/sessions/{session_id}/export-script")
     async def export_script(session_id: str) -> dict[str, Any]:
