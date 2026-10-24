@@ -278,6 +278,63 @@ class BridgeProtocolTests(unittest.TestCase):
         self.assertEqual(lines, [])
         self.assertEqual(client.posts, [])
 
+    def test_initialize_does_not_advertise_resource_subscriptions(self) -> None:
+        # The bridge only POSTs: it never opens the controller's event stream, so
+        # notifications/resources/updated cannot reach a stdio client.
+        class SubscribingClient(FakeHttpMcpClient):
+            def post_json(self, payload, *, session_id=None, protocol_version=None):
+                response = super().post_json(payload, session_id=session_id, protocol_version=protocol_version)
+                if payload.get("method") == "initialize":
+                    response.body["result"]["capabilities"] = {
+                        "tools": {},
+                        "resources": {"subscribe": True, "listChanged": False},
+                    }
+                return response
+
+        lines = self._run(
+            SubscribingClient(),
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n",
+        )
+        capabilities = lines[0]["result"]["capabilities"]
+        self.assertFalse(capabilities.get("resources", {}).get("subscribe"))
+        self.assertEqual(capabilities["resources"]["listChanged"], False)
+        self.assertIn("tools", capabilities)
+
+    def test_initialize_without_resources_capability_is_untouched(self) -> None:
+        lines = self._run(
+            FakeHttpMcpClient(),
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n",
+        )
+        self.assertEqual(lines[0]["result"]["capabilities"], {"tools": {}})
+
+    def test_subscribe_and_unsubscribe_are_method_not_found(self) -> None:
+        for method in ("resources/subscribe", "resources/unsubscribe"):
+            with self.subTest(method=method):
+                client = FakeHttpMcpClient()
+                lines = self._run(
+                    client,
+                    json.dumps({"jsonrpc": "2.0", "id": 5, "method": method, "params": {"uri": "x://y"}}) + "\n",
+                )
+                self.assertEqual(lines[0]["id"], 5)
+                self.assertEqual(lines[0]["error"]["code"], -32601)
+                self.assertEqual(client.posts, [])
+
+    def test_a_non_string_method_does_not_stop_the_bridge(self) -> None:
+        # An unhashable method made the subscription lookup raise TypeError out of
+        # run(), closing the session; it must reach the controller, which answers it.
+        for method in ([], {}):
+            with self.subTest(method=method):
+                client = FakeHttpMcpClient()
+                lines = self._run(
+                    client,
+                    json.dumps({"jsonrpc": "2.0", "id": 1, "method": method})
+                    + "\n"
+                    + json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+                    + "\n",
+                )
+                self.assertEqual([line["id"] for line in lines], [1, 2])
+                self.assertEqual(client.posts[0]["payload"]["method"], method)
+
     def test_notifications_produce_no_response(self) -> None:
         client = FakeHttpMcpClient()
         lines = self._run(client, json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")

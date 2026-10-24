@@ -21,6 +21,11 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **The stdio MCP bridge no longer advertises `resources.subscribe`.** The bridge only POSTs and never
+  opens the controller's event stream, so a stdio client that subscribed would never receive
+  `notifications/resources/updated`. `initialize` now reports `resources.subscribe: false`, and
+  `resources/subscribe` / `resources/unsubscribe` answer JSON-RPC `-32601`. The HTTP transport is
+  unchanged. Both bridge copies stay byte-identical.
 - **`GET /sessions` still lists closed sessions when Redis is empty or unreachable.** Reading one
   session already fell back to the file record, but the listing asked only Redis, so a Redis restart
   without persistence hid every closed session and a dropped connection turned the listing into an
