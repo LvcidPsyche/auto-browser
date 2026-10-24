@@ -346,6 +346,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 description="First tool.",
                 input_model=EmptyInput,
                 handler=handler,
+                pack="browse",
                 read_only_hint=True,
                 idempotent_hint=True,
             )
@@ -361,6 +362,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 description="Second tool.",
                 input_model=EmptyInput,
                 handler=handler,
+                pack="browse",
             )
         )
 

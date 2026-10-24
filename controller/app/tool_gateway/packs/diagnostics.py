@@ -18,7 +18,7 @@ def register(registry, gateway):
             description="Read current remote-access metadata for takeover/API forwarding.",
             input_model=GetRemoteAccessInput,
             handler=gateway._get_remote_access,
-            profiles=("full",),
+            pack="deployment",
         ),
         ToolSpec(
             name="browser.readiness_check",
@@ -30,7 +30,7 @@ def register(registry, gateway):
             ),
             input_model=ReadinessCheckInput,
             handler=gateway._readiness_check,
-            profiles=("full",),
+            pack="deployment",
         ),
         ToolSpec(
             name="browser.get_network_log",
@@ -41,7 +41,7 @@ def register(registry, gateway):
             ),
             input_model=GetNetworkLogInput,
             handler=gateway._get_network_log,
-            profiles=("full",),
+            pack="devtools",
         ),
         ToolSpec(
             name="browser.verify_witness",
@@ -60,7 +60,7 @@ def register(registry, gateway):
             ),
             input_model=VerifyWitnessInput,
             handler=gateway._verify_witness,
-            profiles=("full",),
+            pack="witness",
             read_only_hint=True,
         ),
         ToolSpec(
@@ -75,7 +75,7 @@ def register(registry, gateway):
             ),
             input_model=VerifyWitnessInput,
             handler=gateway._export_witness_bundle,
-            profiles=("full",),
+            pack="witness",
             read_only_hint=True,
         ),
         ToolSpec(
@@ -87,7 +87,7 @@ def register(registry, gateway):
             ),
             input_model=ExportScriptInput,
             handler=gateway._export_script,
-            profiles=("full",),
+            pack="devtools",
         ),
         ToolSpec(
             name="browser.pii_scrubber_status",
@@ -97,7 +97,7 @@ def register(registry, gateway):
             ),
             input_model=EmptyInput,
             handler=gateway._pii_scrubber_status,
-            profiles=("full",),
+            pack="deployment",
         ),
     ]:
         registry.register(spec)

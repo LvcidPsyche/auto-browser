@@ -234,7 +234,7 @@ class McpToolGateway:
     async def _call_tool(self, payload: McpToolCallRequest) -> McpToolCallResponse:
         spec = self._registry.get(payload.name)
         if spec is None:
-            if "full" in self._registry.profiles_offering(payload.name):
+            if self._registry.withheld_pack(payload.name) is not None:
                 return self._error_response(
                     f"{payload.name} is in the full MCP tool profile, and this controller serves the "
                     f"{self.tool_profile} profile. Set MCP_TOOL_PROFILE=full on the controller to use it."

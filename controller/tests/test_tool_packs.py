@@ -8,10 +8,100 @@ every registered tool.
 from __future__ import annotations
 
 import unittest
+from unittest.mock import MagicMock
 
+from app.tool_gateway import ToolRegistry, ToolSpec
+from app.tool_gateway.packs import register_all
 from app.tool_gateway.selection import DEFAULT_PROFILE, PACKS, PROFILES, resolve_tool_selection, smallest_profile_with
+from app.tool_inputs import EmptyInput
 
 CURATED_PACKS = ("browse", "sessions", "tabs", "downloads", "auth_profiles", "wait", "scripting", "vision")
+# Every tool's pack. Moving a tool changes what operators' selections serve, so
+# it is a deliberate edit here and in the docs table, never a side effect.
+PACK_OF = {
+    "browser.observe": "browse",
+    "browser.screenshot": "browse",
+    "browser.execute_action": "browse",
+    "browser.request_human_takeover": "browse",
+    "browser.close_session": "browse",
+    "browser.get_html": "browse",
+    "browser.find_elements": "browse",
+    "browser.create_session": "sessions",
+    "browser.list_sessions": "sessions",
+    "browser.get_session": "sessions",
+    "browser.fork_session": "sessions",
+    "browser.list_tabs": "tabs",
+    "browser.activate_tab": "tabs",
+    "browser.close_tab": "tabs",
+    "browser.list_downloads": "downloads",
+    "browser.read_download": "downloads",
+    "browser.list_auth_profiles": "auth_profiles",
+    "browser.save_auth_profile": "auth_profiles",
+    "browser.wait_for_selector": "wait",
+    "browser.eval_js": "scripting",
+    "browser.find_by_vision": "vision",
+    "browser.get_console": "devtools",
+    "browser.get_page_errors": "devtools",
+    "browser.get_request_failures": "devtools",
+    "browser.stop_trace": "devtools",
+    "browser.get_network_log": "devtools",
+    "browser.export_script": "devtools",
+    "browser.get_remote_access": "deployment",
+    "browser.readiness_check": "deployment",
+    "browser.pii_scrubber_status": "deployment",
+    "browser.verify_witness": "witness",
+    "browser.export_witness_bundle": "witness",
+    "browser.save_memory_profile": "memory_profiles",
+    "browser.get_memory_profile": "memory_profiles",
+    "browser.list_memory_profiles": "memory_profiles",
+    "browser.delete_memory_profile": "memory_profiles",
+    "browser.drag_drop": "advanced_actions",
+    "browser.set_viewport": "advanced_actions",
+    "browser.get_cookies": "storage",
+    "browser.set_cookies": "storage",
+    "browser.get_local_storage": "storage",
+    "browser.set_local_storage": "storage",
+    "browser.get_auth_profile": "auth_admin",
+    "browser.save_auth_state": "auth_admin",
+    "browser.cdp_attach": "session_admin",
+    "browser.share_session": "session_admin",
+    "browser.enable_shadow_browse": "session_admin",
+    "browser.list_approvals": "approvals",
+    "browser.approve_approval": "approvals",
+    "browser.reject_approval": "approvals",
+    "browser.execute_approval": "approvals",
+    "browser.list_agent_jobs": "agent_jobs",
+    "browser.get_agent_job": "agent_jobs",
+    "browser.resume_agent_job": "agent_jobs",
+    "browser.discard_agent_job": "agent_jobs",
+    "browser.cancel_agent_job": "agent_jobs",
+    "browser.queue_agent_step": "agent_jobs",
+    "browser.queue_agent_run": "agent_jobs",
+    "browser.list_providers": "agent_jobs",
+    "browser.list_proxy_personas": "proxies",
+    "browser.create_proxy_persona": "proxies",
+    "browser.delete_proxy_persona": "proxies",
+    "browser.list_cron_jobs": "cron",
+    "browser.create_cron_job": "cron",
+    "browser.delete_cron_job": "cron",
+    "browser.trigger_cron_job": "cron",
+    "harness.start_convergence": "harness",
+    "harness.get_status": "harness",
+    "harness.get_trace": "harness",
+    "harness.list_runs": "harness",
+    "harness.list_candidates": "harness",
+    "harness.get_candidate": "harness",
+    "harness.check_drift": "harness",
+    "harness.check_all_drifts": "harness",
+    "harness.graduate": "harness",
+}
+
+
+def _all_specs() -> dict[str, ToolSpec]:
+    """Every registered tool, in registration order."""
+    registry = ToolRegistry(tool_profile="full", experimental_enabled=lambda _: True)
+    register_all(registry, MagicMock())
+    return registry.tools
 
 
 class SelectionTests(unittest.TestCase):
@@ -113,3 +203,34 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(
             str(caught.exception), "MCP_TOOL_PROFILE='lean' with MCP_TOOL_PACKS='-browse' selects no tool packs."
         )
+
+
+class PackCatalogTests(unittest.TestCase):
+    def test_every_tool_is_in_the_pinned_pack(self) -> None:
+        packs = {name: spec.pack for name, spec in _all_specs().items()}
+        self.assertEqual(len(PACK_OF), 75)
+        self.assertEqual(packs, PACK_OF)
+        self.assertEqual(set(packs.values()), set(PACKS))
+
+    def test_a_tool_with_an_unknown_pack_is_refused(self) -> None:
+        registry = ToolRegistry(tool_profile="full", experimental_enabled=lambda _: True)
+
+        async def handler(_: EmptyInput):
+            return {}
+
+        with self.assertRaises(ValueError) as caught:
+            registry.register(
+                ToolSpec(name="test.one", description="", input_model=EmptyInput, handler=handler, pack="tab")
+            )
+        self.assertEqual(str(caught.exception), "test.one names an unknown tool pack: 'tab'")
+        # A tool without a pack does not get one by default.
+        with self.assertRaises(TypeError):
+            ToolSpec(name="test.two", description="", input_model=EmptyInput, handler=handler)
+
+    def test_a_withheld_tool_is_remembered_by_pack(self) -> None:
+        registry = ToolRegistry(tool_profile="lean", experimental_enabled=lambda _: True)
+        register_all(registry, MagicMock())
+        self.assertEqual(registry.withheld_pack("browser.get_console"), "devtools")
+        self.assertEqual(registry.withheld_pack("browser.list_tabs"), "tabs")
+        self.assertIsNone(registry.withheld_pack("browser.observe"))
+        self.assertIsNone(registry.withheld_pack("browser.nope"))
