@@ -264,9 +264,10 @@ class SelectionTests(unittest.TestCase):
                 self.assertEqual(selection.packs, frozenset(CURATED_PACKS))
         # Unset, or an empty MCP_TOOL_PROFILE= line, is no choice: curated, silently.
         for value in ("", "curated", "lean", "full"):
-            with self.subTest(value=value), self.assertNoLogs("app.tool_gateway.selection", level="WARNING"):
-                selection = resolve_tool_selection(value)
-            self.assertEqual(selection.profile, value or "curated")
+            with self.subTest(value=value):
+                with self.assertNoLogs("app.tool_gateway.selection", level="WARNING"):
+                    selection = resolve_tool_selection(value)
+                self.assertEqual(selection.profile, value or "curated")
 
     def test_an_unknown_pack_stops_startup(self) -> None:
         every_pack = ", ".join(PACKS)
@@ -276,21 +277,24 @@ class SelectionTests(unittest.TestCase):
             ("Tabs", " (did you mean tabs?)"),
             ("-", ""),
         ):
-            with self.subTest(value=value), self.assertRaises(ValueError) as caught:
-                resolve_tool_selection("curated", f"downloads,{value}")
-            self.assertEqual(
-                str(caught.exception),
-                f"MCP_TOOL_PACKS: {value!r} is not a tool pack{hint}. "
-                f"Name packs to add and -pack to remove one: {every_pack}.",
-            )
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as caught:
+                    resolve_tool_selection("curated", f"downloads,{value}")
+                self.assertEqual(
+                    str(caught.exception),
+                    f"MCP_TOOL_PACKS: {value!r} is not a tool pack{hint}. "
+                    f"Name packs to add and -pack to remove one: {every_pack}.",
+                )
 
     def test_a_profile_named_as_a_pack_says_where_it_goes(self) -> None:
         for value in ("full", "-full"):
-            with self.subTest(value=value), self.assertRaises(ValueError) as caught:
-                resolve_tool_selection("curated", value)
-            self.assertEqual(
-                str(caught.exception), "MCP_TOOL_PACKS: full is a tool profile, not a pack; set MCP_TOOL_PROFILE=full."
-            )
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as caught:
+                    resolve_tool_selection("curated", value)
+                self.assertEqual(
+                    str(caught.exception),
+                    "MCP_TOOL_PACKS: full is a tool profile, not a pack; set MCP_TOOL_PROFILE=full.",
+                )
 
     def test_removals_apply_after_additions_and_noops_are_not_turned_off(self) -> None:
         for packs in ("tabs,-tabs", "-tabs,tabs"):
