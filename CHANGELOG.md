@@ -4,6 +4,12 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **The stealth fingerprint layer is canvas noise only, and says so.** Its WebGL1 `getParameter`
+  wrapper returned the real value for every parameter, so it changed nothing except the function's
+  `toString()`; it and its unused seed are removed. WebGL values are reported as the browser has them.
+
 ### Fixed
 
 - **`CURATOR_ENABLED` no longer sends a placeholder transcript to the model.** With the setting on
