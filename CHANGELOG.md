@@ -4,6 +4,13 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **The harness's programmatic verifier tests every `url_matches` pattern in one child process.** It
+  started one Python process per pattern (about 180 ms each on Windows). A verification now starts one,
+  and another only after a pattern that outlasts the timeout; each stuck pattern still times out on
+  its own and the others keep their verdicts.
+
 ### Fixed
 
 - **`CURATOR_ENABLED` no longer sends a placeholder transcript to the model.** With the setting on

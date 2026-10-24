@@ -12,10 +12,15 @@ from .base import VerificationResult
 # interrupted: it holds the GIL for the whole match, so neither wait_for nor a
 # worker thread stops a catastrophic pattern ((a+)+$ on 24 characters stalled
 # the event loop for 2.7 s, in a thread too). A child process can be killed.
+#
+# One child tests every pattern of a verification in order and prints one result
+# line per pattern as it finishes, so the parent can tell which pattern is stuck.
 _REGEX_WORKER = (
     "import json, re, sys\n"
     "request = json.load(sys.stdin)\n"
-    "sys.stdout.write('1' if re.search(request['pattern'], request['text']) else '0')\n"
+    "for pattern in request['patterns']:\n"
+    "    sys.stdout.write('1\\n' if re.search(pattern, request['text']) else '0\\n')\n"
+    "    sys.stdout.flush()\n"
 )
 
 
@@ -31,13 +36,19 @@ class ProgrammaticVerifier:
         searchable_text, dom_text = _searchable_text(observation)
         evidence = _evidence_kinds(trace)
 
+        # Every url_matches pattern (postconditions first, then forbidden states) is
+        # tested in one child process; the loops below take the results in that order.
+        patterns = [c.value for c in contract.postconditions if c.kind == "url_matches"]
+        patterns += [f.value for f in contract.forbidden_states if f.kind == "url_matches"]
+        matches = iter(await _regex_search_many(patterns, url, timeout=self.regex_timeout_seconds))
+
         failed: list[str] = []
         satisfied: list[str] = []
         regex_timeouts: list[str] = []
         for index, postcondition in enumerate(contract.postconditions):
             key = _condition_key(index, postcondition)
             if postcondition.kind == "url_matches":
-                matched = await _regex_search(postcondition.value, url, timeout=self.regex_timeout_seconds)
+                matched = next(matches)
                 if matched is None:
                     regex_timeouts.append(key)
                 passes = bool(matched)
@@ -58,7 +69,7 @@ class ProgrammaticVerifier:
         for index, forbidden in enumerate(contract.forbidden_states):
             hit_label = f"forbidden[{index}]:{forbidden.kind}:{forbidden.value or forbidden.kind}"
             if forbidden.kind == "url_matches":
-                matched = await _regex_search(forbidden.value, url, timeout=self.regex_timeout_seconds)
+                matched = next(matches)
                 if matched is None:
                     # Unknown is not "clear": a forbidden state that could not be
                     # ruled out counts as hit.
@@ -134,8 +145,28 @@ def _evidence_kinds(trace: Any) -> set[str]:
     return set()
 
 
-async def _regex_search(pattern: str, text: str, *, timeout: float) -> bool | None:
-    """re.search(pattern, text) in a child process; None when it outlasts `timeout`."""
+async def _regex_search_many(patterns: list[str], text: str, *, timeout: float) -> list[bool | None]:
+    """re.search(pattern, text) for each pattern, in as few child processes as possible.
+
+    One child tests the patterns in order. A pattern that does not finish within
+    `timeout` of the previous result (of the child's start, for the first) gets
+    None and its child is killed; the patterns after it run in a fresh child, so
+    each stuck pattern costs one timeout and the others keep their own verdicts.
+    """
+    results: list[bool | None] = []
+    remaining = patterns
+    while remaining:
+        finished, stuck = await _regex_search_child(remaining, text, timeout=timeout)
+        results.extend(finished)
+        remaining = remaining[len(finished) :]
+        if stuck:
+            results.append(None)
+            remaining = remaining[1:]
+    return results
+
+
+async def _regex_search_child(patterns: list[str], text: str, *, timeout: float) -> tuple[list[bool], bool]:
+    """Results for the patterns one child finished, and whether the next one outlasted `timeout`."""
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-I",
@@ -145,11 +176,16 @@ async def _regex_search(pattern: str, text: str, *, timeout: float) -> bool | No
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    finished: list[bool] = []
     try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(json.dumps({"pattern": pattern, "text": text}).encode("utf-8")),
-            timeout=timeout,
-        )
+        process.stdin.write(json.dumps({"patterns": patterns, "text": text}).encode("utf-8"))
+        process.stdin.close()
+        while len(finished) < len(patterns):
+            line = await asyncio.wait_for(process.stdout.readline(), timeout=timeout)
+            if not line:
+                break  # the child exited early; the return code below says why
+            finished.append(line.strip() == b"1")  # strip: Windows text mode ends lines with \r\n
+        await asyncio.wait_for(process.wait(), timeout=timeout)
     except BaseException as exc:
         # A timeout, or the caller giving up (the harness's wall-clock wait_for,
         # shutdown): either way the child must not outlive the call.
@@ -159,15 +195,17 @@ async def _regex_search(pattern: str, text: str, *, timeout: float) -> bool | No
             pass  # exited between the wait ending and the kill
         await process.communicate()
         if isinstance(exc, asyncio.TimeoutError):
-            return None
+            # Stuck only if a pattern was still unanswered (not merely slow to exit).
+            return finished, len(finished) < len(patterns)
         raise
     if process.returncode != 0:
         # Patterns are compiled when the contract is built, so this is not a bad
         # pattern; fail loudly rather than guess a verdict.
+        stderr = await process.stderr.read()
         raise RuntimeError(
             f"regex worker failed (code {process.returncode}): {stderr.decode('utf-8', 'replace')[-500:]}"
         )
-    return stdout == b"1"
+    return finished, False
 
 
 def _searchable_text(observation: dict[str, Any]) -> tuple[str, str]:
