@@ -117,13 +117,15 @@ def test_screenshot_redaction_and_invalid_image_fallback() -> None:
     blocks = [{"x": 1, "y": 1, "width": 4, "height": 4, "text": "ops@example.com"}]
 
     redacted, hits = scrub_screenshot(raw, blocks, enabled_patterns={"email"})
-    fallback, fallback_hits = scrub_screenshot(b"not-a-png", blocks, enabled_patterns={"email"})
 
     assert redacted != raw
     assert hits[0]["bbox"] == {"x": 1, "y": 1, "width": 4, "height": 4}
-    assert fallback == b"not-a-png"
-    assert fallback_hits[0]["pattern"] == "email"
     assert scrub_screenshot(raw, [])[1] == []
+
+    # An image that cannot be redacted must not come back as if it had been:
+    # the original bytes with hits attached read as a success to the caller.
+    with pytest.raises(Exception):
+        scrub_screenshot(b"not-a-png", blocks, enabled_patterns={"email"})
 
 
 # ── Effect tests ───────────────────────────────────────────────────────────

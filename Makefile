@@ -8,7 +8,7 @@ lint: ## Run Ruff checks across the whole repo
 	# scripts/*.py) silently excluded client/, integrations/ and benchmarks/ — including
 	# two packages published to PyPI — and four real errors had accumulated there unseen.
 	# Ruff's defaults plus .gitignore already exclude .venv*/, node_modules/, build/, dist/.
-	ruff check . --select E9,F,I
+	ruff check .
 
 up: ## Start the shared browser stack
 	./scripts/compose_local.sh up --build
