@@ -482,11 +482,13 @@ class McpToolGateway:
 
     def _no_session_hint(self) -> str:
         """How to get a session, naming only tools this controller serves (lean has no create_session)."""
+        starter = next((name for name in SESSION_STARTER_TOOLS if name in self._tools), None)
         if "browser.create_session" in self._tools:
+            if starter is None:
+                return " — create one with browser.create_session."
             return (
                 " — create one with browser.create_session (or call an observe/act tool, which creates one on demand)."
             )
-        starter = next((name for name in SESSION_STARTER_TOOLS if name in self._tools), None)
         if starter is None:
             return "."
         return f" — call {starter}, which creates one on demand."

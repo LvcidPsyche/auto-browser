@@ -541,6 +541,12 @@ class WithheldToolTests(unittest.IsolatedAsyncioTestCase):
                 "on demand.",
             ),
             (
+                # create_session is served, but no tool that opens a session on demand is.
+                {"tool_packs": "-browse,-wait"},
+                "browser.list_tabs",
+                "browser.list_tabs needs a session and none are live — create one with browser.create_session.",
+            ),
+            (
                 {"tool_profile": "lean", "tool_packs": "-browse,tabs"},
                 "browser.list_tabs",
                 "browser.list_tabs needs a session and none are live.",
