@@ -87,8 +87,8 @@ def _did_you_mean(value: str, options: Collection[str]) -> str:
 
 
 def _profile_name(value: str) -> str:
-    if not value:
-        # Unset, or an empty MCP_TOOL_PROFILE= line: no choice was made.
+    if not value.strip():
+        # Unset, or an empty or blank MCP_TOOL_PROFILE= line: no choice was made.
         return DEFAULT_PROFILE
     if value in PROFILES:
         return value

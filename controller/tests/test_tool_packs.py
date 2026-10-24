@@ -262,12 +262,13 @@ class SelectionTests(unittest.TestCase):
                 )
                 self.assertEqual(selection.profile, "curated")
                 self.assertEqual(selection.packs, frozenset(CURATED_PACKS))
-        # Unset, or an empty MCP_TOOL_PROFILE= line, is no choice: curated, silently.
-        for value in ("", "curated", "lean", "full"):
+        # Unset, or an empty or blank MCP_TOOL_PROFILE= line, is no choice:
+        # curated, silently.
+        for value in ("", "  ", "\t", "curated", "lean", "full"):
             with self.subTest(value=value):
                 with self.assertNoLogs("app.tool_gateway.selection", level="WARNING"):
                     selection = resolve_tool_selection(value)
-                self.assertEqual(selection.profile, value or "curated")
+                self.assertEqual(selection.profile, value.strip() or "curated")
 
     def test_an_unknown_pack_stops_startup(self) -> None:
         every_pack = ", ".join(PACKS)
