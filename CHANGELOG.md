@@ -6,6 +6,11 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **The stdio MCP bridge no longer advertises `resources.subscribe`.** The bridge only POSTs and never
+  opens the controller's event stream, so a stdio client that subscribed would never receive
+  `notifications/resources/updated`. `initialize` now reports `resources.subscribe: false`, and
+  `resources/subscribe` / `resources/unsubscribe` answer JSON-RPC `-32601`. The HTTP transport is
+  unchanged. Both bridge copies stay byte-identical.
 - **`CURATOR_ENABLED` no longer sends a placeholder transcript to the model.** With the setting on
   and a provider key present, every closed session started a background review that sent the model
   a fixed placeholder string instead of a transcript, and could write what came back to

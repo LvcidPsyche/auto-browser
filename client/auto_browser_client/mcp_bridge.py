@@ -24,6 +24,11 @@ from urllib.request import Request, urlopen
 MCP_SESSION_HEADER = "MCP-Session-Id"
 MCP_PROTOCOL_HEADER = "MCP-Protocol-Version"
 
+# The HTTP transport pushes notifications/resources/updated over its event
+# stream. This bridge only POSTs and never opens that stream, so a stdio client
+# could subscribe and then never hear anything. Say so up front instead.
+_SUBSCRIPTION_METHODS = frozenset({"resources/subscribe", "resources/unsubscribe"})
+
 
 @dataclass
 class HttpMcpResponse:
@@ -147,6 +152,12 @@ class StdioMcpBridge:
 
         request_id = payload.get("id")
         method = payload.get("method")
+        if method in _SUBSCRIPTION_METHODS:
+            if request_id is None:
+                return None
+            return self._jsonrpc_error(
+                request_id, -32601, f"{method} is not supported over the stdio bridge (no server-push channel)"
+            )
         if method == "initialize":
             self._initialize_payload = payload
             self._initialized_sent = False
@@ -201,7 +212,22 @@ class StdioMcpBridge:
             # they carried no id, so the client never saw a response to its
             # request and hung without learning why.
             return self._jsonrpc_error(request_id, -32000, self._http_error_message(response))
+        if method == "initialize":
+            return self._without_resource_subscribe(response.body)
         return response.body
+
+    @staticmethod
+    def _without_resource_subscribe(body: dict[str, Any]) -> dict[str, Any]:
+        """Copy of an initialize response with resources.subscribe switched off."""
+        result = body.get("result")
+        capabilities = result.get("capabilities") if isinstance(result, dict) else None
+        resources = capabilities.get("resources") if isinstance(capabilities, dict) else None
+        if not isinstance(resources, dict) or "subscribe" not in resources:
+            return body
+        return {
+            **body,
+            "result": {**result, "capabilities": {**capabilities, "resources": {**resources, "subscribe": False}}},
+        }
 
     @staticmethod
     def _http_error_message(response: HttpMcpResponse) -> str:
