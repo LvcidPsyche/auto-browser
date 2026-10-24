@@ -2,6 +2,17 @@
 
 All notable changes to auto-browser are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **`CURATOR_ENABLED` no longer sends a placeholder transcript to the model.** With the setting on
+  and a provider key present, every closed session started a background review that sent the model
+  a fixed placeholder string instead of a transcript, and could write what came back to
+  `skills-staging`. Nothing builds a session transcript yet, so the review is not started at all:
+  startup logs that the setting is reserved, and `.env.example` says so. The adapter setup and the
+  setting itself are unchanged.
+
 ## [1.10.1] — 2026-10-24
 
 A dependency and release-process update over 1.10.0. The client, LangChain and MCP bridge
