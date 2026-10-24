@@ -145,6 +145,15 @@ def withheld_tool_message(name: str, pack: str, selection: ToolSelection, served
     Agents and mesh peers read this, so it names the profile but never echoes
     the operator's MCP_TOOL_PACKS value.
     """
+    message = _how_to_serve(name, pack, selection)
+    # An agent's first call is often to create_session, which lean and a
+    # -sessions removal leave out: say what does the same job here.
+    if name == "browser.create_session" and "browser.observe" in served:
+        message += " Without it, browser.observe creates a session when none is live."
+    return message
+
+
+def _how_to_serve(name: str, pack: str, selection: ToolSelection) -> str:
     if pack in selection.turned_off:
         return (
             f"{name} is in the {pack} tool pack, which MCP_TOOL_PACKS turns off on this controller. "
@@ -159,13 +168,8 @@ def withheld_tool_message(name: str, pack: str, selection: ToolSelection, served
             f"MCP_TOOL_PACKS and either add {pack} to it or set MCP_TOOL_PROFILE={smallest_profile_with(pack)} "
             "on the controller."
         )
-    message = (
+    return (
         f"{name} is in the {pack} tool pack, which this controller does not serve "
         f"(it serves the {selection.profile} profile). To use it, add {pack} to MCP_TOOL_PACKS or set "
         f"MCP_TOOL_PROFILE={smallest_profile_with(pack)} on the controller."
     )
-    # The lean profile leaves create_session out, and an agent's first call is
-    # often to it: say what does the same job here.
-    if name == "browser.create_session" and "browser.observe" in served:
-        message += " Without it, browser.observe creates a session when none is live."
-    return message

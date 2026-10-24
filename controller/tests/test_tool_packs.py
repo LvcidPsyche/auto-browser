@@ -528,6 +528,20 @@ class WithheldToolTests(unittest.IsolatedAsyncioTestCase):
             "the lean profile). To use it, add sessions to MCP_TOOL_PACKS or set MCP_TOOL_PROFILE=curated on the "
             "controller. Without it, browser.observe creates a session when none is live.",
         )
+        # The same hint whichever way sessions is left out.
+        self.assertEqual(
+            await self._error("browser.create_session", tool_packs="-sessions"),
+            "browser.create_session is in the sessions tool pack, which MCP_TOOL_PACKS turns off on this "
+            "controller. To use it, remove -sessions from MCP_TOOL_PACKS. Without it, browser.observe creates a "
+            "session when none is live.",
+        )
+        self.assertEqual(
+            await self._error("browser.create_session", tool_profile="lean", tool_packs="-sessions"),
+            "browser.create_session is in the sessions tool pack, which this controller does not serve: the lean "
+            "profile does not include it, and MCP_TOOL_PACKS removes it. To use it, remove -sessions from "
+            "MCP_TOOL_PACKS and either add sessions to it or set MCP_TOOL_PROFILE=curated on the controller. "
+            "Without it, browser.observe creates a session when none is live.",
+        )
         # Without browse there is no observe to point at, and create_session is served.
         manager = _manager()
         response = await self._call("browser.create_session", manager, tool_packs="-browse")
