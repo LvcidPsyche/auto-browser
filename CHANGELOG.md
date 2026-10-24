@@ -21,9 +21,9 @@ All notable changes to auto-browser are documented here.
 
 - **An unrecognised `MCP_TOOL_PROFILE` now logs a warning.** Any value other than `full` used to mean
   `curated` without a word, `FULL`, `full ` and `leen` included. It still serves `curated`, and the
-  startup log now says so and names the closest profile:
+  startup log now says so and, when one is close, names the closest profile:
   `MCP_TOOL_PROFILE='leen' is not a tool profile (did you mean lean?); serving curated. Use lean, curated or full.`
-  Unset or empty still means `curated`, silently.
+  Unset, empty or blank still means `curated`, silently.
 - **A call to a tool outside the selection names its pack.** It used to say the tool "is in the full MCP
   tool profile"; it now says, for example, `browser.get_console is in the devtools tool pack, which this
   controller does not serve (it serves the curated profile). To use it, add devtools to MCP_TOOL_PACKS or

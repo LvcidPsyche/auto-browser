@@ -347,10 +347,10 @@ The rules:
 - `MCP_TOOL_PACKS` is a comma-separated list on top of the profile: a name adds a pack and
   `-name` removes one. Removals apply after additions, whatever order they are written in, and
   removing a pack the selection does not have changes nothing.
-- Names are exact and lowercase. `MCP_TOOL_PROFILE` unset or empty means `curated`.
+- Names are exact and lowercase. `MCP_TOOL_PROFILE` unset, empty or blank means `curated`.
 - An unknown pack in `MCP_TOOL_PACKS` stops the controller at startup, with the valid names in
   the error. An unknown `MCP_TOOL_PROFILE` (`leen`, `FULL`) serves `curated` and logs a warning
-  naming the closest profile; a typo used to give `curated` without a word.
+  that names the closest profile when one is close; a typo used to give `curated` without a word.
 - The startup log says what is served, for example
   `MCP tools: lean profile with MCP_TOOL_PACKS=tabs, 10 tools listed`. `GET /mcp/tools` lists
   the tools themselves.
