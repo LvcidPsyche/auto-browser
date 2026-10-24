@@ -332,6 +332,9 @@ class Settings(BaseSettings):
     # PII scrubbing
     pii_scrub_enabled: bool = Field(True, alias="PII_SCRUB_ENABLED")
     pii_scrub_screenshot: bool = Field(True, alias="PII_SCRUB_SCREENSHOT")
+    # With screenshot scrubbing on but no OCR to drive it, withhold the screenshot (and fail
+    # /readiness) instead of returning it unscrubbed with a warning.
+    pii_scrub_screenshot_strict: bool = Field(False, alias="PII_SCRUB_SCREENSHOT_STRICT")
     # Also redact the before/after snapshot of every action. It runs OCR twice
     # per action; false makes actions much faster and leaves those images
     # unredacted (observations stay redacted).
