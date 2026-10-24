@@ -2,7 +2,40 @@
 
 All notable changes to auto-browser are documented here.
 
-## [Unreleased]
+## [1.10.2] — 2026-10-24
+
+A security release over 1.10.1, with three advisories: GHSA-3pwm-j9pq-4r6q (PII scrubbing,
+traces and fork files), GHSA-m596-6q9j-x6mc (named credentials: artifacts and proxy personas)
+and GHSA-hj9r-c8jj-mf9v (mesh peer registration). **Update the controller image.** The client,
+LangChain and MCP bridge packages carry one bridge fix; updating them alone does not deploy the
+controller fixes.
+
+Upgrade notes:
+- **Playwright tracing is off by default, unless your own settings turn it on.** The
+  `.env.example` of earlier releases set `ENABLE_TRACING=true`, and an older compose file falls back
+  to `true`: if yours do, set `ENABLE_TRACING=false`, then recreate the controller container
+  (`docker compose up -d`; `docker compose restart` keeps the old environment) or restart the
+  process. A trace is not scrubbed. Earlier releases recorded one for every session, so delete the
+  `trace.zip` files under `ARTIFACT_ROOT`, the `fork_*` files under `AUTH_ROOT`, and the built-in
+  agent loop's `agent_steps.jsonl` artifacts (which hold the request URLs it saw), with any copies.
+  Rotate any credential those files may have held.
+- **Network log:** query strings, form bodies and JSON bodies are now stored redacted, so a network
+  hook registered on a query value no longer fires, and some ordinary parameter names are redacted by
+  their name. `docs/deployment.md` lists both.
+- **Named credentials (`API_BEARER_TOKENS`):** proxy personas saved before this release have no owner
+  and stay open to every operator until you add `"owner": "<operator id>"` to each entry in
+  `PROXY_PERSONA_FILE`; the startup warning names them. Check each persona's server and username
+  against your own records first, since another operator could have changed them. Releases 1.8.1 to
+  1.9.1 also returned a persona's stored password to any operator: rotate those passwords.
+  `/artifacts` no longer serves a directory whose session record is gone, or a file placed directly
+  in the artifact root.
+- **Mesh (`MESH_ENABLED=true`):** `POST` and `DELETE /mesh/peers` are removed. Manage peers in the
+  file `MESH_PEERS_PATH` names, and review it for entries you did not add and for keys that differ
+  from what each peer's `/mesh/identity` reports. One invalid entry now turns every peer away: each
+  `node_id` must be the SHA-256 of its key, so an entry registered under a name of your choosing,
+  which earlier releases accepted, has to be re-registered under its key's hash (`docs/mesh.md`).
+- **Credential files are written `0600`.** A backup job or second container that reads them as
+  another user must now run as the controller's user.
 
 ### Added
 
@@ -35,7 +68,7 @@ All notable changes to auto-browser are documented here.
   before this release, then add, change and remove peers by editing it; the controller
   re-reads it when it changes. `GET /mesh/peers` and `GET /mesh/identity` stay, and the
   dashboard's mesh list no longer has a Remove button. See the new `docs/mesh.md` for the file
-  format.
+  format. (GHSA-hj9r-c8jj-mf9v)
 
 ### Fixed
 
@@ -74,48 +107,6 @@ All notable changes to auto-browser are documented here.
   run and the controller, which waits for a healthy `browser-node`, never started. The healthcheck
   now expands the variable inside the container, and `.env.example` ships the line commented out
   because compose sets the path per service.
-- **Revoking a mesh peer by editing the peers file works reliably.** Deleting the file, or
-  saving one that did not parse, left every peer in memory, and the controller rewrote the file
-  each time it recorded `last_seen`, which could put a removed peer back or overwrite an edit made
-  at the same moment. A missing file is now an empty registry; a file that cannot be read, is not
-  valid JSON or has any invalid entry accepts no peer at all (the whole file is refused) and
-  logs a `mesh.peers:` warning; `last_seen` is kept in memory and the controller never writes the
-  file; and the file is checked on every request, so an edit is seen by the next one. Replace the
-  file by rename, and in Docker mount its directory rather than the file; `docs/mesh.md` lists
-  the changes that are not noticed. A request already past
-  the sender check is not cancelled. `docs/mesh.md` says exactly what an edit does.
-- **Mesh envelopes with a NaN timestamp are refused.** The timestamp window was written so a NaN
-  passed it. A correctly signed envelope from a registered peer carrying one was accepted at any
-  time. It now counts as outside the window, for requests and for replies.
-- **`/artifacts` checks the owner of the file a path resolves to.** The mount took the session id
-  from the first component of the path as typed, so a path that starts with `..` and comes back
-  into the artifact root was judged as a session nobody owns and could be served to another
-  operator. The session is now the first component of the resolved file, so every spelling, and
-  a link from one session directory into another, is judged by the owner of what is actually
-  served. With named credentials (`API_BEARER_TOKENS`), a path whose first component is not a
-  session with a stored record (a directory whose record is gone, a file dropped into the
-  artifact root) is not served to anyone; deployments without named credentials are unchanged.
-- **Proxy personas belong to the operator who saved them.** With named credentials, any
-  operator could list, read the server and username of, overwrite or delete another operator's
-  persona, and open a session through it with that operator's stored proxy password. The same
-  rule as memory profiles now applies over HTTP and MCP: a persona records the token-verified
-  operator who first saved it (an `"owner"` key in `PROXY_PERSONA_FILE`), and to every other
-  caller it is missing; overwriting its name answers 409. **Upgrading:** personas that were
-  saved before this release have no owner and stay open to every operator, exactly as before
-  (shared-token deployments are unaffected). The controller logs a warning at startup when
-  named credentials are set and such personas exist, naming how many there are, and a second one
-  for any entry whose `"owner"` is an empty string, which counts as no owner. Until an owner is
-  added, any operator can overwrite or delete the persona too, not only use it. To make one
-  private, add `"owner": "<operator id>"` to its entry in the file. A save by a release before this one
-  drops the `"owner"` keys, so do not roll back and save.
-- **Files that hold credentials are written owner-only.** The stores wrote every file as
-  `0666 & ~umask`, so a `0600` file became `0644` the next time it was saved, and a new
-  credentials file was created `0644` under the default umask. `atomic_write_text` now keeps the
-  mode a file already has and takes an explicit `mode=`; the proxy persona file, the cron store
-  (webhook keys), encrypted auth state, session records, approvals, agent jobs and the MCP
-  session store ask for `0600`. A file written by an earlier release is tightened the next time
-  it is saved. A backup job or second container that reads these files from the data volume as
-  a different user must now run as the controller's user (or `chmod` after each save).
 - **`CURATOR_ENABLED` no longer sends a placeholder transcript to the model.** With the setting on
   and a provider key present, every closed session started a background review that sent the model
   a fixed placeholder string instead of a transcript, and could write what came back to
@@ -142,8 +133,8 @@ All notable changes to auto-browser are documented here.
   URL, which is now redacted, so a hook registered on a query value (for example
   `*email=ops%40example.com`) no longer fires; one on the path or a parameter name still does.
   A JSON member whose name marks a secret (`pass`, `db_pass` and `page_token` do; a paging cursor such as
-  `next_page_token` does not) is redacted whether or not the body has escapes, a redaction in JSON keeps
-  the body valid (the exceptions: a `Cookie:` line inside a string, a private-key block with no `END`
+  `next_page_token` does not) is redacted whether or not the body has escapes, with the default
+  `PII_SCRUB_REPLACEMENT` a redaction in JSON keeps the body valid (the exceptions: a `Cookie:` line inside a string, a private-key block with no `END`
   line, and a value that is not a string, such as `true` or `12345678`, under a name the password
   pattern knows, such as `"pass": true`), and the fragment of a URL, `Referer` or `Location` is scrubbed like its query. The URL of a
   failed request, which `get_request_failures` and every observation returned as the page asked for it,
@@ -153,14 +144,65 @@ All notable changes to auto-browser are documented here.
 - Playwright tracing is now off by default (`ENABLE_TRACING=false` in the settings, `.env.example` and
   the compose file). A session's `trace.zip` holds every request header (`Authorization` and `Cookie`
   included), the request and response bodies, and the text typed into the page, passwords included,
-  none of it scrubbed, and every session wrote one when it closed. Set `ENABLE_TRACING=true` to record
-  traces again; traces written before this release stay on disk under `ARTIFACT_ROOT` until you delete
-  them (GHSA-3pwm-j9pq-4r6q).
+  none of it scrubbed, and every session recorded one, written when tracing stopped or the session
+  closed. Set `ENABLE_TRACING=true` to record traces again; traces written before this release stay
+  on disk under `ARTIFACT_ROOT` until you delete them (GHSA-3pwm-j9pq-4r6q).
 - `fork_session` no longer leaves the source session's cookies on disk. It exported them to
-  `AUTH_ROOT/<session_id>/fork_<id>.json` (plaintext unless `AUTH_STATE_ENCRYPTION_KEY` is set) for the
+  `AUTH_ROOT/<session_id>/fork_<id>.json` (always plaintext through 1.3.0; from 1.3.1 plaintext unless
+  `AUTH_STATE_ENCRYPTION_KEY` is set) for the
   new session to load, and never deleted the file; the file is now removed as soon as the new session
   has loaded it or failed to. Files left by earlier forks stay until you delete them
   (GHSA-3pwm-j9pq-4r6q).
+- **`/artifacts` checks the owner of the file a path resolves to.** The mount took the session id
+  from the first component of the path as typed, so a path that starts with `..` and comes back
+  into the artifact root was judged as a session nobody owns and could be served to another
+  operator. The session is now the first component of the resolved file, so every spelling, and
+  a link from one session directory into another, is judged by the owner of what is actually
+  served. With named credentials (`API_BEARER_TOKENS`), a path whose first component is not a
+  session with a stored record (a directory whose record is gone, a file dropped into the
+  artifact root) is not served to anyone; deployments without named credentials are unchanged. (GHSA-m596-6q9j-x6mc)
+- **Proxy personas belong to the operator who saved them.** With named credentials, any
+  operator could list, read the server and username of, overwrite or delete another operator's
+  persona, and open a session through it with that operator's stored proxy password. The same
+  rule as memory profiles now applies over HTTP and MCP: a persona records the token-verified
+  operator who first saved it (an `"owner"` key in `PROXY_PERSONA_FILE`), and to every other
+  caller it is missing; overwriting its name answers 409. **Upgrading:** personas that were
+  saved before this release have no owner and stay open to every operator, exactly as before
+  (shared-token deployments are unaffected). The controller logs a warning at startup when
+  named credentials are set and such personas exist, naming how many there are, and a second one
+  for any entry whose `"owner"` is an empty string, which counts as no owner. Until an owner is
+  added, any operator can overwrite or delete the persona too, not only use it. To make one
+  private, add `"owner": "<operator id>"` to its entry in the file. A save by a release before this one
+  drops the `"owner"` keys, so do not roll back and save. (GHSA-m596-6q9j-x6mc)
+- **Revoking a mesh peer by editing the peers file works reliably.** Deleting the file, or
+  saving one that did not parse, left every peer in memory, and the controller rewrote the file
+  each time it recorded `last_seen`, which could put a removed peer back or overwrite an edit made
+  at the same moment. A missing file is now an empty registry; a file that cannot be read, is not
+  valid JSON or has any invalid entry accepts no peer at all (the whole file is refused) and
+  logs a `mesh.peers:` warning; `last_seen` is kept in memory and the controller never writes the
+  file; and the file is checked on every request, so an edit is seen by the next one. Replace the
+  file by rename, and in Docker mount its directory rather than the file; `docs/mesh.md` lists
+  the changes that are not noticed. A request already past the sender check is not cancelled.
+  (GHSA-hj9r-c8jj-mf9v)
+- **The peers file refuses a key its `node_id` does not name.** Any API credential could post a key
+  of its own under an existing `node_id`, which kept the id and grants an operator would recognise.
+  A `node_id` is the SHA-256 of the peer's 32-byte Ed25519 key, as `/mesh/identity` reports both;
+  a file with an entry whose key is not that (or is not strict base64, or is filed under another
+  `node_id`) is now refused as a whole and logged. Put back the key the peer's own
+  `/mesh/identity` reports. Earlier releases accepted any `node_id` a sender signed as, so an entry
+  registered under a name of its own must be re-registered under its key's hash. `add()` checks the
+  same. (GHSA-hj9r-c8jj-mf9v)
+- **Mesh envelopes with a NaN timestamp are refused.** The timestamp window was written so a NaN
+  passed it. A correctly signed envelope from a registered peer carrying one was accepted at any
+  time. It now counts as outside the window, for requests and for replies. (GHSA-hj9r-c8jj-mf9v)
+- **Files that hold credentials are written owner-only.** The stores wrote every file as
+  `0666 & ~umask`, so a `0600` file became `0644` the next time it was saved, and a new
+  credentials file was created `0644` under the default umask. `atomic_write_text` now keeps the
+  mode a file already has and takes an explicit `mode=`; the proxy persona file, the cron store
+  (webhook keys), encrypted auth state, session records, approvals, agent jobs and the MCP
+  session store ask for `0600`. A file written by an earlier release is tightened the next time
+  it is saved. A backup job or second container that reads these files from the data volume as
+  a different user must now run as the controller's user (or `chmod` after each save).
 
 ## [1.10.1] — 2026-10-24
 
