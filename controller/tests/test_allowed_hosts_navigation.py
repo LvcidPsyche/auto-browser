@@ -12,6 +12,10 @@ without either check, and one more let the page get there by itself:
 
 These run the real BrowserManager against real Chromium. No traffic leaves the
 machine: every context answers each request itself, by host.
+
+One Chromium serves the whole module (starting it costs seconds per test), so the
+tests share an event loop for the module. Each test still gets its own server,
+manager and browser contexts, and closes the contexts it opened.
 """
 
 from __future__ import annotations
@@ -29,7 +33,8 @@ from unittest.mock import AsyncMock
 from urllib.parse import urlparse
 
 import pytest
-from playwright.async_api import async_playwright
+import pytest_asyncio
+from playwright.async_api import Browser, async_playwright
 
 from app.action_errors import BrowserActionError
 from app.approvals import ApprovalRequiredError
@@ -51,7 +56,23 @@ from app.utils import _BACKGROUND_TASKS
 from tests._chromium import chromium_executable, requires_chromium
 from tests.test_browser_manager_create_session import _settings
 
-pytestmark = requires_chromium
+pytestmark = [requires_chromium, pytest.mark.asyncio(loop_scope="module")]
+
+_SHARED: dict[str, Browser] = {}
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module", autouse=True)
+async def _shared_chromium() -> AsyncIterator[None]:
+    """Launch one Chromium for every test in this module, on the module's event loop."""
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(executable_path=chromium_executable(), headless=True)
+        _SHARED["browser"] = browser
+        try:
+            yield
+        finally:
+            _SHARED.clear()
+            await browser.close()
+
 
 SECRET = "TOP-SECRET-INTERNAL-TEXT"
 EVIL_PAGE = f"<title>EVIL-TITLE</title><p>{SECRET}</p>"
@@ -164,16 +185,13 @@ async def browser_env(
     env.port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        async with async_playwright() as playwright:
-            real = await playwright.chromium.launch(executable_path=chromium_executable(), headless=True)
-            try:
-                manager._acquire_session_browser = AsyncMock(return_value=(_TrackedBrowser(real, env), None))
-                yield env
-            finally:
-                for context in list(env.contexts):
-                    with contextlib.suppress(Exception):
-                        await context.close()
-                await real.close()
+        manager._acquire_session_browser = AsyncMock(return_value=(_TrackedBrowser(_SHARED["browser"], env), None))
+        try:
+            yield env
+        finally:
+            for context in list(env.contexts):
+                with contextlib.suppress(Exception):
+                    await context.close()
     finally:
         server.shutdown()
         server.server_close()
