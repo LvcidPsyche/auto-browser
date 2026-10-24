@@ -13,6 +13,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from ...action_errors import SessionNotFoundError
 from ...downloads import DownloadCaptureService
+from ...network_inspector import scrub_url
 from ...pii_scrub import PiiScrubber
 from ...utils import UTC, spawn_background_task
 
@@ -129,20 +130,23 @@ class BrowserDiagnosticsService:
 
         page.on("console", lambda message: self._bounded_append(session.console_messages, console_entry(message)))
         page.on("pageerror", lambda error: self._bounded_append(session.page_errors, str(error)))
-        page.on(
-            "requestfailed",
-            lambda request: self._bounded_append(
-                session.request_failures,
-                {
-                    "url": request.url,
-                    "method": request.method,
-                    "failure": str(request.failure) if request.failure else None,
-                },
-            ),
-        )
+        page.on("requestfailed", lambda request: self._record_request_failure(session, request))
         page.on("download", lambda download: spawn_background_task(self.manager._handle_download(session, download)))
         page.on("close", lambda _page: self._on_page_closed(session, page))
         page.on("framenavigated", lambda frame: self._on_frame_navigated(session, page, frame))
+
+    def _record_request_failure(self, session: "BrowserSession", request: Any) -> None:
+        """Keep a failed request, its URL scrubbed as the network inspector scrubs the URL of a request.
+
+        The list is served to the agent and goes into every observation, and a URL carries secrets in its
+        query: the inspector's own scrub applies (query and fragment, the same size cap, and nothing
+        scrubbed while PII_SCRUB_NETWORK is off), whatever the NETWORK_INSPECTOR_* settings say.
+        """
+        url, _ = scrub_url(request.url, self.pii_scrubber, self.manager.settings.network_inspector_body_max_bytes)
+        self._bounded_append(
+            session.request_failures,
+            {"url": url, "method": request.method, "failure": str(request.failure) if request.failure else None},
+        )
 
     def _on_frame_navigated(self, session: "BrowserSession", page: "Page", frame: Any) -> None:
         """Send a page that has moved itself off ALLOWED_HOSTS back to about:blank.

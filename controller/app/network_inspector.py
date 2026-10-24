@@ -36,6 +36,7 @@ import logging
 from collections import deque
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 if TYPE_CHECKING:
@@ -180,7 +181,8 @@ class NetworkInspector:
                 return
 
             req_id = str(uuid4())
-            url = request.url or ""
+            # Scrubbed before anything else, so no log line below carries a raw query.
+            url, pii_hit = scrub_url(request.url or "", self.scrubber, self.body_max_bytes)
             method = request.method or "GET"
 
             # Capture request body (if enabled and POST/PUT/PATCH)
@@ -194,21 +196,16 @@ class NetworkInspector:
                     logger.debug("could not read request body for %s: %s", url, exc)
 
             # Scrub request body
-            pii_hit = False
             if req_body and self.scrubber:
                 ct = request.headers.get("content-type") or ""
-                scrubbed, hits = self.scrubber.network_body(req_body, ct)
-                if hits:
-                    req_body = (
-                        scrubbed
-                        if isinstance(scrubbed, str)
-                        else (scrubbed.decode("utf-8", "replace") if scrubbed else req_body)
-                    )
-                    pii_hit = True
+                req_body, body_hit = _scrub_body(self.scrubber, req_body, ct, url)
+                pii_hit = pii_hit or body_hit
 
             # Sanitize headers — remove Authorization / Cookie values
-            headers = dict(request.headers or {})
-            headers = _mask_sensitive_headers(headers)
+            headers, header_hit = _mask_sensitive_headers(
+                dict(request.headers or {}), self.scrubber, self.body_max_bytes
+            )
+            pii_hit = pii_hit or header_hit
 
             entry: dict[str, Any] = {
                 "id": req_id,
@@ -272,7 +269,10 @@ class NetworkInspector:
                 # and they saw status None.
                 entry["status"] = status
                 entry["content_type"] = content_type
-                entry["response_headers"] = _mask_sensitive_headers(resp_headers)
+                entry["response_headers"], header_hit = _mask_sensitive_headers(
+                    resp_headers, self.scrubber, self.body_max_bytes
+                )
+                entry["pii_redacted"] = entry["pii_redacted"] or header_hit
 
             # Capture response body (text/json only, size limited)
             resp_body: str | None = None
@@ -285,14 +285,12 @@ class NetworkInspector:
                     raw_bytes = await response.body()
                     if raw_bytes and len(raw_bytes) <= self.body_max_bytes:
                         resp_body = raw_bytes.decode("utf-8", errors="replace")
-                        if self.scrubber:
-                            scrubbed, hits = self.scrubber.network_body(resp_body, content_type)
-                            if hits:
-                                resp_body = scrubbed if isinstance(scrubbed, str) else resp_body
-                                pii_hit = True
                 except Exception as exc:
                     # Bodies are unavailable for redirects and torn-down contexts.
                     logger.debug("could not read response body for %s: %s", entry.get("url", "?"), exc)
+                if resp_body and self.scrubber:
+                    resp_body, body_hit = _scrub_body(self.scrubber, resp_body, content_type, entry.get("url", "?"))
+                    pii_hit = pii_hit or body_hit
 
             async with self._lock:
                 entry["response_body"] = resp_body
@@ -351,15 +349,97 @@ _SENSITIVE_HEADER_NAMES = frozenset(
         "x-api-key",
         "x-auth-token",
         "x-csrf-token",
+        "x-xsrf-token",
+        "x-amz-security-token",
         "proxy-authorization",
         "www-authenticate",
     }
 )
 
+# Headers whose value is a URL, and can carry its query string's secrets.
+_URL_HEADER_NAMES = frozenset({"referer", "location"})
 
-def _mask_sensitive_headers(headers: dict[str, str]) -> dict[str, str]:
-    """Replace values of security-sensitive headers with [MASKED]."""
-    return {k: "[MASKED]" if k.lower() in _SENSITIVE_HEADER_NAMES else v for k, v in headers.items()}
+
+_QUERY_TOO_LONG = "[QUERY TOO LONG]"
+_FRAGMENT_TOO_LONG = "[FRAGMENT TOO LONG]"
+
+
+def _mask_sensitive_headers(
+    headers: dict[str, str], scrubber: "PiiScrubber | None" = None, max_bytes: int = 16384
+) -> tuple[dict[str, str], bool]:
+    """Replace values of security-sensitive headers with [MASKED]; scrub the query and fragment of URL headers.
+
+    Returns (headers, whether a URL header was redacted). Masking a header whose whole value is secret by
+    name is not counted: only the scrub that looks at the content is.
+    """
+    masked: dict[str, str] = {}
+    redacted = False
+    for name, value in headers.items():
+        lowered = name.lower()
+        if lowered in _SENSITIVE_HEADER_NAMES:
+            masked[name] = "[MASKED]"
+        elif lowered in _URL_HEADER_NAMES:
+            masked[name], hit = scrub_url(value, scrubber, max_bytes)
+            redacted = redacted or hit
+        else:
+            masked[name] = value
+    return masked, redacted
+
+
+def scrub_url(url: str, scrubber: "PiiScrubber | None", max_bytes: int) -> tuple[str, bool]:
+    """Scrub a URL's query string and fragment. A scrub that fails, or a part too long to scrub, costs the part.
+
+    The scrub runs on the event loop, so the query and the fragment are each only scrubbed up to the same
+    size cap as a body; a longer one is replaced, not stored. A query that is too long takes the fragment
+    with it. A fragment carries secrets too: an OAuth implicit grant puts `access_token` there.
+    """
+    if not url or scrubber is None:
+        return url, False
+    head, hash_mark, fragment = url.partition("#")
+    path, _, query = head.partition("?")
+    # The cap is in bytes: a character can take up to four. "surrogatepass" keeps a lone surrogate in a URL
+    # from raising.
+    if _byte_length(query) > max_bytes:
+        return f"{path}?{_QUERY_TOO_LONG}", True
+    fragment_too_long = _byte_length(fragment) > max_bytes
+    try:
+        scrubbed, hits = scrubber.url(head if fragment_too_long else url)
+    except Exception as exc:
+        logger.warning("network inspector could not scrub the query of %s: %s", _origin(url), type(exc).__name__)
+        return path, True
+    if not isinstance(scrubbed, str):
+        return path, True
+    if fragment_too_long:
+        return f"{scrubbed}#{_FRAGMENT_TOO_LONG}", True
+    return scrubbed, bool(hits)
+
+
+def _byte_length(text: str) -> int:
+    return len(text.encode("utf-8", errors="surrogatepass"))
+
+
+def _origin(url: str) -> str:
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.hostname or ''}"
+
+
+def _scrub_body(scrubber: "PiiScrubber", body: str, content_type: str, url: str) -> tuple[str | None, bool]:
+    """Scrub a captured body; whenever the result cannot be trusted the body is dropped, not kept raw.
+
+    Returns (body to store, whether anything was redacted).
+    """
+    try:
+        scrubbed, hits = scrubber.network_body(body, content_type)
+    except Exception as exc:
+        logger.warning("network inspector could not scrub a body for %s: %s", url, type(exc).__name__)
+        return None, True
+    # The value is checked before the hits: a scrubber that reports no hits has not vouched for a
+    # value that is not text, and the raw body must not stand in for it.
+    if not isinstance(scrubbed, str) or not scrubbed:
+        return None, True
+    if not hits:
+        return body, False
+    return scrubbed, True
 
 
 def _elapsed_ms(entry: dict[str, Any]) -> float | None:

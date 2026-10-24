@@ -19,7 +19,7 @@ import time
 import pytest
 from PIL import Image
 
-from app.pii_scrub import ALL_PATTERN_NAMES, PiiScrubber, scrub_screenshot, scrub_text
+from app.pii_scrub import ALL_PATTERN_NAMES, PiiScrubber, find_pii_spans, scrub_screenshot, scrub_text
 
 HOSTILE_UNITS = (
     "a.",
@@ -111,6 +111,63 @@ def test_credentials_in_headers_and_callbacks_are_redacted(line: str, secret: st
 )
 def test_ordinary_text_is_left_alone(text: str) -> None:
     assert _scrubbed(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # The pattern takes every digit group that fits, so the expiry made the whole match fail Luhn.
+        ("4111 1111 1111 1111 12/27", "[REDACTED] 12/27"),
+        ("4111 1111 1111 1111 12 27", "[REDACTED] 12 27"),
+        ("4111-1111-1111-1111-12", "[REDACTED]-12"),
+        ("3782 822463 10005 12 27", "[REDACTED] 12 27"),
+        ("qty 3 4111 1111 1111 1111", "qty 3 [REDACTED]"),
+        ("qty 12 4111 1111 1111 1111 9", "qty 12 [REDACTED] 9"),
+        ("5555 5555 5555 4444 and 4111 1111 1111 1111 12", "[REDACTED] and [REDACTED] 12"),
+        # What the match held beyond the card may begin the next one.
+        ("3782 822463 10005 4111 1111 1111 1111", "[REDACTED] [REDACTED]"),
+        ("5555 5555 5555 4444 4111 1111 1111 1111", "[REDACTED] [REDACTED]"),
+    ],
+)
+def test_a_card_next_to_another_group_of_digits_is_redacted_without_the_group(text: str, expected: str) -> None:
+    result = scrub_text(text, enabled_patterns={"credit_card"})
+
+    assert result.text == expected
+    assert [hit["pattern"] for hit in result.hits] == ["credit_card"] * expected.count("[REDACTED]")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "9999 9999 9999 9999 99",  # no issuer starts with 9
+        "0000 0000 0000 0000 12",
+        "1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9",
+        "4111 1111 1111",  # twelve digits
+        "2026 10 24 11 30 59 0123 4567",
+    ],
+)
+def test_digit_groups_that_hold_no_card_are_left_alone(text: str) -> None:
+    assert scrub_text(text, enabled_patterns={"credit_card"}).text == text
+
+
+def test_card_hit_describes_the_card_and_not_the_digits_beside_it() -> None:
+    result = scrub_text("pay 4111 1111 1111 1111 12/27", enabled_patterns={"credit_card"})
+
+    assert [(hit["offset"], hit["length"]) for hit in result.hits] == [(4, len("4111 1111 1111 1111"))]
+    assert find_pii_spans("pay 4111 1111 1111 1111 12/27", {"credit_card"}) == [(4, 23, "credit_card")]
+
+
+def test_screenshot_redaction_leaves_the_words_beside_a_card_alone() -> None:
+    blank = io.BytesIO()
+    Image.new("RGB", (400, 100), (255, 255, 255)).save(blank, format="PNG")
+    words = [_word(text, 10 + 50 * i, 30, (1, 1, 1)) for i, text in enumerate(("4111", "1111", "1111", "1111", "12"))]
+
+    redacted, hits = scrub_screenshot(blank.getvalue(), words)
+    image = Image.open(io.BytesIO(redacted)).convert("RGB")
+
+    assert all(_is_black(image, block) for block in words[:4])
+    assert not _is_black(image, words[4])
+    assert {hit["pattern"] for hit in hits} == {"credit_card"}
 
 
 def _word(text: str, x: int, y: int, line: tuple[int, int, int]) -> dict:

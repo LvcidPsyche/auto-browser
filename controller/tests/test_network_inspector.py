@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
+from unittest import mock
 
 from app.network_inspector import NetworkInspector
+from app.pii_scrub import PiiScrubber
 
 
 class FakeRequest:
@@ -62,6 +65,9 @@ class FakePage:
 class FakeScrubber:
     def network_body(self, body, content_type: str):
         return "[redacted]", ["secret"] if "secret" in str(body).lower() else []
+
+    def url(self, value: str):
+        return value, []
 
 
 class NetworkInspectorTests(unittest.IsolatedAsyncioTestCase):
@@ -212,6 +218,297 @@ class NetworkInspectorTests(unittest.IsolatedAsyncioTestCase):
             await inspector._handle_request_finished(request)
             self.assertEqual(response.body_calls, 1, name)
             self.assertEqual(inspector.entries()[0]["response_body"], expected, name)
+
+
+SIGNUP_URL = "https://x.test/signup?email=ops%40example.com"
+SIGNUP_URL_SCRUBBED = "https://x.test/signup?email=%5BREDACTED%5D"
+JSON_BODY = '{"email":"ops@example.com"}'
+EMAIL_HIT = {"pattern": "email", "offset": 10, "length": 15, "preview": "ops@ex…"}
+
+
+async def _record(inspector: NetworkInspector, request: FakeRequest, response: FakeResponse | None = None) -> dict:
+    await inspector._handle_request(request)
+    if response is not None:
+        await inspector._handle_response(response)
+    await inspector._handle_request_finished(request)
+    return inspector.entries()[0]
+
+
+class NetworkInspectorEncodedPiiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_request_url_query_is_scrubbed_in_the_stored_entry(self) -> None:
+        inspector = NetworkInspector("session-url", scrubber=PiiScrubber())
+
+        entry = await _record(inspector, FakeRequest(url=SIGNUP_URL))
+
+        self.assertEqual(entry["url"], SIGNUP_URL_SCRUBBED)
+        self.assertTrue(entry["pii_redacted"])
+        self.assertNotIn("ops", json.dumps(inspector.entries(url_contains="signup")))
+
+    async def test_url_without_pii_is_stored_unchanged(self) -> None:
+        inspector = NetworkInspector("session-url-clean", scrubber=PiiScrubber())
+
+        entry = await _record(inspector, FakeRequest(url="https://x.test/search?q=shoes&page=2"))
+
+        self.assertEqual(entry["url"], "https://x.test/search?q=shoes&page=2")
+        self.assertFalse(entry["pii_redacted"])
+
+    async def test_referer_and_location_are_url_scrubbed_and_more_token_headers_masked(self) -> None:
+        inspector = NetworkInspector("session-headers", scrubber=PiiScrubber())
+        request = FakeRequest(
+            url="https://x.test/next",
+            headers={"referer": SIGNUP_URL, "x-xsrf-token": "abc123", "x-amz-security-token": "abc123"},
+        )
+        response = FakeResponse(request, headers={"location": SIGNUP_URL, "content-type": "text/html"}, body=b"<p>")
+
+        entry = await _record(inspector, request, response)
+
+        self.assertEqual(entry["request_headers"]["referer"], SIGNUP_URL_SCRUBBED)
+        self.assertEqual(entry["request_headers"]["x-xsrf-token"], "[MASKED]")
+        self.assertEqual(entry["request_headers"]["x-amz-security-token"], "[MASKED]")
+        self.assertEqual(entry["response_headers"]["location"], SIGNUP_URL_SCRUBBED)
+
+    async def test_a_redaction_in_the_referer_alone_is_counted(self) -> None:
+        inspector = NetworkInspector("session-referer-flag", scrubber=PiiScrubber())
+
+        entry = await _record(inspector, FakeRequest(url="https://x.test/clean", headers={"referer": SIGNUP_URL}))
+
+        self.assertEqual(entry["request_headers"]["referer"], SIGNUP_URL_SCRUBBED)
+        self.assertTrue(entry["pii_redacted"])
+        self.assertEqual(inspector.summary()["pii_redacted"], 1)
+
+    async def test_a_redaction_in_the_location_alone_is_counted(self) -> None:
+        inspector = NetworkInspector("session-location-flag", scrubber=PiiScrubber())
+        request = FakeRequest(url="https://x.test/clean")
+        # A body that is never read: the flag has to come from the header, set when the headers are recorded.
+        response = FakeResponse(request, status=302, headers={"location": SIGNUP_URL, "content-type": "video/mp4"})
+
+        entry = await _record(inspector, request, response)
+
+        self.assertEqual(entry["response_headers"]["location"], SIGNUP_URL_SCRUBBED)
+        self.assertTrue(entry["pii_redacted"])
+        self.assertEqual(inspector.summary()["pii_redacted"], 1)
+
+    async def test_clean_url_headers_do_not_set_the_flag(self) -> None:
+        inspector = NetworkInspector("session-clean-headers", scrubber=PiiScrubber())
+        request = FakeRequest(url="https://x.test/clean", headers={"referer": "https://x.test/r?q=shoes"})
+        response = FakeResponse(request, headers={"location": "https://x.test/next", "content-type": "video/mp4"})
+
+        entry = await _record(inspector, request, response)
+
+        self.assertFalse(entry["pii_redacted"])
+        self.assertEqual(inspector.summary()["pii_redacted"], 0)
+
+    async def test_query_longer_than_the_body_cap_is_replaced_not_scrubbed(self) -> None:
+        inspector = NetworkInspector("session-url-long", scrubber=PiiScrubber(), body_max_bytes=256)
+        url = "https://x.test/p?" + "&".join(f"k{i}=ops%40example.com" for i in range(40)) + "#f"
+
+        entry = await _record(inspector, FakeRequest(url=url, headers={"referer": url}))
+
+        self.assertEqual(entry["url"], "https://x.test/p?[QUERY TOO LONG]")
+        self.assertEqual(entry["request_headers"]["referer"], "https://x.test/p?[QUERY TOO LONG]")
+        self.assertTrue(entry["pii_redacted"])
+
+    async def test_a_long_fragment_is_replaced_and_does_not_make_the_query_long(self) -> None:
+        inspector = NetworkInspector("session-url-frag", scrubber=PiiScrubber(), body_max_bytes=256)
+        fragment_only = "https://x.test/p#" + "a" * 300
+        short_query = "https://x.test/p?email=ops%40example.com#" + "a" * 300
+
+        long_fragment = await _record(inspector, FakeRequest(url=fragment_only, headers={"referer": fragment_only}))
+        scrubbed = await _record(inspector, FakeRequest(url=short_query))
+
+        self.assertEqual(long_fragment["url"], "https://x.test/p#[FRAGMENT TOO LONG]")
+        self.assertEqual(long_fragment["request_headers"]["referer"], "https://x.test/p#[FRAGMENT TOO LONG]")
+        self.assertTrue(long_fragment["pii_redacted"])
+        self.assertEqual(scrubbed["url"], "https://x.test/p?email=%5BREDACTED%5D#[FRAGMENT TOO LONG]")
+        self.assertTrue(scrubbed["pii_redacted"])
+
+    async def test_a_fragment_at_the_cap_is_scrubbed_and_one_byte_over_is_replaced(self) -> None:
+        inspector = NetworkInspector("session-url-frag-cap", scrubber=PiiScrubber(), body_max_bytes=256)
+        at_cap = "https://x.test/p#" + "é" * 128  # 256 bytes
+        over_cap = "https://x.test/p#" + "é" * 129
+        emoji = "https://x.test/p#t=" + "\U0001f600" * 100  # 100 characters, 400 bytes
+
+        kept = await _record(inspector, FakeRequest(url=at_cap))
+        over = await _record(inspector, FakeRequest(url=over_cap))
+        four_byte = await _record(inspector, FakeRequest(url=emoji, headers={"referer": emoji}))
+
+        self.assertEqual(kept["url"], at_cap)
+        self.assertFalse(kept["pii_redacted"])
+        self.assertEqual(over["url"], "https://x.test/p#[FRAGMENT TOO LONG]")
+        self.assertEqual(four_byte["url"], "https://x.test/p#[FRAGMENT TOO LONG]")
+        self.assertEqual(four_byte["request_headers"]["referer"], "https://x.test/p#[FRAGMENT TOO LONG]")
+
+    async def test_a_query_over_the_cap_still_drops_the_fragment_with_it(self) -> None:
+        inspector = NetworkInspector("session-url-query-and-frag", scrubber=PiiScrubber(), body_max_bytes=256)
+        url = "https://x.test/p?" + "&".join(f"k{i}=ops%40example.com" for i in range(40)) + "#access_token=Opaque-1234"
+
+        entry = await _record(inspector, FakeRequest(url=url))
+
+        self.assertEqual(entry["url"], "https://x.test/p?[QUERY TOO LONG]")
+
+    async def test_the_fragment_of_a_location_and_a_referer_is_scrubbed_and_counted(self) -> None:
+        inspector = NetworkInspector("session-location-frag", scrubber=PiiScrubber())
+        callback = "https://app.test/cb#access_token=Opaque-Access-123&id_token=Opaque-Id-4567&state=s"
+        request = FakeRequest(
+            url="https://x.test/clean", headers={"referer": "https://app.test/r#code=Opaque-Code-1234567"}
+        )
+        response = FakeResponse(request, status=302, headers={"location": callback, "content-type": "video/mp4"})
+
+        entry = await _record(inspector, request, response)
+
+        self.assertEqual(
+            entry["response_headers"]["location"],
+            "https://app.test/cb#access_token=%5BREDACTED%5D&id_token=%5BREDACTED%5D&state=s",
+        )
+        self.assertEqual(entry["request_headers"]["referer"], "https://app.test/r#[REDACTED]")
+        self.assertTrue(entry["pii_redacted"])
+        self.assertNotIn("Opaque", json.dumps(inspector.entries()))
+
+    async def test_a_redaction_in_the_location_fragment_alone_is_counted(self) -> None:
+        inspector = NetworkInspector("session-location-frag-flag", scrubber=PiiScrubber())
+        request = FakeRequest(url="https://x.test/clean")
+        response = FakeResponse(
+            request, status=302, headers={"location": "https://app.test/cb#access_token=Opaque-Access-123"}
+        )
+
+        entry = await _record(inspector, request, response)
+
+        self.assertTrue(entry["pii_redacted"])
+        self.assertEqual(inspector.summary()["pii_redacted"], 1)
+
+    async def test_a_failing_scrub_of_a_url_with_a_fragment_drops_the_query_and_the_fragment(self) -> None:
+        scrubber = PiiScrubber()
+        inspector = NetworkInspector("session-url-frag-fail", scrubber=scrubber)
+        url = "https://x.test/cb?a=1#access_token=Opaque-Access-123"
+
+        with mock.patch.object(scrubber, "url", side_effect=RuntimeError("boom")):
+            entry = await _record(inspector, FakeRequest(url=url))
+
+        self.assertEqual(entry["url"], "https://x.test/cb")
+        self.assertTrue(entry["pii_redacted"])
+
+    async def test_query_cap_counts_utf8_bytes_not_characters(self) -> None:
+        inspector = NetworkInspector("session-url-bytes", scrubber=PiiScrubber(), body_max_bytes=256)
+        # "q=" plus n characters of 2 bytes each: 128 of them is exactly the cap, 129 is one over.
+        at_cap = "https://x.test/p?" + "é" * 128
+        over_cap = "https://x.test/p?" + "é" * 129
+        four_byte = "https://x.test/p?q=" + "\U0001f600" * 100  # 100 characters, 400 bytes
+
+        kept = await _record(inspector, FakeRequest(url=at_cap))
+        over = await _record(inspector, FakeRequest(url=over_cap))
+        emoji = await _record(inspector, FakeRequest(url=four_byte, headers={"referer": four_byte}))
+
+        self.assertEqual(kept["url"], at_cap)
+        self.assertFalse(kept["pii_redacted"])
+        self.assertEqual(over["url"], "https://x.test/p?[QUERY TOO LONG]")
+        self.assertEqual(emoji["url"], "https://x.test/p?[QUERY TOO LONG]")
+        self.assertEqual(emoji["request_headers"]["referer"], "https://x.test/p?[QUERY TOO LONG]")
+        self.assertTrue(emoji["pii_redacted"])
+
+    async def test_url_with_a_lone_surrogate_is_still_recorded(self) -> None:
+        inspector = NetworkInspector("session-url-surrogate", scrubber=PiiScrubber(), body_max_bytes=256)
+
+        entry = await _record(inspector, FakeRequest(url="https://x.test/p?q=\ud800"))
+
+        self.assertEqual(entry["url"], "https://x.test/p?q=\ud800")
+
+    async def test_url_scrub_result_that_is_not_a_string_drops_the_query(self) -> None:
+        scrubber = PiiScrubber()
+        inspector = NetworkInspector("session-url-type", scrubber=scrubber)
+
+        with mock.patch.object(scrubber, "url", return_value=(None, [EMAIL_HIT])):
+            entry = await _record(inspector, FakeRequest(url=SIGNUP_URL))
+
+        self.assertEqual(entry["url"], "https://x.test/signup")
+        self.assertTrue(entry["pii_redacted"])
+        self.assertEqual(inspector.entries(url_contains="signup")[0]["url"], "https://x.test/signup")
+
+    async def test_failing_url_scrub_drops_the_query_instead_of_storing_it(self) -> None:
+        scrubber = PiiScrubber()
+        inspector = NetworkInspector("session-url-fail", scrubber=scrubber)
+        request = FakeRequest(url=SIGNUP_URL, headers={"referer": SIGNUP_URL})
+
+        with (
+            mock.patch.object(scrubber, "url", side_effect=RuntimeError("boom")),
+            self.assertLogs("app.network_inspector", level="DEBUG") as logs,
+        ):
+            entry = await _record(inspector, request)
+
+        self.assertFalse(any("ops" in line or "email=" in line for line in logs.output), logs.output)
+        self.assertEqual(entry["url"], "https://x.test/signup")
+        self.assertEqual(entry["request_headers"]["referer"], "https://x.test/signup")
+        self.assertTrue(entry["pii_redacted"])
+
+
+class NetworkInspectorFailClosedTests(unittest.IsolatedAsyncioTestCase):
+    CASES = {
+        "bytes-result": {"return_value": (b"x", [EMAIL_HIT])},
+        "empty-result": {"return_value": ("", [EMAIL_HIT])},
+        "raises": {"side_effect": RuntimeError(f"cannot scrub {JSON_BODY}")},
+        # An unusable value is unusable whatever the hits say: a scrubber that reports no hits
+        # must not get its (wrong-typed) result waved through with the raw body.
+        "none-empty-hits": {"return_value": (None, [])},
+        "bytes-empty-hits": {"return_value": (b"x", [])},
+        "int-false-hits": {"return_value": (42, False)},
+        "none-none": {"return_value": (None, None)},
+        "empty-text-no-hits": {"return_value": ("", [])},
+    }
+
+    async def test_request_body_is_not_stored_when_the_scrub_result_is_unusable(self) -> None:
+        for name, behaviour in self.CASES.items():
+            with self.subTest(name):
+                scrubber = PiiScrubber()
+                inspector = NetworkInspector(f"session-req-{name}", scrubber=scrubber)
+                request = FakeRequest(method="POST", headers={"content-type": "application/json"}, post_data=JSON_BODY)
+
+                with mock.patch.object(scrubber, "network_body", **behaviour):
+                    entry = await _record(inspector, request)
+
+                self.assertIsNone(entry["request_body"])
+                self.assertTrue(entry["pii_redacted"])
+
+    async def test_response_body_is_not_stored_when_the_scrub_result_is_unusable(self) -> None:
+        for name, behaviour in self.CASES.items():
+            with self.subTest(name):
+                scrubber = PiiScrubber()
+                inspector = NetworkInspector(f"session-resp-{name}", scrubber=scrubber)
+                request = FakeRequest()
+                response = FakeResponse(request, headers={"content-type": "application/json"}, body=JSON_BODY.encode())
+
+                with mock.patch.object(scrubber, "network_body", **behaviour):
+                    entry = await _record(inspector, request, response)
+
+                self.assertIsNone(entry["response_body"])
+                self.assertTrue(entry["pii_redacted"])
+
+    async def test_scrub_failure_is_logged_with_the_url_and_never_the_body(self) -> None:
+        scrubber = PiiScrubber()
+        inspector = NetworkInspector("session-log", scrubber=scrubber)
+        request = FakeRequest(
+            url="https://x.test/api", method="POST", headers={"content-type": "application/json"}, post_data=JSON_BODY
+        )
+        response = FakeResponse(request, headers={"content-type": "application/json"}, body=JSON_BODY.encode())
+
+        with (
+            mock.patch.object(scrubber, "network_body", side_effect=RuntimeError(f"cannot scrub {JSON_BODY}")),
+            self.assertLogs("app.network_inspector", level="WARNING") as logs,
+        ):
+            await _record(inspector, request, response)
+
+        warnings = [line for line in logs.output if line.startswith("WARNING")]
+        self.assertEqual(len(warnings), 2)
+        for line in warnings:
+            self.assertIn("https://x.test/api", line)
+            self.assertNotIn("ops@example.com", line)
+
+    async def test_usable_scrub_result_is_still_stored(self) -> None:
+        inspector = NetworkInspector("session-ok", scrubber=PiiScrubber())
+        request = FakeRequest(method="POST", headers={"content-type": "application/json"}, post_data=JSON_BODY)
+
+        entry = await _record(inspector, request)
+
+        self.assertEqual(entry["request_body"], '{"email":"[REDACTED]"}')
+        self.assertTrue(entry["pii_redacted"])
 
 
 if __name__ == "__main__":
