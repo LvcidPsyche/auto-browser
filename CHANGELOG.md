@@ -2,6 +2,16 @@
 
 All notable changes to auto-browser are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Docker images publish only from green CI on main.** A `v*` tag already had to point at a
+  commit on `main` for `docker-publish.yml` to push the `X.Y.Z`, `X.Y` and `latest` image tags.
+  It now also needs a successful `CI` push run on `main` for that exact commit, the same gate
+  `release.yml` has had since 1.10.0. `edge` and `sha-<commit>` are unchanged: every push to
+  `main` still publishes them.
+
 ## [1.10.0] — 2026-10-19
 
 A security update and correctness pass over 1.9.1: every finding was reproduced before it was
