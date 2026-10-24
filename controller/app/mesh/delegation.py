@@ -167,7 +167,8 @@ class DelegationManager:
         # Reply timestamp window — symmetric with inbound, closes a MITM replay vector
         # where a captured reply could be re-served long after the original.
         reply_age = time.time() - reply_envelope.timestamp
-        if abs(reply_age) > self._timestamp_window:
+        # "not <=", not ">": a NaN timestamp compares false both ways and would pass ">".
+        if not abs(reply_age) <= self._timestamp_window:
             raise DelegationError(
                 f"reply timestamp out of window: age={reply_age:.1f}s "
                 f"limit={self._timestamp_window}s peer={peer_node_id}"
@@ -203,7 +204,8 @@ class DelegationManager:
 
         # Timestamp window — check before signature verification (cheap, fails fast)
         age = time.time() - envelope.timestamp
-        if abs(age) > self._timestamp_window:
+        # "not <=", not ">": a NaN timestamp compares false both ways and would pass ">".
+        if not abs(age) <= self._timestamp_window:
             raise DelegationRejected(
                 f"envelope timestamp out of window: age={age:.1f}s limit={self._timestamp_window}s"
             )

@@ -45,7 +45,7 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 from .session_ownership import ANONYMOUS, acting_as, as_system, may_use, owner_identity, verified_operator
-from .utils import UTC, atomic_write_text
+from .utils import PRIVATE_FILE_MODE, UTC, atomic_write_text
 
 try:
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -427,7 +427,7 @@ class CronService:
 
     def _save(self, data: dict[str, Any]) -> None:
         self._store_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(self._store_path, json.dumps(data, indent=2))
+        atomic_write_text(self._store_path, json.dumps(data, indent=2), mode=PRIVATE_FILE_MODE)
 
     @staticmethod
     def _safe_job(job: dict[str, Any]) -> dict[str, Any]:

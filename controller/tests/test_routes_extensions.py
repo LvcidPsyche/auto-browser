@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.mesh.models import PeerRecord
 from app.routes.extensions import register_all_routers
 
 
@@ -49,9 +50,6 @@ class FakePeerRegistry:
 
     def add(self, peer) -> None:
         self.items[peer.node_id] = peer
-
-    def remove(self, node_id: str) -> bool:
-        return self.items.pop(node_id, None) is not None
 
 
 class FakeCdp:
@@ -110,17 +108,15 @@ class RoutesExtensionsTests(unittest.TestCase):
     def test_mesh_cdp_and_dashboard_routes(self) -> None:
         client = self.make_client()
 
-        peer = {
-            "node_id": "peer-1",
-            "pubkey_b64": "pub",
-            "endpoint": "https://peer.example.com",
-            "display_name": "Peer",
-            "grants": [],
-        }
-        self.assertEqual(client.post("/mesh/peers", json=peer).json()["status"], "added")
+        # Peers come from the peers file, not from the API: the registry is seeded directly, and
+        # the HTTP views only read it (see tests/test_mesh_peer_registration.py).
+        client.app.state.peer_registry.add(
+            PeerRecord(node_id="peer-1", pubkey_b64="pub", endpoint="https://peer.example.com", display_name="Peer")
+        )
         self.assertEqual(client.get("/mesh/peers").json()["peers"][0]["node_id"], "peer-1")
-        self.assertEqual(client.delete("/mesh/peers/peer-1").json()["status"], "removed")
-        self.assertEqual(client.delete("/mesh/peers/missing").status_code, 404)
+        self.assertEqual(client.post("/mesh/peers", json={"node_id": "peer-2", "pubkey_b64": "pub"}).status_code, 405)
+        self.assertIn(client.delete("/mesh/peers/peer-1").status_code, (404, 405))
+        self.assertEqual([p["node_id"] for p in client.get("/mesh/peers").json()["peers"]], ["peer-1"])
         self.assertEqual(client.get("/mesh/identity").json()["node_id"], "node-1")
 
         self.assertEqual(client.get("/sessions/session-1/cdp/element?selector=button").json()["selector"], "button")

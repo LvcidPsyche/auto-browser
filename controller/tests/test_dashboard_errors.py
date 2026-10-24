@@ -210,7 +210,6 @@ def test_every_action_shows_why_it_failed() -> None:
             ("GET", "/mesh/peers"): (200, {"peers": [peer]}),
             ("POST", "/approvals/appr-1/approve"): (409, {"detail": "approval already decided"}),
             ("POST", "/agent/jobs/job-123456789abc/cancel"): (500, {"detail": "cancel exploded"}),
-            ("DELETE", "/mesh/peers/node-abcdef0123456789"): (404, {"detail": "peer is gone"}),
             ("GET", "/agent/jobs/job-missing"): (404, {"detail": "no such job"}),
             ("POST", "/sessions"): (500, {"detail": "cannot start a browser"}),
         }
@@ -220,7 +219,7 @@ def test_every_action_shows_why_it_failed() -> None:
         seen: dict[str, str] = {}
         await page.wait_for_selector("#approvals-tbody button")
         await page.wait_for_selector("#agent-jobs-tbody button")
-        await page.wait_for_selector("#peers-tbody button")
+        await page.wait_for_selector("#peers-tbody tr td")
 
         await page.get_by_role("button", name="Approve").click()
         seen["approve"] = await text_after(
@@ -230,10 +229,8 @@ def test_every_action_shows_why_it_failed() -> None:
         seen["cancel"] = await text_after(
             page, "#agent-jobs-status", "document.getElementById('agent-jobs-status').textContent.includes('exploded')"
         )
-        await page.get_by_role("button", name="Remove").click()
-        seen["remove"] = await text_after(
-            page, "#peers-status", "document.getElementById('peers-status').textContent.includes('gone')"
-        )
+        # Peers are managed in the peers file: the list offers no way to change one.
+        seen["peer_buttons"] = str(await page.locator("#peers-tbody button").count())
         await page.fill("#replay-job-id", "job-missing")
         await page.click("#load-replay")
         seen["replay"] = await text_after(
@@ -261,7 +258,7 @@ def test_every_action_shows_why_it_failed() -> None:
 
     assert "approval already decided" in seen["approve"] and not seen["approve"].startswith("Approval appr-1 approved")
     assert "cancel exploded" in seen["cancel"]
-    assert "peer is gone" in seen["remove"]
+    assert seen["peer_buttons"] == "0"
     assert "no such job" in seen["replay"]
     assert "cannot start a browser" in seen["start"]
     assert "cannot start a browser" in seen["reopen"]

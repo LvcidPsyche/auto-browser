@@ -121,10 +121,10 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <h2>Mesh Peers</h2>
       <button class="refresh-btn" id="refresh-peers">↻ Refresh</button>
     </div>
-    <div class="section-note" id="peers-status"></div>
+    <div class="section-note">Peers are listed here and managed in the peers file on the host (MESH_PEERS_PATH).</div>
     <table><thead><tr>
-      <th>Node ID</th><th>Display Name</th><th>Endpoint</th><th>Last Seen</th><th>Grants</th><th>Actions</th>
-    </tr></thead><tbody id="peers-tbody"><tr><td colspan="6" class="empty">No peers registered</td></tr></tbody></table>
+      <th>Node ID</th><th>Display Name</th><th>Endpoint</th><th>Last Seen</th><th>Grants</th>
+    </tr></thead><tbody id="peers-tbody"><tr><td colspan="5" class="empty">No peers registered</td></tr></tbody></table>
   </div>
 
   <!-- Audit -->
@@ -598,12 +598,12 @@ async function loadPeers() {
     d = await api('/mesh/peers');
   } catch (err) {
     document.getElementById('stat-peers').textContent = '—';
-    appendLoadError(tbody, 6, 'peers', err);
+    appendLoadError(tbody, 5, 'peers', err);
     return;
   }
   const peers = d.peers || [];
   document.getElementById('stat-peers').textContent = peers.length;
-  if (!peers.length) { appendEmptyRow(tbody, 6, 'No peers registered'); return; }
+  if (!peers.length) { appendEmptyRow(tbody, 5, 'No peers registered'); return; }
   tbody.replaceChildren();
   peers.forEach(p => {
     const row = document.createElement('tr');
@@ -613,29 +613,8 @@ async function loadPeers() {
     appendCell(row, p.endpoint, {className: 'mono'});
     appendCell(row, timeAgo(p.last_seen));
     appendCell(row, `${(p.grants||[]).length} grants`);
-    const actionCell = document.createElement('td');
-    const button = document.createElement('button');
-    button.className = 'btn btn-danger btn-sm';
-    button.type = 'button';
-    button.textContent = 'Remove';
-    button.addEventListener('click', () => removePeer(asText(p.node_id, '')));
-    actionCell.appendChild(button);
-    row.appendChild(actionCell);
     tbody.appendChild(row);
   });
-}
-
-async function removePeer(nodeId) {
-  if (!confirm('Remove peer ' + nodeId + '?')) return;
-  const statusEl = document.getElementById('peers-status');
-  statusEl.textContent = '';
-  try {
-    await api('/mesh/peers/' + encodeURIComponent(nodeId), {method: 'DELETE'});
-  } catch (err) {
-    statusEl.textContent = `Could not remove peer ${nodeId}: ${err.message}`;
-    return;
-  }
-  loadPeers();
 }
 
 async function loadAudit() {

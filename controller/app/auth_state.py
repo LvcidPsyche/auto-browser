@@ -10,7 +10,7 @@ from typing import Any
 
 from cryptography.fernet import Fernet
 
-from .utils import UTC, atomic_write_text
+from .utils import PRIVATE_FILE_MODE, UTC, atomic_write_text
 
 # Auth state is cookies plus storage state — kilobytes. Anything larger is not
 # a state file, and content-sniffing it is not worth the read.
@@ -69,7 +69,7 @@ class AuthStateManager:
                 "format": "fernet-json",
                 "ciphertext": ciphertext,
             }
-            atomic_write_text(final_path, json.dumps(payload))
+            atomic_write_text(final_path, json.dumps(payload), mode=PRIVATE_FILE_MODE)
             return self.inspect(final_path)
 
         # A fresh temp file per save, removed whatever happens. The fixed

@@ -404,16 +404,20 @@ class BrowserSessionService:
             raise SessionNotFoundError(session_id)
         return record.model_dump()
 
-    async def owner_of(self, session_id: str) -> str | None:
-        """Who owns a session, live or recorded; None when unowned or unknown."""
+    async def find_owner(self, session_id: str) -> tuple[bool, str | None]:
+        """(known, owner) for a session, live or recorded; known is False when it is neither."""
         session = self.manager.sessions.get(session_id)
         if session is not None:
-            return session.owner
+            return True, session.owner
         try:
             record = await self.manager.session_store.get(session_id)
         except KeyError:
-            return None
-        return record.owner
+            return False, None
+        return True, record.owner
+
+    async def owner_of(self, session_id: str) -> str | None:
+        """Who owns a session, live or recorded; None when unowned or unknown."""
+        return (await self.find_owner(session_id))[1]
 
     async def ensure_accessible(self, session_id: str) -> None:
         """Refuse a session that belongs to another operator, as if it did not exist.

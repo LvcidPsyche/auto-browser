@@ -363,6 +363,10 @@ class BrowserManager:
     async def session_owner(self, session_id: str) -> str | None:
         return await self.session_lifecycle.owner_of(session_id)
 
+    async def session_owner_lookup(self, session_id: str) -> tuple[bool, str | None]:
+        """(known, owner): unlike session_owner, tells a session nobody owns from one with no record."""
+        return await self.session_lifecycle.find_owner(session_id)
+
     async def get_session_summary(self, session_id: str) -> dict[str, Any]:
         """Public API for getting a session summary by ID."""
         return await self.session_lifecycle.get_summary(session_id)

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import errno
+import logging
+import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from pathlib import Path
 
+import anyio.to_thread
 from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
@@ -11,6 +16,7 @@ from starlette.responses import Response
 from starlette.types import Scope
 
 from .agent_jobs import AgentJobQueue
+from .auth_policy import has_named_credentials
 from .browser_manager import BrowserManager
 from .config import Settings
 from .cron_service import CronService
@@ -28,7 +34,16 @@ from .session_share import SessionShareManager
 from .tool_gateway import McpToolGateway
 from .vision_target import VisionTargeter
 
+logger = logging.getLogger(__name__)
+
 LifespanFactory = Callable[[FastAPI], AbstractAsyncContextManager[None] | AsyncIterator[None]]
+
+# The most characters of a client-supplied path (or of an error that quotes it) one log line carries.
+MAX_LOGGED_PATH_CHARS = 200
+
+
+def _capped(text: str) -> str:
+    return text if len(text) <= MAX_LOGGED_PATH_CHARS else text[:MAX_LOGGED_PATH_CHARS] + "..."
 
 
 @dataclass(slots=True)
@@ -127,17 +142,61 @@ class SessionArtifactFiles(StaticFiles):
     A mount is outside the routes' dependencies, and an artifact path names its
     session, so screenshots, traces and downloads of another operator's session
     were one guessed path away (trace.zip always has the same name).
+
+    The session is the first component of the file the path RESOLVES to, never of
+    the path as typed: a leading "../" survives Starlette's normalisation, so
+    "/artifacts/%2e%2e/artifacts/<session>/trace.zip" typed the session ".." (which
+    nobody owns) and still reached <session>'s file.
     """
 
-    def __init__(self, *, directory: str, manager: BrowserManager) -> None:
+    def __init__(self, *, directory: str, manager: BrowserManager, require_known_session: bool = False) -> None:
         super().__init__(directory=directory)
         self.manager = manager
+        self.require_known_session = require_known_session
 
     async def get_response(self, path: str, scope: Scope) -> Response:
-        session_id = path.replace("\\", "/").lstrip("/").split("/", 1)[0]
-        if session_id and not may_use(await self.manager.session_owner(session_id)):
+        # The lookup is blocking file I/O, so it runs in a thread, and its errors are mapped here
+        # because this runs ahead of the parent's own lookup, which is where Starlette maps them.
+        try:
+            session_id = await anyio.to_thread.run_sync(self._session_of, path)
+        except ValueError:
+            raise HTTPException(status_code=404) from None  # a null byte or other character no path holds
+        except OSError as exc:
+            if exc.errno != errno.ENAMETOOLONG:  # a name that long is the client's doing, not worth a log line
+                # The path is the client's, and Windows says EINVAL (not ENAMETOOLONG) for a name it
+                # cannot parse and puts that name in the error too: cap both, or one request writes a
+                # log line as long as the request line allows.
+                logger.warning("artifact lookup failed for %r: %s", _capped(path), _capped(str(exc)))
+            raise HTTPException(status_code=404) from None
+        # A path that resolves to nothing is the parent's 404, so nothing is leaked.
+        if session_id is not None and not await self._may_serve(session_id):
             raise HTTPException(status_code=404)
         return await super().get_response(path, scope)
+
+    async def _may_serve(self, session_id: str) -> bool:
+        if not self.require_known_session:
+            return not session_id or may_use(await self.manager.session_owner(session_id))
+        # With named credentials, a first component that is not a session with a record (a file in
+        # the artifact root, a directory whose record is gone) has no owner to check, so no one gets it.
+        known, owner = await self.manager.session_owner_lookup(session_id)
+        return known and may_use(owner)
+
+    def _session_of(self, path: str) -> str | None:
+        """The session the path's file belongs to; "" for a file outside any session directory;
+        None when the path reaches nothing."""
+        full_path, stat_result = self.lookup_path(path)
+        if stat_result is None:
+            return None
+        return self._resolved_session_id(full_path)
+
+    def _resolved_session_id(self, full_path: str) -> str:
+        root = Path(os.path.realpath(self.directory))
+        try:
+            relative = Path(os.path.realpath(full_path)).relative_to(root)
+        except ValueError:
+            # lookup_path already refuses anything outside the root; fail closed regardless.
+            raise HTTPException(status_code=404) from None
+        return relative.parts[0] if relative.parts else ""
 
 
 def create_controller_app(
@@ -160,7 +219,11 @@ def create_controller_app(
 
     application.mount(
         "/artifacts",
-        SessionArtifactFiles(directory=services.settings.artifact_root, manager=services.manager),
+        SessionArtifactFiles(
+            directory=services.settings.artifact_root,
+            manager=services.manager,
+            require_known_session=has_named_credentials(services.settings),
+        ),
         name="artifacts",
     )
     application.include_router(

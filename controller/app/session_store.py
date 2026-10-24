@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .models import SessionRecord
-from .utils import atomic_write_text, record_path
+from .utils import PRIVATE_FILE_MODE, atomic_write_text, record_path
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ class FileSessionStore(_MarkInterruptedMixin):
 
     def _upsert_sync(self, record: SessionRecord) -> None:
         path = record_path(self.root, record.id, ".json")
-        atomic_write_text(path, record.model_dump_json(indent=2))
+        atomic_write_text(path, record.model_dump_json(indent=2), mode=PRIVATE_FILE_MODE)
 
 
 class RedisSessionStore(_MarkInterruptedMixin):
