@@ -187,30 +187,46 @@ class IsolatedSessionTunnelBroker:
     async def release(self, tunnel: IsolatedSessionTunnel) -> None:
         async with self._lock:
             tunnel.released = True
-            if tunnel.heartbeat_task is not None:
-                tunnel.heartbeat_task.cancel()
-                # wait(), not await: awaiting the task and suppressing CancelledError
-                # also swallowed a cancel aimed at release() itself.
-                await asyncio.wait({tunnel.heartbeat_task})
-                tunnel.heartbeat_task = None
-
-            process = tunnel.process
-            if process is not None and process.returncode is None:
-                process.terminate()
+            # Once `released` is set nothing else stops this tunnel, so a cancel
+            # aimed at release() (a close that gave up, shutdown) must not end the
+            # teardown halfway: autossh would keep running and hold its remote
+            # port. Finish it under the lock, then let the cancel through.
+            teardown = asyncio.create_task(self._teardown(tunnel))
+            cancelled: asyncio.CancelledError | None = None
+            while not teardown.done():
                 try:
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
+                    await asyncio.shield(teardown)
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+            teardown.result()
+            if cancelled is not None:
+                raise cancelled
 
-            tunnel.status = "inactive"
-            tunnel.error = None
-            self._write_metadata(tunnel, status="inactive")
-            self._allocated_ports.discard(tunnel.remote_port)
-            self._tunnels.pop(tunnel.session_id, None)
-            if tunnel.stderr_handle is not None:
-                tunnel.stderr_handle.close()
-                tunnel.stderr_handle = None
+    async def _teardown(self, tunnel: IsolatedSessionTunnel) -> None:
+        if tunnel.heartbeat_task is not None:
+            tunnel.heartbeat_task.cancel()
+            # wait(), not await: awaiting the task and suppressing CancelledError
+            # would also swallow a cancel aimed at this task.
+            await asyncio.wait({tunnel.heartbeat_task})
+            tunnel.heartbeat_task = None
+
+        process = tunnel.process
+        if process is not None and process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+
+        tunnel.status = "inactive"
+        tunnel.error = None
+        self._write_metadata(tunnel, status="inactive")
+        self._allocated_ports.discard(tunnel.remote_port)
+        self._tunnels.pop(tunnel.session_id, None)
+        if tunnel.stderr_handle is not None:
+            tunnel.stderr_handle.close()
+            tunnel.stderr_handle = None
 
     def describe(self, tunnel: IsolatedSessionTunnel | None) -> dict[str, Any] | None:
         if tunnel is None:

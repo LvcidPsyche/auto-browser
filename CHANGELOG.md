@@ -14,7 +14,8 @@ All notable changes to auto-browser are documented here.
 - **A cancelled session create no longer leaves its isolated tunnel behind.** Cancelling while
   autossh was starting, or while waiting for the tunnel lock after the startup grace period, left
   the log file open or autossh running and its remote port reserved. Both now stop the process and
-  mark the tunnel as errored. Cancelling a release no longer gets swallowed while it waits for the
+  mark the tunnel as errored. A cancelled release still stops autossh, frees the port and closes
+  the log before the cancel goes through; it used to be swallowed while release waited for the
   tunnel's heartbeat task.
 - **`CURATOR_ENABLED` no longer sends a placeholder transcript to the model.** With the setting on
   and a provider key present, every closed session started a background review that sent the model

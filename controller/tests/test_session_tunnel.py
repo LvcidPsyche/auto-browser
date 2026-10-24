@@ -391,6 +391,31 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(release.cancelled())
             await asyncio.wait({heartbeat})
 
+    async def test_release_cancelled_while_waiting_for_the_heartbeat_still_tears_down(self) -> None:
+        """release() sets `released` first, so nothing else will stop the tunnel. A
+        cancel that lands while it waits for the heartbeat, even one that dies at
+        once, must not leave autossh running, its port reserved or its log open."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            tunnel = broker._build_tunnel("session-1", remote_port=16181, local_host="h", local_port=6080)
+            tunnel.process = FakeProcess()
+            tunnel.stderr_handle = tunnel.log_path.open("ab")
+            broker._tunnels["session-1"] = tunnel
+            broker._allocated_ports.add(16181)
+            tunnel.heartbeat_task = asyncio.create_task(asyncio.sleep(3600))
+
+            release = asyncio.create_task(broker.release(tunnel))
+            await asyncio.sleep(0)  # release() takes the lock and waits for the heartbeat
+            release.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await release
+
+            self.assertTrue(tunnel.process.terminated)
+            self.assertEqual(broker._allocated_ports, set())
+            self.assertEqual(broker._tunnels, {})
+            self.assertIsNone(tunnel.stderr_handle)
+            self.assertEqual(json.loads(tunnel.info_path.read_text(encoding="utf-8"))["status"], "inactive")
+
     async def test_failed_metadata_write_does_not_leak_the_log_handle(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             broker = await self._started_broker(Path(tempdir))
