@@ -176,6 +176,17 @@ class ProviderErrorExtractionTests(unittest.TestCase):
         invalid = BaseProviderAdapter._safe_json(httpx.Response(200, text="not json"))
         self.assertIsNone(invalid)
 
+    def test_safe_json_invalid_utf8_body_is_none(self) -> None:
+        self.assertIsNone(BaseProviderAdapter._safe_json(httpx.Response(502, content=b"\xff\xfe")))
+
+    def test_safe_json_does_not_mask_unrelated_errors(self) -> None:
+        class BrokenResponse:
+            def json(self) -> dict:
+                raise KeyError("bug")
+
+        with self.assertRaises(KeyError):
+            BaseProviderAdapter._safe_json(BrokenResponse())  # type: ignore[arg-type]
+
     def test_extract_error_message(self) -> None:
         self.assertIsNone(BaseProviderAdapter._extract_error_message(None))
         self.assertIsNone(BaseProviderAdapter._extract_error_message({}))
