@@ -109,7 +109,8 @@ def _pack_name(item: str) -> str:
     if name in PACKS:
         return name
     if name in PROFILES:
-        raise ValueError(f"MCP_TOOL_PACKS: {name} is a tool profile, not a pack; set MCP_TOOL_PROFILE={name}.")
+        fix = "MCP_TOOL_PROFILE picks the profile" if item.startswith("-") else f"set MCP_TOOL_PROFILE={name}"
+        raise ValueError(f"MCP_TOOL_PACKS: {name} is a tool profile, not a pack; {fix}.")
     raise ValueError(
         f"MCP_TOOL_PACKS: {item!r} is not a tool pack{_did_you_mean(name, PACKS)}. "
         f"Name packs to add and -pack to remove one: {', '.join(PACKS)}."

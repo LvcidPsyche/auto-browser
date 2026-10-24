@@ -287,14 +287,17 @@ class SelectionTests(unittest.TestCase):
                 )
 
     def test_a_profile_named_as_a_pack_says_where_it_goes(self) -> None:
-        for value in ("full", "-full"):
+        for value, expected in (
+            # Asked for as a pack: the setting that serves it.
+            ("full", "MCP_TOOL_PACKS: full is a tool profile, not a pack; set MCP_TOOL_PROFILE=full."),
+            # Removed as a pack: "set MCP_TOOL_PROFILE=full" would be the opposite.
+            ("-full", "MCP_TOOL_PACKS: full is a tool profile, not a pack; MCP_TOOL_PROFILE picks the profile."),
+            ("-lean", "MCP_TOOL_PACKS: lean is a tool profile, not a pack; MCP_TOOL_PROFILE picks the profile."),
+        ):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError) as caught:
                     resolve_tool_selection("curated", value)
-                self.assertEqual(
-                    str(caught.exception),
-                    "MCP_TOOL_PACKS: full is a tool profile, not a pack; set MCP_TOOL_PROFILE=full.",
-                )
+                self.assertEqual(str(caught.exception), expected)
 
     def test_removals_apply_after_additions_and_noops_are_not_turned_off(self) -> None:
         for packs in ("tabs,-tabs", "-tabs,tabs"):
