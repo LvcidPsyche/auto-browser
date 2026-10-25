@@ -35,7 +35,12 @@ make release-audit   # launch-prep audit; run before any release PR
 
 ## Releases
 
-A `v*` tag runs `.github/workflows/release.yml`, which publishes only three packages: `client/`,
-`integrations/langchain/` and `packaging/auto-browser-mcp/`. Cut a release only when
-`git diff <last-tag>..main -- client/ integrations/langchain/ packaging/auto-browser-mcp/` is
-non-empty. `main` is protected: changes land through a PR with green CI, one merge at a time.
+A `v*` tag runs `.github/workflows/release.yml`, which publishes three packages to PyPI
+(`client/`, `integrations/langchain/` and `packaging/auto-browser-mcp/`), and
+`.github/workflows/docker-publish.yml`, which publishes the controller and browser-node images as
+`X.Y.Z`, `X.Y` and `latest`. Cut a release only when something users install has changed since
+the last tag: a package (`git diff <last-tag>..main -- client/ integrations/langchain/
+packaging/auto-browser-mcp/` is non-empty) or an image (the same diff over `controller/` and
+`browser-node/`, tests aside). A controller-only release bumps every version string as usual and
+says in its CHANGELOG intro that the three packages change only in version (1.10.1, 1.11.0).
+`main` is protected: changes land through a PR with green CI, one merge at a time.
