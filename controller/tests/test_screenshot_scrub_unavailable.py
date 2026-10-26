@@ -26,6 +26,7 @@ from app.browser.services.observation import BrowserObservationService, _scrub_d
 from app.browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
 from app.ocr import OCRExtractor, tesseract_available
 from app.pii_scrub import PiiScrubber
+from tests._fake_element_ids import FakePageElementIds
 
 LOGGER_NAME = "app.browser.services.observation"
 
@@ -79,6 +80,7 @@ def _service(tmp_path: Path, *, ocr_enabled: bool = True, strict: bool = False) 
         remote_access=SimpleNamespace(session_info=MagicMock(return_value={})),
         tabs=SimpleNamespace(summaries=AsyncMock(return_value=[])),
         get_session=AsyncMock(return_value=session),
+        element_ids=FakePageElementIds(),
     )
     manager.session = session
     return BrowserObservationService(manager=manager)

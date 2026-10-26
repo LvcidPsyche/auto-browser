@@ -16,6 +16,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..action_errors import BrowserActionError, SessionNotFoundError
 from ..approvals import ApprovalRequiredError, held_for_execution
+from ..browser.element_ids import refuse_selector_hint
 from ..browser_scripts import PAGE_TEXT_SCRIPT
 from ..models import (
     ActionName,
@@ -86,6 +87,7 @@ from ..tool_inputs import (
     VisionFindInput,
     WaitForSelectorInput,
 )
+from .drag import drag_drop
 from .packs import register_all
 from .registry import ToolRegistry, ToolSpec
 from .selection import withheld_tool_message
@@ -824,6 +826,7 @@ class McpToolGateway:
     async def _wait_for_selector(self, payload: WaitForSelectorInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
         self.manager._assert_page_allowed(session)
+        refuse_selector_hint(payload.selector, action="wait_for_selector")
         await session.page.wait_for_selector(
             payload.selector,
             timeout=payload.timeout_ms,
@@ -920,6 +923,7 @@ class McpToolGateway:
                 )
             return {"session_id": payload.session_id, "query": payload.query, "elements": elements}
 
+        refuse_selector_hint(payload.selector, action="find_elements")
         elements = await session.page.evaluate(
             """([selector, limit]) => {
                 const els = [...document.querySelectorAll(selector)].slice(0, limit);
@@ -943,34 +947,7 @@ class McpToolGateway:
         return {"session_id": payload.session_id, "selector": payload.selector, "elements": elements}
 
     async def _drag_drop(self, payload: DragDropInput) -> dict[str, Any]:
-        session = await self.manager.get_session(payload.session_id)
-        self.manager._assert_page_allowed(session)
-
-        # Resolve source coordinates
-        if payload.source_selector:
-            box = await session.page.locator(payload.source_selector).first.bounding_box()
-            sx = box["x"] + box["width"] / 2 if box else 0
-            sy = box["y"] + box["height"] / 2 if box else 0
-        elif payload.source_x is not None and payload.source_y is not None:
-            sx, sy = payload.source_x, payload.source_y
-        else:
-            raise ValueError("Provide source_selector or source_x/source_y")
-
-        # Resolve target coordinates
-        if payload.target_selector:
-            box = await session.page.locator(payload.target_selector).first.bounding_box()
-            tx = box["x"] + box["width"] / 2 if box else 0
-            ty = box["y"] + box["height"] / 2 if box else 0
-        elif payload.target_x is not None and payload.target_y is not None:
-            tx, ty = payload.target_x, payload.target_y
-        else:
-            raise ValueError("Provide target_selector or target_x/target_y")
-
-        await session.page.mouse.move(sx, sy)
-        await session.page.mouse.down()
-        await session.page.mouse.move(tx, ty, steps=10)
-        await session.page.mouse.up()
-        return {"session_id": payload.session_id, "from": {"x": sx, "y": sy}, "to": {"x": tx, "y": ty}}
+        return await drag_drop(self.manager, payload)
 
     async def _set_viewport(self, payload: SetViewportInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)

@@ -18,6 +18,7 @@ from .approvals import ApprovalStore
 from .artifacts import SessionArtifactService
 from .audit import AuditStore
 from .auth_state import AuthStateManager
+from .browser.element_ids import ElementIds
 from .browser.services import (
     BrowserActionService,
     BrowserApprovalService,
@@ -164,6 +165,7 @@ class BrowserManager:
         self.sessions: dict[str, BrowserSession] = {}
         self._browser_lock = asyncio.Lock()
         self.action_pipeline = BrowserActionPipeline()
+        self.element_ids = ElementIds(settings)
         self.actions = BrowserActionService(self)
         self.approval_service = BrowserApprovalService(self)
         self.auth_profiles = BrowserAuthProfileService(self)
@@ -663,8 +665,10 @@ class BrowserManager:
         action_name: str,
         target: dict[str, Any],
         operation,
+        *,
+        change_made=None,
     ) -> dict[str, Any]:
-        return await self.actions.run_action(session, action_name, target, operation)
+        return await self.actions.run_action(session, action_name, target, operation, change_made=change_made)
 
     async def _settle(self, page: Page) -> None:
         await self.actions.settle(page)

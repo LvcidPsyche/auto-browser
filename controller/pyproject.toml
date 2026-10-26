@@ -50,6 +50,7 @@ select = ["E9", "F", "I", "S"]
 "tests/**" = ["S101", "S104", "S105", "S106", "S107", "S108", "S110", "S310", "S603"]
 # Humanized timing/jitter and user-agent choice: unpredictability for realism, not secrecy.
 "app/browser/services/actions.py" = ["S311"]
+"app/browser/services/element_actions.py" = ["S311"]
 "app/stealth/*.py" = ["S311"]
 "app/config.py" = ["S311"]
 # 0.0.0.0 here is a value compared against or handed to the browser-node container, or listed

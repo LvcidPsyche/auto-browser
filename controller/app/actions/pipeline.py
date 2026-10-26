@@ -8,7 +8,7 @@ from typing import Any
 from playwright.async_api import Error as PlaywrightError
 
 from .. import events as _events
-from ..action_errors import SCREENSHOT_WITHHELD, BrowserActionError
+from ..action_errors import PAGE_NOT_RESPONDING, SCREENSHOT_WITHHELD, BrowserActionError
 from ..utils import utc_now
 from ..witness import WitnessApproval
 
@@ -19,15 +19,29 @@ ActionOperation = Callable[[], Awaitable[None]]
 # The only actions that may run while the page sits on a host ALLOWED_HOSTS refuses:
 # they are how a session gets off it. Everything else would act on, or read, that page.
 LEAVES_DISALLOWED_PAGE = frozenset({"navigate", "go_back"})
+# Errors that mean only the page's state was not read: the snapshot or observation reports them in place.
+_UNOBSERVED = frozenset({SCREENSHOT_WITHHELD, PAGE_NOT_RESPONDING})
+# Where an action's target records the step that failed after its change was made (see ActionRunContext).
+AFTER_CHANGE = "after_change"
+
+
+def _no_change_made() -> bool:
+    return False
 
 
 @dataclass(slots=True)
 class ActionRunContext:
+    """One action's run. ``change_made`` answers whether the operation has made a change that cannot be
+    taken back (an upload, once the file has gone in): from then on a page failure or a retryable error
+    does not fail the action, since a retry would make the change twice. The action is recorded and
+    reported as done, with the step that failed under AFTER_CHANGE in its target."""
+
     manager: Any
     session: Any
     action_name: str
     target: dict[str, Any]
     operation: ActionOperation
+    change_made: Callable[[], bool] = _no_change_made
 
 
 @dataclass(slots=True)
@@ -56,9 +70,13 @@ class BrowserActionPipeline:
                     details={"snapshot": failed},
                 ) from exc
             except BrowserActionError as exc:
+                if exc.retryable and context.change_made():
+                    return await self._record_after_change(context, witness_state, exc.message)
                 await self._handle_browser_action_error(context, witness_state, exc)
                 raise
             except PlaywrightError as exc:
+                if context.change_made():
+                    return await self._record_after_change(context, witness_state, exc.message)
                 failed = await self._handle_playwright_error(context, witness_state)
                 raise BrowserActionError(
                     "Action failed. Refresh observation and retry.",
@@ -255,6 +273,27 @@ class BrowserActionPipeline:
             metadata={"error": error},
         )
 
+    async def _record_after_change(
+        self,
+        context: ActionRunContext,
+        witness_state: ActionWitnessState,
+        error: str,
+    ) -> dict[str, Any]:
+        """Report an action whose change was made before a step after it failed.
+
+        An upload's file has gone in once set_input_files returns. A page that
+        closed while the upload settled made it a failure to retry, and the
+        retry (or the approval, executed again) uploaded the file twice.
+        """
+        logger.warning(
+            "%s in session %s: a step after the change failed: %s", context.action_name, context.session.id, error
+        )
+        context.target[AFTER_CHANGE] = (
+            f"The change was made, then a step after it failed: {error.splitlines()[0][:300]}. Observe the page "
+            "before acting again, and do not repeat the action: that would make the change twice."
+        )
+        return await self._record_success(context, witness_state)
+
     async def _record_success(
         self,
         context: ActionRunContext,
@@ -336,9 +375,9 @@ class BrowserActionPipeline:
             logger.warning("failure snapshot unavailable for session %s: %s", context.session.id, exc)
             return {"url": context.session.page.url, "snapshot_error": str(exc)[:300]}
         except BrowserActionError as exc:
-            # PII_SCRUB_SCREENSHOT_STRICT withheld the snapshot; the action's own
-            # error is the one to report.
-            if exc.code != SCREENSHOT_WITHHELD:
+            # PII_SCRUB_SCREENSHOT_STRICT withheld the snapshot, or the page stopped
+            # answering; the action's own error is the one to report.
+            if exc.code not in _UNOBSERVED:
                 raise
             return {"url": context.session.page.url, "snapshot_error": exc.message[:300]}
 
@@ -366,11 +405,12 @@ class BrowserActionPipeline:
             logger.warning("post-action observation withheld for session %s: %s", session.id, exc)
             return {"url": session.page.url, "observation_error": str(exc)[:300]}
         except BrowserActionError as exc:
-            # PII_SCRUB_SCREENSHOT_STRICT withheld the screenshot. The action ran,
-            # so it is reported and recorded the same way, without the image.
-            if exc.code != SCREENSHOT_WITHHELD:
+            # PII_SCRUB_SCREENSHOT_STRICT withheld the screenshot, or the page
+            # stopped answering (not asked again: it had its deadline). The action
+            # ran, so it is reported and recorded the same way, without the image.
+            if exc.code not in _UNOBSERVED:
                 raise
-            logger.warning("post-action screenshot withheld for session %s: %s", session.id, exc.message)
+            logger.warning("post-action observation unavailable for session %s: %s", session.id, exc.message)
             return {"url": session.page.url, "observation_error": exc.message[:300]}
         try:
             await manager._settle(session.page)
@@ -385,9 +425,9 @@ class BrowserActionPipeline:
             logger.warning("post-action observation withheld for session %s: %s", session.id, exc)
             return {"url": session.page.url, "observation_error": str(exc)[:300]}
         except BrowserActionError as exc:
-            if exc.code != SCREENSHOT_WITHHELD:
+            if exc.code not in _UNOBSERVED:
                 raise
-            logger.warning("post-action screenshot withheld for session %s: %s", session.id, exc.message)
+            logger.warning("post-action observation unavailable for session %s: %s", session.id, exc.message)
             return {"url": session.page.url, "observation_error": exc.message[:300]}
 
     def _approval(

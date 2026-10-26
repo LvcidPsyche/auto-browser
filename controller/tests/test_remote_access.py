@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
 from app.utils import UTC
+from tests._fake_element_ids import FakePageElementIds
 
 
 class FakePage:
@@ -156,6 +157,7 @@ class RemoteAccessPropagationTests(unittest.IsolatedAsyncioTestCase):
         self.settings.remote_access_info_path = str(self.info_path)
         self.settings.remote_access_stale_after_seconds = 30
         self.manager = BrowserManager(self.settings)
+        self.manager.element_ids = FakePageElementIds()
         self.info_path.parent.mkdir(parents=True, exist_ok=True)
         self.info_path.write_text(
             json.dumps(

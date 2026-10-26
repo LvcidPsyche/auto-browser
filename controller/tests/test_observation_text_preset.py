@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from app.browser.services.observation import BrowserObservationService
 from app.browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
+from tests._fake_element_ids import FakePageElementIds
 
 
 class FakePage:
@@ -73,6 +74,7 @@ def _make_manager(
         _assert_page_allowed=MagicMock(),
         remote_access=SimpleNamespace(session_info=MagicMock(return_value={})),
         tabs=SimpleNamespace(summaries=AsyncMock(return_value=[])),
+        element_ids=FakePageElementIds(),
         ocr=SimpleNamespace(extract_from_image=AsyncMock(return_value={"available": True, "blocks": []})),
     )
 

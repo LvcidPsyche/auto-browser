@@ -172,7 +172,7 @@ class BrowserObservationService:
             }
 
         if preset == "text":
-            interactables = await session.page.evaluate(INTERACTABLES_SCRIPT, limit)
+            interactables = await self.manager.element_ids.evaluate(session.page, INTERACTABLES_SCRIPT, limit)
             summary = await self.page_summary(session.page, text_limit=2000)
             tabs = await self.manager.tabs.summaries(session)
             return {
@@ -201,9 +201,9 @@ class BrowserObservationService:
         text_limit = 4000 if preset == "rich" else 2000
 
         async def read_dom() -> tuple[list[dict[str, Any]], dict[str, Any]]:
-            # Interactables first: they tag elements with the operator ids the
-            # summary's active element reports.
-            found = await session.page.evaluate(INTERACTABLES_SCRIPT, effective_limit)
+            # Interactables first: they issue the element ids the summary's
+            # active element reports.
+            found = await self.manager.element_ids.evaluate(session.page, INTERACTABLES_SCRIPT, effective_limit)
             return found, await self.page_summary(session.page, text_limit=text_limit)
 
         screenshot, (interactables, summary) = await _gather_settled(
@@ -322,9 +322,10 @@ class BrowserObservationService:
         # One evaluate returns the text, outline, title and focused element, and
         # it runs alongside the ARIA snapshot rather than after it: this is paid
         # before and after every action, and each round trip costs more when the
-        # browser is a remote node.
+        # browser is a remote node. It runs in the controller's isolated world,
+        # which holds the focused element's id.
         summary, accessibility_outline = await asyncio.gather(
-            page.evaluate(PAGE_SUMMARY_SCRIPT, text_limit),
+            self.manager.element_ids.evaluate(page, PAGE_SUMMARY_SCRIPT, text_limit),
             self.accessibility_outline(page),
         )
         return {

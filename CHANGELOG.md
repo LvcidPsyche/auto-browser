@@ -2,6 +2,135 @@
 
 All notable changes to auto-browser are documented here.
 
+## [Unreleased]
+
+### Security
+
+- **A page can no longer choose which element an `element_id` acts on.** Observe wrote each id into the page
+  as a `data-operator-id` attribute, kept any such id the page had set itself, and an action found its element
+  again with an unescaped `[data-operator-id="<id>"]` selector, as did a `selector_hint` passed as a selector.
+  A page could give a hidden "Pay now" button the id of a visible "Cancel", copy an id once observe had
+  written it, or be named by a crafted id carrying selectors of its own, and the action ran on an element the
+  agent never chose. Every release from 0.1.0 through 1.11.0 is affected. The ids now live in an isolated
+  JavaScript world the controller creates for each page, which page scripts can neither read nor change, and
+  observe no longer writes element-id attributes. An `element_id` must be in the form observe issues (`op-`
+  and 24 lowercase hex digits) or it is refused (`invalid_element_id`). An id from an earlier document (after
+  a navigation to a new document, or a reload), or for an element the page removed or moved into another
+  document (a same-origin frame's), is refused as `stale_element_id`, and one the tab was never given as
+  `unknown_element_id`; past the last 10,000 ids a tab was issued, telling the two apart is best-effort.
+  Observe again and use an id from the new observation. Ids from observations made before the update no longer
+  work.
+- **An action by `element_id` acts on that element, not on one the page points it at.** Click, hover, type and
+  select now find and check the registered element itself in the isolated world, and aim the mouse or the keys
+  at it; they add no attribute or node to the page. The element is scrolled into view and waited on until it
+  is visible and stable (the same box in two consecutive animation frames, as Playwright requires; on a page
+  that draws no frame at all for 1 s, such as a hidden tab, two checks 50 ms apart count instead, and a wait
+  whose frames stop partway is refused as `element_not_stable` at its deadline), for click, hover and type
+  until it is inside the viewport, and for click, type and select until it is enabled: up to
+  `ACTION_TIMEOUT_MS`, except that type waits up to 1 s and then focuses the field directly. The pointer goes
+  to within 2.5 px, in each direction, of the centre of the element's first client rect inside the viewport
+  (Playwright's clickable point; a hover goes to the centre itself), and an element covered there is scrolled
+  again with another alignment, as Playwright retries; the hit test right before the mouse is pressed (for a
+  hover, while it waits) accepts only the element or something inside it, so a label for it, an embedded frame
+  in the document or its open shadow roots (inside the element too), or anything over it, is refused
+  (`element_covered`, naming what covers it) rather than clicked or hovered (type focuses a covered field
+  directly instead); keyboard focus is checked on the element before the text goes out, between select-all and
+  delete, and after the clear (`focus_lost`; focus in a frame inside the element, its open shadow roots
+  included, does not count, since keys would go to the frame's document). A selection follows Playwright's
+  matching rules, and, as Playwright's does, one by the `element_id` of a label, or of an element in a label
+  that is not a control itself (Playwright's 'follow-label' rule), is made in the `<select>` the label is for,
+  the one found when the action starts, which is the one checked as well. An element that never becomes ready
+  is refused with `element_not_visible`, `element_disabled`, `element_not_stable`, `element_not_in_view` or
+  `element_covered`; a select with no matching or only a disabled option with `option_not_found` or
+  `option_disabled`. Upload still uses Playwright's file transfer. It marks the file input (the element, or,
+  as Playwright's transfer does, the control of a label it names by the same rule; anything else is refused as
+  `element_not_a_file_input`) with a one-time attribute for that one action, checks before the upload that the
+  marked input is the only element marked (`element_target_moved` otherwise), and removes the marker in the
+  document and its open shadow roots, and from the input itself. A change sent to the isolated world (a focus,
+  a selection, the upload's marker) is never sent twice: when its answer is lost after it was sent, the action
+  fails as `change_unconfirmed` (not retryable), since the change may have been made.
+- **What an `element_id` guarantees, and what it does not.** The page cannot choose, forge or copy which
+  element an id names. It can still redirect an action in the gaps between the checks and the input, as it
+  always could with its own scripts: the few milliseconds between the last hit test and the press, and the
+  20–80 ms between mouse down and up; focus is not checked between keystrokes, and a keydown handler can move
+  focus within the key it handles, the clear's Delete included: the check after the clear then reports
+  `focus_lost` after the field it moved to was emptied; hover is not hit-tested once the pointer arrives; a
+  drag's destination is not hit-tested (drag libraries put the dragged element under the pointer), and its
+  check of a coordinate end compares scroll positions, so a page can still change what is under that point (by
+  scrolling a box no element end is drawn inside while stopping its scroll events or inside a shadow root, by
+  scrolling back to where it was, or by replacing content), and a scroller an element end is slotted into
+  through a closed shadow root is not seen; the hit test and the focus check do not see into closed shadow
+  roots, so an embedded frame behind one inside the element takes the click, as it does with Playwright and a
+  human click, and focus in such a frame reads as focus on the element, so typed text goes to the frame; and
+  between the check before Playwright resolves the marked file input and the check after it, a page script can
+  move the marker to another file input of its own document, so that the upload goes there, and then put it
+  back. The upload's check afterwards is best-effort (below).
+- **No MCP tool or browser action matches a `selector_hint` against the page any more.** `browser.drag_drop`
+  takes the registered element for a hint (refusing unknown, stale and malformed ids); `browser.find_elements`
+  and `browser.wait_for_selector` refuse a hint (`selector_hint_not_a_selector`) instead of matching an
+  attribute only the page could have written. A hint passed as a `selector` to the action tools still names
+  its element.
+- **A crashed or hung tab no longer hangs observe's element scan or an action's element checks.** Every
+  message to the isolated world has a deadline: `ACTION_TIMEOUT_MS`, plus its own wait for a script that waits
+  on the element. It bounds each message, not the whole action. A page that does not answer in time fails with
+  `page_not_responding` (not retryable): HTTP 504 over REST, and an MCP tool error with the same code and
+  `retryable: false`. Its CDP session is detached and replaced on the next call, and one whose attach
+  completes after its deadline, or after its call was cancelled, is detached once it does. Other calls still
+  wait on the page as before (its title, mouse and keyboard input, and the checks after an action, such as the
+  bot-challenge probe), so a page that hangs during an action, in its click handler for example, holds the
+  action until it answers.
+
+### Changed
+
+- **The hit test before a click now runs after the 30–120 ms pause before the press**, for selector targets as
+  well, so a cover put up during the pause is caught; the press follows the check with no deliberate delay.
+- **A click or selection by `element_id` on an element `aria-disabled` disables is refused as
+  `element_disabled`, by a port of Playwright's rules:** on an element whose role takes `aria-disabled` (a
+  button, link, checkbox, textbox, option and the like), set on it or on the nearest ancestor that sets it
+  either way; and, as in Playwright, the check is made on the button a part of it belongs to, or on the
+  control of the label it is in. A generic `div` with `aria-disabled="true"` is still clicked, as in
+  Playwright. 1.11.0 refused the same cases through Playwright, as a retryable `browser_action_failed` after
+  the same wait.
+- **A custom checkbox whose visible part is a `<label>` over a hidden input is refused at once when clicked by
+  the input's `element_id`** (`element_covered`), where 1.11.0 failed after `ACTION_TIMEOUT_MS` as a retryable
+  `browser_action_failed` (Playwright found that the label intercepts pointer events). The refusal names the
+  label (or the part of it at the pointer) and the way out: click the label by coordinates, or with the
+  selector `label[for="…"]` it gives when the label has a `for` and the whole selector fits in the advice. An
+  element whose centre is an embedded frame inside it, which 1.11.0 clicked into, is refused with the advice
+  to click a part of it outside the frame by coordinates. Such covers, which waiting cannot remove, are
+  refused after one round of re-scroll alignments, not at the end of `ACTION_TIMEOUT_MS` (15 s at the
+  default). A refusal after re-scrolling says the page was scrolled; the page is left where the last re-scroll
+  put it. The cover a refusal names is bounded (its tag and its id, or its first class, each cut to 40
+  characters; the description and the advice at most 200 characters each), whatever the page calls its
+  elements.
+- **Select by `element_id` waits for the named element's box to settle** before matching options, as a click
+  does: a `<select>` named by its own `element_id` that never stops moving, which 1.11.0 selected, is now
+  refused (`element_not_stable`). For a label, its own box is the one that has to settle.
+- **`browser.drag_drop` with an end named by its `selector_hint` (an element end)** reads every other end once
+  the element ends are in place, since bringing one into view can scroll the page or a scrolling element in
+  it: an element end again, without scrolling, and a CSS end for the first time, each refused when its point
+  is outside the viewport (`drag_ends_not_in_view`); a coordinate end is refused (`drag_page_scrolled`) when,
+  afterwards, the window or a box an element end is drawn inside (a web component's shadow scroller included)
+  is at another scroll position, an element end is drawn inside other boxes than before, or a scrolling
+  element outside shadow roots sent a scroll event meanwhile, since the point may no longer be where it was.
+  Both refusals give the way out: a viewport tall enough for both ends (`browser.set_viewport`), or scrolling
+  so both are in view. A source named by its `selector_hint` is hit-tested after the move and the pause, right
+  before the button goes down.
+- **`browser.drag_drop` refuses a CSS end whose element has no box** (it is not rendered, as under `display:
+  none`; `drag_end_not_visible`) before any mouse input, with or without an element end. It used to drag from
+  or to the top-left corner of the viewport, (0, 0).
+- **An upload is no longer a failure to retry once the file has gone in**, by `element_id` or by selector. In
+  1.11.0 a page that closed while the upload settled, or any later step that failed with a browser error, made
+  it a retryable `browser_action_failed` although the file was in, and a retry uploaded it twice. Now the
+  upload is reported as done, with what failed in `target.after_change`. An error that is not retryable,
+  raised after the transfer (a policy block, a bot challenge), or a cancelled request, still surfaces, and the
+  approval the upload itself required (`REQUIRE_APPROVAL_FOR_UPLOADS`) is spent all the same. By `element_id`
+  the action also records `target.delivery`: `{"outcome": "confirmed"}` when the file input holds one file of
+  that name and size, now or when its `input` or `change` event fired, else `{"outcome": "not_confirmed",
+  "reason": …}`; `verification.verified` follows it (signals `upload_confirmed` / `upload_not_confirmed`). The
+  check is best-effort: a page can give the input a file of its own with the same name and size. By selector
+  there is no `target.delivery`, and `verification.verified` means only that Playwright's transfer returned.
+
 ## [1.11.0] — 2026-10-24
 
 A controller feature release over 1.10.2: a `lean` MCP tool profile and tool packs. The client,
