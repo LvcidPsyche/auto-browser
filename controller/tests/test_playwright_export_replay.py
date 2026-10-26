@@ -193,33 +193,38 @@ async def test_a_hostile_start_url_cannot_break_or_extend_the_script(tmp_path: P
     assert ast.get_docstring(tree) is not None and "e.test" not in ast.get_docstring(tree)
 
 
+# Ids in the form observe issues; the export records them as they were.
+SEVEN = "op-" + "7" * 24
+NINE = "op-" + "9" * 24
+
+
 @pytest.mark.parametrize(
     ("action", "extra", "expected"),
     [
-        ("click", {}, "page.locator('[data-operator-id=\"op-7\"]').first.click()"),
-        ("hover", {}, "page.locator('[data-operator-id=\"op-7\"]').first.hover()"),
+        ("click", {}, f"page.locator('[data-operator-id=\"{SEVEN}\"]').first.click()"),
+        ("hover", {}, f"page.locator('[data-operator-id=\"{SEVEN}\"]').first.hover()"),
         (
             "select_option",
             {"value": "large"},
-            "page.locator('[data-operator-id=\"op-7\"]').first.select_option(value='large')",
+            f"page.locator('[data-operator-id=\"{SEVEN}\"]').first.select_option(value='large')",
         ),
     ],
 )
 def test_an_element_id_target_is_exported_with_a_note_that_it_will_not_exist(
     action: str, extra: dict[str, Any], expected: str
 ) -> None:
-    target = {**BrowserActionService.resolve_target(element_id="op-7"), **extra}
+    target = {**BrowserActionService.resolve_target(element_id=SEVEN), **extra}
     script = build_script(
         SESSION, [{"event_type": "browser_action", "status": "ok", "action": action, "details": {"target": target}}]
     )
 
-    assert body_lines(script) == [f"{expected}  # element_id op-7 {ELEMENT_NOTE}"]
+    assert body_lines(script) == [f"{expected}  # element_id {SEVEN} {ELEMENT_NOTE}"]
     assert_plain_module(script)
 
 
 def test_a_typed_element_id_target_notes_both_lines_and_keeps_the_redaction_note() -> None:
     target = BrowserActionService.text_target_payload(
-        BrowserActionService.resolve_target(element_id="op-9"),
+        BrowserActionService.resolve_target(element_id=NINE),
         "hunter2",
         clear_first=True,
         sensitive=True,
@@ -229,8 +234,8 @@ def test_a_typed_element_id_target_notes_both_lines_and_keeps_the_redaction_note
         SESSION, [{"event_type": "browser_action", "status": "ok", "action": "type", "details": {"target": target}}]
     )
 
-    locator = "page.locator('[data-operator-id=\"op-9\"]').first"
-    note = f"element_id op-9 {ELEMENT_NOTE}"
+    locator = f"page.locator('[data-operator-id=\"{NINE}\"]').first"
+    note = f"element_id {NINE} {ELEMENT_NOTE}"
     assert body_lines(script) == [
         f"{locator}.clear()  # {note}",
         f"{locator}.fill('<REDACTED>')  # {note}; text was marked sensitive and redacted",
@@ -248,7 +253,10 @@ def test_a_selector_target_has_no_element_note() -> None:
 
 
 def test_a_hostile_element_id_cannot_end_the_note_comment() -> None:
-    target = BrowserActionService.resolve_target(element_id="op-1\nimport os\nos.system('x')")
+    # An action refuses such an id now (tests/test_element_id_format.py), but an
+    # audit log written by an earlier release can still hold one.
+    hostile = "op-1\nimport os\nos.system('x')"
+    target = {"mode": "selector", "element_id": hostile, "selector": f'[data-operator-id="{hostile}"]'}
     script = build_script(
         SESSION, [{"event_type": "browser_action", "status": "ok", "action": "click", "details": {"target": target}}]
     )

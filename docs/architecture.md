@@ -27,7 +27,7 @@ What the model sees:
 ### 2. Structured plane
 What the model reasons over:
 - URL and title
-- interactable elements with stable `element_id`
+- interactable elements with a document-scoped `element_id`
 - selector hints and bounding boxes
 - console and page errors
 - accessibility summaries and focused-node context
@@ -223,7 +223,7 @@ Screenshot-only control makes models guess. DOM-only control makes them blind.
 
 The better loop is:
 1. capture a screenshot
-2. tag and extract interactables
+2. extract interactables, with ids the controller keeps out of the page's reach
 3. let the model choose an `element_id` or selector
 4. execute the action
 5. capture the after-state

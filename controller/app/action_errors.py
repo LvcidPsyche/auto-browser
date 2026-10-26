@@ -4,6 +4,8 @@ from typing import Any
 
 # PII_SCRUB_SCREENSHOT_STRICT refused to return a screenshot it could not scrub.
 SCREENSHOT_WITHHELD = "screenshot_withheld"
+# The page's isolated world did not answer a message within its deadline: the renderer may have crashed or hung.
+PAGE_NOT_RESPONDING = "page_not_responding"
 
 
 class BrowserActionError(Exception):

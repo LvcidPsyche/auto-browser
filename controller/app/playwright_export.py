@@ -101,7 +101,9 @@ def _locator(target: dict[str, Any]) -> tuple[str, tuple[str, ...]] | None:
     element_id = target.get("element_id")
     if not element_id:
         return loc, ()
-    # observe() tags the live page with data-operator-id; a fresh browser never has it.
+    # The id names an element in the controller's private map of the live page
+    # (app/browser/element_ids.py), and the selector is only its hint: no page,
+    # live or replayed, carries that attribute.
     note = (
         f"element_id {_one_line(element_id)} was tagged by auto-browser's observe() "
         "and does not exist in a replay: replace this selector"

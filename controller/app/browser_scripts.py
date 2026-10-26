@@ -116,7 +116,8 @@ STEALTH_INIT_SCRIPT = r"""
 # function body (``/*__ELEMENT_NAMING__*/``) so all three name elements the same
 # way. It follows the order of the accessible-name computation that matters in
 # practice: aria-labelledby, aria-label, associated <label>s, button captions and
-# image alt text, visible text, title, then placeholder, name and id.
+# image alt text, visible text, title, then placeholder, name and id. Every
+# script that includes it takes the element-id registry as `elementIds`.
 #
 # A field's *value* is never used as its name. The previous fallback chain did,
 # so a password typed into a field with no placeholder became that field's
@@ -224,7 +225,7 @@ _ELEMENT_NAMING_JS = r"""
     if (!el) return null;
     return {
       tag: el.tagName.toLowerCase(),
-      element_id: el.dataset?.operatorId || null,
+      element_id: elementIds ? elementIds.idOf(el) : null,
       name: el.getAttribute('name'),
       id: el.id || null,
       label: abName(el).slice(0, 120)
@@ -239,7 +240,7 @@ def _with_element_naming(source: str) -> str:
 
 INTERACTABLES_SCRIPT = _with_element_naming(
     r"""
-(limit) => {
+(limit, elementIds) => {
 /*__ELEMENT_NAMING__*/
   function isVisible(el) {
     const rect = el.getBoundingClientRect();
@@ -273,13 +274,14 @@ INTERACTABLES_SCRIPT = _with_element_naming(
   const out = [];
   for (const el of document.querySelectorAll(selector)) {
     if (!isVisible(el) || el.closest('[aria-hidden="true"]')) continue;
-    if (!el.dataset.operatorId) {
-      el.dataset.operatorId = `op-${Math.random().toString(36).slice(2, 10)}`;
-    }
+    // Nothing is written into the page: the id lives in the registry. The
+    // hint keeps its old form, and the controller reads it as this element_id
+    // when it comes back as a selector; no element carries that attribute.
+    const elementId = elementIds ? elementIds.issue(el) : null;
     const rect = el.getBoundingClientRect();
     out.push({
-      element_id: el.dataset.operatorId,
-      selector_hint: `[data-operator-id="${el.dataset.operatorId}"]`,
+      element_id: elementId,
+      selector_hint: elementId ? `[data-operator-id="${elementId}"]` : null,
       tag: el.tagName.toLowerCase(),
       type: el.getAttribute('type'),
       role: abRole(el),
@@ -303,7 +305,7 @@ INTERACTABLES_SCRIPT = _with_element_naming(
 
 ACTIVE_ELEMENT_SCRIPT = _with_element_naming(
     r"""
-() => {
+(_unused, elementIds) => {
 /*__ELEMENT_NAMING__*/
   return abActiveElement();
 }
@@ -331,7 +333,7 @@ PAGE_TEXT_SCRIPT = (
 
 PAGE_SUMMARY_SCRIPT = _with_element_naming(
     r"""
-(textLimit) => {
+(textLimit, elementIds) => {
 /*__ELEMENT_NAMING__*/
   const squash = (value, maxLength = textLimit) =>
     String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
@@ -686,83 +688,6 @@ EXTRACT_COMMENTS_SCRIPT = r"""
     if (out.length >= limit) break;
   }
   return out;
-}
-"""
-
-FIND_ACCESSIBLE_TARGET_SCRIPT = r"""
-(options) => {
-  const keywords = (options?.keywords || []).map((item) => String(item).toLowerCase());
-  const excludeKeywords = (options?.excludeKeywords || []).map((item) => String(item).toLowerCase());
-  const index = Number.isInteger(options?.index) ? options.index : 0;
-  const requireTextbox = Boolean(options?.requireTextbox);
-  const selector = options?.selector || [
-    'button',
-    'a',
-    'input',
-    'textarea',
-    'select',
-    '[role="button"]',
-    '[role="link"]',
-    '[role="textbox"]',
-    '[contenteditable="true"]',
-  ].join(',');
-
-  const isVisible = (el) => {
-    const rect = el.getBoundingClientRect();
-    const style = window.getComputedStyle(el);
-    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-  };
-
-  const isTextbox = (el) => {
-    const role = (el.getAttribute('role') || '').toLowerCase();
-    return (
-      el.isContentEditable ||
-      el.getAttribute('contenteditable') === 'true' ||
-      el.tagName === 'TEXTAREA' ||
-      (el.tagName === 'INPUT' && !['checkbox', 'radio', 'submit', 'button'].includes((el.type || '').toLowerCase())) ||
-      role === 'textbox'
-    );
-  };
-
-  const describe = (el) => {
-    return [
-      el.getAttribute('aria-label'),
-      el.getAttribute('title'),
-      el.getAttribute('placeholder'),
-      el.getAttribute('name'),
-      el.getAttribute('id'),
-      el.innerText,
-      el.textContent,
-      el.value,
-    ]
-      .filter(Boolean)
-      .join(' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .toLowerCase();
-  };
-
-  const matches = [];
-  for (const el of document.querySelectorAll(selector)) {
-    if (!isVisible(el) || el.closest('[aria-hidden="true"]')) continue;
-    if (requireTextbox && !isTextbox(el)) continue;
-    const description = describe(el);
-    if (keywords.length && !keywords.some((keyword) => description.includes(keyword))) continue;
-    if (excludeKeywords.some((keyword) => description.includes(keyword))) continue;
-    if (!el.dataset.operatorId) {
-      el.dataset.operatorId = `op-${Math.random().toString(36).slice(2, 10)}`;
-    }
-    const rect = el.getBoundingClientRect();
-    matches.push({
-      selector: `[data-operator-id="${el.dataset.operatorId}"]`,
-      element_id: el.dataset.operatorId,
-      x: Math.round(rect.x + rect.width / 2),
-      y: Math.round(rect.y + rect.height / 2),
-      label: description.slice(0, 160),
-      tag: el.tagName.toLowerCase(),
-    });
-  }
-  return matches[index] || matches[0] || null;
 }
 """
 

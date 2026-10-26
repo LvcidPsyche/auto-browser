@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -10,6 +11,8 @@ from ...session_ownership import may_use
 
 if TYPE_CHECKING:
     from ...browser_manager import BrowserSession
+
+logger = logging.getLogger(__name__)
 
 
 class BrowserUploadService:
@@ -43,26 +46,42 @@ class BrowserUploadService:
         )
 
         target = self.manager.actions.resolve_target(selector=selector, element_id=element_id)
+        payload = {**target, "file_path": str(safe_path), "approved": approval is not None, "approval_id": approval_id}
+        transferred = False
+
+        def mark_transferred() -> None:
+            # Called the moment the raw transfer returns, before anything else is awaited: from then
+            # on the pipeline reports a step that fails with the upload, never as a failure to retry,
+            # and a raise or cancellation spends the approval, since a retry would upload the file again.
+            nonlocal transferred
+            transferred = True
 
         async def operation() -> None:
-            locator = session.page.locator(target["selector"]).first
-            await locator.set_input_files(str(safe_path))
+            if target.get("element_id"):
+                element = self.manager.element_ids.element(session.page, target["element_id"])
+                # Recorded with the action: whether the registered input holds the file (best-effort).
+                payload["delivery"] = await element.set_input_files(str(safe_path), on_transfer=mark_transferred)
+            else:
+                locator = session.page.locator(target["selector"]).first
+                await locator.set_input_files(str(safe_path))
+                mark_transferred()
             await self.manager._settle(session.page)
 
+        def change_made() -> bool:
+            return transferred
+
         if approval is None:
-            return await self.manager._run_action(
-                session,
-                "upload",
-                {**target, "file_path": str(safe_path), "approved": False, "approval_id": approval_id},
-                operation,
-            )
+            return await self.manager._run_action(session, "upload", payload, operation, change_made=change_made)
         async with held_for_execution(self.manager.approvals, approval.id) as held:
-            result = await self.manager._run_action(
-                session,
-                "upload",
-                {**target, "file_path": str(safe_path), "approved": True, "approval_id": approval_id},
-                operation,
-            )
+            try:
+                result = await self.manager._run_action(session, "upload", payload, operation, change_made=change_made)
+            except BaseException:
+                if transferred:
+                    # Raised after the file went in (a policy block, a bot challenge, a cancelled
+                    # request): the approval is spent all the same, here and not by an outer layer that
+                    # held it, since executing it again would upload the file again.
+                    await _spend(self.manager.approvals, approval.id)
+                raise
             await held.executed()
         return result
 
@@ -140,6 +159,14 @@ class BrowserUploadService:
             return  # directly in UPLOAD_ROOT: shared with every operator
         if not may_use(await self.manager.session_owner(parts[0])):
             raise PermissionError("file_path must stay inside upload root")
+
+
+async def _spend(approvals: Any, approval_id: str) -> None:
+    try:
+        await approvals.mark_executed(approval_id)
+    except PermissionError as exc:
+        # It expired while the upload ran (or was already spent): it cannot be claimed again either way.
+        logger.warning("upload approval %s not marked executed after the file went in: %s", approval_id, exc)
 
 
 def _missing_upload(file_path: str) -> str:

@@ -187,7 +187,55 @@ If a provider still proposes a side effect, the controller does not trust it bli
   and one noVNC desktop: cookies and storage stay separate per session, but a human taking
   over one session sees the others' windows. `docker_ephemeral` gives each session its own
   browser container (see `docs/session-isolation-audit.md`).
-- `element_id` values are **observation-scoped**.
+- `element_id` values are **document-scoped**: each names an element of the document it was observed in. The
+  controller keeps them in an isolated world page scripts cannot read or change, not in the page, and refuses an
+  id from an earlier document or for an element the page removed or moved into another document, a frame's
+  (`stale_element_id`), one the tab was never given (`unknown_element_id`; past the last 10,000 ids a tab was
+  issued, stale and unknown are told apart best-effort) or one not in the form observe issues
+  (`invalid_element_id`). Observe again and use an id from the new observation.
+- What an `element_id` guarantees: the page cannot choose, forge or copy which element it names. Click, hover,
+  type and select by `element_id` find and check that element in the isolated world and aim the mouse or keys at
+  it: they wait until it is visible, stable (the same box in two consecutive animation frames; on a page that
+  draws no frame at all for 1 s, such as a hidden tab, two checks 50 ms apart; a wait whose frames stop partway is
+  refused as `element_not_stable` at its deadline), in view for click, hover and type, and enabled, by
+  Playwright's rules, for click, type and select (type waits up to 1 s, then focuses the field directly); aim
+  within 2.5 px, in each direction, of the centre of its first client rect inside the viewport (a hover at the
+  centre itself); press, or hover, only where the element itself takes the pointer (a label for it, an embedded
+  frame in the document or its open shadow roots, or anything over it is refused as `element_covered`, naming the
+  cover); check that keyboard focus is in it (not in a frame inside it, open shadow roots included) before keys go
+  out; and add no attribute or node to the page. A selection or an upload by the `element_id` of a label, or of an
+  element in a label that is not a control itself (Playwright's 'follow-label' rule), goes to the `<select>` or
+  file input the label is for when the action starts, as Playwright's does; upload marks that input for the one
+  action. `browser.find_elements` and `browser.wait_for_selector` refuse a `selector_hint`; pass `element_id` to
+  the action tools.
+- What it does not guarantee is delivery against a page that runs script in the gaps between the checks and the
+  input: the few milliseconds between the last hit test and the press, and the 20-80 ms between mouse down and up;
+  focus is checked before the text, between select-all and delete and after the clear, not between keystrokes, and
+  a keydown handler can move focus within the key it handles, the clear's Delete included: the check after the
+  clear then reports `focus_lost` after the field it moved to was emptied; hover is not hit-tested once the
+  pointer arrives; a drag's destination is not hit-tested (drag libraries put the dragged element under the
+  pointer), and its check of a coordinate end compares scroll positions, so a page can still change what is under
+  that point (by scrolling a box no element end is drawn inside while stopping its scroll events or inside a
+  shadow root, by scrolling back to where it was, or by replacing content), and a scroller an element end is
+  slotted into through a closed shadow root is not seen; the hit test and the focus check do not see into closed
+  shadow roots, so an embedded frame behind one inside the element takes the click (as with Playwright or a person
+  clicking), and focus in such a frame reads as focus on the element, so typed text goes to the frame; and between
+  the check before Playwright resolves the marked file input and the check after it, a page script can move the
+  marker to another file input of its own document, so that the upload goes there, and then put it back. An upload
+  is never a retryable failure once the file has gone in: by `element_id` it records `target.delivery` as
+  `confirmed` (the file input holds one file of that name and size) or `not_confirmed` with a reason, best-effort,
+  since the page can give the input a file of the same name and size (by selector there is no `target.delivery`);
+  a step that fails after the transfer with a browser error (the page closing while it settles) is reported in
+  `target.after_change`, and the upload must not be repeated. An error that is not retryable (a policy block, a
+  bot challenge) still surfaces after the transfer, and so does a cancelled request; the file went in all the
+  same.
+- Each message to the isolated world has a deadline, `ACTION_TIMEOUT_MS` plus its own wait for a script that waits
+  on the element: a bound per message, not a deadline for the whole action. A page that does not answer in time
+  fails with `page_not_responding` (not retryable; HTTP 504 over REST, an MCP tool error with that code). Other
+  calls still wait on the page (its title, mouse and keyboard input, the checks after an action), so a page that
+  hangs in its click handler holds that action until it answers. A change sent to the world (a focus, a selection,
+  the upload's marker) whose answer is lost after it was sent fails as `change_unconfirmed` (not retryable):
+  observe the page before acting again.
 - Provider calls are awaited HTTP requests made from the API process; there is no separate model worker.
 - Provider HTTP calls retry timeouts, network errors, `429` and `5xx` responses with exponential backoff (`MODEL_MAX_RETRIES`, `MODEL_RETRY_BACKOFF_SECONDS`); a `Retry-After` header on a `429`/`5xx` lengthens the wait (capped).
 - Live provider execution depends on either provider API keys or mounted CLI auth state under `CLI_HOME` (OpenAI can also use `host_bridge`).

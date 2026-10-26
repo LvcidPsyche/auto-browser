@@ -20,6 +20,7 @@ from app.browser.services.diagnostics import BrowserDiagnosticsService
 from app.browser.services.observation import BrowserObservationService
 from app.browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
 from app.pii_scrub import PiiScrubber
+from tests._fake_element_ids import FakePageElementIds
 
 BODY_MAX_BYTES = 16384
 SECRET_URL = "https://app.test/api/items?access_token=Opaque-AT-123456&page=2"
@@ -85,6 +86,7 @@ def _setup(
         _assert_page_allowed=MagicMock(),
         remote_access=SimpleNamespace(session_info=MagicMock(return_value={})),
         tabs=SimpleNamespace(summaries=AsyncMock(return_value=[])),
+        element_ids=FakePageElementIds(),
     )
     service = BrowserDiagnosticsService(manager, scrubber, None)  # type: ignore[arg-type]
     service.attach_page_listeners(page, session)  # type: ignore[arg-type]

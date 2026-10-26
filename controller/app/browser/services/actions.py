@@ -19,6 +19,10 @@ from ...models import ApprovalKind, BrowserActionDecision, totp_host_allowed
 from ...utils import spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
+from ..element_ids import selector_hint, target_element_id
+from ..element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
+from ..element_world import READ
+from .element_actions import FOCUS_CLICK_TIMEOUT_MS, JITTER_PX, ElementActions
 
 try:  # pragma: no cover - optional until dependency is installed in runtime image
     import pyotp
@@ -37,13 +41,11 @@ logger = logging.getLogger(__name__)
 # before Python 3.13, coarser than what is being measured.
 _step_clock = time.perf_counter
 
-# How long a click that only moves focus waits for its target to become
-# clickable before focusing it programmatically instead.
-_FOCUS_CLICK_TIMEOUT_MS = 1000
-
 # Whether the element (or a label for it) is what the pointer at (x, y) hits.
 # Runs in the element's own frame; a target inside a child frame was already
-# checked, across frame boundaries, by Playwright's trial click.
+# checked, across frame boundaries, by Playwright's trial click. For selector
+# targets only: an element named by element_id takes a stricter check in the
+# isolated world (element_target.py), where a label for it does not count.
 _RECEIVES_POINTER_SCRIPT = """(el, [x, y]) => {
   if (window !== window.top) return true;
   let hit = document.elementFromPoint(x, y);
@@ -105,20 +107,12 @@ def is_one_time_code_field(attributes: Mapping[str, Any]) -> bool:
     return not _NOT_A_ONE_TIME_CODE.search(described)
 
 
-# Whether keyboard focus is in the element or inside it, shadow roots included.
-_HAS_FOCUS_SCRIPT = """(el) => {
-  for (let node = el.getRootNode().activeElement; node; node = node.parentNode || node.host) {
-    if (node === el) return true;
-  }
-  return false;
-}"""
-
-
 class BrowserActionService:
     """Encapsulates browser action execution and approval orchestration."""
 
     def __init__(self, manager: Any) -> None:
         self.manager = manager
+        self.elements = ElementActions(self)
 
     async def navigate(self, session_id: str, url: str) -> dict[str, Any]:
         self.manager._assert_url_allowed(url)
@@ -159,6 +153,9 @@ class BrowserActionService:
         async def operation() -> None:
             if target["mode"] == "coordinates":
                 await self.click_human_like(session, float(x), float(y))
+            elif target.get("element_id"):
+                element = self.manager.element_ids.element(session.page, target["element_id"])
+                target["x"], target["y"] = await self.elements.click(session, element)
             else:
                 locator = session.page.locator(target["selector"]).first
                 await locator.scroll_into_view_if_needed()
@@ -187,6 +184,9 @@ class BrowserActionService:
         async def operation() -> None:
             if target["mode"] == "coordinates":
                 await self.move_mouse_human_like(session, float(x), float(y))
+            elif target.get("element_id"):
+                element = self.manager.element_ids.element(session.page, target["element_id"])
+                target["x"], target["y"] = await self.elements.hover(session, element)
             else:
                 locator = session.page.locator(target["selector"]).first
                 await locator.scroll_into_view_if_needed()
@@ -214,6 +214,11 @@ class BrowserActionService:
         target = self.resolve_target(selector=selector, element_id=element_id)
 
         async def operation() -> None:
+            if target.get("element_id"):
+                element = self.manager.element_ids.element(session.page, target["element_id"])
+                await element.select_option(value=value, label=label, index=index)
+                await self.manager._settle(session.page)
+                return
             locator = session.page.locator(target["selector"]).first
             await locator.scroll_into_view_if_needed()
             if index is not None:
@@ -252,17 +257,31 @@ class BrowserActionService:
         )
 
         async def operation() -> None:
-            locator = session.page.locator(target["selector"]).first
-            if await self.locator_is_sensitive_input(locator):
-                payload.pop("text_preview", None)
-                payload["text_redacted"] = True
-            await locator.scroll_into_view_if_needed()
-            await self.focus_verified(session, locator, action="type")
+            element = None
+            if target.get("element_id"):
+                element = self.manager.element_ids.element(session.page, target["element_id"])
+                if self.is_sensitive_field(await element.evaluate(_FIELD_ATTRIBUTES_SCRIPT, effect=READ)):
+                    payload.pop("text_preview", None)
+                    payload["text_redacted"] = True
+                await self.elements.focus(session, element)
+            else:
+                locator = session.page.locator(target["selector"]).first
+                if await self.locator_is_sensitive_input(locator):
+                    payload.pop("text_preview", None)
+                    payload["text_redacted"] = True
+                await locator.scroll_into_view_if_needed()
+                await self.focus_verified(session, locator, action="type")
             if clear_first:
                 await session.page.keyboard.press("Control+a")
                 await asyncio.sleep(0.03)
+                if element is not None:
+                    # A select-all handler can move focus and select another field, which Delete would empty.
+                    await self.elements.require_focus(element, during=" after select-all (nothing was cleared)")
                 await session.page.keyboard.press("Delete")
                 await asyncio.sleep(0.05)
+                if element is not None:
+                    # A page can move focus once the clear has gone in, before the text does.
+                    await self.elements.require_focus(element, during=" through the clear")
             await self.type_text_human_like(session.page, text)
             await self.manager._settle(session.page)
 
@@ -557,16 +576,19 @@ class BrowserActionService:
         action_name: str,
         target: dict[str, Any],
         operation: Any,
+        *,
+        change_made: Any = None,
     ) -> dict[str, Any]:
-        return await self.manager.action_pipeline.run(
-            ActionRunContext(
-                manager=self.manager,
-                session=session,
-                action_name=action_name,
-                target=target,
-                operation=operation,
-            )
+        context = ActionRunContext(
+            manager=self.manager,
+            session=session,
+            action_name=action_name,
+            target=target,
+            operation=operation,
         )
+        if change_made is not None:
+            context.change_made = change_made
+        return await self.manager.action_pipeline.run(context)
 
     @staticmethod
     def text_target_payload(
@@ -596,7 +618,11 @@ class BrowserActionService:
             }
         except Exception:
             return False
+        return self.is_sensitive_field(attributes)
 
+    @staticmethod
+    def is_sensitive_field(attributes: Mapping[str, Any]) -> bool:
+        """Whether a field's own attributes (type, name, id, autocomplete, placeholder, label) say it is secret."""
         input_type = (attributes.get("type") or "").strip().lower()
         if input_type == "password":
             return True
@@ -654,13 +680,18 @@ class BrowserActionService:
         session.mouse_position = (x, y)
 
     async def click_human_like(self, session: "BrowserSession", x: float, y: float) -> None:
-        jitter_x = x + random.uniform(-2.5, 2.5)
-        jitter_y = y + random.uniform(-2.5, 2.5)
+        jitter_x = x + random.uniform(-JITTER_PX, JITTER_PX)
+        jitter_y = y + random.uniform(-JITTER_PX, JITTER_PX)
         await self.move_mouse_human_like(session, jitter_x, jitter_y)
-        await self._press_mouse(session, jitter_x, jitter_y)
+        await self.pause_before_press()
+        await self.press_mouse(session, jitter_x, jitter_y)
 
-    async def _press_mouse(self, session: "BrowserSession", x: float, y: float) -> None:
+    @staticmethod
+    async def pause_before_press() -> None:
+        """The pause between the pointer arriving and the press; any hit test runs after it."""
         await asyncio.sleep(random.uniform(0.03, 0.12))
+
+    async def press_mouse(self, session: "BrowserSession", x: float, y: float) -> None:
         await session.page.mouse.down()
         await asyncio.sleep(random.uniform(0.02, 0.08))
         await session.page.mouse.up()
@@ -681,17 +712,18 @@ class BrowserActionService:
         click, while the approval and the audit trail named the button. Playwright's
         own checks run first (visible, stable, enabled, receiving events at its
         click point, frames included), and the point is checked again once the
-        pointer has arrived, so a cover put up during the move is caught as well.
-        When that last check fails the click goes to Playwright's `click()`,
-        which clicks the element if it can and otherwise refuses — it never
-        clicks what covers it.
+        pointer has arrived and the pause before the press is over, so a cover
+        put up during the move or the pause is caught as well. When that last
+        check fails the click goes to Playwright's `click()`, which clicks the
+        element if it can and otherwise refuses — it never clicks what covers it.
         """
         await locator.click(trial=True, timeout=timeout_ms)
-        x = coords[0] + random.uniform(-2.5, 2.5)
-        y = coords[1] + random.uniform(-2.5, 2.5)
+        x = coords[0] + random.uniform(-JITTER_PX, JITTER_PX)
+        y = coords[1] + random.uniform(-JITTER_PX, JITTER_PX)
         await self.move_mouse_human_like(session, x, y)
+        await self.pause_before_press()
         if await self._receives_pointer_at(locator, x, y):
-            await self._press_mouse(session, x, y)
+            await self.press_mouse(session, x, y)
         else:
             await locator.click(timeout=timeout_ms)
 
@@ -707,7 +739,7 @@ class BrowserActionService:
         if coords is None:
             await locator.click()
         else:
-            await self.click_locator_human_like(session, locator, coords, timeout_ms=_FOCUS_CLICK_TIMEOUT_MS)
+            await self.click_locator_human_like(session, locator, coords, timeout_ms=FOCUS_CLICK_TIMEOUT_MS)
         await asyncio.sleep(0.05 + random.random() * 0.1)
 
     async def focus_verified(self, session: "BrowserSession", locator: Any, *, action: str) -> None:
@@ -737,7 +769,7 @@ class BrowserActionService:
     @staticmethod
     async def _has_focus(locator: Any) -> bool:
         try:
-            return bool(await locator.evaluate(_HAS_FOCUS_SCRIPT))
+            return bool(await locator.evaluate(ELEMENT_HAS_FOCUS_SCRIPT))
         except Exception:
             return False
 
@@ -893,6 +925,10 @@ class BrowserActionService:
         elif target_seen_after is False:
             signals.append("target_no_longer_visible")
 
+        delivery = target.get("delivery")
+        if delivery is not None:
+            signals.append(f"upload_{delivery['outcome']}")
+
         verified = bool(signals)
         if action_name == "navigate":
             verified = "url_changed" in signals or "title_changed" in signals
@@ -925,7 +961,8 @@ class BrowserActionService:
         elif action_name in {"wait", "reload"}:
             verified = True
         elif action_name == "upload":
-            verified = True
+            # By element_id, whether the registered input holds the file; by selector, Playwright's word.
+            verified = delivery is None or delivery["outcome"] == "confirmed"
 
         return {
             "verified": verified,
@@ -941,12 +978,11 @@ class BrowserActionService:
         x: float | None = None,
         y: float | None = None,
     ) -> dict[str, Any]:
+        """The target an action records. One with an element_id is acted on through the page's isolated world
+        (app/browser/element_target.py); the selector_hint recorded beside it is never matched against the page."""
+        element_id = target_element_id(selector=selector, element_id=element_id)
         if element_id:
-            return {
-                "mode": "selector",
-                "element_id": element_id,
-                "selector": f'[data-operator-id="{element_id}"]',
-            }
+            return {"mode": "selector", "element_id": element_id, "selector": selector_hint(element_id)}
         if selector:
             return {"mode": "selector", "selector": selector}
         if x is not None and y is not None:
