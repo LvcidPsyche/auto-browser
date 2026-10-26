@@ -2,7 +2,38 @@
 
 All notable changes to auto-browser are documented here.
 
-## [Unreleased]
+## [1.11.1] — 2026-10-26
+
+A security release over 1.11.0, with one advisory: GHSA-wrg7-3hw9-f5wj (a page could choose which
+element an `element_id` acted on). **Update the controller** (its image, or your checkout of
+`controller/` if you run it from source). The client, LangChain and MCP bridge packages change only
+in version; updating them alone does not deploy the fix.
+
+Upgrade notes:
+- **Observe again after updating.** Ids from observations made before 1.11.1 (`op-` and up to 8
+  characters) are refused as `invalid_element_id`, and so are their `selector_hint`s passed as a
+  `selector`.
+- **`browser.find_elements` and `browser.wait_for_selector` refuse a `selector_hint`**
+  (`selector_hint_not_a_selector`). Pass the `element_id` to the action tools instead, or a CSS
+  selector of your own.
+- **Some actions that used to run are now refused**, below: a click or hover by `element_id` whose
+  point lands on an embedded frame inside the element, and a hover by `element_id` on an element
+  something covers (1.11.0 moved the pointer there anyway), both `element_covered`; a selection by a
+  `<select>`'s own `element_id` while it never stops moving (`element_not_stable`); and a drag to or
+  from a CSS end with no box (`drag_end_not_visible`). A click on an input that a label for it
+  covers, such as the hidden input of a custom checkbox, failed on 1.11.0 too, after
+  `ACTION_TIMEOUT_MS`; it is now refused at once, with the way out.
+- **New error codes** a caller may see: `invalid_element_id`, `stale_element_id`,
+  `unknown_element_id`, `element_not_visible`, `element_disabled`, `element_not_stable`,
+  `element_not_in_view`, `element_covered`, `option_not_found`, `option_disabled`,
+  `element_not_a_select`, `element_not_a_file_input`, `element_target_moved`, `change_unconfirmed`,
+  `page_not_responding` (HTTP 504 over REST), `drag_ends_not_in_view`, `drag_page_scrolled`,
+  `drag_end_not_visible` and `selector_hint_not_a_selector`. Of these, the refusals from
+  `element_not_visible` to `element_not_a_file_input`, and `stale_element_id` and
+  `unknown_element_id`, are marked retryable: observe again before retrying. The rest are not.
+- **An upload whose file went in is reported as done.** By `element_id`, read `target.delivery` and
+  `verification.verified` to see whether the input was confirmed to hold the file, rather than
+  retrying; by selector, `verification.verified` means only that the transfer returned.
 
 ### Security
 
