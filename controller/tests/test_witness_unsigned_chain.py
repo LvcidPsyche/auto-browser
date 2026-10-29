@@ -180,9 +180,9 @@ async def test_a_signature_removed_after_signed_receipts_still_fails_with_its_ow
 
 @pytest.mark.asyncio
 async def test_an_empty_chain_passes(manager: BrowserManager, tmp_path: Path) -> None:
-    never_written = await manager.verify_witness_chain("never-recorded")
-    assert never_written["signatures"]["valid"] is True
-    assert never_written["signatures"]["checked"] == 0
+    never_written = await manager.witness.verify_signatures("never-recorded")
+    assert never_written["valid"] is True
+    assert never_written["checked"] == 0
 
     empty = manager.witness._path("empty-file")
     empty.parent.mkdir(parents=True, exist_ok=True)

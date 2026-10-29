@@ -158,7 +158,7 @@ def verify_bundle(
     elif unsigned:
         notes.append(f"{unsigned} unsigned receipt(s) precede the first signed one, whose signature covers them")
     if not receipts:
-        notes.append("bundle contains no receipts")
+        failures.append("bundle contains no receipts: nothing is attested")
 
     return {
         "ok": not failures,

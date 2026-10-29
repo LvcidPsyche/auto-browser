@@ -54,7 +54,8 @@ def register(registry, gateway):
                 "attested by this deployment's key; a chain with no signed receipt "
                 "fails that check. The top-level 'valid' is true only when the hash "
                 "chain, the anchor and the signatures all pass; 'chain_valid' is the "
-                "hash chain and anchor alone. The key sits beside the receipts, so someone with "
+                "hash chain and anchor alone. A missing or empty chain, or a missing or unreadable "
+                "anchor, is not valid. The key sits beside the receipts, so someone with "
                 "write access to this host can re-sign: for evidence that survives a "
                 "compromised host, compare the head hash against one obtained earlier."
             ),

@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
+from .action_errors import SessionNotFoundError
 from .actions import BrowserActionPipeline
 from .approvals import ApprovalStore
 from .artifacts import SessionArtifactService
@@ -823,11 +824,22 @@ class BrowserManager:
         # A hash chain only proves internal consistency — anyone holding the file
         # can rewrite it and recompute every hash, so "valid" includes the
         # signatures and "valid: true" is never mistaken for "attested".
+        await self._require_witness_scope(session_id)
         return await self.witness.verify_with_signatures(session_id)
 
     async def export_witness_bundle(self, session_id: str) -> dict[str, Any]:
         """Third-party-verifiable evidence bundle for a session."""
+        await self._require_witness_scope(session_id)
         return await self.witness.export_bundle(session_id)
+
+    async def _require_witness_scope(self, session_id: str) -> None:
+        """Refuse an id with no session record, no chain and no anchor, as the session routes do.
+
+        The auth-profile receipts have a chain but no session record, so a chain
+        or an anchor alone is enough.
+        """
+        if not self.witness.has_evidence(session_id) and not (await self.session_owner_lookup(session_id))[0]:
+            raise SessionNotFoundError(session_id)
 
     def _initial_witness_remote_state(self, protection_mode: str) -> WitnessRemoteState:
         return self.witness_bridge.initial_remote_state(protection_mode)

@@ -77,23 +77,52 @@ def exclusive_lock(handle: IO[Any]) -> Iterator[None]:
         handle.seek(position)
 
 
+def chain_records(data: bytes) -> list[str]:
+    """The records of a chain's bytes: split on a newline only, blanks dropped.
+
+    `str.splitlines()` also splits on U+2028, U+2029 and U+0085, which JSON leaves
+    raw, so it cut a receipt holding one of them in two. Every receipt ends in a
+    newline and JSON escapes every other control character. Blank means ASCII
+    whitespace, the set `bytes.strip()` removes, in every reader. A record that
+    is not valid UTF-8 comes back behind a NUL, which is never JSON, so every
+    reader sees a record that does not parse. Decoding with replacement instead
+    would let a flipped byte inside a string keep its hash and signature.
+    """
+    return [_decode_record(line.strip()) for line in data.split(b"\n") if line.strip()]
+
+
+def _decode_record(record: bytes) -> str:
+    try:
+        return record.decode("utf-8")
+    except UnicodeDecodeError:
+        return "\x00" + record.decode("utf-8", errors="replace")
+
+
+def read_records(handle: IO[Any]) -> list[str]:
+    """Every record of an open chain file."""
+    handle.flush()
+    raw = handle.buffer
+    raw.seek(0)
+    return chain_records(raw.read())
+
+
 def read_tail_line(handle: IO[Any]) -> str | None:
-    """The last non-empty line of an open text file, without reading all of it."""
-    handle.seek(0, os.SEEK_END)
-    size = handle.tell()
-    if size == 0:
-        return None
+    """The last record of an open chain file, without reading all of it.
+
+    Read as bytes: the window starts at a byte offset, which can fall inside a
+    multi-byte character, and a text read would fail to decode it. Only the last
+    record is decoded, and it is whole.
+    """
+    handle.flush()
+    raw = handle.buffer
+    size = raw.seek(0, os.SEEK_END)
     start = max(0, size - TAIL_READ_BYTES)
-    handle.seek(start)
-    chunk = handle.read()
-    lines = [line for line in chunk.splitlines() if line.strip()]
-    if not lines:
-        return None
-    if start > 0 and len(lines) == 1:
-        # The tail window landed mid-record; fall back to a full read rather
-        # than returning a fragment that would not parse.
-        handle.seek(0)
-        lines = [line for line in handle.read().splitlines() if line.strip()]
+    raw.seek(start)
+    lines = chain_records(raw.read())
+    if start > 0 and len(lines) <= 1:
+        # The tail window landed mid-record (or held only the end of one); read
+        # the whole file rather than return a fragment that would not parse.
+        lines = read_records(handle)
     return lines[-1] if lines else None
 
 
@@ -113,36 +142,66 @@ def read_anchor(chain_path: Path) -> dict[str, Any] | None:
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except (ValueError, OSError):  # not JSON, not UTF-8, or unreadable
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def anchor_fields(anchor: dict[str, Any] | None) -> tuple[str, int] | None:
+    """(head_hash, receipt_count) of an anchor that is well formed, else None.
+
+    The count is an integer of at least 1 (not a bool, which is an int in Python)
+    and the head a non-empty string: an anchor is written only after a receipt.
+    """
+    if anchor is None:
+        return None
+    head, count = anchor.get("head_hash"), anchor.get("receipt_count")
+    if not isinstance(head, str) or not head:
+        return None
+    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+        return None
+    return head, count
 
 
 def compare_to_anchor(chain_path: Path, *, head_hash: str | None, receipt_count: int) -> dict[str, Any]:
     """How the chain on disk stands against its anchor.
 
-    `status` is `"unanchored"` for chains written before this release — absence
-    of an anchor is not evidence of tampering, and must not be reported as if it
-    were.
+    `status` is `"ok"` only when the anchor is present, readable, and agrees with
+    the chain. A missing anchor (`"anchor_missing"`) and an unreadable one
+    (`"anchor_unreadable"`) are failures, not a pass: deleting or damaging the
+    anchor after cutting the chain short would otherwise hide the cut. Chains
+    written before anchors existed are anchored once, on the first start that
+    finds them (`WitnessRecorder.startup`), and never again.
     """
-    anchor = read_anchor(chain_path)
-    if anchor is None:
-        return {"status": "unanchored", "expected_head_hash": None, "expected_receipt_count": None}
+    if not anchor_path(chain_path).exists():
+        return _anchor_verdict(
+            "anchor_missing", "the chain's anchor file is missing, so a cut-short chain cannot be told apart"
+        )
+    fields = anchor_fields(read_anchor(chain_path))
+    if fields is None:
+        return _anchor_verdict("anchor_unreadable", "the chain's anchor file is unreadable or malformed")
 
-    expected_head = anchor.get("head_hash")
-    expected_count = anchor.get("receipt_count")
-    result = {
-        "status": "ok",
-        "expected_head_hash": expected_head,
-        "expected_receipt_count": expected_count,
-    }
-    if isinstance(expected_count, int) and receipt_count < expected_count:
-        result["status"] = "truncated"
-        result["reason"] = (
+    expected_head, expected_count = fields
+    if receipt_count < expected_count:
+        reason = (
             f"chain holds {receipt_count} receipts but the anchor records {expected_count}; "
             "receipts have been removed from the end"
         )
-    elif expected_head and head_hash != expected_head:
-        result["status"] = "diverged"
-        result["reason"] = "chain head does not match the anchor; the chain was rewritten or forked"
+        return _anchor_verdict("truncated", reason, expected_head, expected_count)
+    if head_hash != expected_head or receipt_count != expected_count:
+        reason = "chain head or length does not match the anchor; the chain was rewritten or forked"
+        return _anchor_verdict("diverged", reason, expected_head, expected_count)
+    return _anchor_verdict("ok", None, expected_head, expected_count)
+
+
+def _anchor_verdict(
+    status: str, reason: str | None, expected_head: str | None = None, expected_count: int | None = None
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": status,
+        "expected_head_hash": expected_head,
+        "expected_receipt_count": expected_count,
+    }
+    if reason:
+        result["reason"] = reason
     return result
