@@ -63,6 +63,31 @@ Recommended pattern:
 - keep auth-state encryption enabled in production
 - treat profile names as operator-facing labels, not secrets
 
+Saving a session's state as a profile reads the page's title first, then writes the new state and
+metadata beside the profile's own and puts them in place together: a save that fails or is cancelled
+before they are in place leaves the profile's previous state and metadata as they were, and a first save
+that fails then leaves neither. Once they are in place the save stands: a failure after that (writing
+the session's `actions.jsonl`, the audit event or the witness receipt, say) is reported as an error, and
+the new profile stays. A first save, and a re-save that names an owner the profile's metadata does not
+(an operator's save over a profile saved under the shared token or before owners), puts the metadata,
+which names the owner, in place before the state; any other re-save puts the state first. So under named
+credentials a failed or killed save never leaves a new login with no owner. If a save fails and its
+state cannot be put back as it was (removed, on a first save; a file Windows keeps locked, say), the new
+state stays and an error is logged, naming the hidden file that keeps the previous state, if there was
+one: after a state-first re-save the new state stays beside the previous metadata, and otherwise beside
+the new metadata, which names the owner. When the state is put back, a save that put its metadata first
+puts the previous metadata back too (none, on a first save); if that fails, an error says the new
+metadata names the saving operator as owner of the previous login. A process killed during a save can
+leave the new state beside the previous metadata, or the new metadata beside the previous state or none,
+and hidden files beside them whose names start with `.state.json` or `..state.json` and end in
+`.tmp.json`, `.tmp.json.enc` or `.tmp`, holding the previous login and, encrypted when encryption is on,
+the new one; exports leave those out. A profile with metadata and no state answers "No saved auth
+profile" when it is loaded, and other operators are refused it: delete it or save it again. The state
+file is there throughout a save, for a session opening the profile or an export meanwhile. A rename that
+Windows refuses for a moment (another process has the file open) is tried again. An encrypted save also
+tries to remove the plaintext `state.json` saved before the encryption key was set; a removal that fails
+is logged, and the save stands.
+
 ## Provider authentication choices
 
 You now have two viable ways to authenticate model providers:
@@ -203,14 +228,259 @@ curl -fsS "${AUTH[@]}" http://127.0.0.1:8000/maintenance/status | jq
 `/readiness` answers `503` when a check fails, so `-f` prints nothing; drop `-f` to see which check.
 If `METRICS_ENABLED=false`, skip the `/metrics` check; the endpoint returns `404`.
 
+## What ALLOWED_HOSTS refuses, and what it does not
+
+`ALLOWED_HOSTS` names the hosts the browser's top-level page may visit. Iframes and subresources an
+allowed page loads from other hosts are not filtered, by design. These are the rules as of 1.11.2.
+
+An internationalized host matches only in its `xn--` (punycode) form, so list it as `xn--...` and
+navigate to its `xn--` URL. The check before a navigation reads the host as the URL writes it, in
+Unicode, and the check after the load reads the URL Chromium reports, in punycode: a Unicode entry
+passes the first and is refused after the load, and a Unicode URL is refused before the request by an
+`xn--` entry. This predates 1.11.2 and fails closed: such a page is refused, not read.
+
+### When a page is refused
+
+A page is refused while it is on a host `ALLOWED_HOSTS` does not allow, and while it is tainted. It is
+tainted when it commits a refused URL; when it commits a page its navigation reached through a refused
+host (a redirect from one to an allowed URL); when it commits any page on its own while another page of
+the session is refused (a refused page can send the tab that opened it to `about:blank` and write into
+it, or to an allowed URL whose path and query carry what it read); and when it is a popup whose opener
+is refused or tainted, whatever the popup's URL, or whose first navigation passed a refused redirect. It
+is refused, too, while its opener is still being looked up. A popup or blank window a refused page
+opened is refused with it. A page on a `blob:` URL is judged by the origin that made it; one with no
+origin (`blob:null`) is judged by where it came from alone. A page refused only while it navigates
+through a refused host is read again once that navigation fails without loading a page (a `204`, or a
+download). Every check below that judges a page uses this rule.
+
+When the controller attaches its listeners to a page (a session's first page, a popup, a new tab), it
+checks the URL the page is already on, as it does after a later navigation. A refused top-level page,
+a tainted one included, is sent back to `about:blank` with a `navigation_blocked` audit event.
+Shadow-browse sessions attach these listeners to every popup.
+
+### Reading a refused page again
+
+Observe, screenshots, the page-reading MCP tools and actions other than navigation answer that a
+refused page is not read (REST: 403), also after the controller has sent it back to `about:blank`, and
+after the page has loaded an allowed URL on its own (a refused host's redirect, a script). The taint
+clears only in two ways:
+
+- the agent navigates the page to an allowed URL, and that navigation returns a response that ends on an
+  allowed http(s) URL, no hop of its redirect chain was refused, no commit during it came from a refused
+  hop, no commit after its own was made while another tab of the session was refused (that tab can send
+  it on before the navigation returns, so a page that moves itself while it loads, by a client redirect
+  or `history.replaceState`, stays refused then), and no refused hop is still in flight when it returns;
+- a blocked action's rollback brings the page back to the page the agent read before the action, with no
+  refused hop on the way and no other tab of the session refused meanwhile.
+
+The page's own navigation to an allowed URL does not clear it, nor does the controller's own blank,
+since a refused opener can write into a later blank of its window. A navigation within the page (to a
+`#fragment`) returns no response and clears nothing. `go_back` runs on a refused page but leaves it
+refused; `reload` and `go_forward` are refused there. A refused tab that is not the active one cannot be
+activated, and so cannot be navigated: close it, or open a new tab. The REST `403` says so.
+
+The TOTP autofill skips a refused page, also on a host in `totp_hosts`, since a refused host's redirect
+can choose that URL. Forking a session onto its page's URL (no `start_url`) refuses while its page is
+refused, and over REST answers the same 403 as observe (any other refusal of a fork answers the generic
+403); a fork onto a `start_url` the caller names is judged by that URL, as a new session is.
+
+### Other tabs while one is refused
+
+While a tab of the session counts as refused, the other tabs' own navigations are refused too: a refused
+tab can send another tab it holds (the one that opened it, say) to an allowed URL whose path and query
+carry what it read. A tab that loads a page on its own meanwhile (a link the agent clicks, a redirect, a
+script, a reload or go back) is refused until the agent navigates it. The controller sends it back to
+`about:blank`, with a `navigation_blocked` audit event that names its (allowed) origin, and whatever it
+had loaded, a form in progress included, is lost. Close the refused tab if it is still open, then, with
+the other one active, navigate it to an allowed URL; the refusal says so. Each of the agent's actions on
+the session (a navigate, a click, typing, a key press, a history move), and a tab it opens onto a URL,
+first waits out what is left of the 2 seconds after a refused tab closed (below), so what the page
+commits because of it (a `#fragment`, `history.replaceState`, a client redirect) is not taken for the
+closed tab's choice. The wait lasts at most 2 seconds from the call, however many refused tabs close
+meanwhile (a navigation that goes on while a later close's 2 seconds still run is refused), and there is
+none while a refused tab is still open, where it would change nothing. It holds the session, and comes
+before the action's snapshot and before the action begins: a call cancelled meanwhile gives a claimed
+approval back. A tab refused this way that is not the active one stays refused after the refused tab
+closes, and cannot be activated: close it too, or open a new tab. Activating it is refused (REST: 403)
+with "That tab loaded while another tab of this session was refused, or within 2 seconds after a refused
+tab closed, which can send it to a URL it chose, and cannot be activated. Close it, or open a new tab."
+A tab's own navigation that starts, or a blank, `blob:` or `data:` page that commits, within 2 seconds
+of a refused tab closing is refused like one made while it was open, and so is one that started while it
+was open; the agent's navigate clears it. The agent's own actions wait those 2 seconds out first
+(above), so this is a page's own navigation, or an action that went on past its wait.
+
+The tabs that count are those on a host `ALLOWED_HOSTS` does not allow, those that came from one (by a
+redirect or their opener), those navigating through one, and those that loaded a blank, `blob:` or
+`data:` page while another tab was refused, since such a page has the origin of the page that made it. A
+tab refused only because another tab was refused when it loaded an allowed http(s) page, or one still
+waiting for the page that opened it to judge it, stays refused itself but does not count while it is on
+an allowed http(s) page, whose document comes from that URL's origin, or on the `about:blank` the
+controller sent it to, whose origin is its own; on any other blank, `blob:` or `data:` page it counts.
+
+### Logs of a refused page
+
+Console messages and page errors are not kept while the list refuses their page.
+
+The network log withholds a request made by a refused page, and one that navigates a top-level page to
+a refused host. Such a request is recorded with `"withheld": "page off ALLOWED_HOSTS"`, its URL cut to
+the origin (`scheme://host:port`), its method reduced to a standard one or `OTHER`, and its status,
+resource type, timing and failure, with no headers or bodies. Network hooks receive that entry and match
+its origin, also when it is logged unfinished because too many requests were in flight. Which page made
+a request is decided when it starts. These are withheld too, whatever their URL:
+
+- a popup's first navigation, since its page cannot be judged yet and a refused opener may have chosen it;
+- any top-level navigation that starts while a page of the session counts as refused for the others
+  (above), a navigation from a refused page to an allowed URL among them;
+- a service worker's request while such a page is open, or when its script's URL is refused;
+- any other request with no frame, which comes from a page the browser has not reported yet: a window a
+  refused page opened onto a `204` is never reported, and the refused page can script its blank document;
+- a request that cannot be attributed.
+
+`request_failures`, in every observation and `browser.get_request_failures`, leaves a failed request out
+when its page was refused as it started (so one that fails after its page was blanked, or after the page
+loaded an allowed URL, is left out too), when its page is refused as it fails, and when it is a top-level
+navigation to a URL off the list.
+
+### Refused downloads
+
+A file the browser downloads must come from a host on `ALLOWED_HOSTS`, from a page on one. The host
+checked is the one the file comes from after its redirects: Playwright reports a download's final URL,
+so a file an allowed host redirects to (a CDN, a file host) is refused unless that host is on the list
+too, and listing it also lets pages navigate there. A file a page generates (a `blob:` or `data:` URL)
+is judged by the page that reports the download, not by the origin that built it, so one that an iframe
+from another host builds on an allowed page is kept, and one a refused page generates is refused. A
+download a navigation through a refused host turned into is refused too, whichever of the download and
+that navigation's failure the browser reports first. That includes a popup's first navigation, whose
+download Playwright reports on the page that opened the popup; such a download's URL stays refused for
+every download of the session, the last eight such URLs kept, since no page holds it for the agent's
+navigate to clear.
+
+A refused download is cancelled. A failed cancel is logged (at debug level), and nothing is saved either
+way. It is recorded in the session's downloads and `downloads.jsonl` with status `blocked`, no file name,
+path or artifact URL, its source URL's origin only and the reason, and a `download_blocked` audit event
+is written; `browser.read_download` refuses it as not completed.
+
+### Cookies an allowed host would receive
+
+`browser.get_cookies` returns a host-only cookie when its host is allowed, and a domain cookie when its
+domain is allowed or is a parent of an allowed host (`Domain=example.com` is returned when only
+`app.example.com` is listed, as the browser sends it there). A partitioned cookie, which the browser
+sends only under the top-level site it is keyed to, is dropped when no listed host belongs to that site
+(an IPv6 site is judged by its bracketed address). A URL in `urls` that the list refuses is dropped
+before the browser is asked, so naming only refused URLs returns no cookies. With `ALLOWED_HOSTS` empty
+or `*`, nothing is filtered.
+
+### Reads and the page tools
+
+Each read notes the session's active page and that page's count of refused commits before it reads, and
+refuses afterwards if either changed, the page closed, or the page is refused now; a page that went from
+one allowed URL to another meanwhile is read. This covers observe, every screenshot (deleted when
+refused, and when the read is cancelled before it is checked), the snapshots around an action, the share
+page's frame and title (the share poll answers 403), `browser.eval_js`, `browser.wait_for_selector`,
+`browser.get_html`, `browser.find_elements`, the storage tools (refused before a write and checked after
+it), `browser.drag_drop`, the DOM resource and the CDP routes. Tab listings, session summaries, approval
+requests and saved auth profiles leave the title empty in the same cases, and a bot challenge found on a
+page that moved while it was probed is refused instead of described.
+
+A refused page's URL is shown by its origin only (`scheme://host:port`) in tab listings, session
+summaries, the snapshots an action returns, approval requests and the `navigation_blocked` audit event.
+`about:blank` is shown whole, and so is the URL of a page that is allowed again by the time it is shown.
+
+The page-reading MCP tools (`browser.eval_js`, `browser.get_html`, `browser.find_elements`,
+`browser.get_local_storage` and `browser.set_local_storage`, for local or session storage,
+`browser.drag_drop` and the `browser://<session>/dom` resource) take the session lock: they wait up to
+10 seconds for a session another call holds and then fail, and give up on a page that does not answer
+within 30 seconds (a `browser.find_elements` text query within 10, `query_timeout`; a drag: 30 seconds,
+plus `ACTION_TIMEOUT_MS` for each end named by a selector or `element_id`, the most that end waits for
+its element). `browser.eval_js` takes an optional `timeout_ms` (default 30000, at most 60000) in place
+of those 30 seconds, and its timeout error says the expression may still be running in the page, which
+it may: giving up does not stop the page's script. `browser.wait_for_selector` does not take the lock,
+so an action can run while it waits (the click that makes the element appear, say); it keeps its own
+`timeout_ms`. It is refused if, while it waited, its page went to a refused host or became refused,
+closed, or stopped being the active tab, and that refusal comes at its `timeout_ms` plus 250 ms, whether
+or not the selector matched.
+
+A drag whose mouse button may have gone down sends one release, whether the drag succeeded, failed or
+reached its deadline, and waits at most 5 seconds more for it, still holding the session, also when
+the call is cancelled meanwhile. A release the browser does not answer in that time fails a drag that
+had succeeded; after a drag that failed, the drag's own error is the one reported. A drag cut off while
+it brought an end named by `element_id` into view also waits at most 2 seconds, before the release, to
+remove its scroll watch.
+
+The REST CDP routes, `GET /sessions/{id}/cdp/element` and `POST /sessions/{id}/cdp/raw`, take the
+session lock and answer 403, as observe does, while the list refuses the session's active page or when
+it moved during the call. When they cannot attach to the active tab they answer 503 rather than read
+the tab they were attached to before. A session another call keeps for more than 10 seconds gets 409. A
+command the page does not answer within 10 seconds gets 504 and lets go of the session, and so does an
+attach to the active tab, or a detach from the tab before it, that the browser does not finish within 10
+seconds.
+
+### What a refused page still does
+
+- **Its request has already gone out when it is refused.** Checks run when a request starts or a
+  navigation commits, and the navigation request itself, with whatever the page put in its URL, reaches
+  the refused host. The page runs, sets cookies and shows in the takeover (noVNC) view until it is
+  blanked.
+- **Blanking waits for any call in flight on the session to finish.** The page-reading MCP tools hold
+  the session at most 30 seconds each (`browser.eval_js` up to its `timeout_ms`), a drag also
+  `ACTION_TIMEOUT_MS` for each end named by a selector or `element_id`, and 7 seconds more: 2 to remove
+  its scroll watch and 5 for its release (`browser.wait_for_selector` does not hold it). Observe and
+  actions make several page calls in turn and are not bounded as a whole, so they can hold it longer. A
+  service worker the page registered keeps running after that.
+- **What an allowed origin's own scripts do with what a refused redirect or a refused opener put in its
+  URL is not tracked.** They can keep it in that origin's storage or cookies, send it to that origin's
+  server, or pass it to its other windows and service worker, and reads of those after the page is
+  readable again return it. A tab refused only because another tab was refused when it loaded an allowed
+  http(s) page runs such scripts too, and does not refuse the others while it stays on that page or on
+  the `about:blank` the controller sent it to. Two cases of this: a service worker's requests are
+  withheld while a page of the session counts as refused or when its script's URL is refused, so a worker
+  on an allowed origin can keep what a refused page sent it and send it once no such page is open, and
+  that request is logged whole; and a page on an allowed origin that a refused host's redirect or a
+  refused opener reached is refused, but it can write into another window of its origin that it holds
+  (through `window.opener`, say), and that window is not refused, and the agent reads what it wrote
+  there.
+- **Cookies.** A refused page can set a cookie on a parent domain that an allowed host receives
+  (`evil.example.com` setting `Domain=example.com` when `app.example.com` is listed), and
+  `browser.get_cookies` returns it, as the browser sends it to the allowed host. Partition keys are
+  judged by site in the same way, so a partitioned cookie a refused host set under its site is returned
+  when an allowed host belongs to that site. A glob entry is matched against a cookie's domain by its
+  text, so an entry such as `*.example.*` can withhold a domain cookie that a host it matches would
+  receive.
+- **Logs.** A withheld network entry keeps the host's labels, which the page chooses, and its timing,
+  status and resource type. A popup's first navigation is withheld even when an allowed page opened it.
+  A request still in flight when its page navigates away is not listed until the log evicts it, since
+  Playwright reports no failure for it. A console message, page error or download is judged as its page
+  is when it is delivered, so one a refused document produced that is delivered only after the agent's
+  navigation has made its page readable again is kept (a page's own navigation to an allowed URL leaves
+  it refused).
+- **Tabs.** A tab still waiting for the page that opened it to judge it (that page closed first) stays
+  refused until the agent navigates it or it is closed. On an allowed http(s) URL it does not refuse the
+  other tabs; on a blank, `blob:` or `data:` page, which can hold what that page wrote, it does. An
+  iframe from another host on an allowed page can open a popup, which is judged by its opener, the
+  allowed page. A popup is judged by its opener as the opener is when Playwright reports the popup,
+  after its first commit, so one a refused page opened just before the agent's navigate made that page
+  readable again is readable too. A popup the context has not reported yet does not count for the
+  session, though a refused host's document may already run in it, so a tab it navigates in that moment
+  is not refused for it; and the refused first navigation of a popup that closes before it is reported
+  stays on the session's record (a download from its URL is refused) until the session ends. The 2
+  seconds after a refused tab closes are measured by the clock: a commit that comes with no request (a
+  `#fragment`, `about:blank`) and that a slow renderer delivers later than that is not refused for that
+  tab.
+- **Traces and exports.** Playwright traces (`ENABLE_TRACING`, off by default) record the whole browser
+  context, the refused page included, and a storage-state export (`POST /sessions/{id}/storage-state`,
+  saving an auth profile) holds every host's cookies.
+- **Iframes and subresources** from other hosts on an allowed page are not filtered, by design.
+
 ## Witness receipts: what a signature proves
 
 Each receipt is hash-chained to the one before it and signed with an Ed25519 key. The key is generated on first use in `<WITNESS_ROOT>/keys`, beside the receipts it signs. That decides what the signature can prove:
 
-- **It proves the receipts are consistent and were signed by that key.** `GET /sessions/{id}/witness/verify` and the `browser.verify_witness` tool report this: the hash walk, the anchor, and a `signatures` block. A chain with no signed receipt fails the `signatures` check, and so does an unsigned receipt after a signed one. The top-level `valid` passes only when all three do. `chain_valid` is the hash walk and the anchor alone, and `reason` says which check failed. Missing evidence is never `valid`: a chain with no receipts (deleted, or never written), a chain whose anchor file is missing or unreadable (`anchor.status` is `anchor_missing` or `anchor_unreadable`), and a chain shorter than its anchor all fail. An id with no session record, no chain and no anchor answers `404`, for verify and for the bundle. Chains written before 1.7.0, when anchors arrived, are anchored as they are on the first start after upgrading (the root is then marked `.anchors-migrated` and no later start anchors anything), so they keep verifying; anything lost from them earlier cannot be detected. A later receipt never moves the anchor over a chain that was cut short or lost its anchor: the chain stays flagged, and the receipt is still recorded. With `WITNESS_ENABLED=false` no receipts are recorded, so a session that has none verifies `false`; receipts recorded earlier still verify. Anyone who can write the witness directory can still make a cut chain verify, by rewriting the anchor, by deleting the chain together with its anchor, or by deleting `.anchors-migrated` before a restart: for evidence that must survive that, pin a head hash off the box (below). A crash or a full disk between a scope's first receipt and its anchor leaves that chain `anchor_missing` for good, and a receipt whose anchor update failed is unprotected until the next successful append moves the anchor. To recover a chain you have checked by other means, delete `<WITNESS_ROOT>/.anchors-migrated` and restart: that anchors every chain without an anchor as it stands, so it also anchors any cut chain whose anchor was deleted.
+- **It proves the receipts are consistent and were signed by that key.** `GET /sessions/{id}/witness/verify` and the `browser.verify_witness` tool report this: the hash walk, the anchor, and a `signatures` block. A chain with no signed receipt fails the `signatures` check, and so does an unsigned receipt after a signed one. The top-level `valid` passes only when all three do. `chain_valid` is the hash walk and the anchor alone, and `reason` says which check failed. Missing evidence is never `valid`: a chain with no receipts (deleted, or never written), a chain whose anchor file is missing or unreadable (`anchor.status` is `anchor_missing` or `anchor_unreadable`), and a chain shorter than its anchor all fail. An id with no session record, no chain and no anchor answers `404`, for verify and for the bundle. Under named credentials (`API_BEARER_TOKENS`) an id with no session record answers `404` even with a chain, since no owner can be checked for it: the chain of the auth-profile export and import receipts (`auth-profiles`) is one, so its witness routes and tools answer `404` to every operator. Chains written before 1.7.0, when anchors arrived, are anchored as they are on the first start after upgrading (the root is then marked `.anchors-migrated` and no later start anchors anything), so their hash walk and anchor keep passing, though a chain written wholly before 1.6.0, when receipts were first signed, still fails the `signatures` check; anything lost from them earlier cannot be detected. That start anchors a chain of any release that lacks its anchor, so a chain whose anchor was deleted on 1.11.1 or earlier is anchored as it stands too: if its evidence matters, check the chains without a `<id>.jsonl.anchor.json` before the first 1.11.2 start. A later receipt never moves the anchor over a chain that was cut short or lost its anchor: the chain stays flagged, and the receipt is still recorded. With `WITNESS_ENABLED=false` no session receipts are recorded (auth-profile export and import still record theirs), so a session that has none verifies `false`; receipts recorded earlier still verify. Anyone who can write the witness directory can still make a cut chain verify: by rewriting the anchor; by deleting the chain together with its anchor, after which the next receipt starts a new chain that verifies; or by deleting `.anchors-migrated` before a restart, which anchors a cut chain whose anchor is missing as it stands. For evidence that must survive that, pin a head hash off the box (below). A crash or a full disk between a scope's first receipt and its anchor leaves that chain `anchor_missing` for good. A receipt whose anchor update failed leaves the chain one receipt ahead of its anchor. Until the next successful append moves the anchor over it, verify reports the chain `diverged` (`valid: false`, "the chain was rewritten or forked"), and that receipt can be removed without verify noticing. If no receipt follows (it was the scope's last), the chain stays `diverged`. To recover a chain you have checked by other means, delete `<WITNESS_ROOT>/.anchors-migrated` and restart: that anchors every chain that has no anchor file, as it stands, so it also anchors any cut chain whose anchor was deleted. A chain whose anchor file is still there (unreadable, truncated, or diverged, such as one whose last anchor update failed) is skipped: delete its `<id>.jsonl.anchor.json` as well.
 - **It does not prove anything against someone who controls the box.** Whoever can write the witness directory can also read the key, so they can edit receipts and sign the result. A bundle that verifies tells a recipient the receipts match the key in the bundle, not that the key was never in the wrong hands.
 
-For evidence that survives a compromised controller host, keep a head hash from before the compromise and check it when you verify: `python scripts/verify_witness_bundle.py bundle.json --expect-head <head_hash> --expect-key-id <key_id>`. The `head_hash` and `signing_key_id` come from `GET /sessions/{id}/witness/bundle` or from the verify result. Sending a copy of each receipt to a hosted Witness service (`WITNESS_REMOTE_URL`), or copying the key id and head somewhere the controller host cannot write, works as well. Without such a pin, a recipient can only check that the bundle is internally consistent.
+How verify reads a chain, since 1.11.2: `valid` is `false` when the chain file is gone (even with its anchor left behind), when a chain has no receipts, when its anchor file is missing (`anchor_missing`), and when the anchor is corrupt, not UTF-8 or malformed (`anchor_unreadable`: the count must be an integer of at least 1 and the head a non-empty string). The chain's length and head must match the anchor exactly; `truncated` and `diverged` fail as well. The `anchor.status` value `unanchored`, which passed, is gone. A final receipt that parses but lost its newline counts as a receipt in verify, list, export and the next append, which completes it instead of setting it aside. A chain with an unparseable record fails the signature check with a verdict, not an error. `chain_valid_at_export` in a witness bundle follows the same rule, and `scripts/verify_witness_bundle.py` fails a bundle with no receipts.
+
+For evidence that survives a compromised controller host, keep a head hash from before the compromise and check it when you verify: `python scripts/verify_witness_bundle.py bundle.json --expect-head <head_hash> --expect-key-id <key_id>`. The `head_hash` and `signing_key_id` come from `GET /sessions/{id}/witness/bundle`; the verify result has the `head_hash` too. Sending a copy of each receipt to a hosted Witness service (`WITNESS_REMOTE_URL`), or copying the key id and head somewhere the controller host cannot write, works as well. Without such a pin, a recipient can only check that the bundle is internally consistent.
 
 ## What PII scrubbing covers, and what it does not
 
@@ -328,6 +598,9 @@ Back up at least:
 - `/data/jobs/`
 - `/data/auth/` if you intentionally keep reusable auth state
 - `/data/audit/`
+- `/data/witness/`, whole: the chains with their `*.anchor.json` files, `.anchors-migrated` and `keys/` (since 1.11.2 a chain restored without its anchor fails verification, and receipts verify only against the key that signed them)
+- `/data/crons/` if you use cron jobs
+- `/data/approvals/` if pending approvals and operators' rejections should survive a restore; a copy taken between an approve and its claim brings that approval back as `approved` until it expires (`APPROVAL_TTL_MINUTES` after the approve), so after restoring one, reject any whose action already ran
 
 ## Cleanup
 
