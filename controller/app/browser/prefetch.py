@@ -18,7 +18,6 @@ setting, and the preference syncs to their other devices.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import itertools
 import json
 import logging
@@ -36,6 +35,8 @@ _SET = f"new Promise(r => chrome.settingsPrivate.setPref('{PREF}', {PREFETCH_OFF
 # The whole route: open the page, wait for its API, read, set, read back.
 PREF_TIMEOUT_SECONDS = 20.0
 _READY_POLL_SECONDS = 0.25
+# Each cleanup step (closing the settings tab, detaching), so the outer bound holds through the cleanup too.
+CLEANUP_TIMEOUT_SECONDS = 2.0
 
 
 async def turn_prefetch_off(browser: Any) -> Any:
@@ -89,8 +90,16 @@ async def _set_pref(browser: Any) -> Any:
                 await evaluate(_SET)
             return await evaluate(_GET)
         finally:
-            with contextlib.suppress(Exception):
-                await cdp.send("Target.closeTarget", {"targetId": target})
+            await _bounded_cleanup(
+                cdp.send("Target.closeTarget", {"targetId": target}), f"close the settings tab {target}"
+            )
     finally:
-        with contextlib.suppress(Exception):
-            await cdp.detach()
+        await _bounded_cleanup(cdp.detach(), "detach its browser session")
+
+
+async def _bounded_cleanup(step: Any, what: str) -> None:
+    """One cleanup step, bounded on its own, so PREF_TIMEOUT_SECONDS holds through a cleanup that stalls."""
+    try:
+        await asyncio.wait_for(step, timeout=CLEANUP_TIMEOUT_SECONDS)
+    except Exception as exc:
+        logger.warning("prefetch preference: could not %s: %s", what, f"{type(exc).__name__}: {exc}"[:200])

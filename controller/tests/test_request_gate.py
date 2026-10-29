@@ -743,3 +743,23 @@ async def test_a_lookup_that_never_answers_is_a_failed_lookup(monkeypatch) -> No
 
     assert (refused_reply, allowed_reply) == ("Fetch.failRequest", "Fetch.continueRequest")
     assert h.gate.unattributed_blocks == 1
+
+
+class StallingPageSession(FakeCDPSession):
+    async def send(self, method: str, params: dict | None = None) -> dict:
+        await asyncio.Event().wait()
+        return {}
+
+
+async def test_r5_reading_a_pages_target_id_is_bounded(monkeypatch) -> None:
+    monkeypatch.setattr(request_gate, "TARGET_ID_TIMEOUT_SECONDS", 0.05)
+    gates = request_gate.RequestGates(
+        url_refused=refused,
+        enabled=lambda: True,
+        origin_switch_declared=lambda: False,
+        default_attach_mode=lambda: False,
+        on_lost=lambda _gate: None,
+    )
+    page = Mock(context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=StallingPageSession())))
+
+    assert await asyncio.wait_for(gates.target_id_of(page), timeout=2.0) is None

@@ -5,6 +5,7 @@ The real Chromium route is tests/test_request_gate_hardening_chromium.py.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -88,3 +89,29 @@ async def test_a_cdp_failure_is_reported_not_raised() -> None:
 
     assert result == {"error": "RuntimeError: Target.createTarget: not allowed"}
     assert cdp.detached
+
+
+class StallingCleanup(FakeCDPSession):
+    """Answers until the cleanup: Target.closeTarget and detach never return."""
+
+    async def send(self, method: str, params: dict | None = None) -> dict:
+        if method == "Target.closeTarget":
+            await asyncio.Event().wait()
+        return await super().send(method, params)
+
+    async def detach(self) -> None:
+        await asyncio.Event().wait()
+
+
+async def test_r4_a_cleanup_that_stalls_is_bounded_and_names_the_settings_target(caplog) -> None:
+    cdp = StallingCleanup(
+        {"Target.createTarget": {"targetId": "settings"}, "Target.attachToTarget": {"sessionId": "s1"}}
+    )
+    cdp.replies["Target.sendMessageToTarget"] = SettingsPage(cdp, pref=0)
+    browser = SimpleNamespace(new_browser_cdp_session=AsyncMock(return_value=cdp))
+
+    with patch.object(prefetch, "CLEANUP_TIMEOUT_SECONDS", 0.05), caplog.at_level("WARNING", "app.browser.prefetch"):
+        result = await asyncio.wait_for(prefetch.turn_prefetch_off(browser), timeout=2.0)
+
+    assert result == prefetch.PREFETCH_OFF
+    assert "settings" in caplog.text

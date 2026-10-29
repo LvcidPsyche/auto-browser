@@ -60,6 +60,8 @@ REQUEST_URLS_KEPT = 1024
 BLOCKS_KEPT = 50
 # How long a frame's lookup may take before it counts as failed (a refused URL then fails).
 LOOKUP_TIMEOUT_SECONDS = 5.0
+# How long reading a page's targetId may take (it runs under the session lock, in error handling too).
+TARGET_ID_TIMEOUT_SECONDS = 2.0
 
 OFF_LIST = "off_list"
 CROSS_ORIGIN_POST_REDIRECT = "cross_origin_post_redirect"
@@ -433,6 +435,20 @@ class RequestGate:
                 logger.exception("pre-request gate: the block listener failed")
 
 
+async def _read_target_id(page: Any) -> str:
+    session = await page.context.new_cdp_session(page)
+    try:
+        return (await session.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
+    finally:
+        # Not awaited here: a detach that stalls must not hold the bound above, or the session lock.
+        spawn_background_task(_detach_quietly(session))
+
+
+async def _detach_quietly(session: Any) -> None:
+    with contextlib.suppress(Exception):
+        await session.detach()
+
+
 class RequestGates:
     """The gate of every Browser the controller uses, attached where the browser is acquired.
 
@@ -590,14 +606,10 @@ class RequestGates:
         if known is not None:
             return known
         try:
-            session = await page.context.new_cdp_session(page)
-            try:
-                target_id = (await session.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
-            finally:
-                with contextlib.suppress(Exception):
-                    await session.detach()
+            target_id = await asyncio.wait_for(_read_target_id(page), timeout=TARGET_ID_TIMEOUT_SECONDS)
         except Exception as exc:
-            logger.debug("could not read a page's targetId: %s", exc)
+            # Nothing is attributed to the page then, and the caller's own error stands.
+            logger.debug("could not read a page's targetId: %s", f"{type(exc).__name__}: {exc}"[:200])
             return None
         self._target_ids[page] = target_id
         return target_id
