@@ -2,6 +2,47 @@
 
 All notable changes to auto-browser are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **Pre-request blocking.** A top-level navigation of a controller session to a host `ALLOWED_HOSTS` refuses
+  is now stopped before Chromium sends it: every redirect hop and a popup's first request included
+  (`PRE_REQUEST_BLOCKING`, default true; off when `ALLOWED_HOSTS` is empty or `*`). The guard that refuses
+  such a page after it commits stays on behind it, and still catches what the gate cannot see: speculation-rules
+  prefetch and bfcache restores in attach modes, a same-site refused iframe's service worker serving a popup's
+  first navigation, `blob:` navigations a refused iframe makes, and requests held when the gate detaches.
+  Iframes and subresources of other hosts are still not filtered. See
+  [`docs/deployment.md`](./docs/deployment.md#stopped-before-the-request-is-sent).
+- `/readiness` reports a `pre_request_gate` check (warns at worst).
+- `CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED`, for an attached Chrome started with
+  `--disable-features=BlockOriginHeaderModificationOnRedirect`.
+
+### Changed
+
+- In the browsers the controller launches, speculation-rules prefetch is off (a runtime preference, and the
+  `NetworkPredictionOptions` policy in the browser-node image), owned pages bypass service workers, and
+  third-party storage partitioning is back on, as in Chrome. With partitioning, a third-party iframe's
+  `localStorage` is keyed to the top-level site and is not carried by a saved auth profile; its cookies and
+  first-party logins are.
+
+### Upgrade notes
+
+- **Agent-visible errors change.** `navigate`, a session's `start_url` and a tab opened onto a URL that the gate
+  stops answer `browser_action_blocked` (REST 403, `retryable: false`), naming only the refused origin, instead
+  of a retryable failure. A click whose page was stopped succeeds and reports `target.blocked_navigations`; the
+  tab list marks such a tab with `blocked_navigation`. Blocks are audited as `navigation_blocked` with
+  `source: "request"`.
+- A browser the gate cannot attach to gets no sessions: `pre_request_gate_unavailable` (503, retryable). When
+  the gate detaches, that browser's sessions are closed, and the next call on one says why
+  (`request_gate_lost`).
+- **Attach modes** (`CDP_CONNECT_URL`, `browser.cdp_attach`): the operator's own tabs are never stopped. Start
+  that Chrome with `--disable-features=BlockOriginHeaderModificationOnRedirect` and set
+  `CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true`; without it, the controller stops cross-origin 307/308 POST
+  redirect hops in its sessions, and Chrome fails the same redirects in the operator's own tabs while the
+  controller is attached.
+- To go back to the old behaviour, set `PRE_REQUEST_BLOCKING=false`.
+
 ## [1.11.2] — 2026-10-29
 
 A security release over 1.11.1, with four advisories:

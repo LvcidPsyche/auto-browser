@@ -239,6 +239,74 @@ Unicode, and the check after the load reads the URL Chromium reports, in punycod
 passes the first and is refused after the load, and a Unicode URL is refused before the request by an
 `xn--` entry. This predates 1.11.2 and fails closed: such a page is refused, not read.
 
+### Stopped before the request is sent
+
+With `PRE_REQUEST_BLOCKING=true` (the default) the controller holds each top-level document request of its
+own sessions in Chromium (DevTools `Fetch`, one session per browser) and fails the one whose URL
+`ALLOWED_HOSTS` refuses, before Chromium sends it. There is nothing to stop, and no gate, when
+`ALLOWED_HOSTS` is empty or `*`. The promise:
+
+- **Stopped before it is sent:** a top-level navigation's request to a host off `ALLOWED_HOSTS`, including
+  every redirect hop and a popup's first request.
+- **Still caught after the fact by NAV-07** (the guard that sends a refused page back to `about:blank` once it
+  commits):
+  - speculation-rules prefetch in attach modes;
+  - a navigation served by a service worker that a same-site refused iframe registered, for a popup's first
+    navigation in every mode;
+  - `blob:` navigations a refused iframe makes;
+  - bfcache restores in attach modes;
+  - requests held when the gate detaches. They go out; no window is promised.
+- **Not covered:** iframes and subresources of other hosts.
+
+What the agent sees:
+
+- `navigate`, a session's `start_url` and a tab opened onto a URL answer `browser_action_blocked` (REST 403,
+  `retryable: false`), naming only the refused origin, where they answered a retryable failure before. A
+  cross-origin POST redirect stopped in an attach mode (below) answers the same code with what to change.
+- An action that did its work and whose page was then stopped (a click on a link) succeeds, and its result
+  carries `target.blocked_navigations` (origin, reason, explanation) for blocks on the action's own page only;
+  a background tab's block is not pinned on it.
+- A tab whose navigation was stopped shows Chrome's error page, and the tab list marks it with
+  `blocked_navigation`.
+- Each block is audited as `navigation_blocked` with `source: "request"` and the origin only.
+- A browser the gate cannot attach to gets no sessions: creating one answers `pre_request_gate_unavailable`
+  (503, retryable), naming `PRE_REQUEST_BLOCKING`. If the gate detaches on its own, every session on that
+  browser is closed, and the next call on one names the reason (`request_gate_lost`); the next session
+  attaches a new gate.
+- `/readiness` reports a `pre_request_gate` check: its state (off, idle, attached, lost, attach failed),
+  whether it is an attach mode with the switch declared, and the prefetch preference read back. It warns at
+  worst, so a health check never restart-loops on it.
+
+Classification relies on a page's target existing when its first request pauses, which was measured on
+Chromium 151 and is guarded by the popup tests. If a Chromium change broke that, a refused page would fall back
+to NAV-07 after the fact.
+
+In the browsers the controller launches (browser-node, `docker_ephemeral`, shadow browsing):
+
+- speculation-rules prefetch is turned off: the controller sets `net.network_prediction_options` to 2 in the
+  browser's default profile when it acquires it, and the browser-node image sets the `NetworkPredictionOptions`
+  policy. A prefetch is fetched without DevTools seeing it, so the refused host would get the request;
+- owned pages bypass service workers (`Network.setBypassServiceWorker`), so a worker cannot answer their
+  navigations without a request the gate sees (except a popup's first, which starts before the controller
+  sees the popup);
+- third-party storage partitioning is back on, as in Chrome: Playwright turns it off, and the controller passes
+  Playwright's own `--disable-features` list without `ThirdPartyStoragePartitioning`. What changes for sites:
+  a third-party iframe's `localStorage` is keyed to the top-level site, so the same origin opened top-level
+  does not see it, and a saved auth profile (`storage_state`) does not carry it. Its cookies and first-party
+  logins round-trip as before.
+
+In the attach modes (`CDP_CONNECT_URL`, `browser.cdp_attach`) the gate acts only on the contexts the controller
+creates: the operator's own tabs and windows are never stopped, and their prefetch setting is left alone.
+The gate adds about 13 ms to each navigation there (the median measured on Chromium 151). Start that Chrome with
+`--disable-features=BlockOriginHeaderModificationOnRedirect` and set `CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true`:
+without the switch, Chrome fails a cross-origin 307/308 POST redirect hop that a DevTools `Fetch` handler lets
+through, so the controller stops such a hop in its sessions itself, with an error naming the switch, and the
+same redirects fail in the operator's own tabs too while the gate is attached. The controller logs a warning,
+and `/readiness` warns, while the switch is not declared.
+
+`PRE_REQUEST_BLOCKING=false` turns the gate off; NAV-07 then refuses such pages only after their request has
+gone out, as before.
+
 ### When a page is refused
 
 A page is refused while it is on a host `ALLOWED_HOSTS` does not allow, and while it is tainted. It is

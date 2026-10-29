@@ -269,6 +269,26 @@ With `APP_ENV=production` the controller refuses to start while any of these is 
 
 By default every session shares one Chromium process and one noVNC desktop (`SESSION_ISOLATION_MODE=shared_browser_node`). Cookies and storage stay separate per session, but a human taking over one session can see the others' windows. When sessions belong to different people, accounts or trust domains, start with `make up-isolation` to give each session its own browser container and takeover surface (`docker_ephemeral`). [`docs/session-isolation-audit.md`](./docs/session-isolation-audit.md) has the details.
 
+`ALLOWED_HOSTS` is held before the request goes out (`PRE_REQUEST_BLOCKING=true`, the default):
+
+- **Stopped before it is sent:** a top-level navigation's request to a host off `ALLOWED_HOSTS`, including
+  every redirect hop and a popup's first request.
+- **Still caught after the fact by NAV-07** (the guard that sends a refused page back to `about:blank` once it
+  commits):
+  - speculation-rules prefetch in attach modes;
+  - a navigation served by a service worker that a same-site refused iframe registered, for a popup's first
+    navigation in every mode;
+  - `blob:` navigations a refused iframe makes;
+  - bfcache restores in attach modes;
+  - requests held when the gate detaches. They go out; no window is promised.
+- **Not covered:** iframes and subresources of other hosts.
+
+In an attach mode (`CDP_CONNECT_URL`, `browser.cdp_attach`) the operator's own tabs are never stopped; start that
+Chrome with `--disable-features=BlockOriginHeaderModificationOnRedirect` and set
+`CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true`, or cross-origin 307/308 POST redirects fail in the operator's own
+tabs too while the controller is attached. The gate adds about 13 ms per navigation there. Details:
+[`docs/deployment.md`](./docs/deployment.md#stopped-before-the-request-is-sent).
+
 `COMPLIANCE_TEMPLATE` can apply a preconfigured posture at startup:
 
 | Preset | Auth Encryption | Operator ID | PII Scrub | Isolation | Max Session Age |

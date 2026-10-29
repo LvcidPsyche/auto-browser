@@ -19,6 +19,25 @@ The following are not considered valid security goals for this project:
 - stealth / undetectable automation
 - deceptive fingerprinting
 
+## What ALLOWED_HOSTS promises
+
+A report that breaks one of these is in scope:
+
+- **Stopped before it is sent:** a top-level navigation's request to a host off `ALLOWED_HOSTS`, including
+  every redirect hop and a popup's first request.
+- **Still caught after the fact by NAV-07** (the guard that sends a refused page back to `about:blank` once it
+  commits):
+  - speculation-rules prefetch in attach modes;
+  - a navigation served by a service worker that a same-site refused iframe registered, for a popup's first
+    navigation in every mode;
+  - `blob:` navigations a refused iframe makes;
+  - bfcache restores in attach modes;
+  - requests held when the gate detaches. They go out; no window is promised.
+- **Not covered:** iframes and subresources of other hosts.
+
+The rules, the attach-mode switch and its effect on the operator's own tabs are in
+[`docs/deployment.md`](./docs/deployment.md#what-allowed_hosts-refuses-and-what-it-does-not).
+
 ## Reporting
 
 Report security issues privately via GitHub's private vulnerability reporting:
