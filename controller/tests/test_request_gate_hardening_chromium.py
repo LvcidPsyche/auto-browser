@@ -23,6 +23,7 @@ import pytest
 import pytest_asyncio
 from playwright.async_api import Browser, async_playwright
 
+from app.action_errors import BROWSER_ACTION_BLOCKED, BrowserActionError
 from app.browser.launch_flags import STORAGE_PARTITIONING_ON
 from tests._chromium import chromium_executable, requires_chromium
 from tests.test_request_gate_chromium import ALLOWED, REFUSED, REFUSED_SAME_SITE, eventually, gated
@@ -185,10 +186,14 @@ async def test_a_tab_the_controller_opens_is_bypassed_too(tmp_path: Path) -> Non
         session_id = await _worker_ready(env, REFUSED_SAME_SITE, scope)
         session = env.manager.sessions[session_id]
 
-        await env.manager.open_tab(session_id, env.server.url(ALLOWED, "/"), True)
+        # The tab's first navigation: bypassed before it starts, not by the page listener racing it.
+        with pytest.raises(BrowserActionError) as caught:
+            target = env.server.url(REFUSED_SAME_SITE, scope + "served/top")
+            await env.manager.open_tab(session_id, env.server.url(ALLOWED, f"/r/302?to={target}"), True)
 
-        assert session.page is not session.context.pages[0]
-        await _refused_top_level_is_stopped(env, session.page, scope, session.gate_context_id, 0)
+        assert caught.value.code == BROWSER_ACTION_BLOCKED
+        assert env.gate().blocked_count(session.gate_context_id) == 1
+        assert f"{scope}served/top" not in env.server.pages_on(REFUSED_SAME_SITE)
 
 
 async def test_a_popup_is_bypassed_from_its_second_navigation(tmp_path: Path) -> None:
