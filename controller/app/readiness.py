@@ -70,6 +70,18 @@ def pre_request_gate_check(settings: Any, gates: dict[str, Any]) -> ReadinessChe
             fix="Check the controller log; set PRE_REQUEST_BLOCKING=false to run on the post-load guard alone.",
             details=details,
         )
+    prefetch_on = [gate for gate in gates.get("gates", []) if "prefetch_pref" in gate and gate["prefetch_pref"] != 2]
+    if prefetch_on:
+        return ReadinessCheck(
+            name=name,
+            status="warn",
+            message=(
+                "Speculation-rules prefetch could not be turned off in a browser the controller launched: a "
+                "prefetch of a host ALLOWED_HOSTS does not allow is sent, and only the page is refused."
+            ),
+            fix="Check the controller log; the browser-node image also sets the NetworkPredictionOptions policy.",
+            details=details,
+        )
     unswitched = [
         gate for gate in gates.get("gates", []) if gate.get("attach_mode") and not gate.get("switch_declared")
     ]

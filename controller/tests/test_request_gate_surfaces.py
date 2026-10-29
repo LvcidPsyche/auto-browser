@@ -205,6 +205,23 @@ class ReadinessTests(unittest.TestCase):
             check = pre_request_gate_check(self.settings(), {"state": state, "gates": [{"state": state}]})
             self.assertEqual(check.status, "warn", state)
 
+    def test_a_launched_browser_whose_prefetch_is_still_on_warns(self) -> None:
+        for read_back in (0, {"error": "TimeoutError: "}):
+            gates = {
+                "state": "attached",
+                "gates": [{"state": "attached", "attach_mode": False, "prefetch_pref": read_back}],
+            }
+
+            check = pre_request_gate_check(self.settings(), gates)
+
+            self.assertEqual(check.status, "warn", read_back)
+            self.assertIn("prefetch", check.message)
+
+    def test_a_launched_browser_whose_prefetch_is_off_passes(self) -> None:
+        gates = {"state": "attached", "gates": [{"state": "attached", "attach_mode": False, "prefetch_pref": 2}]}
+
+        self.assertEqual(pre_request_gate_check(self.settings(), gates).status, "pass")
+
     def test_switched_off_warns(self) -> None:
         check = pre_request_gate_check(self.settings(pre_request_blocking=False), {"state": "off", "gates": []})
 

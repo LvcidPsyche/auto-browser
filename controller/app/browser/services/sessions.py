@@ -19,6 +19,7 @@ from ...network_inspector import NetworkInspector
 from ...session_ownership import may_use, verified_operator
 from ...url_safety import refuse_another_navigation_host
 from ...utils import UTC
+from ..launch_flags import STORAGE_PARTITIONING_ON
 from ..page_read import PageRead
 from ..request_gate import RequestGateUnavailable, navigation_blocked_error
 
@@ -182,6 +183,7 @@ class BrowserSessionService:
             if gate is not None:
                 # Owned from the first page, before anything navigates: its popups and tabs inherit it.
                 gate_context_id = await gate.register_context(context, page)
+                await self.manager.request_gates.bypass_service_workers(page)
             session = BrowserSession(
                 id=session_id,
                 name=name or f"session-{session_id}",
@@ -711,7 +713,7 @@ class BrowserSessionService:
         # Launch a local headed browser process
         headed_browser = await manager.playwright.chromium.launch(
             headless=False,
-            args=["--no-sandbox", "--disable-setuid-sandbox"],
+            args=["--no-sandbox", "--disable-setuid-sandbox", STORAGE_PARTITIONING_ON],
         )
         try:
             # Launched by the controller (not an attach mode), and gated before its first context.
@@ -724,6 +726,8 @@ class BrowserSessionService:
                 await apply_stealth(context)
             page = await context.new_page()
             gate_context_id = await gate.register_context(context, page) if gate is not None else None
+            if gate is not None:
+                await manager.request_gates.bypass_service_workers(page)
 
             shadow_session = BrowserSession(
                 id=shadow_session_id,

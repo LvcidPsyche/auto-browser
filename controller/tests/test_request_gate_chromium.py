@@ -65,6 +65,8 @@ class Hit:
 @dataclass
 class Server:
     pages: dict[str, str] = field(default_factory=dict)
+    # A path's Content-Type when it is not HTML (a service worker's script).
+    types: dict[str, str] = field(default_factory=dict)
     hits: list[Hit] = field(default_factory=list)
     port: int = 0
 
@@ -98,7 +100,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         page = server.pages.get(parsed.path, f"<title>{host}</title><p>{host}{parsed.path}</p>").encode()
         self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", server.types.get(parsed.path, "text/html; charset=utf-8"))
         self.send_header("Content-Length", str(len(page)))
         self.end_headers()
         self.wfile.write(page)
@@ -126,7 +128,7 @@ class Env:
 
 @contextlib.asynccontextmanager
 async def gated(
-    tmp_path: Path, *, attach_mode: bool | None = None, switch_declared: bool = False
+    tmp_path: Path, *, attach_mode: bool | None = None, switch_declared: bool = False, browser: Browser | None = None
 ) -> AsyncIterator[Env]:
     settings = _settings(tmp_path)
     settings.allowed_hosts = f"{ALLOWED},{ALLOWED_TOO}"
@@ -134,7 +136,7 @@ async def gated(
     settings.max_sessions = 4
     manager = BrowserManager(settings)
     manager._maybe_provision_session_tunnel = AsyncMock()
-    browser = _SHARED["browser"]
+    browser = browser or _SHARED["browser"]
     manager._acquire_session_browser = AsyncMock(return_value=(browser, None))
     state = Server()
     http = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)

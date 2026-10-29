@@ -44,6 +44,7 @@ from typing import Any, Callable
 from ..action_errors import BROWSER_ACTION_BLOCKED, PRE_REQUEST_GATE_UNAVAILABLE, BrowserActionError
 from ..network_inspector import url_origin
 from ..utils import spawn_background_task
+from .prefetch import PREFETCH_OFF, turn_prefetch_off
 
 logger = logging.getLogger(__name__)
 
@@ -464,6 +465,10 @@ class RequestGates:
         self._attach_failures: dict[int, tuple[Any, str]] = {}
         # Each page's targetId, read once (a block names the page by it).
         self._target_ids: weakref.WeakKeyDictionary[Any, str] = weakref.WeakKeyDictionary()
+        # The prefetch preference read back from each launched browser (decision 5), for readiness.
+        self._prefetch: dict[int, tuple[Any, Any]] = {}
+        # Each owned page's session holding Network.setBypassServiceWorker; the bypass lasts as long as it does.
+        self._bypass_sessions: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
         self._lock = asyncio.Lock()
 
     def get(self, browser: Any) -> RequestGate | None:
@@ -479,6 +484,34 @@ class RequestGates:
             await self.require(browser)
         except RequestGateUnavailable as exc:
             logger.warning("%s", exc.message)
+            return
+        if not attach_mode:
+            await self._prefetch_off(browser)
+
+    async def _prefetch_off(self, browser: Any) -> None:
+        """A launched browser's prefetch, off at acquisition (decision 5); an attach mode's is never touched."""
+        value = await turn_prefetch_off(browser)
+        self._prefetch[id(browser)] = (browser, value)
+        if value != PREFETCH_OFF:
+            logger.warning(
+                "pre-request gate: speculation-rules prefetch could not be turned off in a launched browser (read "
+                "back %r): a prefetch of a host ALLOWED_HOSTS does not allow is sent, and only the page is refused.",
+                value,
+            )
+
+    async def bypass_service_workers(self, page: Any) -> None:
+        """Keep service workers from serving an owned page's navigations: it then makes a request the gate sees.
+
+        Not a popup's first navigation: Playwright reports a popup only once that has started (step 0, m3).
+        """
+        try:
+            session = await page.context.new_cdp_session(page)
+            await session.send("Network.enable")
+            await session.send("Network.setBypassServiceWorker", {"bypass": True})
+        except Exception as exc:
+            logger.warning("pre-request gate: could not bypass service workers on a page: %s", exc)
+            return
+        self._bypass_sessions[page] = session
 
     async def require(self, browser: Any) -> RequestGate | None:
         """The browser's live gate, attached now if need be; None while pre-request blocking is off."""
@@ -512,6 +545,7 @@ class RequestGates:
         """Detach a browser's gate on purpose, before the controller closes or drops that browser."""
         self._attach_modes.pop(id(browser), None)
         self._attach_failures.pop(id(browser), None)
+        self._prefetch.pop(id(browser), None)
         entry = self._gates.pop(id(browser), None)
         if entry is not None:
             await entry[1].detach()
@@ -579,8 +613,9 @@ class RequestGates:
                 "state": "attached" if gate.live else "lost",
                 "attach_mode": gate.attach_mode,
                 "switch_declared": gate.origin_switch_declared,
+                **({"prefetch_pref": self._prefetch[key][1]} if key in self._prefetch else {}),
             }
-            for _browser, gate in self._gates.values()
+            for key, (_browser, gate) in self._gates.items()
         ]
         gates += [
             {"state": "attach_failed", "error": message[:300]}

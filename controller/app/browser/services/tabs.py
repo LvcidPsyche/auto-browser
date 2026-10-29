@@ -67,6 +67,8 @@ class BrowserTabService:
             new_page = await session.context.new_page()
             # Reported by the context like a popup, but with no opener to judge it.
             self.manager.page_provenance.opened_by_controller(new_page)
+            if session.gate_context_id is not None:
+                await gates.bypass_service_workers(new_page)
             try:
                 self.manager._attach_page_listeners(new_page, session)
                 if url:

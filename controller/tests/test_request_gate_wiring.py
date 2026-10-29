@@ -59,6 +59,11 @@ def _registering(browser: FakeBrowser, context: FakeContext) -> FakeCDPSession:
     )
 
 
+def _gate_sessions(browser: FakeBrowser) -> list[FakeCDPSession]:
+    """The browser sessions that enabled Fetch: gates, not the prefetch preference's short-lived session."""
+    return [session for session in browser.cdp_sessions if any(m == "Fetch.enable" for m, _ in session.sent)]
+
+
 class GateWiringTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -77,10 +82,11 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         self.manager.playwright = SimpleNamespace(chromium=SimpleNamespace(**chromium))  # type: ignore[assignment]
 
     def _assert_gate_first(self, browser: FakeBrowser) -> None:
+        """The gate attached, then the context, then its first page owned, then the first navigation."""
         steps = [entry[1] if entry[0] == "cdp" else entry[0] for entry in browser.log]
-        self.assertEqual(
-            steps[:5], ["Target.setDiscoverTargets", "Fetch.enable", "new_context", "register", "goto"], browser.log
-        )
+        order = ["Target.setDiscoverTargets", "Fetch.enable", "new_context", "register", "goto"]
+        firsts = [steps.index(step) if step in steps else -1 for step in order]
+        self.assertTrue(-1 not in firsts and firsts == sorted(firsts), browser.log)
 
     # ── each way a browser is acquired ───────────────────────────────────────
 
@@ -92,12 +98,18 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         attached = list(self.browser.log)
         session_id = (await self.manager.create_session(name="s", start_url=START_URL))["id"]
 
-        self.assertEqual([m for _, m in attached], ["Target.setDiscoverTargets", "Fetch.enable"])
+        # The gate, then the prefetch preference of a launched browser (decision 5), all at acquisition.
+        self.assertEqual(
+            [m for _, m in attached][:3], ["Target.setDiscoverTargets", "Fetch.enable", "Target.createTarget"]
+        )
+        self.assertIn(
+            ("Target.createTarget", {"url": "chrome://settings/performance"}), self.browser.cdp_sessions[1].sent
+        )
         self._assert_gate_first(self.browser)
         gate = self.manager.request_gates.get(self.browser)
         self.assertFalse(gate.attach_mode)
         self.assertTrue(gate.owns(self.manager.sessions[session_id].gate_context_id))
-        self.assertEqual(len(self.browser.cdp_sessions), 1, "create_session attached a second gate")
+        self.assertEqual(len(_gate_sessions(self.browser)), 1, "create_session attached a second gate")
 
     async def test_cdp_connect_url_is_an_attach_mode(self) -> None:
         self.manager.settings.cdp_connect_url = "http://127.0.0.1:9222"
@@ -108,6 +120,8 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
 
         self._assert_gate_first(self.browser)
         self.assertTrue(self.manager.request_gates.get(self.browser).attach_mode)
+        sent = [method for session in self.browser.cdp_sessions for method, _ in session.sent]
+        self.assertNotIn("Target.createTarget", sent, "the operator's own prefetch setting was touched")
 
     async def test_cdp_attach_gates_the_new_browser_and_releases_the_old_one(self) -> None:
         previous = _browser()
@@ -356,7 +370,7 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIs(first, second)
-        self.assertEqual(len(self.browser.cdp_sessions), 1, "two Fetch sessions on one browser")
+        self.assertEqual(len(_gate_sessions(self.browser)), 1, "two Fetch sessions on one browser")
 
     async def test_a_create_that_fails_after_registering_leaves_the_context_unowned(self) -> None:
         self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
