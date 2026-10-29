@@ -79,15 +79,31 @@ async def test_truncating_the_tail_is_detected(recorder: WitnessRecorder) -> Non
 
 
 @pytest.mark.asyncio
-async def test_a_chain_with_no_anchor_is_not_reported_as_tampered(recorder: WitnessRecorder) -> None:
-    """Chains written before this release must not start failing verification."""
+async def test_a_chain_whose_anchor_was_deleted_is_not_valid(recorder: WitnessRecorder) -> None:
+    """Without the anchor a truncated chain looks complete, so its absence is not a pass.
+
+    Chains written before the anchor existed are anchored once, on the first
+    start (`WitnessRecorder.startup`), so they do not land here.
+    """
     await recorder.startup()
     await recorder.record("sess-1", **receipt("click-0").model_dump(exclude={"scope"}))
     anchor_path(recorder._path("sess-1")).unlink()
 
     result = await recorder.verify("sess-1")
-    assert result["anchor"]["status"] == "unanchored"
-    assert result["valid"] is True
+    assert result["anchor"]["status"] == "anchor_missing"
+    assert result["valid"] is False
+    assert "anchor" in result["reason"]
+
+
+@pytest.mark.asyncio
+async def test_a_corrupt_anchor_is_reported_as_unreadable(recorder: WitnessRecorder) -> None:
+    await recorder.startup()
+    await recorder.record("sess-1", **receipt("click-0").model_dump(exclude={"scope"}))
+    anchor_path(recorder._path("sess-1")).write_text("{not json", encoding="utf-8")
+
+    result = await recorder.verify("sess-1")
+    assert result["anchor"]["status"] == "anchor_unreadable"
+    assert result["valid"] is False
 
 
 @pytest.mark.asyncio
@@ -103,10 +119,12 @@ async def test_an_intact_chain_still_verifies(recorder: WitnessRecorder) -> None
 
 
 def test_concurrent_writers_cannot_fork_the_chain() -> None:
-    """Threads bypass the asyncio lock, so this exercises the file lock itself.
+    """Threads bypass the asyncio lock, so this exercises the append critical section.
 
-    Without it, two writers read the same head and both claim it as their
-    predecessor, and verify() reports a broken chain at the second one.
+    The threads share one recorder, so what serialises them is its thread lock; the
+    file lock inside it orders processes, which this does not exercise. Without the
+    section, two writers read the same head and both claim it as their predecessor,
+    and verify() reports a broken chain at the second one.
     """
     root = Path(tempfile.mkdtemp(prefix="auto-browser-witness-fork-"))
     try:

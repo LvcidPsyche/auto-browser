@@ -14,11 +14,44 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from .models import OperatorIdentity, ProtectionMode
-from .utils import record_path, utc_now
-from .witness_anchor import compare_to_anchor, exclusive_lock, read_anchor, read_tail_line, write_anchor
+from .utils import atomic_write_text, record_path, utc_now
+from .witness_anchor import (
+    anchor_fields,
+    anchor_path,
+    chain_records,
+    compare_to_anchor,
+    exclusive_lock,
+    read_anchor,
+    read_records,
+    read_tail_line,
+    write_anchor,
+)
 from .witness_signing import SIGNATURE_ALGORITHM
 
 logger = logging.getLogger(__name__)
+
+# Written in the witness root once the startup pass has anchored the legacy chains.
+ANCHORS_MIGRATED_MARKER = ".anchors-migrated"
+
+
+def _chain_hash_of(record: str) -> str | None:
+    try:
+        return WitnessReceipt.model_validate_json(record).chain_hash
+    except ValueError:
+        return None
+
+
+def _is_receipt(segment: bytes) -> bool:
+    """Whether bytes parse as a receipt. Whether its hashes hold is verify's question."""
+    records = chain_records(segment)
+    if len(records) != 1:
+        return False
+    try:
+        WitnessReceipt.model_validate_json(records[0])
+    except ValueError:
+        return False
+    return True
+
 
 EvidenceMode = Literal["standard", "restricted"]
 ConcernSeverity = Literal["info", "warn", "high", "critical"]
@@ -298,6 +331,45 @@ class WitnessRecorder:
 
     async def startup(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(self._anchor_legacy_chains)
+
+    def _anchor_legacy_chains(self) -> None:
+        """Anchor every chain that has none, once, as it stands.
+
+        Chains written before anchors existed have no anchor, and a missing one
+        fails verification. The first start that finds the root unmarked anchors
+        them as they are (whatever was lost from them earlier cannot be known) and
+        marks the root. After that no start anchors anything: an anchor that
+        disappears later is evidence, and re-anchoring on restart would turn a
+        cut chain back into a valid one.
+        """
+        marker = self.root / ANCHORS_MIGRATED_MARKER
+        if marker.exists():
+            return
+        for path in sorted(self.root.glob("*.jsonl")):
+            if anchor_path(path).exists():
+                continue
+            try:
+                self._anchor_chain(path)
+            except Exception:
+                logger.exception("witness: could not anchor legacy chain %s; it will fail verification", path)
+        atomic_write_text(marker, utc_now())
+
+    def _anchor_chain(self, path: Path) -> None:
+        with self._thread_lock, open(path, "a+", encoding="utf-8") as handle, exclusive_lock(handle):
+            if anchor_path(path).exists():  # another worker anchored it first
+                return
+            self._set_aside_torn_tail(path, handle)
+            records = read_records(handle)
+            if not records:
+                return
+            head_hash = WitnessReceipt.model_validate_json(records[-1]).chain_hash
+            write_anchor(path, head_hash=head_hash, receipt_count=len(records))
+
+    def has_evidence(self, scope: str) -> bool:
+        """Whether a chain file or an anchor exists for the scope."""
+        path = self._path(scope)
+        return path.exists() or anchor_path(path).exists()
 
     async def record(self, scope: str, **kwargs) -> WitnessReceipt:
         receipt = WitnessReceipt(
@@ -328,7 +400,7 @@ class WitnessRecorder:
             self._set_aside_torn_tail(path, handle)
             last_line = read_tail_line(handle)
             item.chain_prev_hash = WitnessReceipt.model_validate_json(last_line).chain_hash if last_line else None
-            previous_count = self._previous_count(path, handle, item.chain_prev_hash)
+            anchored_count = self._next_anchor_count(path, handle, item.chain_prev_hash)
             item.chain_hash = self._compute_hash(item)
             if self.signer is not None:
                 try:
@@ -345,7 +417,8 @@ class WitnessRecorder:
             handle.write(item.model_dump_json() + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-            write_anchor(path, head_hash=item.chain_hash, receipt_count=previous_count + 1)
+            if anchored_count is not None:
+                write_anchor(path, head_hash=item.chain_hash, receipt_count=anchored_count)
         return item
 
     @staticmethod
@@ -361,6 +434,10 @@ class WitnessRecorder:
         inspection, not deleted, and the chain continues from the last complete
         receipt. A complete last line that does not parse is not a torn write,
         and still fails closed.
+
+        A last segment that parses as a receipt is a record that lost only its
+        newline (or kept a dangling carriage return): it is terminated, not set
+        aside, which is how verify, list and export read it too.
         """
         handle.flush()
         raw = handle.buffer
@@ -374,6 +451,13 @@ class WitnessRecorder:
         raw.seek(0)
         data = raw.read()
         keep = data.rfind(b"\n") + 1
+        if _is_receipt(data[keep:]) or not data[keep:].strip():
+            raw.seek(0, os.SEEK_END)
+            raw.write(b"\n")
+            raw.flush()
+            os.fsync(raw.fileno())
+            handle.seek(0, os.SEEK_END)
+            return
         torn = path.with_name(f"{path.name}.torn-{uuid4().hex[:12]}")
         torn.write_bytes(data[keep:])
         raw.truncate(keep)
@@ -388,24 +472,41 @@ class WitnessRecorder:
         )
 
     @staticmethod
-    def _previous_count(path: Path, handle: Any, previous_hash: str | None) -> int:
-        """How many receipts precede this one.
+    def _next_anchor_count(path: Path, handle: Any, previous_hash: str | None) -> int | None:
+        """The receipt count the anchor records after this append, or None to leave it.
+
+        An append advances an anchor only over a chain that still extends what the
+        anchor describes. Writing it unconditionally turned a truncated chain into
+        a valid one with the next receipt, and a deleted anchor into a fresh one.
+        When the anchor is left as it is, verify keeps reporting the chain as
+        truncated, diverged, or missing its anchor, and the receipt is recorded
+        all the same: evidence is never dropped.
 
         Read through the already-open handle, never a second one: a Windows
         byte-range lock excludes every other handle, including this process's
         own, so reopening the chain inside the lock fails with EACCES.
-
-        The anchor supplies the count in the steady state; a full count is only
-        needed when the anchor is missing or stale, which is a chain written
-        before this release or one appended to by an older build.
         """
+        fields = anchor_fields(read_anchor(path))
         if previous_hash is None:
-            return 0
-        anchor = read_anchor(path)
-        if anchor and anchor.get("head_hash") == previous_hash and isinstance(anchor.get("receipt_count"), int):
-            return anchor["receipt_count"]
-        handle.seek(0)
-        return sum(1 for line in handle if line.strip())
+            if not anchor_path(path).exists():
+                return 1  # a new scope
+            reason = "the chain is empty but its anchor remains"
+        elif fields is None:
+            reason = "its anchor is missing or unreadable"
+        else:
+            head, count = fields
+            if head == previous_hash:
+                # O(1) on purpose: a chain missing a middle receipt still fails
+                # verify's hash walk, whatever the anchor then says.
+                return count + 1
+            records = read_records(handle)
+            # The chain may be one receipt ahead of the anchor: a crash after the
+            # receipt was written and before its anchor was.
+            if len(records) >= count and _chain_hash_of(records[count - 1]) == head:
+                return len(records) + 1
+            reason = "the chain no longer extends its anchor"
+        logger.warning("witness: %s: %s; recording the receipt and leaving the anchor as it is", path.name, reason)
+        return None
 
     async def list(self, scope: str, *, limit: int = 100) -> list[WitnessReceipt]:
         return await asyncio.to_thread(self._list_sync, self._path(scope), limit)
@@ -467,8 +568,14 @@ class WitnessRecorder:
         if not path.exists():
             return result
 
-        for index, line in enumerate(line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()):
-            receipt = WitnessReceipt.model_validate_json(line)
+        for index, line in enumerate(chain_records(path.read_bytes())):
+            try:
+                receipt = WitnessReceipt.model_validate_json(line)
+            except ValueError:
+                result["valid"] = False
+                result["first_invalid_index"] = index
+                result["reason"] = "receipt is not parseable"
+                return result
             result["checked"] = index + 1
             if not receipt.chain_signature:
                 result["unsigned"] += 1
@@ -534,11 +641,7 @@ class WitnessRecorder:
     def _read_all_sync(path: Path) -> list[WitnessReceipt]:
         if not path.exists():
             return []
-        return [
-            WitnessReceipt.model_validate_json(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        return [WitnessReceipt.model_validate_json(line) for line in chain_records(path.read_bytes())]
 
     @classmethod
     def _verify_sync(cls, scope: str, path: Path) -> dict[str, Any]:
@@ -553,14 +656,11 @@ class WitnessRecorder:
             "first_invalid_receipt_id": None,
             "reason": None,
         }
-        if not path.exists():
-            return result
+        lines = chain_records(path.read_bytes()) if path.exists() else []
 
         previous: str | None = None
         index = -1
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
+        for line in lines:
             index += 1
             try:
                 receipt = WitnessReceipt.model_validate_json(line)
@@ -601,14 +701,19 @@ class WitnessRecorder:
         )
         result["anchor"] = anchor
         if anchor["status"] in {"truncated", "diverged"}:
-            result["valid"] = False
-            result["reason"] = anchor.get("reason")
+            return cls._verify_failure(result, None, None, anchor["reason"])
+        if not result["receipt_count"]:
+            # A session that was ever recorded has at least one receipt, so none
+            # is missing evidence, and a chain of none attests to nothing.
+            return cls._verify_failure(result, None, None, "no receipts recorded for this scope")
+        if anchor["status"] != "ok":
+            return cls._verify_failure(result, None, None, anchor["reason"])
         return result
 
     @staticmethod
     def _verify_failure(
         result: dict[str, Any],
-        index: int,
+        index: int | None,
         receipt_id: str | None,
         reason: str,
     ) -> dict[str, Any]:
@@ -636,13 +741,13 @@ class WitnessRecorder:
         # the entire receipt chain dumped into a response instead of an empty page.
         if limit <= 0:
             return []
-        text = path.read_text(encoding="utf-8")
-        lines = text.splitlines()
-        if lines and not text.endswith("\n"):
+        data = path.read_bytes()
+        lines = chain_records(data)
+        unterminated = data[data.rfind(b"\n") + 1 :]
+        if unterminated.strip() and not _is_receipt(unterminated):
             # An append cut short; the next append sets it aside (see
             # _set_aside_torn_tail). Listing skips it rather than failing.
             lines.pop()
-        lines = [line for line in lines if line.strip()]
         items = [WitnessReceipt.model_validate_json(line) for line in lines[-limit:]]
         items.reverse()
         return items

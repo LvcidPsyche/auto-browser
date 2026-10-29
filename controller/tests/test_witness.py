@@ -210,14 +210,16 @@ class WitnessVerifyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["first_invalid_index"], 2)
             self.assertIn("not parseable", result["reason"])
 
-    async def test_verify_empty_scope_is_valid(self) -> None:
+    async def test_verify_empty_scope_is_not_valid(self) -> None:
+        # No receipts attests to nothing; it is also what a deleted chain looks like.
         with tempfile.TemporaryDirectory() as tempdir:
             recorder = WitnessRecorder(Path(tempdir))
             await recorder.startup()
 
             result = await recorder.verify("never-written")
 
-            self.assertTrue(result["valid"])
+            self.assertFalse(result["valid"])
+            self.assertIn("no receipts", result["reason"])
             self.assertEqual(result["receipt_count"], 0)
             self.assertIsNone(result["head_hash"])
 
