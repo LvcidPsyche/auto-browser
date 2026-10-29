@@ -579,6 +579,20 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         method, _ = await replacement.wait_for_reply("after-loss")
         self.assertEqual(method, "Fetch.failRequest")
 
+    async def test_r2_no_replacement_when_blocking_was_switched_off_is_not_logged_as_gated(self) -> None:
+        """require() gives no gate once pre-request blocking is off: the survivor is not "gated"."""
+        first, _second = await self._two_sessions()
+        self.manager.sessions[first].context.close = AsyncMock(side_effect=RuntimeError("context close failed"))
+        self.manager.settings.pre_request_blocking = False
+
+        with self.assertLogs("app.browser.services.runtime", level="ERROR") as logs:
+            self.browser.cdp_sessions[0].emit("close", self.browser.cdp_sessions[0])
+            await self._settled()
+
+        text = " ".join(logs.output)
+        self.assertIn("post-load guard alone", text)
+        self.assertNotIn("stay gated", text)
+
     async def test_r2_a_replacement_that_cannot_attach_is_logged_as_the_post_load_guard_alone(self) -> None:
         attaches = 0
 
