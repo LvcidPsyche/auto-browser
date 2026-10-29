@@ -887,3 +887,65 @@ async def test_r6_blocks_on_page_finds_a_lookup_error_block_by_the_pages_target(
 )
 def test_r6_only_a_blocked_by_client_failure_is_the_gates(error: str, converted: bool) -> None:
     assert request_gate.stopped_by_gate(Exception(error)) is converted
+
+
+# ── round 3: R12 and R15 ─────────────────────────────────────────────────────
+
+
+async def test_r12_a_page_gets_one_bypass_session_however_often_and_concurrently_asked() -> None:
+    gates = request_gate.RequestGates(
+        url_refused=refused,
+        enabled=lambda: True,
+        origin_switch_declared=lambda: False,
+        default_attach_mode=lambda: False,
+        on_lost=lambda _gate: None,
+    )
+
+    async def slow_session(_page) -> FakeCDPSession:
+        await asyncio.sleep(0.01)
+        return FakeCDPSession()
+
+    new_cdp_session = AsyncMock(side_effect=slow_session)
+    page = Mock(context=SimpleNamespace(new_cdp_session=new_cdp_session))
+
+    first = asyncio.create_task(gates.bypass_service_workers(page))
+    await asyncio.sleep(0)
+    await gates.bypass_service_workers(page)  # returns only once the first call's session holds the bypass
+    assert page in gates._bypass_sessions, "the second caller went on before the page was bypassed"
+    await first
+    await gates.bypass_service_workers(page)
+
+    assert new_cdp_session.await_count == 1
+
+
+async def test_r15_a_replacement_gate_knows_the_previous_url_of_a_hop() -> None:
+    """A same-origin POST hop paused at the replacement, right after a loss, is not taken for a cross-origin one."""
+    h = await _attach_mode()
+    _, first = await h.pause(f"{ALLOWED}/r/307", method="POST", headers=ORIGIN)
+    cdp = FakeCDPSession()
+    replacement = RequestGate(
+        SimpleNamespace(new_browser_cdp_session=AsyncMock(return_value=cdp)),
+        url_refused=refused,
+        attach_mode=True,
+        origin_switch_declared=False,
+        on_lost=lambda _gate: None,
+        inherit_from=h.gate,
+    )
+    await replacement.attach()
+    cdp.emit(
+        "Target.targetCreated",
+        {"targetInfo": {"targetId": h.page, "type": "page", "browserContextId": h.owned, "url": ""}},
+    )
+
+    cdp.emit(
+        "Fetch.requestPaused",
+        {
+            "requestId": "hop",
+            "redirectedRequestId": first["requestId"],
+            "request": {"url": f"{ALLOWED}/target", "method": "POST", "headers": ORIGIN},
+            "frameId": h.page,
+        },
+    )
+
+    method, _ = await cdp.wait_for_reply("hop")
+    assert method == "Fetch.continueRequest"

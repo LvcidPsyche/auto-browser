@@ -196,9 +196,14 @@ class RequestGate:
         self._owned: dict[str, _OwnedContext] = inherit_from._owned if inherit_from is not None else {}
         # Blocks by page targetId, shared the same way: a caller's count from before a loss still compares.
         self._pages: OrderedDict[str, _PageBlocks] = inherit_from._pages if inherit_from is not None else OrderedDict()
-        self._request_urls: OrderedDict[str, str] = OrderedDict()
+        # Shared too: a hop paused at the replacement right after a loss finds the URL it redirects from.
+        self._request_urls: OrderedDict[str, str] = (
+            inherit_from._request_urls if inherit_from is not None else OrderedDict()
+        )
         self.unattributed_blocks = 0
         self.handler_errors = 0
+        # Blocks of a frame the gate could not look up (failed because their URL is refused).
+        self.lookup_error_blocks = 0
 
     @property
     def live(self) -> bool:
@@ -462,6 +467,8 @@ class RequestGate:
             page.blocks.append(block)
             while len(self._pages) > PAGES_KEPT:
                 self._pages.popitem(last=False)
+        if verdict.lookup_error is not None:
+            self.lookup_error_blocks += 1
         if owned is None:
             self.unattributed_blocks += 1
         else:
@@ -502,8 +509,11 @@ class RequestGates:
         default_attach_mode: Callable[[], bool],
         on_lost: Callable[[RequestGate], None],
         on_block: Callable[[GateBlock], None] | None = None,
+        off_reason: Callable[[], str | None] | None = None,
     ) -> None:
         self._url_refused = url_refused
+        # Why pre-request blocking is off (BrowserManager's rule), for readiness: one source for that rule.
+        self._off_reason = off_reason
         self._on_block = on_block
         self._enabled = enabled
         self._origin_switch_declared = origin_switch_declared
@@ -522,6 +532,9 @@ class RequestGates:
         self._prefetch: dict[int, tuple[Any, Any]] = {}
         # Each owned page's session holding Network.setBypassServiceWorker; the bypass lasts as long as it does.
         self._bypass_sessions: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
+        # Pages whose bypass session is being opened: a second call meanwhile waits for that one (one per page).
+        self._bypass_pending: weakref.WeakKeyDictionary[Any, asyncio.Future] = weakref.WeakKeyDictionary()
+        self.bypass_failures = 0
         self._lock = asyncio.Lock()
 
     def get(self, browser: Any) -> RequestGate | None:
@@ -557,13 +570,27 @@ class RequestGates:
 
         Not a popup's first navigation: Playwright reports a popup only once that has started (step 0, m3).
         """
+        pending = self._bypass_pending.get(page)
+        if pending is not None:
+            # The caller that must not navigate first (tabs.open) waits for the one in flight (the page event's).
+            await asyncio.shield(pending)
+            return
+        if page in self._bypass_sessions:
+            return
+        done = asyncio.get_running_loop().create_future()
+        self._bypass_pending[page] = done
         try:
             session = await page.context.new_cdp_session(page)
             await session.send("Network.enable")
             await session.send("Network.setBypassServiceWorker", {"bypass": True})
         except Exception as exc:
+            self.bypass_failures += 1
             logger.warning("pre-request gate: could not bypass service workers on a page: %s", exc)
             return
+        finally:
+            self._bypass_pending.pop(page, None)
+            if not done.done():
+                done.set_result(None)
         self._bypass_sessions[page] = session
 
     async def require(self, browser: Any) -> RequestGate | None:
@@ -665,12 +692,15 @@ class RequestGates:
     def status(self) -> dict[str, Any]:
         """Each browser's gate as /readiness reports it: attached, lost or attach failed, and its attach mode."""
         if not self._enabled():
-            return {"state": "off", "gates": []}
+            reason = (self._off_reason() if self._off_reason is not None else None) or "disabled"
+            return {"state": "off", "off_reason": reason, "gates": []}
         gates: list[dict[str, Any]] = [
             {
                 "state": "attached" if gate.live else "lost",
                 "attach_mode": gate.attach_mode,
                 "switch_declared": gate.origin_switch_declared,
+                "handler_errors": gate.handler_errors,
+                "lookup_error_blocks": gate.lookup_error_blocks,
                 **({"prefetch_pref": self._prefetch[key][1]} if key in self._prefetch else {}),
             }
             for key, (_browser, gate) in self._gates.items()
@@ -686,4 +716,4 @@ class RequestGates:
         ]
         states = {gate["state"] for gate in gates}
         state = next((name for name in ("attach_failed", "lost", "attached") if name in states), "idle")
-        return {"state": state, "gates": gates}
+        return {"state": state, "bypass_failures": self.bypass_failures, "gates": gates}

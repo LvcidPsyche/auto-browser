@@ -17,7 +17,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -258,15 +258,37 @@ class ReadinessTests(unittest.TestCase):
         self.assertEqual(pre_request_gate_check(self.settings(), gates).status, "pass")
 
     def test_switched_off_warns(self) -> None:
-        check = pre_request_gate_check(self.settings(pre_request_blocking=False), {"state": "off", "gates": []})
+        check = pre_request_gate_check(
+            self.settings(pre_request_blocking=False), {"state": "off", "off_reason": "disabled", "gates": []}
+        )
 
         self.assertEqual(check.status, "warn")
         self.assertIn("PRE_REQUEST_BLOCKING=false", check.message)
 
     def test_nothing_to_stop_passes(self) -> None:
-        for allowed in ("*", ""):
-            check = pre_request_gate_check(self.settings(allowed_hosts=allowed), {"state": "off", "gates": []})
-            self.assertEqual(check.status, "pass", allowed)
+        gates = {"state": "off", "off_reason": "allows_every_host", "gates": []}
+
+        self.assertEqual(pre_request_gate_check(self.settings(), gates).status, "pass")
+
+    def test_r9_readiness_reads_the_gates_own_off_reason_not_the_settings(self) -> None:
+        """One source for the on/off rule: settings that say otherwise do not change the verdict."""
+        disabled = {"state": "off", "off_reason": "disabled", "gates": []}
+        every_host = {"state": "off", "off_reason": "allows_every_host", "gates": []}
+
+        self.assertEqual(pre_request_gate_check(self.settings(allowed_hosts="*"), disabled).status, "warn")
+        self.assertEqual(pre_request_gate_check(self.settings(pre_request_blocking=False), every_host).status, "pass")
+
+    def test_r13_bypass_failures_and_handler_errors_warn(self) -> None:
+        healthy = {"state": "attached", "attach_mode": False, "prefetch_pref": 2, "handler_errors": 0}
+        for gates in (
+            {"state": "attached", "bypass_failures": 1, "gates": [healthy]},
+            {"state": "attached", "bypass_failures": 0, "gates": [{**healthy, "handler_errors": 2}]},
+        ):
+            check = pre_request_gate_check(self.settings(), gates)
+            self.assertEqual(check.status, "warn", gates)
+            self.assertIn("NAV-07", check.message)
+        clean = {"state": "attached", "bypass_failures": 0, "gates": [healthy]}
+        self.assertEqual(pre_request_gate_check(self.settings(), clean).status, "pass")
 
     def test_the_report_carries_it_and_a_lost_gate_does_not_fail_readiness(self) -> None:
         settings = MagicMock(
@@ -304,4 +326,29 @@ class GatesStatusTests(_Base):
     async def test_status_off(self) -> None:
         self.manager.settings.pre_request_blocking = False
 
-        self.assertEqual(self.manager.request_gates.status(), {"state": "off", "gates": []})
+        self.assertEqual(self.manager.request_gates.status(), {"state": "off", "off_reason": "disabled", "gates": []})
+
+    async def test_r9_status_says_why_it_is_off(self) -> None:
+        for allowed in ("*", ""):
+            self.manager.settings.allowed_hosts = allowed
+            self.assertEqual(self.manager.request_gates.status()["off_reason"], "allows_every_host", allowed)
+
+    async def test_r13_status_counts_bypass_failures_handler_errors_and_lookup_error_blocks(self) -> None:
+        await self.manager.create_session(name="s")
+        gates = self.manager.request_gates
+        failures_before = gates.status()["bypass_failures"]
+        page = Mock(context=SimpleNamespace(new_cdp_session=AsyncMock(side_effect=RuntimeError("no session"))))
+        await gates.bypass_service_workers(page)
+        cdp = self.browser.cdp_sessions[0]
+        cdp.replies["Target.getTargetInfo"] = RuntimeError("Target.getTargetInfo: boom")
+        cdp.emit(
+            "Fetch.requestPaused",
+            {"requestId": "r1", "frameId": "x", "request": {"url": "https://refused.example/", "headers": {}}},
+        )
+        await cdp.wait_for_reply("r1")
+
+        status = gates.status()
+
+        self.assertEqual(status["bypass_failures"], failures_before + 1)
+        [gate] = status["gates"]
+        self.assertEqual((gate["handler_errors"], gate["lookup_error_blocks"]), (0, 1))

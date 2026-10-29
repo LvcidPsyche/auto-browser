@@ -44,8 +44,11 @@ def pre_request_gate_check(settings: Any, gates: dict[str, Any]) -> ReadinessChe
     restart-loop the controller on it, and sessions are refused on a browser without a gate anyway."""
     name = "pre_request_gate"
     details = dict(gates)
-    patterns = [item.strip() for item in str(getattr(settings, "allowed_hosts", "")).split(",") if item.strip()]
-    if not getattr(settings, "pre_request_blocking", True):
+    state = gates.get("state")
+    # Why it is off comes from the gates' own rule (BrowserManager._pre_request_blocking_off_reason), not re-derived.
+    if state == "off" and gates.get("off_reason") == "allows_every_host":
+        return ReadinessCheck(name=name, status="pass", message="ALLOWED_HOSTS allows every host: nothing to stop.")
+    if state == "off":
         return ReadinessCheck(
             name=name,
             status="warn",
@@ -56,9 +59,6 @@ def pre_request_gate_check(settings: Any, gates: dict[str, Any]) -> ReadinessChe
             fix="Set PRE_REQUEST_BLOCKING=true.",
             details=details,
         )
-    if not patterns or "*" in patterns:
-        return ReadinessCheck(name=name, status="pass", message="ALLOWED_HOSTS allows every host: nothing to stop.")
-    state = gates.get("state")
     if state in {"lost", "attach_failed"}:
         return ReadinessCheck(
             name=name,
@@ -83,6 +83,20 @@ def pre_request_gate_check(settings: Any, gates: dict[str, Any]) -> ReadinessChe
                 "prefetch of a host ALLOWED_HOSTS does not allow is sent, and only the page is refused."
             ),
             fix="Check the controller log; the browser-node image also sets the NetworkPredictionOptions policy.",
+            details=details,
+        )
+    handler_errors = sum(gate.get("handler_errors", 0) for gate in gates.get("gates", []))
+    if gates.get("bypass_failures", 0) or handler_errors:
+        return ReadinessCheck(
+            name=name,
+            status="warn",
+            message=(
+                f"The pre-request gate had {gates.get('bypass_failures', 0)} service-worker bypass failure(s) and "
+                f"{handler_errors} handler error(s): a service worker may serve an owned page's navigation, and a "
+                "request the handler could not judge was failed only if its URL is refused; NAV-07 refuses such a "
+                "page after it loads."
+            ),
+            fix="Check the controller log for 'pre-request gate'.",
             details=details,
         )
     unswitched = [

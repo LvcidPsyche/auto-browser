@@ -190,6 +190,7 @@ class BrowserManager:
             default_attach_mode=lambda: bool(self.settings.cdp_connect_url),
             on_lost=lambda gate: self.runtime.gate_lost(gate),
             on_block=self._on_navigation_stopped,
+            off_reason=self._pre_request_blocking_off_reason,
         )
         self.action_pipeline = BrowserActionPipeline()
         self.element_ids = ElementIds(settings)
@@ -827,8 +828,17 @@ class BrowserManager:
 
     def _pre_request_blocking_on(self) -> bool:
         """Whether browsers get the pre-request gate: PRE_REQUEST_BLOCKING, and an ALLOWED_HOSTS that refuses something."""
+        return self._pre_request_blocking_off_reason() is None
+
+    def _pre_request_blocking_off_reason(self) -> str | None:
+        """Why there is no gate: ``disabled`` (PRE_REQUEST_BLOCKING=false) or ``allows_every_host`` (an empty
+        ALLOWED_HOSTS, or one with ``*``: nothing to stop); None while it is on."""
+        if not self.settings.pre_request_blocking:
+            return "disabled"
         patterns = self.settings.allowed_host_patterns
-        return self.settings.pre_request_blocking and bool(patterns) and "*" not in patterns
+        if not patterns or "*" in patterns:
+            return "allows_every_host"
+        return None
 
     def _cookie_off_list(self, domain: str) -> bool:
         """Whether no host ALLOWED_HOSTS allows would receive a cookie stored for ``domain``.
