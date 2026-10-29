@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from app.browser.launch_flags import STORAGE_PARTITIONING_ON
 from app.browser.request_gate import RequestGateUnavailable
 from app.browser_manager import BrowserManager
 from tests._fake_cdp import FakeCDPSession
@@ -175,10 +176,13 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
         self.manager.sessions[source_id].context.storage_state = AsyncMock(return_value={})
         headed = _browser()
-        self._playwright(launch=AsyncMock(return_value=headed))
+        launch = AsyncMock(return_value=headed)
+        self._playwright(launch=launch)
 
         shadow_id = (await self.manager.enable_shadow_browse(source_id))["shadow_session_id"]
 
+        # Decision 9: storage partitioning back on, Playwright's other disabled features kept.
+        self.assertEqual(launch.await_args.kwargs["args"][-1], STORAGE_PARTITIONING_ON)
         self._assert_gate_first(headed)
         gate = self.manager.request_gates.get(headed)
         self.assertFalse(gate.attach_mode)
