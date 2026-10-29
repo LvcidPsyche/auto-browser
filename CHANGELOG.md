@@ -2,9 +2,125 @@
 
 All notable changes to auto-browser are documented here.
 
-## [Unreleased]
+## [1.11.2] — 2026-10-29
+
+A security release over 1.11.1, with four advisories:
+
+- GHSA-3pv7-p7w6-q93q (high): a web page could reach the browser desktop through VNC on port 5900,
+  bypassing noVNC's Origin check.
+- GHSA-9wxr-2vcc-9x6c: governed approvals could be forged for a tool call, reused after their action
+  started, or skipped by the cron tools.
+- GHSA-j5hf-3vw7-g4cp: content of a page outside `ALLOWED_HOSTS` reached the agent through popups,
+  logs, downloads, cookies and the pages it chose.
+- GHSA-xq9j-p4rw-q2cq: a page could stop a session's witness receipts; each later action ran, then
+  reported an error.
+
+Two more fixes, to witness verification and to staged skill candidates, are listed below without an
+advisory of their own. **Update the controller** (its image, or your checkout of `controller/` if you
+run it from source) **and the browser-node image**, which carries the VNC fix, and recreate the
+containers. The client, LangChain and MCP bridge packages change only in version; updating them alone
+does not deploy the fixes.
 
 Upgrade notes:
+- **A VNC viewer pointed at port 5900 no longer connects.** Open noVNC on 6080 instead, which asks for
+  `VNC_PASSWORD` when you set one; rebuild or pull the browser-node image to get the fix (Security,
+  below).
+- **Ask again for a governed tool call that is pending or approved when you upgrade.** An approval now
+  records what it may be spent on, and one stored without that is an approval for a browser action, which
+  no tool call can spend: the agent repeats the call without its old `approval_id`, and an operator
+  approves the new request. A pending one left from before shows in the queue as a
+  `request_human_takeover` action; reject it, and with `AUTONOMOUS_APPROVALS=true` that rejection also
+  stops the agent approving its repeated call itself.
+- **An approval is spent when a call claims it, before its action runs.** The claim marks it `executed`,
+  persisted, and it stays spent whatever happens next: a refusal once the action has begun, retryable
+  ones included (`element_not_stable`, `element_covered` and the other waits inside an action, a timeout,
+  a page that went away), where 1.11.1 let the same `approval_id` run the action again; any refusal of a
+  governed tool call that is not a browser action (`browser.eval_js`, `browser.set_cookies`, ...) once
+  the call is made; a refusal before the action's checks (a `navigate` to a host `ALLOWED_HOSTS`
+  refuses), unless an operator's reject waits on it (below); a cancellation once the action has begun, or
+  of a governed tool call that is not a browser action; a crash or a restart. The same `approval_id` is
+  then refused with "was spent when its action started"; repeat the call without it to ask for a new
+  approval. The refusal texts in these notes reach MCP tool calls, `browser.execute_approval` included.
+  REST routes answer an approval refusal with fixed text, as before (403 "Not permitted" on
+  `/sessions/{id}/actions/*`, 409 "Conflict" on `POST /approvals/{id}/execute`), except for a browser
+  action's own error, which keeps its message, its `code` and any `approval_given_back`, and for the 409
+  of a decision on a claimed approval (below), or of an approve whose arguments or text are gone ("its
+  arguments are no longer stored", "its text is no longer held"), which says why.
+- **Only a browser action that ends before it began gives its approval back.** The paths that can are
+  `browser.execute_action` (with or without a `governed_approval_id`),
+  `POST /sessions/{id}/actions/execute`, `browser.execute_approval` and `POST /approvals/{id}/execute`,
+  the agent loop (`/agent/step`, `/agent/run`, queued agent steps and runs, cron runs), and an upload
+  (`POST /sessions/{id}/actions/upload`, or an `upload` action through any of these) before its transfer.
+  On those paths the approval is given back on any error the action's pipeline raises before the action
+  begins: its refusals (the page on a host `ALLOWED_HOSTS` does not allow, a hosted witness that is not
+  ready, a witness policy block, an upload's `element_id` that is not a file input or whose one-time
+  marker the page moved, an operator's reject that arrived while the action waited, below), or another
+  failure by then, such as the page snapshot it takes first. It is also given back on any refusal of an
+  approval check or claim inside the call (a governed `browser.execute_action` with a
+  `governed_approval_id` whose runtime approval is still to be asked for, unknown, or not approved), on a
+  cancellation before the action began, during its claim's write included (an agent job cancelled, a
+  harness run past its `max_wall_seconds`, or the controller shutting down), and on any ending before the
+  action began while an operator's reject waits on it (below), which then applies. An error raised
+  outside the pipeline before the action began, with no reject waiting, leaves it spent; so does a
+  cancellation once the action has begun, or of a governed tool call that is not a browser action. The
+  approval goes from `executed` back to `approved` (`executed_at` cleared, audited as
+  `approval_given_back`), or to `rejected` when an operator's reject applied. The action's error, or the
+  `approval_required` answer, says so in `approval_given_back` (the approval the call was given, the
+  outer one when there are two) and `approvals_given_back` (every one, innermost first), each with its
+  `status`, `approved`, `rejected` or `expired`, and a message; the agent loop's step result carries them
+  in `execution`. Retry an `approved` one with the same id once the cause is gone, rather than asking
+  again; repeat the call without `approval_id` for an `expired` one.
+- **A reject that arrives while a browser action has claimed its approval but not begun** (it waits for
+  the session, or is still being checked) answers 200 with the record, still `executed`, and a `message`:
+  the rejection stops the action unless it has begun (the action is refused with `approval_rejected`),
+  and the approval then becomes `rejected`, with the operator's comment, a witness receipt and an audit
+  entry. An approve sent meanwhile withdraws the rejection, and says what follows: the action may start;
+  it was already refused, and the approval goes back to approved (or has expired, and the agent asks
+  again); or it ended with an error that gives no approval back by itself, and the approval stays spent.
+  Which ending gives back is read when the approval is written back, so it does not depend on whether the
+  approve landed just before the action ended or just after. Once the action has begun, or while a
+  governed tool call that is not a browser action runs (its approval is never given back), the reject is
+  refused with why (a 409 over REST, with that text); so is an agent's own reject of a claimed approval.
+  The rejection applies however the action ends before it began, an error or a cancellation included; if
+  the approval cannot be written back, it stays spent, and the audit says the rejection did not apply.
+  Claims are tracked in the controller process, so a reject sent to another worker or replica is refused
+  with a 409, as before. On a Windows host with the default file store (`STATE_DB_PATH` unset), any read
+  or write of a record made while another write replaces it can fail, since Windows briefly locks a file
+  being replaced: a decision then answers 409 "Conflict" too; a claim, a check of the approval before the
+  action runs, or a give-back fails the call; and a listing leaves the record out. A give-back that fails
+  so leaves the approval spent. The Docker image runs Linux, where this does not happen.
+- **A governed upload's file is checked before anyone is asked to approve it**, in `browser.execute_action`
+  and the agent loop: a missing file is refused (`not_found` over MCP) and queues nothing.
+  `browser.execute_approval` and `POST /approvals/{id}/execute` check an upload's file before they claim
+  its approval, so a file gone since the approval leaves it approved, where it spent it on `not_found`.
+- **`done` is refused as an action to approve or execute** (a 400), as `request_human_takeover` is,
+  whatever risk category it carries; `POST /approvals/{id}/execute` refuses an approval for it with a 409,
+  without spending it.
+- **Approval webhooks and SSE approval events carry `origin`, `action_summary` and, for a tool call,
+  `arguments_size`.** The first two are written by the server. `reason` is the agent's own words for an
+  action approval, and goes out with its hidden characters written as code points, as the summary does:
+  a newline as `\n`, and a tab, a carriage return or another control as its code point (`[U+0009]`),
+  so a multi-line reason arrives on one line.
+- **A governed tool call's arguments are kept whole beside its approval** (`<id>.arguments` in
+  `APPROVAL_ROOT`), as the preview shows them uncut (credentials left out by tool and path, so a cookie's
+  value or a storage value is approved without being viewable), served by `GET /approvals/{id}/arguments`
+  to whoever may read the approval, and opened from the dashboard row ("View all N characters"). The
+  record keeps the size and sha256 of that text, which is not the digest the approval binds (that one
+  covers the call's own arguments). The file is removed when the call that spent the approval ends (a
+  removal that fails is logged, and leaves the file to the next start), and at startup for an approval
+  spent by a call whose process died mid-way, or for a file no record names. A reject is not final (an
+  operator may approve the approval after all), so a rejected approval keeps its file for the approval
+  TTL (`APPROVAL_TTL_MINUTES`) after the rejection; it then goes at the next approval request or start,
+  and an approve after that is refused as below. An approve of a tool call's approval whose file is gone
+  is refused before the record changes ("its arguments are no longer stored; the agent asks again"), and
+  so is an approve of a sensitive `type` whose text the process no longer holds, dropped by a reject, a
+  restart, or 24 hours after it was asked, or held by another worker ("its text is no longer held; the
+  agent asks again"). Expiry is not a final state in the store (an approval approved and past its expiry
+  stays `approved`, and is refused when used), so an approval left pending, or approved and never run,
+  keeps its file until its call spends it; nothing else sweeps it.
+- **A sensitive `type` reads "text hidden at the agent's request (sensitive)"**, where it read
+  "(sensitive text hidden)", in the queue, the confirm dialog, the webhook and the SSE summary: the agent
+  marks any typed text sensitive, a password field or not.
 - **A page `ALLOWED_HOSTS` refused for a page it loaded, or for where it came from, is read again only after the
   agent navigates it to an allowed URL, or a blocked action's rollback brings it back.** Observe, screenshots,
   the page-reading MCP tools and actions other than navigation answer that the page is not read (REST: 403)
@@ -58,8 +174,174 @@ Upgrade notes:
   browser does not answer in that time fails a drag that had succeeded; after a drag that failed, the drag's
   own error is the one reported. A drag cut off while it brought an end named by `element_id` into view also
   waits at most 2 seconds, before the release, to remove its scroll watch.
+- **`GET /sessions/{id}/witness/verify` and `browser.verify_witness` now fail on missing evidence where they used to pass it**, so `valid: true` means more than before:
+  - The first start after upgrading anchors every witness chain that has no anchor yet, as the chain
+    stands, and marks the witness root (`.anchors-migrated`). That is the only start that does. Chains
+    written before 1.7.0, when anchors arrived, keep verifying; whatever was cut from one earlier stays
+    undetectable. After that, a chain whose anchor file is deleted reports `anchor_missing` and keeps
+    reporting it across restarts.
+  - A chain that is cut short, or whose anchor goes missing or unreadable, stays flagged when more
+    receipts are recorded: the receipt is always recorded, but the anchor is no longer moved over a chain
+    it does not describe. Before, one more action erased a truncation.
+  - The `anchor.status` value `unanchored` is gone. `anchor_missing`, `anchor_unreadable`, `truncated`
+    and `diverged` all make `valid` false.
+  - With `WITNESS_ENABLED=false` no receipts are recorded, so a session that has none now verifies
+    `false` ("no receipts recorded for this scope"). Receipts recorded earlier still verify.
+  - A crash or a full disk between a scope's first receipt and its anchor leaves that chain
+    `anchor_missing` for good, and a receipt whose anchor update failed is unprotected until the next
+    successful append moves the anchor. To recover a chain you have checked by other means, delete
+    `<WITNESS_ROOT>/.anchors-migrated` and restart: that anchors every chain that has no anchor, as it
+    stands, so it also anchors any cut chain whose anchor was deleted. Check them first.
+  - An id with no session record, no chain and no anchor answers `404` on `/witness/verify` and
+    `/witness/bundle`.
 
 ### Security
+
+- **Raw VNC is gone: x11vnc listens on no TCP port, and noVNC on 6080 is the only way to the
+  desktop.** Upgrade note: a VNC viewer pointed at port 5900 no longer connects. Open the noVNC page
+  on 6080 instead (`http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale`, or the session's
+  `takeover_url`); it asks for `VNC_PASSWORD` when you set one. `VNC_PORT` is removed from
+  `.env.example`, the compose file and `make doctor`, and an isolated session's `runtime` object no
+  longer has `vnc_port`. Rebuild or pull the browser-node image to get the fix.
+
+  x11vnc served the browser-node display on TCP 5900, with no password unless `VNC_PASSWORD` was set,
+  next to the Origin check that keeps web pages out of noVNC on 6080. Its VNC library also accepts
+  WebSocket connections on 5900 and never checks their Origin, so a web page could reach the desktop
+  around that check: a page open in a browser on the same host, through the `127.0.0.1:5900` publish
+  (the base compose file, and every isolated session container), wherever that browser lets pages
+  connect to local addresses without asking. The agent's own Chromium asks before a public page may
+  do that. A page that got through had full view and control of a browser holding stored logins.
+  x11vnc now serves RFB only on a unix socket, in a directory only the browser user can enter; the
+  IPv6 port its library opened on 5900 by itself is closed too. websockify forwards noVNC to that
+  socket, and nothing exposes or publishes 5900.
+
+  Unchanged by this fix: noVNC has no password by default, and a program that is not a browser can
+  send any Origin it likes, so anything on the host or the Docker network that can reach 6080 can
+  still take over the desktop. Set `VNC_PASSWORD` wherever that matters.
+
+- **An approval for a governed tool call can no longer be minted as a browser action, or spent as the
+  wrong one.** The gateway approves a governed tool call that is not a browser action (`browser.eval_js`,
+  `browser.set_cookies`, ...) through a stand-in action, a `request_human_takeover` whose text names the
+  tool and a digest of its arguments, and approvals were matched on field values alone. An agent could ask
+  for the same stand-in through `browser.execute_action`, with a reason of its choosing that previewed
+  other arguments, which the dashboard showed as that tool call; once an operator approved it, the agent
+  spent it on the arguments the digest named. Every release from 1.0.5 through 1.11.1 is affected (before
+  1.8.0 the stand-in carried no digest, so such an approval covered any governed tool call of its kind,
+  whatever the tool and arguments). An approval now records its origin, `action` or `tool_call`, set only
+  by the gateway where it builds the stand-in: an action approval is refused for a tool call and the
+  reverse, a pending approval is reused only within its origin, and the dashboard names a tool call only
+  for `origin: tool_call`. An operator's rejection counts whatever the origin of either record, so one
+  made before the upgrade still holds. A `request_human_takeover` or a `done` is refused as an action to
+  approve or execute (a 400; over MCP the error for a takeover points to `browser.request_human_takeover`,
+  and the one for `done` says it ends an agent's run), and
+  `POST /approvals/{id}/execute` refuses a tool call's approval, or a takeover approved before origin
+  existed, with a 409, without consuming it, where it failed with a 400 ("Unsupported action" over MCP).
+  An agent still writes the reason of the approvals it asks for, so a request for a real action can still
+  be described misleadingly: read the action as well as the reason.
+
+- **An approval that let its action start is spent, whatever fails after.** An approval was reserved in
+  memory and consumed only once its action had returned, so an action that went through and then failed
+  (the settle after a click, the observation, a captcha, a recording error), or a controller restart
+  while it ran, left it approved, and the same `approval_id` ran the action again: a second payment click
+  or upload. The same held for a governed upload with `REQUIRE_APPROVAL_FOR_UPLOADS=false`, and for an
+  upload whose file went in while Playwright's call raised. Releases from 1.8.1 through 1.11.1 are
+  affected, and by the code so are earlier ones, which also consumed an approval only once its action
+  returned. The claim now spends it, and only a browser action that ends before it began gives it back,
+  as the upgrade notes say. An action approval covers one operation: a second one under the same claim,
+  or one from a task still running after the claim was released, is refused before it changes anything. A
+  policy block before the operation began no longer navigates back, which made an approved `go_back` go
+  back twice. A give-back revokes the claim before it writes anything, so a task still inside the
+  execution cannot act on the approval it returns, and a give-back whose audit fails leaves the approval
+  usable, where it dropped the sensitive text the approval needs to run. The approval guard's own
+  refusals reach the agent and the audit with their code (`approval_released`, `approval_rejected`,
+  `approval_already_used`; the blocked action's audit entry carries it as `details.code`, as a policy
+  block's carries `browser_action_blocked`), where they read "Action blocked by policy", and an upload
+  they stop before its transfer is not navigated back. Its expiry is checked at the claim, so an action
+  that started in time is no longer refused once it has run. A witness receipt reports an approval status
+  only for the approval its action ran under: `executed` once the action began, `approved` when it was
+  refused before and given back, `rejected` when an operator's reject stopped it (which gets its own
+  receipt), and none for an `approval_id` passed with an action that needed none. A governed
+  `browser.execute_action` that spends its `governed_approval_id` names that approval in the receipt. The
+  action's own status stays `blocked` or `failed`, and a policy block after the change names the block
+  under `target.after_change`. Not covered: two controller processes sharing one approval store (file or
+  SQLite) can still both claim an approval, since the claim is atomic only within a process (several
+  workers or replicas are not supported, as before).
+
+- **An approval whose session has no record follows the operator who asked for it.** Who may use an
+  approval follows its session's owner, and a session with no record (its record lost while the approval
+  stayed) read as unowned, so under named credentials any operator could read, list, decide and execute
+  another operator's approval, and read its tool call's arguments. Such an approval now belongs to the
+  operator its record names, and one that names nobody is refused under named credentials, as such a
+  session id is (below); a known session that nobody owns stays open to every operator, as before.
+
+- **What an operator is shown for an approval says what it covers.** The approval webhook and the SSE
+  approval event carried the reason but neither the origin nor the action, so a coordinate click whose
+  reason copied a tool call's read the same as that tool call's approval; they now carry the origin and a
+  server-rendered summary. The queue and that summary each showed fields of their own choosing: the queue
+  showed a coordinate click as a bare `click`, an option pick without its value, a selector where an
+  element id beside it was what ran, and typed text cut at 200 characters without saying so. Both now
+  render one list of every field an approval binds, checked against the match that binds it: the element
+  id that runs first (a selector beside it is marked as not used), the text a `type` types and whether it
+  replaces the field, coordinates, an option's value, label or index, a scroll's distance and a wait's
+  length, each string JSON-quoted so a newline shows as `\n`. A field that does not act says so: one the
+  action does not read is marked "(not used by click)" (a `url` on a click, a `file_path` or `text` on a
+  press), and one that another field set beside it overrides names the one that runs ("(not used:
+  selector runs)" after coordinates beside a selector; an option's index runs before its value, and its
+  value before its label). An empty `value` or `label` is shown (`value=""` was left out, so the row read
+  only the label it ran over), and a `value` that runs is marked "(matches an option's value or label)":
+  it picks the first option whose value or label it is, as Playwright matches it. The queue row cuts
+  nothing; the summary and the approve dialog cut an action's field strings at 200 characters and say how
+  many characters they leave out, and the dialog names the target first and points to the row; a tool
+  call's dialog shows the server's preview, which gives the length of the whole call (below). What would
+  hide or reorder the text an operator reads (format characters such as bidi overrides and zero-width
+  marks, controls, line and paragraph separators, and default-ignorable code points such as variation
+  selectors and Hangul fillers; the server's lists of format and default-ignorable code points are
+  Unicode 17.0's, whatever Unicode its Python knows) is shown as its code point (`[U+202E]`) in the
+  queue, the dialog, the summary, the webhook and SSE `reason`, the arguments viewer and the run replay,
+  and a tool call's preview is ASCII JSON (`\u202e`). A preview cut at 600 characters ends before an
+  escape it would split, and gives the length of the whole text, and the whole arguments open from the
+  queue (see the upgrade notes). A preview leaves out credentials by tool and path, where every value
+  under a key named `value`, `password`, `token` or `secret` was hidden at any depth, which hid a harness
+  run's start URL and conditions and whatever an agent put under those names: a `browser.set_cookies`
+  preview shows each cookie but its value (it hid the whole list), a `browser.set_local_storage` value
+  shows only its length, and the userinfo of `browser.cdp_attach`'s URL, a cookie's URL, a harness run's
+  start URL and its mock final page's URL is left out, with the value of each query parameter whose name,
+  or a part of it split at punctuation and at camelCase, names a credential (a token, key, secret,
+  password, signature, session or ticket, such as `access_token`, `X-Amz-Signature` or `ticket`), or that
+  runs such words together (`accesstoken`, `clientsecret`, `privatekey` and the like), the name decoded
+  until it reads the same (at most twice), and a query item with no `=`; a part, not a substring, so
+  `monkey` is shown. `&` and `;` both separate items, and a query value that is itself an http(s) URL as
+  a browser reads one (past spaces and control characters at either end, and without tabs or newlines),
+  such as a return URL, has its own userinfo and credential values left out (one level deep), and one
+  that urllib cannot read as a URL (`https://[draft`) is shown as written. Every other query value is
+  shown, a hosted browser's `--proxy-server` among them, where every one was left out. Those URLs are
+  refused when one holds a backslash or a control character, or names one host to a browser and another
+  to the controller (a percent-encoded host; a host a browser maps to another name, mapped by UTS 46's
+  table as a browser maps it, such as `127.1` in full-width digits or a name with a zero-width space in
+  it; and an IPv4 address not written as a dotted quad, such as `2130706433` or `127.1`, included), and
+  the preview reads the host as a browser does: `wss://x@evil.example\@bank.example/` was accepted and
+  shown as `wss://<redacted>@bank.example/`, while Playwright connected to `evil.example`. An
+  internationalized name is accepted, and shown as the `xn--` form a browser sends, with the name as
+  written beside it. Witness receipts and audit entries for an approval carry its origin and, for a tool
+  call, the tool, where they named only the stand-in `request_human_takeover`. Still the case: letters
+  that look alike across scripts (a Cyrillic `а` for a Latin `a`) and right-to-left letters are shown as
+  they are; a credential in a URL's fragment or in a query parameter of another name, or anywhere but
+  those paths, is shown; an agent can mark any typed text sensitive, which the queue says it did; an
+  operator's rejection blocks the same request only within its session (in controller scope, for the same
+  operator); and with `AUTONOMOUS_APPROVALS=true` the agent approves its own calls, including one an
+  operator rejected in another session.
+
+- **The cron tools now ask for approval under governed approvals.** Upgrade notes: an agent that
+  creates, triggers or deletes cron jobs with `workflow_profile=governed`, or on a controller with
+  `FORCE_GOVERNED_APPROVALS=true`, now gets `approval_required` for `browser.create_cron_job`
+  (`write`), `browser.trigger_cron_job` (`write`) and `browser.delete_cron_job` (`destructive`),
+  and repeats the call with the `approval_id` once an operator approves. Before, these three
+  tools were never gated. A job also keeps the `workflow_profile` of the call that created it and
+  every run starts under it; before, every run started as `fast`, so a governed agent could plant
+  a job that ran its writes without approval. Jobs created through REST store `fast`, and jobs
+  created by older versions keep running as `fast`: an update cannot change a job's profile, so to
+  govern one, delete it and create it again from a governed caller, or turn on
+  `FORCE_GOVERNED_APPROVALS` (which forces every run to `governed`). The full tool profile now has 19 tools with a governed kind, not 16.
 
 - **A popup that opens onto a host outside `ALLOWED_HOSTS` is sent back to `about:blank`, and console messages
   and page errors are not kept while the list refuses their page.** Playwright reports a popup only once its
@@ -76,6 +358,7 @@ Upgrade notes:
   `navigation_blocked` audit event, as it does after a later navigation. Shadow-browse sessions attach the
   listeners to every popup, and console messages and page errors are no longer kept while the list refuses
   their page. The entries below cover what else such a page left behind, and the last one what it still can.
+
 - **A page is refused for where it came from, not only for where it is.** A blank window a refused page opened
   (`window.open()` with no URL) is on `about:blank`, same-origin with that page and scriptable by it, so
   whatever the refused page had it log, fetch, fail, title or download passed every URL check, and after the
@@ -98,6 +381,7 @@ Upgrade notes:
   `blob:` URL is judged by the origin that made it; one with no origin (`blob:null`) is judged by where it came
   from alone. The TOTP autofill skips a refused page, also on a host in `totp_hosts`, since a refused host's
   redirect can choose that URL. The checks below that judge a page use this rule.
+
 - **The network log withholds what a page `ALLOWED_HOSTS` refuses asks for.** A request made by such a page,
   or one that navigates a top-level page to a refused host, was logged whole, the refused page's HTML
   included. A service worker's request has no page, and one a refused page registered went on being logged
@@ -113,6 +397,7 @@ Upgrade notes:
   the browser has not reported yet, and is withheld whatever its URL: a window a refused page opened onto a
   `204` is never reported, and the refused page can script its blank document. A request that cannot be
   attributed is withheld. Iframes and subresources an allowed page loads from other hosts are logged as before.
+
 - **A download from a host off `ALLOWED_HOSTS`, or one a page the list refuses starts, is cancelled and nothing
   is saved.** Such a download, a file a refused page generated itself (a `blob:` or `data:` URL) included, was
   saved to the session's downloads and readable through `browser.read_download` and its artifact URL. The
@@ -125,11 +410,13 @@ Upgrade notes:
   source URL's origin only and the reason, and a `download_blocked` audit event is written;
   `browser.read_download` refuses it as not completed. The cancel is asked for, and a failed one is logged;
   nothing is saved either way.
+
 - **Failed requests of a page `ALLOWED_HOSTS` refuses are not listed.** `request_failures`, in every
   observation and `browser.get_request_failures`, kept the URL, path included, of each request such a page
   made that failed. A failed request is now left out when its page was refused as it started (so one that
   fails after its page was blanked, or after the page loaded an allowed URL, is left out too), when its page
   is refused as it fails, and when it is a top-level navigation to a URL off the list.
+
 - **The REST CDP routes refuse while the session's page is refused.** `GET /sessions/{id}/cdp/element` and
   `POST /sessions/{id}/cdp/raw` read the session's active page whatever its host. They now take the session
   lock and answer 403, as observe does, while the list refuses that page or when it moved during the call.
@@ -138,6 +425,7 @@ Upgrade notes:
   within 10 seconds gets 504 and lets go of the session, and so does an attach to the active tab, or a detach
   from the tab before it, that the browser does not finish within 10 seconds. The 1.10.0 note that raw CDP
   passthrough is unchanged no longer holds.
+
 - **`browser.get_cookies` returns only cookies a host on `ALLOWED_HOSTS` would receive.** A page off the
   list sets cookies before it is blanked and the browser keeps them, and `browser.get_cookies` returned them,
   also when asked for that host's URL. A host-only cookie is now returned when its host is allowed, and a
@@ -146,6 +434,7 @@ Upgrade notes:
   browser sends only under the top-level site it is keyed to, is dropped when no listed host belongs to that
   site (an IPv6 site is judged by its bracketed address). A URL in `urls` that the list refuses is dropped
   before the browser is asked. With `ALLOWED_HOSTS` empty or `*`, nothing is filtered.
+
 - **A read is refused when its page went refused, closed or stopped being the active tab while it was read.**
   Reads checked the page's URL before they read it, and some again after, which compares two moments: a page
   that went to a refused host and came back, one sent to `about:blank` meanwhile, or an active tab that closed
@@ -162,11 +451,13 @@ Upgrade notes:
   `start_url`) refuses while its page is refused, and over REST answers the same 403 as observe (any other
   refusal of a fork answers the generic 403); a fork onto a `start_url` the caller names is judged by that URL,
   as a new session is.
+
 - **A refused page's URL is shown by its origin only.** Tab listings, session summaries, the snapshots an
   action returns, approval requests and the `navigation_blocked` audit event showed a
   refused page's URL whole, and the page chooses its path and query. They now show `scheme://host:port`, as
   the network log and blocked downloads do; `about:blank` is shown whole, and so is the URL of a page that is
   allowed again by the time it is shown.
+
 - **What a page `ALLOWED_HOSTS` refuses still does.** Its request has already gone out when it is refused:
   checks run when a request starts or a navigation commits, and the navigation request itself, with whatever the
   page put in its URL, reaches the refused host. The page runs, sets cookies and shows in the takeover (noVNC)
@@ -204,12 +495,55 @@ Upgrade notes:
   saving an auth profile) holds every host's cookies. Iframes and subresources from other hosts on an allowed
   page are not filtered, by design.
 
+- **Witness verification no longer reports missing evidence as valid.** Anyone who could write the
+  witness directory could remove receipts and still read `valid: true`. Now `valid` is `false` when the
+  chain file is gone (even with its anchor left behind), when a chain has no receipts, when a chain's
+  anchor file is missing (`anchor_missing`) and when it is corrupt, not UTF-8 or malformed
+  (`anchor_unreadable`: the count must be an integer of at least 1 and the head a non-empty string). The
+  chain's length and head must match the anchor exactly. Before, a missing or corrupt anchor read as
+  `unanchored`, which passed, so cutting the tail of a chain and deleting its anchor hid the cut, and
+  so did the next receipt, which moved the anchor to the shortened chain. A final receipt that parses
+  but lost its newline counts as a receipt in verify, list, export and the next append, which
+  completes it instead of setting it aside. A chain with an unparseable record now fails the
+  signature check with a verdict instead of an error. `chain_valid_at_export` in a witness bundle
+  follows the same rule, and `scripts/verify_witness_bundle.py` fails a bundle with no receipts. A
+  holder of write access to the witness directory can still make a cut chain verify: by rewriting
+  the anchor to match it, by deleting the chain together with its anchor, or by deleting
+  `.anchors-migrated` before a restart. For evidence that must survive that, pin a head hash somewhere
+  the controller host cannot write.
+
+- **A page can no longer stop a session's witness chain from recording.** Two separate faults ended
+  recording, both since 1.7.0. First, the tail read that finds the last receipt started at a byte
+  offset and decoded it as text, so once a chain passed 64 KiB and the window began inside a
+  multi-byte character (a Japanese page, a euro sign), every later append failed. Second, a single
+  receipt holding U+2028, U+2029 or U+0085 (a page puts one there through its title, which receipts copy as it is) was cut
+  in two by the line splitting, so every later append failed at any chain size, and verify, the
+  receipt list and the bundle export failed on such a chain too. In both, each later action ran, then
+  reported an error, and its receipt was never recorded, so a caller that retried could repeat a click
+  or a submit. The tail is read as bytes and chains are split on newlines only now; a chain stuck this
+  way accepts appends and verifies again with no repair.
+
+- **A staged skill candidate can no longer be edited, or copied to another directory, and still read
+  as verified.** Upgrade note: candidates staged by an earlier version carry no `candidate_hash` and
+  are now refused (and left out of `harness.list_candidates`) with "induce it again": run the
+  convergence again to stage them afresh. This only matters on a controller with a mesh identity,
+  where candidates are signed. The signature now also covers every field of `candidate.json` except
+  the `files` map (`safety_class`, `verifier_backend`, `name`, ...), which `harness.get_candidate`
+  and `harness.list_candidates` now build from the directory the candidate was read from. The files
+  are hashed in that directory, which must be named for the candidate's `skill_id` and must stay
+  inside the staging directory once links are resolved (listing now applies the same check as
+  `harness.get_candidate`). Before, someone
+  who could write to the staging directory could change those fields, or copy a genuine
+  `candidate.json` next to altered files, and the registry served it as verified. The review files
+  `provenance.json`, `envelope.json`, `contract.json` and `trace.json` are still not hashed.
+
 ### Fixed
 
 - **The session-limit error names only the sessions the caller may use.** Under named credentials
   (`API_BEARER_TOKENS`), the error `browser.create_session` (and an observe or act tool that creates a
   session) returns at `MAX_SESSIONS` listed every live session id, other operators' included. It now lists
   the caller's own and unowned sessions, and counts the rest.
+
 - **An MCP session (`MCP-Session-Id`) belongs to the operator who initialized it.** Under named credentials,
   another operator holding the id could ping it, subscribe it to resources and `DELETE /mcp` it, though tool
   calls always ran as the caller's own operator. Any other operator now gets `-32001` "Unknown MCP session".
@@ -219,23 +553,27 @@ Upgrade notes:
   hears of it. The MCP session table keeps 500 sessions and evicts the least recently used, so one operator
   initializing many evicted another operator's idle session. An operator now keeps at most 100, and past that
   loses its own least recently used first. Unowned sessions are bounded by the 500 alone.
+
 - **Under named credentials, a session id with no live session and no record is refused like another
   operator's.** Such an id has no owner to check, so the routes and MCP tools that read a session's files by
   id (replay, audit, witness) served an orphaned id's files and events to every operator, while `/artifacts`
   refused them, and other routes answered it in their own words, which told another operator's session from
   none. Routes and tools that name the session id (in the path or a `session_id` parameter) now answer `404`
-  `unknown_session` before anything else. Approvals and agent jobs, looked up by their own id, apply the
-  same rule to the session they belong to: they are left out of listings and answer as if they did not
-  exist. An upload from such an id's directory under `UPLOAD_ROOT` is refused. A subfolder of `UPLOAD_ROOT`
+  `unknown_session` before anything else. Agent jobs, looked up by their own id, apply the same rule to
+  the session they belong to: they are left out of listings and answer as if they did not exist, and so
+  do approvals of such an id that name no operator (one that names the operator who asked belongs to
+  that operator, above). An upload from such an id's directory under `UPLOAD_ROOT` is refused. A subfolder of `UPLOAD_ROOT`
   named like a session id (12 lowercase hexadecimal characters, so a name of 12 digits, such as a timestamp,
   too) is treated as that session's directory, even if you made it yourself, and an upload refused for that
   reason says so: rename the folder. Other subfolders stay shared with every operator. Deployments without
   named credentials are unchanged.
+
 - **Tab listings, the `fast` observe preset and the bot-challenge check no longer wait without end for a page
   stuck in a script.** All three run under the session lock, so one tab whose renderer never answered stalled
   every call on the session. A tab's title now waits at most 2 seconds (the tab is listed without one), the
   `fast` preset's title at most 30 seconds (observe fails), and the bot-challenge probe that runs after every
   action at most 30 seconds (the page is then checked by its URL alone).
+
 - **A failed auth-profile save loses nothing, unless putting the previous state back fails too.** Saving a
   session's state as a profile wrote the state file first and then read the page's title for the profile's
   metadata. When that read or the metadata write failed, the new state file stayed in place, on a first save
@@ -250,6 +588,7 @@ Upgrade notes:
   those out. A rename that Windows refuses for a moment (another process has the file open) is tried again. An
   encrypted save also tries to remove the plaintext `state.json` saved before the encryption key was set; a
   removal that fails is logged, and the save stands.
+
 - **An action whose observation hits a permission error on a file reports it without the server's path.** When
   the observation after an action hit a permission error on a file (`EACCES` or `EPERM`: a screenshot in an
   artifact directory the controller may not write, say), the OS error, path included, was returned as the
