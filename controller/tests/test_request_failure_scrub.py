@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.browser.page_provenance import PageProvenance
 from app.browser.services.diagnostics import BrowserDiagnosticsService
 from app.browser.services.observation import BrowserObservationService
 from app.browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
@@ -58,6 +59,10 @@ class FakeRequest:
         self.url = url
         self.method = method
         self.failure = failure
+        self.resource_type = "fetch"
+
+    def is_navigation_request(self) -> bool:
+        return False
 
 
 def _setup(
@@ -84,6 +89,9 @@ def _setup(
         _session_summary=AsyncMock(return_value={"id": "session-1"}),
         _current_takeover_url=MagicMock(return_value=None),
         _assert_page_allowed=MagicMock(),
+        _url_off_list=MagicMock(return_value=False),
+        _page_refused=MagicMock(return_value=False),
+        page_provenance=PageProvenance(),
         remote_access=SimpleNamespace(session_info=MagicMock(return_value={})),
         tabs=SimpleNamespace(summaries=AsyncMock(return_value=[])),
         element_ids=FakePageElementIds(),

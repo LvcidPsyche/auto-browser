@@ -21,8 +21,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 
 import app.main as main_module
+from app.browser.page_provenance import PageProvenance
 from app.browser.services import observation as observation_module
 from app.browser.services.observation import SHARE_FRAME_KEEP_SECONDS, SHARE_FRAME_LABEL, BrowserObservationService
+from app.routes._utils import OFF_LIST_PAGE_DETAIL
 
 
 class FakePage:
@@ -71,6 +73,8 @@ def _manager(session: SimpleNamespace, *, scrubbing: bool = False) -> SimpleName
         get_session=AsyncMock(return_value=session),
         _capture_screenshot=AsyncMock(side_effect=capture),
         _assert_page_allowed=MagicMock(),
+        _page_refused=MagicMock(return_value=False),
+        page_provenance=PageProvenance(),
         _session_summary=AsyncMock(),
         tabs=SimpleNamespace(summaries=AsyncMock()),
         pii_scrubber=SimpleNamespace(screenshot_enabled=scrubbing, audit_report=False),
@@ -196,6 +200,22 @@ class ShareRouteTests(unittest.TestCase):
         self.assertEqual((body["url"], body["title"]), ("https://example.com/watched", "Watched"))
         self.assertRegex(body["screenshot_url"], rf"^/share/tok/screenshots/.*-{SHARE_FRAME_LABEL}\.png$")
         self.assertEqual(body["session"], {"id": "session-1"})
+        self.assertFalse(self.session.lock.locked())
+
+    def test_a_page_refused_before_the_frame_answers_403_with_the_off_list_detail(self) -> None:
+        main_module.manager._assert_page_allowed.side_effect = PermissionError("host 'evil.example' is not allowed")
+
+        response = self.client.get("/share/tok/observe")
+
+        self.assertEqual((response.status_code, response.json()), (403, {"detail": OFF_LIST_PAGE_DETAIL}))
+        self.assertEqual(list(self.dir.glob("*.png")), [])
+
+    def test_a_page_that_moved_while_the_frame_was_taken_answers_403_and_keeps_no_frame(self) -> None:
+        with patch.object(main_module.manager, "_page_refused", return_value=True):
+            response = self.client.get("/share/tok/observe")
+
+        self.assertEqual((response.status_code, response.json()), (403, {"detail": OFF_LIST_PAGE_DETAIL}))
+        self.assertEqual(list(self.dir.glob("*.png")), [])
         self.assertFalse(self.session.lock.locked())
 
 

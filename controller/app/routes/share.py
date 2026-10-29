@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from ..models import ShareSessionRequest
 from ..session_ownership import as_system
-from ._utils import internal_error, require_safe_segment
+from ._utils import OFF_LIST_PAGE_DETAIL, internal_error, require_safe_segment
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,10 @@ def create_share_router(*, manager: Any, share_manager: Any, settings: Any) -> A
                 observation = await manager.share_snapshot(session_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Unknown session") from None
+        except PermissionError:
+            # A refused page, or one that moved while the frame was taken: refused as observe
+            # refuses it, not a 500 whose log line names the host.
+            raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
         except Exception:
             raise internal_error(logger, "shared observe failed") from None
         screenshot_path = observation.get("screenshot_path")

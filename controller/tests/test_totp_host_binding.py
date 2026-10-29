@@ -11,10 +11,11 @@ from __future__ import annotations
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from pydantic import ValidationError
 
+from app.action_errors import BrowserActionError
 from app.browser.services.actions import BrowserActionService
 from app.models import CreateSessionRequest, resolve_totp_hosts, totp_host_allowed
 
@@ -61,10 +62,17 @@ class TotpHostResolutionTests(unittest.TestCase):
 
 
 class TotpAutofillTests(unittest.TestCase):
-    def run_autofill(self, url: str, *, hosts: tuple[str, ...]) -> tuple[object, AsyncMock]:
+    def run_autofill(
+        self, url: str, *, hosts: tuple[str, ...], refused: bool = False, shown: str | None = None
+    ) -> tuple[object, AsyncMock]:
         typed = AsyncMock()
         locator = SimpleNamespace(fill=AsyncMock(), press=AsyncMock())
-        service = BrowserActionService(SimpleNamespace(_settle=AsyncMock()))
+        manager = SimpleNamespace(
+            _settle=AsyncMock(),
+            _page_refused=lambda page: refused,
+            _shown_url=lambda page: shown if shown is not None else page.url,
+        )
+        service = BrowserActionService(manager)
         service._find_one_time_code_field = AsyncMock(return_value=(locator, 'input[name*="code" i]'))
         service.focus_verified = AsyncMock()
         service.type_text_human_like = typed
@@ -87,6 +95,21 @@ class TotpAutofillTests(unittest.TestCase):
                 result, typed = self.run_autofill(url, hosts=("login.example.com",))
                 self.assertIsNone(result)
                 typed.assert_not_awaited()
+
+    def test_a_refused_page_on_a_named_host_gets_nothing(self) -> None:
+        """CR-4: the check before the autofill is by URL only, so a page a refused host's redirect sent to a
+        named sign-in URL (with its own query) was given a live code."""
+        result, typed = self.run_autofill(
+            "https://login.example.com/2fa?d=X", hosts=("login.example.com",), refused=True
+        )
+        self.assertIsNone(result)
+        typed.assert_not_awaited()
+
+    def test_totp_unavailable_names_the_page_as_it_is_shown(self) -> None:
+        with patch("app.browser.services.actions.pyotp", None), self.assertRaises(BrowserActionError) as raised:
+            self.run_autofill("https://login.example.com/2fa?d=X", hosts=("login.example.com",), shown="SHOWN-URL")
+        self.assertEqual(raised.exception.code, "totp_unavailable")
+        self.assertEqual(raised.exception.details["url"], "SHOWN-URL")
 
     def test_a_session_without_hosts_types_nowhere(self) -> None:
         """Sessions built without going through create() fail closed."""

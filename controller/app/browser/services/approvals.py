@@ -20,31 +20,34 @@ class BrowserApprovalService:
     ) -> list[dict[str, Any]]:
         approvals = await self.manager.approvals.list(status=status, session_id=session_id)
         # One lookup per session, not per approval: a session can hold many.
-        session_owners = {
-            session: await self.manager.session_owner(session)
+        session_usable = {
+            session: await self.manager.session_accessible(session)
             for session in {item.session_id for item in approvals if item.session_id != CONTROLLER_SCOPE}
         }
         return [
             approval.model_dump()
             for approval in approvals
-            if may_use(
-                approval.owner if approval.session_id == CONTROLLER_SCOPE else session_owners[approval.session_id]
+            if (
+                may_use(approval.owner)
+                if approval.session_id == CONTROLLER_SCOPE
+                else session_usable[approval.session_id]
             )
         ]
 
     async def get(self, approval_id: str) -> dict[str, Any]:
         return (await self._accessible(approval_id)).model_dump()
 
-    async def _owner_of(self, approval: ApprovalRecord) -> str | None:
-        """Who may use an approval: its session's owner, or for one with no session, who asked."""
+    async def _may_use(self, approval: ApprovalRecord) -> bool:
+        """Who may use an approval: whoever may use its session, or for one with no session, who asked."""
         if approval.session_id == CONTROLLER_SCOPE:
-            return approval.owner
-        return await self.manager.session_owner(approval.session_id)
+            return may_use(approval.owner)
+        return await self.manager.session_accessible(approval.session_id)
 
     async def _accessible(self, approval_id: str) -> ApprovalRecord:
-        """An approval of another operator's session answers as if it did not exist."""
+        """An approval of another operator's session, or of an id with no session under named credentials,
+        answers as if it did not exist."""
         approval = await self.manager.approvals.get(approval_id)
-        if not may_use(await self._owner_of(approval)):
+        if not await self._may_use(approval):
             raise KeyError(approval_id)
         return approval
 

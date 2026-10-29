@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from ...approvals import held_for_execution
 from ...models import BrowserActionDecision
 from ...session_ownership import may_use
+from .sessions import SESSION_ID_HEX_DIGITS, is_session_id
 
 if TYPE_CHECKING:
     from ...browser_manager import BrowserSession
@@ -157,6 +158,18 @@ class BrowserUploadService:
         parts = candidate.relative_to(root).parts if candidate.is_relative_to(root) else ()
         if len(parts) < 2:
             return  # directly in UPLOAD_ROOT: shared with every operator
+        # A subfolder named like a session id is that session's, and under named credentials one with no
+        # session and no record has no owner to check, so no one gets it (the rule ensure_accessible
+        # applies). Any other subfolder is shared, as the root is.
+        if is_session_id(parts[0]):
+            if not await self.manager.session_accessible(parts[0]):
+                raise PermissionError(
+                    f"file_path is in a folder of UPLOAD_ROOT whose name has the shape of a session id "
+                    f"({SESSION_ID_HEX_DIGITS} lowercase hexadecimal characters, digits-only names included), so it "
+                    "counts as that session's upload folder, which this caller "
+                    "may not use. If it is not a session's folder, rename it."
+                )
+            return
         if not may_use(await self.manager.session_owner(parts[0])):
             raise PermissionError("file_path must stay inside upload root")
 

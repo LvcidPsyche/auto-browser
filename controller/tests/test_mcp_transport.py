@@ -10,7 +10,14 @@ from unittest.mock import AsyncMock
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from app.mcp_transport import MCP_PROTOCOL_HEADER, MCP_SESSION_HEADER, McpHttpTransport, McpSession
+from app.mcp_transport import (
+    MAX_MCP_SESSIONS,
+    MAX_MCP_SESSIONS_PER_OWNER,
+    MCP_PROTOCOL_HEADER,
+    MCP_SESSION_HEADER,
+    McpHttpTransport,
+    McpSession,
+)
 from app.models import McpToolCallContent, McpToolCallResponse
 
 
@@ -553,6 +560,62 @@ class McpTransportTests(unittest.TestCase):
         )
 
         self.assertEqual(uris, ["browser://session-1/dom", "browser://sessions"])
+
+
+def _owned_sessions(owner: str | None, count: int, *, minute: int) -> dict[str, McpSession]:
+    """count sessions of one owner, used in turn during one minute (later index, later use)."""
+    return {
+        f"{owner}-{index}": McpSession(
+            id=f"{owner}-{index}",
+            protocol_version="2025-11-25",
+            client_info={},
+            client_capabilities={},
+            created_at=f"2026-04-17T00:{minute:02d}:00.{index:06d}Z",
+            owner=owner,
+        )
+        for index in range(count)
+    }
+
+
+class McpSessionCapTests(unittest.TestCase):
+    """The table's cap ignored owners: one operator's initialize flood evicted another's live session."""
+
+    def setUp(self) -> None:
+        self.transport = McpHttpTransport(
+            tool_gateway=SimpleNamespace(), server_name="auto-browser", server_version="0.2.0", manager=None
+        )
+
+    def test_one_operators_flood_does_not_evict_another_operators_session(self) -> None:
+        self.transport._sessions = {**_owned_sessions("alice", 1, minute=0), **_owned_sessions("bob", 600, minute=1)}
+
+        self.transport._evict_stale_sessions()
+
+        self.assertIn("alice-0", self.transport._sessions)
+
+    def test_an_owner_over_its_cap_loses_its_own_least_recently_used_sessions(self) -> None:
+        self.transport._sessions = {
+            **_owned_sessions("alice", 1, minute=0),
+            **_owned_sessions("bob", MAX_MCP_SESSIONS_PER_OWNER + 2, minute=1),
+        }
+
+        self.transport._evict_stale_sessions()
+
+        bob = sorted((key for key in self.transport._sessions if key.startswith("bob-")), key=lambda k: int(k[4:]))
+        self.assertEqual(len(bob), MAX_MCP_SESSIONS_PER_OWNER)
+        self.assertEqual(bob[0], "bob-2")
+        self.assertIn("alice-0", self.transport._sessions)
+
+    def test_control_the_global_cap_still_bounds_the_table(self) -> None:
+        owners = [f"operator-{n}" for n in range(MAX_MCP_SESSIONS // MAX_MCP_SESSIONS_PER_OWNER + 1)]
+        for minute, owner in enumerate(owners):
+            self.transport._sessions.update(_owned_sessions(owner, MAX_MCP_SESSIONS_PER_OWNER, minute=minute))
+        self.transport._sessions.update(_owned_sessions(None, 10, minute=59))
+
+        self.transport._evict_stale_sessions()
+
+        self.assertEqual(len(self.transport._sessions), MAX_MCP_SESSIONS)
+        self.assertNotIn("operator-0-0", self.transport._sessions)
+        self.assertIn("None-9", self.transport._sessions)
 
 
 if __name__ == "__main__":

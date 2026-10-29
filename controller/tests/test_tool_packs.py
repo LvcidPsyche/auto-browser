@@ -7,6 +7,7 @@ every registered tool.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import tempfile
@@ -20,6 +21,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from app.app_factory import build_controller_services
+from app.browser.page_provenance import PageProvenance
 from app.config import Settings
 from app.mcp_instructions import SERVER_INSTRUCTIONS, server_instructions
 from app.mcp_transport import McpHttpTransport
@@ -655,8 +657,10 @@ class LeanSessionTests(unittest.IsolatedAsyncioTestCase):
                     observe=AsyncMock(return_value={"url": "https://example.com"}),
                     execute_decision=AsyncMock(return_value={"action": "navigate"}),
                     capture_screenshot=AsyncMock(return_value={"screenshot_url": "/artifacts/session-1/shot.png"}),
-                    get_session=AsyncMock(return_value=SimpleNamespace(page=page)),
+                    get_session=AsyncMock(return_value=SimpleNamespace(page=page, lock=asyncio.Lock())),
                     _assert_page_allowed=Mock(),
+                    _page_refused=Mock(return_value=False),
+                    page_provenance=PageProvenance(),
                 )
                 response = await _gateway(manager, tool_profile="lean").call_tool(
                     McpToolCallRequest(name=name, arguments=arguments)

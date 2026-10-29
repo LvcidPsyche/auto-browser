@@ -16,6 +16,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# How long the tab list waits for one tab's title before listing it without one.
+TAB_TITLE_TIMEOUT_SECONDS = 2.0
+# Why a tab is not activated (REST answers it too). Only the active page can be navigated, so the way out
+# of a refused tab that is not active is to close it; it names no host.
+REFUSED_TAB_MESSAGE = (
+    "That tab is on a host ALLOWED_HOSTS does not allow, or came from one, and cannot be activated. Close it, "
+    "or open a new tab."
+)
+
 
 class BrowserTabService:
     def __init__(self, manager: Any) -> None:
@@ -36,10 +45,13 @@ class BrowserTabService:
         session = await self.manager.get_session(session_id)
         async with session.lock:
             new_page = await session.context.new_page()
+            # Reported by the context like a popup, but with no opener to judge it.
+            self.manager.page_provenance.opened_by_controller(new_page)
             try:
                 self.manager._attach_page_listeners(new_page, session)
                 if url:
-                    await new_page.goto(url, wait_until="domcontentloaded")
+                    with self.manager.page_provenance.controller_navigation(new_page) as navigation:
+                        navigation.response = await new_page.goto(url, wait_until="domcontentloaded")
                     await self.manager._settle(new_page)
                     # The check navigate() makes after the page loads: an
                     # allowlisted URL can redirect somewhere that is not.
@@ -85,7 +97,10 @@ class BrowserTabService:
             # refuses, and every later action and observation reads session.page.
             # Refused before it becomes the active page, so the session stays
             # where it was.
-            self.manager._assert_runtime_url_allowed(target_page.url)
+            try:
+                self.manager._assert_page_object_allowed(target_page)
+            except PermissionError as exc:
+                raise PermissionError(REFUSED_TAB_MESSAGE) from exc
             self.manager._attach_page_listeners(target_page, session)
             if hasattr(target_page, "bring_to_front"):
                 await target_page.bring_to_front()
@@ -135,26 +150,43 @@ class BrowserTabService:
         pages = self.pages(session)
         for page in pages:
             self.manager._attach_page_listeners(page, session)
+        # A tab ALLOWED_HOSTS refuses is listed by URL only: checked before the title
+        # is read and after, by its count of refused commits too, since the page can
+        # move while it is read and come back (see app/browser/page_read.py).
+        provenance = self.manager.page_provenance
+        before = [(self.manager._page_refused(page), provenance.refused_commits(page)) for page in pages]
         # Every observation lists the tabs; fetch the titles together rather
-        # than paying one browser round trip per open tab in turn.
-        titles = await asyncio.gather(*(self._title(page) for page in pages))
-        # A tab on a host the list refuses is listed by URL only.
+        # than paying one browser round trip per open tab in turn. A tab refused
+        # already is not asked.
+        titles = await asyncio.gather(*(self._title(page, refused=off) for page, (off, _) in zip(pages, before)))
         titles = [
-            "" if self.manager._url_off_list(getattr(page, "url", "")) else title for page, title in zip(pages, titles)
+            ""
+            if off or self.manager._page_refused(page) or provenance.refused_commits(page) != commits or _closed(page)
+            else title
+            for page, title, (off, commits) in zip(pages, titles, before)
         ]
         return [
             {
                 "index": index,
                 "active": page is session.page,
-                "url": getattr(page, "url", ""),
+                "url": self.manager._shown_url(page),
                 "title": title,
             }
             for index, (page, title) in enumerate(zip(pages, titles))
         ]
 
     @staticmethod
-    async def _title(page: "Page") -> str:
+    async def _title(page: "Page", *, refused: bool) -> str:
+        if refused:
+            return ""
         try:
-            return await page.title()
+            # Bounded: the list is read under the session lock, and a tab stuck in a script never answers.
+            return await asyncio.wait_for(page.title(), timeout=TAB_TITLE_TIMEOUT_SECONDS)
         except Exception:
             return ""
+
+
+def _closed(page: Any) -> bool:
+    """A tab that closed while its title was read: its provenance is gone with it."""
+    is_closed = getattr(page, "is_closed", None)
+    return callable(is_closed) and bool(is_closed())

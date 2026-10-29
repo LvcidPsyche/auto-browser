@@ -4,22 +4,25 @@ import asyncio
 import fnmatch
 import logging
 import weakref
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
-from .action_errors import SessionNotFoundError
+from .action_errors import RefusedPageError, SessionNotFoundError
 from .actions import BrowserActionPipeline
 from .approvals import ApprovalStore
 from .artifacts import SessionArtifactService
 from .audit import AuditStore
 from .auth_state import AuthStateManager
 from .browser.element_ids import ElementIds
+from .browser.page_provenance import REFUSED_FAILURES_KEPT, PageProvenance
+from .browser.page_read import start_read
 from .browser.services import (
     BrowserActionService,
     BrowserApprovalService,
@@ -45,7 +48,7 @@ from .models import (
     SessionStatus,
     WitnessRemoteState,
 )
-from .network_inspector import NetworkInspector
+from .network_inspector import NetworkInspector, url_origin
 from .ocr import OCRExtractor
 from .pii_scrub import PiiScrubber
 from .session_isolation import DockerBrowserNodeProvisioner, IsolatedBrowserRuntime
@@ -123,9 +126,18 @@ class BrowserSession:
     # Weak refs: a collected Page must not block re-attaching listeners to a
     # new Page that happens to reuse its id().
     attached_pages: weakref.WeakSet[Any] = field(default_factory=weakref.WeakSet)
+    # Top-level requests through a URL off the list (to one, or redirected from one) that only this
+    # session's context saw, before it reported their page (a popup's first navigation): see
+    # BrowserDiagnosticsService.on_context_request.
+    unframed_hops: list[Any] = field(default_factory=list)
+    # Final URLs of those navigations that failed: Playwright reports the download a navigation of a page
+    # it has not reported turns into on that page's opener, so the download is judged by this record.
+    refused_failures: deque[str] = field(default_factory=lambda: deque(maxlen=REFUSED_FAILURES_KEPT))
     last_action: str | None = None
     proxy_persona: str | None = None
     last_auth_state_path: Path | None = None
+    # The last screenshot a checked read returned (see capture_session_screenshot).
+    last_screenshot: dict[str, str] | None = None
     auth_profile_name: str | None = None
     tunnel_error: str | None = None
     mouse_position: tuple[float, float] | None = None
@@ -164,6 +176,7 @@ class BrowserManager:
         self.playwright: Playwright | None = None
         self.browser: Browser | None = None
         self.sessions: dict[str, BrowserSession] = {}
+        self.page_provenance = PageProvenance(url_refused=self._url_off_list)
         self._browser_lock = asyncio.Lock()
         self.action_pipeline = BrowserActionPipeline()
         self.element_ids = ElementIds(settings)
@@ -363,6 +376,9 @@ class BrowserManager:
     async def ensure_session_accessible(self, session_id: str) -> None:
         await self.session_lifecycle.ensure_accessible(session_id)
 
+    async def session_accessible(self, session_id: str) -> bool:
+        return await self.session_lifecycle.accessible(session_id)
+
     async def session_owner(self, session_id: str) -> str | None:
         return await self.session_lifecycle.owner_of(session_id)
 
@@ -546,8 +562,12 @@ class BrowserManager:
     def _attach_page_listeners(self, page: Page, session: BrowserSession) -> None:
         self.diagnostics.attach_page_listeners(page, session)
 
-    async def _handle_download(self, session: BrowserSession, download: Any) -> None:
-        return await self.diagnostics.handle_download(session, download)
+    def _attach_popup(self, page: Page, session: BrowserSession) -> None:
+        """Attach to a page the context reports (a popup, a new tab), judged by its opener too."""
+        self.diagnostics.attach_popup(page, session)
+
+    async def _handle_download(self, session: BrowserSession, download: Any, *, page_refused: bool = False) -> None:
+        return await self.diagnostics.handle_download(session, download, page_refused=page_refused)
 
     # ── Actions ──────────────────────────────────────────────────────────────
 
@@ -675,7 +695,18 @@ class BrowserManager:
         await self.actions.settle(page)
 
     async def _check_bot_challenge(self, session: BrowserSession) -> dict[str, Any] | None:
-        return await self.bot_challenge.check(session)
+        try:
+            read = start_read(self, session)
+        except PermissionError:
+            # A refused page is not probed: the probe reads its title and iframes, and the
+            # pipeline's own checks refuse the page after this.
+            return None
+        challenge = await self.bot_challenge.check(session)
+        if challenge is not None:
+            # The probe's title and iframe sources go to the agent in the error: a page
+            # that moved while it was probed is refused instead of described.
+            read.check()
+        return challenge
 
     async def _maybe_handle_totp(self, session: BrowserSession) -> dict[str, Any] | None:
         return await self.actions.maybe_handle_totp(session)
@@ -719,9 +750,17 @@ class BrowserManager:
 
     def _assert_runtime_url_allowed(self, url: str) -> None:
         parsed = urlparse(url)
+        # A blob: URL is a file its origin's page generated (blob:https://host/uuid),
+        # so that origin is held to the list; an opaque one (blob:null/...) names no
+        # host, and the page that made it is judged instead (PageProvenance).
+        if parsed.scheme == "blob":
+            inner = urlsplit(parsed.path)
+            if inner.scheme.lower() in HTTP_URL_SCHEMES:
+                self._assert_url_allowed(parsed.path)
+            return
         # Where a page may legitimately be after an action: a blank or
         # script-built document, or Chromium's own page for a failed load.
-        if parsed.scheme in {"about", "data", "blob", "chrome-error", ""}:
+        if parsed.scheme in {"about", "data", "chrome-error", ""}:
             return
         self._assert_url_allowed(url)
 
@@ -733,12 +772,78 @@ class BrowserManager:
             return True
         return False
 
+    def _cookie_off_list(self, domain: str) -> bool:
+        """Whether no host ALLOWED_HOSTS allows would receive a cookie stored for ``domain``.
+
+        A host-only cookie goes to its host alone. A domain cookie (".example.com") also
+        goes to every host under its domain, so it is kept for its domain or for a host
+        the list allows under it: "app.example.com" keeps ".example.com". An entry with a
+        leading dot allows no host (_assert_url_allowed matches none), so it keeps none.
+        """
+        if not self._url_off_list(f"https://{domain.lstrip('.')}/"):
+            return False
+        if not domain.startswith("."):
+            return True
+        under = domain.lower()
+        return not any(
+            entry.lower().endswith(under) and not entry.startswith(".") for entry in self.settings.allowed_host_patterns
+        )
+
+    def _partition_off_list(self, partition_key: str | None) -> bool:
+        """Whether a partitioned (CHIPS) cookie's top-level site is one no listed host belongs to.
+
+        Such a cookie is sent only under that top-level site, so one keyed to a refused site was set
+        by a frame on the refused page and never reaches an allowed top-level page. The key is a
+        site (https://example.com), so it is judged like a domain cookie for that site. A key that
+        names no host is refused.
+        """
+        if not partition_key:
+            return False
+        host = urlsplit(partition_key).hostname
+        if host is None:
+            return True
+        # An IPv6 host goes back into a URL in brackets (https://[::1]/): unbracketed it names no host.
+        return self._cookie_off_list(f".[{host}]" if ":" in host else f".{host}")
+
+    def _page_refused(self, page: Any) -> bool:
+        """Whether ALLOWED_HOSTS refuses this page: its URL is off the list, or where it came from is.
+
+        A page that committed a refused URL stays refused on the controller's blank
+        until the agent navigates it to an allowed URL, and a blank window a refused page opened is
+        refused with it (see app/browser/page_provenance.py).
+        """
+        return self._url_off_list(page.url) or self.page_provenance.refused(page)
+
+    def _shown_url(self, page: Any) -> str:
+        """The URL a listing or record shows for a page: its origin only while ALLOWED_HOSTS refuses it.
+
+        A refused page chose its URL's path and query, which can carry what it read, so they are
+        cut as the network log and blocked downloads cut them (url_origin).
+        """
+        url = page.url
+        if url == "about:blank" or not self._page_refused(page):
+            return url
+        return url_origin(url)
+
     def _page_off_list(self, session: BrowserSession) -> bool:
-        """Whether the session's active page is on a URL ALLOWED_HOSTS refuses."""
-        return self._url_off_list(session.page.url)
+        """Whether ALLOWED_HOSTS refuses the session's active page (see _page_refused)."""
+        return self._page_refused(session.page)
+
+    def _session_has_refused_page(self, session: BrowserSession) -> bool:
+        """Whether a page of the session, its active one or another tab, can run a refused host's code.
+
+        Its URL is off the list, or PageProvenance.counts_for_its_session: not every page _page_refused
+        refuses, since one refused only because another tab was, or only waiting for its opener's
+        verdict, has its document from an allowed origin while it is on an allowed http(s) URL, and none
+        on the controller's own blank.
+        """
+        return any(
+            self._url_off_list(page.url) or self.page_provenance.counts_for_its_session(page)
+            for page in self.tabs.pages(session)
+        )
 
     def _assert_page_allowed(self, session: BrowserSession) -> None:
-        """Refuse to read a page that has landed on a host ALLOWED_HOSTS does not allow.
+        """Refuse to read a page ALLOWED_HOSTS refuses (see _page_refused).
 
         The list is enforced where the controller moves the page. A page can also
         move itself after an action has finished (a timer, a late redirect), and
@@ -746,13 +851,32 @@ class BrowserManager:
         diagnostics sends such a page to about:blank; this covers the moments
         before it has, and every path that returns page content calls it first.
         """
+        self._assert_page_object_allowed(session.page)
+
+    def _assert_page_object_allowed(self, page: Any) -> None:
         try:
-            self._assert_runtime_url_allowed(session.page.url)
+            self._assert_runtime_url_allowed(page.url)
         except PermissionError as exc:
-            raise PermissionError(
+            raise RefusedPageError(
                 f"The page navigated on its own to a host ALLOWED_HOSTS does not allow ({exc}) "
-                "and is being moved to about:blank. Try again in a moment."
+                "and is being moved to about:blank. It is not read until it is navigated to an allowed URL."
             ) from exc
+        if self.page_provenance.refused_by_another_page(page):
+            # The cause is another tab, and while it stays open this page's own navigations are refused too.
+            raise RefusedPageError(
+                "The page loaded while another tab of this session was refused, so it is sent back to "
+                "about:blank and not read: that tab can send this one to a URL it chose. Close the refused "
+                "tab, then navigate this one to an allowed URL. A tab counts here while it is on a host "
+                "ALLOWED_HOSTS does not allow, came from one, or is navigating through one, and while it is "
+                "refused on a blank, blob: or data: page other than the controller's own blank; a tab on an "
+                "allowed page refused only because of another tab, or waiting for its opener, does not."
+            )
+        if self.page_provenance.refused(page):
+            raise RefusedPageError(
+                "The page was on a host ALLOWED_HOSTS does not allow, was opened by a page there, or "
+                "loaded a blank, blob: or data: page while another tab of this session was refused, "
+                "and is not read until it is navigated to an allowed URL."
+            )
 
     # ── Tabs ─────────────────────────────────────────────────────────────────
 

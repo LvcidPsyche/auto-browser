@@ -63,9 +63,9 @@ class FakeOrchestrator:
         )
 
 
-async def no_owner(_session_id: str) -> None:
+async def every_session_usable(_session_id: str) -> bool:
     """No session in these tests is owned (see test_session_ownership.py)."""
-    return None
+    return True
 
 
 class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
@@ -75,7 +75,7 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.queue = AgentJobQueue(
             orchestrator=self.orchestrator,
             store_root=Path(self.tempdir.name),
-            session_owner=no_owner,
+            session_accessible=every_session_usable,
             worker_count=1,
         )
         await self.queue.startup()
@@ -257,7 +257,7 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.queue = AgentJobQueue(
             orchestrator=slow_orchestrator,
             store_root=Path(self.tempdir.name),
-            session_owner=no_owner,
+            session_accessible=every_session_usable,
             worker_count=1,
         )
         await self.queue.startup()
@@ -288,7 +288,7 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.queue = AgentJobQueue(
             orchestrator=slow_orchestrator,
             store_root=Path(self.tempdir.name),
-            session_owner=no_owner,
+            session_accessible=every_session_usable,
             worker_count=1,
         )
         await self.queue.startup()
@@ -320,7 +320,7 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.queue = AgentJobQueue(
             orchestrator=FakeOrchestrator(),
             store_root=Path(self.tempdir.name),
-            session_owner=no_owner,
+            session_accessible=every_session_usable,
             worker_count=1,
         )
         await self.queue.startup()

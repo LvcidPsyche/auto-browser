@@ -56,6 +56,15 @@ class SchemeGateTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             manager._assert_runtime_url_allowed("file://localhost/etc/passwd")
 
+    def test_a_blob_url_is_judged_by_the_origin_that_made_it(self) -> None:
+        """blob:https://host/uuid is a file that host's page generated; it passed on its scheme alone."""
+        manager = BrowserManager(Settings(_env_file=None, ALLOWED_HOSTS="allowed.example"))
+        with self.assertRaises(PermissionError):
+            manager._assert_runtime_url_allowed("blob:https://refused.example/9b1d")
+        manager._assert_runtime_url_allowed("blob:https://allowed.example/9b1d")
+        # An opaque origin names no host; the page that made it is judged instead.
+        manager._assert_runtime_url_allowed("blob:null/9b1d")
+
 
 class ForkRouteTests(unittest.TestCase):
     def setUp(self) -> None:

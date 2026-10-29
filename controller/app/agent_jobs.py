@@ -18,7 +18,7 @@ from .models import (
     AgentStepResult,
     OperatorIdentity,
 )
-from .session_ownership import acting_as, may_use
+from .session_ownership import acting_as
 from .utils import PRIVATE_FILE_MODE, atomic_write_text, record_path, utc_now
 
 logger = logging.getLogger(__name__)
@@ -239,14 +239,15 @@ class AgentJobQueue:
         *,
         orchestrator,
         store_root: str | Path,
-        session_owner: Callable[[str], Awaitable[str | None]],
+        session_accessible: Callable[[str], Awaitable[bool]],
         worker_count: int = 1,
         audit_store=None,
     ):
         self.orchestrator = orchestrator
-        # Who owns a session (BrowserManager.session_owner): a job in another
-        # operator's session is left out of listings and refused by id.
-        self.session_owner = session_owner
+        # Whether the current operator may use a session (BrowserManager.session_accessible): a job in
+        # another operator's session, or of an id with no session under named credentials, is left out
+        # of listings and refused by id.
+        self.session_accessible = session_accessible
         self.store = AgentJobStore(store_root)
         self.worker_count = max(1, worker_count)
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
@@ -307,8 +308,8 @@ class AgentJobQueue:
         session_id: str | None = None,
     ) -> list[dict]:
         records = await self.store.list(status=status, session_id=session_id)
-        owners = {record.session_id: await self.session_owner(record.session_id) for record in records}
-        return [self._public_record(record) for record in records if may_use(owners[record.session_id])]
+        usable = {record.session_id: await self.session_accessible(record.session_id) for record in records}
+        return [self._public_record(record) for record in records if usable[record.session_id]]
 
     async def get_job(self, job_id: str) -> dict:
         return self._public_record(await self._accessible(job_id))
@@ -316,7 +317,7 @@ class AgentJobQueue:
     async def _accessible(self, job_id: str) -> AgentJobRecord:
         """A job in another operator's session answers as if it did not exist."""
         record = await self.store.get(job_id)
-        if not may_use(await self.session_owner(record.session_id)):
+        if not await self.session_accessible(record.session_id):
             raise KeyError(job_id)
         return record
 

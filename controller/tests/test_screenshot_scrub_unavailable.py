@@ -22,7 +22,9 @@ from PIL import Image
 from pytesseract import TesseractNotFoundError
 
 from app.action_errors import BrowserActionError
+from app.browser.page_provenance import PageProvenance
 from app.browser.services.observation import BrowserObservationService, _scrub_disclosure
+from app.browser_manager import BrowserManager
 from app.browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
 from app.ocr import OCRExtractor, tesseract_available
 from app.pii_scrub import PiiScrubber
@@ -77,11 +79,15 @@ def _service(tmp_path: Path, *, ocr_enabled: bool = True, strict: bool = False) 
         _session_summary=AsyncMock(return_value={"id": session.id}),
         _current_takeover_url=MagicMock(return_value=None),
         _assert_page_allowed=MagicMock(),
+        _page_refused=MagicMock(return_value=False),
+        page_provenance=PageProvenance(),
         remote_access=SimpleNamespace(session_info=MagicMock(return_value={})),
         tabs=SimpleNamespace(summaries=AsyncMock(return_value=[])),
         get_session=AsyncMock(return_value=session),
         element_ids=FakePageElementIds(),
     )
+    # The real rule: the whole URL, or only its origin while the fake's _page_refused says refused.
+    manager._shown_url = lambda page: BrowserManager._shown_url(manager, page)
     manager.session = session
     return BrowserObservationService(manager=manager)
 

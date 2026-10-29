@@ -10,6 +10,7 @@ from ... import events as _events
 from ...action_errors import SCREENSHOT_WITHHELD, BrowserActionError
 from ...browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
 from ..aria_outline import outline_from_aria_snapshot, unavailable_outline
+from ..page_read import bounded, start_read
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -67,6 +68,20 @@ def _prune_share_frames(directory: Path, *, keep: Path) -> None:
         logger.warning("failed to prune share frames in %s: %s", directory, exc)
 
 
+def _delete_when_done(capture: asyncio.Future, path: str) -> None:
+    """A capture whose read was cancelled: nothing checked what it writes, so the file goes once it is written."""
+
+    def delete(finished: asyncio.Future) -> None:
+        if not finished.cancelled() and finished.exception() is not None:
+            logger.debug("a cancelled read's screenshot capture failed: %s", type(finished.exception()).__name__)
+        Path(path).unlink(missing_ok=True)
+
+    if capture.done():
+        delete(capture)
+    else:
+        capture.add_done_callback(delete)
+
+
 class BrowserObservationService:
     """Encapsulates observation, screenshot, and trace payload helpers."""
 
@@ -98,10 +113,19 @@ class BrowserObservationService:
         """
         session = await self.manager.get_session(session_id)
         async with session.lock:
-            screenshot = await self._capture_screenshot_redacted(session, SHARE_FRAME_LABEL)
+            # The title is read after the frame, so it is checked after its read too.
+            read = start_read(self.manager, session)
+            screenshot = None
+            try:
+                screenshot = await self._capture_screenshot_redacted(session, SHARE_FRAME_LABEL)
+                title = await bounded(session.page.title())
+            except Exception:
+                read.refuse_raised(screenshot and screenshot["path"])
+                raise
+            read.check(screenshot["path"])
             snapshot = {
                 "url": session.page.url,
-                "title": await session.page.title(),
+                "title": title,
                 "screenshot_path": screenshot["path"],
             }
         await asyncio.to_thread(_prune_share_frames, Path(session.artifact_dir), keep=Path(screenshot["path"]))
@@ -111,9 +135,11 @@ class BrowserObservationService:
         session = await self.manager.get_session(session_id)
         async with session.lock:
             screenshot = await self._capture_screenshot_redacted(session, label)
+            # Where the checked capture saw the page, before the summary's await lets it move.
+            url = self.manager._shown_url(session.page)
             return {
                 "session": await self.manager._session_summary(session),
-                "url": session.page.url,
+                "url": url,
                 "screenshot_path": screenshot["path"],
                 "screenshot_url": screenshot["url"],
                 **_scrub_disclosure(screenshot),
@@ -137,7 +163,28 @@ class BrowserObservationService:
         screenshot_label: str = "observe",
         preset: str | None = None,
     ) -> dict[str, Any]:
-        self.manager._assert_page_allowed(session)
+        # Checked before the read and after it (PageRead): the page can move in between, and
+        # what was read is then the refused page's. Its screenshot is deleted with it.
+        read = start_read(self.manager, session)
+        try:
+            payload = await self._read_observation(
+                session, limit=limit, screenshot_label=screenshot_label, preset=preset
+            )
+        except Exception:
+            # An error raised by a page that moved meanwhile was checked by nobody.
+            read.refuse_raised()
+            raise
+        read.check(payload.get("screenshot_path"))
+        return payload
+
+    async def _read_observation(
+        self,
+        session: "BrowserSession",
+        *,
+        limit: int,
+        screenshot_label: str,
+        preset: str | None,
+    ) -> dict[str, Any]:
         if preset is None:
             preset = self.manager.settings.perception_preset_default
         if preset not in ("text", "fast", "normal", "rich"):
@@ -146,7 +193,7 @@ class BrowserObservationService:
 
         if preset == "fast":
             screenshot = await self._capture_screenshot_redacted(session, screenshot_label)
-            title = await session.page.title()
+            title = await bounded(session.page.title())
             tabs = await self.manager.tabs.summaries(session)
             return {
                 "session": await self.manager._session_summary(session),
@@ -279,7 +326,7 @@ class BrowserObservationService:
         return screenshot
 
     async def light_snapshot(self, session: "BrowserSession", *, label: str) -> dict[str, Any]:
-        self.manager._assert_page_allowed(session)
+        read = start_read(self.manager, session)
         # The before/after snapshot of every action. Redacting it runs OCR twice
         # per action, the largest cost an action has; PII_SCRUB_ACTION_SCREENSHOTS
         # =false trades that redaction for speed and leaves observations redacted.
@@ -287,7 +334,12 @@ class BrowserObservationService:
             capture = self._capture_screenshot_redacted(session, label)
         else:
             capture = self.manager._capture_screenshot(session, label)
-        screenshot, summary = await _gather_settled(capture, self.page_summary(session.page))
+        try:
+            screenshot, summary = await _gather_settled(capture, self.page_summary(session.page))
+        except Exception:
+            read.refuse_raised()
+            raise
+        read.check(screenshot["path"])
         return {
             "url": session.page.url,
             "title": summary["title"],
@@ -302,8 +354,25 @@ class BrowserObservationService:
 
     async def capture_session_screenshot(self, session: "BrowserSession", label: str) -> dict[str, str]:
         # Every screenshot (observe, capture, diff, the action snapshots) comes through here.
-        self.manager._assert_page_allowed(session)
-        return await self.manager.artifacts.capture_screenshot(session, label)
+        read = start_read(self.manager, session)
+        target = self.manager.artifacts.screenshot_target(session, label)
+        # A task, shielded from the read's cancellation: Playwright writes the image in a thread once it
+        # arrives, and cancelling the await does not stop that write.
+        capture = asyncio.ensure_future(self.manager.artifacts.capture_screenshot(session, label, target=target))
+        try:
+            screenshot = await asyncio.shield(capture)
+        except BaseException as exc:
+            # Cut off (cancelled, or failed) while the file was written: nothing checked it.
+            if isinstance(exc, Exception):
+                read.refuse_raised(target["path"])
+            else:
+                _delete_when_done(capture, target["path"])
+            raise
+        read.check(screenshot["path"])
+        # The screenshot tools that reuse an earlier one (compare, vision) take this one, which
+        # was checked, rather than whatever PNG is newest in the artifact directory.
+        session.last_screenshot = screenshot
+        return screenshot
 
     def trace_payload(self, session: "BrowserSession") -> dict[str, Any]:
         return self.manager.artifacts.trace_payload(session)

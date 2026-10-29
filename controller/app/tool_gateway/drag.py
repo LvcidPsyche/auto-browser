@@ -13,8 +13,10 @@ from or to the corner. A drag with no element end works as before otherwise.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from playwright.async_api import Error as PlaywrightError
@@ -22,6 +24,7 @@ from playwright.async_api import Error as PlaywrightError
 from ..action_errors import BrowserActionError
 from ..browser.element_ids import target_element_id
 from ..browser.element_target import ElementTarget, centre
+from ..browser.page_read import bounded, locked_read
 
 if TYPE_CHECKING:
     from ..tool_inputs import DragDropInput
@@ -112,16 +115,45 @@ _UNWATCH_SCRIPT = (
 )
 # How much of a CSS selector a refusal repeats.
 _SELECTOR_LIMIT = 100
+# How long a drag waits for the mouse button to be released.
+MOUSE_UP_TIMEOUT_SECONDS = 5.0
+# How long a drag that failed or reached its deadline waits for its scroll watch to be removed: it runs
+# after the deadline, which waits for it, and the watch goes with the page anyway. So a drag holds the
+# session at most its deadline, this, and the release's bound.
+UNWATCH_TIMEOUT_SECONDS = 2.0
 _WAY_OUT = (
     "Make the viewport tall enough for both ends (browser.set_viewport), or scroll so both are in view, "
     "then drag again."
 )
 
 
+@dataclass
+class _Button:
+    """Whether the drag may have pressed the mouse button: set before mouse.down() is sent."""
+
+    may_be_down: bool = False
+
+
 async def drag_drop(manager: Any, payload: "DragDropInput") -> dict[str, Any]:
     session = await manager.get_session(payload.session_id)
-    manager._assert_page_allowed(session)
+    button = _Button()
+    # Outside the action pipeline, so under the session lock here, checked before and after.
+    async with locked_read(manager, session):
+        try:
+            result = await bounded(_drag(manager, session, payload, button))
+        except BaseException:
+            # The drag failed or reached its deadline, perhaps with the button down: let it go, or
+            # the page keeps it pressed for whatever runs next. The drag's own error is the one reported.
+            if button.may_be_down:
+                await _release_after_failure(session.page)
+            raise
+        # After the deadline, not under it: a deadline that expired during the release cancelled it.
+        if button.may_be_down:
+            await _release_through_a_cancel(session.page)
+        return result
 
+
+async def _drag(manager: Any, session: Any, payload: "DragDropInput", button: _Button) -> dict[str, Any]:
     source = _end(manager, session, payload.source_selector, payload.source_x, payload.source_y, "source")
     target = _end(manager, session, payload.target_selector, payload.target_x, payload.target_y, "target")
     by_id = any(isinstance(end, ElementTarget) for end in (source, target))
@@ -139,10 +171,42 @@ async def drag_drop(manager: Any, payload: "DragDropInput") -> dict[str, Any]:
         cover = await source.cover_at(sx, sy)
         if cover is not None:
             raise source.refusal("element_covered", "dragged", cover=cover)
+    # From here the button may be down, also if mouse.down() never answers: drag_drop lets it go.
+    button.may_be_down = True
     await session.page.mouse.down()
     await session.page.mouse.move(tx, ty, steps=10)
-    await session.page.mouse.up()
     return {"session_id": payload.session_id, "from": {"x": sx, "y": sy}, "to": {"x": tx, "y": ty}}
+
+
+async def _release_after_failure(page: Any) -> None:
+    try:
+        await _release_through_a_cancel(page)
+    except (PlaywrightError, RuntimeError) as exc:
+        logger.warning("could not release the mouse button after a drag that failed: %s", exc)
+
+
+async def _release_through_a_cancel(page: Any) -> None:
+    """The release after a drag, whether it succeeded or failed, carried through a cancel that arrives
+    meanwhile (a client giving up as the drag ended): the button goes up before the session lock is let go,
+    then the cancel goes on. The release has its own bound, so the wait for it ends."""
+    release = asyncio.ensure_future(_release_button(page))
+    try:
+        await asyncio.shield(release)
+    except asyncio.CancelledError:
+        await asyncio.wait([release])
+        if not release.cancelled() and release.exception() is not None:
+            logger.warning(
+                "could not release the mouse button after a drag that was cancelled: %s", release.exception()
+            )
+        raise
+
+
+async def _release_button(page: Any) -> None:
+    """mouse.up(), with its own bound, sent once after the drag and outside its deadline, still under the lock."""
+    try:
+        await asyncio.wait_for(page.mouse.up(), timeout=MOUSE_UP_TIMEOUT_SECONDS)
+    except TimeoutError:
+        raise RuntimeError(f"The mouse button was not released within {MOUSE_UP_TIMEOUT_SECONDS:g} seconds.") from None
 
 
 def _end(manager: Any, session: Any, selector: str | None, x: float | None, y: float | None, name: str) -> DragEnd:
@@ -190,8 +254,10 @@ async def _bring_element_ends_into_view(
 
 async def _stop_watching_quietly(manager: Any, session: Any, nonce: str) -> None:
     try:
-        await manager.element_ids.evaluate(session.page, _UNWATCH_SCRIPT, nonce)
-    except (PlaywrightError, BrowserActionError) as exc:
+        await asyncio.wait_for(
+            manager.element_ids.evaluate(session.page, _UNWATCH_SCRIPT, nonce), timeout=UNWATCH_TIMEOUT_SECONDS
+        )
+    except (PlaywrightError, BrowserActionError, TimeoutError) as exc:
         # The wait's own error is the one to report; the listener goes with the page.
         logger.debug("drag: the scroll watch could not be removed: %s", exc)
 

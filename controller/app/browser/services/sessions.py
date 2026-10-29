@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -11,11 +12,13 @@ from playwright.async_api import Error as PlaywrightError
 
 from ... import events as _events
 from ...action_errors import SessionNotFoundError
+from ...auth_policy import has_named_credentials
 from ...browser_scripts import apply_stealth
 from ...models import SessionRecord, SessionStatus, resolve_totp_hosts
 from ...network_inspector import NetworkInspector
 from ...session_ownership import may_use, verified_operator
 from ...utils import UTC
+from ..page_read import PageRead
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext
@@ -24,6 +27,21 @@ if TYPE_CHECKING:
     from ...session_isolation import IsolatedBrowserRuntime
 
 logger = logging.getLogger(__name__)
+
+# A session id is this many lowercase hex digits of a uuid4 (new_session_id). An upload subfolder
+# named like one is treated as that session's directory (see uploads._require_directory_access).
+SESSION_ID_HEX_DIGITS = 12
+_SESSION_ID_SHAPE = re.compile(rf"[0-9a-f]{{{SESSION_ID_HEX_DIGITS}}}")
+
+
+def new_session_id() -> str:
+    return uuid4().hex[:SESSION_ID_HEX_DIGITS]
+
+
+def is_session_id(name: str) -> bool:
+    """Whether a name has the shape new_session_id gives, whether or not such a session exists."""
+    return _SESSION_ID_SHAPE.fullmatch(name) is not None
+
 
 # page.title() and page.evaluate() have no timeout, and a page running a script
 # in an endless loop never answers them. These bound what the session list and
@@ -94,7 +112,7 @@ class BrowserSessionService:
         resolved_protection_mode = protection_mode or self.manager.settings.witness_protection_mode_default
         self.manager._check_session_limit()
 
-        session_id = uuid4().hex[:12]
+        session_id = new_session_id()
         artifact_dir, auth_dir, upload_dir = self.prepare_dirs(session_id)
         source_path: Path | None = None
 
@@ -190,7 +208,7 @@ class BrowserSessionService:
                 session.last_auth_state_path = source_path
             self.manager._attach_page_listeners(page, session)
             if hasattr(context, "on"):
-                context.on("page", lambda popup: self.manager._attach_page_listeners(popup, session))
+                self.manager.diagnostics.watch_context(context, session)
 
             if self.manager.settings.network_inspector_enabled:
                 inspector = NetworkInspector(
@@ -199,6 +217,9 @@ class BrowserSessionService:
                     capture_bodies=self.manager.settings.network_inspector_capture_bodies,
                     body_max_bytes=self.manager.settings.network_inspector_body_max_bytes,
                     scrubber=self.manager.pii_scrubber if self.manager.settings.pii_scrub_enabled else None,
+                    url_refused=self.manager._url_off_list,
+                    page_refused=self.manager._page_refused,
+                    session_refused=lambda: self.manager._session_has_refused_page(session),
                 )
                 # The context, not the first page: attached to the page, the
                 # log missed every popup and tab opened later, and recorded
@@ -223,7 +244,8 @@ class BrowserSessionService:
                 # about:blank between the load and the check: that would turn a
                 # refused redirect into a session parked on a blank page.
                 async with session.lock:
-                    await page.goto(start_url, wait_until="domcontentloaded")
+                    with self.manager.page_provenance.controller_navigation(page) as navigation:
+                        navigation.response = await page.goto(start_url, wait_until="domcontentloaded")
                     await self.manager._settle(page)
                     # The check navigate() makes after the page loads: an allowlisted
                     # start URL can redirect somewhere that is not. Raising here rolls
@@ -287,11 +309,16 @@ class BrowserSessionService:
 
     def check_limit(self) -> None:
         if len(self.manager.sessions) + self._creating >= self.manager.settings.max_sessions:
-            active_ids = ", ".join(sorted(self.manager.sessions.keys())) or "none"
+            # Another operator's session answers like one that does not exist, so it is
+            # counted here, not named.
+            usable = sorted(sid for sid, session in self.manager.sessions.items() if may_use(session.owner))
+            others = len(self.manager.sessions) - len(usable)
             message = (
                 f"Session limit reached: max_sessions={self.manager.settings.max_sessions}. "
-                f"Active live session(s): {active_ids}."
+                f"Active live session(s): {', '.join(usable) or 'none'}."
             )
+            if others:
+                message += f" {others} more belong to other operators."
             if self._creating:
                 message += f" {self._creating} more still starting."
             if self.manager.settings.session_isolation_mode == "shared_browser_node":
@@ -419,13 +446,21 @@ class BrowserSessionService:
         """Who owns a session, live or recorded; None when unowned or unknown."""
         return (await self.find_owner(session_id))[1]
 
-    async def ensure_accessible(self, session_id: str) -> None:
-        """Refuse a session that belongs to another operator, as if it did not exist.
+    async def accessible(self, session_id: str) -> bool:
+        """Whether the current operator may use what belongs to this session id.
 
         For entry points that address a session by id but never resolve it
         through get(): diagnostics that read its files, approvals, agent jobs.
+        Under named credentials an id with no live session and no record is
+        refused as well, the rule /artifacts applies: it has no owner to check,
+        and answering it otherwise told another operator's session from none.
         """
-        if not may_use(await self.owner_of(session_id)):
+        known, owner = await self.find_owner(session_id)
+        return may_use(owner) and (known or not has_named_credentials(self.manager.settings))
+
+    async def ensure_accessible(self, session_id: str) -> None:
+        """Refuse a session the current operator may not use (see accessible), as if it did not exist."""
+        if not await self.accessible(session_id):
             raise SessionNotFoundError(session_id)
 
     async def _recorded_status(self, session_id: str) -> str | None:
@@ -559,12 +594,17 @@ class BrowserSessionService:
         """Fork a session: clone cookies + localStorage state into a new session."""
         session = await self.manager.get_session(session_id)
         async with session.lock:
+            # As shadow browse: without a start_url the fork opens the page's URL with the session's
+            # cookies, and a refused page chose that URL, so a refused page is not forked onto it and the
+            # URL is recorded as shown. A start_url the caller names is judged by create_session.
+            if start_url is None:
+                self.manager._assert_page_allowed(session)
+            current_url = self.manager._shown_url(session.page)
             # Export through AuthStateManager so the state file is encrypted
             # at rest whenever an encryption key is configured.
             fork_auth_path = session.auth_dir / f"fork_{uuid4().hex[:8]}.json"
             self.manager.auth_profiles.mark_session_auth_dir(session.auth_dir, session.owner)
             auth_info = await self.manager.auth_state.write_storage_state(session.context, fork_auth_path)
-            current_url = session.page.url
 
         # Create the new session using the forked state
         try:
@@ -607,13 +647,18 @@ class BrowserSessionService:
 
         session = await manager.get_session(session_id)
         async with session.lock:
-            current_url = session.page.url
+            # The shadow opens the page's URL in a second browser: a refused page is not read
+            # (its URL is the refused page's choice), and only an allowed http(s) URL is opened.
+            manager._assert_page_allowed(session)
+            current_url = manager._shown_url(session.page)
+            if current_url != "about:blank":
+                manager._assert_url_allowed(current_url)
             # In-memory export: shadow state never touches disk.
             storage_state = await session.context.storage_state()
 
         from ...browser_manager import BrowserSession
 
-        shadow_session_id = uuid4().hex[:12]
+        shadow_session_id = new_session_id()
         artifact_dir, auth_dir, upload_dir = self.prepare_dirs(shadow_session_id)
         context_kwargs: dict[str, Any] = {
             "viewport": {
@@ -655,10 +700,14 @@ class BrowserSessionService:
                 owner=session.owner,
             )
             manager._attach_page_listeners(page, shadow_session)
+            # As in create_session: popups need the listeners too, the page guard among them.
+            manager.diagnostics.watch_context(context, shadow_session)
             manager.sessions[shadow_session_id] = shadow_session
 
-            await page.goto(current_url, wait_until="domcontentloaded")
-            await manager._settle(page)
+            if current_url != "about:blank":
+                with manager.page_provenance.controller_navigation(page) as navigation:
+                    navigation.response = await page.goto(current_url, wait_until="domcontentloaded")
+                await manager._settle(page)
             await manager._persist_session(shadow_session, status="active")
         except Exception:
             manager.sessions.pop(shadow_session_id, None)
@@ -688,19 +737,25 @@ class BrowserSessionService:
         is_closed = getattr(page, "is_closed", None)
         if callable(is_closed) and is_closed():
             return "", "", False
-        # Every session summary carries the title: a page that has moved itself
-        # off ALLOWED_HOSTS reports its URL, not what it shows.
-        if self.manager._url_off_list(page.url):
-            return page.url, "", True
+        # Every session summary carries the title: a page ALLOWED_HOSTS refuses
+        # (see _page_refused) reports its URL, not what it shows.
+        if self.manager._page_refused(page):
+            return self.manager._shown_url(page), "", True
+        read = PageRead(self.manager, session)
         try:
-            return page.url, await asyncio.wait_for(page.title(), timeout=PAGE_TITLE_TIMEOUT_SECONDS), True
+            title = await asyncio.wait_for(page.title(), timeout=PAGE_TITLE_TIMEOUT_SECONDS)
         except TimeoutError:
             # Live, but its renderer is not answering (a script in an endless
-            # loop). Without a bound this hung every listing and every close.
-            return page.url, "", True
+            # loop). Without a bound this hung every listing and every close. It may
+            # have moved meanwhile, so its URL is shown as for any other read.
+            return self.manager._shown_url(page), "", True
         except PlaywrightError as exc:
             logger.debug("page snapshot failed for session %s: %s", session.id, exc)
             return "", "", False
+        # And after the read: the page can move while its title is read, and come back.
+        if read.moved():
+            return self.manager._shown_url(page), "", True
+        return page.url, title, True
 
     async def summary(
         self,

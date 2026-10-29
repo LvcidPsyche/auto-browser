@@ -52,7 +52,7 @@ from app.tool_inputs import (
     SetStorageInput,
     WaitForSelectorInput,
 )
-from app.utils import _BACKGROUND_TASKS
+from tests._background import pending
 from tests._chromium import chromium_executable, requires_chromium
 from tests.test_browser_manager_create_session import _settings
 
@@ -200,7 +200,7 @@ async def browser_env(
 def switch_off_page_guard(monkeypatch) -> None:
     """Disable the framenavigated guard, to test what the rest of the code does without it."""
     monkeypatch.setattr(
-        BrowserDiagnosticsService, "_on_frame_navigated", lambda self, session, page, frame: None, raising=False
+        BrowserDiagnosticsService, "_on_frame_navigated", lambda self, session, page, frame, **_: None, raising=False
     )
 
 
@@ -247,7 +247,7 @@ async def test_activate_tab_refuses_a_popup_on_a_disallowed_host(tmp_path: Path,
         popup = await open_popup(env, session_id, f"{env.evil}/")
         assert popup.url.startswith(env.evil)
 
-        with pytest.raises(PermissionError, match="127.0.0.1"):
+        with pytest.raises(PermissionError, match="cannot be activated. Close it"):
             await env.manager.activate_tab(session_id, 1)
 
         assert session.page is original, "the session was switched onto the disallowed tab"
@@ -293,8 +293,10 @@ async def test_blocked_replace_in_a_popup_leaves_the_page_blank_and_the_snapshot
         assert blocked.value.code == "browser_action_blocked"
         assert SECRET not in str(blocked.value.payload), "the 403 carried the disallowed page's content"
         assert popup.url == "about:blank"
-        observed = await env.manager.observe(session_id, preset="text")
-        assert SECRET not in str(observed)
+        # Blank, and still refused until the agent navigates it to an allowed URL.
+        with pytest.raises(PermissionError, match="until it is navigated to an allowed URL") as refused:
+            await env.manager.observe(session_id, preset="text")
+        assert SECRET not in str(refused.value)
 
 
 async def test_blocked_action_that_cannot_leave_the_page_withholds_its_content(tmp_path: Path, monkeypatch) -> None:
@@ -325,6 +327,9 @@ async def test_blocked_navigation_where_history_exists_is_still_rolled_back(tmp_
         assert blocked.value.code == "browser_action_blocked"
         assert SECRET not in str(blocked.value.payload)
         assert env.manager.sessions[session_id].page.url == f"{env.allowed}/assign"
+        # Back on the page read before the click, the page is read again.
+        observed = await env.manager.observe(session_id, preset="text")
+        assert SECRET not in str(observed)
 
 
 # ── N-1: a page that navigates itself after the action has finished ──────────
@@ -357,6 +362,10 @@ async def test_page_that_navigates_itself_off_the_list_is_returned_to_blank(tmp_
         await navigate_later(session.page, f"{env.evil}/")
 
         await wait_for(lambda: session.page.url == "about:blank", timeout=5)
+        # Still refused on the controller's blank, until the agent navigates it to an allowed URL.
+        with pytest.raises(PermissionError, match="until it is navigated to an allowed URL"):
+            await env.manager.observe(session_id, preset="text")
+        await env.manager.navigate(session_id, url=f"{env.allowed}/back")
         observed = await env.manager.observe(session_id, preset="text")
         assert SECRET not in str(observed)
         (event,) = blocked_events(spy)
@@ -379,7 +388,9 @@ async def test_popup_that_navigates_itself_off_the_list_is_returned_to_blank(tmp
 async def test_guard_leaves_a_page_alone_that_is_back_on_an_allowed_url_by_the_time_it_gets_the_lock(
     tmp_path: Path,
 ) -> None:
-    """An action in flight holds the lock and handles its own navigations; the guard must not undo that."""
+    """The agent's navigate in flight holds the lock and takes the page back itself; the guard must not
+    undo that. (Only the agent's own navigation clears the taint the refused commit left, so the
+    navigation is marked as the navigate action marks it.)"""
     async with browser_env(tmp_path, {"/timer": TIMER_PAGE}) as env:
         session_id = await env.create("/timer")
         session = env.manager.sessions[session_id]
@@ -388,8 +399,9 @@ async def test_guard_leaves_a_page_alone_that_is_back_on_an_allowed_url_by_the_t
         async with session.lock:
             await navigate_later(session.page, f"{env.evil}/")
             await wait_for(lambda: session.page.url.startswith(env.evil), timeout=5)
-            await session.page.goto(f"{env.allowed}/back")
-        await wait_for(lambda: not _BACKGROUND_TASKS, timeout=5)
+            with env.manager.page_provenance.controller_navigation(session.page) as navigation:
+                navigation.response = await session.page.goto(f"{env.allowed}/back")
+        await wait_for(lambda: not pending(), timeout=5)
 
         assert session.page.url == f"{env.allowed}/back"
         assert blocked_events(spy) == []
@@ -406,7 +418,7 @@ async def test_guard_does_nothing_for_a_page_that_closed_while_it_waited(tmp_pat
             await navigate_later(popup, f"{env.evil}/")
             await wait_for(lambda: popup.url.startswith(env.evil), timeout=5)
             await popup.close()
-        await wait_for(lambda: not _BACKGROUND_TASKS, timeout=5)
+        await wait_for(lambda: not pending(), timeout=5)
 
         assert blocked_events(spy) == []
         assert not [record for record in caplog.records if record.levelname == "ERROR"]
@@ -553,7 +565,7 @@ async def test_guard_does_nothing_for_a_session_that_closed_while_it_waited(tmp_
             await navigate_later(session.page, f"{env.evil}/")
             await wait_for(lambda: session.page.url.startswith(env.evil), timeout=5)
             del env.manager.sessions[session_id]  # what closing the session does first
-        await wait_for(lambda: not _BACKGROUND_TASKS, timeout=5)
+        await wait_for(lambda: not pending(), timeout=5)
 
         assert session.page.url.startswith(env.evil), "the guard acted on a session that was already gone"
         assert blocked_events(spy) == []

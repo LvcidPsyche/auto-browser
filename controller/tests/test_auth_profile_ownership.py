@@ -20,8 +20,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.audit import reset_current_operator, set_current_operator
+from app.browser.page_provenance import PageProvenance
 from app.browser.services.auth_profiles import BrowserAuthProfileService
 
 
@@ -58,6 +60,9 @@ class AuthProfileOwnershipTests(unittest.TestCase):
             settings=SimpleNamespace(auth_root=str(self.root), auth_state_encryption_key=None),
             auth_state=StubAuthState(),
             _page_off_list=lambda session: False,
+            _page_refused=lambda page: False,
+            _shown_url=lambda page: page.url,
+            page_provenance=PageProvenance(),
         )
         self.service = BrowserAuthProfileService(manager)
         self._operator_token = None
@@ -188,6 +193,33 @@ class AuthProfileOwnershipTests(unittest.TestCase):
             self.service.require_access("alice-login", action="reading")
         with self.assertRaises(PermissionError):
             self.save("alice-login")
+
+    # ── A save that fails after the state is written leaves no state behind (round 4, B6) ──
+
+    def state_files(self, profile_name: str) -> list[str]:
+        return sorted(path.name for path in (self.root / "profiles" / profile_name).glob("state.json*"))
+
+    def test_a_title_that_raises_leaves_no_state_file(self) -> None:
+        """The cookies were on disk with no metadata, so with no owner: any caller could load them."""
+
+        class RaisingPage(StubPage):
+            async def title(self) -> str:
+                raise RuntimeError("Target page, context or browser has been closed")
+
+        session = StubSession()
+        session.page = RaisingPage()
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(self.service.save_for_session(session, "half-saved"))
+
+        self.assertEqual(self.state_files("half-saved"), [])
+
+    def test_a_metadata_write_that_fails_takes_the_state_file_with_it(self) -> None:
+        with patch("app.browser.services.auth_profiles.atomic_write_text", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.save("half-saved")
+
+        self.assertEqual(self.state_files("half-saved"), [])
 
 
 if __name__ == "__main__":

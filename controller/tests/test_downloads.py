@@ -27,6 +27,22 @@ class FakeDownload:
 
 
 class DownloadCaptureServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_refused_download_is_cancelled_and_recorded_by_its_origin_only(self) -> None:
+        """Nothing else stops the browser fetching the rest of the file a refused page started."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts = SessionArtifactService(tempdir)
+            artifact_dir = artifacts.prepare_session_dir("session-1")
+            service = DownloadCaptureService(artifacts)
+            session = SimpleNamespace(id="session-1", artifact_dir=artifact_dir, downloads=[])
+            download = FakeDownload("leak.txt", url="https://user:pw@refused.example:8443/x/leak.txt?q=secret")
+            download.cancel = mock.AsyncMock()
+
+            record = await service.block(session, download, "from a host ALLOWED_HOSTS does not allow")
+
+            download.cancel.assert_awaited_once_with()
+            self.assertEqual((record["status"], record["source_url"]), ("blocked", "https://refused.example:8443"))
+            self.assertEqual((record["path"], record["filename"]), (None, None))
+
     async def test_capture_saves_file_and_jsonl_record(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             artifacts = SessionArtifactService(tempdir)

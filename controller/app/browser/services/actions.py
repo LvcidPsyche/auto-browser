@@ -22,6 +22,7 @@ from ...witness import WitnessApproval
 from ..element_ids import selector_hint, target_element_id
 from ..element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
 from ..element_world import READ
+from ..page_read import title_or_blank
 from .element_actions import FOCUS_CLICK_TIMEOUT_MS, JITTER_PX, ElementActions
 
 try:  # pragma: no cover - optional until dependency is installed in runtime image
@@ -119,7 +120,11 @@ class BrowserActionService:
         session = await self.manager.get_session(session_id)
 
         async def operation() -> None:
-            await session.page.goto(url, wait_until="domcontentloaded")
+            # The agent's navigation: it clears a refused page's taint when it ends on the list, judged
+            # by its response (PageProvenance.controller_navigation). A tainted page's commit during it
+            # still starts the page guard, which waits for the lock and then finds nothing to do.
+            with self.manager.page_provenance.controller_navigation(session.page) as navigation:
+                navigation.response = await session.page.goto(url, wait_until="domcontentloaded")
             await self.manager._settle(session.page)
             challenge = await self.manager._check_bot_challenge(session)
             if challenge:
@@ -553,8 +558,8 @@ class BrowserActionService:
 
     async def _approval_observation(self, session: "BrowserSession") -> dict[str, Any]:
         return {
-            "url": session.page.url,
-            "title": "" if self.manager._page_off_list(session) else await session.page.title(),
+            "url": self.manager._shown_url(session.page),
+            "title": await title_or_blank(self.manager, session),
             "takeover_url": self.manager._current_takeover_url(session),
             "remote_access": self.manager.remote_access.session_info(session),
             "isolation": self.manager.session_lifecycle.isolation_payload(session),
@@ -807,7 +812,8 @@ class BrowserActionService:
         # A live code is typed into whatever "code" field is visible, so the
         # page has to be one the caller named: otherwise any site the agent is
         # sent to can show an input named "code" and read a valid second factor.
-        if not self._totp_host_allowed(session):
+        # Nor a refused page on a named host: a refused host's redirect chose its URL.
+        if not self._may_fill_totp(session):
             return None
         if pyotp is None:
             raise BrowserActionError(
@@ -815,7 +821,7 @@ class BrowserActionService:
                 action="totp_fill",
                 code="totp_unavailable",
                 retryable=False,
-                details={"url": session.page.url},
+                details={"url": self.manager._shown_url(session.page)},
             )
         located = await self._find_one_time_code_field(session.page)
         if located is None:
@@ -823,7 +829,7 @@ class BrowserActionService:
 
         locator, selector = located
         # Finding the field awaited the page, which may have navigated since.
-        if not self._totp_host_allowed(session):
+        if not self._may_fill_totp(session):
             return None
         code = pyotp.TOTP(session.totp_secret).now()
         await self.focus_verified(session, locator, action="totp_fill")
@@ -839,6 +845,9 @@ class BrowserActionService:
         await locator.press("Enter")
         await self.manager._settle(session.page)
         return {"selector": selector, "code_length": len(code)}
+
+    def _may_fill_totp(self, session: "BrowserSession") -> bool:
+        return not self.manager._page_refused(session.page) and self._totp_host_allowed(session)
 
     @staticmethod
     def _totp_host_allowed(session: "BrowserSession") -> bool:

@@ -145,7 +145,7 @@ curl -s http://127.0.0.1:8000/sessions/<session-id>/observe | jq
 **1.10.0**
 
 - **Operators can no longer reach each other's work.** With named credentials (`API_BEARER_TOKENS`), saved auth state, exported archives, harness runs, skill candidates, memory profiles, uploads, MCP resource lists and controller-wide approvals belong to the operator who made them.
-- **`ALLOWED_HOSTS` holds wherever a page ends up:** after a redirect, a tab switch, a cookie write, or a page that navigates itself.
+- **`ALLOWED_HOSTS` holds wherever a page ends up:** after a redirect, a tab switch, a cookie written through `browser.set_cookies`, or a page that navigates itself or opens a popup (a popup's first page is held from the release after 1.11.1). A page that gets off the list on its own is sent back to `about:blank` once it has navigated, not before its request goes out.
 - **Witness verification rejects a chain with its signatures stripped**, and the top-level `valid` now covers signatures. Read the upgrade notes in the changelog before upgrading.
 - **Fixes** for the Playwright export, stealth mode, REST error statuses, text-only agent steps, private-key scrubbing and the dashboard's error reporting, plus an opt-in `FORCE_GOVERNED_APPROVALS`.
 

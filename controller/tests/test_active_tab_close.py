@@ -4,6 +4,7 @@ import unittest
 import weakref
 from types import SimpleNamespace
 
+from app.browser.page_provenance import PageProvenance
 from app.browser.services.diagnostics import BrowserDiagnosticsService
 
 
@@ -38,7 +39,7 @@ class ActiveTabCloseTests(unittest.TestCase):
     def test_session_moves_to_another_tab_when_its_active_tab_closes_itself(self) -> None:
         """A page calling window.close() left session.page on a closed page,
         so every later action failed while other tabs were open."""
-        service = BrowserDiagnosticsService(SimpleNamespace(), None, None)  # type: ignore[arg-type]
+        service = BrowserDiagnosticsService(SimpleNamespace(page_provenance=PageProvenance()), None, None)  # type: ignore[arg-type]
         opener, popup = FakePage(), FakePage()
         session = self._session(opener, popup)
         for page in (opener, popup):
@@ -50,7 +51,7 @@ class ActiveTabCloseTests(unittest.TestCase):
         self.assertIs(session.page, opener)
 
     def test_closing_a_background_tab_keeps_the_active_one(self) -> None:
-        service = BrowserDiagnosticsService(SimpleNamespace(), None, None)  # type: ignore[arg-type]
+        service = BrowserDiagnosticsService(SimpleNamespace(page_provenance=PageProvenance()), None, None)  # type: ignore[arg-type]
         active, background = FakePage(), FakePage()
         session = self._session(active, background)
         for page in (active, background):
