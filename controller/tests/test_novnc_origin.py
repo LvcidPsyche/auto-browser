@@ -48,7 +48,8 @@ class NoVncOriginTests(unittest.TestCase):
             headers["Origin"] = origin
         headers["Host"] = host
         try:
-            self.module.SameOriginOnly(source).authenticate(headers, "localhost", 5900)
+            # websockify --unix-target passes no target host or port.
+            self.module.SameOriginOnly(source).authenticate(headers, None, None)
         except self.module.InvalidOriginError:
             return False
         return True

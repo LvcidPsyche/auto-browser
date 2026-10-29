@@ -770,7 +770,6 @@ class BrowserSessionService:
                 "downloads_dir": str(session.runtime.downloads_dir),
                 "ws_endpoint_file": str(session.runtime.ws_endpoint_file),
                 "novnc_port": session.runtime.novnc_port,
-                "vnc_port": session.runtime.vnc_port,
             }
         return payload
 

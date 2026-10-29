@@ -282,11 +282,15 @@ Use **one** of:
 
 Do **not** expose raw controller or noVNC ports directly to the public internet.
 
-`VNC_PASSWORD` adds VNC authentication to noVNC (6080) and raw VNC (5900), on the
-shared browser-node and on isolated session containers; noVNC prompts for it. Set it
-whenever those ports are reachable beyond loopback — but treat it as a second layer,
-not the gateway: the VNC protocol uses only the first 8 characters and a
-DES-based challenge.
+noVNC (6080) is the only way to the desktop. x11vnc listens on no TCP port: it serves
+RFB only on a unix socket inside the container, in a directory only the `browser` user
+can enter, and websockify proxies noVNC to that socket. A native VNC viewer cannot
+connect to the container; use the noVNC page.
+
+`VNC_PASSWORD` adds VNC authentication to noVNC, on the shared browser-node and on
+isolated session containers; noVNC prompts for it. Set it whenever 6080 is reachable
+beyond loopback — but treat it as a second layer, not the gateway: the VNC protocol
+uses only the first 8 characters and a DES-based challenge.
 
 Chromium runs in the same container as noVNC, so every page it loads can reach
 `ws://127.0.0.1:6080`. Two things keep such a page out:

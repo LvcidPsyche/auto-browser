@@ -41,12 +41,21 @@ if [[ "$(id -u)" -eq 0 ]] && id "$BROWSER_USER" >/dev/null 2>&1; then
   chmod 1777 /tmp/.X11-unix
 fi
 
-# x11vnc serves the raw display, and noVNC fronts it. Without a password either
-# port is full control of a browser holding stored logins, which is only safe
-# while both stay bound to loopback. VNC_PASSWORD adds VNC authentication for
-# deployments that publish them more widely (noVNC prompts for it). The VNC
-# protocol uses only the first 8 characters. It goes through a 0600 file, not
-# argv, and is unset so Chromium and the other processes never inherit it.
+# x11vnc serves the display, and noVNC (websockify, below) fronts it. x11vnc
+# listens on a unix socket only, never on a TCP port: libvncserver answers
+# WebSocket upgrades on its own port and never checks Origin, so a TCP port here
+# was a way around noVNC's Origin guard for anything that could reach it (the
+# host publish, other containers, pages loaded from a loopback address).
+# libvncserver also opens an IPv6 listener on 5900 whatever -rfbport says, and
+# -rfbportv6 0 turns it off. Only the browser user, which runs websockify, can
+# enter the socket's directory.
+VNC_SOCKET_DIR=/tmp/runtime/vnc
+VNC_SOCKET="$VNC_SOCKET_DIR/rfb.sock"
+# Without a password noVNC is full control of a browser holding stored logins,
+# which is only safe while 6080 stays bound to loopback. VNC_PASSWORD adds VNC
+# authentication for deployments that publish it more widely (noVNC prompts for
+# it). The VNC protocol uses only the first 8 characters. It goes through a 0600
+# file, not argv, and is unset so Chromium and the other processes never inherit it.
 VNC_AUTH_ARGS=(-nopw)
 if [[ -n "${VNC_PASSWORD:-}" ]]; then
   VNC_PASSWORD_FILE=/tmp/runtime/vnc-password
@@ -73,7 +82,9 @@ if [[ ! -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ]]; then
   exit 1
 fi
 run_as_browser fluxbox >/tmp/fluxbox.log 2>&1 &
-run_as_browser x11vnc -display "$DISPLAY" -forever -shared -rfbport 5900 "${VNC_AUTH_ARGS[@]}" -xkb >/tmp/x11vnc.log 2>&1 &
+run_as_browser install -d -m 0700 "$VNC_SOCKET_DIR"
+run_as_browser x11vnc -display "$DISPLAY" -forever -shared -rfbport 0 -rfbportv6 0 -unixsock "$VNC_SOCKET" \
+  "${VNC_AUTH_ARGS[@]}" -xkb >/tmp/x11vnc.log 2>&1 &
 # websockify serves noVNC directly, rather than through its wrapper script, so it can take an
 # auth plugin. Chromium shares this network namespace, so without an Origin
 # check any page it loads could open ws://127.0.0.1:6080 and read and drive the
@@ -84,7 +95,8 @@ run_as_browser env PYTHONPATH=/opt/browser-node websockify \
   --web /usr/share/novnc \
   --auth-plugin novnc_origin.SameOriginOnly \
   --auth-source "${NOVNC_ALLOWED_ORIGINS:-} ${NOVNC_ALLOWED_HOSTS:-}" \
-  6080 localhost:5900 >/tmp/novnc.log 2>&1 &
+  --unix-target "$VNC_SOCKET" \
+  6080 >/tmp/novnc.log 2>&1 &
 
 cleanup() {
   if [[ -n "${PLAYWRIGHT_SERVER_PID:-}" ]] && kill -0 "$PLAYWRIGHT_SERVER_PID" >/dev/null 2>&1; then

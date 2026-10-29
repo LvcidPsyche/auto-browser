@@ -166,7 +166,6 @@ class BrowserRemoteAccessService:
                 "container_name": session.runtime.container_name,
                 "browser_node": session.runtime.browser_node_name,
                 "novnc_port": session.runtime.novnc_port,
-                "vnc_port": session.runtime.vnc_port,
             }
         return payload
 

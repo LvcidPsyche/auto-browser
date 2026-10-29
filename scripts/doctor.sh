@@ -183,32 +183,25 @@ ensure_local_socket_access
 
 REQUESTED_API_PORT="${API_PORT:-8000}"
 REQUESTED_NOVNC_PORT="${NOVNC_PORT:-6080}"
-REQUESTED_VNC_PORT="${VNC_PORT:-5900}"
 
 current_controller_port=""
 current_browser_novnc_port=""
-current_browser_vnc_port=""
 # docker compose ps -q exits 0 even when no containers exist; check for non-empty output
 if docker compose ps -q controller 2>/dev/null | grep -q .; then
   current_controller_port="$(docker compose port controller 8000 2>/dev/null | awk -F: 'NF {print $NF}' | tail -n1 || true)"
 fi
 if docker compose ps -q browser-node 2>/dev/null | grep -q .; then
   current_browser_novnc_port="$(docker compose port browser-node 6080 2>/dev/null | awk -F: 'NF {print $NF}' | tail -n1 || true)"
-  current_browser_vnc_port="$(docker compose port browser-node 5900 2>/dev/null | awk -F: 'NF {print $NF}' | tail -n1 || true)"
 fi
 
 API_PORT="$(pick_port "$REQUESTED_API_PORT" "$current_controller_port" 8010 8011 8012 18000)"
 NOVNC_PORT="$(pick_port "$REQUESTED_NOVNC_PORT" "$current_browser_novnc_port" 6081 6082 16080)"
-VNC_PORT="$(pick_port "$REQUESTED_VNC_PORT" "$current_browser_vnc_port" 5901 5902 15900)"
 
 if [[ "$API_PORT" != "$REQUESTED_API_PORT" ]]; then
   echo "Using API_PORT=$API_PORT because $REQUESTED_API_PORT is busy."
 fi
 if [[ "$NOVNC_PORT" != "$REQUESTED_NOVNC_PORT" ]]; then
   echo "Using NOVNC_PORT=$NOVNC_PORT because $REQUESTED_NOVNC_PORT is busy."
-fi
-if [[ "$VNC_PORT" != "$REQUESTED_VNC_PORT" ]]; then
-  echo "Using VNC_PORT=$VNC_PORT because $REQUESTED_VNC_PORT is busy."
 fi
 
 TAKEOVER_URL="${TAKEOVER_URL:-http://127.0.0.1:${NOVNC_PORT}/vnc.html?autoconnect=true&resize=scale}"
@@ -250,7 +243,7 @@ compose_flags=(-d)
 if [[ "${DOCTOR_BUILD:-0}" == "1" ]]; then
   compose_flags+=(--build)
 fi
-API_PORT="$API_PORT" NOVNC_PORT="$NOVNC_PORT" VNC_PORT="$VNC_PORT" TAKEOVER_URL="$TAKEOVER_URL" \
+API_PORT="$API_PORT" NOVNC_PORT="$NOVNC_PORT" TAKEOVER_URL="$TAKEOVER_URL" \
   docker compose up "${compose_flags[@]}" browser-node controller >/dev/null
 
 if ! wait_for_http "http://127.0.0.1:${API_PORT}/readyz"; then

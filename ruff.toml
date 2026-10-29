@@ -28,6 +28,8 @@ select = ["E9", "F", "I", "S"]
 "scripts/**" = ["S603", "S607"]
 # SECRET_PATTERN is the regex the secret scan greps for, not a credential.
 "scripts/release_audit.py" = ["S105"]
+# Reads the x11vnc log browser-node's entrypoint writes in the container's /tmp.
+"scripts/check_vnc_exposure.py" = ["S108"]
 # urlopen on the base URL the operator configured (http/https endpoint of their
 # own controller), same as the controller's copy of the bridge.
 "client/auto_browser_client/mcp_bridge.py" = ["S310"]

@@ -196,5 +196,16 @@ jobs:
       - name: Run doctor smoke test
         run: DOCTOR_BUILD=1 ./scripts/doctor.sh
 
+      - name: Check browser-node serves VNC only through noVNC
+        # x11vnc listened on TCP 5900, where libvncserver takes a WebSocket from any
+        # Origin, right beside noVNC's Origin guard. Fails on any RFB TCP listener
+        # and proves takeover through noVNC still reaches the display. doctor moves noVNC
+        # off 6080 when that port is busy, so the published port is read back here.
+        run: |
+          novnc_port="$(docker compose port browser-node 6080 | awk -F: 'NF {print $NF}' | tail -n1)"
+          : "${novnc_port:?browser-node publishes no host port for noVNC (6080)}"
+          python3 scripts/check_vnc_exposure.py "$(docker compose ps -q browser-node)" "$novnc_port" \
+            ${VNC_PASSWORD:+--expect-password}
+
       - name: Run isolated session smoke test
         run: DOCTOR_BUILD=1 API_PORT=8010 ./scripts/smoke_isolated_session.sh
