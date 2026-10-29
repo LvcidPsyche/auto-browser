@@ -88,6 +88,9 @@ assert payload["takeover_url"] == f"http://127.0.0.1:{novnc_port}/vnc.html?autoc
 print("isolated remote-access endpoint ok")
 PY
 
+# NOVNC_PORT is the session's published noVNC port, as the API reported it above.
+python3 "${ROOT_DIR}/scripts/check_vnc_exposure.py" "${CONTAINER_NAME}" "${NOVNC_PORT}" ${VNC_PASSWORD:+--expect-password}
+
 CLOSE_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}" -X DELETE)"
 python3 - <<'PY' "${CLOSE_JSON}"
 import json

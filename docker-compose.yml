@@ -42,9 +42,10 @@ services:
       PLAYWRIGHT_SERVER_HOST: 0.0.0.0
       PLAYWRIGHT_SERVER_PORT: 9223
       PLAYWRIGHT_SERVER_ADVERTISED_HOST: browser-node
-      # Optional VNC authentication for noVNC (6080) and raw VNC (5900); only the
-      # first 8 characters count. Both ports are loopback-only here — set this
-      # when you publish them anywhere else. See browser-node/entrypoint.sh.
+      # Optional VNC authentication for noVNC (6080); only the first 8 characters
+      # count. 6080 is loopback-only here — set this when you publish it anywhere
+      # else. x11vnc itself listens on no TCP port, only on a unix socket inside
+      # the container. See browser-node/entrypoint.sh.
       VNC_PASSWORD: ${VNC_PASSWORD:-}
       # noVNC accepts a WebSocket only from its own page, opened on a loopback
       # name, so sites the browser visits cannot drive the desktop. When the
@@ -58,7 +59,6 @@ services:
       - ./data/downloads:/data/downloads
     ports:
       - "127.0.0.1:${NOVNC_PORT:-6080}:6080"
-      - "127.0.0.1:${VNC_PORT:-5900}:5900"
 
   controller:
     build:

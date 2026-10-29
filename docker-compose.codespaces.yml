@@ -12,10 +12,10 @@
 #
 #   export API_BEARER_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 #
-# Raw VNC (5900) is deliberately no longer published here: without a password
-# it is unauthenticated, and only safe behind a loopback bind. noVNC (6080)
-# stays published so human takeover still works. Codespaces forwards ports
-# privately by default; if you make 6080 public, also set VNC_PASSWORD (noVNC
+# noVNC (6080) is the only VNC surface: x11vnc listens on no TCP port, only on
+# a unix socket inside the container. 6080 stays published so human takeover
+# still works. Codespaces forwards ports privately by default; if you make 6080
+# public, also set VNC_PASSWORD (noVNC
 # then prompts for it; only the first 8 characters count). noVNC only accepts
 # its own page on loopback names, so set NOVNC_ALLOWED_HOSTS to the forwarded
 # host name (<codespace>-6080.app.github.dev) if takeover reports

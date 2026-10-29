@@ -86,7 +86,6 @@ class FakeDockerContainers:
                 "NetworkSettings": {
                     "Ports": {
                         "6080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "16080"}],
-                        "5900/tcp": [{"HostIp": "127.0.0.1", "HostPort": "15900"}],
                     }
                 },
             },
@@ -408,7 +407,6 @@ class DockerBrowserNodeProvisionerTests(unittest.IsolatedAsyncioTestCase):
                 ws_endpoint="",
                 takeover_url="",
                 novnc_port=None,
-                vnc_port=None,
             )
             self.assertEqual(client.containers.browser_containers, {})
 
@@ -432,7 +430,6 @@ class DockerBrowserNodeProvisionerTests(unittest.IsolatedAsyncioTestCase):
                 ws_endpoint="",
                 takeover_url="",
                 novnc_port=None,
-                vnc_port=None,
             )
 
             await provisioner.release(runtime)
@@ -553,7 +550,6 @@ class BrowserIsolationSummaryTests(unittest.IsolatedAsyncioTestCase):
                 ws_endpoint="ws://browser-session-session-1:9223/playwright",
                 takeover_url="http://127.0.0.1:16080/vnc.html?autoconnect=true&resize=scale",
                 novnc_port=16080,
-                vnc_port=15900,
             )
             artifact_dir = Path(settings.artifact_root) / "session-1"
             artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -588,6 +584,10 @@ class BrowserIsolationSummaryTests(unittest.IsolatedAsyncioTestCase):
                 summary["isolation"]["runtime"]["container_name"],
                 "browser-session-session-1",
             )
+            # x11vnc has no TCP port (INFRA-01), so neither runtime view reports a raw VNC port.
+            for view in (summary["isolation"]["runtime"], summary["remote_access"]["runtime"]):
+                self.assertEqual(view["novnc_port"], 16080)
+                self.assertNotIn("vnc_port", view)
 
     async def test_isolated_session_remote_access_marks_public_host_as_active(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -615,7 +615,6 @@ class BrowserIsolationSummaryTests(unittest.IsolatedAsyncioTestCase):
                 ws_endpoint="ws://browser-session-session-2:9223/playwright",
                 takeover_url="https://tailscale-box.example.ts.net:16081/vnc.html?autoconnect=true&resize=scale",
                 novnc_port=16081,
-                vnc_port=15901,
             )
             artifact_dir = Path(settings.artifact_root) / "session-2"
             artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -680,7 +679,6 @@ class BrowserIsolationSummaryTests(unittest.IsolatedAsyncioTestCase):
                 ws_endpoint="ws://browser-session-session-3:9223/playwright",
                 takeover_url="http://127.0.0.1:16082/vnc.html?autoconnect=true&resize=scale",
                 novnc_port=16082,
-                vnc_port=15902,
             )
             tunnel = IsolatedSessionTunnel(
                 session_id="session-3",
@@ -767,7 +765,6 @@ class BrowserIsolationSummaryTests(unittest.IsolatedAsyncioTestCase):
                 ws_endpoint="ws://browser-session-session-4:9223/playwright",
                 takeover_url="http://127.0.0.1:16083/vnc.html?autoconnect=true&resize=scale",
                 novnc_port=16083,
-                vnc_port=15903,
                 tunnel_local_host="browser-session-session-4",
                 tunnel_local_port=6080,
             )
@@ -850,7 +847,6 @@ class BrowserSessionRollbackTests(unittest.IsolatedAsyncioTestCase):
                 ws_endpoint="ws://browser-session-session-rollback:9223/playwright",
                 takeover_url="http://127.0.0.1:16084/vnc.html?autoconnect=true&resize=scale",
                 novnc_port=16084,
-                vnc_port=15904,
                 tunnel_local_host="browser-session-session-rollback",
                 tunnel_local_port=6080,
             )

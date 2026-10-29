@@ -49,6 +49,6 @@ COPY server.mjs /opt/browser-node/server.mjs
 COPY novnc_origin.py /opt/browser-node/novnc_origin.py
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
-EXPOSE 5900 6080 9223
+EXPOSE 6080 9223
 
 CMD ["/entrypoint.sh"]

@@ -32,7 +32,6 @@ class IsolatedBrowserRuntime:
     ws_endpoint: str
     takeover_url: str
     novnc_port: int | None
-    vnc_port: int | None
     tunnel_local_host: str = "host.docker.internal"
     tunnel_local_port: int = 6080
 
@@ -120,7 +119,6 @@ class DockerBrowserNodeProvisioner:
             await asyncio.to_thread(pending.container.reload)
             ports = pending.container.attrs.get("NetworkSettings", {}).get("Ports", {})
             novnc_port = self._extract_host_port(ports, "6080/tcp")
-            vnc_port = self._extract_host_port(ports, "5900/tcp")
             takeover_url = self._build_takeover_url(novnc_port)
             return IsolatedBrowserRuntime(
                 session_id=pending.session_id,
@@ -134,7 +132,6 @@ class DockerBrowserNodeProvisioner:
                 ws_endpoint=ws_endpoint,
                 takeover_url=takeover_url,
                 novnc_port=novnc_port,
-                vnc_port=vnc_port,
                 tunnel_local_host=pending.container_name,
                 tunnel_local_port=6080,
             )
@@ -217,8 +214,8 @@ class DockerBrowserNodeProvisioner:
             "PLAYWRIGHT_SERVER_PORT": "9223",
             "PLAYWRIGHT_SERVER_ADVERTISED_HOST": container_name,
         }
-        # Each isolated container publishes its own noVNC and raw VNC ports, so a
-        # password set for the shared browser-node has to reach these too.
+        # Each isolated container publishes its own noVNC port, so a password set
+        # for the shared browser-node has to reach these too.
         if self.settings.vnc_password:
             environment["VNC_PASSWORD"] = self.settings.vnc_password
         # noVNC in the container only accepts its own page on a loopback name or
@@ -239,7 +236,6 @@ class DockerBrowserNodeProvisioner:
             },
             ports={
                 "6080/tcp": (self.settings.isolated_browser_bind_host, None),
-                "5900/tcp": (self.settings.isolated_browser_bind_host, None),
             },
             labels={
                 _MANAGED_LABEL: "true",
@@ -381,7 +377,6 @@ class DockerBrowserNodeProvisioner:
             ws_endpoint="",
             takeover_url="",
             novnc_port=None,
-            vnc_port=None,
             tunnel_local_host=pending.container_name,
             tunnel_local_port=6080,
         )

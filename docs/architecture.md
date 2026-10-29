@@ -128,7 +128,7 @@ Within that limitation, the controller now still scopes working state per sessio
 This repo now also includes an optional `docker_ephemeral` session mode:
 - the controller provisions a fresh browser-node container per session
 - each isolated session gets its own Playwright endpoint
-- each isolated session gets its own published noVNC/VNC port pair
+- each isolated session gets its own published noVNC port
 - session summaries/observations now expose session-specific `remote_access` state so operators can see whether an isolated takeover URL is local-only or remotely reachable
 - the shared reverse-SSH metadata is not blindly reused for those takeover URLs
 - when isolated takeover ports are only local, the controller can now open a per-session reverse-SSH tunnel and advertise that remote URL instead
