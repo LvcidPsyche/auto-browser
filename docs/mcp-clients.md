@@ -398,45 +398,132 @@ Use `workflow_profile=governed` when starting convergence against a live browser
 ### Governed approvals on tool calls
 
 Pass `workflow_profile=governed` on a tool call (it defaults to `fast`) and every tool assigned a
-governed kind asks for an operator's approval first (most tools that write have one, not all:
-creating a session or a proxy persona does not; see `FORCE_GOVERNED_APPROVALS` below): the call
-returns `approval_required` with an `approval_id`, an operator approves it,
-and the agent repeats the same call with that `approval_id`. An approval covers exactly one call with
-exactly those arguments, and the call spends it when it claims it, before the action runs: if the call
-then fails, the same `approval_id` is refused ("was spent when its action started"), and repeating the
-call without it asks for a new approval. The exception is a browser action that ends before it begins,
-wherever it runs: `browser.execute_action` (with or without a `governed_approval_id`),
-`browser.execute_approval` and `POST /approvals/{id}/execute`, REST
-`POST /sessions/{id}/actions/execute` and `POST /sessions/{id}/actions/upload`, and the agent loop. On
-those paths any error the action's pipeline raises before the action begins gives the approval back:
-its refusals (the page on a host `ALLOWED_HOSTS` does not allow, a hosted witness that is not ready, a
-witness policy block, an upload's target that is not a file input or whose one-time marker the page
-moved, an operator's reject while the action waits, below), or another failure by then, such as the
-page snapshot it takes first. So do, under a `governed_approval_id`, a runtime approval the call still
-has to ask for, does not know, or finds not approved; a cancellation before the action begins, during
-its claim's write included (an agent job cancelled, a harness run past its `max_wall_seconds`, or the
-controller shutting down); and any ending before the action begins while an operator's reject waits on
-it, which then applies. An error raised outside the pipeline before the action begins, with no reject
-waiting, leaves it spent; so does a cancellation once the action has begun. The approval goes back to
-`approved`, or to `rejected` when the operator's reject applied. The error or the `approval_required`
-answer carries `approval_given_back` (and `approvals_given_back`, every approval given back, innermost
-first), each with its `status` and a message, and an agent loop step carries them in its `execution`.
-Retry an `approved` one with the same `approval_id` once the cause is gone, rather than asking again,
-and repeat the call without it for an `expired` one. A governed tool call that is not a browser action
-(`browser.eval_js`, `browser.set_cookies`, ...) spends its approval once the call is made, however it
-ends. A tool call's approval is spent only by repeating that tool call: `POST /approvals/{id}/execute`
-runs approved browser actions, and refuses a tool call's approval with a 409 without spending it.
+governed kind asks for an operator's approval first (most tools that write have one, not all: creating a
+session or a proxy persona does not; see `FORCE_GOVERNED_APPROVALS` below): the call returns
+`approval_required` with an `approval_id`, an operator approves it, and the agent repeats the same call
+with that `approval_id`. An approval covers exactly one call with exactly those arguments (a browser
+action's `reason` and `confidence` aside), and the call spends it when it claims it, before the action
+runs. If the call then fails, the same `approval_id` is refused with "was spent when its action started
+(executed_at ...), so the action may have taken effect: observe the page, or check the outcome, before
+acting again. Only to do it again, repeat the call without approval_id, which asks an operator for a new
+approval", unless the answer carries `approval_given_back` (a browser action that ended before it began;
+below). A spent approval does not mean its action failed, so an operator asked to approve the repeat
+checks the outcome too.
 
-These refusal messages are the tool call's answer over MCP. REST routes answer an approval refusal with
-fixed text (403 "Not permitted" on `/sessions/{id}/actions/*`, 409 "Conflict" on
-`POST /approvals/{id}/execute`); a browser action's own error keeps its message, its `code` and its
-`approval_given_back` there too, and a 409 for a decision on a claimed approval, or for an approve
-whose arguments or text are gone, carries its reason as the `detail`, which the dashboard shows.
+#### When an approval is spent, and when it is given back
+
+The claim marks the approval `executed`, persisted, and it stays spent whatever happens next: a refusal
+once the action has begun, retryable ones included (`element_not_stable`, `element_covered` and the
+other waits inside an action, a timeout, a page that went away); a cancellation once the action has
+begun; a crash or a restart. A governed tool call that is not a browser action (`browser.eval_js`,
+`browser.set_cookies`, ...) spends its approval once the call is made, however it ends, a refusal or a
+cancellation included.
+
+The exception is a browser action that ends before it begins, wherever it runs: `browser.execute_action`
+(with or without a `governed_approval_id`), `browser.execute_approval` and `POST
+/approvals/{id}/execute`, REST `POST /sessions/{id}/actions/execute`, the agent loop (`/agent/step`,
+`/agent/run`, queued agent steps and runs, cron runs), and an upload (`POST
+/sessions/{id}/actions/upload`, or an `upload` action through any of these) before its transfer. On
+those paths any error the action's pipeline raises before the action begins gives the approval back: its
+refusals (the current page on a host `ALLOWED_HOSTS` does not allow, a hosted witness that is not ready,
+a witness policy block, an upload's `element_id` that is not a file input or whose one-time marker the
+page moved, an operator's reject while the action waits, below), or another failure by then, such as the
+page snapshot it takes first. So do any refusal of an approval check or claim inside the call (a
+governed `browser.execute_action` with a `governed_approval_id` whose runtime approval is still to be
+asked for, unknown, or not approved); a cancellation before the action begins, during its claim's write
+included (an agent job cancelled, a harness run past its `max_wall_seconds`, or the controller shutting
+down); and any ending before the action begins while an operator's reject waits on it, which then
+applies. So does what the dispatched action raises before its pipeline begins, its own session lookup
+and an upload's file check included, and a `navigate` that `ALLOWED_HOSTS` refuses after its approval
+was claimed (below). Any other error raised outside the pipeline before the action begins, with no
+reject waiting, leaves it spent. The approval goes from `executed` back to `approved` (`executed_at`
+cleared, audited as `approval_given_back`), or to `rejected` when the operator's reject applied. A
+give-back revokes the claim before it writes anything, so a task still inside the execution cannot act
+on the approval it returns, and a give-back whose audit fails leaves the approval usable. The error or
+the `approval_required` answer carries `approval_given_back` (the approval the call was given, the outer
+one when there are two) and `approvals_given_back` (every approval given back, innermost first), each
+with its `status` (`approved`, `rejected` or `expired`) and a message, and an agent loop step carries
+them in its `execution`. Retry an `approved` one with the same `approval_id` once the cause is gone,
+rather than asking again, and repeat the call without it for an `expired` one. A session that has closed
+never comes back: its note says the approval is still approved but nothing can run it ("... repeat the
+call in a live session without approval_id, which asks for a new approval").
+
+An action approval covers one operation: a second one under the same claim, or one from a task still
+running after the claim was released, is refused before it changes anything. Its expiry is checked at
+the claim, so an action that started in time is not refused once it has run. A policy block before the
+operation began does not navigate back (that made an approved `go_back` go back twice), and neither does
+an approval refusal that stops an upload before its transfer. After an approved `go_back` or `reload`, a
+policy block does not go back either: the page stays where the action left it, and a page
+`ALLOWED_HOSTS` refuses is sent to `about:blank`. The approval guard's own refusals reach the agent and
+the audit with their code (`approval_released`, `approval_rejected`, `approval_already_used`); the
+blocked action's audit entry carries it as `details.code`, as a policy block's carries
+`browser_action_blocked`. A witness receipt reports an approval status only for the approval its action
+ran under: `executed` once the action began, `approved` when it was refused before and given back,
+`rejected` when an operator's reject stopped it (which gets its own receipt), and none for an
+`approval_id` passed with an action that needed none. A governed `browser.execute_action` that spends
+its `governed_approval_id` names that approval in the receipt. The action's own status stays `blocked`
+or `failed`, and a policy block after the change names the block under `target.after_change`.
+
+A governed upload's file is checked before anyone is asked to approve it, in `browser.execute_action`
+and the agent loop: a missing file is refused (`not_found` over MCP) and queues nothing.
+`browser.execute_approval` and `POST /approvals/{id}/execute` check an upload's file before they claim
+its approval, so a file gone since the approval leaves it approved. For every action they also refuse an
+approval whose session has closed before they claim it, and it stays `approved`. A session that closes,
+or an upload's file that is removed, after the approval is claimed and before the action begins counts
+as an action that ended before it began: the approval is given back, and the note for a closed session
+says nothing can run it. A `navigate` to a host `ALLOWED_HOSTS` refuses is refused before an approval is
+asked for, in every profile; one whose host leaves the list after the approve is refused when it is
+executed, and gives its approval back.
+
+A tool call's approval is spent only by repeating that tool call: `POST /approvals/{id}/execute` runs
+approved browser actions, and refuses a tool call's approval, or a takeover approved before approvals
+recorded their origin, with a 409 without spending it. An agent cannot ask for approval of a
+`request_human_takeover` or a `done` action, or run one: it is refused with a 400 before anything is
+queued, whatever risk category it carries; over MCP the error for a takeover points to
+`browser.request_human_takeover`, and the one for `done` says it ends an agent's run.
+
+With `STATE_DB_PATH` set, every record is written to the file store first, and to SQLite while SQLite is
+primary, and each write lands whole before the store's lock is released, also when its caller is
+cancelled. A start on SQLite first copies into it every file record it lacks or holds differently, so an
+approval spent while SQLite was unavailable stays spent, except a file record that would turn SQLite's
+spent or rejected one to another status. SQLite's spent record always stays: a later file record beside
+it is a give-back SQLite never took (cut off by a crash, a write whose put-back failed too, several
+workers), and losing it leaves the approval spent, so the agent asks again. Its rejected record stays
+over a file record not updated after it, and an approve made after the reject while SQLite was
+unavailable is copied: operator decisions and give-backs are stamped later than the record they change,
+by a microsecond when the clock has not moved past it. So the copy can only err toward spent or
+rejected. The record SQLite keeps is first written over the file's, so a later start whose SQLite fails
+cannot claim the approval again. If that write fails, it is logged with the approval's id and the start
+goes on with SQLite primary; if SQLite then cannot take the file store's other records either, the
+controller refuses to start rather than run on a file store that could claim a spent approval, and the
+error names those approvals and says to check that `APPROVAL_ROOT` and `STATE_DB_PATH` are writable. Any
+other failure of the copy, or of SQLite's own start, leaves the file store primary, and the log says
+which step failed. A write whose SQLite half fails puts the file record back before the failure is
+reported, so both stores hold what the caller was told; if putting it back fails too, that is logged,
+and a give-back reported as failed is still not revived at the next start, since SQLite's spent record
+stays. Within one process, writes under the lock land in order; records stored by 1.11.1, several
+workers sharing a store, and a restored backup can leave a file record that differs without being the
+latest word, and the rule then keeps the spend or the rejection. A stored record that no longer
+validates (a navigate approval an earlier version stored for a URL this one refuses) is left out of
+listings and answers as an unknown id, in either store; fetching or listing it logs a warning that names
+it and where it fails, not what it holds. Not covered: two controller processes sharing one approval
+store (file or SQLite) can both claim an approval, since the claim is atomic only within a process;
+several workers or replicas are not supported.
+
+These refusal messages are the tool call's answer over MCP, `browser.execute_approval` included. REST
+routes answer an approval refusal with fixed text (403 "Not permitted" on `/sessions/{id}/actions/*`,
+409 "Conflict" on `POST /approvals/{id}/execute`); a browser action's own error keeps its status, its
+message, its `code` and its `approval_given_back` there too (the approval guard's refusals,
+`approval_rejected` and the like, answer 409), and a 409 for a decision on a claimed approval, or for an
+approve whose arguments or text are gone, carries its reason as the `detail`, which the dashboard shows.
+
+#### Rejecting or approving while an action holds its approval
 
 An operator who rejects an approval while a browser action holds it but has not begun (it waits for the
 session, or its checks are running) gets the record back, still `executed`, with a `message`: the
 rejection stops the action, which is refused with `approval_rejected`, and the approval becomes
-`rejected`, however the action ends before it begins (an error or a cancellation included; if the
+`rejected`, with the operator's comment, a witness receipt and an audit entry, however the action ends
+before it begins (an error or a cancellation included; if the
 approval cannot be written back, it stays spent, and the audit says the rejection did not apply).
 Approving it meanwhile withdraws the rejection, and the answer says what follows: the action may start;
 it was already refused, and the approval goes back to approved (or has expired, and the agent asks
@@ -445,54 +532,120 @@ Which ending gives back is read when the approval is written back, so it does no
 approve landed just before the action ended or just after. Once the action has begun, or while a
 governed tool call that is not a browser action runs, a decision is refused with why (a 409 over REST,
 with that text), and so is an agent's own reject of a claimed approval. The claim lives in the
-controller process, so a decision sent to another worker or replica is refused with a 409. On a Windows
+controller process, so a decision sent to another worker or replica while an action holds the approval
+is refused with a 409 ("has already been spent"), where 1.11.1 accepted a reject. On a Windows
 host with the default file store (`STATE_DB_PATH` unset), any read or write of a record made while
 another write replaces it can fail, since Windows briefly locks a file being replaced: a decision then
 answers 409 "Conflict" too; a claim, a check of the approval before the action runs, or a give-back
 fails the call; and a listing leaves the record out. A give-back that fails so leaves the approval
 spent. The Docker image runs Linux, where this does not happen.
 
-For an action approval the reason is the agent's own words. The dashboard queue shows the action
-itself, every field the approval binds, uncut; a field that does not act is marked "(not used by
-click)" when the action does not read it, or "(not used: selector runs)" when another field set beside
-it runs instead; a `select_option` value that runs is marked "(matches an option's value or label)",
-since it picks the first option whose value or label it is, and an empty value or label is shown
-(`value=""`). The approval webhook (`APPROVAL_WEBHOOK_URL`) and the SSE approval event carry its
-`origin` and an `action_summary` the server writes from the same fields, which cuts a string at 200
-characters and says how many it leaves out: when it does, decide on the queue row. For a tool call the
-reason previews the arguments (600 characters, credentials left out by tool and path); the record, the
-webhook and the SSE event (sent only for an approval in a session) carry `arguments_size`; and
-`GET /approvals/{id}/arguments`, or the queue's "View all N characters", shows them whole, with the
-same credentials left out, to whoever may read the approval; a cut preview gives that text's length.
-The record's `arguments_sha256` is that text's digest, not the one the approval binds, which covers the
-call's own arguments (so a cookie's or a storage value is approved without being viewable). They are
-removed when the call that spends the approval ends, or at the next start for a call whose process
-died, or whose removal failed (that is logged, and leaves the file). Until then they stay: an approval
-left pending, or approved and never run (one past its expiry stays `approved`), keeps its file, and a
-rejected one keeps it for the approval TTL (`APPROVAL_TTL_MINUTES`) after the rejection, since an
-operator may approve it again meanwhile; the file goes at the next approval request or start after
-that. An approve of one whose arguments are gone is refused ("its arguments are no longer stored; the
-agent asks again"), and so is an approve of a sensitive `type` whose text the controller no longer
-holds ("its text is no longer held; the agent asks again").
+#### What the operator is shown
+
+For an action approval the reason is the agent's own words, so read the action as well as the reason: a
+request for a real action can still be described misleadingly. The dashboard queue shows the action
+itself, uncut: one list of every field the approval binds, checked against the match that binds it. That
+is the element id that runs first (a selector beside it is marked as not used), a navigate's URL, an
+upload's file path, the key a press sends, the text a `type` types and whether it replaces the field,
+coordinates, an option's value, label or index, a scroll's distance, a wait's length, and any recipient,
+platform or username set, each string JSON-quoted, so a newline shows as `\n` and a tab or another
+control as its JSON escape (`\t`, `\u0001`). A field that does not act is marked "(not used by click)"
+when the action does not read it (a `url` on a click, a `file_path` or `text` on a press), or "(not
+used: selector runs)" when another field set beside it runs instead (coordinates beside a selector are
+marked so; an option's index runs before its value, and its value before its label). A `select_option`
+value that runs is marked "(matches an option's value or label)", since it picks the first option whose
+value or label it is, as Playwright matches it, and an empty value or label is shown (`value=""`). The
+approval webhook (`APPROVAL_WEBHOOK_URL`) and the SSE approval event carry its `origin` and an
+`action_summary` the server writes from the same fields, which cuts a string at 200 characters and says
+how many it leaves out: when it does, decide on the queue row. The approve dialog cuts the same way,
+names the target first and points to the row; a tool call's dialog shows the server's preview.
+
+For a tool call the reason previews the arguments (600 characters, credentials left out by tool and
+path, below; a cut preview ends before an escape it would split, and gives the length of the whole
+text); the record, the webhook and the SSE event (sent only for an approval in a session) carry
+`arguments_size`; and `GET /approvals/{id}/arguments`, or the queue's "View all N characters", shows
+them whole, with the same credentials left out, to whoever may read the approval. They are kept as
+`<id>.arguments` in `APPROVAL_ROOT`. The record's `arguments_sha256` is that text's digest, not the one
+the approval binds, which covers the call's own arguments (so a cookie's or a storage value is approved
+without being viewable). The file is removed when the call that spends the approval ends, or at the next
+start for a call whose process died, or whose removal failed (that is logged, and leaves the file), and
+for a file no record names. Until then it stays: an approval left pending, or approved and never run,
+keeps its file, and nothing else sweeps it (expiry is not a final state in the store: one past its
+expiry stays `approved`, and is refused when used); a rejected one keeps it for the approval TTL
+(`APPROVAL_TTL_MINUTES`) after the rejection, since an operator may approve it again meanwhile, and the
+file goes at the next approval request or start after that. An approve of one whose arguments are gone
+is refused before the record changes ("its arguments are no longer stored; the agent asks again"), and
+so is an approve of a sensitive `type` whose text the controller no longer holds, dropped by a reject, a
+restart, or 24 hours after it was asked, or held by another worker ("its text is no longer held; the
+agent asks again"). When the agent asks again with the same text while that approval is still pending in
+the same controller process (the 24-hour case), the text is held again and that approval can be
+approved. After a reject, a restart, or on another worker, asking again queues a new approval for the
+operator to decide, and the old one can no longer be approved.
 
 In the dashboard (the queue, the confirm dialog, the arguments viewer and the run replay), in the
 `action_summary`, and in the webhook's and the SSE event's `reason`, a character that would hide or
-reorder the text is shown as its code point (`[U+202E]`); in the `reason`, a newline is written `\n`,
-and a tab, a carriage return or another control as its code point. A tool call's preview and arguments
-are ASCII JSON (`\u202e`). Every answer that carries the record serves its fields as stored: the record
-and listing routes (`GET /approvals`, `GET /approvals/{id}`, MCP `browser.list_approvals`), the answers
-to an approve, a reject or an execute over REST and MCP, the `approval_required` answer, and witness
-receipts. The queue lists only pending approvals: read one on its row before you decide. In an action
-approval, letters that look alike across scripts, and right-to-left letters, are shown as they are, and
-a credential in its URL is shown, in the queue, the summary, the webhook and SSE alike. A tool call's
-preview leaves out the userinfo, and the values of query parameters named as credentials, of
-`browser.cdp_attach`'s URL, a cookie's URL, and a harness run's start URL and mock final page URL; a
-credential in a URL's fragment, in a query parameter of another name, or anywhere else in the arguments
-is shown. A `type` the agent marked sensitive reads "text hidden at the agent's request (sensitive)":
+reorder the text is shown as its code point (`[U+202E]`): format characters such as bidi overrides and
+zero-width marks, controls, line and paragraph separators, and default-ignorable code points such as
+variation selectors and Hangul fillers. The server's lists of format and default-ignorable code points
+are Unicode 17.0's, whatever Unicode its Python knows. In the `reason`, a newline is written `\n`, and a
+tab, a carriage return or another control as its code point (`[U+0009]`), so a multi-line reason
+arrives on one line; field strings are JSON, so their controls show as JSON escapes (above). A tool
+call's preview and arguments are ASCII JSON (`\u202e`). Every answer that carries the record serves its
+fields as stored: the record and listing routes (`GET /approvals`, `GET /approvals/{id}`, MCP
+`browser.list_approvals`), the answers to an approve, a reject or an execute over REST and MCP, the
+`approval_required` answer, and witness receipts. The queue lists only pending approvals: read one on
+its row before you decide. Letters that look alike across scripts (a Cyrillic `а` for a Latin `a`), and
+right-to-left letters, are shown as they are, in the queue, the summary, the webhook and SSE alike. A
+navigate's `url` is shown with its host as a browser sends it (each non-ASCII label as `xn--`) and the
+host as written beside it, in the queue and the summary; a credential in it is shown.
+
+A preview leaves out credentials by tool and path: a `browser.set_cookies` preview shows each cookie but
+its value, and a `browser.set_local_storage` value shows only its length. Five URL fields are checked
+and shown as a browser reads them: `browser.cdp_attach`'s URL, a cookie's URL, a harness run's start URL
+and its mock final page's URL, and `browser.create_cron_job`'s `start_url`. Each is shown without its
+userinfo, and without the value of each query parameter whose name, or a part of it split at punctuation
+and at camelCase, names a credential (token, key or apikey, secret, password, passwd or pwd, sig or
+signature, session, sessionid, jsessionid or phpsessid, sid, ticket, code, auth or authorization, otp,
+jwt, credential or credentials, or the whole name SAMLResponse; such as `access_token`,
+`X-Amz-Signature`, `sig`, `ticket` or `code`, so a `promo_code` is left out too), or that runs such
+words together (`accesstoken`, `clientsecret`, `privatekey` and the like), the name decoded until it
+reads the same (at most twice), or of a query item with no `=`; a part, not a substring, so `monkey` is
+shown. `&` and `;` both separate items. A query value that is itself an http(s) URL as a browser reads
+one (past spaces and control characters at either end, without tabs or newlines, and with or without the
+`//` after its scheme, or with extra slashes), such as a return URL, has its own userinfo and credential
+values left out (one level deep); one that urllib cannot read as a URL (`https://[draft`) is shown as
+written. Every other query value is shown, a hosted browser's `--proxy-server` among them. A credential
+in a URL's fragment, in a query parameter of another name, or anywhere else in the arguments is shown.
+
+Those five fields are refused when one holds a backslash or a control character (U+0000 to U+001F; DEL
+and other controls are not refused), or names one host to a browser and another to the controller: a URL
+written without the `//` after its scheme or with extra slashes (`https:u:p@host/`,
+`https:////u:p@host/`); a percent-encoded host; a host a browser maps to another name beyond case
+folding and composition, mapped by UTS 46's table as a browser maps it, such as `127.1` in full-width
+digits or a name with a zero-width space in it (a host it maps only by case folding or composition, such
+as a name written decomposed, or with the fi ligature, the long s or the micro sign, is accepted); and
+an IPv4 address not written as a dotted quad, such as `2130706433` or `127.1`. So
+`wss://x@evil.example\@bank.example/`, which the controller would read as `bank.example` while
+Playwright connects to `evil.example`, is refused. An internationalized name is accepted, and shown as
+the `xn--` form a browser sends, with the name as written beside it.
+
+A navigation URL (a `navigate` action, `POST /sessions/{id}/actions/navigate`, `POST
+/sessions/{id}/tabs/open`, and the `start_url` of `browser.create_session`, `browser.fork_session` and
+the REST session and fork routes, in every profile) is refused by the same host rules, but not for a
+backslash or a control in its path or query, which moves no host (a search for `C:\Users`, say): only
+when the host a browser would load differs from the one shown. A control character (U+0000 to U+001F) in
+its scheme, the slashes after it or its host is refused ("has a control character in its scheme or host,
+which a browser drops"): a browser drops a tab or a newline there, and the URL shown would keep it. A
+cron job that an earlier version stored with a `start_url` these rules refuse fails each run before a
+browser opens, and the controller logs why.
+
+A `type` the agent marked sensitive reads "text hidden at the agent's request (sensitive)":
 the agent can mark any text sensitive, so look at the field it types into. An operator's rejection
 stops the agent from approving the same request itself (`AUTONOMOUS_APPROVALS=true`) only within its
 session, or in controller scope for the same operator; with `AUTONOMOUS_APPROVALS=true` the agent
 approves its own calls, and can repeat a rejected one in a new session.
+
+#### Controller-scope approvals and the audit log
 
 A governed tool that names no session (`browser.delete_memory_profile`, `browser.cdp_attach`)
 is approved in a controller-wide scope: the approval's `session_id` is `controller`, and
@@ -500,26 +653,39 @@ is approved in a controller-wide scope: the approval's `session_id` is `controll
 session owner, so under named credentials (`API_BEARER_TOKENS`) such an approval belongs to
 the operator who asked and to nobody else: another operator cannot list, decide, reuse or
 spend it. `POST /approvals/{id}/execute` does not run it (the agent repeats the tool call).
+Witness receipts and audit entries for an approval carry its origin and, for a tool call, the tool.
 The audit log is operator-wide, though (`GET /audit/events`, `browser://audit/events`): any
 operator reads in it another operator's approval ids, kinds, origins and tools, and the
 comments decisions were given with, though not a reason or a tool call's arguments.
 
-The cron tools are governed too: `browser.create_cron_job` and `browser.trigger_cron_job` are
-`write` and `browser.delete_cron_job` is `destructive`. A job keeps the `workflow_profile` of the
-call that created it, and every run, scheduled or triggered, starts under it, so a job created by a
-`governed` caller cannot be used to run writes without approval. A job created through REST
-(`POST /crons`) stores `fast`, and so does a job created before this release: it keeps running as
-`fast` unless `FORCE_GOVERNED_APPROVALS=true` (below). A job's profile cannot be changed by an
-update. To govern an existing job, delete it and create it again from a `governed` caller, or turn
-on `FORCE_GOVERNED_APPROVALS`.
+#### Cron jobs and FORCE_GOVERNED_APPROVALS
+
+The cron tools are governed too: `browser.create_cron_job` and `browser.trigger_cron_job` are `write`
+and `browser.delete_cron_job` is `destructive`. A job keeps the `workflow_profile` of the call that
+created it, and every run, scheduled or triggered, starts under it, so a job created by a `governed`
+caller cannot be used to run writes without approval. Likewise, a run or step queued by a `governed`
+`browser.queue_agent_run` or `browser.queue_agent_step` call runs governed, whatever its request names.
+A job created through REST (`POST /crons`) stores the `workflow_profile` the request body names, `fast`
+by default. A job created before this release stores `fast`: it keeps running as `fast` unless
+`FORCE_GOVERNED_APPROVALS=true` (below). A job's profile is fixed when it is created (jobs cannot be
+edited). To govern an existing job, delete it and create it again from a `governed` caller (or through
+REST with `"workflow_profile": "governed"`), or turn on `FORCE_GOVERNED_APPROVALS`.
+
+A governed job's run cannot continue past an action that needs an operator's approval: the run stops
+there, and its session closes with the run, so that approval, once approved, can no longer be executed:
+it stays `approved`. Triggering the job again asks for a new approval in a new session. With
+`AUTONOMOUS_APPROVALS=true` the agent approves such an action itself and the run carries on. Run work
+that needs an operator's approval in an interactive session, or keep the job `fast` under a reviewed
+script.
 
 `workflow_profile` is the caller's argument, so by default governed approvals are the agent's choice. A
 deployment that wants them as a rule sets `FORCE_GOVERNED_APPROVALS=true`: every tool with a governed
 kind then runs as `governed` whatever the call passed, with or without a session, and `fast` is no
 longer available for them. Tools without a governed kind are unchanged: the reads, and some that write,
 among them the proxy persona tools; `browser.create_session` and `browser.fork_session` open a
-`start_url` with no approval, and so does each run of a cron job, though creating or triggering the
-job asks for one. It also forces
+`start_url` with no approval, and so does each run of a cron job, scheduled or triggered. Only the MCP
+cron tools ask for an approval to create or trigger a job; REST `POST /crons` and `POST
+/crons/{job_id}/trigger`, which need the bearer token, never do. `FORCE_GOVERNED_APPROVALS` also forces
 every step of the agent loop to `governed`, whatever `request.workflow_profile` says, so
 `browser.queue_agent_step` and `browser.queue_agent_run`, REST `/agent/step` and `/agent/run`, and cron
 runs cannot be used to get around it.

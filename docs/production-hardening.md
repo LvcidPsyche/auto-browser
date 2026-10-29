@@ -48,7 +48,8 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   multi-operator deployment an agent that leaves it out can run ordinary writes without
   governed approval; the runtime approvals still apply (an upload's, with
   `REQUIRE_APPROVAL_FOR_UPLOADS` on by default, and those of `post`, `payment`,
-  `account_change` and `destructive` decisions), and `browser.eval_js` always asks.
+  `account_change` and `destructive` decisions), and `browser.eval_js` always asks: an operator,
+  unless `AUTONOMOUS_APPROVALS=true` lets the agent approve its own (below).
   `FORCE_GOVERNED_APPROVALS=true` takes the choice away. It is off by default because it
   stalls an existing agent loop on its first write until an operator approves. Readiness
   (`GET /readiness`, `browser.readiness_check`) warns `governed_approvals` when more than
