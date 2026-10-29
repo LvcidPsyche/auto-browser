@@ -30,6 +30,9 @@ class FakeRequest:
     def failure(self) -> str:
         return self._failure
 
+    def is_navigation_request(self) -> bool:
+        return False
+
 
 class FakeResponse:
     def __init__(

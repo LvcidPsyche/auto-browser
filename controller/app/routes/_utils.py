@@ -8,6 +8,7 @@ from logging import Logger
 from fastapi import HTTPException, Request
 
 from ..action_errors import BrowserActionError
+from ..browser.services.tabs import REFUSED_TAB_MESSAGE
 
 _SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -36,9 +37,11 @@ async def require_session_access(request: Request) -> None:
 # Fixed texts for a page or tab ALLOWED_HOSTS refuses. The PermissionError behind
 # them names the host; these routes answer generically everywhere else.
 OFF_LIST_PAGE_DETAIL = (
-    "The page is on a host ALLOWED_HOSTS does not allow and is being moved to about:blank. Try again in a moment."
+    "The page is on a host ALLOWED_HOSTS does not allow, or came from one, and is not read until it is "
+    "navigated to an allowed URL. A page that loaded while another tab of this session was refused is "
+    "refused too: close that tab, then navigate this one."
 )
-OFF_LIST_TAB_DETAIL = "That tab is on a host ALLOWED_HOSTS does not allow."
+OFF_LIST_TAB_DETAIL = REFUSED_TAB_MESSAGE
 
 
 def internal_error(logger: Logger, message: str, *args: object) -> HTTPException:

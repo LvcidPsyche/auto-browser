@@ -18,6 +18,7 @@ import pytest
 from app.audit import FileAuditStore
 from app.cron_service import CronService
 from app.maintenance import MaintenanceService
+from tests import _background
 
 
 class _FakeManager:
@@ -229,7 +230,8 @@ def test_background_task_failures_are_logged(caplog) -> None:
         with pytest.raises(ValueError):
             await task
 
-    with caplog.at_level(logging.ERROR):
+    # It fails on purpose: the conftest fixture fails a test whose background task failed, unless expected.
+    with caplog.at_level(logging.ERROR), _background.crashes_expected():
         asyncio.run(drive())
 
     assert any("kaboom" in str(r.getMessage()) or "kaboom" in str(r.exc_info) for r in caplog.records)

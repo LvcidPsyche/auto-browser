@@ -253,7 +253,7 @@ class ForceGovernedAgentLoopTests(unittest.IsolatedAsyncioTestCase):
         queue = AgentJobQueue(
             orchestrator=self.orchestrator,
             store_root=Path(self.tmp.name) / "jobs",
-            session_owner=self.manager.session_owner,
+            session_accessible=self.manager.session_accessible,
         )
         await queue.startup()
         try:

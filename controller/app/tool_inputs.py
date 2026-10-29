@@ -382,11 +382,25 @@ class ForkSessionInput(SessionIdInput):
         return validate_url(value, field_name="start_url", allowed_schemes=HTTP_URL_SCHEMES)
 
 
+# eval_js waits this long for its expression unless the call says otherwise, and never longer than the max.
+EVAL_JS_DEFAULT_TIMEOUT_MS = 30_000
+EVAL_JS_MAX_TIMEOUT_MS = 60_000
+
+
 class EvalJsInput(SessionIdInput):
     expression: str = Field(
         min_length=1,
         max_length=50000,
         description="JavaScript expression or function source, evaluated in the page; returns its JSON value.",
+    )
+    timeout_ms: int | None = Field(
+        default=None,
+        ge=100,
+        le=EVAL_JS_MAX_TIMEOUT_MS,
+        description=(
+            f"How long to wait for the expression, at most {EVAL_JS_MAX_TIMEOUT_MS}; omitted, "
+            f"{EVAL_JS_DEFAULT_TIMEOUT_MS}. One that times out may still be running in the page."
+        ),
     )
     approval_id: str | None = Field(
         default=None,

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import tarfile
 import tempfile
@@ -15,8 +16,9 @@ from urllib.parse import urlparse
 
 from ...audit import get_current_operator
 from ...session_ownership import may_use, verified_operator
-from ...utils import UTC, atomic_write_text, utc_now
+from ...utils import PRIVATE_FILE_MODE, UTC, atomic_write_text, replace_retrying, utc_now
 from ...witness import WitnessActionContext
+from ..page_read import title_or_blank
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +35,12 @@ MAX_ARCHIVE_MEMBER_BYTES = 64 * 1024 * 1024
 MAX_ARCHIVE_TOTAL_BYTES = 256 * 1024 * 1024
 _COPY_CHUNK_BYTES = 64 * 1024
 
-# Plaintext state that earlier releases wrote beside a profile's state file:
-# decrypted copies made while a session opened ("auth-state-*.json") and
-# per-save temp files (".<name>.<random>.tmp.json"). A process that died at the
-# wrong moment left them behind, and an export must not carry them off.
-_PLAINTEXT_LEFTOVER = re.compile(r"auth-state-[^/\\]*\.json|\.[^/\\]*\.tmp\.json")
+# Files an export leaves out, by name, before it reads them: decrypted copies
+# earlier releases made while a session opened ("auth-state-*.json"), and the
+# temp, staged and kept-for-rollback files a save writes beside the profile's
+# own (".<name>.<random>.tmp", ".tmp.json", ".tmp.json.enc"), which come and go
+# while a save runs and which a process that died at the wrong moment left behind.
+_NOT_EXPORTED = re.compile(r"auth-state-[^/\\]*\.json|\.[^/\\]*\.tmp(\.json(\.enc)?)?")
 
 
 # Written beside the state a session saves in AUTH_ROOT/<session_id>/ when that
@@ -52,8 +55,80 @@ EXPORTER_SIDECAR_SUFFIX = ".exporter.json"
 _FOREIGN_SESSION_STATE = "storage_state_path points into the saved auth state of another operator's session"
 
 
-def _skip_plaintext_leftovers(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
-    return None if _PLAINTEXT_LEFTOVER.fullmatch(PurePosixPath(member.name).name) else member
+def _staged_beside(path: Path) -> Path:
+    """A fresh name beside ``path`` for a file written before it is put in place (".<name>.<random>.tmp.json")."""
+    return path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp.json")
+
+
+def _put_in_place(staged_state: Path, state_path: Path, staged_metadata: Path, metadata_path: Path) -> None:
+    """Move a profile's new state and metadata onto its own, both or neither.
+
+    The state file is there throughout: the previous state is kept by a second link to it (a copy where
+    links fail) for the rollback, and the new state replaces the file in one rename. Moving it aside first
+    left the profile with no state file between the renames, which a reader in another thread saw (an
+    export, Playwright reading a plaintext state). No await in here, so nothing on the event loop sees
+    one file without the other.
+    """
+    previous = _keep_previous(state_path)
+    try:
+        replace_retrying(staged_state, state_path)
+        replace_retrying(staged_metadata, metadata_path)
+    except BaseException:
+        _roll_back(previous, state_path)
+        raise
+    if previous is not None:
+        _remove_quietly(previous, "the previous state after a save")
+
+
+def _keep_previous(state_path: Path) -> Path | None:
+    if not state_path.exists():
+        return None
+    previous = _staged_beside(state_path)
+    try:
+        os.link(state_path, previous)
+    except OSError:
+        try:
+            shutil.copy2(state_path, previous)
+        except BaseException:
+            previous.unlink(missing_ok=True)  # a copy cut short is not the previous state
+            raise
+    return previous
+
+
+def _roll_back(previous: Path | None, state_path: Path) -> None:
+    """Put the previous state back after a failed save (none on a first save), logging where it is kept if not."""
+    try:
+        if previous is None:
+            state_path.unlink(missing_ok=True)
+        elif state_path.exists() and os.path.samefile(previous, state_path):
+            previous.unlink()  # the new state never landed: the link is the state file itself
+        else:
+            replace_retrying(previous, state_path)
+    except OSError as exc:
+        logger.error(
+            "could not put an auth profile's previous state back after a failed save; it is kept at %s (%s)",
+            previous,
+            exc,
+        )
+
+
+def _add_tree(tar: tarfile.TarFile, path: Path, arcname: str, skipped) -> None:
+    """tar.add(path) and what is under it, in tar.add's order, leaving out what ``skipped(arcname, name)`` names."""
+    tar.add(str(path), arcname=arcname, recursive=False)
+    if path.is_symlink() or not path.is_dir():
+        return
+    for name in sorted(os.listdir(path)):
+        child = f"{arcname}/{name}"
+        if not skipped(child, name):
+            _add_tree(tar, path / name, child, skipped)
+
+
+def _remove_quietly(path: Path, what: str) -> None:
+    """Best effort once a save has landed: what is left is logged, the save stands."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("could not remove %s, %s: %s", what, path, exc)
 
 
 class BrowserAuthProfileService:
@@ -215,34 +290,58 @@ class BrowserAuthProfileService:
         # same takeover as reading it, and this method rewrites the metadata
         # file wholesale, so the owner has to be carried across explicitly.
         owner = self.require_access(normalized, action="saving an auth profile")
+        # Read before the state is written: a page call that fails afterwards left the cookies on
+        # disk with no metadata, so with no owner, for any caller to load.
+        saved_from_url = self.manager._shown_url(session.page)
+        saved_from_title = await title_or_blank(self.manager, session)
         profile_state_path = self.state_base_path(normalized, create=True)
-        auth_info = await self.manager.auth_state.write_storage_state(session.context, profile_state_path)
-        session.last_auth_state_path = Path(auth_info["path"]) if auth_info["path"] else None
-        session.auth_profile_name = normalized
-
-        profile_payload = {
-            "profile_name": normalized,
-            "last_saved_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-            "saved_from_session_id": session.id,
-            "saved_from_url": session.page.url,
-            "saved_from_title": "" if self.manager._page_off_list(session) else await session.page.title(),
-            "platform": self.current_platform(session),
-        }
-        if owner:
-            profile_payload["owner"] = owner
-        if metadata:
-            profile_payload.update(metadata)
-
         metadata_path = self.metadata_path(normalized, create=True)
         profile_root_str = os.path.realpath(os.fspath(self.root()))
         metadata_path_str = os.path.realpath(os.fspath(metadata_path))
         profile_root_prefix = profile_root_str if profile_root_str.endswith(os.sep) else profile_root_str + os.sep
         if not metadata_path_str.startswith(profile_root_prefix):
             raise PermissionError("auth profile metadata path must stay inside auth profile root")
-
-        # Atomic: open("w") truncated first, and a reader in that window got
-        # {} from read_metadata, which require_access took for "no owner".
-        atomic_write_text(Path(metadata_path_str), json.dumps(profile_payload, indent=2, sort_keys=True))
+        # The new state and metadata are written beside the profile's own and put in place together
+        # (_put_in_place), so a save that fails or is cancelled at any point leaves the profile's
+        # previous state and metadata as they were, and a first save leaves neither. Replacing the state
+        # first and deleting it on a failure lost the previous login. The staged names match
+        # _NOT_EXPORTED, so an export leaves out those a dead process left behind.
+        staged_state = _staged_beside(profile_state_path)
+        staged_metadata = _staged_beside(Path(metadata_path_str))
+        staged = [staged_state, staged_state.with_name(f"{staged_state.name}.enc"), staged_metadata]
+        try:
+            auth_info = await self.manager.auth_state.write_storage_state(session.context, staged_state)
+            written_state = Path(auth_info["path"])
+            state_path = profile_state_path.with_name(
+                profile_state_path.name + (".enc" if written_state.name.endswith(".enc") else "")
+            )
+            profile_payload = {
+                "profile_name": normalized,
+                "last_saved_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                "saved_from_session_id": session.id,
+                "saved_from_url": saved_from_url,
+                "saved_from_title": saved_from_title,
+                "platform": self.current_platform(session),
+            }
+            if owner:
+                profile_payload["owner"] = owner
+            if metadata:
+                profile_payload.update(metadata)
+            # Atomic: open("w") truncated first, and a reader in that window got
+            # {} from read_metadata, which require_access took for "no owner".
+            atomic_write_text(
+                staged_metadata, json.dumps(profile_payload, indent=2, sort_keys=True), mode=PRIVATE_FILE_MODE
+            )
+            _put_in_place(written_state, state_path, staged_metadata, Path(metadata_path_str))
+            if state_path != profile_state_path:
+                # Saved encrypted: the plaintext state saved before the key was set has no reason to stay.
+                _remove_quietly(profile_state_path, "the plaintext state saved before the encryption key was set")
+        finally:
+            for path in staged:
+                path.unlink(missing_ok=True)
+        auth_info = {**auth_info, "path": str(state_path)}
+        session.last_auth_state_path = state_path
+        session.auth_profile_name = normalized
         return {
             "profile_name": normalized,
             "saved_to": auth_info["path"],
@@ -838,22 +937,24 @@ class BrowserAuthProfileService:
 
     @staticmethod
     def write_tar(source_dir: Path, dest: Path) -> None:
-        # Encrypted state supersedes the plaintext copy beside it. Saving with a
-        # key set writes state.json.enc but leaves a state.json saved before the
-        # key was configured, and the archive is what leaves the box.
+        # Encrypted state supersedes the plaintext copy beside it, and the archive
+        # is what leaves the box: a state.json saved before the key was configured
+        # stays beside state.json.enc until an encrypted save removes it. A save
+        # keeps state.json.enc present throughout (_put_in_place), so an export
+        # during one never finds that copy unsuperseded. A profile with only a
+        # plaintext state exports it, key or no key.
         superseded = {
             path.relative_to(source_dir.parent).as_posix().removesuffix(".enc")
             for path in source_dir.rglob("*.enc")
             if path.is_file()
         }
 
-        def _filter(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
-            if member.name in superseded:
-                return None
-            return _skip_plaintext_leftovers(member)
+        def skipped(arcname: str, name: str) -> bool:
+            # By name, before the file is read: a save's own files come and go meanwhile.
+            return arcname in superseded or _NOT_EXPORTED.fullmatch(name) is not None
 
         with tarfile.open(str(dest), "w:gz") as tar:
-            tar.add(str(source_dir), arcname=source_dir.name, filter=_filter)
+            _add_tree(tar, source_dir, source_dir.name, skipped)
 
     @staticmethod
     def safe_archive_member_name(member_name: str) -> PurePosixPath:

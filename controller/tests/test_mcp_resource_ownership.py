@@ -36,12 +36,21 @@ class McpResourceOwnershipTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
+        # Closed sessions keep their record, and so their owner.
+        records = {"gone-1": "alice", "gone-shared": None}
+
+        async def session_owner_lookup(session_id: str) -> tuple[bool, str | None]:
+            if session_id == "unreadable-1":
+                raise OSError("session store unavailable")
+            return session_id in records, records.get(session_id)
+
         self.manager = SimpleNamespace(
             sessions={
                 "alice-1": SimpleNamespace(owner="alice"),
                 "bob-1": SimpleNamespace(owner="bob"),
                 "shared-1": SimpleNamespace(owner=None),
-            }
+            },
+            session_owner_lookup=session_owner_lookup,
         )
         self.transport = McpHttpTransport(
             tool_gateway=SimpleNamespace(list_tools=lambda: []),
@@ -171,16 +180,124 @@ class McpResourceOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(anyone), ["browser://sessions", "browser://shared-1/dom"])
 
     async def test_stream_still_reports_a_session_that_has_just_closed(self) -> None:
-        # The close event is emitted after the session leaves manager.sessions, so
-        # its owner is no longer known; the subscriber's own subscriptions are
-        # already limited to what it may use, and the generic list URI names no one.
+        # The close event is emitted after the session leaves manager.sessions; its
+        # owner is then read from its record.
         subscribed = ["browser://sessions", "browser://alice-1/dom"]
+        closed = [{"event": "session", "session_id": "gone-1", "status": "closed"}]
 
-        alice = self.notified(
-            await self.stream_as(ALICE, [{"event": "session", "session_id": "gone-1", "status": "closed"}], subscribed)
+        self.assertEqual(self.notified(await self.stream_as(ALICE, closed, subscribed)), ["browser://sessions"])
+
+    async def test_stream_does_not_report_another_operators_session_closing(self) -> None:
+        """The generic browser://sessions update told every subscriber when another operator's session closed."""
+        closed = [{"event": "session", "session_id": "gone-1", "status": "closed"}]
+        unowned = [{"event": "session", "session_id": "gone-shared", "status": "closed"}]
+        unknown = [{"event": "session", "session_id": "never-1", "status": "closed"}]
+
+        self.assertEqual(self.notified(await self.stream_as(BOB, closed, ["browser://sessions"])), [])
+        self.assertEqual(
+            self.notified(await self.stream_as(BOB, unowned, ["browser://sessions"])), ["browser://sessions"]
+        )
+        # The owner could not be read: the update is withheld, not sent.
+        unreadable = [{"event": "session", "session_id": "unreadable-1", "status": "closed"}]
+        self.assertEqual(self.notified(await self.stream_as(BOB, unreadable, ["browser://sessions"])), [])
+        # No live session and no record names no operator, so it is not held back.
+        self.assertEqual(
+            self.notified(await self.stream_as(BOB, unknown, ["browser://sessions"])), ["browser://sessions"]
         )
 
-        self.assertEqual(alice, ["browser://sessions"])
+
+def mcp_request(http_method: str, mcp_session_id: str | None = None, body: dict | None = None) -> Request:
+    headers = [(b"content-type", b"application/json"), (MCP_PROTOCOL_HEADER.lower().encode(), PROTOCOL.encode())]
+    if mcp_session_id is not None:
+        headers.append((MCP_SESSION_HEADER.lower().encode(), mcp_session_id.encode()))
+    payload = json.dumps(body or {}).encode()
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": payload, "more_body": False}
+
+    scope = {"type": "http", "method": http_method, "path": "/mcp", "query_string": b"", "headers": headers}
+    return Request(scope, receive)
+
+
+class McpTransportSessionOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    """An MCP session (MCP-Session-Id) belongs to the operator who initialized it.
+
+    Another operator holding the id could ping it, change its subscriptions and DELETE it. Tool calls
+    always ran as the bearer's own operator, so no browser session was reachable this way.
+    """
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.store = f"{self.tempdir.name}/mcp-sessions.json"
+        self.manager = SimpleNamespace(sessions={})
+        self.transport = self.new_transport()
+
+    def new_transport(self) -> McpHttpTransport:
+        return McpHttpTransport(
+            tool_gateway=SimpleNamespace(list_tools=lambda: []),
+            server_name="auto-browser",
+            server_version="0.2.0",
+            session_store_path=self.store,
+            manager=self.manager,
+        )
+
+    async def initialize_as(self, operator: OperatorIdentity | None) -> str:
+        init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": PROTOCOL}}
+        with acting_as(operator):
+            response = await self.transport.handle_post_request(mcp_request("POST", body=init))
+            mcp_session_id = response.headers[MCP_SESSION_HEADER]
+            ready = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+            await self.transport.handle_post_request(mcp_request("POST", mcp_session_id, ready))
+        return mcp_session_id
+
+    async def call_as(self, operator: OperatorIdentity | None, mcp_session_id: str, method: str, params=None):
+        body = {"jsonrpc": "2.0", "id": 2, "method": method, "params": params or {}}
+        with acting_as(operator):
+            return await self.transport.handle_post_request(mcp_request("POST", mcp_session_id, body))
+
+    def assert_unknown(self, response, mcp_session_id: str) -> None:
+        self.assertEqual(response.status_code, 404)
+        error = json.loads(response.body)["error"]
+        self.assertEqual((error["code"], error["message"]), (-32001, f"Unknown MCP session: {mcp_session_id}"))
+
+    async def test_another_operator_cannot_use_or_delete_an_mcp_session(self) -> None:
+        mcp_session_id = await self.initialize_as(ALICE)
+
+        for intruder in (BOB, ALICE_BY_HEADER, None):
+            with self.subTest(intruder=intruder):
+                self.assert_unknown(await self.call_as(intruder, mcp_session_id, "ping"), mcp_session_id)
+                subscribe = await self.call_as(
+                    intruder, mcp_session_id, "resources/subscribe", {"uri": "browser://sessions"}
+                )
+                self.assert_unknown(subscribe, mcp_session_id)
+                with acting_as(intruder):
+                    self.assert_unknown(
+                        await self.transport.handle_get_request(mcp_request("GET", mcp_session_id)), mcp_session_id
+                    )
+                    deleted = await self.transport.handle_delete_request(mcp_request("DELETE", mcp_session_id))
+                self.assert_unknown(deleted, mcp_session_id)
+
+        self.assertEqual(self.transport._sessions[mcp_session_id].resource_subscriptions, [])
+        self.assertEqual((await self.call_as(ALICE, mcp_session_id, "ping")).status_code, 200)
+        with acting_as(ALICE):
+            self.assertEqual(
+                (await self.transport.handle_delete_request(mcp_request("DELETE", mcp_session_id))).status_code, 204
+            )
+
+    async def test_an_unowned_mcp_session_stays_open_to_everyone(self) -> None:
+        for creator in (None, ALICE_BY_HEADER):
+            with self.subTest(creator=creator):
+                mcp_session_id = await self.initialize_as(creator)
+                self.assertEqual((await self.call_as(BOB, mcp_session_id, "ping")).status_code, 200)
+
+    async def test_an_mcp_sessions_owner_survives_a_restart(self) -> None:
+        mcp_session_id = await self.initialize_as(ALICE)
+
+        self.transport = self.new_transport()
+
+        self.assert_unknown(await self.call_as(BOB, mcp_session_id, "ping"), mcp_session_id)
+        self.assertEqual((await self.call_as(ALICE, mcp_session_id, "ping")).status_code, 200)
 
 
 if __name__ == "__main__":

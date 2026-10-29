@@ -26,6 +26,10 @@ Each entry:
     "failure_text":  str | None
     "pii_redacted":  bool
   }
+
+A request made by a page ALLOWED_HOSTS refuses (see `_from_refused_page`) is
+recorded with `"withheld": WITHHELD`: its URL cut to the origin, and no
+headers or bodies.
 """
 
 from __future__ import annotations
@@ -39,6 +43,8 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from playwright.async_api import Error as PlaywrightError
+
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, Page, Request, Response
 
@@ -48,6 +54,8 @@ from .utils import UTC, spawn_background_task
 logger = logging.getLogger(__name__)
 
 _SKIP_RESOURCE_TYPES = frozenset({"image", "font", "media", "websocket"})
+WITHHELD = "page off ALLOWED_HOSTS"
+_STANDARD_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
 
 HookFn = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -69,15 +77,33 @@ class NetworkInspector:
         capture_bodies: bool = True,
         body_max_bytes: int = 16384,
         scrubber: "PiiScrubber | None" = None,
+        url_refused: Callable[[str], bool] | None = None,
+        page_refused: Callable[[Any], bool] | None = None,
+        session_refused: Callable[[], bool] | None = None,
     ):
         self.session_id = session_id
         self.max_entries = max_entries
         self.capture_bodies = capture_bodies
         self.body_max_bytes = body_max_bytes
         self.scrubber = scrubber
+        # Whether ALLOWED_HOSTS refuses a top-level page at this URL (the session's
+        # manager._url_off_list); None records every request whole. page_refused
+        # judges the page that made a request (manager._page_refused, which also
+        # knows where the page came from); without it, the page's URL is judged.
+        # session_refused says whether a page of the session can run a refused host's code
+        # (manager._session_has_refused_page).
+        self.url_refused = url_refused
+        self.page_refused = page_refused
+        self.session_refused = session_refused
 
         self._log: deque[dict[str, Any]] = deque(maxlen=max_entries)
-        self._pending: dict[str, dict[str, Any]] = {}  # request_id → partial entry
+        # request_id → partial entry. A request its document still had in flight when the page navigated
+        # away is not settled here: Playwright emits neither requestfailed nor requestfinished for it,
+        # whether its response had arrived or not (Playwright 1.62, Chromium, probed 2026-10-27 with the
+        # guard's page.goto("about:blank")), so there is no event to settle it on. It stays pending until
+        # the eviction in _handle_request logs it as no longer tracked, withheld if it was: the log
+        # under-reports, and nothing a refused page sent is shown.
+        self._pending: dict[str, dict[str, Any]] = {}
         self._page: "Page | BrowserContext | None" = None
         self._lock = asyncio.Lock()
         self._hooks: dict[str, HookFn] = {}
@@ -161,7 +187,58 @@ class NetworkInspector:
     # ── Listeners (synchronous wrappers → schedule async work) ─────────────
 
     def _on_request(self, request: "Request") -> None:
-        spawn_background_task(self._handle_request(request))
+        # Decided while the event is delivered: by the time the task runs, the page
+        # guard may already have sent the page that made the request to about:blank.
+        spawn_background_task(self._handle_request(request, refused=self._from_refused_page(request)))
+
+    def _from_refused_page(self, request: "Request") -> bool:
+        """Whether a page ALLOWED_HOSTS refuses made the request, or it navigates a top-level page to one.
+
+        A top-level navigation is also withheld when its frame is not available yet
+        (a popup's first request, whatever its URL) and when it starts while a page
+        of the session counts as refused (session_refused). Any other request with no
+        frame is judged by its service worker's script URL and by session_refused;
+        one with no worker either comes from a page not reported yet and is refused.
+        Iframes and subresources an allowed page loads from other hosts are not refused.
+        A request that cannot be judged is.
+        """
+        if self.url_refused is None:
+            return False
+        try:
+            return self._refused(request, self.url_refused)
+        except Exception as exc:
+            # Fail closed: withheld, not logged whole.
+            logger.debug("network inspector could not attribute a request; withheld: %s", type(exc).__name__)
+            return True
+
+    def _refused(self, request: "Request", url_refused: Callable[[str], bool]) -> bool:
+        try:
+            frame = request.frame
+        except PlaywrightError:
+            frame = None
+        top_level = frame is None or frame.parent_frame is None
+        if request.is_navigation_request() and request.resource_type == "document" and top_level:
+            if url_refused(request.url):
+                return True
+            # A popup's first navigation, whose frame is not available yet, is withheld by the frameless
+            # rule below: its page cannot be judged yet, and a refused opener may have chosen the URL.
+            # A navigation that starts while a page of the session counts as refused may be its choice.
+            if self.session_refused is not None and self.session_refused():
+                return True
+        if frame is None:
+            worker = request.service_worker
+            if worker is None:
+                # In this driver only a page the context has not reported yet makes these: a refused
+                # page's window that never commits (a 204) stays unreported, and the refused page can
+                # script its blank document. Such a page cannot be judged, so the request is withheld.
+                return True
+            # A service worker's request: it outlives the page that registered it, and serves every
+            # page of its scope, a refused one among them, so it is withheld while a page of the
+            # session counts as refused.
+            return url_refused(worker.url) or (self.session_refused is not None and self.session_refused())
+        if self.page_refused is not None:
+            return self.page_refused(frame.page)
+        return url_refused(frame.page.url)
 
     def _on_response(self, response: "Response") -> None:
         spawn_background_task(self._handle_response(response))
@@ -174,38 +251,20 @@ class NetworkInspector:
 
     # ── Async handlers ─────────────────────────────────────────────────────
 
-    async def _handle_request(self, request: "Request") -> None:
+    async def _handle_request(self, request: "Request", *, refused: bool = False) -> None:
         try:
             resource_type = getattr(request, "resource_type", "other") or "other"
             if resource_type in _SKIP_RESOURCE_TYPES:
                 return
 
             req_id = str(uuid4())
-            # Scrubbed before anything else, so no log line below carries a raw query.
-            url, pii_hit = scrub_url(request.url or "", self.scrubber, self.body_max_bytes)
             method = request.method or "GET"
-
-            # Capture request body (if enabled and POST/PUT/PATCH)
-            req_body: str | None = None
-            if self.capture_bodies and method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
-                try:
-                    raw = request.post_data
-                    if raw and len(raw) <= self.body_max_bytes:
-                        req_body = raw
-                except Exception as exc:
-                    logger.debug("could not read request body for %s: %s", url, exc)
-
-            # Scrub request body
-            if req_body and self.scrubber:
-                ct = request.headers.get("content-type") or ""
-                req_body, body_hit = _scrub_body(self.scrubber, req_body, ct, url)
-                pii_hit = pii_hit or body_hit
-
-            # Sanitize headers — remove Authorization / Cookie values
-            headers, header_hit = _mask_sensitive_headers(
-                dict(request.headers or {}), self.scrubber, self.body_max_bytes
-            )
-            pii_hit = pii_hit or header_hit
+            if refused:
+                # The page chooses the method token too: only a standard one is kept.
+                method = method.upper() if method.upper() in _STANDARD_METHODS else "OTHER"
+                url, pii_hit, req_body, headers = url_origin(request.url or ""), False, None, {}
+            else:
+                url, pii_hit, req_body, headers = self._request_content(request, method)
 
             entry: dict[str, Any] = {
                 "id": req_id,
@@ -226,6 +285,8 @@ class NetworkInspector:
                 "pii_redacted": pii_hit,
                 "_started_at": datetime.now(UTC).timestamp(),
             }
+            if refused:
+                entry["withheld"] = WITHHELD
 
             # Store request ID on the Playwright Request object for cross-referencing
             try:
@@ -233,6 +294,7 @@ class NetworkInspector:
             except Exception as exc:
                 logger.debug("could not tag request object for %s: %s", url, exc)
 
+            untracked: list[dict[str, Any]] = []
             async with self._lock:
                 # Requests that never finish (long polls, streams a page keeps
                 # opening) stayed here for the life of the session. Past the
@@ -244,10 +306,39 @@ class NetworkInspector:
                     stale["duration_ms"] = _elapsed_ms(stale)
                     stale.pop("_started_at", None)
                     self._log.append(stale)
+                    untracked.append(stale)
                 self._pending[req_id] = entry
+            # Logged like any finished entry, so hooks see it like one.
+            for stale in untracked:
+                await self._fire_hooks(stale)
 
         except Exception as exc:
             logger.debug("network inspector request error: %s", exc)
+
+    def _request_content(self, request: "Request", method: str) -> tuple[str, bool, str | None, dict[str, str]]:
+        """(scrubbed URL, whether anything was redacted, request body, masked headers) of a request."""
+        # Scrubbed before anything else, so no log line below carries a raw query.
+        url, pii_hit = scrub_url(request.url or "", self.scrubber, self.body_max_bytes)
+
+        # Capture request body (if enabled and POST/PUT/PATCH)
+        req_body: str | None = None
+        if self.capture_bodies and method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+            try:
+                raw = request.post_data
+                if raw and len(raw) <= self.body_max_bytes:
+                    req_body = raw
+            except Exception as exc:
+                logger.debug("could not read request body for %s: %s", url, exc)
+
+        # Scrub request body
+        if req_body and self.scrubber:
+            ct = request.headers.get("content-type") or ""
+            req_body, body_hit = _scrub_body(self.scrubber, req_body, ct, url)
+            pii_hit = pii_hit or body_hit
+
+        # Sanitize headers — remove Authorization / Cookie values
+        headers, header_hit = _mask_sensitive_headers(dict(request.headers or {}), self.scrubber, self.body_max_bytes)
+        return url, pii_hit or header_hit, req_body, headers
 
     async def _handle_response(self, response: "Response") -> None:
         try:
@@ -268,6 +359,8 @@ class NetworkInspector:
                 # the entry and fire hooks while the body is still being read,
                 # and they saw status None.
                 entry["status"] = status
+                if entry.get("withheld"):
+                    return
                 entry["content_type"] = content_type
                 entry["response_headers"], header_hit = _mask_sensitive_headers(
                     resp_headers, self.scrubber, self.body_max_bytes
@@ -405,7 +498,7 @@ def scrub_url(url: str, scrubber: "PiiScrubber | None", max_bytes: int) -> tuple
     try:
         scrubbed, hits = scrubber.url(head if fragment_too_long else url)
     except Exception as exc:
-        logger.warning("network inspector could not scrub the query of %s: %s", _origin(url), type(exc).__name__)
+        logger.warning("network inspector could not scrub the query of %s: %s", url_origin(url), type(exc).__name__)
         return path, True
     if not isinstance(scrubbed, str):
         return path, True
@@ -418,9 +511,16 @@ def _byte_length(text: str) -> int:
     return len(text.encode("utf-8", errors="surrogatepass"))
 
 
-def _origin(url: str) -> str:
+def url_origin(url: str) -> str:
+    """scheme://host:port of a URL, without its user, path, query or fragment; a blob: URL's is the page's."""
     parts = urlsplit(url)
-    return f"{parts.scheme}://{parts.hostname or ''}"
+    if parts.scheme == "blob":
+        inner = urlsplit(parts.path)
+        # blob:null/uuid: made by a page with an opaque origin, serialized "null" as browsers do.
+        return url_origin(parts.path) if inner.scheme and inner.netloc else "null"
+    if not parts.netloc:
+        return f"{parts.scheme}:"
+    return f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}"
 
 
 def _scrub_body(scrubber: "PiiScrubber", body: str, content_type: str, url: str) -> tuple[str | None, bool]:

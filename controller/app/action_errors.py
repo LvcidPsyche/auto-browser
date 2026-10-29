@@ -8,6 +8,14 @@ SCREENSHOT_WITHHELD = "screenshot_withheld"
 PAGE_NOT_RESPONDING = "page_not_responding"
 
 
+class RefusedPageError(PermissionError):
+    """A page ALLOWED_HOSTS refuses, for its URL or where it came from, is not read (the page checks).
+
+    A PermissionError still, for every caller that catches one; a route that answers other
+    PermissionErrors generically tells this one apart (the fork route).
+    """
+
+
 class BrowserActionError(Exception):
     def __init__(
         self,

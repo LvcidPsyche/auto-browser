@@ -17,6 +17,8 @@ from pydantic import BaseModel, ValidationError
 from ..action_errors import BrowserActionError, SessionNotFoundError
 from ..approvals import ApprovalRequiredError, held_for_execution
 from ..browser.element_ids import refuse_selector_hint
+from ..browser.page_read import MOVED_DETAIL, bounded, locked_read, start_read
+from ..browser.services.diagnostics import checked_screenshot
 from ..browser_scripts import PAGE_TEXT_SCRIPT
 from ..models import (
     ActionName,
@@ -29,6 +31,7 @@ from ..models import (
 from ..readiness import run_readiness_checks
 from ..result_shaping import inline_screenshot_path, shape_mcp_result
 from ..tool_inputs import (
+    EVAL_JS_DEFAULT_TIMEOUT_MS,
     AgentJobIdInput,
     ApprovalDecisionInput,
     AuthProfileNameInput,
@@ -98,6 +101,10 @@ logger = logging.getLogger(__name__)
 # catastrophically backtracking regex would otherwise hang page.evaluate
 # (and the session) indefinitely.
 FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS = 10.0
+
+# How long past its timeout a wait whose page moved is refused, matched or not: an unmatched wait's
+# answer comes after Playwright's own timer and an IPC round trip, which fall inside the pad.
+MOVED_PAD_SECONDS = 0.25
 
 # Tools allowed to create a session on demand when session_id is omitted and no
 # session is live — the first call an agent makes is almost always one of these.
@@ -824,32 +831,54 @@ class McpToolGateway:
 
     async def _eval_js(self, payload: EvalJsInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
-        self.manager._assert_page_allowed(session)
-        result = await session.page.evaluate(payload.expression)
+        # Each page tool reads under the session lock, checked before and after (locked_read).
+        timeout = (payload.timeout_ms or EVAL_JS_DEFAULT_TIMEOUT_MS) / 1000
+        async with locked_read(self.manager, session):
+            try:
+                result = await asyncio.wait_for(session.page.evaluate(payload.expression), timeout=timeout)
+            except TimeoutError:
+                # Giving up does not stop the page's script: the renderer keeps running it.
+                raise RuntimeError(
+                    f"The expression did not finish within {timeout:g} seconds; it may still be running in the page."
+                ) from None
         return {"session_id": payload.session_id, "result": result}
 
     async def _wait_for_selector(self, payload: WaitForSelectorInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
-        self.manager._assert_page_allowed(session)
         refuse_selector_hint(payload.selector, action="wait_for_selector")
-        await session.page.wait_for_selector(
-            payload.selector,
-            timeout=payload.timeout_ms,
-            state=payload.state,
-        )
-        return {"session_id": payload.session_id, "selector": payload.selector, "state": payload.state}
+        # Not under the session lock: the wait lasts up to its timeout, and holding the lock stalled
+        # every action on the session meanwhile, the click that makes the element appear among them.
+        # The page is captured before the wait and checked after it, so one that moved is refused.
+        read = start_read(self.manager, session)
+        deadline = time.monotonic() + payload.timeout_ms / 1000
+        try:
+            # Bounded by its own timeout_ms.
+            await read.page.wait_for_selector(
+                payload.selector,
+                timeout=payload.timeout_ms,
+                state=payload.state,
+            )
+        except Exception:
+            # Judged here, refused below: waiting in this block kept Playwright's error, whose call log
+            # can quote the refused page's markup, as the context of the refusal and of a cancel.
+            if not read.moved():
+                raise
+        else:
+            if not read.moved():
+                return {"session_id": payload.session_id, "selector": payload.selector, "state": payload.state}
+        await _refuse_moved_at(deadline + MOVED_PAD_SECONDS)
 
     async def _get_html(self, payload: GetPageHtmlInput) -> dict[str, Any]:
         # Bounded and paged: a page's serialized DOM is routinely megabytes, and
         # returned whole it overran the context of the model that asked for it.
         session = await self.manager.get_session(payload.session_id)
-        self.manager._assert_page_allowed(session)
-        if payload.text_only:
-            content = await session.page.evaluate(PAGE_TEXT_SCRIPT)
-            kind = "text"
-        else:
-            content = await session.page.content()
-            kind = "html"
+        async with locked_read(self.manager, session):
+            if payload.text_only:
+                content = await bounded(session.page.evaluate(PAGE_TEXT_SCRIPT))
+                kind = "text"
+            else:
+                content = await bounded(session.page.content())
+                kind = "html"
         return {
             "session_id": payload.session_id,
             "type": kind,
@@ -858,7 +887,12 @@ class McpToolGateway:
 
     async def _find_elements(self, payload: FindElementsInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
-        self.manager._assert_page_allowed(session)
+        if payload.query is None:
+            refuse_selector_hint(payload.selector, action="find_elements")
+        async with locked_read(self.manager, session):
+            return await self._find_elements_read(session, payload)
+
+    async def _find_elements_read(self, session: Any, payload: FindElementsInput) -> dict[str, Any]:
         if payload.query is not None:
             evaluate = session.page.evaluate(
                 """([query, isRegex, context, limit]) => {
@@ -928,9 +962,9 @@ class McpToolGateway:
                 )
             return {"session_id": payload.session_id, "query": payload.query, "elements": elements}
 
-        refuse_selector_hint(payload.selector, action="find_elements")
-        elements = await session.page.evaluate(
-            """([selector, limit]) => {
+        elements = await bounded(
+            session.page.evaluate(
+                """([selector, limit]) => {
                 const els = [...document.querySelectorAll(selector)].slice(0, limit);
                 return els.map(el => {
                     const r = el.getBoundingClientRect();
@@ -947,7 +981,8 @@ class McpToolGateway:
                     };
                 });
             }""",
-            [payload.selector, payload.limit],
+                [payload.selector, payload.limit],
+            )
         )
         return {"session_id": payload.session_id, "selector": payload.selector, "elements": elements}
 
@@ -961,8 +996,24 @@ class McpToolGateway:
 
     async def _get_cookies(self, payload: GetCookiesInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
-        cookies = await session.context.cookies(urls=payload.urls)
-        return {"session_id": payload.session_id, "cookies": cookies}
+        urls = payload.urls
+        if urls:
+            # Nothing is answered for a URL the list refuses. With none left, nothing at all:
+            # cookies(urls=[]) would return every cookie.
+            urls = [url for url in urls if not self.manager._url_off_list(url)]
+            if not urls:
+                return {"session_id": payload.session_id, "cookies": []}
+        cookies = await session.context.cookies(urls=urls)
+        # A page on a host ALLOWED_HOSTS refuses sets cookies before it is blanked, and the
+        # context keeps them: a cookie is returned only when a host the list allows would
+        # receive it.
+        allowed = [
+            c
+            for c in cookies
+            if not self.manager._cookie_off_list(c["domain"])
+            and not self.manager._partition_off_list(c.get("partitionKey"))
+        ]
+        return {"session_id": payload.session_id, "cookies": allowed}
 
     async def _set_cookies(self, payload: SetCookiesInput) -> dict[str, Any]:
         session = await self.manager.get_session(payload.session_id)
@@ -983,26 +1034,29 @@ class McpToolGateway:
         if payload.storage_type not in {"local", "session"}:
             raise ValueError(f"Invalid storage_type: {payload.storage_type!r}")
         session = await self.manager.get_session(payload.session_id)
-        self.manager._assert_page_allowed(session)
         if payload.key:
             script = f"() => window.{payload.storage_type}Storage.getItem({payload.key!r})"
-            value = await session.page.evaluate(script)
+            async with locked_read(self.manager, session):
+                value = await bounded(session.page.evaluate(script))
             return {"session_id": payload.session_id, "key": payload.key, "value": value}
         script = (
             f"() => Object.fromEntries("
             f"Object.keys(window.{payload.storage_type}Storage).map("
             f"k => [k, window.{payload.storage_type}Storage.getItem(k)]))"
         )
-        data = await session.page.evaluate(script)
+        async with locked_read(self.manager, session):
+            data = await bounded(session.page.evaluate(script))
         return {"session_id": payload.session_id, "storage": data}
 
     async def _set_local_storage(self, payload: SetStorageInput) -> dict[str, Any]:
         if payload.storage_type not in {"local", "session"}:
             raise ValueError(f"Invalid storage_type: {payload.storage_type!r}")
         session = await self.manager.get_session(payload.session_id)
-        self.manager._assert_page_allowed(session)
         script = f"([k, v]) => window.{payload.storage_type}Storage.setItem(k, v)"
-        await session.page.evaluate(script, [payload.key, payload.value])
+        # Refused before the write, and after it if the page moved meanwhile: the
+        # value may then be in a refused page's storage.
+        async with locked_read(self.manager, session):
+            await bounded(session.page.evaluate(script, [payload.key, payload.value]))
         return {"session_id": payload.session_id, "key": payload.key, "set": True}
 
     async def _export_script(self, payload: ExportScriptInput) -> dict[str, Any]:
@@ -1028,15 +1082,11 @@ class McpToolGateway:
             screenshot = await self.manager.capture_screenshot(payload.session_id, label="vision")
             screenshot_path = screenshot["screenshot_path"]
         else:
-            # Use the most recent screenshot if available
-            screenshots = sorted(
-                session.artifact_dir.glob("*.png"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            if not screenshots:
+            # The last screenshot a checked read returned, not the newest PNG on disk.
+            screenshot = checked_screenshot(session)
+            if screenshot is None:
                 raise RuntimeError("No screenshots available — take one first")
-            screenshot_path = str(screenshots[0])
+            screenshot_path = screenshot["path"]
 
         result = await self.vision_targeter.find_element(screenshot_path, payload.description)
         return {"session_id": payload.session_id, **result}
@@ -1110,3 +1160,16 @@ class McpToolGateway:
 
     async def _pii_scrubber_status(self, _: EmptyInput) -> dict[str, Any]:
         return self.manager.get_pii_scrubber_status()
+
+
+async def _refuse_moved_at(deadline: float) -> None:
+    """Refuse a wait whose page moved at ``deadline`` (time.monotonic()): its timeout plus MOVED_PAD_SECONDS.
+
+    Refused at once, the answer came right after the selector matched on the refused document and at the
+    timeout when it did not, so its latency told whether it matched there. The session lock is not held
+    by the wait, so only its caller waits. Called outside the wait's except block, so neither the
+    refusal nor a cancel meanwhile carries the wait's own error, which can quote the page's text.
+    """
+    while (remaining := deadline - time.monotonic()) > 0:
+        await asyncio.sleep(remaining)
+    raise PermissionError(MOVED_DETAIL) from None

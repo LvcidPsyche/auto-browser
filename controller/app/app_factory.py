@@ -72,7 +72,7 @@ def build_controller_services(settings: Settings, *, version: str) -> Controller
     job_queue = AgentJobQueue(
         orchestrator=orchestrator,
         store_root=settings.job_store_root,
-        session_owner=manager.session_owner,
+        session_accessible=manager.session_accessible,
         worker_count=settings.agent_job_worker_count,
         audit_store=manager.audit,
     )

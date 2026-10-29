@@ -173,6 +173,45 @@ class UploadIsolationTests(unittest.IsolatedAsyncioTestCase):
 
         await self._assert_passes_path_check(BOB, bob, f"{unowned}/secret.pdf")
 
+    async def test_under_named_credentials_a_session_id_directory_with_no_session_is_nobodys(self) -> None:
+        """A directory named like a session id whose session and record are gone (or never were) has no
+        owner to check: under named credentials no one uploads from it, the rule ensure_accessible applies."""
+        self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+        alice = await self._session(ALICE, "a")
+        bob = await self._session(BOB, "b")
+        orphan = self.upload_root / "0a0a0a0a0a0a"
+        orphan.mkdir()
+        (orphan / "secret.pdf").write_text("PRIVATE", encoding="utf-8")
+
+        for operator, session_id in ((ALICE, alice), (BOB, bob)):
+            for file_path in ("0a0a0a0a0a0a/secret.pdf", str(orphan / "secret.pdf")):
+                with self.subTest(operator=operator.id, file_path=file_path), self.assertRaises(PermissionError):
+                    await self._upload(operator, session_id, file_path)
+
+    async def test_a_refused_folder_named_like_a_session_id_is_refused_by_its_name(self) -> None:
+        """F3: a folder named with 12 digits (a timestamp) has a session id's shape, so it is taken for that
+        session's folder; the refusal said only "must stay inside upload root", which did not say why."""
+        self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+        bob = await self._session(BOB, "b")
+        folder = self.upload_root / "202610281530"
+        folder.mkdir()
+        (folder / "report.pdf").write_text("x", encoding="utf-8")
+
+        with self.assertRaisesRegex(PermissionError, "session id.*[Rr]ename"):
+            await self._upload(BOB, bob, "202610281530/report.pdf")
+
+    async def test_control_plain_subfolders_stay_shared_and_orphans_open_without_named_credentials(self) -> None:
+        bob = await self._session(BOB, "b")
+        orphan = self.upload_root / "0a0a0a0a0a0a"
+        orphan.mkdir()
+        (orphan / "secret.pdf").write_text("x", encoding="utf-8")
+        (self.upload_root / "invoices").mkdir()
+        (self.upload_root / "invoices" / "march.pdf").write_text("x", encoding="utf-8")
+
+        await self._assert_passes_path_check(BOB, bob, "0a0a0a0a0a0a/secret.pdf")
+        self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+        await self._assert_passes_path_check(BOB, bob, "invoices/march.pdf")
+
     async def test_the_system_may_reach_any_session_directory(self) -> None:
         alice = await self._session(ALICE, "a")
         bob = await self._session(BOB, "b")

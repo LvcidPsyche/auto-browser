@@ -23,6 +23,28 @@ LEAVES_DISALLOWED_PAGE = frozenset({"navigate", "go_back"})
 _UNOBSERVED = frozenset({SCREENSHOT_WITHHELD, PAGE_NOT_RESPONDING})
 # Where an action's target records the step that failed after its change was made (see ActionRunContext).
 AFTER_CHANGE = "after_change"
+WITHHELD_SNAPSHOT_ERROR = "The page is on a host ALLOWED_HOSTS does not allow; its content is withheld."
+# For an OS-level PermissionError while observing (an artifact file the controller could not write): its
+# text can name a server path, so it is logged and this goes to the agent instead.
+OS_OBSERVATION_ERROR = "The page could not be observed after the action (a file error on the controller)."
+
+
+def _withheld_observation(manager: Any, session: Any, exc: PermissionError) -> dict[str, Any]:
+    """A post-action observation refused with ``exc``: the URL as shown, and the refusal, or for an
+    OS-level error (it has an errno, and its text can name a server path) a fixed text, the OS text logged."""
+    logger.warning("post-action observation withheld for session %s: %s", session.id, exc)
+    error = OS_OBSERVATION_ERROR if exc.errno is not None else str(exc)[:300]
+    return {"url": manager._shown_url(session.page), "observation_error": error}
+
+
+def _withheld_snapshot(manager: Any, session: Any) -> dict[str, Any]:
+    """The snapshot of a page that moved off ALLOWED_HOSTS while it was read: where it is, and nothing it showed.
+
+    Shown as _shown_url shows it everywhere else: by its origin while the page is refused, whole once it is
+    not. Always cut to its origin, an allowed page's URL differed from the one the rollback compares, so a
+    blocked action went back from a page nothing had moved, and a success reported url_changed.
+    """
+    return {"url": manager._shown_url(session.page), "snapshot_error": WITHHELD_SNAPSHOT_ERROR}
 
 
 def _no_change_made() -> bool:
@@ -50,6 +72,9 @@ class ActionWitnessState:
     action_class: str
     outcome: Any
     before: dict[str, Any]
+    # The URL of the page the agent read before the action; None when it was not read (refused, or moved
+    # while it was read). A blocked action's rollback that lands back on it clears the taint the action left.
+    escape_url: str | None = None
 
 
 class BrowserActionPipeline:
@@ -66,7 +91,7 @@ class BrowserActionPipeline:
                     action=context.action_name,
                     status_code=403,
                     retryable=False,
-                    url=context.session.page.url,
+                    url=context.manager._shown_url(context.session.page),
                     details={"snapshot": failed},
                 ) from exc
             except BrowserActionError as exc:
@@ -84,7 +109,7 @@ class BrowserActionPipeline:
                     action=context.action_name,
                     status_code=400,
                     retryable=True,
-                    url=context.session.page.url,
+                    url=context.manager._shown_url(context.session.page),
                     details={"snapshot": failed},
                 ) from exc
             return await self._record_success(context, witness_state)
@@ -105,20 +130,28 @@ class BrowserActionPipeline:
                 witness_context=witness_context,
             ),
         )
+        escape_url = None
         if manager._page_off_list(session):
             # Not read: the before-state goes to the audit log and the receipts, and
             # _execute refuses every action but a way out of this page.
             before = {
-                "url": session.page.url,
+                "url": manager._shown_url(session.page),
                 "snapshot_error": "The page is on a host ALLOWED_HOSTS does not allow; its content is not read.",
             }
         else:
-            before = await manager._light_snapshot(session, label=f"before-{context.action_name}")
+            try:
+                before = await manager._light_snapshot(session, label=f"before-{context.action_name}")
+                escape_url = before.get("url")
+            except PermissionError:
+                # Refused after the read: the page moved off the list meanwhile. The
+                # action is still decided and recorded; _execute refuses it if it must.
+                before = _withheld_snapshot(manager, session)
         return ActionWitnessState(
             witness_context=witness_context,
             action_class=action_class,
             outcome=outcome,
             before=before,
+            escape_url=escape_url,
         )
 
     async def _execute(self, context: ActionRunContext, witness_state: ActionWitnessState) -> None:
@@ -155,8 +188,11 @@ class BrowserActionPipeline:
     ) -> dict[str, Any]:
         session = context.session
         try:
-            if session.page.url != witness_state.before.get("url"):
-                await session.page.go_back(wait_until="domcontentloaded")
+            # The before-snapshot shows a refused page by its origin; compared the same way.
+            if context.manager._shown_url(session.page) != witness_state.before.get("url"):
+                # Back on the page the agent read before the action, the taint the action left clears.
+                with context.manager.page_provenance.escape(session.page, witness_state.escape_url):
+                    await session.page.go_back(wait_until="domcontentloaded")
                 await context.manager._settle(session.page)
         except Exception as exc:
             logger.debug("failed to roll back blocked action navigation for session %s: %s", session.id, exc)
@@ -183,12 +219,21 @@ class BrowserActionPipeline:
         """
         manager = context.manager
         session = context.session
-        if not manager._page_off_list(session):
+        # By URL: a page on the controller's blank already is (the guard handles the rest).
+        if not manager._url_off_list(session.page.url):
             return
+        # The controller's own blank, as the guard's is (_return_to_blank): not counted as a refused
+        # commit, which the guard would send to about:blank a second time with a second audit event.
+        manager.page_provenance.blank_started(session.page)
         try:
             await session.page.goto("about:blank")
         except Exception as exc:
+            manager.page_provenance.blank_failed(session.page)
             logger.warning("could not move session %s off a disallowed page: %s", session.id, exc)
+        except BaseException:
+            # Cancelled: a blank still counted would exempt the page's own next about:blank commit.
+            manager.page_provenance.blank_failed(session.page)
+            raise
 
     async def _handle_browser_action_error(
         self,
@@ -341,7 +386,7 @@ class BrowserActionPipeline:
             ),
         )
         await manager._persist_session(session, status="active")
-        _events.emit_action(session.id, context.action_name, "ok", {"url": session.page.url})
+        _events.emit_action(session.id, context.action_name, "ok", {"url": manager._shown_url(session.page)})
         return {
             "action": context.action_name,
             "action_class": action_class,
@@ -366,20 +411,23 @@ class BrowserActionPipeline:
         """
         if context.manager._page_off_list(context.session):
             return {
-                "url": context.session.page.url,
+                "url": context.manager._shown_url(context.session.page),
                 "snapshot_error": "The page is on a host ALLOWED_HOSTS does not allow; its content is withheld.",
             }
         try:
             return await context.manager._light_snapshot(context.session, label=label)
         except PlaywrightError as exc:
             logger.warning("failure snapshot unavailable for session %s: %s", context.session.id, exc)
-            return {"url": context.session.page.url, "snapshot_error": str(exc)[:300]}
+            return {"url": context.manager._shown_url(context.session.page), "snapshot_error": str(exc)[:300]}
+        except PermissionError:
+            # The page moved off ALLOWED_HOSTS while the snapshot read it.
+            return _withheld_snapshot(context.manager, context.session)
         except BrowserActionError as exc:
             # PII_SCRUB_SCREENSHOT_STRICT withheld the snapshot, or the page stopped
             # answering; the action's own error is the one to report.
             if exc.code not in _UNOBSERVED:
                 raise
-            return {"url": context.session.page.url, "snapshot_error": exc.message[:300]}
+            return {"url": context.manager._shown_url(context.session.page), "snapshot_error": exc.message[:300]}
 
     @staticmethod
     async def _after_observation(context: ActionRunContext) -> dict[str, Any]:
@@ -402,8 +450,7 @@ class BrowserActionPipeline:
         except PermissionError as exc:
             # The page moved itself off ALLOWED_HOSTS after the action's own check.
             # The action ran, so report it with the URL and nothing the page showed.
-            logger.warning("post-action observation withheld for session %s: %s", session.id, exc)
-            return {"url": session.page.url, "observation_error": str(exc)[:300]}
+            return _withheld_observation(manager, session, exc)
         except BrowserActionError as exc:
             # PII_SCRUB_SCREENSHOT_STRICT withheld the screenshot, or the page
             # stopped answering (not asked again: it had its deadline). The action
@@ -411,24 +458,23 @@ class BrowserActionPipeline:
             if exc.code not in _UNOBSERVED:
                 raise
             logger.warning("post-action observation unavailable for session %s: %s", session.id, exc.message)
-            return {"url": session.page.url, "observation_error": exc.message[:300]}
+            return {"url": manager._shown_url(session.page), "observation_error": exc.message[:300]}
         try:
             await manager._settle(session.page)
             return await manager._observation_payload(session, limit=20, screenshot_label=label)
         except PlaywrightError as exc:
             logger.warning("post-action observation failed for session %s: %s", session.id, exc)
             return {
-                "url": session.page.url,
+                "url": manager._shown_url(session.page),
                 "observation_error": f"Page changed while it was being observed; observe again. ({exc})"[:300],
             }
         except PermissionError as exc:
-            logger.warning("post-action observation withheld for session %s: %s", session.id, exc)
-            return {"url": session.page.url, "observation_error": str(exc)[:300]}
+            return _withheld_observation(manager, session, exc)
         except BrowserActionError as exc:
             if exc.code not in _UNOBSERVED:
                 raise
             logger.warning("post-action observation unavailable for session %s: %s", session.id, exc.message)
-            return {"url": session.page.url, "observation_error": exc.message[:300]}
+            return {"url": manager._shown_url(session.page), "observation_error": exc.message[:300]}
 
     def _approval(
         self,

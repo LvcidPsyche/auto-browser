@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from app.browser.page_provenance import PageProvenance
 from app.browser_scripts import PAGE_SUMMARY_SCRIPT, PAGE_TEXT_SCRIPT
 from app.models import McpToolCallRequest
 from app.tool_gateway import McpToolGateway
@@ -104,9 +105,11 @@ class GetHtmlPagingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.manager = SimpleNamespace(
             ensure_session_accessible=AsyncMock(),
-            get_session=AsyncMock(return_value=SimpleNamespace(page=self.page)),
+            get_session=AsyncMock(return_value=SimpleNamespace(page=self.page, lock=asyncio.Lock())),
             require_governed_approval=AsyncMock(return_value=None),
             _assert_page_allowed=Mock(),
+            _page_refused=Mock(return_value=False),
+            page_provenance=PageProvenance(),
         )
         self.gateway = McpToolGateway(
             manager=self.manager, orchestrator=SimpleNamespace(), job_queue=SimpleNamespace(), tool_profile="full"

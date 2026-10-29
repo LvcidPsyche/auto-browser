@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ..page_read import bounded
+
 logger = logging.getLogger(__name__)
 
 BOT_CHALLENGE_SIGNALS = (
@@ -36,8 +38,9 @@ class BrowserBotChallengeService:
         body_text = ""
         iframe_sources: list[str] = []
         try:
-            # One evaluate, not three: this probe runs after every action.
-            probe = await session.page.evaluate(CHALLENGE_PROBE_SCRIPT)
+            # One evaluate, not three: this probe runs after every action. Bounded, under the session
+            # lock: a probe that times out is checked by the URL alone, like one that failed.
+            probe = await bounded(session.page.evaluate(CHALLENGE_PROBE_SCRIPT))
             title = str(probe.get("title") or "").lower()
             body_text = str(probe.get("text") or "").lower()
             iframe_sources = [str(item).lower() for item in probe.get("iframes") or []]

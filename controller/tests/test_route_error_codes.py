@@ -25,6 +25,8 @@ from fastapi.testclient import TestClient
 import app.main as main_module
 from app.action_errors import BrowserActionError, SessionNotFoundError
 from app.approvals import ApprovalRequiredError
+from app.browser_manager import BrowserManager
+from app.config import Settings
 from app.models import ApprovalRecord, BrowserActionDecision
 from app.routes._utils import OFF_LIST_PAGE_DETAIL
 
@@ -77,8 +79,13 @@ SESSION_ROUTES = [
     Route("get", f"/sessions/{SID}/tabs", None, "list_tabs"),
     Route("post", f"/sessions/{SID}/takeover", {"reason": "check the page"}, "request_human_takeover"),
     Route("delete", f"/sessions/{SID}", None, "close_session"),
-    # A RuntimeError from fork_session is a state conflict on purpose.
+    # A RuntimeError from fork_session is a state conflict on purpose. Only the refused page's own refusal
+    # answers OFF_LIST_PAGE_DETAIL (test_a_forks_page_refusal_answers_as_the_page_routes_do); any other
+    # PermissionError, create_session's URL check among them, is the generic refusal (R4C-L1-5).
     Route("post", f"/sessions/{SID}/fork", None, "fork_session", runtime=(409, "Conflict")),
+    Route(
+        "post", f"/sessions/{SID}/fork?start_url=https://example.com/", None, "fork_session", runtime=(409, "Conflict")
+    ),
     Route("post", f"/sessions/{SID}/storage-state", {"path": "state.json"}, "save_storage_state"),
 ]
 
@@ -211,6 +218,19 @@ def test_permission_error_is_a_generic_refusal(client: TestClient, route: Route)
     assert response.status_code == status, response.text
     # A fixed text: the exception's own message can carry hosts and paths.
     assert response.json() == {"detail": detail}
+
+
+@pytest.mark.parametrize("start_url", [None, "https://example.com/"], ids=["page-url", "start-url"])
+def test_a_forks_page_refusal_answers_as_the_page_routes_do(client: TestClient, start_url: str | None) -> None:
+    """F4: the fork of a refused page opens its URL with its cookies; its refusal says why, as observe's does."""
+    manager = BrowserManager(Settings(_env_file=None, ALLOWED_HOSTS="allowed.example"))
+    with pytest.raises(PermissionError) as refused:
+        manager._assert_page_object_allowed(SimpleNamespace(url="https://refused.example/"))
+    page_refusal = refused.value
+    params = {"start_url": start_url} if start_url else {}
+    with patch.object(main_module.manager, "fork_session", new=AsyncMock(side_effect=page_refusal)):
+        response = client.post(f"/sessions/{SID}/fork", params=params)
+    assert (response.status_code, response.json()) == (403, {"detail": OFF_LIST_PAGE_DETAIL})
 
 
 @pytest.mark.parametrize("route", ALL_ROUTES, ids=lambda r: r.id)

@@ -20,12 +20,17 @@ class SessionArtifactService:
         (artifact_dir / "downloads").mkdir(parents=True, exist_ok=True)
         return artifact_dir
 
-    async def capture_screenshot(self, session: Any, label: str) -> dict[str, str]:
-        safe_label = self._safe_label(label)
-        filename = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%f')}Z-{safe_label}.png"
-        path = session.artifact_dir / filename
-        await session.page.screenshot(path=str(path), full_page=False)
-        return {"path": str(path), "url": f"/artifacts/{session.id}/{filename}"}
+    def screenshot_target(self, session: Any, label: str) -> dict[str, str]:
+        """Where a screenshot labelled ``label`` is written, and its artifact URL."""
+        filename = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%f')}Z-{self._safe_label(label)}.png"
+        return {"path": str(session.artifact_dir / filename), "url": f"/artifacts/{session.id}/{filename}"}
+
+    async def capture_screenshot(
+        self, session: Any, label: str, *, target: dict[str, str] | None = None
+    ) -> dict[str, str]:
+        target = target or self.screenshot_target(session, label)
+        await session.page.screenshot(path=target["path"], full_page=False)
+        return dict(target)
 
     @staticmethod
     def trace_payload(session: Any) -> dict[str, Any]:

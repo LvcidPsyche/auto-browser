@@ -422,6 +422,37 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
                 self.manager._record_witness_receipt.assert_awaited_once()
         self.assertEqual(len(clicks), 2)
 
+    async def test_an_os_permission_error_in_the_post_action_observation_is_not_given_to_the_agent(self) -> None:
+        """CR-5: its text names a server path, and it went into the action's result, the audit log and the
+        witness receipt as the observation's error. A policy refusal (no errno) keeps its text."""
+        before = {"url": "https://example.com", "title": "Before"}
+        allowed = SimpleNamespace(should_block=False, block_reason=None, require_approval=False)
+        self.manager.witness_policy.evaluate_action = Mock(return_value=allowed)
+        self.manager._light_snapshot = AsyncMock(return_value=before)
+        self.manager._settle = AsyncMock()  # type: ignore[method-assign]
+        self.manager._ensure_witness_remote_ready = AsyncMock()  # type: ignore[method-assign]
+        self.manager._check_bot_challenge = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        destroyed = PlaywrightError("Execution context was destroyed, most likely because of a navigation")
+        denied = PermissionError(13, "Permission denied", "/data/artifacts/SERVER-PATH/after-click.png")
+
+        async def click() -> None:
+            pass
+
+        # On the first observation, and on the retry after a late navigation.
+        for observations in ([denied], [destroyed, denied]):
+            with self.subTest(observations=len(observations)):
+                self.manager.audit.append.reset_mock()
+                self.manager._observation_payload = AsyncMock(side_effect=observations)  # type: ignore[method-assign]
+
+                result = await BrowserManager._run_action(
+                    self.manager, self.session, "click", {"selector": "#go"}, click
+                )
+
+                self.assertEqual(result["action"], "click")
+                self.assertTrue(result["after"]["observation_error"])
+                self.assertNotIn("SERVER-PATH", json.dumps(result, default=str))
+                self.assertNotIn("SERVER-PATH", str(self.manager.audit.append.await_args_list))
+
     async def test_a_withheld_failure_snapshot_keeps_the_actions_own_error(self) -> None:
         before = {"url": "https://example.com", "title": "Before"}
         allowed = SimpleNamespace(should_block=False, block_reason=None, require_approval=False)
@@ -438,6 +469,86 @@ class BrowserManagerActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.code, "browser_action_failed")
         self.assertIn("withheld", ctx.exception.details["snapshot"]["snapshot_error"])
         self.manager.audit.append.assert_awaited()
+
+    def _action_statuses(self) -> list[str]:
+        return [
+            call.kwargs["status"]
+            for call in self.manager.audit.append.await_args_list
+            if call.kwargs.get("event_type") == "browser_action"
+        ]
+
+    async def test_a_failure_snapshot_refused_after_its_read_keeps_the_actions_own_error_and_record(self) -> None:
+        """The page moves off ALLOWED_HOSTS while the failure snapshot reads it, so the read refuses."""
+        allowed = SimpleNamespace(should_block=False, block_reason=None, require_approval=False)
+        self.manager.witness_policy.evaluate_action = Mock(return_value=allowed)
+        self.session.page.url = "https://example.com/cart?id=7"
+        reads = iter([{"url": "https://example.com/cart?id=7", "title": "x"}])
+
+        async def light_snapshot(session: BrowserSession, *, label: str) -> dict:
+            for before in reads:
+                return before
+            # Went to a refused host and came back while it was read: refused now, on an allowed URL.
+            self.manager.page_provenance.committed(session.page, "https://evil.example/", url_refused=True)
+            raise PermissionError("The page navigated on its own to a host ALLOWED_HOSTS does not allow")
+
+        self.manager._light_snapshot = light_snapshot  # type: ignore[method-assign]
+        self.manager._ensure_witness_remote_ready = AsyncMock()  # type: ignore[method-assign]
+
+        async def crash() -> None:
+            raise PlaywrightError("Target crashed")
+
+        with self.assertRaises(BrowserActionError) as ctx:
+            await BrowserManager._run_action(self.manager, self.session, "click", {"selector": "#go"}, crash)
+
+        self.assertEqual(ctx.exception.code, "browser_action_failed")
+        snapshot = ctx.exception.details["snapshot"]
+        # A page refused now is shown by its origin: its path and query are its own.
+        self.assertEqual(snapshot["url"], "https://example.com")
+        self.assertIn("its content is withheld", snapshot["snapshot_error"])
+        self.assertEqual(self._action_statuses(), ["failed"])
+        self.manager._record_witness_receipt.assert_awaited_once()
+
+    async def test_a_before_snapshot_refused_after_its_read_is_recorded_as_withheld(self) -> None:
+        allowed = SimpleNamespace(should_block=False, block_reason=None, require_approval=False)
+        self.manager.witness_policy.evaluate_action = Mock(return_value=allowed)
+        moved = PermissionError("The page navigated on its own to a host ALLOWED_HOSTS does not allow")
+        self.session.page.url = "https://example.com/cart"
+        self.manager._light_snapshot = AsyncMock(side_effect=[moved])
+        self.manager._ensure_witness_remote_ready = AsyncMock()  # type: ignore[method-assign]
+        self.manager._observation_payload = AsyncMock(return_value={"url": "https://example.com/cart"})  # type: ignore[method-assign]
+        ran: list[int] = []
+
+        async def click() -> None:
+            ran.append(1)
+
+        result = await BrowserManager._run_action(self.manager, self.session, "click", {"selector": "#go"}, click)
+
+        self.assertEqual(ran, [1])
+        # Refused by the read (another tab took over, say), but allowed now: shown whole, as the page shows it.
+        self.assertEqual(result["before"]["url"], "https://example.com/cart")
+        self.assertIn("its content is withheld", result["before"]["snapshot_error"])
+        self.assertEqual(self._action_statuses(), ["ok"])
+        self.assertNotIn("url_changed", result["verification"]["signals"])
+
+    async def test_a_policy_blocked_action_after_a_withheld_before_snapshot_does_not_go_back(self) -> None:
+        blocked = SimpleNamespace(should_block=True, block_reason="policy says no", require_approval=False)
+        self.manager.witness_policy.evaluate_action = Mock(return_value=blocked)
+        self.session.page.url = "https://example.com/cart"
+        moved = PermissionError("The page navigated on its own to a host ALLOWED_HOSTS does not allow")
+        self.manager._light_snapshot = AsyncMock(side_effect=[moved, {"url": "https://example.com/cart"}])
+        self.manager._ensure_witness_remote_ready = AsyncMock()  # type: ignore[method-assign]
+        ran: list[int] = []
+
+        async def click() -> None:
+            ran.append(1)
+
+        with self.assertRaises(BrowserActionError) as ctx:
+            await BrowserManager._run_action(self.manager, self.session, "click", {"selector": "#go"}, click)
+
+        self.assertEqual((ctx.exception.code, ran), ("browser_action_blocked", []))
+        # The action never ran, so there is nothing to roll back.
+        self.session.page.go_back.assert_not_awaited()
+        self.assertEqual(self.session.page.url, "https://example.com/cart")
 
     async def test_remote_access_metadata_and_isolated_takeover_resolution(self) -> None:
         info_path = Path(self.manager.settings.remote_access_info_path)

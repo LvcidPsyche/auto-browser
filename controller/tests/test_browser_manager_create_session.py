@@ -71,6 +71,22 @@ class BrowserManagerCreateSessionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         self.tmp.cleanup()
 
+    async def test_the_network_inspector_is_given_the_sessions_refused_page_check(self) -> None:
+        """A service worker's request is withheld while any tab of the session is refused (round 4, A2 item 5)."""
+        self.manager.settings.network_inspector_enabled = True
+        page, other = FakePage(), FakePage()
+        context = FakeContext(page)
+        context.pages.append(other)
+        self.manager._acquire_session_browser = AsyncMock(return_value=(FakeBrowser(context), None))  # type: ignore[method-assign]
+
+        result = await self.manager.create_session(name="fixture")
+        inspector = self.manager.sessions[result["id"]].network_inspector
+
+        self.assertTrue(callable(inspector.session_refused))
+        self.assertFalse(inspector.session_refused())
+        self.manager.page_provenance.committed(other, "https://refused.example/", url_refused=True)
+        self.assertTrue(inspector.session_refused())
+
     async def test_create_session_builds_context_loads_memory_and_runs_hook(self) -> None:
         page = FakePage()
         context = FakeContext(page)
@@ -102,7 +118,8 @@ class BrowserManagerCreateSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.metadata["memory_profile"], "checkout")
         self.assertEqual(session.metadata["memory_context"], "remember this")
         self.assertEqual(page.url, "https://example.com")
-        context.on.assert_called_once()
+        # Popups, and the first navigation of a popup the context has not reported yet.
+        self.assertEqual([c.args[0] for c in context.on.call_args_list], ["page", "request", "requestfailed"])
         page.on.assert_called()
         browser.new_context.assert_awaited_once()
         context_kwargs = browser.new_context.await_args.kwargs
@@ -135,7 +152,7 @@ class BrowserManagerCreateSessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_session_limit_message_mentions_shared_browser_mode(self) -> None:
         self.manager.settings.max_sessions = 1
-        self.manager.sessions["session-1"] = object()  # type: ignore[assignment]
+        self.manager.sessions["session-1"] = SimpleNamespace(owner=None)  # type: ignore[assignment]
 
         with self.assertRaisesRegex(RuntimeError, "one visible desktop"):
             self.manager._check_session_limit()

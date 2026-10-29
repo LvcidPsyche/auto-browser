@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock
 
 from app.action_errors import BrowserActionError
 from app.approvals import ApprovalRequiredError
+from app.browser.page_provenance import PageProvenance
 from app.memory_manager import MemoryProfile
 from app.metrics import MetricsRecorder
 from app.models import ApprovalRecord, BrowserActionDecision, McpToolCallRequest, ProviderInfo
@@ -57,6 +58,11 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             get_remote_access_info=lambda: {"active": False, "status": "inactive"},
             _assert_url_allowed=Mock(),
             _assert_page_allowed=Mock(),
+            _url_off_list=Mock(return_value=False),
+            _cookie_off_list=Mock(return_value=False),
+            _partition_off_list=Mock(return_value=False),
+            _page_refused=Mock(return_value=False),
+            page_provenance=PageProvenance(),
             get_session=AsyncMock(return_value={"id": "session-1"}),
             verify_witness_chain=AsyncMock(
                 return_value={
@@ -760,7 +766,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.manager.require_governed_approval = AsyncMock(return_value=approval)
         page = SimpleNamespace(evaluate=AsyncMock())
-        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page))
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page, lock=asyncio.Lock()))
 
         response = await self.full_gateway.call_tool(
             McpToolCallRequest(
@@ -955,13 +961,14 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 return FakeLocator()
 
         fake_context = SimpleNamespace(
-            cookies=AsyncMock(return_value=[{"name": "sid"}]),
+            cookies=AsyncMock(return_value=[{"name": "sid", "domain": "example.com"}]),
             add_cookies=AsyncMock(),
         )
         fake_session = SimpleNamespace(
             page=FakePage(),
             context=fake_context,
             artifact_dir=Path("."),
+            lock=asyncio.Lock(),
         )
         self.manager.get_session = AsyncMock(return_value=fake_session)
         self.manager.get_network_log = AsyncMock(return_value={"entries": []})
@@ -1076,7 +1083,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 ]
             )
         )
-        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page))
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page, lock=asyncio.Lock()))
 
         response = await self.full_gateway.call_tool(
             McpToolCallRequest(
@@ -1197,7 +1204,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             return []
 
         page = SimpleNamespace(evaluate=never_finishes)
-        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page))
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page, lock=asyncio.Lock()))
 
         original = gateway_module.FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS
         gateway_module.FIND_ELEMENTS_QUERY_TIMEOUT_SECONDS = 0.05
@@ -1217,7 +1224,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_find_elements_invalid_regex_surfaces_structured_error(self) -> None:
         page = SimpleNamespace(evaluate=AsyncMock(return_value={"__invalid_regex": "Unterminated group"}))
-        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page))
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page, lock=asyncio.Lock()))
 
         response = await self.full_gateway.call_tool(
             McpToolCallRequest(
@@ -1234,7 +1241,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_arguments_message_reaches_the_caller(self) -> None:
         # drag_drop with neither selectors nor coordinates fails validation with an
         # operator-facing message; it must surface instead of "Tool execution failed".
-        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=SimpleNamespace()))
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=SimpleNamespace(), lock=asyncio.Lock()))
 
         response = await self.full_gateway.call_tool(
             McpToolCallRequest(
@@ -1330,7 +1337,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 )
             ),
         )
-        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page))
+        self.manager.get_session = AsyncMock(return_value=SimpleNamespace(page=page, lock=asyncio.Lock()))
 
         waited = await self.full_gateway.call_tool(
             McpToolCallRequest(

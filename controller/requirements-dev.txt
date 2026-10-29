@@ -1,5 +1,7 @@
 pytest
-pytest-asyncio>=1.4.0
+# Capped below the next minor: tests/conftest.py uses pytest-asyncio's private loop fixture name
+# (_{scope}_scoped_runner), and fails every asyncio test by that name if a release renames it.
+pytest-asyncio>=1.4.0,<1.5
 pytest-cov>=7.1.0
 respx
 ruff==0.17.1

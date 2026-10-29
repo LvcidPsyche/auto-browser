@@ -99,6 +99,8 @@ def _autofill(html: str) -> dict:
                         default_viewport_height=720,
                     ),
                     _settle=settle,
+                    _page_refused=lambda _page: False,
+                    _shown_url=lambda page: page.url,
                 )
                 session = SimpleNamespace(
                     page=page, totp_secret="JBSWY3DPEHPK3PXP", totp_hosts=(HOST,), mouse_position=(5.0, 5.0)

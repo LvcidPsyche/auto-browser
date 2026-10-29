@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,9 +16,10 @@ from pydantic import ValidationError
 
 from . import events as _events
 from .audit import get_current_operator
+from .browser.page_read import bounded, locked_read
 from .mcp_instructions import server_instructions
 from .models import McpToolCallRequest, OperatorIdentity
-from .session_ownership import ANONYMOUS, acting_as, may_use
+from .session_ownership import ANONYMOUS, acting_as, may_use, verified_operator
 from .utils import PRIVATE_FILE_MODE, atomic_write_text, utc_now
 
 JSONRPC_VERSION = "2.0"
@@ -34,6 +36,11 @@ CURRENT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 # reusing it here left clients unable to tell "send initialized first" apart
 # from "no such resource". -32005 sits in the implementation-defined range.
 INITIALIZATION_REQUIRED_ERROR = -32005
+# The most MCP sessions the table keeps, and the most one token-verified operator keeps: past its
+# cap an operator loses its own least recently used sessions, so its initialize flood cannot evict
+# another operator's. Unowned sessions (shared token, no token) are bounded by the table's cap alone.
+MAX_MCP_SESSIONS = 500
+MAX_MCP_SESSIONS_PER_OWNER = 100
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +56,9 @@ class McpSession:
     # Updated in memory on every request and saved with the next store write;
     # eviction goes by this, so a busy long-lived client is not dropped.
     last_used_at: str = ""
+    # The token-verified operator who initialized it (None: unowned, open to all,
+    # as sessions are). Another operator finds no such MCP session.
+    owner: str | None = None
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -151,8 +161,10 @@ class McpHttpTransport:
             return self._json_error_response(
                 None, -32000, f"Missing required header: {MCP_SESSION_HEADER}", status_code=400
             )
-        if self._sessions.pop(session_id, None) is None:
+        session = self._sessions.get(session_id)
+        if session is None or not may_use(session.owner):
             return self._json_error_response(None, -32001, f"Unknown MCP session: {session_id}", status_code=404)
+        del self._sessions[session_id]
         self._persist_sessions()
         return Response(status_code=204)
 
@@ -372,8 +384,8 @@ class McpHttpTransport:
 
             if resource == "dom":
                 session = await self.manager.get_session(session_id)
-                self.manager._assert_page_allowed(session)
-                html = await session.page.content()
+                async with locked_read(self.manager, session):
+                    html = await bounded(session.page.content())
                 return {"uri": uri, "mimeType": "text/html", "text": html}
 
             if resource == "console":
@@ -466,7 +478,7 @@ class McpHttpTransport:
                 except json.JSONDecodeError:
                     logger.debug("dropping malformed browser event payload from MCP resource stream")
                     continue
-                if not self._may_see_event(event, operator):
+                if not await self._may_see_event(event, operator):
                     continue
                 for uri in self._updated_resource_uris(event, subscribed=session.resource_subscriptions):
                     message = {
@@ -478,24 +490,33 @@ class McpHttpTransport:
         finally:
             _events.unsubscribe_all(queue)
 
-    def _may_see_event(self, event: dict[str, Any], operator: OperatorIdentity | None) -> bool:
+    async def _may_see_event(self, event: dict[str, Any], operator: OperatorIdentity | None) -> bool:
         """Whether the subscriber may hear about this event's session.
 
         Per-session URIs can only be subscribed to for sessions the subscriber
         could use then (see _list_resources); this also keeps the generic
         browser://sessions update from telling a subscriber that another
-        operator's live session is active. A session that has already closed has
-        no owner left to check: its event only reaches the subscriptions the
-        subscriber holds and the generic URI, which names no session.
+        operator's session is active or has closed. A session that is no longer
+        live (its close is announced after it leaves manager.sessions) is judged
+        by its record; an id with neither names no operator and is let through.
         """
         session_id = event.get("session_id")
         if self.manager is None or not isinstance(session_id, str):
             return True
         live = self.manager.sessions.get(session_id)
-        if live is None:
-            return True
+        if live is not None:
+            owner = getattr(live, "owner", None)
+        else:
+            try:
+                _known, owner = await self.manager.session_owner_lookup(session_id)
+            except Exception:
+                # Fail closed: an update that cannot be attributed is dropped, not sent.
+                logger.warning(
+                    "could not read the owner of session %s; its update is withheld", session_id, exc_info=True
+                )
+                return False
         with acting_as(operator or ANONYMOUS):
-            return may_use(getattr(live, "owner", None))
+            return may_use(owner)
 
     @staticmethod
     def _updated_resource_uris(event: dict[str, Any], *, subscribed: list[str]) -> list[str]:
@@ -551,6 +572,7 @@ class McpHttpTransport:
             protocol_version=negotiated_version,
             client_info=self._coerce_dict(params.get("clientInfo")),
             client_capabilities=self._coerce_dict(params.get("capabilities")),
+            owner=verified_operator(),
         )
         self._sessions[session.id] = session
         # Here as well as in _persist_sessions: with no store path configured
@@ -595,7 +617,7 @@ class McpHttpTransport:
                 status_code=400,
             )
         session = self._sessions.get(session_id)
-        if session is None:
+        if session is None or not may_use(session.owner):
             return self._json_error_response(
                 request_id,
                 -32001,
@@ -691,6 +713,7 @@ class McpHttpTransport:
                     initialized=bool(item.get("initialized", False)),
                     created_at=str(item.get("created_at") or ""),
                     last_used_at=str(item.get("last_used_at") or ""),
+                    owner=item["owner"] if isinstance(item.get("owner"), str) else None,
                     resource_subscriptions=[
                         str(uri) for uri in item.get("resource_subscriptions", []) if isinstance(uri, str)
                     ],
@@ -701,21 +724,19 @@ class McpHttpTransport:
         self._sessions = restored
 
     def _evict_stale_sessions(self) -> None:
-        if len(self._sessions) <= 500:
-            return
-        excess = len(self._sessions) - 500
         # Least recently used first. Ordering by creation evicted a client that
         # had been connected (and busy) the longest as soon as 500 newer
         # sessions, most of them abandoned without a DELETE, piled up behind it.
-        stale_keys = [
-            session.id
-            for session in sorted(
-                self._sessions.values(),
-                key=lambda item: (item.last_used_at or item.created_at or "", item.id),
-            )[:excess]
-        ]
-        for key in stale_keys:
-            del self._sessions[key]
+        by_owner: dict[str, list[McpSession]] = {}
+        for session in _least_recently_used(self._sessions.values()):
+            if session.owner is not None:
+                by_owner.setdefault(session.owner, []).append(session)
+        for sessions in by_owner.values():
+            for session in sessions[: max(0, len(sessions) - MAX_MCP_SESSIONS_PER_OWNER)]:
+                del self._sessions[session.id]
+        excess = len(self._sessions) - MAX_MCP_SESSIONS
+        for session in _least_recently_used(self._sessions.values())[: max(0, excess)]:
+            del self._sessions[session.id]
 
     def _persist_sessions(self) -> None:
         if self._session_store_path is None:
@@ -785,3 +806,7 @@ class McpHttpTransport:
     @staticmethod
     def _session_headers(session: McpSession) -> dict[str, str]:
         return {MCP_PROTOCOL_HEADER: session.protocol_version}
+
+
+def _least_recently_used(sessions: Iterable[McpSession]) -> list[McpSession]:
+    return sorted(sessions, key=lambda item: (item.last_used_at or item.created_at or "", item.id))

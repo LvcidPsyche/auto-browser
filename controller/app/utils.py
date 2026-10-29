@@ -63,6 +63,24 @@ def _target_mode(path: Path, mode: int | None) -> int:
         return 0o666 & ~_UMASK
 
 
+# Windows refuses a rename while another process has the target open (an
+# antivirus scan, an indexer, a reader thread); that clears within milliseconds.
+RENAME_ATTEMPTS = 5
+RENAME_RETRY_STEP_SECONDS = 0.01
+
+
+def replace_retrying(source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> None:
+    """os.replace, retried briefly through a sharing violation (PermissionError), then raised."""
+    for attempt in range(RENAME_ATTEMPTS):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt == RENAME_ATTEMPTS - 1:
+                raise
+            time.sleep(RENAME_RETRY_STEP_SECONDS * (attempt + 1))
+
+
 def atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None:
     """Replace ``path`` with ``text`` so readers only ever see a whole file.
 
@@ -83,16 +101,7 @@ def atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
         os.chmod(tmp_name, target_mode)
-        # Windows refuses the rename while another process has the target
-        # open; that clears within milliseconds, so retry briefly.
-        for attempt in range(5):
-            try:
-                os.replace(tmp_name, path)
-                return
-            except PermissionError:
-                if attempt == 4:
-                    raise
-                time.sleep(0.01 * (attempt + 1))
+        replace_retrying(tmp_name, path)
     except BaseException:
         try:
             os.unlink(tmp_name)

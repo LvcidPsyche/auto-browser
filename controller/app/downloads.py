@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from playwright.async_api import Error as PlaywrightError
+
 from .artifacts import SessionArtifactService
+from .network_inspector import url_origin
 from .utils import utc_now
+
+logger = logging.getLogger(__name__)
 
 # Name attempts before `_reserve` gives up. It runs on the event loop.
 _RESERVE_ATTEMPTS = 20
@@ -46,6 +52,31 @@ class DownloadCaptureService:
             "url": f"/artifacts/{session.id}/downloads/{destination.name}",
             "source_url": getattr(download, "url", None),
             "failure": failure,
+        }
+        self._bounded_append(session.downloads, record, limit=100)
+        await self.artifacts.append_jsonl(session.artifact_dir / "downloads.jsonl", record)
+        return record
+
+    async def block(self, session: Any, download: Any, reason: str) -> dict[str, Any]:
+        """Cancel a download ALLOWED_HOSTS refuses, and record it with nothing saved.
+
+        The page chose the file's name and its URL's path, so the record keeps the origin only.
+        """
+        try:
+            await download.cancel()
+        except PlaywrightError as exc:
+            # Only capture() saves a download, so nothing is kept either way.
+            logger.debug("could not cancel a refused download for session %s: %s", session.id, exc)
+        record = {
+            "id": uuid4().hex[:12],
+            "timestamp": utc_now(),
+            "status": "blocked",
+            "filename": None,
+            "suggested_filename": None,
+            "path": None,
+            "url": None,
+            "source_url": url_origin(str(getattr(download, "url", "") or "")),
+            "failure": reason,
         }
         self._bounded_append(session.downloads, record, limit=100)
         await self.artifacts.append_jsonl(session.artifact_dir / "downloads.jsonl", record)

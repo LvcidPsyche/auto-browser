@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import unittest
@@ -8,6 +9,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.browser.page_provenance import PageProvenance
 from app.mesh.models import PeerRecord
 from app.routes.extensions import register_all_routers
 
@@ -72,7 +74,17 @@ class RoutesExtensionsTests(unittest.TestCase):
             operator_name_header="X-Operator-Name",
         )
         app.state.network_inspectors = {"session-1": FakeInspector()}
-        app.state.cdp_sessions = {"session-1": FakeCdp()}
+        # The CDP routes read the session's active page under its lock, and only while it is allowed.
+        session = SimpleNamespace(page=SimpleNamespace(url="https://example.com/"), lock=asyncio.Lock())
+        app.state.browser_manager = SimpleNamespace(
+            sessions={"session-1": session},
+            _assert_page_allowed=lambda _s: None,
+            _page_refused=lambda _page: False,
+            page_provenance=PageProvenance(),
+        )
+        cdp = FakeCdp()
+        cdp.page = session.page
+        app.state.cdp_sessions = {"session-1": cdp}
         app.state.peer_registry = FakePeerRegistry()
         app.state.mesh_identity = SimpleNamespace(node_id="node-1", pubkey_b64="pub")
         register_all_routers(app)

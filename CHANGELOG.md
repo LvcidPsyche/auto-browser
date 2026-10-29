@@ -2,6 +2,259 @@
 
 All notable changes to auto-browser are documented here.
 
+## [Unreleased]
+
+Upgrade notes:
+- **A page `ALLOWED_HOSTS` refused for a page it loaded, or for where it came from, is read again only after the
+  agent navigates it to an allowed URL, or a blocked action's rollback brings it back.** Observe, screenshots,
+  the page-reading MCP tools and actions other than navigation answer that the page is not read (REST: 403)
+  after the controller has sent it back to `about:blank`, where they used to read the blank page, and also after
+  the page has loaded an allowed URL on its own (a refused host's redirect, a script). Navigate it to an allowed
+  URL to go on: the page is read again when that navigation returns a response that ends on an allowed http(s)
+  URL, no hop of its redirect chain was refused, no commit during it came from a refused hop, and no refused hop
+  is still in flight when it returns; or when a blocked action's rollback brings it back to the page the agent
+  read before the action, with no refused hop on the way. A navigation within the page (to a `#fragment`)
+  returns no response and clears nothing. A page refused only while it navigates through a refused host is read
+  again once that navigation fails without loading a page (a `204`, or a download). A popup or blank window a
+  refused page opened is refused with it. A refused tab that is not the active one cannot be activated, and so
+  cannot be navigated: close it, or open a new tab. The REST `403` says so.
+- **While a tab of the session is refused, the other tabs' own navigations are refused too.** A refused tab can
+  send another tab it holds (the one that opened it, say) to an allowed URL whose path and query carry what it
+  read. So a tab that loads a page on its own while another tab is refused (a link the agent clicks, a redirect,
+  a script, a reload or go back) is refused until the agent navigates it. The controller sends it back to
+  `about:blank`, with a `navigation_blocked` audit event that names its (allowed) origin, and whatever it had
+  loaded, a form in progress included, is lost. Close the refused tab, then navigate the other one to an allowed
+  URL; the refusal says so. The tabs that count are those on a host `ALLOWED_HOSTS` does not allow, those that
+  came from one (by a redirect or their opener), those navigating through one, and those that loaded a blank,
+  `blob:` or `data:` page while another tab was refused, since such a page has the origin of the page that made
+  it. A tab refused only because another tab was refused when it loaded an allowed page, or one still waiting
+  for the page that opened it to judge it, stays refused itself but does not count while it is on an allowed
+  http(s) page or on the `about:blank` the controller sent it to; on any other blank, `blob:` or `data:` page it
+  counts.
+- **A file the browser downloads must come from a host on `ALLOWED_HOSTS`, from a page on one.** A download
+  from any other host, or started by a page the list refuses, is now cancelled and recorded as `blocked`
+  (below). The host checked is the one the file comes from after its redirects: Playwright reports a
+  download's final URL, so a file an allowed host redirects to (a CDN, a file host) is refused unless that
+  host is on the list too, and listing it also lets pages navigate there. A file a page generates (a `blob:`
+  or `data:` URL) is judged by the page that reports the download, not by the origin that built it, so one
+  that an iframe from another host builds on an allowed page is kept.
+- **`browser.get_cookies` returns only cookies a host on `ALLOWED_HOSTS` would receive.** That is a host-only
+  cookie of an allowed host, or a domain cookie whose domain is allowed or lies above an allowed host. A
+  partitioned cookie is also dropped when its top-level site is one no listed host belongs to. A URL in `urls`
+  that the list refuses is dropped, so naming only refused URLs returns no cookies. With `ALLOWED_HOSTS` empty
+  or `*`, nothing is filtered.
+- **The page-reading MCP tools take the session lock, and are bounded.** `browser.eval_js`,
+  `browser.get_html`, `browser.find_elements`, the local and session storage tools, `browser.drag_drop` and
+  the `browser://<session>/dom` resource now wait up to 10 seconds for a session another call holds and then
+  fail, and give up on a page that does not answer within 30 seconds. `browser.eval_js` takes an optional
+  `timeout_ms` (default 30000, at most 60000) in place of those 30 seconds, and its timeout error says the
+  expression may still be running in the page, which it may: giving up does not stop the page's script.
+  `browser.wait_for_selector` does not take the lock, so an action can run while it waits (the click that
+  makes the element appear, say); it keeps its own `timeout_ms`. It is refused if, while it waited, its page
+  went to a refused host or became refused, closed, or stopped being the active tab, and that refusal comes at
+  its `timeout_ms` plus 250 ms, whether or not the selector matched. A drag whose mouse button may have gone
+  down now sends one release, whether the drag succeeded, failed or reached its 30 seconds, and waits at most 5
+  seconds more for it, still holding the session, also when the call is cancelled meanwhile. A release the
+  browser does not answer in that time fails a drag that had succeeded; after a drag that failed, the drag's
+  own error is the one reported. A drag cut off while it brought an end named by `element_id` into view also
+  waits at most 2 seconds, before the release, to remove its scroll watch.
+
+### Security
+
+- **A popup that opens onto a host outside `ALLOWED_HOSTS` is sent back to `about:blank`, and console messages
+  and page errors are not kept while the list refuses their page.** Playwright reports a popup only once its
+  first navigation has committed, so the listener that holds a page to the list was attached after the
+  navigation it had to see. A popup a page opened straight onto a disallowed host (by `window.open`, a
+  `target=_blank` link the agent clicked, or a page timer with no click at all) stayed there until it
+  navigated again, kept running, and no `navigation_blocked` event was written. Its console messages and page
+  errors went into every observation, `browser.get_console`, `browser.get_page_errors` and the
+  `browser://<session>/console` resource, while the session's own page stayed allowed. Shadow-browse sessions
+  attached no listeners to their popups at all until their tabs were next listed. Every release through 1.11.1
+  is affected: the guard that missed these arrived in 1.10.0, and before 1.10.0 no popup was sent back at all.
+  When the controller attaches its listeners to a page (a session's first page, a popup, a new tab), it now
+  also checks the URL the page is already on, and sends a top-level page off the list to `about:blank` with a
+  `navigation_blocked` audit event, as it does after a later navigation. Shadow-browse sessions attach the
+  listeners to every popup, and console messages and page errors are no longer kept while the list refuses
+  their page. The entries below cover what else such a page left behind, and the last one what it still can.
+- **A page is refused for where it came from, not only for where it is.** A blank window a refused page opened
+  (`window.open()` with no URL) is on `about:blank`, same-origin with that page and scriptable by it, so
+  whatever the refused page had it log, fetch, fail, title or download passed every URL check, and after the
+  refused page was blanked the agent could switch to that window and observe it. A page is now also refused
+  while it is tainted. It is tainted when it commits a refused URL; when it commits a page its navigation
+  reached through a refused host (a redirect from one to an allowed URL); when it commits any page on its own
+  while another page of the session is refused (a refused page can send the tab that opened it to `about:blank`
+  and write into it, or to an allowed URL whose path and query carry what it read); and when it is a popup whose
+  opener is refused or tainted, whatever the popup's URL, or whose first navigation passed a refused redirect.
+  It is refused, too, while its opener is still being looked up. Another page counts for that rule while it is
+  on a refused host, tainted, or navigating through a refused host. A blank, `blob:` or `data:` page has the
+  origin of the page that made it, so one a page loads while another page is refused taints it as a refused
+  page's own would. A page refused only because another page was refused when it loaded an allowed http(s) URL,
+  or only waiting for its opener, does not count while it is on an allowed http(s) URL, whose document comes
+  from that URL's origin, or on the `about:blank` the controller sent it to, whose origin is its own; on any
+  other page it counts. The taint clears only when the agent's navigation ends on the list, or a blocked
+  action's rollback returns to the page the agent read before it (see the upgrade notes). The page's own
+  navigation to an allowed URL does not clear it, nor does the controller's own blank, since a refused opener
+  can write into a later blank of its window. A tainted page is sent back to `about:blank` too. A page on a
+  `blob:` URL is judged by the origin that made it; one with no origin (`blob:null`) is judged by where it came
+  from alone. The TOTP autofill skips a refused page, also on a host in `totp_hosts`, since a refused host's
+  redirect can choose that URL. The checks below that judge a page use this rule.
+- **The network log withholds what a page `ALLOWED_HOSTS` refuses asks for.** A request made by such a page,
+  or one that navigates a top-level page to a refused host, was logged whole, the refused page's HTML
+  included. A service worker's request has no page, and one a refused page registered went on being logged
+  whole, query and body included, after the page was blanked. Such requests are now recorded with
+  `"withheld": "page off ALLOWED_HOSTS"`, their URL cut to the origin (`scheme://host:port`), their method
+  reduced to a standard one or `OTHER`, and their status, resource type, timing and failure, with no headers
+  or bodies; network hooks receive that entry and match its origin, also when it is logged unfinished because
+  too many requests were in flight. Which page made a request is decided when it starts. A popup's first
+  navigation is withheld whatever its URL, since its page cannot be judged yet and a refused opener may have
+  chosen it. So is any top-level navigation that starts while a page of the session counts as refused for the
+  others (above), a navigation from a refused page to an allowed URL among them. A service worker's request is
+  withheld while such a page is open, or when its script's URL is refused. Any other request with no frame comes from a page
+  the browser has not reported yet, and is withheld whatever its URL: a window a refused page opened onto a
+  `204` is never reported, and the refused page can script its blank document. A request that cannot be
+  attributed is withheld. Iframes and subresources an allowed page loads from other hosts are logged as before.
+- **A download from a host off `ALLOWED_HOSTS`, or one a page the list refuses starts, is cancelled and nothing
+  is saved.** Such a download, a file a refused page generated itself (a `blob:` or `data:` URL) included, was
+  saved to the session's downloads and readable through `browser.read_download` and its artifact URL. The
+  download's final URL and the page it is reported on are now checked, and a download a navigation through a
+  refused host turned into is refused too, whichever of the download and that navigation's failure the browser
+  reports first. That includes a popup's first navigation, whose download Playwright reports on the page that
+  opened the popup; such a download's URL stays refused for every download of the session, the last eight such
+  URLs kept, since no page holds it for the agent's navigate to clear. A refused download is recorded in the
+  session's downloads and `downloads.jsonl` with status `blocked`, no file name, path or artifact URL, its
+  source URL's origin only and the reason, and a `download_blocked` audit event is written;
+  `browser.read_download` refuses it as not completed. The cancel is asked for, and a failed one is logged;
+  nothing is saved either way.
+- **Failed requests of a page `ALLOWED_HOSTS` refuses are not listed.** `request_failures`, in every
+  observation and `browser.get_request_failures`, kept the URL, path included, of each request such a page
+  made that failed. A failed request is now left out when its page was refused as it started (so one that
+  fails after its page was blanked, or after the page loaded an allowed URL, is left out too), when its page
+  is refused as it fails, and when it is a top-level navigation to a URL off the list.
+- **The REST CDP routes refuse while the session's page is refused.** `GET /sessions/{id}/cdp/element` and
+  `POST /sessions/{id}/cdp/raw` read the session's active page whatever its host. They now take the session
+  lock and answer 403, as observe does, while the list refuses that page or when it moved during the call.
+  When they cannot attach to the active tab they answer 503 rather than read the tab they were attached to
+  before. A session another call keeps for more than 10 seconds gets 409. A command the page does not answer
+  within 10 seconds gets 504 and lets go of the session, and so does an attach to the active tab, or a detach
+  from the tab before it, that the browser does not finish within 10 seconds. The 1.10.0 note that raw CDP
+  passthrough is unchanged no longer holds.
+- **`browser.get_cookies` returns only cookies a host on `ALLOWED_HOSTS` would receive.** A page off the
+  list sets cookies before it is blanked and the browser keeps them, and `browser.get_cookies` returned them,
+  also when asked for that host's URL. A host-only cookie is now returned when its host is allowed, and a
+  domain cookie when its domain is allowed or is a parent of an allowed host (`Domain=example.com` is returned
+  when only `app.example.com` is listed, as the browser sends it there). A partitioned cookie, which the
+  browser sends only under the top-level site it is keyed to, is dropped when no listed host belongs to that
+  site (an IPv6 site is judged by its bracketed address). A URL in `urls` that the list refuses is dropped
+  before the browser is asked. With `ALLOWED_HOSTS` empty or `*`, nothing is filtered.
+- **A read is refused when its page went refused, closed or stopped being the active tab while it was read.**
+  Reads checked the page's URL before they read it, and some again after, which compares two moments: a page
+  that went to a refused host and came back, one sent to `about:blank` meanwhile, or an active tab that closed
+  and handed the session to another passed both checks, and what was read was the refused page's. Each read
+  now notes the session's active page and that page's count of refused commits before it reads, and refuses
+  afterwards if either changed, the page closed, or the page is refused now; a page that went from one allowed
+  URL to another meanwhile is read. This covers observe, every screenshot (deleted when refused, and when the
+  read is cancelled before it is checked), the snapshots around an action, the share page's frame and title
+  (the share poll answers 403), `browser.eval_js`, `browser.wait_for_selector`, `browser.get_html`,
+  `browser.find_elements`, the storage tools (refused before a write and checked after it),
+  `browser.drag_drop`, the DOM resource and the CDP routes. Tab listings, session summaries, approval requests
+  and saved auth profiles leave the title empty in the same cases, and a bot challenge found on a page that
+  moved while it was probed is refused instead of described. Forking a session onto its page's URL (no
+  `start_url`) refuses while its page is refused, and over REST answers the same 403 as observe (any other
+  refusal of a fork answers the generic 403); a fork onto a `start_url` the caller names is judged by that URL,
+  as a new session is.
+- **A refused page's URL is shown by its origin only.** Tab listings, session summaries, the snapshots an
+  action returns, approval requests and the `navigation_blocked` audit event showed a
+  refused page's URL whole, and the page chooses its path and query. They now show `scheme://host:port`, as
+  the network log and blocked downloads do; `about:blank` is shown whole, and so is the URL of a page that is
+  allowed again by the time it is shown.
+- **What a page `ALLOWED_HOSTS` refuses still does.** Its request has already gone out when it is refused:
+  checks run when a request starts or a navigation commits, and the navigation request itself, with whatever the
+  page put in its URL, reaches the refused host. The page runs, sets cookies and shows in the takeover (noVNC)
+  view until it is blanked. Blanking waits for any call in flight on the session to finish: the page-reading MCP
+  tools hold the session at most 30 seconds each (`browser.eval_js` up to its `timeout_ms`), and a drag up to 7
+  seconds more: 2 to remove its scroll watch and 5 for its release (`browser.wait_for_selector` does not hold
+  it). Observe and actions make several page calls in turn and are not bounded as a whole, so they can hold it
+  longer. A service worker it registered keeps running after that. What an allowed origin's own scripts do with
+  what a refused redirect or a refused opener put in its URL is not tracked: they can keep it in that origin's
+  storage or cookies, send it to that origin's server, or pass it to its other windows and service worker, and
+  reads of those after the page is readable again return it. A tab refused only because another tab was refused
+  when it loaded an allowed http(s) page runs such scripts too, and does not refuse the others while it stays on
+  that page or on the `about:blank` the controller sent it to. Two cases of this: a service worker's requests
+  are withheld while a page of the session counts as refused or when its script's URL is refused, so a worker on
+  an allowed origin can keep what a refused page sent it and send it once no such page is open, and that request
+  is logged whole; and a page on an allowed origin that a refused host's redirect or a refused opener reached is
+  refused, but it can write into another window of its origin that it holds (through `window.opener`, say), and
+  that window is not refused, and the agent reads what it wrote there. A refused page can set a cookie on a
+  parent domain that an allowed host receives (`evil.example.com` setting `Domain=example.com` when
+  `app.example.com` is listed), and `browser.get_cookies` returns it, as the browser sends it to the allowed
+  host. Partition keys are judged by site in the same way, so a partitioned cookie a refused host set under its
+  site is returned when an allowed host belongs to that site. A glob entry is matched against a cookie's domain
+  by its text, so an entry such as `*.example.*` can withhold a domain cookie that a host it matches would
+  receive. A withheld network entry keeps the host's labels, which the page chooses, and its timing, status and
+  resource type. A popup's first navigation is withheld even when an allowed page opened it. A request still in
+  flight when its page navigates away is not listed until the log evicts it, since Playwright reports no failure
+  for it. A console message, page error or download is judged as its page is when it is delivered, so one a
+  refused document produced that is delivered only after the agent's navigation has made its page readable again
+  is kept (a page's own navigation to an allowed URL leaves it refused). A tab still waiting for the page that
+  opened it to judge it (that page closed first) stays refused until the agent navigates it or it is closed. On
+  an allowed http(s) URL it does not refuse the other tabs; on a blank, `blob:` or `data:` page, which can hold
+  what that page wrote, it does. An iframe from another host on an allowed page can open a popup, which is
+  judged by its opener, the allowed page. Playwright traces (`ENABLE_TRACING`, off by default) record the whole
+  browser context, the refused page included, and a storage-state export (`POST /sessions/{id}/storage-state`,
+  saving an auth profile) holds every host's cookies. Iframes and subresources from other hosts on an allowed
+  page are not filtered, by design.
+
+### Fixed
+
+- **The session-limit error names only the sessions the caller may use.** Under named credentials
+  (`API_BEARER_TOKENS`), the error `browser.create_session` (and an observe or act tool that creates a
+  session) returns at `MAX_SESSIONS` listed every live session id, other operators' included. It now lists
+  the caller's own and unowned sessions, and counts the rest.
+- **An MCP session (`MCP-Session-Id`) belongs to the operator who initialized it.** Under named credentials,
+  another operator holding the id could ping it, subscribe it to resources and `DELETE /mcp` it, though tool
+  calls always ran as the caller's own operator. Any other operator now gets `-32001` "Unknown MCP session".
+  MCP session ids created before this release, or by a client that initialized without a named credential,
+  stay usable by any operator until they are deleted or evicted. The `browser://sessions` update no longer
+  reaches other operators' subscribers when an owned session closes; the session's record now decides who
+  hears of it. The MCP session table keeps 500 sessions and evicts the least recently used, so one operator
+  initializing many evicted another operator's idle session. An operator now keeps at most 100, and past that
+  loses its own least recently used first. Unowned sessions are bounded by the 500 alone.
+- **Under named credentials, a session id with no live session and no record is refused like another
+  operator's.** Such an id has no owner to check, so the routes and MCP tools that read a session's files by
+  id (replay, audit, witness) served an orphaned id's files and events to every operator, while `/artifacts`
+  refused them, and other routes answered it in their own words, which told another operator's session from
+  none. Routes and tools that name the session id (in the path or a `session_id` parameter) now answer `404`
+  `unknown_session` before anything else. Approvals and agent jobs, looked up by their own id, apply the
+  same rule to the session they belong to: they are left out of listings and answer as if they did not
+  exist. An upload from such an id's directory under `UPLOAD_ROOT` is refused. A subfolder of `UPLOAD_ROOT`
+  named like a session id (12 lowercase hexadecimal characters, so a name of 12 digits, such as a timestamp,
+  too) is treated as that session's directory, even if you made it yourself, and an upload refused for that
+  reason says so: rename the folder. Other subfolders stay shared with every operator. Deployments without
+  named credentials are unchanged.
+- **Tab listings, the `fast` observe preset and the bot-challenge check no longer wait without end for a page
+  stuck in a script.** All three run under the session lock, so one tab whose renderer never answered stalled
+  every call on the session. A tab's title now waits at most 2 seconds (the tab is listed without one), the
+  `fast` preset's title at most 30 seconds (observe fails), and the bot-challenge probe that runs after every
+  action at most 30 seconds (the page is then checked by its URL alone).
+- **A failed auth-profile save loses nothing, unless putting the previous state back fails too.** Saving a
+  session's state as a profile wrote the state file first and then read the page's title for the profile's
+  metadata. When that read or the metadata write failed, the new state file stayed in place, on a first save
+  with no metadata beside it, so with no owner. The title is now read first, and the new state and metadata are
+  written beside the profile's own and put in place together: a save that fails or is cancelled at any point
+  leaves the profile's previous state and metadata as they were, and a first save that fails leaves neither. If
+  putting the previous state back fails as well (a file Windows keeps locked, say), the new state stays, beside
+  the previous metadata or, on a first save, none, and an error is logged; the previous state, if there was one,
+  is left in a hidden file the error names. The state file is there throughout a save, for a session opening the
+  profile or an export meanwhile. A process killed during a save can leave the new state with the previous
+  metadata, and hidden `.state.json*.tmp.json` files beside them, the previous login among them; exports leave
+  those out. A rename that Windows refuses for a moment (another process has the file open) is tried again. An
+  encrypted save also tries to remove the plaintext `state.json` saved before the encryption key was set; a
+  removal that fails is logged, and the save stands.
+- **An action whose observation hits a permission error on a file reports it without the server's path.** When
+  the observation after an action hit a permission error on a file (`EACCES` or `EPERM`: a screenshot in an
+  artifact directory the controller may not write, say), the OS error, path included, was returned as the
+  action's `observation_error`. It is now a fixed text, and the OS error is logged.
+
 ## [1.11.1] — 2026-10-26
 
 A security release over 1.11.0, with one advisory: GHSA-wrg7-3hw9-f5wj (a page could choose which

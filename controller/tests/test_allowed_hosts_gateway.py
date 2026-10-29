@@ -9,14 +9,18 @@ BrowserManager's allowlist and a mocked context, or a mocked page.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from playwright.async_api import Error as PlaywrightError
 
 from app.browser_manager import BrowserManager
 from app.tool_gateway import McpToolGateway
+from app.tool_gateway import gateway as gateway_module
 from app.tool_inputs import (
     DragDropInput,
     EvalJsInput,
@@ -27,6 +31,7 @@ from app.tool_inputs import (
     SetStorageInput,
     WaitForSelectorInput,
 )
+from tests.test_allowed_hosts_reads import gateway_for, manager_for, read_session
 from tests.test_browser_manager_create_session import _settings
 
 
@@ -129,3 +134,169 @@ async def test_page_tools_refuse_before_touching_the_page(tool: str) -> None:
     page.content.assert_not_called()
     page.wait_for_selector.assert_not_called()
     page.mouse.move.assert_not_called()
+
+
+# ── wait_for_selector waits without the session lock (round 4, B1) ───────────
+
+# How long an action may wait for the session while wait_for_selector waits.
+ACTION_WAIT_SECONDS = 1.0
+
+
+async def test_an_action_runs_on_the_session_while_wait_for_selector_waits(tmp_path: Path) -> None:
+    """The wait lasts up to its timeout (60 s): under the session lock it stalled every action on the
+    session meanwhile, the click that makes the element appear among them."""
+    manager = manager_for(tmp_path)
+    session = read_session(manager, "returns", tmp_path)
+    session.page.move = None
+    appeared, entered = asyncio.Event(), asyncio.Event()
+
+    async def wait_for_selector(*_args, **_kwargs) -> None:
+        entered.set()
+        await appeared.wait()
+
+    session.page.wait_for_selector = wait_for_selector
+    waiting = asyncio.ensure_future(
+        gateway_for(manager)._wait_for_selector(WaitForSelectorInput(session_id="s1", selector="#late"))
+    )
+    # The wait is under way (past any lock it might take) before the action asks for the session (F7).
+    await asyncio.wait_for(entered.wait(), timeout=ACTION_WAIT_SECONDS)
+
+    async def click() -> None:
+        async with session.lock:  # what every action holds while it runs (BrowserActionPipeline.run)
+            appeared.set()
+
+    action = asyncio.ensure_future(click())
+    done, _ = await asyncio.wait({action}, timeout=ACTION_WAIT_SECONDS)
+    if not done:
+        action.cancel()
+        waiting.cancel()
+    assert done, "the action could not run until the wait had ended"
+
+    assert (await waiting)["selector"] == "#late"
+
+
+# ── A wait refused because its page moved answers at its timeout (round 4c, CR-3) ──
+
+WAIT_TIMEOUT_MS = 400
+# asyncio may wake a sleeper up to its clock's resolution early (about 16 ms on Windows).
+CLOCK_TOLERANCE_SECONDS = 0.05
+
+
+async def timed_wait(manager, session, wait_for_selector) -> float:
+    """Seconds the wait took to answer; it must answer with the moved-page refusal."""
+    session.page.wait_for_selector = wait_for_selector
+    started = time.monotonic()
+    with pytest.raises(PermissionError, match="moved while it was read"):
+        await gateway_for(manager)._wait_for_selector(
+            WaitForSelectorInput(session_id="s1", selector="#x", timeout_ms=WAIT_TIMEOUT_MS)
+        )
+    return time.monotonic() - started
+
+
+@pytest.mark.parametrize("raises", [False, True], ids=["matched", "raised"])
+async def test_a_wait_refused_because_its_page_moved_answers_no_sooner_than_its_timeout(
+    tmp_path: Path, raises: bool
+) -> None:
+    """A refusal right after the selector matched on the refused document, against one at the timeout when it
+    did not, told the agent whether its selector matched there: one bit per call, from the latency."""
+    manager = manager_for(tmp_path)
+    session = read_session(manager, "returns", tmp_path)
+
+    async def wait_for_selector(*_args, **_kwargs) -> None:
+        await session.page._moved()
+        if raises:
+            raise PlaywrightError("Unexpected token in selector")
+
+    elapsed = await timed_wait(manager, session, wait_for_selector)
+
+    assert elapsed >= WAIT_TIMEOUT_MS / 1000 - CLOCK_TOLERANCE_SECONDS, elapsed
+
+
+# The pad a moved wait's refusal waits past its timeout (gateway.MOVED_PAD_SECONDS), set for these tests,
+# and how much later than that an answer still counts as the same time.
+MOVED_PAD_SECONDS = 0.25
+PAD_SLACK_SECONDS = 0.15
+# How late a fake Playwright answers an unmatched wait: its own timer, then one IPC round trip.
+IPC_LAG_SECONDS = 0.03
+# How long a test lets a moved wait run into its refusal's sleep before cancelling it.
+INTO_THE_SLEEP_SECONDS = 0.05
+
+
+@pytest.mark.parametrize("matched", [True, False], ids=["matched", "unmatched-answered-late"])
+async def test_a_moved_wait_answers_at_its_timeout_and_pad_whether_or_not_the_selector_matched(
+    tmp_path: Path, monkeypatch, matched: bool
+) -> None:
+    """Round 4d (R4C-L1-8): a matched wait was refused exactly at the deadline, and an unmatched one at
+    Playwright's own timer plus an IPC round trip, so on a fine clock an agent timing many refusals could
+    tell the two apart."""
+    monkeypatch.setattr(gateway_module, "MOVED_PAD_SECONDS", MOVED_PAD_SECONDS, raising=False)
+    manager = manager_for(tmp_path)
+    session = read_session(manager, "returns", tmp_path)
+
+    async def wait_for_selector(*_args, timeout: float, **_kwargs) -> None:
+        await session.page._moved()
+        if not matched:
+            await asyncio.sleep(timeout / 1000 + IPC_LAG_SECONDS)
+            raise PlaywrightError(f"Timeout {timeout}ms exceeded.")
+
+    elapsed = await timed_wait(manager, session, wait_for_selector)
+
+    answer_at = WAIT_TIMEOUT_MS / 1000 + MOVED_PAD_SECONDS
+    assert answer_at - CLOCK_TOLERANCE_SECONDS <= elapsed < answer_at + PAD_SLACK_SECONDS, elapsed
+
+
+def chained(exc: BaseException | None) -> list[BaseException]:
+    """The exception and every one its __cause__ or __context__ leads to, suppressed or not."""
+    found: list[BaseException] = []
+    while exc is not None and all(exc is not seen for seen in found):
+        found.append(exc)
+        exc = exc.__cause__ or exc.__context__
+    return found
+
+
+@pytest.mark.parametrize("cancelled", [False, True], ids=["refused", "cancelled-while-it-waits"])
+async def test_a_moved_waits_answer_keeps_nothing_of_the_waits_own_error(
+    tmp_path: Path, monkeypatch, cancelled: bool
+) -> None:
+    """Round 4d (R4C-L1-8): the refusal waited inside the wait's except block, so its PermissionError, and a
+    cancel during that sleep, carried Playwright's error as __context__. Its call log can quote the refused
+    page's markup, and a cancel logged with its traceback shows it."""
+    monkeypatch.setattr(gateway_module, "MOVED_PAD_SECONDS", MOVED_PAD_SECONDS, raising=False)
+    manager = manager_for(tmp_path)
+    session = read_session(manager, "returns", tmp_path)
+    failed = asyncio.Event()
+
+    async def wait_for_selector(*_args, **_kwargs) -> None:
+        await session.page._moved()
+        failed.set()
+        raise PlaywrightError("waiting for locator('#x') <div>REFUSED-MARKUP</div>")
+
+    session.page.wait_for_selector = wait_for_selector
+    wait = asyncio.ensure_future(
+        gateway_for(manager)._wait_for_selector(
+            WaitForSelectorInput(session_id="s1", selector="#x", timeout_ms=WAIT_TIMEOUT_MS)
+        )
+    )
+    if cancelled:
+        await asyncio.wait_for(failed.wait(), timeout=WAIT_TIMEOUT_MS / 1000)
+        await asyncio.sleep(INTO_THE_SLEEP_SECONDS)
+        wait.cancel()
+
+    with pytest.raises(asyncio.CancelledError if cancelled else PermissionError) as answered:
+        await wait
+
+    assert not [exc for exc in chained(answered.value) if isinstance(exc, PlaywrightError)], chained(answered.value)
+
+
+async def test_control_a_wait_whose_page_did_not_move_answers_when_the_selector_matches(tmp_path: Path) -> None:
+    manager = manager_for(tmp_path)
+    session = read_session(manager, "returns", tmp_path)
+    session.page.move = None
+    session.page.wait_for_selector = AsyncMock()
+
+    started = time.monotonic()
+    await gateway_for(manager)._wait_for_selector(
+        WaitForSelectorInput(session_id="s1", selector="#x", timeout_ms=WAIT_TIMEOUT_MS)
+    )
+
+    assert time.monotonic() - started < WAIT_TIMEOUT_MS / 1000 / 2
