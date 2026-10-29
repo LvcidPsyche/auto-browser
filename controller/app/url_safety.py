@@ -17,6 +17,7 @@ and allowlist checks parse that instead of the raw input.
 from __future__ import annotations
 
 import re
+import unicodedata
 from urllib.parse import urlsplit
 
 from idna import uts46_remap
@@ -26,6 +27,8 @@ from idna import uts46_remap
 _C0_CONTROL_OR_SPACE = "".join(chr(code) for code in range(0x21))
 _TAB_OR_NEWLINE = str.maketrans("", "", "\t\n\r")
 _SPECIAL_SCHEMES = ("http:", "https:", "ws:", "wss:", "ftp:", "file:")
+# A special scheme with an authority (file: has its own rules) and the run of slashes and backslashes after it.
+_AUTHORITY_SLASHES = re.compile(r"^(https?:|wss?:|ftp:)[/\\]*", re.IGNORECASE)
 # WHATWG reads a host whose last label is a number (decimal, or hex after 0x) as IPv4, in one to four
 # decimal, octal (a leading 0) or hex parts; only the dotted quad of plain decimals is written as it reads.
 _NUMBER_LABEL = re.compile(r"0[xX][0-9a-fA-F]*|[0-9]+")
@@ -38,6 +41,9 @@ def browser_equivalent_url(url: str) -> str:
     normalized = url.strip(_C0_CONTROL_OR_SPACE).translate(_TAB_OR_NEWLINE)
     if not normalized.lower().startswith(_SPECIAL_SCHEMES):
         return normalized
+    # A browser skips any run of slashes and backslashes after a special scheme's colon, none included, and
+    # reads the authority after it: https:u:p@h/ and https:////u:p@h/ are both u:p@h to it, none to urllib.
+    normalized = _AUTHORITY_SLASHES.sub(r"\1//", normalized, count=1)
     # Backslash is a path separator for special schemes up to the query or
     # fragment; inside those it is a literal character in both parsers.
     cut = min((index for index in (normalized.find("?"), normalized.find("#")) if index != -1), default=-1)
@@ -59,6 +65,28 @@ def refuse_ambiguous_host(url: str, *, field_name: str) -> str:
         raise ValueError(
             f"{field_name} must not contain a backslash or a control character: a browser can read another host in it"
         )
+    return refuse_another_navigation_host(url, field_name=field_name)
+
+
+def refuse_another_navigation_host(url: str, *, field_name: str) -> str:
+    """``url`` as given, or ValueError when a browser would load another host from it than urllib reads.
+
+    refuse_ambiguous_host without its blanket rule, for a URL the agent
+    navigates to (navigate, open_tab, a navigate action): a backslash or a
+    control where it moves no host (in the query, in the path) is a page's to
+    read, a search for C:\\Users among them. The host is read as a browser
+    reads it (browser_equivalent_url: a backslash in the authority, a run of
+    slashes after the scheme), and mapped, decoded or numeric hosts are
+    refused as there. A control in the scheme or the authority is refused: a
+    browser drops a tab or a newline there, and urllib too, so both read the
+    same host, while the URL shown keeps it (a host punycoded with the tab in
+    it, or a scheme no host is found after).
+    """
+    if any(ord(char) < 0x20 for char in _scheme_and_authority(url)):
+        raise ValueError(
+            f"{field_name} has a control character in its scheme or host, which a browser drops: it would show "
+            "another host than the one a browser loads"
+        )
     host = urlsplit(url).hostname
     if host != urlsplit(browser_equivalent_url(url)).hostname:
         raise ValueError(f"{field_name} names another host to a browser than it shows")
@@ -67,15 +95,45 @@ def refuse_ambiguous_host(url: str, *, field_name: str) -> str:
     if not written.isascii():
         try:
             mapped = browser_host(written)
+            # urllib's host, lower-cased its own way, must be the same host to a browser: a capital sigma that
+            # ends a label is a final small sigma to str.lower, a small sigma to UTS 46.
+            urllib_mapped = host if not host or host.isascii() else browser_host(host)
         except UnicodeError as error:
             raise ValueError(f"{field_name} writes its host {written!r} with what a browser refuses: {error}") from None
-        if mapped != host:
+        # Beyond case folding and composition (Cherokee capitals, a name written decomposed; casefold also
+        # maps the fi ligature, the long s and the micro sign as UTS 46 does, so those are accepted): full-width
+        # forms, segmented digits, a dropped ignorable.
+        if _folded(mapped) != _folded(written):
             raise ValueError(
                 f"{field_name} writes its host {written!r} in a form a browser reads as another host, {mapped!r}"
+            )
+        if urllib_mapped != mapped:
+            raise ValueError(
+                f"{field_name} writes its host {written!r} in a form a browser reads as another host than urllib"
+                f" does ({mapped!r}, not {urllib_mapped!r})"
             )
     if host and _decoded_by_a_browser(host):
         raise ValueError(f"{field_name} writes its host {host!r} in a form a browser reads as another host")
     return url
+
+
+def _scheme_and_authority(url: str) -> str:
+    """What of ``url`` comes before its path, query or fragment: its scheme, the slashes after it, its authority.
+
+    As a browser reads them for a special scheme: any run of slashes and backslashes after the colon, and the
+    authority up to the next slash, backslash, ? or #. With no colon, all of it.
+    """
+    colon = url.find(":")
+    if colon == -1:
+        return url
+    authority = url[colon + 1 :].lstrip("/\\")
+    end = next((index for index, char in enumerate(authority) if char in "/\\?#"), len(authority))
+    return url[: len(url) - len(authority) + end]
+
+
+def _folded(text: str) -> str:
+    """``text`` composed (NFC) and case-folded: what is left of a host once case and composition are set aside."""
+    return unicodedata.normalize("NFC", text).casefold()
 
 
 def browser_host(host: str) -> str:

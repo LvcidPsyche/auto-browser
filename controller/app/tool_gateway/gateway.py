@@ -17,7 +17,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..action_errors import BrowserActionError, SessionNotFoundError
 from ..approval_display import shown_code_points
-from ..approvals import ApprovalRequiredError, given_back_notes, held_for_execution
+from ..approvals import CONTROLLER_SCOPE, ApprovalRequiredError, given_back_notes, held_for_execution
 from ..browser.element_ids import refuse_selector_hint
 from ..browser.page_read import MOVED_DETAIL, bounded, locked_read, start_read
 from ..browser.services.diagnostics import checked_screenshot
@@ -124,6 +124,8 @@ SESSION_STARTER_TOOLS = (
     "browser.wait_for_selector",
 )
 IMPLICIT_SESSION_CREATE_TOOLS = frozenset(SESSION_STARTER_TOOLS)
+# Tools that queue an agent step or run: its request carries its own workflow_profile (_call_tool).
+QUEUE_TOOLS = frozenset({"browser.queue_agent_run", "browser.queue_agent_step"})
 
 
 # Characters of a governed tool call's arguments shown to the approving operator.
@@ -282,6 +284,14 @@ class McpToolGateway:
                 # the force override below: force decides at call time (the orchestrator
                 # applies it to every run), and is not stored on the job.
                 raw_arguments["workflow_profile"] = "governed" if policy_profile == "governed" else "fast"
+            if (
+                spec.name in QUEUE_TOOLS
+                and policy_profile == "governed"
+                and isinstance(raw_arguments.get("request"), dict)
+            ):
+                # As for a cron job: a governed caller's queued run or step runs governed, whatever its request
+                # names. A fast caller's request keeps its own profile.
+                raw_arguments["request"] = {**raw_arguments["request"], "workflow_profile": "governed"}
             if spec.governed_kind is not None and self.manager.settings.force_governed_approvals:
                 # workflow_profile is the caller's argument, and the caller is
                 # the agent the approval is meant to check: on a deployment that
@@ -305,7 +315,9 @@ class McpToolGateway:
             # Before the handler, for tools that read a session's records
             # without resolving the session itself (witness, audit, downloads).
             session_id = getattr(arguments, "session_id", None)
-            if isinstance(session_id, str) and session_id:
+            # Controller-wide approvals are listed by their owner: their scope names no session.
+            listing_controller = spec.name == "browser.list_approvals" and session_id == CONTROLLER_SCOPE
+            if isinstance(session_id, str) and session_id and not listing_controller:
                 await self.manager.ensure_session_accessible(session_id)
             approval = await self._require_governed_tool_approval(
                 spec,

@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .url_safety import refuse_another_navigation_host
+
 ProtectionMode = Literal["normal", "confidential"]
 WitnessRemoteStatus = Literal["disabled", "idle", "healthy", "delivered", "failed"]
 
@@ -153,6 +155,8 @@ class CreateSessionRequest(StrictInputModel):
         if (self.proxy_username or self.proxy_password) and not self.proxy_server:
             raise ValueError("proxy_username and proxy_password require proxy_server")
         if self.start_url:
+            # Checked by its host as navigate checks a URL: the session's first page is a navigation too.
+            refuse_another_navigation_host(self.start_url, field_name="start_url")
             self.start_url = validate_url(
                 self.start_url,
                 field_name="start_url",
@@ -248,6 +252,7 @@ class NavigateRequest(StrictInputModel):
     @field_validator("url")
     @classmethod
     def validate_navigation_url(cls, value: str) -> str:
+        refuse_another_navigation_host(value, field_name="url")
         return validate_url(value, field_name="url", allowed_schemes=HTTP_URL_SCHEMES)
 
 
@@ -302,6 +307,7 @@ class OpenTabRequest(StrictInputModel):
     def validate_open_tab_url(cls, value: str | None) -> str | None:
         if value is None:
             return None
+        refuse_another_navigation_host(value, field_name="url")
         return validate_url(value, field_name="url", allowed_schemes=HTTP_URL_SCHEMES)
 
 
@@ -452,6 +458,8 @@ class BrowserActionDecision(StrictInputModel):
         if self.action == "navigate":
             if not self.url:
                 raise ValueError("navigate requires url")
+            # An approval shows the url: a host a browser reads otherwise would be approved for another.
+            refuse_another_navigation_host(self.url, field_name="url")
             self.url = validate_url(self.url, field_name="url", allowed_schemes=HTTP_URL_SCHEMES)
         if self.action == "upload":
             if not has_locator_target:

@@ -87,6 +87,7 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 pii_scrub_enabled=True,
                 require_approval_for_uploads=True,
                 force_governed_approvals=False,
+                action_timeout_ms=15000,
             ),
             memory=SimpleNamespace(
                 save=AsyncMock(

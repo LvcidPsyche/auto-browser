@@ -238,7 +238,7 @@ class BrowserDiagnosticsService:
 
         page.on("console", lambda message: self._keep_output(page, session.console_messages, console_entry(message)))
         page.on("pageerror", lambda error: self._keep_output(page, session.page_errors, str(error)))
-        page.on("request", lambda request: self._on_request_started(page, request))
+        page.on("request", lambda request: self._on_request_started(session, page, request))
         page.on("requestfailed", lambda request: self._record_request_failure(session, page, request))
         page.on("download", lambda download: self._on_download(session, page, download))
         page.on("popup", lambda popup: self._on_popup(session, page, popup))
@@ -273,10 +273,16 @@ class BrowserDiagnosticsService:
         )
         spawn_background_task(self.manager._handle_download(session, download, page_refused=page_refused))
 
-    def _on_request_started(self, page: "Page", request: Any) -> None:
-        if _top_level_navigation(request) and self.manager._url_off_list(request.url):
-            # The commit that follows is the refused host's choice, whatever its URL (a redirect).
-            self.manager.page_provenance.refused_hop_started(page, request)
+    def _on_request_started(self, session: "BrowserSession", page: "Page", request: Any) -> None:
+        if _top_level_navigation(request):
+            if self.manager._url_off_list(request.url):
+                # The commit that follows is the refused host's choice, whatever its URL (a redirect).
+                self.manager.page_provenance.refused_hop_started(page, request)
+            # A refused page that caused this navigation can close before its commit is delivered. The
+            # page's own taint is left out: its commits stay refused while it lasts (PageProvenance.committed).
+            self.manager.page_provenance.navigation_started(
+                page, request, session_refused=self.manager._session_has_refused_page(session, besides=page)
+            )
         self._started_refused[request] = self.manager._page_refused(page)
 
     def _record_request_failure(self, session: "BrowserSession", page: "Page", request: Any) -> None:
@@ -331,8 +337,11 @@ class BrowserDiagnosticsService:
         allowed URL whose path and query carry what it read. That also refuses
         a tab's own navigations (the agent's clicks among them) while a refused
         tab is open; the agent's navigate clears it, and closing the refused tab
-        stops it. Such a commit of a blank, blob: or data: document is a
-        refused commit, as the refused tab's own would be: the document has the
+        stops it, though not for a navigation that started while it was open or
+        within CLOSED_PAGE_GRACE_SECONDS of its close, nor for a commit made
+        within that time (PageProvenance.navigation_started). Such a commit of
+        a blank, blob: or data: document is a refused commit, as the refused
+        tab's own would be: the document has the
         origin of the page that made it, which can be the refused one. Not the
         commit replayed for a page the context just ``reported`` (its opener
         judges that one), nor the controller's own blank (committed() sees that
@@ -341,13 +350,26 @@ class BrowserDiagnosticsService:
         if frame.parent_frame is not None:
             return
         url_refused = self.manager._url_off_list(frame.url)
-        session_refused = not url_refused and not reported and self.manager._session_has_refused_page(session)
+        session_refused = (
+            not url_refused
+            and not reported
+            and (
+                self.manager._session_has_refused_page(session)
+                or self.manager.page_provenance.started_while_refused(page)
+            )
+        )
         on_http = is_http(frame.url)
-        if self.manager.page_provenance.committed(
+        provenance = self.manager.page_provenance
+        # During the controller's navigation or escape of the page: whether this commit may be another page's choice.
+        another_page_counted = provenance.recording_commits(page) and (
+            self.manager._session_has_refused_page(session, besides=page) or provenance.started_while_refused(page)
+        )
+        if provenance.committed(
             page,
             frame.url,
             url_refused=url_refused or (session_refused and not on_http),
             by_another_page=session_refused and on_http,
+            another_page_counted=another_page_counted,
         ):
             spawn_background_task(self._return_to_blank(session, page))
 
@@ -392,7 +414,11 @@ class BrowserDiagnosticsService:
         to, say) left session.page pointing at a closed page: every later action
         failed and the session read as interrupted while its other tabs were fine.
         """
-        self.manager.page_provenance.forget(page)
+        provenance = self.manager.page_provenance
+        if self.manager._url_off_list(page.url) or provenance.counts_for_its_session(page):
+            # What it did just before closing (an opener it navigated, a blank it wrote) is delivered after this.
+            provenance.closed_while_counting(session.id)
+        provenance.forget(page)
         if session.page is not page:
             return
         context = getattr(session, "context", None)

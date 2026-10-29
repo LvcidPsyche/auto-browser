@@ -587,12 +587,15 @@ class MessageTests(SpendBase):
     """What the agent is told about its approval: spent and how to ask again, or still approved."""
 
     async def test_a_spent_approval_says_when_it_was_spent_and_how_to_ask_again(self) -> None:
+        """Item 34: it advised repeating the call first, which invites a second payment or send when the first may
+        have gone through. It warns that the action may have taken effect, then says how to do it again."""
         decision, approval_id = await self.approved_click()
         await self.manager.execute_decision(SESSION, decision, approval_id=approval_id)
         executed_at = (await self.manager.approvals.get(approval_id)).executed_at
         expected = (
-            f"approval {approval_id} was spent when its action started (executed_at {executed_at}); "
-            "repeat the call without approval_id to ask for a new approval"
+            f"approval {approval_id} was spent when its action started (executed_at {executed_at}), so the action "
+            "may have taken effect: observe the page, or check the outcome, before acting again. Only to do it "
+            "again, repeat the call without approval_id, which asks an operator for a new approval"
         )
 
         with self.assertRaises(PermissionError) as check:

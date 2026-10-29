@@ -25,7 +25,7 @@ from unittest.mock import AsyncMock, Mock
 
 from playwright.async_api import Error as PlaywrightError
 
-from app.action_errors import BrowserActionError
+from app.action_errors import BrowserActionError, SessionNotFoundError
 from app.approvals import ApprovalRequiredError, ApprovalStore, held_for_execution
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
@@ -39,6 +39,10 @@ from app.witness import WitnessPolicyOutcome
 SESSION = "session-1"
 START_URL = "https://example.com"
 OFF_LIST_URL = "https://elsewhere.test/"
+# How long a test waits for a paused claim, and for the call once it is let go.
+CLAIM_WAIT_SECONDS = 5.0
+# What the given-back note says of an approval whose session closed: it cannot be run, so no retry with its id.
+CLOSED_SESSION_NOTE = "but its session has closed, so nothing can run it"
 PAST = (datetime.now(UTC) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
 # Long enough for a loaded machine; what the tests wait on is an event, not a duration.
 WAIT_SECONDS = 30
@@ -247,6 +251,183 @@ class GiveBackTests(SpendBase):
     async def assert_retry_runs_once(self, decision: BrowserActionDecision, approval_id: str) -> None:
         await self.manager.execute_decision(SESSION, decision, approval_id=approval_id)
         self.assertEqual((self.page.clicks, await self.status(approval_id)), (1, "executed"))
+
+    async def test_executing_an_approval_of_a_closed_session_is_refused_and_leaves_it_approved(self) -> None:
+        """B-COMPOSE-3 / B-LC-4: execute_approval claimed the approval before it resolved the session for every
+        action but an upload, so an approval of a session that had closed (every approval a governed cron
+        run asked for, once the run ended) was spent with nothing run."""
+        decision, approval_id = await self.approved_click()
+        del self.manager.sessions[SESSION]  # the session closed
+
+        with self.assertRaises(SessionNotFoundError):
+            await self.manager.execute_approval(approval_id)
+
+        approval = await self.manager.approvals.get(approval_id)
+        self.assertEqual((self.page.clicks, approval.status, approval.executed_at), (0, "approved", None))
+        self.manager.sessions[SESSION] = self.session  # the same session again: the approval still runs once
+        await self.manager.execute_approval(approval_id)
+        self.assertEqual((self.page.clicks, await self.status(approval_id)), (1, "executed"))
+
+    async def test_a_session_that_closes_while_its_approval_is_claimed_gives_the_approval_back(self) -> None:
+        """Item 26 (Codex C 3): execute_approval resolves the session before it claims (item 18), and the action
+        looks it up again after the claim. A session closed in between was refused there with nothing run, and
+        the approval stayed spent. A click and an upload: each looks the session up in its own service."""
+        self.settings.require_approval_for_uploads = True
+        click = {"action": "click", "reason": "submit payment", "selector": "#pay", "risk_category": "payment"}
+        upload = {"action": "upload", "reason": "attach", "selector": "#file", "file_path": "demo.txt"}
+        for action in (click, upload):
+            with self.subTest(action=action["action"]):
+                self.manager.sessions[SESSION] = self.session
+                approval_id = await self.approved(BrowserActionDecision(**action))
+                answer = await self.execute_while_the_session_closes_during_the_claim(approval_id)
+
+                self.assertTrue(answer.isError, answer.content[0].text)
+                self.assertEqual(answer.structuredContent.get("code"), "unknown_session", answer.structuredContent)
+                notes = answer.structuredContent.get("approval_given_back", {})
+                self.assertEqual(notes.get("status"), "approved", answer.structuredContent)
+                # Item 46 (Fable E1-F5): the note advised a retry with this approval_id once the cause is gone,
+                # and a closed session never comes back.
+                self.assertIn(CLOSED_SESSION_NOTE, notes.get("message", ""))
+                self.assertNotIn("Retry with this approval_id", notes.get("message", ""))
+                approval = await self.manager.approvals.get(approval_id)
+                self.assertEqual((approval.status, approval.executed_at), ("approved", None))
+                self.assertEqual((self.page.clicks, self.page.uploads), (0, []))
+
+    async def test_a_session_closed_while_execute_decision_reads_the_approval_gives_it_back(self) -> None:
+        """Item 42 (Fable E1-F1): execute_decision resolved the session, then read the approval in a worker
+        thread, and the dispatched click looked the session up again outside its pipeline: a close landing
+        during that read was raised there unrecorded, and the approval stayed spent with nothing run."""
+        _, approval_id = await self.approved_click()
+        store = self.manager.approvals
+        reading, release = asyncio.Event(), asyncio.Event()
+        require_approved = store.require_approved
+
+        async def paused_read(**kwargs: Any) -> Any:
+            approval = await require_approved(**kwargs)
+            if not reading.is_set():
+                reading.set()
+                await release.wait()
+            return approval
+
+        store.require_approved = paused_read  # type: ignore[method-assign]
+        call = asyncio.create_task(self.call("browser.execute_approval", approval_id=approval_id))
+        await asyncio.wait_for(reading.wait(), CLAIM_WAIT_SECONDS)
+        del self.manager.sessions[SESSION]  # after execute_decision's lookup, before the click's own
+        release.set()
+        answer = await asyncio.wait_for(call, CLAIM_WAIT_SECONDS)
+
+        await self.assert_answered_given_back(answer, approval_id)
+
+    async def test_an_upload_whose_file_goes_while_its_approval_is_claimed_gives_the_approval_back(self) -> None:
+        """Item 42: execute_approval checks the upload's file, then claims, and the upload resolves the file
+        again: one deleted during the claim was refused there, outside the pipeline, unrecorded, and the
+        approval stayed spent."""
+        self.settings.require_approval_for_uploads = True
+        upload = {"action": "upload", "reason": "attach", "selector": "#file", "file_path": "demo.txt"}
+        approval_id = await self.approved(BrowserActionDecision(**upload))
+        staged = Path(self.settings.upload_root) / "demo.txt"
+
+        answer = await self.execute_while_the_claim_is_written(approval_id, staged.unlink)
+
+        await self.assert_answered_given_back(answer, approval_id)
+
+    async def test_a_navigate_allowed_hosts_refuses_is_refused_before_an_approval_is_asked_for(self) -> None:
+        """Item 43 (Fable E1-F2): navigate checks ALLOWED_HOSTS only once it runs, so an operator was asked to
+        approve a navigation that could never run, and its approval was then spent with nothing run. The
+        runtime's ask (execute_decision) and the governed one (browser.execute_action) both check first."""
+        decision = BrowserActionDecision(action="navigate", reason="go pay", url=OFF_LIST_URL, risk_category="payment")
+        with self.subTest(ask="runtime"):
+            with self.assertRaisesRegex(PermissionError, "not allowlisted"):
+                await self.manager.execute_decision(SESSION, decision)
+            self.assertEqual(await self.manager.approvals.list(), [])
+        with self.subTest(ask="governed"):
+            answer = await self.call(
+                "browser.execute_action",
+                session_id=SESSION,
+                workflow_profile="governed",
+                action={"action": "navigate", "reason": "go", "url": OFF_LIST_URL, "risk_category": "write"},
+            )
+            self.assertTrue(answer.isError, answer.structuredContent)
+            self.assertIn("not allowlisted", answer.content[0].text)
+            self.assertEqual(await self.manager.approvals.list(), [])
+
+    async def test_control_a_navigate_whose_host_leaves_the_list_after_its_approve_gives_the_approval_back(
+        self,
+    ) -> None:
+        """Item 43, the other order: refused once the approval is claimed, and given back (item 42's record)."""
+        decision = BrowserActionDecision(
+            action="navigate", reason="go pay", url=f"{START_URL}/pay", risk_category="payment"
+        )
+        approval_id = await self.approved(decision)
+        self.settings.allowed_hosts = "localhost"
+
+        answer = await self.call("browser.execute_approval", approval_id=approval_id)
+
+        await self.assert_answered_given_back(answer, approval_id)
+        self.assertEqual(self.page.url, START_URL)
+
+    async def test_a_governed_upload_whose_file_goes_after_the_gateways_check_gives_the_approval_back(self) -> None:
+        """Item 55 (Codex F 4): execute_decision checks the upload's file again before it dispatches, outside
+        _dispatch_recorded: under the gateway's claim, a file gone since the gateway's check was refused there
+        unrecorded, and the approval stayed spent with nothing transferred."""
+        self.settings.require_approval_for_uploads = False
+        upload = {"action": "upload", "reason": "attach", "selector": "#file", "file_path": "demo.txt"}
+        approval_id = await self.approved_governed(upload)
+        staged = Path(self.settings.upload_root) / "demo.txt"
+
+        def execute() -> Any:
+            return self.call(
+                "browser.execute_action",
+                session_id=SESSION,
+                workflow_profile="governed",
+                action=upload,
+                approval_id=approval_id,
+            )
+
+        answer = await self.execute_while_the_claim_is_written(approval_id, staged.unlink, tool=execute)
+
+        await self.assert_answered_given_back(answer, approval_id)
+
+    async def assert_answered_given_back(self, answer: Any, approval_id: str) -> None:
+        self.assertTrue(answer.isError, answer.content[0].text)
+        notes = answer.structuredContent.get("approval_given_back", {})
+        self.assertEqual(notes.get("status"), "approved", answer.structuredContent)
+        approval = await self.manager.approvals.get(approval_id)
+        self.assertEqual((approval.status, approval.executed_at), ("approved", None))
+        self.assertEqual((self.page.clicks, self.page.uploads), (0, []))
+
+    async def execute_while_the_session_closes_during_the_claim(self, approval_id: str):
+        """browser.execute_approval of ``approval_id``, its session closed while the claim (executed) is written."""
+
+        def close() -> None:
+            del self.manager.sessions[SESSION]
+
+        return await self.execute_while_the_claim_is_written(approval_id, close)
+
+    async def execute_while_the_claim_is_written(self, approval_id: str, meanwhile: Any, *, tool: Any = None):
+        """``tool`` (browser.execute_approval of ``approval_id`` when None), ``meanwhile()`` run while the claim
+        (executed) is written."""
+        store = self.manager.approvals
+        writing, release = asyncio.Event(), asyncio.Event()
+        persist = store._persist
+
+        async def paused_claim(approval: Any) -> None:
+            if approval.id == approval_id and approval.status == "executed" and not writing.is_set():
+                writing.set()
+                await release.wait()
+            await persist(approval)
+
+        store._persist = paused_claim  # type: ignore[method-assign]
+        try:
+            call = asyncio.create_task(
+                tool() if tool else self.call("browser.execute_approval", approval_id=approval_id)
+            )
+            await asyncio.wait_for(writing.wait(), CLAIM_WAIT_SECONDS)
+            meanwhile()
+            release.set()
+            return await asyncio.wait_for(call, CLAIM_WAIT_SECONDS)
+        finally:
+            store._persist = persist  # type: ignore[method-assign]
 
     async def test_a_page_off_the_list_gives_the_approval_back(self) -> None:
         decision, approval_id = await self.approved_click()

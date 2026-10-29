@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from .approval_backends import ApprovalStoreBackend, FileApprovalStore, SQLiteApprovalStore
+from .approval_backends import ApprovalStoreBackend, FileApprovalStore, SQLiteApprovalStore, UnreadableRecord
 from .approval_display import UNBOUND_FIELDS, approval_provenance
 
 # The execution side moved to approval_execution.py; importers keep reaching it here.
@@ -72,6 +72,9 @@ __all__ = [
 # arguments name none). Session ids are uuid4().hex[:12], so this can never be one.
 # There is no session owner to ask, so these approvals follow ApprovalRecord.owner.
 CONTROLLER_SCOPE = "controller"
+# SQLite's statuses the startup catch-up keeps over a file record of another status (_undoes_a_final_decision):
+# a spend whatever the file record's time, an operator's rejection over one not later than it.
+KEPT_OVER_THE_FILE = frozenset({"executed", "rejected"})
 # What a sensitive `type` action's text is stored as in its approval.
 SENSITIVE_TEXT_PREFIX = "[sensitive text] hmac-sha256:"
 # How long the text of an undecided sensitive approval is kept in memory.
@@ -99,6 +102,19 @@ class Decision:
 
     record: ApprovalRecord
     on_claim: Literal["deferred", "withdrawn", "withdrawn_after_refusal", "withdrawn_spent"] | None = None
+
+
+class ApprovalStoresUntrusted(RuntimeError):
+    """Neither approval store can be trusted at a start: the file store still holds records that SQLite's spent
+    or rejected ones could not be written over, and SQLite could not take the file store's other records."""
+
+    def __init__(self, approval_ids: list[str]) -> None:
+        super().__init__(
+            "the approval store cannot start: the file store still holds records of approvals "
+            f"{', '.join(approval_ids)} that SQLite's spent or rejected ones could not be written over, and SQLite "
+            "could not take the file store's other records. Check that APPROVAL_ROOT and STATE_DB_PATH are writable, "
+            "then start again"
+        )
 
 
 class ApprovalStore:
@@ -147,8 +163,80 @@ class ApprovalStore:
             except Exception as exc:
                 logger.warning("sqlite approval store unavailable, using file store fallback: %s", exc)
             else:
-                self._primary = self.sqlite_store
+                try:
+                    await self._catch_sqlite_up()
+                except ApprovalStoresUntrusted:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "sqlite approval store could not catch up with the file store, using file store fallback: %r",
+                        exc,
+                    )
+                else:
+                    self._primary = self.sqlite_store
         await self._sweep_arguments(startup=True)
+
+    async def _catch_sqlite_up(self) -> None:
+        """Copy into SQLite every file record it lacks or holds differently, before SQLite is primary again.
+
+        Every write goes to the file store first, and to SQLite only while it is primary: a start whose
+        SQLite failed ran on the file store alone, and an approval spent then (executed) still read approved
+        in SQLite at the next start, so it ran twice.
+
+        What holds within one process: writes under the lock land whole and in order (_persist), and one whose
+        SQLite half fails puts the file record back (_write), so a file record that differs is a write SQLite
+        missed, or one cut off by the process dying between the two. What does not: records stored by 1.11.1,
+        several workers sharing the store (the lock is per process), and a restored backup can leave a file
+        record that differs without being the latest word. So SQLite's executed record stays over a file record
+        of another status whatever its time: a later one is a give-back SQLite never took (cut off by a crash,
+        a write whose put-back failed too, several workers), and losing it leaves the approval spent, and the
+        agent asks again. SQLite's rejected record stays over one not updated after it, and an approve after
+        the reject, later than it (made while SQLite was unavailable), is caught up. A record SQLite keeps is
+        written over the file's, so the two agree for a later start whose SQLite fails. The rule errs toward
+        spent or rejected.
+
+        The file store is repaired first, then SQLite takes the rest: a SQLite failure falls back to a file store
+        already repaired. A repair that fails is logged and leaves SQLite primary; if SQLite then fails as well,
+        neither store can be trusted, and the store refuses to start (ApprovalStoresUntrusted).
+        """
+        held = {record.id: record for record in await self.sqlite_store.list()}
+        copies: list[ApprovalRecord] = []
+        unrepaired: list[str] = []
+        for record in await self.file_store.list():
+            kept = held.get(record.id)
+            if kept == record:
+                continue
+            if kept is None or not self._undoes_a_final_decision(kept, record):
+                copies.append(record)
+                continue
+            logger.warning("approval %s: SQLite's %s record is kept over the file store's", record.id, kept.status)
+            try:
+                # And written over the file's: a start whose SQLite fails runs on the file store alone.
+                await self.file_store.upsert(kept)
+            except Exception as exc:
+                logger.error(
+                    "approval %s: SQLite's %s record could not be written over the file store's: %r",
+                    record.id,
+                    kept.status,
+                    exc,
+                )
+                unrepaired.append(record.id)
+        try:
+            for record in copies:
+                await self.sqlite_store.upsert(record)
+        except Exception as exc:
+            if unrepaired:
+                raise ApprovalStoresUntrusted(unrepaired) from exc
+            raise
+
+    def _undoes_a_final_decision(self, kept: ApprovalRecord, record: ApprovalRecord) -> bool:
+        """Whether ``record`` (the file's) would turn ``kept`` (SQLite's) to another status: a spend whatever
+        the file record's time, a rejection when the file record is not later than it."""
+        if kept.status not in KEPT_OVER_THE_FILE or record.status == kept.status:
+            return False
+        if kept.status == "executed":
+            return True  # a spend is final at a start
+        return self._parse_timestamp(record.updated_at) <= self._parse_timestamp(kept.updated_at)
 
     async def _sweep_arguments(self, *, startup: bool = False) -> None:
         """Remove the arguments no approve or call will read again: at each create (under the lock) and at startup.
@@ -164,7 +252,11 @@ class ApprovalStore:
         for approval_id in await self.file_store.arguments_ids():
             try:
                 approval: ApprovalRecord | None = await self.get(approval_id)
-            except KeyError:
+            except KeyError as exc:
+                if isinstance(exc, UnreadableRecord):
+                    if startup:
+                        logger.warning("kept the arguments of approval %s: its record is unreadable", approval_id)
+                    continue
                 approval = None
             except Exception:
                 if startup:
@@ -219,6 +311,11 @@ class ApprovalStore:
                 session_id=session_id, kind=kind, action=action, owner=owner, origin=origin
             )
             if existing is not None:
+                if action.sensitive and action.text:
+                    # Its digest matched, so this is the text it binds: held again from now, or an approval
+                    # whose text aged out (SENSITIVE_TEXT_RETENTION) could never be approved.
+                    self._prune_sensitive_texts()
+                    self._sensitive_texts[existing.id] = (action.text or "", time.monotonic())
                 return existing
 
             now = utc_now()
@@ -338,7 +435,7 @@ class ApprovalStore:
             if hold.rejection is None and not hold.gives_back_on_its_own:
                 return None
             approval = await self.get(hold.approval_id)
-            now = utc_now()
+            now = self._later_than(approval.updated_at)
             approval.status = "approved"
             approval.updated_at = now
             approval.executed_at = None
@@ -457,6 +554,7 @@ class ApprovalStore:
         approval.status = "executed"
         approval.updated_at = now
         approval.executed_at = now
+        # Run through here too, so the cancellation is reported: _persist would raise it once the write landed.
         _, cancelled = await _run_through(self._persist(approval))
         return approval, cancelled
 
@@ -545,7 +643,9 @@ class ApprovalStore:
                 )
             if status == "approved":
                 await self._refuse_what_is_no_longer_whole(approval)
-            now = utc_now()
+            # Later than the record it changes, as a give-back is: the catch-up keeps SQLite's rejection over a
+            # file record not later than it, so an approve in the reject's microsecond was lost.
+            now = self._later_than(approval.updated_at)
             approval.status = status
             approval.updated_at = now
             approval.decided_at = now
@@ -575,9 +675,53 @@ class ApprovalStore:
             raise ServerStateRefusal(f"approval {approval.id}: its text is no longer held; the agent asks again")
 
     async def _persist(self, approval: ApprovalRecord) -> None:
+        """Write a record to its end under the caller's lock, whatever happens to the caller.
+
+        The file write runs in a worker thread, which a cancellation does not stop: cancelled around it, the
+        caller released the lock while the write went on, and a write landing after a later one (approved,
+        after another call had spent the approval) revived the approval at the next start. A cancelled
+        caller is cancelled once the write has landed; a claim reports it instead (_mark_executed).
+        """
+        _, cancelled = await _run_through(self._write(approval))
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _write(self, approval: ApprovalRecord) -> None:
+        """The file store first, so a start whose SQLite fails sees every write, then SQLite while it is primary.
+
+        When SQLite's half fails, the file is put back to the record SQLite still holds (none: removed), then
+        the failure is raised: both stores hold what the caller is told, the old record. A file record left
+        later than SQLite's was read as a write SQLite missed, and caught up at the next start (a give-back
+        reported as failed, revived beside the new approval the agent asked for).
+        """
+        if self.sqlite_store is None or self._primary is not self.sqlite_store:
+            await self.file_store.upsert(approval)
+            return
+        try:
+            before: ApprovalRecord | None = await self.sqlite_store.get(approval.id)
+        except KeyError:
+            before = None
         await self.file_store.upsert(approval)
-        if self.sqlite_store is not None and self._primary is self.sqlite_store:
+        try:
             await self.sqlite_store.upsert(approval)
+        except Exception:
+            await self._put_the_file_back(approval.id, before)
+            raise
+
+    async def _put_the_file_back(self, approval_id: str, before: ApprovalRecord | None) -> None:
+        try:
+            if before is None:
+                await self.file_store.remove(approval_id)
+            else:
+                await self.file_store.upsert(before)
+        except Exception as exc:
+            # The SQLite failure is still raised; the next start may catch this file record up.
+            logger.error(
+                "approval %s: its SQLite write failed, and its file record could not be put back: %r",
+                approval_id,
+                exc,
+                exc_info=exc,
+            )
 
     async def _operator_rejected(self, approval: ApprovalRecord) -> bool:
         # Whatever the rejected record's origin: a rejection only ever restricts,
@@ -672,6 +816,20 @@ class ApprovalStore:
     def _expiry_timestamp(self, decided_at: str) -> str:
         decided = self._parse_timestamp(decided_at)
         return (decided + self.approval_ttl).isoformat().replace("+00:00", "Z")
+
+    @classmethod
+    def _later_than(cls, stamp: str) -> str:
+        """utc_now(), or ``stamp`` plus a microsecond when the clock has not moved past it.
+
+        For a give-back: the catch-up reads a file record not later than SQLite's executed one as a stale
+        write, and two utc_now() calls can return the same microsecond, so a give-back carries a later time
+        than the claim it turns back.
+        """
+        now = utc_now()
+        if cls._parse_timestamp(now) > cls._parse_timestamp(stamp):
+            return now
+        later = cls._parse_timestamp(stamp) + timedelta(microseconds=1)
+        return later.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     @staticmethod
     def _parse_timestamp(value: str) -> datetime:

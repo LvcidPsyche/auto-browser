@@ -563,6 +563,27 @@ const shownValue = (value, cut) => {
   const [kept, more] = cutChars(value, cut);
   return JSON.stringify(kept) + leftOut(more);
 };
+// A URL's host as written, as the server's _WRITTEN_HOST reads it, and the URL with a non-ASCII host as a
+// browser sends it, that host as written beside it (the server's url_as_sent).
+const WRITTEN_HOST = /^[A-Za-z][A-Za-z0-9+.-]*:\\/\\/(?:[^\\/?#]*@)?(\\[[^\\]]*\\]|[^:\\/?#]*)/;
+const urlAsSent = (url) => {
+  const match = WRITTEN_HOST.exec(url);
+  if (!match || /^[\\x00-\\x7f]*$/.test(match[1])) return [url, null];
+  let sent;
+  try {
+    sent = new URL(url).hostname;
+  } catch {
+    return [url, null];
+  }
+  const start = match[0].length - match[1].length;
+  return [url.slice(0, start) + sent + url.slice(match[0].length), match[1]];
+};
+const shownField = (name, value, cut) => {
+  if (name !== 'url' || typeof value !== 'string') return `${name}=${shownValue(value, cut)}`;
+  const [sent, written] = urlAsSent(value);
+  const shown = `${name}=${shownValue(sent, cut)}`;
+  return written === null ? shown : `${shown} (host as written: ${written})`;
+};
 const describeAction = (action, origin, cut) => {
   if (!action || typeof action !== 'object') return '—';
   // A governed tool call (eval_js, set_cookies, ...) is approved through a
@@ -593,7 +614,7 @@ const describeAction = (action, origin, cut) => {
     if ((actions && !actions.includes(action.action)) || !isSet(value)) return;
     const part = name === 'text' && action.sensitive
       ? APPROVAL_DISPLAY.sensitiveTextHidden
-      : `${name}=${shownValue(value, cut)}`;
+      : shownField(name, value, cut);
     const note = unusedNote(name)
       ?? (verb === 'select_option' && name === 'value' ? APPROVAL_DISPLAY.valueOrLabel : null);
     parts.push(note ? `${part} ${note}` : part);

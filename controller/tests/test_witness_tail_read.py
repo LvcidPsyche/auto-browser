@@ -10,6 +10,7 @@ shift it with an ASCII pad after the text.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import datetime
@@ -193,3 +194,51 @@ class TailReadManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ran), 3)
         self.assertEqual(result["receipt_count"], 3)
         self.assertTrue(result["valid"], result["reason"])
+
+    async def test_lone_surrogates_in_a_pages_title_neither_fail_the_action_nor_cost_its_receipt(self) -> None:
+        """SG-2 (Codex M1): a string can hold a lone surrogate ('Sale\\ud800today'), which UTF-8 cannot encode: page
+        text read through a driver that hands it over (Chromium replaces one with U+FFFD; tool arguments cannot carry
+        one, as pydantic's str refuses it, string_unicode). The action ran, then failed writing actions.jsonl and its
+        receipt, as ACT-01 did. Normal, malformed, malformed, recovered: four receipts, and no error."""
+        del self.manager._append_jsonl  # the real actions.jsonl writer
+        titles = ["Sale today", "Sale\ud800today", "Sale\udc00today", "Sale today"]
+        written = ["Sale today", "Sale�today", "Sale�today", "Sale today"]
+        ran: list[int] = []
+
+        async def click() -> None:
+            ran.append(1)
+
+        for title in titles:
+            payload = {"url": "https://example.com", "title": title, "text_excerpt": "hi"}
+            self.manager._light_snapshot = AsyncMock(return_value=dict(payload))
+            self.manager._observation_payload = AsyncMock(return_value=dict(payload))
+            await BrowserManager._run_action(self.manager, self.session, "click", {"selector": "#b"}, click)
+
+        result = await self.manager.witness.verify("session-1")
+        self.assertEqual(len(ran), 4)
+        self.assertEqual(result["receipt_count"], 4)
+        self.assertTrue(result["valid"], result["reason"])
+        receipts = list(reversed(await self.manager.witness.list("session-1", limit=10)))
+        self.assertEqual([receipt.evidence.before["title"] for receipt in receipts], written)
+        lines = (self.session.artifact_dir / "actions.jsonl").read_text(encoding="utf-8").split("\n")[:-1]
+        self.assertEqual([json.loads(line)["before"]["title"] for line in lines], written)
+
+    async def test_a_receipt_recorded_outside_an_action_survives_a_lone_surrogate(self) -> None:
+        """The auth-profile receipts are recorded straight to the store, with the profile's name in their target."""
+        recorder = self.manager.witness
+
+        await recorder.record(
+            "auth-profiles",
+            profile="normal",
+            event_type="auth_profile",
+            status="ok",
+            action="export_auth_profile",
+            action_class="auth",
+            operator={"id": "alice", "source": "header"},
+            target={"profile_name": "shop\udfffmain"},
+        )
+
+        result = await recorder.verify("auth-profiles")
+        self.assertTrue(result["valid"], result["reason"])
+        receipts = await recorder.list("auth-profiles", limit=1)
+        self.assertEqual(receipts[0].target, {"profile_name": "shop�main"})

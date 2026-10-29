@@ -250,6 +250,62 @@ async def test_a_failed_drag_cancelled_while_the_button_is_let_go_still_lets_it_
     assert not session.lock.locked()
 
 
+async def test_a_drag_cancelled_twice_while_the_button_is_let_go_still_lets_it_go_before_the_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """NAV07-OUT-5: a client gives up as the drag finishes, then the server shuts down (or a wrapper's timeout
+    fires) while the release is in flight. The second cancel stopped the wait for the release, so the session
+    lock was let go with the button still pressed for the next action."""
+    monkeypatch.setattr("app.browser.page_read.PAGE_READ_TIMEOUT_SECONDS", PAGE_BOUND_SECONDS)
+    manager, session = still_session(tmp_path)
+    button = Button(session.page.mouse, session.lock, up_seconds=0.3)
+    drag = asyncio.ensure_future(gateway_for(manager)._drag_drop(drag_payload()))
+    await asyncio.wait_for(button.up_started.wait(), timeout=TEST_BOUND_SECONDS)
+
+    drag.cancel()
+    await asyncio.sleep(0.05)
+    drag.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(drag, timeout=TEST_BOUND_SECONDS)
+
+    assert (button.down, button.ups, button.locked_at_up) == (False, 1, [True])
+    assert not session.lock.locked()
+
+
+class SlowEnd(ElementTarget):
+    """An end named by element_id that becomes actionable after a while, within its own wait (ACTION_TIMEOUT_MS)."""
+
+    def __init__(self, element_id: str, seconds: float) -> None:
+        self.element_id = element_id
+        self._seconds = seconds
+
+    async def wait_until_actionable(self, **_kwargs) -> dict[str, float]:
+        await asyncio.sleep(self._seconds)
+        return {"x": 0, "y": 0, "width": 10, "height": 10}
+
+    async def pointer_rect(self) -> dict[str, float]:
+        return {"x": 0, "y": 0, "width": 10, "height": 10}
+
+    async def cover_at(self, _x: float, _y: float) -> None:
+        return None
+
+
+async def test_a_drag_whose_ends_are_each_slow_to_become_actionable_is_not_cut_off(tmp_path: Path, monkeypatch) -> None:
+    """NAV07-OUT-3: each end named by element_id (or by a CSS selector) waits up to ACTION_TIMEOUT_MS for its
+    element, and the drag's single 30 s bound could end before both had: a drag that 1.11.1, which had no
+    bound, finished was refused with "The page did not answer". The deadline now allows each end its wait."""
+    monkeypatch.setattr("app.browser.page_read.PAGE_READ_TIMEOUT_SECONDS", 0.5)
+    manager, session = still_session(tmp_path)
+    monkeypatch.setattr(manager.settings, "action_timeout_ms", 1000)
+    ends = iter([SlowEnd("e1", 0.4), SlowEnd("e2", 0.4)])  # 0.8 s in all: past the bound, each within its wait
+    monkeypatch.setattr(drag_module, "_end", lambda *_args: next(ends))
+
+    result = await asyncio.wait_for(gateway_for(manager)._drag_drop(drag_payload()), timeout=TEST_BOUND_SECONDS)
+
+    assert result["to"] == {"x": 5.0, "y": 5.0}
+    session.page.mouse.up.assert_awaited_once()
+
+
 class StuckEnd(ElementTarget):
     """An end named by element_id on a renderer that stopped answering while it was brought into view."""
 

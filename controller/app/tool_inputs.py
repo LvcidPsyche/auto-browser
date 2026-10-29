@@ -32,7 +32,7 @@ from .models import (
     validate_url,
 )
 from .result_shaping import ResultDetail
-from .url_safety import refuse_ambiguous_host
+from .url_safety import refuse_ambiguous_host, refuse_another_navigation_host
 
 __all__ = [
     "AgentJobIdInput",
@@ -389,6 +389,7 @@ class ForkSessionInput(SessionIdInput):
     def validate_start_url(cls, value: str | None) -> str | None:
         if value is None:
             return None
+        refuse_another_navigation_host(value, field_name="start_url")
         return validate_url(value, field_name="start_url", allowed_schemes=HTTP_URL_SCHEMES)
 
 
@@ -621,8 +622,8 @@ class CreateCronJobInput(StrictInputModel):
     max_steps: int = Field(default=20, ge=1, le=AGENT_RUN_MAX_STEPS)
     enabled: bool = True
     webhook_enabled: bool = False
-    # Set by the gateway from the creating call's workflow_profile, not by the caller:
-    # every run of the job starts under it.
+    # Every run of the job starts under it. Over MCP the gateway sets it from the creating call's
+    # workflow_profile, so it is not in the tool's schema; a REST body (an operator) names it.
     workflow_profile: SkipJsonSchema[WorkflowProfile] = "fast"
 
     @field_validator("start_url")
@@ -630,6 +631,8 @@ class CreateCronJobInput(StrictInputModel):
     def validate_start_url(cls, value: str | None) -> str | None:
         if value is None:
             return None
+        # The operator approves the host shown; every run of the job opens the one a browser reads.
+        refuse_ambiguous_host(value, field_name="start_url")
         return validate_url(value, field_name="start_url", allowed_schemes=HTTP_URL_SCHEMES)
 
     @model_validator(mode="after")

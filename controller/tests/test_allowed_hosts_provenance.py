@@ -56,6 +56,8 @@ def listened_page(manager: BrowserManager, url: str = ALLOWED) -> FiringPage:
     page = FiringPage(url)
     session = SimpleNamespace(
         id="s1",
+        page=page,
+        context=SimpleNamespace(pages=[page]),
         attached_pages=weakref.WeakSet(),
         request_failures=[],
         lock=asyncio.Lock(),
@@ -339,6 +341,62 @@ async def test_the_escape_back_to_the_page_read_before_the_action_makes_it_reada
     assert not manager._page_refused(page)
 
 
+@pytest.mark.parametrize("action", ["go_back", "reload"])
+async def test_a_go_back_or_reload_that_lands_on_a_refused_page_is_not_rolled_back_with_go_back(
+    tmp_path: Path, action: str
+) -> None:
+    """B-COMPOSE-4: the rollback of a block after the operation began is a go_back. After an approved go_back
+    it went one page further back (two-back here), and after a reload to a page a redirect sent off the list,
+    to the page before the reloaded one: neither is the page the action left. The refused page is sent to
+    about:blank instead."""
+    manager = manager_for(tmp_path)
+    backs: list[HistoryPage] = []
+    page = HistoryPage(manager, ALLOWED, back_to=f"{ALLOWED}/two-back", on_back=backs.append)
+    session = action_session(manager, page, tmp_path)
+
+    await blocked_action(manager, session, action=action)
+
+    assert (backs, page.url) == ([], "about:blank")
+    assert manager._page_refused(page)
+
+
+async def test_a_go_forward_that_lands_on_a_refused_page_is_rolled_back_to_the_page_before_it(
+    tmp_path: Path,
+) -> None:
+    """Item 28 (Opus C): after an approved go_forward from P to N, a redirect of N to a refused host replaces
+    N's entry (it adds none), so a go_back returns to P, the page read before the action, and the rollback's
+    escape clears it. Item 19 left go_forward out of the rollback: the tab was blanked and stayed refused."""
+    manager = manager_for(tmp_path)
+    page = HistoryPage(manager, ALLOWED, back_to=ALLOWED)
+
+    await blocked_action(manager, action_session(manager, page, tmp_path), action="go_forward")
+
+    assert page.url == ALLOWED
+    assert not manager._page_refused(page)
+
+
+async def test_a_policy_block_on_a_refused_page_nothing_moved_does_not_go_back(tmp_path: Path) -> None:
+    """Item 22 (the merge): the rollback compares where the page is with the before-snapshot, which shows a
+    refused page by its origin (_withheld_snapshot). Compared by its whole URL, a refused page nothing moved
+    differed from its own snapshot, and a block after the operation began went back: a navigation nobody
+    approved, made while the approval is given back for a retry."""
+    manager = manager_for(tmp_path)
+    backs: list[HistoryPage] = []
+    page = HistoryPage(manager, ALLOWED, back_to=f"{ALLOWED}/earlier", on_back=backs.append)
+    session = action_session(manager, page, tmp_path)
+    manager.page_provenance.committed(page, REFUSED, url_refused=True)  # refused, though on an allowed URL
+    assert manager._shown_url(page) != page.url
+
+    async def operation() -> None:
+        raise PermissionError("Host 'refused.example' is not allowlisted")  # the navigate's own target
+
+    with pytest.raises(BrowserActionError) as blocked:
+        await manager._run_action(session, "navigate", {"url": REFUSED}, operation)
+
+    assert blocked.value.code == "browser_action_blocked"
+    assert (backs, page.url) == ([], ALLOWED)
+
+
 async def test_an_escape_that_lands_on_another_url_leaves_the_page_refused(tmp_path: Path) -> None:
     manager = manager_for(tmp_path)
     page = HistoryPage(manager, ALLOWED, back_to=f"{ALLOWED}/elsewhere")
@@ -381,7 +439,7 @@ async def test_an_escape_from_a_page_refused_before_the_action_leaves_it_refused
 def two_tab_network(manager: BrowserManager, *, tainted: bool) -> tuple[list[FiringPage], NetworkInspector]:
     """A session of two tabs on an allowed URL, the first tainted when `tainted`, and its network inspector."""
     pages = [FiringPage(ALLOWED), FiringPage(ALLOWED)]
-    session = SimpleNamespace(page=pages[1], context=SimpleNamespace(pages=pages))
+    session = SimpleNamespace(id="s1", page=pages[1], context=SimpleNamespace(pages=pages))
     if tainted:
         manager.page_provenance.committed(pages[0], REFUSED, url_refused=True)
     network = NetworkInspector(

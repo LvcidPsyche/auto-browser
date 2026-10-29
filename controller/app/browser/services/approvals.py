@@ -283,10 +283,12 @@ class BrowserApprovalService:
             raise PermissionError(f"approval {approval_id} is for done, which ends an agent's run: nothing can run it")
 
         decision = self.manager.approvals.executable_action(approval)
+        # The session before the claim, for every action: one that has closed (a governed cron run's, once
+        # the run ended) is refused here, and the approval stays approved instead of spent on nothing.
+        session = await self.manager.get_session(approval.session_id)
         if decision.action == "upload":
             # The file first, as browser.execute_action and the agent loop check it: a
             # missing file is no refusal before the effect, and would spend the approval.
-            session = await self.manager.get_session(approval.session_id)
             await self.manager.uploads.safe_path(decision.file_path or "", session=session)
         # Claimed here, for the approval's own kind: execute_decision only
         # claims the kinds the runtime requires, so a governed `write` approval

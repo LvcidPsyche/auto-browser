@@ -18,14 +18,17 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.browser_manager import BrowserManager
 from app.models import McpToolCallRequest, OperatorIdentity, SessionRecord
+from app.routes._utils import require_session_access
 from app.routes.session_diagnostics import create_session_diagnostics_router
+from app.session_ownership import acting_as
 from app.tool_gateway import McpToolGateway
 from app.witness import WitnessRecorder
 from app.witness_anchor import anchor_path, read_anchor
@@ -174,6 +177,36 @@ async def test_a_chain_that_is_not_a_session_is_still_verifiable(manager, client
 
     assert response.status_code == 200
     assert response.json()["valid"] is True
+
+
+@pytest.mark.parametrize(
+    ("named", "operator", "status"),
+    [
+        (True, OperatorIdentity(id="alice", source="token"), 404),
+        (True, OperatorIdentity(id="system", source="system"), 404),
+        (False, OperatorIdentity(id="alice", source="header"), 200),
+    ],
+    ids=["named-operator", "named-system", "control-unnamed"],
+)
+async def test_under_named_credentials_the_auth_profile_chain_is_refused_like_any_id_with_no_record(
+    manager, named: bool, operator: OperatorIdentity, status: int
+) -> None:
+    """COMBINE-01, decided: kept. The app-wide dependency refuses an id with no live session and no record under
+    named credentials before the witness routes run, the auth-profile chain's among them (which also keeps one
+    operator from another's profile-export receipts). The bare router above does not run that dependency."""
+    if named:
+        manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+    await _record(manager, 2, scope="auth-profiles")
+    app = FastAPI(dependencies=[Depends(require_session_access)])
+    app.state.browser_manager = manager
+    app.add_exception_handler(KeyError, main_module.handle_key_not_found)
+    app.include_router(create_session_diagnostics_router(manager=manager, settings=manager.settings))
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        with acting_as(operator):
+            responses = [await client.get(f"/sessions/auth-profiles/witness/{leaf}") for leaf in ("verify", "bundle")]
+
+    assert [response.status_code for response in responses] == [status, status], [r.text for r in responses]
 
 
 @pytest.mark.parametrize(

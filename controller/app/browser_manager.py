@@ -21,7 +21,7 @@ from .artifacts import SessionArtifactService
 from .audit import AuditStore
 from .auth_state import AuthStateManager
 from .browser.element_ids import ElementIds
-from .browser.page_provenance import REFUSED_FAILURES_KEPT, PageProvenance
+from .browser.page_provenance import CLOSED_PAGE_GRACE_SECONDS, REFUSED_FAILURES_KEPT, PageProvenance
 from .browser.page_read import start_read
 from .browser.services import (
     BrowserActionService,
@@ -840,18 +840,37 @@ class BrowserManager:
         """Whether ALLOWED_HOSTS refuses the session's active page (see _page_refused)."""
         return self._page_refused(session.page)
 
-    def _session_has_refused_page(self, session: BrowserSession) -> bool:
+    def _session_has_refused_page(self, session: BrowserSession, *, besides: Any = None) -> bool:
         """Whether a page of the session, its active one or another tab, can run a refused host's code.
 
         Its URL is off the list, or PageProvenance.counts_for_its_session: not every page _page_refused
         refuses, since one refused only because another tab was, or only waiting for its opener's
         verdict, has its document from an allowed origin while it is on an allowed http(s) URL, and none
-        on the controller's own blank.
+        on the controller's own blank. A page that counted still counts for CLOSED_PAGE_GRACE_SECONDS
+        after it closed: what it did just before closing is delivered after the close. ``besides`` is a page
+        left out: the one whose commit is judged by what the others could do to it.
         """
+        return self.page_provenance.counting_page_closed_recently(session.id) or self._open_page_counts(
+            session, besides=besides
+        )
+
+    def _open_page_counts(self, session: BrowserSession, *, besides: Any = None) -> bool:
+        """Whether an open page of the session, other than ``besides``, counts for it (_session_has_refused_page)."""
         return any(
-            self._url_off_list(page.url) or self.page_provenance.counts_for_its_session(page)
+            page is not besides and (self._url_off_list(page.url) or self.page_provenance.counts_for_its_session(page))
             for page in self.tabs.pages(session)
         )
+
+    async def _wait_out_closed_page_grace(self, session: BrowserSession) -> None:
+        """Before the agent's own action on a tab: wait out the grace after a page that counted closed (bounded).
+
+        The refusal's advice is to close the refused tab and then act; what the tab commits at once would count
+        as the closed tab's choice. Not while a page that counts is still open: its commits are judged that way
+        whether the action waits or not, and the advice is to close it first.
+        """
+        if not self.page_provenance.counting_page_closed_recently(session.id) or self._open_page_counts(session):
+            return
+        await self.page_provenance.after_the_closed_page_grace(session.id)
 
     def _assert_page_allowed(self, session: BrowserSession) -> None:
         """Refuse to read a page ALLOWED_HOSTS refuses (see _page_refused).
@@ -873,14 +892,16 @@ class BrowserManager:
                 "and is being moved to about:blank. It is not read until it is navigated to an allowed URL."
             ) from exc
         if self.page_provenance.refused_by_another_page(page):
-            # The cause is another tab, and while it stays open this page's own navigations are refused too.
+            # The cause is another tab, and while it stays open this page's own navigations are refused too;
+            # or one that closed within the grace, already gone.
             raise RefusedPageError(
-                "The page loaded while another tab of this session was refused, so it is sent back to "
+                "The page loaded while another tab of this session was refused, or within "
+                f"{CLOSED_PAGE_GRACE_SECONDS:g} seconds after a refused tab closed, so it is sent back to "
                 "about:blank and not read: that tab can send this one to a URL it chose. Close the refused "
-                "tab, then navigate this one to an allowed URL. A tab counts here while it is on a host "
-                "ALLOWED_HOSTS does not allow, came from one, or is navigating through one, and while it is "
-                "refused on a blank, blob: or data: page other than the controller's own blank; a tab on an "
-                "allowed page refused only because of another tab, or waiting for its opener, does not."
+                "tab if it is still open, then navigate this one to an allowed URL. A tab counts here while it "
+                "is on a host ALLOWED_HOSTS does not allow, came from one, or is navigating through one, and "
+                "while it is refused on a blank, blob: or data: page other than the controller's own blank; a "
+                "tab on an allowed page refused only because of another tab, or waiting for its opener, does not."
             )
         if self.page_provenance.refused(page):
             raise RefusedPageError(
@@ -970,8 +991,12 @@ class BrowserManager:
     async def _require_witness_scope(self, session_id: str) -> None:
         """Refuse an id with no session record, no chain and no anchor, as the session routes do.
 
-        The auth-profile receipts have a chain but no session record, so a chain
-        or an anchor alone is enough.
+        Without named credentials a chain or an anchor alone is enough: the auth-profile
+        receipts (scope ``auth-profiles``) have a chain but no session record. Under named
+        credentials the session check every route and tool runs first
+        (ensure_session_accessible) refuses such an id before this runs, that chain's
+        included, for SYSTEM too: no owner can be checked for it, and refusing it keeps one
+        operator from another's profile-export receipts.
         """
         if not self.witness.has_evidence(session_id) and not (await self.session_owner_lookup(session_id))[0]:
             raise SessionNotFoundError(session_id)

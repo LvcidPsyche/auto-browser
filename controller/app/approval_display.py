@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import unicodedata
 from decimal import Decimal
 from typing import Any
 
 from .models import ApprovalRecord, BrowserActionDecision
+from .url_safety import host_as_sent
 
 # Characters of one string field a short account of an approval shows before it says how many it
 # leaves out: the webhook's and the SSE event's summary, and the dashboard's confirm dialog. The
@@ -221,12 +223,41 @@ def describe_action(action: BrowserActionDecision, *, cut: int | None) -> str:
         # An empty string is set: only a value and a label can be one, and either runs (select_option).
         if (actions is not None and action.action not in actions) or value is None:
             continue
-        part = SENSITIVE_TEXT_HIDDEN if name == "text" and action.sensitive else f"{name}={_shown_value(value, cut)}"
+        part = SENSITIVE_TEXT_HIDDEN if name == "text" and action.sensitive else _shown_field(name, value, cut)
         note = unused_note(action.action, name, fields)
         if note is None and action.action == "select_option" and name == "value":
             note = VALUE_OR_LABEL
         parts.append(f"{part} {note}" if note else part)
     return shown_code_points(" · ".join(parts))
+
+
+# A URL's host as written: after the scheme's // and any userinfo (to its last @), up to a port, path, query
+# or fragment. The dashboard's WRITTEN_HOST is the same expression.
+_WRITTEN_HOST = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://(?:[^/?#]*@)?(\[[^\]]*\]|[^:/?#]*)")
+
+
+def url_as_sent(url: str) -> tuple[str, str | None]:
+    """``url`` with a non-ASCII host as a browser sends it (host_as_sent), and that host as written; as it is,
+    and None, for an ASCII host or one a browser could not map. The dashboard's urlAsSent reads the host with
+    new URL instead, which drops a control in the scheme or the host: the two agree for every URL the
+    navigation sites accept, since those refuse such a control (refuse_another_navigation_host)."""
+    match = _WRITTEN_HOST.match(url)
+    if match is None or match.group(1).isascii():
+        return url, None
+    try:
+        sent = host_as_sent(match.group(1))
+    except UnicodeError:
+        return url, None
+    return url[: match.start(1)] + sent + url[match.end(1) :], match.group(1)
+
+
+def _shown_field(name: str, value: Any, cut: int | None) -> str:
+    """``name=value``, a URL's host as a browser sends it with the host as written beside it."""
+    if name != "url" or not isinstance(value, str):
+        return f"{name}={_shown_value(value, cut)}"
+    sent, written = url_as_sent(value)
+    shown = f"{name}={_shown_value(sent, cut)}"
+    return f"{shown} (host as written: {written})" if written else shown
 
 
 def unused_note(action: str, name: str, fields: dict[str, Any]) -> str | None:

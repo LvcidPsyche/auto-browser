@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -709,6 +710,45 @@ async def test_a_tab_a_refused_page_navigates_to_an_allowed_url_is_refused(tmp_p
         summary = await env.manager.get_session_summary(session_id)
         assert CHOSEN_MARKER not in json.dumps(tabs), tabs
         assert CHOSEN_MARKER not in json.dumps(summary, default=str), summary
+        with pytest.raises(PermissionError, match="another tab of this session"):
+            await env.manager.observe(session_id, preset="text")
+
+
+class _SlowSearchHandler(nav._Handler):
+    """The harness's server, with /search answered after a pause: the refused popup has closed by its commit."""
+
+    def do_GET(self) -> None:  # noqa: N802 - http.server's name
+        if self.path.startswith("/search"):
+            time.sleep(SLOW_SEARCH_SECONDS)
+        super().do_GET()
+
+
+# Long enough for the popup's close to be delivered first, well inside the grace after it.
+SLOW_SEARCH_SECONDS = 0.5
+
+
+async def test_a_tab_a_refused_page_navigates_and_then_closes_on_is_refused(tmp_path: Path, monkeypatch) -> None:
+    """PROV-1: the refused popup set window.opener.location to a URL it chose and called window.close(). Its
+    close was delivered before the opener's commit, so the session had no refused tab by then, and the opener
+    was read on the URL the popup chose."""
+    monkeypatch.setattr(nav, "_Handler", _SlowSearchHandler)
+    script = f"(() => {{ {NAVIGATES_ITS_OPENER} window.close(); }})()"
+    monkeypatch.setattr(nav, "EVIL_PAGE", nav.EVIL_PAGE + f"<script>{script}</script>")
+    async with browser_env(tmp_path, {}) as env:
+        session_id = await env.create()
+        session = env.manager.sessions[session_id]
+        opener = session.page
+        committed: list[str] = []
+        opener.on("framenavigated", lambda frame: committed.append(frame.url) if frame == opener.main_frame else None)
+        closed = asyncio.Event()
+        session.context.on("page", lambda page: page.on("close", lambda _page: closed.set()))
+
+        await opener.evaluate("(url) => window.open(url)", f"{env.evil}/")
+        await asyncio.wait_for(closed.wait(), timeout=SCRIPT_TIMEOUT_SECONDS)
+        assert await settle(lambda: any(CHOSEN_MARKER in url for url in committed), timeout=10.0), committed
+
+        tabs = await env.manager.list_tabs(session_id)
+        assert CHOSEN_MARKER not in json.dumps(tabs), tabs
         with pytest.raises(PermissionError, match="another tab of this session"):
             await env.manager.observe(session_id, preset="text")
 

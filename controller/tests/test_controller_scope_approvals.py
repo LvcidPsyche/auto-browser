@@ -255,6 +255,19 @@ class ControllerScopeApprovalTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(listed.isError, listed.content[0].text)
                 self.assertEqual([item["id"] for item in listed.structuredContent], [expected])
 
+    async def test_under_named_credentials_the_mcp_listing_by_scope_still_answers_each_operator(self) -> None:
+        """B-LC-5: the gateway's session check refused session_id=controller as an unknown session under named
+        credentials (no session record), though the listing filters controller approvals by their owner."""
+        self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+        alice_id = await self._request(ALICE)
+        bob_id = await self._request(BOB)
+
+        for operator, expected in ((ALICE, alice_id), (BOB, bob_id)):
+            with self.subTest(operator=operator.id):
+                listed = await self._call(operator, "browser.list_approvals", {"session_id": CONTROLLER_SCOPE})
+                self.assertFalse(listed.isError, listed.content[0].text)
+                self.assertEqual([item["id"] for item in listed.structuredContent], [expected])
+
     async def test_another_operators_identical_request_gets_its_own_approval(self) -> None:
         alice_id = await self._request(ALICE)
 
@@ -394,6 +407,36 @@ class ControllerScopeListingRouteTests(unittest.IsolatedAsyncioTestCase):
                 response = await self._get(operator, f"/approvals?session_id={CONTROLLER_SCOPE}")
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertEqual([item["id"] for item in response.json()], [ids[operator.id]])
+
+    async def test_under_named_credentials_the_sentinel_still_lists_only_my_controller_approvals(self) -> None:
+        """B-LC-5, over REST: the app-wide session check refused the listing's session_id=controller."""
+        self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+        decision = BrowserActionDecision(action="request_human_takeover", reason="x", risk_category="destructive")
+        ids = {}
+        for operator in (ALICE, BOB):
+            with acting_as(operator):
+                ids[operator.id] = (
+                    await self.manager.approvals.create_or_reuse_pending(
+                        session_id=CONTROLLER_SCOPE, kind="destructive", reason="x", action=decision
+                    )
+                ).id
+
+        for operator in (ALICE, BOB):
+            with self.subTest(operator=operator.id):
+                response = await self._get(operator, f"/approvals?session_id={CONTROLLER_SCOPE}")
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual([item["id"] for item in response.json()], [ids[operator.id]])
+
+    async def test_control_under_named_credentials_controller_is_no_session_anywhere_else(self) -> None:
+        self.manager.settings.api_bearer_tokens = "alice:token-a,bob:token-b"
+
+        @self.app.get("/sessions/{session_id}/witness")
+        async def witness(session_id: str):
+            return {"session_id": session_id}
+
+        for path in (f"/sessions/{CONTROLLER_SCOPE}/witness", "/sessions/abcdef123456/witness?session_id=x"):
+            with self.subTest(path=path), self.assertRaises(SessionNotFoundError):
+                await self._get(ALICE, path)
 
     async def test_an_unknown_real_session_id_is_still_listed_empty_not_an_error(self) -> None:
         response = await self._get(ALICE, "/approvals?session_id=abcdef123456")

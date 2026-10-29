@@ -513,7 +513,14 @@ async def test_requests_on_a_page_navigating_through_a_refused_hop_are_withheld(
     """Net F7: what the browser fetches before the commit (early hints) is the refused host's choice."""
     manager = manager_for(tmp_path)
     page = FiringPage(ALLOWED)
-    session = SimpleNamespace(id="s1", attached_pages=weakref.WeakSet(), request_failures=[], lock=asyncio.Lock())
+    session = SimpleNamespace(
+        id="s1",
+        page=page,
+        context=SimpleNamespace(pages=[page]),
+        attached_pages=weakref.WeakSet(),
+        request_failures=[],
+        lock=asyncio.Lock(),
+    )
     manager.diagnostics.attach_page_listeners(page, session)
     network = NetworkInspector("s1", url_refused=manager._url_off_list, page_refused=manager._page_refused)
     hop = FramedRequest(

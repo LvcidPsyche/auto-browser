@@ -105,6 +105,22 @@ class SensitiveApprovalTextTests(unittest.IsolatedAsyncioTestCase):
             self.store.executable_action(approval)
         self.assertNotIn(approval.id, self.store._sensitive_texts)
 
+    async def test_asking_again_for_a_pending_approval_whose_text_aged_out_holds_the_text_again(self) -> None:
+        """B-LC-2: the held text of a pending sensitive approval aged out (SENSITIVE_TEXT_RETENTION), so it
+        could not be approved; asking again matched the same pending approval by its digest and returned it as
+        it was, stuck for good."""
+        approval = await self.request(typing(SECRET))
+        text, kept_at = self.store._sensitive_texts[approval.id]
+        self.store._sensitive_texts[approval.id] = (text, kept_at - SENSITIVE_TEXT_RETENTION.total_seconds() - 60)
+        with self.assertRaisesRegex(PermissionError, "its text is no longer held"):
+            await self.store.approve(approval.id)
+
+        again = await self.request(typing(SECRET))
+        approved = await self.store.approve(again.id)
+
+        self.assertEqual((again.id, approved.status), (approval.id, "approved"))
+        self.assertEqual(self.store.executable_action(approved).text, SECRET)
+
     async def test_non_sensitive_text_is_kept_for_the_approver_to_read(self) -> None:
         approval = await self.request(typing("Hello team", sensitive=False))
         self.assertEqual(approval.action.text, "Hello team")

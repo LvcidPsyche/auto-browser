@@ -4,7 +4,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ...approvals import effect_started, held_for_execution
+from ...action_errors import SessionNotFoundError
+from ...approvals import effect_started, held_for_execution, refused_before_effect
 from ...models import BrowserActionDecision
 from ...session_ownership import may_use
 from .sessions import SESSION_ID_HEX_DIGITS, is_session_id
@@ -27,8 +28,17 @@ class BrowserUploadService:
         selector: str | None = None,
         element_id: str | None = None,
     ) -> dict[str, Any]:
-        session = await self.manager.get_session(session_id)
-        safe_path = await self.safe_path(file_path, session=session)
+        try:
+            session = await self.manager.get_session(session_id)
+        except SessionNotFoundError as exc:
+            refused_before_effect(exc)  # nothing ran: an approval an outer layer claimed is given back
+            raise
+        try:
+            safe_path = await self.safe_path(file_path, session=session)
+        except Exception as exc:
+            # Nothing ran: a file gone since an outer layer checked it and claimed (execute_approval).
+            refused_before_effect(exc)
+            raise
         approval = await self.manager.actions.require_decision_approval(
             session_id,
             BrowserActionDecision(

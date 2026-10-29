@@ -31,6 +31,9 @@ DECLARATIONS = (
     "cutChars",
     "leftOut",
     "shownValue",
+    "WRITTEN_HOST",
+    "urlAsSent",
+    "shownField",
     "describeAction",
     "SERVER_CUT_NOTE",
     "cutPreview",
@@ -317,6 +320,40 @@ def test_the_queue_and_the_server_summary_say_the_same() -> None:
     queue = describe(*[(record.model_dump(mode="json")["action"], record.origin) for record in records], cut=CUT)
 
     assert queue == [approval_summary(record) for record in records]
+
+
+def test_a_navigate_urls_host_is_shown_as_a_browser_sends_it() -> None:
+    """B-DISP-4: a navigate approval showed url="https://аpple.com/" (a Cyrillic а) as written, and the browser
+    loads xn--pple-43d.com. The host a browser sends is shown, as the tool-call preview shows it, with the host as
+    written beside it; an ASCII host is shown as it is."""
+    urls = [
+        "https://аpple.com/login",
+        "https://u@bücher.example:8443/?q=1",
+        "https://bank.example/",
+    ]
+    expected = [
+        'navigate · url="https://xn--pple-43d.com/login" (host as written: аpple.com)',
+        'navigate · url="https://u@xn--bcher-kva.example:8443/?q=1" (host as written: bücher.example)',
+        'navigate · url="https://bank.example/"',
+    ]
+    records = [
+        ApprovalRecord(
+            id=f"a{index}",
+            session_id="s",
+            kind="write",
+            status="pending",
+            created_at="t",
+            updated_at="t",
+            reason="r",
+            action=BrowserActionDecision(action="navigate", reason="r", url=url),
+        )
+        for index, url in enumerate(urls)
+    ]
+
+    queue = describe(*[(record.model_dump(mode="json")["action"], record.origin) for record in records], cut=CUT)
+
+    assert [approval_summary(record) for record in records] == expected
+    assert queue == expected
 
 
 # One string per category the page writes as code points; the server's shown_code_points must agree.

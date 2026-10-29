@@ -300,6 +300,30 @@ class ApprovalArgumentsTests(SpendBase):
         for shown in (text, reason):
             self.assertNotIn("SECRET", shown)
 
+    async def test_a_return_url_written_with_other_slashes_keeps_its_credentials_out_of_all_three(self) -> None:
+        """Codex B 2: a browser reads https:u:SECRET@h.example/ and https:////u:SECRET@h.example/ as authority
+        u:SECRET@h.example (a special scheme skips any run of slashes after the colon); urllib read no authority
+        in either, so SECRET reached the reason, the arguments file and the webhook."""
+        for nested in (
+            "https%3Au%3ASECRET%40h.example%2F%3Ftoken%3DSECRET",
+            "https%3A%2F%2F%2F%2Fu%3ASECRET%40h.example%2F%3Ftoken%3DSECRET",
+        ):
+            with self.subTest(nested=nested):
+                cookie = {"name": "sid", "value": "v", "url": f"https://bank.example/?return={nested}&lang=en"}
+                approval_id = await self.ask(None, "browser.set_cookies", session_id=SESSION, cookies=[cookie])
+                approval = await self.manager.approvals.get(approval_id)
+                client = Mock()
+                client.post = AsyncMock(return_value=Mock(status_code=200))
+                with patch.object(webhooks, "get_client", return_value=client):
+                    await webhooks.dispatch_approval_event(approval, webhook_url="https://hooks.example.com/approval")
+
+                text = (await self.get(None, f"/approvals/{approval_id}/arguments")).json()["arguments"]
+                webhook = client.post.await_args.kwargs["content"].decode()
+
+                for shown in (text, approval.reason, webhook):
+                    self.assertNotIn("SECRET", shown)
+                self.assertIn("lang=en", text)
+
     async def test_a_query_value_that_only_looks_like_a_url_is_kept_as_text_and_the_call_is_asked(self) -> None:
         # Codex's round-5 read: the preview parsed https://[draft as a URL, urllib raised, and the governed call
         # never reached its approval.

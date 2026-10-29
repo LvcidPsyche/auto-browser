@@ -385,14 +385,27 @@ class BrowserActionService:
         *,
         approval_id: str | None = None,
     ) -> dict[str, Any]:
-        session = await self.manager.get_session(session_id)
-        _refuse_unrunnable(decision)
-        if decision.action == "upload":
-            # Check the file before asking anyone to approve the upload: an
-            # operator should not be asked to approve an upload of a file that
-            # is not there, only for it to fail once they have. The direct
-            # upload path already checks in this order.
-            await self.manager.uploads.safe_path(decision.file_path or "", session=session)
+        try:
+            session = await self.manager.get_session(session_id)
+        except SessionNotFoundError as exc:
+            # Nothing ran: an approval an outer layer claimed for this action (execute_approval's, whose
+            # session closed after its claim) is given back.
+            refused_before_effect(exc)
+            raise
+        try:
+            _refuse_unrunnable(decision)
+            self._refuse_a_host_off_the_list(decision)
+            if decision.action == "upload":
+                # Check the file before asking anyone to approve the upload: an
+                # operator should not be asked to approve an upload of a file that
+                # is not there, only for it to fail once they have. The direct
+                # upload path already checks in this order.
+                await self.manager.uploads.safe_path(decision.file_path or "", session=session)
+        except Exception as exc:
+            # Nothing ran: refused here under an outer layer's claim (a governed call's, its file gone since
+            # the gateway checked it), that approval is given back.
+            refused_before_effect(exc)
+            raise
         approval = await self.require_decision_approval(
             session_id,
             decision,
@@ -412,11 +425,41 @@ class BrowserActionService:
             # Uploads go through manager.upload, which checks and claims the
             # approval itself.
             if approval is None or decision.action == "upload":
-                return await self._dispatch_decision(session_id, decision, approval_id=approval_id)
+                return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
             async with held_for_execution(self.manager.approvals, approval.id, may_give_back=True):
-                return await self._dispatch_decision(session_id, decision, approval_id=approval_id)
+                return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
         finally:
             session.pending_witness_context = None
+
+    def _refuse_a_host_off_the_list(self, decision: BrowserActionDecision) -> None:
+        """Refuse a navigate whose URL ALLOWED_HOSTS refuses, before an approval for it is asked for or spent.
+
+        navigate checks the list only once it runs, so an operator was asked to approve a navigation that
+        could never run, and the approval was then spent with nothing run. Refused after an outer layer's
+        claim (a host off the list since the approve), that approval is given back.
+        """
+        if decision.action != "navigate":
+            return
+        try:
+            self.manager._assert_url_allowed(decision.url or "")
+        except PermissionError as exc:
+            refused_before_effect(exc)
+            raise
+
+    async def _dispatch_recorded(
+        self, session_id: str, decision: BrowserActionDecision, *, approval_id: str | None
+    ) -> dict[str, Any]:
+        """_dispatch_decision, with a failure before the action's effect recorded for the approval's holder.
+
+        The dispatched action looks the session up again, outside its pipeline: a close landing while this
+        call read the approval (a worker thread) was raised there unrecorded, and a claimed approval stayed
+        spent with nothing run. refused_before_effect marks only holds whose effect has not begun.
+        """
+        try:
+            return await self._dispatch_decision(session_id, decision, approval_id=approval_id)
+        except Exception as exc:
+            refused_before_effect(exc)
+            raise
 
     async def _dispatch_decision(
         self,
@@ -628,6 +671,7 @@ class BrowserActionService:
             if origin == "action":
                 _refuse_unrunnable(decision)
             return None
+        self._refuse_a_host_off_the_list(decision)
         # A caller that knows what is being approved (the MCP gateway, for tool
         # calls that are not browser actions) supplies the reason the operator
         # reads; the generic sentence named the stand-in action instead.

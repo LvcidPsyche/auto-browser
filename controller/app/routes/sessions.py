@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from ..action_errors import RefusedPageError
+from ..browser.services.tabs import TabRefusedByAnotherTabError
 from ..models import (
     HTTP_URL_SCHEMES,
     ClickRequest,
@@ -26,7 +27,8 @@ from ..models import (
     WaitRequest,
     validate_url,
 )
-from ._utils import OFF_LIST_PAGE_DETAIL, OFF_LIST_TAB_DETAIL, typed_route_errors
+from ..url_safety import refuse_another_navigation_host
+from ._utils import OFF_LIST_OTHER_TAB_DETAIL, OFF_LIST_PAGE_DETAIL, OFF_LIST_TAB_DETAIL, typed_route_errors
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +105,8 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             return await manager.activate_tab(session_id, payload.index)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid request") from None
+        except TabRefusedByAnotherTabError:
+            raise HTTPException(status_code=403, detail=OFF_LIST_OTHER_TAB_DETAIL) from None
         except PermissionError:
             raise HTTPException(status_code=403, detail=OFF_LIST_TAB_DETAIL) from None
 
@@ -240,6 +244,7 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
         # the URL gets the same validation here.
         with typed_route_errors(logger, "fork failed for session %s", session_id):
             if start_url is not None:
+                refuse_another_navigation_host(start_url, field_name="start_url")
                 start_url = validate_url(start_url, field_name="start_url", allowed_schemes=HTTP_URL_SCHEMES)
             try:
                 return await manager.fork_session(session_id, name=name, start_url=start_url)

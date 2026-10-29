@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from playwright.async_api import Error as PlaywrightError
 
 from ...action_errors import BrowserActionError
+from ..page_provenance import CLOSED_PAGE_GRACE_SECONDS
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -24,6 +25,18 @@ REFUSED_TAB_MESSAGE = (
     "That tab is on a host ALLOWED_HOSTS does not allow, or came from one, and cannot be activated. Close it, "
     "or open a new tab."
 )
+# A tab refused only because another tab of the session was refused when it loaded, or had just closed
+# (page_provenance's grace): its own page is allowed. Closing the refused tab does not clear it (only the
+# agent's navigate does, and a tab that is not active cannot be navigated), so the advice is REFUSED_TAB_MESSAGE's.
+REFUSED_BY_ANOTHER_TAB_MESSAGE = (
+    "That tab loaded while another tab of this session was refused, or within "
+    f"{CLOSED_PAGE_GRACE_SECONDS:g} seconds after a refused tab closed, which can send it to a URL it chose, "
+    "and cannot be activated. Close it, or open a new tab."
+)
+
+
+class TabRefusedByAnotherTabError(PermissionError):
+    """Activating a tab refused only because another tab of its session was; the text names no host."""
 
 
 class BrowserTabService:
@@ -44,6 +57,10 @@ class BrowserTabService:
             self.manager._assert_url_allowed(url)
         session = await self.manager.get_session(session_id)
         async with session.lock:
+            if url:
+                # As every action does (the pipeline): what the new page commits while it loads, right
+                # after a refused tab closed, would count as that tab's choice.
+                await self.manager._wait_out_closed_page_grace(session)
             new_page = await session.context.new_page()
             # Reported by the context like a popup, but with no opener to judge it.
             self.manager.page_provenance.opened_by_controller(new_page)
@@ -100,6 +117,8 @@ class BrowserTabService:
             try:
                 self.manager._assert_page_object_allowed(target_page)
             except PermissionError as exc:
+                if self.manager.page_provenance.refused_by_another_page(target_page):
+                    raise TabRefusedByAnotherTabError(REFUSED_BY_ANOTHER_TAB_MESSAGE) from exc
                 raise PermissionError(REFUSED_TAB_MESSAGE) from exc
             self.manager._attach_page_listeners(target_page, session)
             if hasattr(target_page, "bring_to_front"):

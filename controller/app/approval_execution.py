@@ -18,7 +18,7 @@ from typing import Any, TypeVar
 
 from fastapi import HTTPException
 
-from .action_errors import BrowserActionError
+from .action_errors import BrowserActionError, SessionNotFoundError
 from .models import ApprovalDecider, ApprovalOrigin, ApprovalRecord, ApprovalStatus
 
 # The attribute a refusal carries the notes of the approvals given back with it in.
@@ -197,10 +197,16 @@ class ApprovalRequiredError(HTTPException):
 
 
 def spent_refusal(approval: ApprovalRecord) -> PermissionError:
-    """The refusal of an approval that is spent: when, and what the agent does instead."""
+    """The refusal of an approval that is spent: when, that its action may have taken effect, and what then.
+
+    The check comes before the way to ask again: told only to repeat the call, an agent whose action had gone
+    through (then failed a later step) asked for a second payment or send, as the pipeline's after-change note
+    warns against.
+    """
     return PermissionError(
-        f"approval {approval.id} was spent when its action started (executed_at {approval.executed_at}); "
-        "repeat the call without approval_id to ask for a new approval"
+        f"approval {approval.id} was spent when its action started (executed_at {approval.executed_at}), so the "
+        "action may have taken effect: observe the page, or check the outcome, before acting again. Only to do it "
+        "again, repeat the call without approval_id, which asks an operator for a new approval"
     )
 
 
@@ -289,6 +295,14 @@ def _report_given_back(refusal: Exception, approval: ApprovalRecord, *, expired:
         message = (
             f"approval {approval.id} expired while its action waited, and the action was refused before it "
             "began: repeat the call without approval_id to ask for a new approval"
+        )
+    elif isinstance(refusal, SessionNotFoundError):
+        # Not "retry once the cause is gone": a closed session never comes back, and an approval is bound to
+        # the session it was asked for in.
+        status = "approved"
+        message = (
+            f"approval {approval.id} is still approved, but its session has closed, so nothing can run it: to do "
+            "the action, repeat the call in a live session without approval_id, which asks for a new approval"
         )
     else:
         status = "approved"

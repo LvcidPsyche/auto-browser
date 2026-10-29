@@ -176,6 +176,7 @@ _REDACTIONS: dict[str, tuple[tuple[tuple[str, ...], Callable[[Any], Any]], ...]]
     "browser.set_cookies": ((("cookies", "*", "value"), _hidden), (("cookies", "*", "url"), redacted_url)),
     "browser.set_local_storage": ((("value",), _length_only),),
     "browser.cdp_attach": ((("cdp_url",), redacted_url),),
+    "browser.create_cron_job": ((("start_url",), redacted_url),),
     "harness.start_convergence": (
         (("contract", "preconditions", "*"), _start_url_redacted),
         (("mock_final_observation", "url"), redacted_url),

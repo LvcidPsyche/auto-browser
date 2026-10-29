@@ -9,11 +9,43 @@ from contextlib import closing
 from pathlib import Path
 from typing import Protocol
 
+from pydantic import ValidationError
+
 from .models import ApprovalRecord, ApprovalStatus
 from .sqlite_utils import connect_sqlite
 from .utils import PRIVATE_FILE_MODE, atomic_write_text, record_path
 
 logger = logging.getLogger(__name__)
+
+
+class UnreadableRecord(KeyError):
+    """A stored record that no longer validates: read as an unknown id, so nothing can run it, though it is
+    there, and the arguments an approve of the mended record reads are kept (the startup sweep)."""
+
+
+def _valid_record(approval_id: str, payload: str) -> ApprovalRecord | None:
+    """The record stored as ``payload``, or None, with a warning naming it, when it no longer validates.
+
+    An earlier version stored what this one refuses (a navigate approval to a URL whose host a browser reads
+    otherwise): one such record failed the whole listing, and the SQLite catch-up with it at every start.
+    """
+    try:
+        return ApprovalRecord.model_validate_json(payload)
+    except ValueError as exc:
+        # Where and what kind of failure only: pydantic's messages and input preview quote the stored record
+        # (a navigate URL, a token in its query).
+        failures = (
+            [
+                f"{'.'.join(str(part) for part in error['loc'])}: {error['type']}"
+                for error in exc.errors(include_url=False, include_context=False, include_input=False)
+            ]
+            if isinstance(exc, ValidationError)
+            else [type(exc).__name__]
+        )
+        logger.warning(
+            "approval %s is left out: its stored record no longer validates (%s)", approval_id, "; ".join(failures)
+        )
+        return None
 
 
 class ApprovalStoreBackend(Protocol):
@@ -49,6 +81,10 @@ class FileApprovalStore:
     async def upsert(self, approval: ApprovalRecord) -> None:
         await asyncio.to_thread(self._write_sync, approval)
 
+    async def remove(self, approval_id: str) -> None:
+        """Remove a record, if there is one: a write SQLite refused, of an approval SQLite does not hold."""
+        await asyncio.to_thread(self._path(approval_id).unlink, missing_ok=True)
+
     def _list_sync(
         self,
         status: ApprovalStatus | None,
@@ -57,9 +93,13 @@ class FileApprovalStore:
         approvals: list[ApprovalRecord] = []
         for path in sorted(self.root.glob("*.json"), reverse=True):
             try:
-                approval = ApprovalRecord.model_validate_json(path.read_text(encoding="utf-8"))
-            except Exception as exc:
+                payload = path.read_text(encoding="utf-8")
+            except (OSError, ValueError) as exc:  # gone since the glob, or not UTF-8
                 logger.debug("skipping unreadable approval file %s: %s", path.name, exc)
+                continue
+            # As SQLite's listing: a warning naming the record, without what it holds.
+            approval = _valid_record(path.stem, payload)
+            if approval is None:
                 continue
             if status is not None and approval.status != status:
                 continue
@@ -73,7 +113,10 @@ class FileApprovalStore:
         path = self._path(approval_id)
         if not path.exists():
             raise KeyError(approval_id)
-        return ApprovalRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        approval = _valid_record(approval_id, path.read_text(encoding="utf-8"))
+        if approval is None:
+            raise UnreadableRecord(approval_id)
+        return approval
 
     def _write_sync(self, approval: ApprovalRecord) -> None:
         path = self._path(approval.id)
@@ -165,7 +208,7 @@ class SQLiteApprovalStore:
         status: ApprovalStatus | None,
         session_id: str | None,
     ) -> list[ApprovalRecord]:
-        query = "SELECT payload FROM approvals WHERE 1=1"
+        query = "SELECT id, payload FROM approvals WHERE 1=1"
         params: list[str] = []
         if status is not None:
             query += " AND status = ?"
@@ -176,14 +219,17 @@ class SQLiteApprovalStore:
         query += " ORDER BY created_at DESC, id DESC"
         with closing(self._connect()) as conn, conn:
             rows = conn.execute(query, params).fetchall()
-        return [ApprovalRecord.model_validate_json(row[0]) for row in rows]
+        return [record for row in rows if (record := _valid_record(row[0], row[1])) is not None]
 
     def _get_sync(self, approval_id: str) -> ApprovalRecord:
         with closing(self._connect()) as conn, conn:
             row = conn.execute("SELECT payload FROM approvals WHERE id = ?", (approval_id,)).fetchone()
         if row is None:
             raise KeyError(approval_id)
-        return ApprovalRecord.model_validate_json(row[0])
+        approval = _valid_record(approval_id, row[0])
+        if approval is None:
+            raise UnreadableRecord(approval_id)
+        return approval
 
     def _upsert_sync(self, approval: ApprovalRecord) -> None:
         with closing(self._connect()) as conn, conn:
