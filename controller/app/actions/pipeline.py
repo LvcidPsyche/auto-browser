@@ -9,6 +9,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from .. import events as _events
 from ..action_errors import PAGE_NOT_RESPONDING, SCREENSHOT_WITHHELD, BrowserActionError
+from ..approvals import ApprovalRefusal, effect_started, held_status, refused_before_effect
 from ..utils import utc_now
 from ..witness import WitnessApproval
 
@@ -27,6 +28,9 @@ WITHHELD_SNAPSHOT_ERROR = "The page is on a host ALLOWED_HOSTS does not allow; i
 # For an OS-level PermissionError while observing (an artifact file the controller could not write): its
 # text can name a server path, so it is logged and this goes to the agent instead.
 OS_OBSERVATION_ERROR = "The page could not be observed after the action (a file error on the controller)."
+# Actions whose operation checks its target before it begins its change, and marks that moment itself
+# (effect_started): an upload's refusal before the transfer leaves the approval it ran under unspent.
+MARKS_OWN_EFFECT = frozenset({"upload"})
 
 
 def _withheld_observation(manager: Any, session: Any, exc: PermissionError) -> dict[str, Any]:
@@ -51,6 +55,10 @@ def _no_change_made() -> bool:
     return False
 
 
+def _not_begun() -> bool:
+    return False
+
+
 @dataclass(slots=True)
 class ActionRunContext:
     """One action's run. ``change_made`` answers whether the operation has made a change that cannot be
@@ -64,6 +72,9 @@ class ActionRunContext:
     target: dict[str, Any]
     operation: ActionOperation
     change_made: Callable[[], bool] = _no_change_made
+    # For an action that marks its own effect (MARKS_OWN_EFFECT): whether its change has begun (an
+    # upload's transfer). Refused before then, it has nothing of its own for a block to roll back.
+    began: Callable[[], bool] = _not_begun
 
 
 @dataclass(slots=True)
@@ -75,21 +86,43 @@ class ActionWitnessState:
     # The URL of the page the agent read before the action; None when it was not read (refused, or moved
     # while it was read). A blocked action's rollback that lands back on it clears the taint the action left.
     escape_url: str | None = None
+    # Whether this run's operation began; until then a block has nothing of the action's to roll back.
+    operation_started: bool = False
 
 
 class BrowserActionPipeline:
     async def run(self, context: ActionRunContext) -> dict[str, Any]:
+        try:
+            return await self._run(context)
+        except Exception as exc:
+            # Raised before the operation began its change (a page off the list, a
+            # witness that is not ready, a policy block): nothing ran, so the layer
+            # holding the approval gives it back for a retry. Once the change has
+            # begun, nothing is recorded and the approval stays spent.
+            refused_before_effect(exc)
+            raise
+
+    async def _run(self, context: ActionRunContext) -> dict[str, Any]:
         async with context.session.lock:
             witness_state = await self._prepare(context)
             try:
                 await self._execute(context, witness_state)
             except PermissionError as exc:
-                failed = await self._handle_policy_block(context, witness_state)
+                # The approval guard says what became of the approval; anything else is a policy block.
+                if isinstance(exc, ApprovalRefusal):
+                    message, code, status_code = str(exc), exc.code, 409
+                else:
+                    message, code, status_code = "Action blocked by policy", "browser_action_blocked", 403
+                # On the holds now, not once the block's snapshot and trail are written: an operator's
+                # approve meanwhile is told the action was refused, not that it may start. The error
+                # raised below replaces it as the refusal (run).
+                refused_before_effect(exc)
+                failed = await self._handle_policy_block(context, witness_state, error=message, code=code)
                 raise BrowserActionError(
-                    "Action blocked by policy",
-                    code="browser_action_blocked",
+                    message,
+                    code=code,
                     action=context.action_name,
-                    status_code=403,
+                    status_code=status_code,
                     retryable=False,
                     url=context.manager._shown_url(context.session.page),
                     details={"snapshot": failed},
@@ -163,10 +196,21 @@ class BrowserActionPipeline:
             await manager._ensure_witness_remote_ready(session, action=context.action_name)
         if witness_state.outcome.should_block:
             raise PermissionError(witness_state.outcome.block_reason or "Witness policy blocked this action")
+        if context.action_name not in MARKS_OWN_EFFECT:
+            effect_started()
+            witness_state.operation_started = True
         await context.operation()
         # Checked before the TOTP autofill, which types a live code into the
         # page: a redirect to a disallowed host must not receive one first.
-        manager._assert_runtime_url_allowed(session.page.url)
+        try:
+            manager._assert_runtime_url_allowed(session.page.url)
+        except PermissionError as exc:
+            # Still the policy block it is, but after the change: say so in the record.
+            context.target[AFTER_CHANGE] = (
+                f"The change was made, then the page it led to was blocked: {str(exc)[:300]}. Observe the page "
+                "before acting again, and do not repeat the action: that would make the change twice."
+            )
+            raise
         totp_result = await manager._maybe_handle_totp(session)
         if totp_result is not None:
             context.target.setdefault("totp", totp_result)
@@ -185,11 +229,17 @@ class BrowserActionPipeline:
         self,
         context: ActionRunContext,
         witness_state: ActionWitnessState,
+        *,
+        error: str,
+        code: str,
     ) -> dict[str, Any]:
         session = context.session
+        # A page that moved itself before the operation began is not this action's doing: going back
+        # would be a navigation nobody approved, made while the approval is given back for a retry.
+        started = witness_state.operation_started or context.began()
         try:
             # The before-snapshot shows a refused page by its origin; compared the same way.
-            if context.manager._shown_url(session.page) != witness_state.before.get("url"):
+            if started and context.manager._shown_url(session.page) != witness_state.before.get("url"):
                 # Back on the page the agent read before the action, the taint the action left clears.
                 with context.manager.page_provenance.escape(session.page, witness_state.escape_url):
                     await session.page.go_back(wait_until="domcontentloaded")
@@ -203,8 +253,8 @@ class BrowserActionPipeline:
             witness_state,
             status="blocked",
             after=failed,
-            error="Action blocked by policy",
-            approval_status="blocked",
+            error=error,
+            code=code,
         )
         return failed
 
@@ -248,7 +298,6 @@ class BrowserActionPipeline:
             status="failed",
             after=failed,
             error=exc.payload,
-            approval_status="failed",
         )
         exc.details.setdefault("snapshot", failed)
 
@@ -264,7 +313,6 @@ class BrowserActionPipeline:
             status="failed",
             after=failed,
             error="Action failed. Refresh observation and retry.",
-            approval_status="failed",
         )
         return failed
 
@@ -276,8 +324,9 @@ class BrowserActionPipeline:
         status: str,
         after: dict[str, Any],
         error: Any,
-        approval_status: str,
+        code: str | None = None,
     ) -> None:
+        """Record how the action ended; ``code`` is a blocked action's refusal code (approval_rejected, ...)."""
         manager = context.manager
         session = context.session
         await manager._append_jsonl(
@@ -297,7 +346,7 @@ class BrowserActionPipeline:
             status=status,
             action=context.action_name,
             session_id=session.id,
-            details={"target": context.target, "error": error},
+            details={"target": context.target, "error": error, **({"code": code} if code else {})},
         )
         await manager._record_witness_receipt(
             session,
@@ -313,7 +362,7 @@ class BrowserActionPipeline:
             approval=self._approval(
                 context,
                 witness_state,
-                status=approval_status,
+                status=self._approval_outcome(context, witness_state),
             ),
             metadata={"error": error},
         )
@@ -382,7 +431,7 @@ class BrowserActionPipeline:
             approval=self._approval(
                 context,
                 witness_state,
-                status="executed" if self._approval_id(context, witness_state) else None,
+                status=self._approval_outcome(context, witness_state),
             ),
         )
         await manager._persist_session(session, status="active")
@@ -493,6 +542,18 @@ class BrowserActionPipeline:
             approval_id=approval_id,
             status=status,
         )
+
+    def _approval_outcome(self, context: ActionRunContext, witness_state: ActionWitnessState) -> str | None:
+        """What happened to the action's approval, apart from how the action ended.
+
+        Spent once the change had begun; otherwise given back (held_for_execution).
+        None for an id this run does not hold: a caller's approval_id on an action
+        that needs none was reported spent or given back, even one already spent or rejected.
+        """
+        approval_id = self._approval_id(context, witness_state)
+        if approval_id is None:
+            return None
+        return held_status(approval_id)
 
     @staticmethod
     def _approval_id(context: ActionRunContext, witness_state: ActionWitnessState) -> str | None:

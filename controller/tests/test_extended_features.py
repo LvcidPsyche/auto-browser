@@ -140,7 +140,9 @@ class TestEventBus(unittest.IsolatedAsyncioTestCase):
 
     async def test_emit_approval_event(self) -> None:
         q = _events.subscribe("sess-3")
-        _events.emit_approval("sess-3", "appr-1", "upload", "pending", "Upload needs approval")
+        _events.emit_approval(
+            "sess-3", "appr-1", "upload", "pending", "Upload needs approval", origin="action", summary="upload"
+        )
         payload = json.loads(q.get_nowait())
         self.assertEqual(payload["event"], "approval")
         self.assertEqual(payload["approval_id"], "appr-1")

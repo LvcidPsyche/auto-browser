@@ -374,6 +374,9 @@ ApprovalStatus = Literal["pending", "approved", "rejected", "executed"]
 # Who decided an approval: an operator (dashboard, REST API) or an agent
 # (MCP, the built-in agent loop) under AUTONOMOUS_APPROVALS.
 ApprovalDecider = Literal["operator", "agent"]
+# What an approval may be spent on: a browser action, or a governed tool call
+# the MCP gateway approves through a stand-in action it builds itself.
+ApprovalOrigin = Literal["action", "tool_call"]
 SessionStatus = Literal["active", "closed", "interrupted", "failed"]
 AgentJobKind = Literal["agent_step", "agent_run"]
 AgentJobStatus = Literal[
@@ -547,6 +550,17 @@ class ApprovalRecord(BaseModel):
     # approval is governed by the session's owner; this is what governs one in
     # CONTROLLER_SCOPE, which has no session to ask.
     owner: str | None = None
+    # Recorded by the server, never taken from a caller: the stand-in's fields
+    # are ones any caller can write, so only this says a gateway built it. A
+    # record stored before the field existed loads as an action approval.
+    origin: ApprovalOrigin = "action"
+    # A tool call's whole arguments, as the operator may view them (GET /approvals/{id}/arguments):
+    # the preview's text uncut, credentials left out by tool and path, kept beside the record and
+    # removed once the call spends the approval. The size and sha256 of that text stay here: not the
+    # digest the approval binds (the stand-in's text hashes the call's own arguments, credentials and
+    # all). None for an action approval, whose record is the whole action.
+    arguments_size: int | None = None
+    arguments_sha256: str | None = None
 
 
 class ApprovalDecisionRequest(StrictInputModel):

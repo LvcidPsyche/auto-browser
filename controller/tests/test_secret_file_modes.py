@@ -26,7 +26,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.agent_jobs import AgentJobStore
-from app.approvals import FileApprovalStore
+from app.approval_backends import FileApprovalStore
 from app.auth_state import AuthStateManager
 from app.cron_service import CronService
 from app.mcp_transport import McpHttpTransport

@@ -83,6 +83,20 @@ class SensitiveApprovalTextTests(unittest.IsolatedAsyncioTestCase):
                 approval_id=approval.id, session_id="session-1", kind="payment", action=typing(SECRET)
             )
 
+    async def test_an_approve_of_text_no_longer_held_is_refused_before_the_record_changes(self) -> None:
+        # A reject drops the text (a secret is not kept for a change of mind), and so does a restart: an
+        # approve then gave an approval that execute_approval cannot run. The agent asks again instead.
+        rejected = await self.store.reject((await self.request(typing(SECRET))).id, comment="no")
+        pending = await self.request(typing("another-pin"))
+        restarted = ApprovalStore(self.root)
+        await restarted.startup()
+
+        for store, approval in ((self.store, rejected), (restarted, pending)):
+            with self.subTest(status=approval.status):
+                with self.assertRaisesRegex(PermissionError, "its text is no longer held; the agent asks again"):
+                    await store.approve(approval.id, comment="ok after all")
+                self.assertEqual((await store.get(approval.id)).status, approval.status)
+
     async def test_undecided_text_is_dropped_after_the_retention_window(self) -> None:
         approval = await self.store.approve((await self.request(typing(SECRET))).id)
         text, kept_at = self.store._sensitive_texts[approval.id]

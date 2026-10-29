@@ -44,6 +44,7 @@ from .memory_manager import MemoryManager
 from .models import (
     HTTP_URL_SCHEMES,
     ApprovalDecider,
+    ApprovalOrigin,
     BrowserActionDecision,
     SessionStatus,
     WitnessRemoteState,
@@ -208,15 +209,17 @@ class BrowserManager:
         if self.settings.state_db_path:
             Path(self.settings.state_db_path).resolve().parent.mkdir(parents=True, exist_ok=True)
         Path(self.settings.session_store_root).mkdir(parents=True, exist_ok=True)
-        self.approvals = ApprovalStore(
-            self.settings.approval_root,
-            db_path=self.settings.state_db_path,
-            approval_ttl_minutes=self.settings.approval_ttl_minutes,
-        )
         self.audit = AuditStore(
             self.settings.audit_root,
             db_path=self.settings.state_db_path,
             max_events=self.settings.audit_max_events,
+        )
+        self.approvals = ApprovalStore(
+            self.settings.approval_root,
+            db_path=self.settings.state_db_path,
+            approval_ttl_minutes=self.settings.approval_ttl_minutes,
+            audit=self.audit,
+            rejection_receipt=self.approval_service.rejection_receipt,
         )
         self.artifacts = SessionArtifactService(self.settings.artifact_root)
         self.download_capture = DownloadCaptureService(self.artifacts)
@@ -470,6 +473,9 @@ class BrowserManager:
     ) -> dict[str, Any]:
         return await self.approval_service.reject(approval_id, comment=comment, decided_via=decided_via)
 
+    async def approval_arguments(self, approval_id: str) -> dict[str, Any]:
+        return await self.approval_service.arguments(approval_id)
+
     async def execute_approval(self, approval_id: str) -> dict[str, Any]:
         return await self.approval_service.execute(approval_id)
 
@@ -480,9 +486,11 @@ class BrowserManager:
         *,
         approval_id: str | None,
         reason: str | None = None,
+        origin: ApprovalOrigin = "action",
+        arguments: str | None = None,
     ):
         return await self.actions.require_governed_approval(
-            session_id, decision, approval_id=approval_id, reason=reason
+            session_id, decision, approval_id=approval_id, reason=reason, origin=origin, arguments=arguments
         )
 
     # ── Observation ──────────────────────────────────────────────────────────
@@ -688,8 +696,11 @@ class BrowserManager:
         operation,
         *,
         change_made=None,
+        began=None,
     ) -> dict[str, Any]:
-        return await self.actions.run_action(session, action_name, target, operation, change_made=change_made)
+        return await self.actions.run_action(
+            session, action_name, target, operation, change_made=change_made, began=began
+        )
 
     async def _settle(self, page: Page) -> None:
         await self.actions.settle(page)

@@ -16,11 +16,21 @@ and allowlist checks parse that instead of the raw input.
 
 from __future__ import annotations
 
+import re
+from urllib.parse import urlsplit
+
+from idna import uts46_remap
+
 # WHATWG: strip leading and trailing C0 control-or-space, then remove every
 # ASCII tab and newline from the input before parsing.
 _C0_CONTROL_OR_SPACE = "".join(chr(code) for code in range(0x21))
 _TAB_OR_NEWLINE = str.maketrans("", "", "\t\n\r")
 _SPECIAL_SCHEMES = ("http:", "https:", "ws:", "wss:", "ftp:", "file:")
+# WHATWG reads a host whose last label is a number (decimal, or hex after 0x) as IPv4, in one to four
+# decimal, octal (a leading 0) or hex parts; only the dotted quad of plain decimals is written as it reads.
+_NUMBER_LABEL = re.compile(r"0[xX][0-9a-fA-F]*|[0-9]+")
+_OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
+_CANONICAL_IPV4 = re.compile(rf"{_OCTET}(?:\.{_OCTET}){{3}}")
 
 
 def browser_equivalent_url(url: str) -> str:
@@ -33,3 +43,77 @@ def browser_equivalent_url(url: str) -> str:
     cut = min((index for index in (normalized.find("?"), normalized.find("#")) if index != -1), default=-1)
     head, tail = (normalized, "") if cut == -1 else (normalized[:cut], normalized[cut:])
     return head.replace("\\", "/") + tail
+
+
+def refuse_ambiguous_host(url: str, *, field_name: str) -> str:
+    """``url`` as given, or ValueError when a browser could read another host in it than urllib does.
+
+    For a URL the operator approves by reading it (a CDP URL, a cookie's url, a
+    harness start URL): a backslash or a C0 control in it, or a host that
+    browser_equivalent_url reads otherwise, would show the operator one host and
+    connect to another; and a host the browser maps or decodes first (written
+    in full-width or another form it maps to another name, percent-encoded, or
+    IPv4 not as a dotted quad) is not the host shown either.
+    """
+    if "\\" in url or any(ord(char) < 0x20 for char in url):
+        raise ValueError(
+            f"{field_name} must not contain a backslash or a control character: a browser can read another host in it"
+        )
+    host = urlsplit(url).hostname
+    if host != urlsplit(browser_equivalent_url(url)).hostname:
+        raise ValueError(f"{field_name} names another host to a browser than it shows")
+    # As written: urlsplit lower-cases the host, and a browser maps what is written.
+    written = urlsplit(url).netloc.rpartition("@")[2].partition(":")[0]
+    if not written.isascii():
+        try:
+            mapped = browser_host(written)
+        except UnicodeError as error:
+            raise ValueError(f"{field_name} writes its host {written!r} with what a browser refuses: {error}") from None
+        if mapped != host:
+            raise ValueError(
+                f"{field_name} writes its host {written!r} in a form a browser reads as another host, {mapped!r}"
+            )
+    if host and _decoded_by_a_browser(host):
+        raise ValueError(f"{field_name} writes its host {host!r} in a form a browser reads as another host")
+    return url
+
+
+def browser_host(host: str) -> str:
+    """``host``, as written in a URL, as a browser maps it before it connects; IDNAError when it cannot.
+
+    WHATWG's host parser maps a domain through UTS 46's table (nontransitional,
+    without STD3 rules), as idna.uts46_remap does: full-width digits and dots
+    and other compatibility forms fold to ASCII, an ignorable code point
+    (U+200B, U+1BCA0) is dropped, letters are lower-cased, and a code point it
+    disallows is an error. Python's idna codec does none of it for what Unicode
+    3.2 did not have (it read Unicode 13's segmented 127.1 as a name) and writes
+    straße as strasse. An ASCII name is only lower-cased, so the callers pass
+    only a host that is not ASCII.
+    """
+    return uts46_remap(host, std3_rules=False, transitional=False)
+
+
+def host_as_sent(host: str) -> str:
+    """``host``, as written in a URL, as a browser sends it: mapped (browser_host), each non-ASCII label as xn--.
+
+    Punycode per label, as WHATWG's domain to ASCII writes it.
+    """
+    return ".".join(
+        label if label.isascii() else "xn--" + label.encode("punycode").decode("ascii")
+        for label in browser_host(host).split(".")
+    )
+
+
+def _decoded_by_a_browser(host: str) -> bool:
+    """Whether a browser connects to ``host`` under another name: percent-encoded, or IPv4 not as a dotted quad.
+
+    %62ank.example is bank.example to it, and 2130706433, 0177.0.0.01,
+    0x7f000001 and 127.1 are 127.0.0.1. An IPv6 literal is left alone.
+    """
+    if "%" in host:
+        return True
+    if ":" in host:
+        return False
+    labels = host.split(".")
+    last = labels[-1] or (labels[-2] if len(labels) > 1 else "")
+    return bool(_NUMBER_LABEL.fullmatch(last)) and not _CANONICAL_IPV4.fullmatch(host)

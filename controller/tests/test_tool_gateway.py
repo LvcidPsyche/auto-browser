@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from app.action_errors import BrowserActionError
-from app.approvals import ApprovalRequiredError
+from app.approvals import ApprovalRequiredError, ExecutionHold
 from app.browser.page_provenance import PageProvenance
 from app.memory_manager import MemoryProfile
 from app.metrics import MetricsRecorder
@@ -109,8 +109,8 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 delete=AsyncMock(return_value=True),
             ),
             approvals=SimpleNamespace(
-                mark_executed=AsyncMock(),
-                claim_execution=AsyncMock(),
+                # A real hold: held_for_execution reads and sets its fields.
+                claim_execution=AsyncMock(return_value=ExecutionHold("approval-governed-storage-1")),
                 release_execution=Mock(),
             ),
         )
@@ -785,9 +785,11 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(response.isError)
         self.manager.require_governed_approval.assert_awaited_once()
         page.evaluate.assert_awaited_once()
+        # The claim spends the approval; the hold it returns is released, still spent, once the call returns.
         self.manager.approvals.claim_execution.assert_awaited_once_with("approval-governed-storage-1")
-        self.manager.approvals.mark_executed.assert_awaited_once_with("approval-governed-storage-1")
-        self.manager.approvals.release_execution.assert_called_once_with("approval-governed-storage-1")
+        self.manager.approvals.release_execution.assert_called_once_with(
+            self.manager.approvals.claim_execution.return_value, spent=True
+        )
 
     async def test_auth_profile_tools_forward_arguments(self) -> None:
         list_response = await self.gateway.call_tool(

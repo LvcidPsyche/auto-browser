@@ -319,7 +319,7 @@ tools in the order `tools/list` returns them.
 | `downloads` | curated | reading files the page downloads | `browser.list_downloads`, `browser.read_download` |
 | `auth_profiles` | curated | listing saved sign-ins, and saving a session's sign-in to disk | `browser.list_auth_profiles`, `browser.save_auth_profile` |
 | `wait` | curated | waiting for an element (the `wait` action waits a fixed time) | `browser.wait_for_selector` |
-| `scripting` | curated | JavaScript in the page; every call needs an operator's approval | `browser.eval_js` |
+| `scripting` | curated | JavaScript in the page; every call needs an approval, an operator's unless `AUTONOMOUS_APPROVALS=true` | `browser.eval_js` |
 | `vision` | curated | finding an element from a description; listed only with a vision model (`ANTHROPIC_API_KEY`) | `browser.find_by_vision` |
 | `devtools` | full | debugging a page: console, page errors and failed requests beyond observe's last ten, the network log, traces, script export | `browser.get_console`, `browser.get_page_errors`, `browser.get_request_failures`, `browser.stop_trace`, `browser.get_network_log`, `browser.export_script` |
 | `deployment` | full | the controller's own setup: remote access, the readiness check, the PII scrubber | `browser.get_remote_access`, `browser.readiness_check`, `browser.pii_scrubber_status` |
@@ -397,11 +397,102 @@ Use `workflow_profile=governed` when starting convergence against a live browser
 
 ### Governed approvals on tool calls
 
-Pass `workflow_profile=governed` on a tool call (it defaults to `fast`) and every tool with a
-governed kind asks for an operator's approval first (not every tool that changes state has one:
-creating a session or a proxy persona does not): the call returns `approval_required` with an
-`approval_id`, an operator approves it, and the agent repeats the same call with that
-`approval_id`. An approval covers exactly one call with exactly those arguments.
+Pass `workflow_profile=governed` on a tool call (it defaults to `fast`) and every tool assigned a
+governed kind asks for an operator's approval first (most tools that write have one, not all:
+creating a session or a proxy persona does not; see `FORCE_GOVERNED_APPROVALS` below): the call
+returns `approval_required` with an `approval_id`, an operator approves it,
+and the agent repeats the same call with that `approval_id`. An approval covers exactly one call with
+exactly those arguments, and the call spends it when it claims it, before the action runs: if the call
+then fails, the same `approval_id` is refused ("was spent when its action started"), and repeating the
+call without it asks for a new approval. The exception is a browser action that ends before it begins,
+wherever it runs: `browser.execute_action` (with or without a `governed_approval_id`),
+`browser.execute_approval` and `POST /approvals/{id}/execute`, REST
+`POST /sessions/{id}/actions/execute` and `POST /sessions/{id}/actions/upload`, and the agent loop. On
+those paths any error the action's pipeline raises before the action begins gives the approval back:
+its refusals (the page on a host `ALLOWED_HOSTS` does not allow, a hosted witness that is not ready, a
+witness policy block, an upload's target that is not a file input or whose one-time marker the page
+moved, an operator's reject while the action waits, below), or another failure by then, such as the
+page snapshot it takes first. So do, under a `governed_approval_id`, a runtime approval the call still
+has to ask for, does not know, or finds not approved; a cancellation before the action begins, during
+its claim's write included (an agent job cancelled, a harness run past its `max_wall_seconds`, or the
+controller shutting down); and any ending before the action begins while an operator's reject waits on
+it, which then applies. An error raised outside the pipeline before the action begins, with no reject
+waiting, leaves it spent; so does a cancellation once the action has begun. The approval goes back to
+`approved`, or to `rejected` when the operator's reject applied. The error or the `approval_required`
+answer carries `approval_given_back` (and `approvals_given_back`, every approval given back, innermost
+first), each with its `status` and a message, and an agent loop step carries them in its `execution`.
+Retry an `approved` one with the same `approval_id` once the cause is gone, rather than asking again,
+and repeat the call without it for an `expired` one. A governed tool call that is not a browser action
+(`browser.eval_js`, `browser.set_cookies`, ...) spends its approval once the call is made, however it
+ends. A tool call's approval is spent only by repeating that tool call: `POST /approvals/{id}/execute`
+runs approved browser actions, and refuses a tool call's approval with a 409 without spending it.
+
+These refusal messages are the tool call's answer over MCP. REST routes answer an approval refusal with
+fixed text (403 "Not permitted" on `/sessions/{id}/actions/*`, 409 "Conflict" on
+`POST /approvals/{id}/execute`); a browser action's own error keeps its message, its `code` and its
+`approval_given_back` there too, and a 409 for a decision on a claimed approval, or for an approve
+whose arguments or text are gone, carries its reason as the `detail`, which the dashboard shows.
+
+An operator who rejects an approval while a browser action holds it but has not begun (it waits for the
+session, or its checks are running) gets the record back, still `executed`, with a `message`: the
+rejection stops the action, which is refused with `approval_rejected`, and the approval becomes
+`rejected`, however the action ends before it begins (an error or a cancellation included; if the
+approval cannot be written back, it stays spent, and the audit says the rejection did not apply).
+Approving it meanwhile withdraws the rejection, and the answer says what follows: the action may start;
+it was already refused, and the approval goes back to approved (or has expired, and the agent asks
+again); or it ended with an error that gives no approval back by itself, and the approval stays spent.
+Which ending gives back is read when the approval is written back, so it does not depend on whether the
+approve landed just before the action ended or just after. Once the action has begun, or while a
+governed tool call that is not a browser action runs, a decision is refused with why (a 409 over REST,
+with that text), and so is an agent's own reject of a claimed approval. The claim lives in the
+controller process, so a decision sent to another worker or replica is refused with a 409. On a Windows
+host with the default file store (`STATE_DB_PATH` unset), any read or write of a record made while
+another write replaces it can fail, since Windows briefly locks a file being replaced: a decision then
+answers 409 "Conflict" too; a claim, a check of the approval before the action runs, or a give-back
+fails the call; and a listing leaves the record out. A give-back that fails so leaves the approval
+spent. The Docker image runs Linux, where this does not happen.
+
+For an action approval the reason is the agent's own words. The dashboard queue shows the action
+itself, every field the approval binds, uncut; a field that does not act is marked "(not used by
+click)" when the action does not read it, or "(not used: selector runs)" when another field set beside
+it runs instead; a `select_option` value that runs is marked "(matches an option's value or label)",
+since it picks the first option whose value or label it is, and an empty value or label is shown
+(`value=""`). The approval webhook (`APPROVAL_WEBHOOK_URL`) and the SSE approval event carry its
+`origin` and an `action_summary` the server writes from the same fields, which cuts a string at 200
+characters and says how many it leaves out: when it does, decide on the queue row. For a tool call the
+reason previews the arguments (600 characters, credentials left out by tool and path); the record, the
+webhook and the SSE event (sent only for an approval in a session) carry `arguments_size`; and
+`GET /approvals/{id}/arguments`, or the queue's "View all N characters", shows them whole, with the
+same credentials left out, to whoever may read the approval; a cut preview gives that text's length.
+The record's `arguments_sha256` is that text's digest, not the one the approval binds, which covers the
+call's own arguments (so a cookie's or a storage value is approved without being viewable). They are
+removed when the call that spends the approval ends, or at the next start for a call whose process
+died, or whose removal failed (that is logged, and leaves the file). Until then they stay: an approval
+left pending, or approved and never run (one past its expiry stays `approved`), keeps its file, and a
+rejected one keeps it for the approval TTL (`APPROVAL_TTL_MINUTES`) after the rejection, since an
+operator may approve it again meanwhile; the file goes at the next approval request or start after
+that. An approve of one whose arguments are gone is refused ("its arguments are no longer stored; the
+agent asks again"), and so is an approve of a sensitive `type` whose text the controller no longer
+holds ("its text is no longer held; the agent asks again").
+
+In the dashboard (the queue, the confirm dialog, the arguments viewer and the run replay), in the
+`action_summary`, and in the webhook's and the SSE event's `reason`, a character that would hide or
+reorder the text is shown as its code point (`[U+202E]`); in the `reason`, a newline is written `\n`,
+and a tab, a carriage return or another control as its code point. A tool call's preview and arguments
+are ASCII JSON (`\u202e`). Every answer that carries the record serves its fields as stored: the record
+and listing routes (`GET /approvals`, `GET /approvals/{id}`, MCP `browser.list_approvals`), the answers
+to an approve, a reject or an execute over REST and MCP, the `approval_required` answer, and witness
+receipts. The queue lists only pending approvals: read one on its row before you decide. In an action
+approval, letters that look alike across scripts, and right-to-left letters, are shown as they are, and
+a credential in its URL is shown, in the queue, the summary, the webhook and SSE alike. A tool call's
+preview leaves out the userinfo, and the values of query parameters named as credentials, of
+`browser.cdp_attach`'s URL, a cookie's URL, and a harness run's start URL and mock final page URL; a
+credential in a URL's fragment, in a query parameter of another name, or anywhere else in the arguments
+is shown. A `type` the agent marked sensitive reads "text hidden at the agent's request (sensitive)":
+the agent can mark any text sensitive, so look at the field it types into. An operator's rejection
+stops the agent from approving the same request itself (`AUTONOMOUS_APPROVALS=true`) only within its
+session, or in controller scope for the same operator; with `AUTONOMOUS_APPROVALS=true` the agent
+approves its own calls, and can repeat a rejected one in a new session.
 
 A governed tool that names no session (`browser.delete_memory_profile`, `browser.cdp_attach`)
 is approved in a controller-wide scope: the approval's `session_id` is `controller`, and
@@ -409,6 +500,9 @@ is approved in a controller-wide scope: the approval's `session_id` is `controll
 session owner, so under named credentials (`API_BEARER_TOKENS`) such an approval belongs to
 the operator who asked and to nobody else: another operator cannot list, decide, reuse or
 spend it. `POST /approvals/{id}/execute` does not run it (the agent repeats the tool call).
+The audit log is operator-wide, though (`GET /audit/events`, `browser://audit/events`): any
+operator reads in it another operator's approval ids, kinds, origins and tools, and the
+comments decisions were given with, though not a reason or a tool call's arguments.
 
 The cron tools are governed too: `browser.create_cron_job` and `browser.trigger_cron_job` are
 `write` and `browser.delete_cron_job` is `destructive`. A job keeps the `workflow_profile` of the
@@ -419,13 +513,16 @@ call that created it, and every run, scheduled or triggered, starts under it, so
 update. To govern an existing job, delete it and create it again from a `governed` caller, or turn
 on `FORCE_GOVERNED_APPROVALS`.
 
-`workflow_profile` is the caller's argument, so by default governed approvals are the agent's
-choice. A deployment that wants them as a rule sets `FORCE_GOVERNED_APPROVALS=true`: every tool
-with a governed kind then runs as `governed` whatever the call passed, with or without a
-session, and `fast` is no longer available for them. Tools without a governed kind
-(reads, and some that change state, such as `browser.create_session`) are unchanged. It also forces every step of the agent loop to `governed`, whatever
-`request.workflow_profile` says, so `browser.queue_agent_step` and `browser.queue_agent_run`, REST
-`/agent/step` and `/agent/run`, and cron runs cannot be used to get around it.
+`workflow_profile` is the caller's argument, so by default governed approvals are the agent's choice. A
+deployment that wants them as a rule sets `FORCE_GOVERNED_APPROVALS=true`: every tool with a governed
+kind then runs as `governed` whatever the call passed, with or without a session, and `fast` is no
+longer available for them. Tools without a governed kind are unchanged: the reads, and some that write,
+among them the proxy persona tools; `browser.create_session` and `browser.fork_session` open a
+`start_url` with no approval, and so does each run of a cron job, though creating or triggering the
+job asks for one. It also forces
+every step of the agent loop to `governed`, whatever `request.workflow_profile` says, so
+`browser.queue_agent_step` and `browser.queue_agent_run`, REST `/agent/step` and `/agent/run`, and cron
+runs cannot be used to get around it.
 
 It does not cover the REST action routes (`/sessions/{id}/actions/*`): they ask for approval
 only for uploads and for `post`, `payment`, `account_change` and `destructive` decisions, and an

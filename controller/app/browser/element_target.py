@@ -228,14 +228,19 @@ class ElementTarget:
             self._raise_refused(result, "selected", timeout_ms)
         return result["values"]
 
-    async def set_input_files(self, path: str, *, on_transfer: Callable[[], None]) -> dict[str, str]:
+    async def set_input_files(
+        self, path: str, *, before_transfer: Callable[[], None], on_transfer: Callable[[], None]
+    ) -> dict[str, str]:
         """Playwright's ``set_input_files`` on this element, bound to it as tightly as a marker allows.
 
         A page script that moves the marker in the moment between the last
         check and Playwright's resolution can still send the file to another
-        file input of the same document. ``on_transfer`` is called as soon as
-        Playwright's transfer returns, before anything else is awaited, so a
-        caller cancelled during the checks after it knows the file went in.
+        file input of the same document. ``before_transfer`` is called once the
+        checks have passed, just before Playwright's transfer begins, so a
+        caller knows the file may go in even when the call then raises.
+        ``on_transfer`` is called as soon as Playwright's transfer returns,
+        before anything else is awaited, so a caller cancelled during the
+        checks after it knows the file went in.
         Answers the delivery: ``confirmed`` when the registered input holds a
         file of this name and size, else ``not_confirmed`` with the reason. It
         is never an error once the file has gone in, since a retry would upload
@@ -250,6 +255,7 @@ class ElementTarget:
             handle = await self._resolve_marked(nonce)
             try:
                 await self._require_marked_alone(nonce)
+                before_transfer()
                 await handle.set_input_files(path)
                 on_transfer()
             finally:

@@ -15,6 +15,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any
 
+from .approval_display import shown_code_points
 from .utils import UTC
 
 logger = logging.getLogger(__name__)
@@ -151,7 +152,22 @@ def emit_action(session_id: str, action: str, status: str, details: dict[str, An
     )
 
 
-def emit_approval(session_id: str, approval_id: str, kind: str, status: str, reason: str) -> None:
+def emit_approval(
+    session_id: str,
+    approval_id: str,
+    kind: str,
+    status: str,
+    reason: str,
+    *,
+    origin: str,
+    summary: str,
+    arguments_size: int | None = None,
+) -> None:
+    """``origin`` and ``summary`` are the server's account of the approval; ``reason`` may be an agent's.
+
+    The reason goes out with its code points shown (shown_code_points), as the
+    dashboard shows it: a consumer that renders it cannot be made to read it otherwise.
+    """
     _dispatch(
         session_id,
         {
@@ -161,7 +177,11 @@ def emit_approval(session_id: str, approval_id: str, kind: str, status: str, rea
             "approval_id": approval_id,
             "kind": kind,
             "status": status,
-            "reason": reason,
+            "origin": origin,
+            "action_summary": summary,
+            "reason": shown_code_points(reason),
+            # A tool call's whole arguments stay on the controller (GET /approvals/{id}/arguments).
+            "arguments_size": arguments_size,
         },
     )
 

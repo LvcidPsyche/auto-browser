@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 
 from app.agent_jobs import AgentJobStore
-from app.approvals import FileApprovalStore
+from app.approval_backends import FileApprovalStore
 from app.models import SessionRecord
 from app.session_store import FileSessionStore
 from app.witness import WitnessRecorder

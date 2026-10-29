@@ -471,6 +471,73 @@ async def test_an_upload_cancelled_after_the_transfer_spends_its_approval(
         assert (await env.manager.approvals.get(approval.id)).status == "executed"
 
 
+@pytest.mark.parametrize("by", ["element_id", "selector"])
+async def test_an_upload_that_delivers_and_then_raises_spends_its_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, by: str
+) -> None:
+    """The transfer was recorded only once Playwright's call had returned, so a file that went in before
+    the call raised (a timeout, a lost reply) gave the approval back for a second upload."""
+    async with browser_env(tmp_path, {"/": UPLOADS}) as env:
+        env.manager.settings.require_approval_for_uploads = True
+        session_id = await env.create("/")
+        _stage(env)
+        attachment = await env.element(session_id, "Attachment")
+        target = {"element_id": attachment["element_id"]} if by == "element_id" else {"selector": "#file"}
+        page = env.page(session_id)
+        with pytest.raises(ApprovalRequiredError) as asked:
+            await env.manager.upload(session_id, file_path="report.txt", approved=False, **target)
+        approval = await env.manager.approvals.approve(asked.value.approval.id, comment="ok")
+        owner = ElementHandle if by == "element_id" else Locator
+        set_input_files = owner.set_input_files
+
+        async def then_lose_the_answer(self, *args, **kwargs):
+            await set_input_files(self, *args, **kwargs)
+            raise PlaywrightError("Timeout 30000ms exceeded.")
+
+        monkeypatch.setattr(owner, "set_input_files", then_lose_the_answer)
+
+        await _refusal(
+            env.manager.upload(session_id, file_path="report.txt", approved=True, approval_id=approval.id, **target)
+        )
+
+        assert await page.title() == "FILE report.txt"
+        assert (await env.manager.approvals.get(approval.id)).status == "executed"
+
+
+NOT_A_FILE_INPUT = """<title>uploads</title>
+<input id="name" aria-label="Name">
+"""
+
+
+async def test_an_upload_refused_before_the_transfer_gives_its_approval_back(tmp_path: Path) -> None:
+    """Nothing was sent, so the approval is not spent, and the receipt says it was given back."""
+    async with browser_env(tmp_path, {"/": NOT_A_FILE_INPUT}) as env:
+        env.manager.settings.require_approval_for_uploads = True
+        env.manager.settings.witness_enabled = True
+        session_id = await env.create("/")
+        _stage(env)
+        name = await env.element(session_id, "Name")
+        with pytest.raises(ApprovalRequiredError) as asked:
+            await env.manager.upload(session_id, file_path="report.txt", approved=False, element_id=name["element_id"])
+        approval = await env.manager.approvals.approve(asked.value.approval.id, comment="ok")
+
+        refused = await _refusal(
+            env.manager.upload(
+                session_id,
+                file_path="report.txt",
+                approved=True,
+                approval_id=approval.id,
+                element_id=name["element_id"],
+            )
+        )
+
+        assert refused.code == "element_not_a_file_input"
+        assert (await env.manager.approvals.get(approval.id)).status == "approved"
+        receipts = await env.manager.list_witness_receipts(session_id)
+        receipt = [item for item in receipts if item["event_type"] == "browser_action"][-1]
+        assert (receipt["status"], receipt["approval"]["status"]) == ("failed", "approved")
+
+
 # The one-time-code field hands focus on, so the TOTP fill that follows every action fails with focus_lost.
 CODE_FIELD_HANDS_FOCUS_ON = """<title>uploads</title>
 <input id="file" type="file" aria-label="Attachment">

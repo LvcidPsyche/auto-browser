@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import ValidationError
 
+from ..approvals import ServerStateRefusal
 from ..models import ApprovalDecisionRequest
 from ..tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, TriggerCronJobInput
 from ._utils import typed_route_errors
@@ -53,10 +54,20 @@ def create_operations_router(
     async def get_approval(approval_id: str) -> dict[str, Any]:
         return await manager.get_approval(approval_id)
 
+    # A tool call's whole arguments, which the approval's reason previews; the record's access rule.
+    @router.get("/approvals/{approval_id}/arguments")
+    async def get_approval_arguments(approval_id: str) -> dict[str, Any]:
+        return await manager.approval_arguments(approval_id)
+
+    # A decision refused for what the server knows (an approval its action holds, or one whose
+    # arguments or text are gone) answers with why: ServerStateRefusal names nothing an agent
+    # wrote. Any other refusal keeps the fixed text.
     @router.post("/approvals/{approval_id}/approve")
     async def approve_approval(approval_id: str, payload: ApprovalDecisionRequest) -> dict[str, Any]:
         try:
             return await manager.approve(approval_id, comment=payload.comment)
+        except ServerStateRefusal as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
         except PermissionError:
             raise HTTPException(status_code=409, detail="Conflict") from None
 
@@ -64,6 +75,8 @@ def create_operations_router(
     async def reject_approval(approval_id: str, payload: ApprovalDecisionRequest) -> dict[str, Any]:
         try:
             return await manager.reject(approval_id, comment=payload.comment)
+        except ServerStateRefusal as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
         except PermissionError:
             raise HTTPException(status_code=409, detail="Conflict") from None
 

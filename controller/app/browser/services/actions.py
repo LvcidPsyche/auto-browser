@@ -14,8 +14,15 @@ from playwright.async_api import Error as PlaywrightError
 from ... import events as _events
 from ...action_errors import BrowserActionError, SessionNotFoundError
 from ...actions import ActionRunContext
-from ...approvals import CONTROLLER_SCOPE, ApprovalRequiredError, held_for_execution
-from ...models import ApprovalKind, BrowserActionDecision, totp_host_allowed
+from ...approval_display import approval_provenance, approval_summary
+from ...approvals import (
+    CONTROLLER_SCOPE,
+    ApprovalRequiredError,
+    held_action_approval,
+    held_for_execution,
+    refused_before_effect,
+)
+from ...models import ApprovalKind, ApprovalOrigin, BrowserActionDecision, totp_host_allowed
 from ...utils import spawn_background_task
 from ...webhooks import dispatch_approval_event
 from ...witness import WitnessApproval
@@ -94,6 +101,27 @@ _FIELD_ATTRIBUTES_SCRIPT = """(el) => ({
   'aria-label': el.getAttribute('aria-label') || '',
   autocomplete: el.getAttribute('autocomplete') || '',
 })"""
+
+
+# Actions that are in ActionName but that nothing executes, with why.
+_NOT_EXECUTABLE = {
+    "request_human_takeover": (
+        "request_human_takeover is not an action to execute; use browser.request_human_takeover"
+    ),
+    "done": "done is not an action to execute: it ends an agent's run",
+}
+
+
+def _refuse_unrunnable(decision: BrowserActionDecision) -> None:
+    """Refuse an action nothing executes, before any approval is asked for.
+
+    A takeover has its own tool and route, and done ends an agent's run, so the
+    only use of an approval for either was to put agent-written text before an
+    operator, shaped like the gateway's stand-in for a governed tool call.
+    """
+    refusal = _NOT_EXECUTABLE.get(decision.action)
+    if refusal is not None:
+        raise ValueError(refusal)
 
 
 def is_one_time_code_field(attributes: Mapping[str, Any]) -> bool:
@@ -358,6 +386,7 @@ class BrowserActionService:
         approval_id: str | None = None,
     ) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
+        _refuse_unrunnable(decision)
         if decision.action == "upload":
             # Check the file before asking anyone to approve the upload: an
             # operator should not be asked to approve an upload of a file that
@@ -369,10 +398,13 @@ class BrowserActionService:
             decision,
             approval_id=approval_id,
         )
+        # The receipt names the approval the action runs under: this call's own, or
+        # the one an outer layer holds for it (a governed call's governed_approval_id).
+        witnessed_id = approval_id or (approval.id if approval is not None else None) or held_action_approval()
         session.pending_witness_context = {
             "risk_category": decision.risk_category,
-            "approval_id": approval_id or (approval.id if approval is not None else None),
-            "approval_status": "approved" if approval_id or approval is not None else None,
+            "approval_id": witnessed_id,
+            "approval_status": "approved" if witnessed_id else None,
             "runtime_requires_approval": approval is not None or approval_id is not None,
             "sensitive_input": bool(getattr(decision, "sensitive", False)),
         }
@@ -381,10 +413,8 @@ class BrowserActionService:
             # approval itself.
             if approval is None or decision.action == "upload":
                 return await self._dispatch_decision(session_id, decision, approval_id=approval_id)
-            async with held_for_execution(self.manager.approvals, approval.id) as held:
-                result = await self._dispatch_decision(session_id, decision, approval_id=approval_id)
-                await held.executed()
-                return result
+            async with held_for_execution(self.manager.approvals, approval.id, may_give_back=True):
+                return await self._dispatch_decision(session_id, decision, approval_id=approval_id)
         finally:
             session.pending_witness_context = None
 
@@ -455,26 +485,66 @@ class BrowserActionService:
         approval_id: str | None,
         fallback_reason: str | None = None,
         approval_kind: ApprovalKind | None = None,
+        origin: ApprovalOrigin = "action",
+        arguments: str | None = None,
     ):
         """Require an approval for ``decision``; ``session_id=None`` asks in CONTROLLER_SCOPE.
 
         A tool call that names no session (a memory profile, a CDP attach) has
         no session to observe or witness, and none to look up an owner from: its
         approval belongs to the operator who asked (ApprovalRecord.owner).
+
+        ``origin`` is "tool_call" only for the gateway's stand-in for a governed
+        tool call (McpToolGateway._governed_call_decision), and ``arguments``
+        that call's whole arguments, which its approval keeps beside the record.
+
+        All of it runs before the action begins. Inside an outer layer's hold (a
+        governed execute_action whose runtime approval is still to ask for, is
+        refused, or names no approval that exists), whatever it raises gives the
+        outer approval back: an unknown id used to spend it.
         """
-        kind = approval_kind or self.approval_kind_for_decision(decision)
-        if kind is None:
-            return None
+        try:
+            return await self._require_decision_approval(
+                session_id,
+                decision,
+                approval_id=approval_id,
+                fallback_reason=fallback_reason,
+                approval_kind=approval_kind,
+                origin=origin,
+                arguments=arguments,
+            )
+        except Exception as exc:
+            refused_before_effect(exc)
+            raise
+
+    async def _require_decision_approval(
+        self,
+        session_id: str | None,
+        decision: BrowserActionDecision,
+        *,
+        approval_id: str | None,
+        fallback_reason: str | None,
+        approval_kind: ApprovalKind | None,
+        origin: ApprovalOrigin,
+        arguments: str | None,
+    ):
         if session_id == CONTROLLER_SCOPE:
             # The sentinel is a scope, not a session a caller may name: left to
             # match, it would let a session-bound call spend a controller approval.
             raise SessionNotFoundError(session_id)
+        # Before the kind: a done that needs no approval (risk "read") is still nothing to run.
+        if origin == "action":
+            _refuse_unrunnable(decision)
+        kind = approval_kind or self.approval_kind_for_decision(decision)
+        if kind is None:
+            return None
         if approval_id:
             return await self.manager.approvals.require_approved(
                 approval_id=approval_id,
                 session_id=session_id or CONTROLLER_SCOPE,
                 kind=kind,
                 action=decision,
+                origin=origin,
             )
 
         session = None if session_id is None else await self.manager.get_session(session_id)
@@ -484,6 +554,8 @@ class BrowserActionService:
             reason=fallback_reason or decision.reason,
             action=decision,
             observation=None if session is None else await self._approval_observation(session),
+            origin=origin,
+            arguments=arguments,
         )
         if session is None:
             # No session means no witness receipt to carry the request, so the
@@ -495,7 +567,7 @@ class BrowserActionService:
                 action="approval_requested",
                 session_id=CONTROLLER_SCOPE,
                 approval_id=approval.id,
-                details={"kind": approval.kind},
+                details={"kind": approval.kind, **approval_provenance(approval)},
             )
         else:
             await self.manager._record_witness_receipt(
@@ -516,10 +588,20 @@ class BrowserActionService:
                     "action": decision.action,
                     "selector": decision.selector,
                     "element_id": decision.element_id,
+                    **approval_provenance(approval),
                 },
                 metadata={"reason": approval.reason},
             )
-            _events.emit_approval(session_id, approval.id, approval.kind, approval.status, approval.reason)
+            _events.emit_approval(
+                session_id,
+                approval.id,
+                approval.kind,
+                approval.status,
+                approval.reason,
+                origin=approval.origin,
+                summary=approval_summary(approval),
+                arguments_size=approval.arguments_size,
+            )
         if self.manager.settings.approval_webhook_url:
             spawn_background_task(
                 dispatch_approval_event(
@@ -537,9 +619,14 @@ class BrowserActionService:
         *,
         approval_id: str | None,
         reason: str | None = None,
+        origin: ApprovalOrigin = "action",
+        arguments: str | None = None,
     ):
         kind = self.governed_approval_kind_for_decision(decision)
         if kind is None:
+            # A done that calls itself "read" needs no approval, and is still nothing to run.
+            if origin == "action":
+                _refuse_unrunnable(decision)
             return None
         # A caller that knows what is being approved (the MCP gateway, for tool
         # calls that are not browser actions) supplies the reason the operator
@@ -554,6 +641,8 @@ class BrowserActionService:
             approval_id=approval_id,
             fallback_reason=reason,
             approval_kind=kind,
+            origin=origin,
+            arguments=arguments,
         )
 
     async def _approval_observation(self, session: "BrowserSession") -> dict[str, Any]:
@@ -583,6 +672,7 @@ class BrowserActionService:
         operation: Any,
         *,
         change_made: Any = None,
+        began: Any = None,
     ) -> dict[str, Any]:
         context = ActionRunContext(
             manager=self.manager,
@@ -593,6 +683,8 @@ class BrowserActionService:
         )
         if change_made is not None:
             context.change_made = change_made
+        if began is not None:
+            context.began = began
         return await self.manager.action_pipeline.run(context)
 
     @staticmethod

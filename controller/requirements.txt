@@ -15,6 +15,9 @@ uvicorn[standard]==0.54.0
 playwright==1.62.0
 pydantic-settings==2.16.0
 httpx==0.28.1
+# Imported directly (url_safety maps a host through its UTS 46 table, as a browser does);
+# httpx, anyio and requests also need it.
+idna==3.18
 redis==8.1.0
 cryptography==50.0.2
 Pillow==13.0.0

@@ -6,6 +6,7 @@ import difflib
 import hashlib
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, get_args
@@ -15,13 +16,15 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from pydantic import BaseModel, ValidationError
 
 from ..action_errors import BrowserActionError, SessionNotFoundError
-from ..approvals import ApprovalRequiredError, held_for_execution
+from ..approval_display import shown_code_points
+from ..approvals import ApprovalRequiredError, given_back_notes, held_for_execution
 from ..browser.element_ids import refuse_selector_hint
 from ..browser.page_read import MOVED_DETAIL, bounded, locked_read, start_read
 from ..browser.services.diagnostics import checked_screenshot
 from ..browser_scripts import PAGE_TEXT_SCRIPT
 from ..models import (
     ActionName,
+    ApprovalOrigin,
     BrowserActionDecision,
     McpImageContent,
     McpToolCallContent,
@@ -92,6 +95,7 @@ from ..tool_inputs import (
 )
 from .drag import drag_drop
 from .packs import register_all
+from .previews import preview_arguments
 from .registry import ToolRegistry, ToolSpec
 from .selection import withheld_tool_message
 
@@ -124,20 +128,9 @@ IMPLICIT_SESSION_CREATE_TOOLS = frozenset(SESSION_STARTER_TOOLS)
 
 # Characters of a governed tool call's arguments shown to the approving operator.
 _APPROVAL_PREVIEW_CHARS = 600
-# Argument names whose values are credentials (cookie and storage values, and
-# the usual suspects) — never copied into an approval's human-readable reason.
-_PREVIEW_REDACTED_KEYS = frozenset({"value", "cookies", "password", "token", "secret"})
-
-
-def _redact_for_preview(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: "<redacted>" if key in _PREVIEW_REDACTED_KEYS else _redact_for_preview(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_for_preview(item) for item in value]
-    return value
+# One character of a json.dumps(ensure_ascii=True) text: past the BMP as its surrogate pair of escapes, as
+# another escape (\u202e, \n, \\), or as itself. The preview is cut between two of them.
+_JSON_CHARACTER = re.compile(r"\\ud[89ab][0-9a-f]{2}\\u[0-9a-f]{4}|\\u[0-9a-f]{4}|\\.|.", re.DOTALL)
 
 
 # A viewport PNG is typically well under 1 MB. Anything past this is not worth
@@ -157,6 +150,21 @@ def _page_of(content: str, *, offset: int, max_chars: int) -> dict[str, Any]:
         "truncated": truncated,
         "next_offset": end if truncated else None,
     }
+
+
+def _cut_between_characters(dumped: str, limit: int) -> str:
+    """The longest start of a json.dumps text within ``limit`` characters that splits none of its escapes.
+
+    Cut inside one, the preview ended in \\u202 and did not say that a bidi
+    override came next. Read from the start: an escaped backslash before plain
+    u202e reads as an escape from its end.
+    """
+    end = 0
+    for character in _JSON_CHARACTER.finditer(dumped):
+        if character.end() > limit:
+            break
+        end = character.end()
+    return dumped[:end]
 
 
 def _read_inline_image(path: Path) -> bytes | None:
@@ -308,9 +316,12 @@ class McpToolGateway:
             if approval is None:
                 result = await spec.handler(arguments)
             else:
-                async with held_for_execution(self.manager.approvals, approval.id) as held:
+                # Only execute_action's block is a single action call; any other
+                # handler may change the page itself, so its approval is never given back.
+                async with held_for_execution(
+                    self.manager.approvals, approval.id, may_give_back=spec.name == "browser.execute_action"
+                ):
                     result = await spec.handler(arguments)
-                    await held.executed()
             result = shape_mcp_result(spec.name, result, detail=getattr(arguments, "detail", "compact"))
             # The JSON stays the first block: clients (and the LangChain
             # adapter) read content[0].text as the result.
@@ -346,10 +357,8 @@ class McpToolGateway:
             )
             return self._error_response(f"Invalid arguments for {payload.name}: {details}")
         except SessionNotFoundError as exc:
-            return McpToolCallResponse(
-                content=[McpToolCallContent(text=exc.message)],
-                structuredContent={"error": exc.message, "code": exc.code, "session_id": exc.session_id},
-                isError=True,
+            return self._refusal_response(
+                exc.message, {"error": exc.message, "code": exc.code, "session_id": exc.session_id}, exc
             )
         except (ValueError, KeyError, RuntimeError) as exc:
             # Handlers raise these with operator-facing messages ("Provide
@@ -357,7 +366,7 @@ class McpToolGateway:
             # Surface them so the calling agent can self-correct, instead of
             # collapsing them into the opaque catch-all below.
             message = str(exc.args[0]) if exc.args else exc.__class__.__name__
-            return self._error_response(message)
+            return self._refusal_response(message, {"error": message}, exc)
         except FileNotFoundError as exc:
             # Lookups that miss raise FileNotFoundError with a message naming
             # what the caller asked for: an auth profile, an upload file. A
@@ -366,13 +375,9 @@ class McpToolGateway:
             # stays opaque, as with PermissionError below.
             if exc.errno is not None:
                 logger.exception("tool %s failed", payload.name)
-                return self._error_response("Tool execution failed")
+                return self._refusal_response("Tool execution failed", {"error": "Tool execution failed"}, exc)
             message = str(exc.args[0]) if exc.args else "Not found"
-            return McpToolCallResponse(
-                content=[McpToolCallContent(text=message)],
-                structuredContent={"error": message, "code": "not_found"},
-                isError=True,
-            )
+            return self._refusal_response(message, {"error": message, "code": "not_found"}, exc)
         except PermissionError as exc:
             # Policy refusals raise PermissionError with a reason for the caller:
             # a host outside ALLOWED_HOSTS, an approval not yet granted or not
@@ -383,13 +388,9 @@ class McpToolGateway:
             # one stays opaque.
             if exc.errno is not None:
                 logger.exception("tool %s failed", payload.name)
-                return self._error_response("Tool execution failed")
+                return self._refusal_response("Tool execution failed", {"error": "Tool execution failed"}, exc)
             message = str(exc.args[0]) if exc.args else "Not permitted"
-            return McpToolCallResponse(
-                content=[McpToolCallContent(text=message)],
-                structuredContent={"error": message, "code": "not_permitted"},
-                isError=True,
-            )
+            return self._refusal_response(message, {"error": message, "code": "not_permitted"}, exc)
         except PlaywrightError as exc:
             # The browser's answer about the caller's own page: a selector that
             # never appeared, an invalid selector, a script that threw. These
@@ -400,14 +401,10 @@ class McpToolGateway:
             message = (getattr(exc, "message", None) or str(exc)).split("\nCall log:")[0]
             message = message.split("\n    at ")[0].strip()
             code = "timeout" if isinstance(exc, PlaywrightTimeoutError) else "browser_error"
-            return McpToolCallResponse(
-                content=[McpToolCallContent(text=message[:2000])],
-                structuredContent={"error": message[:2000], "code": code},
-                isError=True,
-            )
-        except Exception:
+            return self._refusal_response(message[:2000], {"error": message[:2000], "code": code}, exc)
+        except Exception as exc:
             logger.exception("tool %s failed", payload.name)
-            return self._error_response("Tool execution failed")
+            return self._refusal_response("Tool execution failed", {"error": "Tool execution failed"}, exc)
 
     async def _inline_image(self, tool_name: str, result: Any) -> McpImageContent | None:
         """The result's screenshot as MCP image content, when the tool's job is to show the page."""
@@ -451,6 +448,22 @@ class McpToolGateway:
         if close:
             return f"{message}. Did you mean {close[0]}?"
         return message
+
+    @staticmethod
+    def _refusal_response(message: str, structured: dict[str, Any], exc: BaseException) -> McpToolCallResponse:
+        """An error answer that also says what became of each approval given back with ``exc``.
+
+        Only a BrowserActionError or an approval_required answer carried that,
+        so an agent refused by a plain PermissionError (an inner approval that is
+        not approved) was not told its governed approval was still approved.
+        """
+        notes = given_back_notes(exc)
+        if notes:
+            structured = {**structured, **notes}
+            message = f"{message} ({notes['approval_given_back']['message']})"
+        return McpToolCallResponse(
+            content=[McpToolCallContent(text=message)], structuredContent=structured, isError=True
+        )
 
     @staticmethod
     def _error_response(message: str) -> McpToolCallResponse:
@@ -552,17 +565,55 @@ class McpToolGateway:
         session_id = getattr(arguments, "session_id", None) or None
         decision = getattr(arguments, "action", None)
         reason = None
+        whole_arguments = None
+        origin: ApprovalOrigin = "action"
         if not isinstance(decision, BrowserActionDecision):
-            decision, reason = self._governed_call_decision(spec, arguments)
+            if approval_id:
+                # Spending the approval it names: matched on the stand-in's text alone, so neither the
+                # preview nor the kept arguments are built. Its digest dumps and hashes them all the
+                # same, so off the event loop too.
+                decision, reason = await asyncio.to_thread(self._governed_call_decision, spec, arguments)
+            else:
+                # Off the event loop, which serves every session: megabytes of arguments take seconds to
+                # write out, and the preview and the digest dump and hash them whole again.
+                def asked() -> tuple[str, tuple[BrowserActionDecision, str]]:
+                    whole = self._governed_call_arguments(spec, arguments)
+                    return whole, self._governed_call_decision(spec, arguments, arguments_size=len(whole))
+
+                whole_arguments, (decision, reason) = await asyncio.to_thread(asked)
+            # Only here, where the stand-in is built: the same fields from a
+            # caller are an action approval, which no tool call can spend.
+            origin = "tool_call"
+        elif decision.action == "upload":
+            # Before the operator is asked, and before the approval is claimed:
+            # a missing file would spend it on not_found. execute_decision checks
+            # in this order for the runtime approval.
+            session = await self.manager.get_session(session_id) if session_id else None
+            await self.manager.uploads.safe_path(decision.file_path or "", session=session)
         return await self.manager.require_governed_approval(
             session_id,
             decision,
             approval_id=approval_id,
             reason=reason,
+            origin=origin,
+            arguments=whole_arguments,
         )
 
     @staticmethod
-    def _governed_call_decision(spec: ToolSpec, arguments: BaseModel) -> tuple[BrowserActionDecision, str]:
+    def _governed_call_arguments(spec: ToolSpec, arguments: BaseModel) -> str:
+        """A governed call's whole arguments as the operator may view them: the preview's, uncut and indented.
+
+        Credentials left out as in the preview (preview_arguments), and every
+        character past ASCII written as its escape, so the text holds nothing
+        hidden but the newlines of its indent.
+        """
+        args = arguments.model_dump(mode="json", exclude={"session_id", "approval_id"}, exclude_none=True)
+        return json.dumps(preview_arguments(spec.name, args), sort_keys=True, indent=2, ensure_ascii=True)
+
+    @staticmethod
+    def _governed_call_decision(
+        spec: ToolSpec, arguments: BaseModel, *, arguments_size: int | None = None
+    ) -> tuple[BrowserActionDecision, str]:
         """Stand-in decision for approving a governed tool call that is not a browser action.
 
         An approval has to be for *this* call. The stand-in used to carry only the
@@ -573,14 +624,26 @@ class McpToolGateway:
         and previewed in the reason the operator reads. Credential-bearing fields
         are left out of the preview (approvals are stored and sent to webhooks);
         the hash still covers them.
+
+        ``arguments_size`` is the length of the whole text View all shows
+        (_governed_call_arguments), which a cut preview names: its own one-line
+        form is shorter, and counting that gave one call two totals. Without it
+        the reason names only the tool, for a caller that needs only ``text``.
         """
         args = arguments.model_dump(mode="json", exclude={"session_id", "approval_id"}, exclude_none=True)
         canonical = json.dumps(args, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        preview = json.dumps(_redact_for_preview(args), sort_keys=True, ensure_ascii=False)
-        if len(preview) > _APPROVAL_PREVIEW_CHARS:
-            preview = preview[:_APPROVAL_PREVIEW_CHARS] + "…"
-        reason = f"Approve {spec.name} with {preview}"
+        reason = f"Approve {spec.name}"
+        if arguments_size is not None:
+            # Every character past ASCII as its \uXXXX escape: a homoglyph host, an invisible name or a
+            # line separator that ends a // comment reads as itself, not as the character it imitates.
+            # Cut before it is escaped: what is shown is all that needs escaping, and escaping
+            # megabytes first blocked the event loop for tens of seconds.
+            dumped = json.dumps(preview_arguments(spec.name, args), sort_keys=True, ensure_ascii=True)
+            preview = shown_code_points(_cut_between_characters(dumped, _APPROVAL_PREVIEW_CHARS))
+            if len(dumped) > _APPROVAL_PREVIEW_CHARS:
+                preview = f"{preview}… ({arguments_size} characters in all: View all shows them)"
+            reason = f"{reason} with {preview}"
         decision = BrowserActionDecision(
             action="request_human_takeover",
             reason=reason[:1000],
