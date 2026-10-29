@@ -140,6 +140,9 @@ class SkillInducer:
             "verifier": verification.model_dump(mode="json"),
             "files_sha256": files_sha256,
             "provenance_hash": hash_payload(provenance),
+            # Every field of candidate.json except the path map and the envelope itself, so
+            # none of them can be edited under a valid signature.
+            "candidate_hash": hash_payload(provenance["candidate"]),
             "metadata": {
                 "task_class": contract.task_class,
                 "attempts": attempts,

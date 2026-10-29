@@ -49,7 +49,7 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   stalls an existing agent loop on its first write until an operator approves. Readiness
   (`GET /readiness`, `browser.readiness_check`) warns `governed_approvals` when more than one
   operator credential is configured and it is off. What it covers and what it does not:
-  - It covers every MCP tool call that has a governed kind (16 in the full tool profile,
+  - It covers every MCP tool call that has a governed kind (19 in the full tool profile, including the cron tools,
     `browser.execute_action`, `browser.set_cookies` and `browser.delete_memory_profile` among
     them) and every step of the agent loop: MCP-queued steps and runs (`browser.queue_agent_step`,
     `browser.queue_agent_run`), REST `/agent/step` and `/agent/run`, and cron runs. Each runs as

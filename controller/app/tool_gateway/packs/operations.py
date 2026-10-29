@@ -56,6 +56,7 @@ def register(registry, gateway):
             ),
             input_model=CreateCronJobInput,
             handler=gateway._create_cron_job,
+            governed_kind="write",
             pack="cron",
         ),
         ToolSpec(
@@ -63,6 +64,7 @@ def register(registry, gateway):
             description="Delete a cron / webhook trigger job.",
             input_model=CronJobIdInput,
             handler=gateway._delete_cron_job,
+            governed_kind="destructive",
             pack="cron",
         ),
         ToolSpec(
@@ -70,6 +72,7 @@ def register(registry, gateway):
             description="Immediately trigger a cron job (internal - no webhook auth required).",
             input_model=CronJobIdInput,
             handler=gateway._trigger_cron_job,
+            governed_kind="write",
             pack="cron",
         ),
     ]:

@@ -22,6 +22,7 @@ from pathlib import Path
 
 from app.harness.induce import SkillCandidate
 from app.harness.register import SkillStagingRegistry
+from app.harness.trace import hash_payload
 
 
 def candidate(skill_id: str = "skill-1", **overrides) -> SkillCandidate:
@@ -61,6 +62,12 @@ def signed_envelope(
     }
 
 
+def with_signed_envelope(entry: SkillCandidate, **envelope_args) -> SkillCandidate:
+    """`entry` carrying a valid envelope that also attests to the candidate itself."""
+    attested = hash_payload(entry.model_dump(mode="json", exclude={"files", "envelope"}))
+    return entry.model_copy(update={"envelope": {**signed_envelope(**envelope_args), "candidate_hash": attested}})
+
+
 def accepting_verifier(envelope: dict) -> dict:
     if envelope.get("signature") != "valid":
         raise ValueError("bad signature")
@@ -83,7 +90,7 @@ class RegistryVerificationTests(unittest.TestCase):
         return SkillStagingRegistry(self.root, verifier=accepting_verifier if verify else None)
 
     def test_a_valid_signature_is_accepted(self) -> None:
-        self.stage(candidate(signed=True, envelope=signed_envelope()))
+        self.stage(with_signed_envelope(candidate(signed=True)))
         self.assertEqual(self.registry(verify=True).get_candidate("skill-1").skill_id, "skill-1")
 
     def test_a_forged_signature_is_refused(self) -> None:
@@ -115,7 +122,7 @@ class RegistryVerificationTests(unittest.TestCase):
             self.registry(verify=True).get_candidate("skill-1")
 
     def test_listing_omits_what_it_cannot_verify(self) -> None:
-        self.stage(candidate("good", signed=True, envelope=signed_envelope(skill_id="good")))
+        self.stage(with_signed_envelope(candidate("good", signed=True), skill_id="good"))
         self.stage(candidate("forged", signed=True, envelope={**signed_envelope(), "signature": "forged"}))
         listed = {entry["skill_id"] for entry in self.registry(verify=True).list_candidates()}
         self.assertEqual(listed, {"good"})

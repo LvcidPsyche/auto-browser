@@ -107,6 +107,8 @@ Stage 1 is expected to add the CUAVerifierBench regression suite and verifier en
 
 When mesh identity is enabled, staged skill candidates are wrapped in the existing Ed25519 `SignedEnvelope` format. The signed payload is credential-free by design: no auth profiles, cookies, storage state, uploads, or browser profile material are embedded.
 
+The registry checks a staged candidate on every read. The envelope signs the contract and trace hashes, the hashes of `SKILL.md`, `helper.py` and `test_skill.py`, and a hash of everything else in `candidate.json` except the `files` map; a candidate that differs from it is refused. The files are hashed in the directory `candidate.json` was read from, and that directory must be named for the candidate's `skill_id`, so a copied `candidate.json` is refused. The `files` paths in what `harness.get_candidate` and `harness.list_candidates` return are built from that directory. The other review files (`provenance.json`, `envelope.json`, `contract.json`, `trace.json`) are not hashed.
+
 This gives future mesh replication a provenance format without widening the trust boundary in Stage 0.
 
 Signed candidates are verified immediately after signing. If the mesh envelope cannot be created or verified, staging fails closed instead of writing an ambiguous artifact.
