@@ -181,10 +181,17 @@ class ReadinessTests(unittest.TestCase):
         return SimpleNamespace(**{"pre_request_blocking": True, "allowed_hosts": "example.com", **values})
 
     def test_attached(self) -> None:
-        check = pre_request_gate_check(
-            self.settings(), {"state": "attached", "gates": [{"state": "attached", "attach_mode": False}]}
-        )
-        self.assertEqual(check.status, "pass")
+        gates = {"state": "attached", "gates": [{"state": "attached", "attach_mode": False, "prefetch_pref": 2}]}
+
+        self.assertEqual(pre_request_gate_check(self.settings(), gates).status, "pass")
+
+    def test_r3_a_launched_browser_with_no_prefetch_readback_warns(self) -> None:
+        gates = {"state": "attached", "gates": [{"state": "attached", "attach_mode": False}]}
+
+        check = pre_request_gate_check(self.settings(), gates)
+
+        self.assertEqual(check.status, "warn")
+        self.assertIn("prefetch", check.message)
 
     def test_attach_mode_without_the_switch_warns(self) -> None:
         gates = {"state": "attached", "gates": [{"state": "attached", "attach_mode": True, "switch_declared": False}]}

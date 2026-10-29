@@ -70,7 +70,10 @@ def pre_request_gate_check(settings: Any, gates: dict[str, Any]) -> ReadinessChe
             fix="Check the controller log; set PRE_REQUEST_BLOCKING=false to run on the post-load guard alone.",
             details=details,
         )
-    prefetch_on = [gate for gate in gates.get("gates", []) if "prefetch_pref" in gate and gate["prefetch_pref"] != 2]
+    # A launched browser (not an attach mode) whose preference did not read back 2, or was never read.
+    prefetch_on = [
+        gate for gate in gates.get("gates", []) if gate.get("attach_mode") is False and gate.get("prefetch_pref") != 2
+    ]
     if prefetch_on:
         return ReadinessCheck(
             name=name,

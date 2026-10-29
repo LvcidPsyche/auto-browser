@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from app.browser.launch_flags import STORAGE_PARTITIONING_ON
 from app.browser.request_gate import RequestGateUnavailable
@@ -514,6 +514,112 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.browser.cdp_sessions[0].detached)
         events = [call.kwargs.get("event_type") for call in self.manager.audit.append.await_args_list]
         self.assertNotIn("request_gate_lost", events)
+
+    # ── round 3: no context runs ungated ─────────────────────────────────────
+
+    async def test_r1_a_shadow_launch_whose_gate_is_lost_while_it_starts_is_refused(self) -> None:
+        """The loss lands before the shadow session is in manager.sessions, so containment cannot see it."""
+        self.manager.settings.shadow_browse_enabled = True
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
+        self.manager.sessions[source_id].context.storage_state = AsyncMock(return_value={})
+        headed = _browser()
+        self._playwright(launch=AsyncMock(return_value=headed))
+        gates = self.manager.request_gates
+
+        async def lose_the_gate_meanwhile(_page) -> None:
+            if gates.get(headed) is not None:
+                [gate_session] = _gate_sessions(headed)
+                gate_session.emit("close", gate_session)
+                await self._settled()  # containment runs now, and finds no session on the browser
+
+        gates.bypass_service_workers = AsyncMock(side_effect=lose_the_gate_meanwhile)  # type: ignore[method-assign]
+
+        with self.assertRaises(RequestGateUnavailable):
+            await self.manager.enable_shadow_browse(source_id)
+
+        self.assertEqual(
+            [s for s in self.manager.sessions.values() if s.browser is headed], [], "a shadow session runs ungated"
+        )
+        headed.close.assert_awaited_once()
+
+    async def _lose_the_gate_with_a_context_that_will_not_close(self) -> tuple[str, object]:
+        first, _second = await self._two_sessions()
+        session = self.manager.sessions[first]
+        session.context.close = AsyncMock(side_effect=RuntimeError("context close failed"))
+        lost = self.manager.request_gates.get(self.browser)
+        self.browser.cdp_sessions[0].emit("close", self.browser.cdp_sessions[0])
+        await self._settled()
+        return session.gate_context_id, lost
+
+    async def test_r2_a_context_containment_could_not_close_is_gated_again_at_once(self) -> None:
+        with self.assertLogs("app.browser.services.runtime", level="WARNING") as logs:
+            context_id, lost = await self._lose_the_gate_with_a_context_that_will_not_close()
+
+        gate = self.manager.request_gates.get(self.browser)
+        self.assertIsNot(gate, lost)
+        self.assertTrue(gate.live, "no replacement gate until some later create")
+        self.assertTrue(gate.owns(context_id))
+        self.assertIn("stay gated", " ".join(logs.output))
+        replacement = _gate_sessions(self.browser)[-1]
+        replacement.replies["Target.getTargetInfo"] = {
+            "targetInfo": {"targetId": "survivor", "type": "page", "browserContextId": context_id}
+        }
+        replacement.emit(
+            "Fetch.requestPaused",
+            {
+                "requestId": "after-loss",
+                "request": {"url": "https://refused.example/", "method": "GET", "headers": {}},
+                "frameId": "survivor",
+            },
+        )
+        method, _ = await replacement.wait_for_reply("after-loss")
+        self.assertEqual(method, "Fetch.failRequest")
+
+    async def test_r2_a_replacement_that_cannot_attach_is_logged_as_the_post_load_guard_alone(self) -> None:
+        attaches = 0
+
+        async def first_attach_only() -> FakeCDPSession:
+            nonlocal attaches
+            attaches += 1
+            if attaches > 1:
+                raise RuntimeError("no more sessions")
+            session = FakeCDPSession(log=self.browser.log)
+            self.browser.cdp_sessions.append(session)
+            return session
+
+        self.browser.new_browser_cdp_session.side_effect = first_attach_only
+
+        with self.assertLogs("app.browser.services.runtime", level="ERROR") as logs:
+            await self._lose_the_gate_with_a_context_that_will_not_close()
+
+        text = " ".join(logs.output)
+        self.assertIn("post-load guard alone", text)
+        self.assertNotIn("stay gated", text)
+
+    async def test_r3_prefetch_is_turned_off_even_when_the_first_attach_fails(self) -> None:
+        self.manager.settings.browser_ws_endpoint = "ws://browser-node:9223/x"
+        self._playwright(connect=AsyncMock(return_value=self.browser))
+        attaches = 0
+
+        async def failing_first() -> FakeCDPSession:
+            nonlocal attaches
+            attaches += 1
+            replies = {"Fetch.enable": RuntimeError("Fetch.enable failed")} if attaches == 1 else {}
+            session = FakeCDPSession(replies, log=self.browser.log)
+            self.browser.cdp_sessions.append(session)
+            return session
+
+        self.browser.new_browser_cdp_session.side_effect = failing_first
+        prefetch = AsyncMock(return_value=2)
+
+        with patch("app.browser.request_gate.turn_prefetch_off", prefetch):
+            await self.manager.ensure_browser()
+            await self.manager.create_session(name="s", start_url=START_URL)
+
+        prefetch.assert_awaited_once_with(self.browser)
+        [gate] = self.manager.request_gates.status()["gates"]
+        self.assertEqual((gate["state"], gate["prefetch_pref"]), ("attached", 2))
 
 
 if __name__ == "__main__":

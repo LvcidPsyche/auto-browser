@@ -756,6 +756,12 @@ class BrowserSessionService:
                 with manager.page_provenance.controller_navigation(page) as navigation:
                     navigation.response = await page.goto(current_url, wait_until="domcontentloaded")
                 await manager._settle(page)
+            if gate is not None and not gate.live:
+                # Lost before the session was in manager.sessions, where containment looks: refused, as in create.
+                raise RequestGateUnavailable(
+                    "The pre-request gate detached from the shadow browser while it was starting, so it was closed. "
+                    "Enable shadow browsing again."
+                )
             await manager._persist_session(shadow_session, status="active")
         except Exception:
             manager.sessions.pop(shadow_session_id, None)

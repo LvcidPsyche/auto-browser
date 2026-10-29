@@ -484,8 +484,8 @@ class RequestGates:
             await self.require(browser)
         except RequestGateUnavailable as exc:
             logger.warning("%s", exc.message)
-            return
         if not attach_mode:
+            # The browser's preference, not the gate's: set even when this attach failed and a later one succeeds.
             await self._prefetch_off(browser)
 
     async def _prefetch_off(self, browser: Any) -> None:
@@ -618,7 +618,11 @@ class RequestGates:
             for key, (_browser, gate) in self._gates.items()
         ]
         gates += [
-            {"state": "attach_failed", "error": message[:300]}
+            {
+                "state": "attach_failed",
+                "error": message[:300],
+                **({"prefetch_pref": self._prefetch[key][1]} if key in self._prefetch else {}),
+            }
             for key, (_browser, message) in self._attach_failures.items()
             if key not in self._gates
         ]

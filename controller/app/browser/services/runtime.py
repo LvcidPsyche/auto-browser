@@ -12,7 +12,7 @@ from ...auth_policy import credentials_for
 from ...session_isolation import IsolatedBrowserRuntime
 from ...session_ownership import as_system
 from ...utils import spawn_background_task
-from ..request_gate import RequestGate
+from ..request_gate import RequestGate, RequestGateUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +172,29 @@ class BrowserRuntimeService:
         """A browser's pre-request gate detached on its own: Chromium resumes what it held (decision 2)."""
         spawn_background_task(self._contain_lost_gate(gate))
 
+    async def _regate_survivors(self, browser: Any, failed: list[str]) -> None:
+        """Attach a replacement gate now, which inherits the contexts that did not close, rather than at some
+        later create."""
+        names = ", ".join(failed)
+        try:
+            replacement = await self.manager.request_gates.require(browser)
+        except RequestGateUnavailable as exc:
+            logger.error(
+                "pre-request gate loss: session(s) %s did not close and no replacement gate attached (%s): their "
+                "context runs on the post-load guard alone",
+                names,
+                exc.message,
+            )
+            return
+        if replacement is not None and replacement.live:
+            logger.error("pre-request gate loss: session(s) %s did not close; they stay gated by a new gate", names)
+            return
+        logger.error(
+            "pre-request gate loss: session(s) %s did not close and no gate is live: their context runs on the "
+            "post-load guard alone",
+            names,
+        )
+
     async def _contain_lost_gate(self, gate: RequestGate) -> None:
         """Close every session on the gate's browser; the next session there attaches a new gate.
 
@@ -207,7 +230,7 @@ class BrowserRuntimeService:
                 # the next gate inherits it: still gated, but not closed.
                 (failed if gate.owns(session.gate_context_id) else closed).append(session.id)
         if failed:
-            logger.error("pre-request gate loss: session(s) %s did not close; they stay gated", ", ".join(failed))
+            await self._regate_survivors(browser, failed)
         await manager.audit.append(
             event_type="request_gate_lost",
             status="error",
