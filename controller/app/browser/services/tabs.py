@@ -8,7 +8,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from ...action_errors import BrowserActionError
 from ..page_provenance import CLOSED_PAGE_GRACE_SECONDS
-from ..request_gate import block_summary, navigation_blocked_error
+from ..request_gate import block_summary, navigation_blocked_error, stopped_by_gate
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -63,8 +63,9 @@ class BrowserTabService:
                 # after a refused tab closed, would count as that tab's choice.
                 await self.manager._wait_out_closed_page_grace(session)
             gates = self.manager.request_gates
-            blocked_before = gates.blocked_count(session.browser, session.gate_context_id)
             new_page = await session.context.new_page()
+            # The new page's own count, before it navigates: another tab's blocks are not this one's.
+            blocked_before = await gates.page_block_count(session.browser, new_page)
             # Reported by the context like a popup, but with no opener to judge it.
             self.manager.page_provenance.opened_by_controller(new_page)
             if session.gate_context_id is not None:
@@ -81,8 +82,8 @@ class BrowserTabService:
             except BaseException as exc:
                 # Read while the tab is open: a block names its page by the page's targetId.
                 stopped = (
-                    await gates.blocks_on_page(session.browser, session.gate_context_id, new_page, since=blocked_before)
-                    if isinstance(exc, PlaywrightError)
+                    await gates.blocks_on_page(session.browser, new_page, since=blocked_before)
+                    if isinstance(exc, PlaywrightError) and stopped_by_gate(exc)
                     else []
                 )
                 # A failed open (DNS error, timeout, refused redirect) left the
@@ -209,9 +210,7 @@ class BrowserTabService:
         for tab, page in zip(tabs, pages):
             # A tab whose navigation the pre-request gate stopped shows Chrome's error page: say what was stopped.
             if str(tab["url"]).startswith("chrome-error:"):
-                block = await self.manager.request_gates.last_block_on_page(
-                    session.browser, session.gate_context_id, page
-                )
+                block = await self.manager.request_gates.last_block_on_page(session.browser, page)
                 if block is not None:
                     tab["blocked_navigation"] = block_summary(block)
         return tabs

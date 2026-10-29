@@ -56,8 +56,12 @@ REDIRECT_ORIGIN_SWITCH = "--disable-features=BlockOriginHeaderModificationOnRedi
 REDIRECT_ORIGIN_SETTING = "CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED"
 # The URL of each recent request of an owned page, for the redirect hop that follows it.
 REQUEST_URLS_KEPT = 1024
-# Blocks kept per owned context, for what the agent is told about them.
+# Blocks kept per owned context, and per page, for what the agent is told about them.
 BLOCKS_KEPT = 50
+# Pages whose blocks are kept (each dropped when its target is destroyed); the oldest goes past this.
+PAGES_KEPT = 512
+# How Playwright reports a request the gate failed (Fetch.failRequest BlockedByClient).
+BLOCKED_BY_CLIENT_TEXT = "net::ERR_BLOCKED_BY_CLIENT"
 # How long a frame's lookup may take before it counts as failed (a refused URL then fails).
 LOOKUP_TIMEOUT_SECONDS = 5.0
 # How long reading a page's targetId may take (it runs under the session lock, in error handling too).
@@ -117,10 +121,20 @@ def block_summary(block: GateBlock) -> dict[str, str]:
     return {"origin": block.origin, "reason": block.reason, "explanation": block.explanation}
 
 
+def stopped_by_gate(exc: BaseException) -> bool:
+    """Whether a Playwright failure is a request the gate failed: anything else (a selector timeout while the page
+    tried a refused navigation) keeps its own error."""
+    return BLOCKED_BY_CLIENT_TEXT in str(exc)
+
+
 @dataclass
 class _OwnedContext:
     blocked: int = 0
     blocks: deque[GateBlock] = field(default_factory=lambda: deque(maxlen=BLOCKS_KEPT))
+
+
+# A page's blocks: the same shape, keyed by its targetId, whether or not its context was known.
+_PageBlocks = _OwnedContext
 
 
 @dataclass(frozen=True)
@@ -180,6 +194,8 @@ class RequestGate:
         # A gate attached after a loss shares the lost one's contexts: what outlived containment stays gated,
         # and the close listener register_context wired forgets it here too.
         self._owned: dict[str, _OwnedContext] = inherit_from._owned if inherit_from is not None else {}
+        # Blocks by page targetId, shared the same way: a caller's count from before a loss still compares.
+        self._pages: OrderedDict[str, _PageBlocks] = inherit_from._pages if inherit_from is not None else OrderedDict()
         self._request_urls: OrderedDict[str, str] = OrderedDict()
         self.unattributed_blocks = 0
         self.handler_errors = 0
@@ -284,6 +300,14 @@ class RequestGate:
         owned = self._owned.get(context_id)
         return owned.blocked if owned is not None else 0
 
+    def page_blocks(self, target_id: str | None) -> list[GateBlock]:
+        page = self._pages.get(target_id) if target_id else None
+        return list(page.blocks) if page is not None else []
+
+    def page_blocked_count(self, target_id: str | None) -> int:
+        page = self._pages.get(target_id) if target_id else None
+        return page.blocked if page is not None else 0
+
     # ── events ───────────────────────────────────────────────────────────────
 
     def _on_target(self, event: dict[str, Any]) -> None:
@@ -294,6 +318,7 @@ class RequestGate:
 
     def _on_target_destroyed(self, event: dict[str, Any]) -> None:
         self._targets.pop(event.get("targetId"), None)
+        self._pages.pop(event.get("targetId"), None)
 
     def _on_paused(self, event: dict[str, Any]) -> None:
         # Delivered inline by Playwright's event emitter; the decision and its reply run in a task.
@@ -312,6 +337,8 @@ class RequestGate:
         if verdict.owned_page:
             # Decision state, not bookkeeping: the next hop's verdict reads it, so it is written before the reply.
             self._remember_url(event.get("requestId"), url)
+        # On record before the reply (memory only): whoever reads once Playwright reports the failure finds it.
+        block = self._record_block(event, url, verdict) if verdict.fail else None
         reply_error: BaseException | None = None
         try:
             if verdict.fail:
@@ -322,8 +349,8 @@ class RequestGate:
                 await self._cdp.send("Fetch.continueRequest", {"requestId": event.get("requestId")})
         except Exception as exc:
             reply_error = exc
-        # Bookkeeping, only after the reply.
-        self._after_reply(event, url, verdict, handler_error, reply_error)
+        # The audit and the logs, only after the reply.
+        self._after_reply(verdict, block, handler_error, reply_error)
 
     async def _verdict(self, event: dict[str, Any], request: dict[str, Any], url: str) -> _Verdict:
         kind, context_id, lookup_error = await self._classify(event.get("frameId"))
@@ -387,9 +414,8 @@ class RequestGate:
 
     def _after_reply(
         self,
-        event: dict[str, Any],
-        url: str,
         verdict: _Verdict,
+        block: GateBlock | None,
         handler_error: BaseException | None,
         reply_error: BaseException | None,
     ) -> None:
@@ -400,10 +426,14 @@ class RequestGate:
             logger.warning("pre-request gate: could not classify a paused request's frame: %s", verdict.lookup_error)
         if reply_error is not None:
             logger.warning("pre-request gate: Chromium did not take the reply to a paused request: %s", reply_error)
-        if verdict.fail:
-            self._record_block(event, url, verdict)
+        if block is not None and self._on_block is not None:
+            try:
+                self._on_block(block)
+            except Exception:
+                logger.exception("pre-request gate: the block listener failed")
 
-    def _record_block(self, event: dict[str, Any], url: str, verdict: _Verdict) -> None:
+    def _record_block(self, event: dict[str, Any], url: str, verdict: _Verdict) -> GateBlock:
+        """Keep the block by its page, and by its context when that is known. Memory only: it runs before the reply."""
         origin = _origin_of(url)
         if verdict.reason == CROSS_ORIGIN_POST_REDIRECT:
             explanation = (
@@ -423,16 +453,21 @@ class RequestGate:
             reason=verdict.reason or UNCLASSIFIED,
             explanation=explanation,
         )
+        if block.target_id:
+            page = self._pages.get(block.target_id)
+            if page is None:
+                page = self._pages[block.target_id] = _PageBlocks()
+            self._pages.move_to_end(block.target_id)
+            page.blocked += 1
+            page.blocks.append(block)
+            while len(self._pages) > PAGES_KEPT:
+                self._pages.popitem(last=False)
         if owned is None:
             self.unattributed_blocks += 1
-            return
-        owned.blocked += 1
-        owned.blocks.append(block)
-        if self._on_block is not None:
-            try:
-                self._on_block(block)
-            except Exception:
-                logger.exception("pre-request gate: the block listener failed")
+        else:
+            owned.blocked += 1
+            owned.blocks.append(block)
+        return block
 
 
 async def _read_target_id(page: Any) -> str:
@@ -481,6 +516,8 @@ class RequestGates:
         self._attach_failures: dict[int, tuple[Any, str]] = {}
         # Each page's targetId, read once (a block names the page by it).
         self._target_ids: weakref.WeakKeyDictionary[Any, str] = weakref.WeakKeyDictionary()
+        # When each page last committed a main-frame document other than Chrome's error page (monotonic).
+        self._commits: weakref.WeakKeyDictionary[Any, float] = weakref.WeakKeyDictionary()
         # The prefetch preference read back from each launched browser (decision 5), for readiness.
         self._prefetch: dict[int, tuple[Any, Any]] = {}
         # Each owned page's session holding Network.setBypassServiceWorker; the bypass lasts as long as it does.
@@ -572,33 +609,42 @@ class RequestGates:
 
     # ── what a session's pages ran into ──────────────────────────────────────
 
-    def blocked_count(self, browser: Any, context_id: str | None) -> int:
-        """A context's block count now: what an action compares against after its operation."""
+    async def page_block_count(self, browser: Any, page: Any) -> int:
+        """A page's own block count now: what an operation on it compares against afterwards."""
         gate = self.get(browser)
-        return gate.blocked_count(context_id) if gate is not None and context_id else 0
+        if gate is None:
+            return 0
+        return gate.page_blocked_count(await self.target_id_of(page))
 
-    async def blocks_on_page(self, browser: Any, context_id: str | None, page: Any, *, since: int) -> list[GateBlock]:
-        """The blocks recorded on ``page`` after the context's count was ``since``: its own, never another tab's."""
+    async def blocks_on_page(self, browser: Any, page: Any, *, since: int) -> list[GateBlock]:
+        """The blocks on ``page`` since its count was ``since``: its own, never another tab's."""
         gate = self.get(browser)
-        if gate is None or not context_id:
+        if gate is None:
             return []
-        new = gate.blocked_count(context_id) - since
-        if new <= 0:
-            return []
-        recent = gate.blocks(context_id)[-new:]
         target_id = await self.target_id_of(page)
-        return [block for block in recent if block.target_id == target_id]
+        new = gate.page_blocked_count(target_id) - since
+        return gate.page_blocks(target_id)[-new:] if new > 0 else []
 
-    async def last_block_on_page(self, browser: Any, context_id: str | None, page: Any) -> GateBlock | None:
+    async def last_block_on_page(self, browser: Any, page: Any) -> GateBlock | None:
         """The most recent block on ``page`` (a tab whose navigation was stopped shows Chrome's error page)."""
         gate = self.get(browser)
-        if gate is None or not context_id:
+        if gate is None:
             return None
-        blocks = gate.blocks(context_id)
-        if not blocks:
+        blocks = gate.page_blocks(await self.target_id_of(page))
+        if not blocks or blocks[-1].at <= self._commits.get(page, float("-inf")):
+            # Older than the page's last real commit: its error page now is some other failure's.
             return None
-        target_id = await self.target_id_of(page)
-        return next((block for block in reversed(blocks) if block.target_id == target_id), None)
+        return blocks[-1]
+
+    def note_commit(self, page: Any, url: str) -> None:
+        """A main-frame commit of ``page`` (the page guard reports each); Chrome's error page is not one."""
+        if not url.startswith("chrome-error:"):
+            with contextlib.suppress(TypeError):  # a page that cannot be weakly referenced (a test double)
+                self._commits[page] = time.monotonic()
+
+    def known_target_id(self, page: Any) -> str | None:
+        """A page's targetId if it was read already: no I/O (the audit's attribution reads it)."""
+        return self._target_ids.get(page)
 
     async def target_id_of(self, page: Any) -> str | None:
         """A page's targetId (the frameId of its main frame's requests), read once through a page session."""

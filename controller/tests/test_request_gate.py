@@ -52,6 +52,7 @@ class Harness:
             attach_mode=options.pop("attach_mode", False),
             origin_switch_declared=options.pop("origin_switch_declared", False),
             on_lost=self.lost.append,
+            on_block=options.pop("on_block", None),
         )
         self.requests = 0
 
@@ -553,19 +554,36 @@ async def test_no_switch_warning_when_it_does_not_apply(caplog, attach_mode: boo
     assert [r for r in caplog.records if r.name == "app.browser.request_gate"] == []
 
 
-async def test_the_reply_goes_out_before_the_block_is_recorded(harness: Harness) -> None:
-    seen_at_reply: list[tuple[int, int]] = []
+async def test_the_block_is_on_record_at_the_reply_and_audited_and_logged_only_after_it(caplog) -> None:
+    """R6: whoever reads after Playwright reports the failure finds the block; the audit and logs wait for the reply."""
+    audited: list = []
+    h = Harness(on_block=audited.append)
+    await h.start()
+    seen_at_reply: list = []
 
     def fail_request(params: dict) -> dict:
-        seen_at_reply.append((harness.gate.blocked_count(harness.owned), len(harness.gate.blocks(harness.owned))))
+        seen_at_reply.append(
+            (h.gate.page_blocked_count(h.page), h.gate.blocked_count(h.owned), len(audited), caplog.text)
+        )
         return {}
 
-    harness.cdp.replies["Fetch.failRequest"] = fail_request
+    h.cdp.replies["Fetch.failRequest"] = fail_request
+    h.cdp.replies["Target.getTargetInfo"] = RuntimeError("Target.getTargetInfo: boom")
+    unknown = "unknown-frame"
 
-    await harness.pause(f"{REFUSED}/")
+    with caplog.at_level("WARNING", "app.browser.request_gate"):
+        await h.pause(f"{REFUSED}/", frame=unknown)
+        await asyncio.sleep(0)
 
-    assert seen_at_reply == [(0, 0)], "the block was recorded before Chromium had its answer"
-    assert harness.gate.blocked_count(harness.owned) == 1
+    [(page_count, _context_count, audits, logged)] = seen_at_reply
+    assert page_count == 0 and h.gate.page_blocked_count(unknown) == 1, "the page's record at the reply"
+    seen_at_reply.clear()
+    await h.pause(f"{REFUSED}/2")
+    [(page_count, context_count, audits, logged)] = seen_at_reply
+    assert (page_count, context_count) == (1, 1), "the block was not on record when Chromium got its answer"
+    assert audits == 1, "the audit of this block ran before the reply"
+    assert len(audited) == 2
+    assert "could not classify" in caplog.text
 
 
 async def test_the_hop_url_map_forgets_its_oldest_entry(monkeypatch) -> None:
@@ -763,3 +781,109 @@ async def test_r5_reading_a_pages_target_id_is_bounded(monkeypatch) -> None:
     page = Mock(context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=StallingPageSession())))
 
     assert await asyncio.wait_for(gates.target_id_of(page), timeout=2.0) is None
+
+
+# ── round 3: blocks kept per page (R6) ───────────────────────────────────────
+
+
+async def test_r6_other_pages_blocks_cannot_evict_a_pages_own(harness: Harness) -> None:
+    await harness.pause(f"{REFUSED}/mine")
+    popup_context = harness.owned
+    for n in range(BLOCKS_KEPT + 1):
+        popup = f"popup-{n}"
+        harness.target(popup, "page", popup_context)
+        await harness.pause(f"{REFUSED}/popup", frame=popup)
+
+    [own] = harness.gate.page_blocks(harness.page)
+    assert own.origin == REFUSED
+    assert harness.gate.page_blocked_count(harness.page) == 1
+    assert len(harness.gate.blocks(harness.owned)) == BLOCKS_KEPT, "the context's own history is still bounded"
+
+
+async def test_r6_a_lookup_error_block_is_kept_by_its_target_and_announced(harness_with_audit) -> None:
+    h, audited = harness_with_audit
+    h.cdp.replies["Target.getTargetInfo"] = RuntimeError("Target.getTargetInfo: boom")
+
+    method, _ = await h.pause(f"{REFUSED}/x", frame="unclassified-page")
+
+    assert method == "Fetch.failRequest"
+    [block] = h.gate.page_blocks("unclassified-page")
+    assert (block.context_id, block.target_id, block.reason) == (None, "unclassified-page", "unclassified")
+    assert audited == [block]
+
+
+async def test_r6_a_destroyed_target_forgets_its_blocks(harness: Harness) -> None:
+    await harness.pause(f"{REFUSED}/")
+
+    harness.cdp.emit("Target.targetDestroyed", {"targetId": harness.page})
+
+    assert harness.gate.page_blocks(harness.page) == []
+    assert harness.gate.page_blocked_count(harness.page) == 0
+
+
+async def test_r6_the_pages_kept_are_capped(monkeypatch, harness: Harness) -> None:
+    monkeypatch.setattr(request_gate, "PAGES_KEPT", 2)
+    for n in range(3):
+        harness.target(f"tab-{n}", "page", harness.owned)
+        await harness.pause(f"{REFUSED}/", frame=f"tab-{n}")
+
+    assert [harness.gate.page_blocked_count(f"tab-{n}") for n in range(3)] == [0, 1, 1]
+
+
+async def test_r6_a_replacement_gate_keeps_the_pages_blocks(harness: Harness) -> None:
+    await harness.pause(f"{REFUSED}/")
+    replacement = RequestGate(
+        SimpleNamespace(new_browser_cdp_session=AsyncMock(return_value=FakeCDPSession())),
+        url_refused=refused,
+        attach_mode=False,
+        origin_switch_declared=False,
+        on_lost=lambda _gate: None,
+        inherit_from=harness.gate,
+    )
+
+    assert replacement.page_blocked_count(harness.page) == 1
+
+
+@pytest.fixture
+async def harness_with_audit() -> tuple[Harness, list]:
+    audited: list = []
+    h = Harness(on_block=audited.append)
+    await h.start()
+    return h, audited
+
+
+async def test_r6_blocks_on_page_finds_a_lookup_error_block_by_the_pages_target() -> None:
+    cdp = FakeCDPSession()
+    browser = SimpleNamespace(new_browser_cdp_session=AsyncMock(return_value=cdp))
+    gates = request_gate.RequestGates(
+        url_refused=refused,
+        enabled=lambda: True,
+        origin_switch_declared=lambda: False,
+        default_attach_mode=lambda: False,
+        on_lost=lambda _gate: None,
+    )
+    await gates.require(browser)
+    page = Mock(context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=page_session_for("ctx", "the-page"))))
+    since = await gates.page_block_count(browser, page)
+    cdp.replies["Target.getTargetInfo"] = RuntimeError("Target.getTargetInfo: boom")
+
+    cdp.emit(
+        "Fetch.requestPaused",
+        {"requestId": "r1", "request": {"url": f"{REFUSED}/", "method": "GET", "headers": {}}, "frameId": "the-page"},
+    )
+    await cdp.wait_for_reply("r1")
+
+    [block] = await gates.blocks_on_page(browser, page, since=since)
+    assert block.target_id == "the-page"
+    assert await gates.blocks_on_page(browser, page, since=since + 1) == []
+
+
+@pytest.mark.parametrize(
+    ("error", "converted"),
+    [
+        ("Page.goto: net::ERR_BLOCKED_BY_CLIENT at https://allowed.example/r", True),
+        ("Locator.click: Timeout 1000ms exceeded.", False),
+    ],
+)
+def test_r6_only_a_blocked_by_client_failure_is_the_gates(error: str, converted: bool) -> None:
+    assert request_gate.stopped_by_gate(Exception(error)) is converted

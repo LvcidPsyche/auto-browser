@@ -12,6 +12,7 @@ The refused host must receive nothing in every case.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -195,3 +196,41 @@ async def test_each_block_is_audited_by_origin_with_its_source(tmp_path: Path) -
         assert [event["details"] for event in requested] == [
             {"url": env.server.url(REFUSED, ""), "source": "request", "reason": "off_list"}
         ]
+
+
+async def test_r6_a_selector_timeout_while_the_page_was_stopped_keeps_its_own_error(tmp_path: Path) -> None:
+    """The page sends itself to a refused host while the click waits for an element that never comes."""
+    async with gated(tmp_path) as env:
+        env.manager.settings.action_timeout_ms = 1500
+        env.server.pages["/wanders"] = (
+            f"<script>setTimeout(() => {{ location.href = '{env.server.url(REFUSED, '/away')}'; }}, 200)</script>"
+        )
+        session_id = await env.create("/wanders")
+        session = env.manager.sessions[session_id]
+
+        with pytest.raises(BrowserActionError) as caught:
+            await env.manager.click(session_id, selector="#never-there")
+
+        assert env.gate().blocked_count(session.gate_context_id) == 1, "the control: the page was stopped meanwhile"
+        assert caught.value.code != BROWSER_ACTION_BLOCKED, caught.value.message
+        assert env.server.hits_on(REFUSED) == []
+
+
+async def test_r7_a_tab_that_loaded_an_allowed_page_since_its_block_is_not_labelled_by_it(tmp_path: Path) -> None:
+    """A refused navigation, an allowed one that succeeds, then an unrelated failure: no stale label."""
+    async with gated(tmp_path) as env:
+        session_id = await env.create()
+        page = env.manager.sessions[session_id].page
+        with contextlib.suppress(Exception):
+            await page.goto(env.server.url(REFUSED, "/x"))
+        await eventually(lambda: page.url.startswith("chrome-error:"))  # a blocked goto raises before it commits
+        [tab] = await env.manager.list_tabs(session_id)
+        assert tab["blocked_navigation"]["origin"] == env.server.url(REFUSED, ""), "the control: labelled first"
+        await page.goto(env.server.url(ALLOWED, "/fine"))
+
+        with contextlib.suppress(Exception):
+            await page.goto(f"http://{ALLOWED}:9/unreachable")  # refused by the port, not by the gate
+        await eventually(lambda: page.url.startswith("chrome-error:"))
+        [tab] = await env.manager.list_tabs(session_id)
+
+        assert "blocked_navigation" not in tab, tab

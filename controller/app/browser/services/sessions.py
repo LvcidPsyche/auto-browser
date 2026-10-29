@@ -21,7 +21,7 @@ from ...url_safety import refuse_another_navigation_host
 from ...utils import UTC
 from ..launch_flags import STORAGE_PARTITIONING_ON
 from ..page_read import PageRead
-from ..request_gate import RequestGateUnavailable, navigation_blocked_error
+from ..request_gate import RequestGateUnavailable, navigation_blocked_error, stopped_by_gate
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext
@@ -258,17 +258,7 @@ class BrowserSessionService:
                 # about:blank between the load and the check: that would turn a
                 # refused redirect into a session parked on a blank page.
                 async with session.lock:
-                    try:
-                        with self.manager.page_provenance.controller_navigation(page) as navigation:
-                            navigation.response = await page.goto(start_url, wait_until="domcontentloaded")
-                    except PlaywrightError as exc:
-                        # Outside the action pipeline, so mapped here: a block, not a failed load.
-                        stopped = await self.manager.request_gates.blocks_on_page(
-                            browser, gate_context_id, page, since=0
-                        )
-                        if stopped:
-                            raise navigation_blocked_error(stopped[-1], action="create_session") from exc
-                        raise
+                    await self._goto_or_blocked(browser, page, start_url, action="create_session")
                     await self.manager._settle(page)
                     # The check navigate() makes after the page loads: an allowlisted
                     # start URL can redirect somewhere that is not. Raising here rolls
@@ -753,8 +743,7 @@ class BrowserSessionService:
             manager.sessions[shadow_session_id] = shadow_session
 
             if current_url != "about:blank":
-                with manager.page_provenance.controller_navigation(page) as navigation:
-                    navigation.response = await page.goto(current_url, wait_until="domcontentloaded")
+                await self._goto_or_blocked(headed_browser, page, current_url, action="enable_shadow_browse")
                 await manager._settle(page)
             if gate is not None and not gate.live:
                 # Lost before the session was in manager.sessions, where containment looks: refused, as in create.
@@ -786,6 +775,20 @@ class BrowserSessionService:
             "headless": False,
             "note": "Headed Chrome launched. Close the original session when done debugging.",
         }
+
+    async def _goto_or_blocked(self, browser: Any, page: Any, url: str, *, action: str) -> None:
+        """The controller's own navigation outside the action pipeline, a stop by the gate mapped to the block it
+        is (R6's rule: the gate's own failure, and a block on this page since the navigation started)."""
+        gates = self.manager.request_gates
+        since = await gates.page_block_count(browser, page)
+        try:
+            with self.manager.page_provenance.controller_navigation(page) as navigation:
+                navigation.response = await page.goto(url, wait_until="domcontentloaded")
+        except PlaywrightError as exc:
+            stopped = await gates.blocks_on_page(browser, page, since=since) if stopped_by_gate(exc) else []
+            if stopped:
+                raise navigation_blocked_error(stopped[-1], action=action) from exc
+            raise
 
     async def _page_snapshot(self, session: "BrowserSession") -> tuple[str, str, bool]:
         page = session.page

@@ -17,6 +17,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from playwright.async_api import Error as PlaywrightError
+
+from app.action_errors import BrowserActionError
 from app.browser.launch_flags import STORAGE_PARTITIONING_ON
 from app.browser.request_gate import RequestGateUnavailable
 from app.browser_manager import BrowserManager
@@ -620,6 +623,42 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         prefetch.assert_awaited_once_with(self.browser)
         [gate] = self.manager.request_gates.status()["gates"]
         self.assertEqual((gate["state"], gate["prefetch_pref"]), ("attached", 2))
+
+    async def test_r14_a_shadow_launch_whose_page_the_gate_stops_is_the_same_block(self) -> None:
+        self.manager.settings.shadow_browse_enabled = True
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
+        self.manager.sessions[source_id].context.storage_state = AsyncMock(return_value={})
+        headed = _browser()
+        headed.context.page.context = headed.context  # as a Playwright page has
+        self._playwright(launch=AsyncMock(return_value=headed))
+
+        async def stopped_by_the_gate(url: str, wait_until: str = "domcontentloaded") -> None:
+            [gate_session] = _gate_sessions(headed)
+            gate_session.replies["Target.getTargetInfo"] = {
+                "targetInfo": {"targetId": "first-page", "type": "page", "browserContextId": headed.context.context_id}
+            }
+            gate_session.emit(
+                "Fetch.requestPaused",
+                {
+                    "requestId": "shadow-hop",
+                    "frameId": "first-page",
+                    "request": {"url": "https://refused.example/secret", "method": "GET", "headers": {}},
+                },
+            )
+            await gate_session.wait_for_reply("shadow-hop")
+            raise PlaywrightError(f"Page.goto: net::ERR_BLOCKED_BY_CLIENT at {url}")
+
+        headed.context.page.goto = AsyncMock(side_effect=stopped_by_the_gate)
+
+        with self.assertRaises(BrowserActionError) as caught:
+            await self.manager.enable_shadow_browse(source_id)
+
+        self.assertEqual(
+            (caught.exception.code, caught.exception.action), ("browser_action_blocked", "enable_shadow_browse")
+        )
+        self.assertNotIn("secret", caught.exception.message)
+        headed.close.assert_awaited_once()
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from ..action_errors import (
     NavigationStoppedError,
 )
 from ..approvals import ApprovalRefusal, effect_started, held_status, refused_before_effect
-from ..browser.request_gate import block_summary
+from ..browser.request_gate import block_summary, stopped_by_gate
 from ..utils import utc_now
 from ..witness import WitnessApproval
 
@@ -219,12 +219,14 @@ class BrowserActionPipeline:
             witness_state.operation_started = True
         page = session.page
         gates = getattr(manager, "request_gates", None)
-        browser, context_id = getattr(session, "browser", None), getattr(session, "gate_context_id", None)
-        blocked_before = gates.blocked_count(browser, context_id) if gates is not None else 0
+        browser = getattr(session, "browser", None)
+        # The page's own count: a background tab's blocks are not this action's.
+        blocked_before = await gates.page_block_count(browser, page) if gates is not None else 0
         try:
             await context.operation()
         except PlaywrightError as exc:
-            stopped = await self._blocks_during(context, page, blocked_before)
+            # Only the gate's own failure of this page's request: a selector timeout keeps its error.
+            stopped = await self._blocks_during(context, page, blocked_before) if stopped_by_gate(exc) else []
             if stopped:
                 # The operation failed because the gate stopped its navigation: a block, not a retryable failure.
                 raise NavigationStoppedError(stopped[-1].explanation) from exc
@@ -264,9 +266,7 @@ class BrowserActionPipeline:
         gates = getattr(context.manager, "request_gates", None)
         if gates is None:
             return []
-        session = context.session
-        browser, context_id = getattr(session, "browser", None), getattr(session, "gate_context_id", None)
-        return await gates.blocks_on_page(browser, context_id, page, since=since)
+        return await gates.blocks_on_page(getattr(context.session, "browser", None), page, since=since)
 
     async def _handle_policy_block(
         self,

@@ -165,15 +165,43 @@ class BlockAuditTests(_Base):
         ]
         self.assertEqual(details, {"url": "https://refused.example", "source": "request", "reason": "off_list"})
 
-    async def test_a_block_in_no_session_is_not_audited(self) -> None:
+    async def test_r6_a_block_in_no_session_is_audited_without_one(self) -> None:
         self.manager.audit.append = AsyncMock()  # type: ignore[method-assign]
 
         self.manager._on_navigation_stopped(
-            GateBlock(context_id="nobody", target_id="t", origin="https://x.example", reason="off_list", explanation="")
+            GateBlock(context_id=None, target_id="t", origin="https://x.example", reason="unclassified", explanation="")
         )
         await self.settled()
 
-        self.manager.audit.append.assert_not_awaited()
+        [call] = self.manager.audit.append.await_args_list
+        self.assertIsNone(call.kwargs["session_id"])
+        self.assertEqual(call.kwargs["details"]["source"], "request")
+
+    async def test_r6_a_lookup_error_block_on_a_sessions_page_is_audited_to_that_session(self) -> None:
+        self.manager.audit.append = AsyncMock()  # type: ignore[method-assign]
+        session_id = (await self.manager.create_session(name="s"))["id"]
+        page = self.manager.sessions[session_id].page
+        page.context = self.manager.sessions[session_id].context  # as a Playwright page has
+        target_id = await self.manager.request_gates.target_id_of(page)
+        self.assertIsNotNone(target_id)
+        cdp = self.browser.cdp_sessions[0]
+        cdp.replies["Target.getTargetInfo"] = RuntimeError("Target.getTargetInfo: boom")
+
+        cdp.emit(
+            "Fetch.requestPaused",
+            {
+                "requestId": "r1",
+                "frameId": target_id,
+                "request": {"url": "https://refused.example/", "method": "GET", "headers": {}},
+            },
+        )
+        await cdp.wait_for_reply("r1")
+        await self.settled()
+
+        [call] = [
+            c for c in self.manager.audit.append.await_args_list if c.kwargs.get("event_type") == "navigation_blocked"
+        ]
+        self.assertEqual((call.kwargs["session_id"], call.kwargs["details"]["reason"]), (session_id, "unclassified"))
 
 
 class ReadinessTests(unittest.TestCase):

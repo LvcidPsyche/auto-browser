@@ -797,16 +797,30 @@ class BrowserManager:
         return False
 
     def _on_navigation_stopped(self, block: GateBlock) -> None:
-        """Audit a navigation the gate stopped, by its origin only, once the gate has answered Chromium."""
-        session = next((s for s in list(self.sessions.values()) if s.gate_context_id == block.context_id), None)
-        if session is None:
-            return
+        """Audit a navigation the gate stopped, by its origin only, once the gate has answered Chromium.
+
+        A block with no context (a frame the gate could not look up) goes to the live session whose page has that
+        targetId, as far as targetIds were read already; otherwise to no session."""
+        sessions = list(self.sessions.values())
+        session = next((s for s in sessions if block.context_id and s.gate_context_id == block.context_id), None)
+        if session is None and block.target_id:
+            session = next(
+                (
+                    s
+                    for s in sessions
+                    if any(
+                        self.request_gates.known_target_id(page) == block.target_id
+                        for page in list(getattr(s.context, "pages", []))
+                    )
+                ),
+                None,
+            )
         spawn_background_task(
             self.audit.append(
                 event_type="navigation_blocked",
                 status="blocked",
                 action="navigate",
-                session_id=session.id,
+                session_id=session.id if session is not None else None,
                 details={"url": block.origin, "source": "request", "reason": block.reason},
             )
         )
