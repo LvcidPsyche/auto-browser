@@ -8,8 +8,15 @@ from typing import Any
 from playwright.async_api import Error as PlaywrightError
 
 from .. import events as _events
-from ..action_errors import PAGE_NOT_RESPONDING, SCREENSHOT_WITHHELD, BrowserActionError
+from ..action_errors import (
+    BROWSER_ACTION_BLOCKED,
+    PAGE_NOT_RESPONDING,
+    SCREENSHOT_WITHHELD,
+    BrowserActionError,
+    NavigationStoppedError,
+)
 from ..approvals import ApprovalRefusal, effect_started, held_status, refused_before_effect
+from ..browser.request_gate import block_summary
 from ..utils import utc_now
 from ..witness import WitnessApproval
 
@@ -119,8 +126,11 @@ class BrowserActionPipeline:
                 # The approval guard says what became of the approval; anything else is a policy block.
                 if isinstance(exc, ApprovalRefusal):
                     message, code, status_code = str(exc), exc.code, 409
+                elif isinstance(exc, NavigationStoppedError):
+                    # Stopped before it was sent (the pre-request gate): its text names only the origin.
+                    message, code, status_code = str(exc), BROWSER_ACTION_BLOCKED, 403
                 else:
-                    message, code, status_code = "Action blocked by policy", "browser_action_blocked", 403
+                    message, code, status_code = "Action blocked by policy", BROWSER_ACTION_BLOCKED, 403
                 # On the holds now, not once the block's snapshot and trail are written: an operator's
                 # approve meanwhile is told the action was refused, not that it may start. The error
                 # raised below replaces it as the refusal (run).
@@ -207,7 +217,22 @@ class BrowserActionPipeline:
         if context.action_name not in MARKS_OWN_EFFECT:
             effect_started()
             witness_state.operation_started = True
-        await context.operation()
+        page = session.page
+        gates = getattr(manager, "request_gates", None)
+        browser, context_id = getattr(session, "browser", None), getattr(session, "gate_context_id", None)
+        blocked_before = gates.blocked_count(browser, context_id) if gates is not None else 0
+        try:
+            await context.operation()
+        except PlaywrightError as exc:
+            stopped = await self._blocks_during(context, page, blocked_before)
+            if stopped:
+                # The operation failed because the gate stopped its navigation: a block, not a retryable failure.
+                raise NavigationStoppedError(stopped[-1].explanation) from exc
+            raise
+        stopped = await self._blocks_during(context, page, blocked_before)
+        if stopped:
+            # The action did its work; a navigation it led to on its own page was stopped before it was sent.
+            context.target["blocked_navigations"] = [block_summary(block) for block in stopped]
         # Checked before the TOTP autofill, which types a live code into the
         # page: a redirect to a disallowed host must not receive one first.
         try:
@@ -232,6 +257,16 @@ class BrowserActionPipeline:
                 retryable=False,
                 details=challenge,
             )
+
+    @staticmethod
+    async def _blocks_during(context: ActionRunContext, page: Any, since: int) -> list[Any]:
+        """The pre-request gate's blocks on the action's own page since ``since``: a background tab's are not its."""
+        gates = getattr(context.manager, "request_gates", None)
+        if gates is None:
+            return []
+        session = context.session
+        browser, context_id = getattr(session, "browser", None), getattr(session, "gate_context_id", None)
+        return await gates.blocks_on_page(browser, context_id, page, since=since)
 
     async def _handle_policy_block(
         self,

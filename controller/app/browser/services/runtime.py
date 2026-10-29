@@ -7,7 +7,7 @@ from typing import Any
 
 from playwright.async_api import Browser
 
-from ...action_errors import SessionNotFoundError
+from ...action_errors import SESSION_CLOSED_GATE_LOST, SessionNotFoundError
 from ...auth_policy import credentials_for
 from ...session_isolation import IsolatedBrowserRuntime
 from ...session_ownership import as_system
@@ -196,7 +196,7 @@ class BrowserRuntimeService:
         with as_system():
             for session in sessions:
                 try:
-                    await manager.close_session(session.id)
+                    await manager.close_session(session.id, reason=SESSION_CLOSED_GATE_LOST)
                 except SessionNotFoundError:
                     pass  # closed meanwhile by its own caller
                 except Exception as exc:

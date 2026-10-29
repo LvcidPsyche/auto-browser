@@ -36,10 +36,12 @@ import asyncio
 import contextlib
 import logging
 import time
+import weakref
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from ..action_errors import BROWSER_ACTION_BLOCKED, PRE_REQUEST_GATE_UNAVAILABLE, BrowserActionError
 from ..network_inspector import url_origin
 from ..utils import spawn_background_task
 
@@ -63,8 +65,25 @@ CROSS_ORIGIN_POST_REDIRECT = "cross_origin_post_redirect"
 UNCLASSIFIED = "unclassified"
 
 
-class RequestGateUnavailable(RuntimeError):
-    """The gate is not attached to a browser, or could not register a context: sessions there are refused."""
+GATE_REQUIRED = (
+    "Sessions are refused on this browser while PRE_REQUEST_BLOCKING is on; PRE_REQUEST_BLOCKING=false runs "
+    "on the guard that refuses a page after it loads alone."
+)
+
+
+class RequestGateUnavailable(BrowserActionError):
+    """The gate is not attached to a browser, or could not register a context: sessions there are refused.
+
+    Retryable: the next session attaches a new gate (RequestGates.require).
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            f"{message.rstrip('.')}. {GATE_REQUIRED}",
+            code=PRE_REQUEST_GATE_UNAVAILABLE,
+            status_code=503,
+            retryable=True,
+        )
 
 
 @dataclass(frozen=True)
@@ -76,6 +95,23 @@ class GateBlock:
     reason: str
     explanation: str
     at: float = field(default_factory=time.monotonic)
+
+
+def navigation_blocked_error(block: GateBlock, *, action: str) -> BrowserActionError:
+    """What the agent is told about a navigation the gate stopped outside the action pipeline (a start URL, a new
+    tab's URL): a block, not a retryable failure, naming only the origin."""
+    return BrowserActionError(
+        block.explanation,
+        code=BROWSER_ACTION_BLOCKED,
+        action=action,
+        status_code=403,
+        retryable=False,
+        url=block.origin,
+    )
+
+
+def block_summary(block: GateBlock) -> dict[str, str]:
+    return {"origin": block.origin, "reason": block.reason, "explanation": block.explanation}
 
 
 @dataclass
@@ -123,9 +159,11 @@ class RequestGate:
         attach_mode: bool,
         origin_switch_declared: bool,
         on_lost: Callable[["RequestGate"], None],
+        on_block: Callable[[GateBlock], None] | None = None,
         inherit_from: "RequestGate | None" = None,
     ) -> None:
         self.browser = browser
+        self._on_block = on_block
         self._url_refused = url_refused
         self._attach_mode = attach_mode
         self._origin_switch_declared = origin_switch_declared
@@ -150,6 +188,10 @@ class RequestGate:
     @property
     def attach_mode(self) -> bool:
         return self._attach_mode
+
+    @property
+    def origin_switch_declared(self) -> bool:
+        return self._origin_switch_declared
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -383,12 +425,11 @@ class RequestGate:
             return
         owned.blocked += 1
         owned.blocks.append(block)
-
-
-GATE_REQUIRED = (
-    "Sessions are refused on this browser while PRE_REQUEST_BLOCKING is on; PRE_REQUEST_BLOCKING=false runs "
-    "on the guard that refuses a page after it loads alone."
-)
+        if self._on_block is not None:
+            try:
+                self._on_block(block)
+            except Exception:
+                logger.exception("pre-request gate: the block listener failed")
 
 
 class RequestGates:
@@ -408,8 +449,10 @@ class RequestGates:
         origin_switch_declared: Callable[[], bool],
         default_attach_mode: Callable[[], bool],
         on_lost: Callable[[RequestGate], None],
+        on_block: Callable[[GateBlock], None] | None = None,
     ) -> None:
         self._url_refused = url_refused
+        self._on_block = on_block
         self._enabled = enabled
         self._origin_switch_declared = origin_switch_declared
         self._default_attach_mode = default_attach_mode
@@ -417,6 +460,10 @@ class RequestGates:
         # By id: a browser is held until it is released, so its id is not reused meanwhile.
         self._gates: dict[int, tuple[Any, RequestGate]] = {}
         self._attach_modes: dict[int, tuple[Any, bool]] = {}
+        # Why the last attach to a browser failed, until one succeeds (readiness).
+        self._attach_failures: dict[int, tuple[Any, str]] = {}
+        # Each page's targetId, read once (a block names the page by it).
+        self._target_ids: weakref.WeakKeyDictionary[Any, str] = weakref.WeakKeyDictionary()
         self._lock = asyncio.Lock()
 
     def get(self, browser: Any) -> RequestGate | None:
@@ -431,7 +478,7 @@ class RequestGates:
         try:
             await self.require(browser)
         except RequestGateUnavailable as exc:
-            logger.warning("%s", exc)
+            logger.warning("%s", exc.message)
 
     async def require(self, browser: Any) -> RequestGate | None:
         """The browser's live gate, attached now if need be; None while pre-request blocking is off."""
@@ -449,18 +496,22 @@ class RequestGates:
                 attach_mode=known[1] if known is not None else self._default_attach_mode(),
                 origin_switch_declared=self._origin_switch_declared(),
                 on_lost=self._on_lost,
+                on_block=self._on_block,
                 inherit_from=previous,
             )
             try:
                 await gate.attach()
             except RequestGateUnavailable as exc:
-                raise RequestGateUnavailable(f"{exc}. {GATE_REQUIRED}") from exc
+                self._attach_failures[id(browser)] = (browser, exc.message)
+                raise
+            self._attach_failures.pop(id(browser), None)
             self._gates[id(browser)] = (browser, gate)
             return gate
 
     async def release(self, browser: Any) -> None:
         """Detach a browser's gate on purpose, before the controller closes or drops that browser."""
         self._attach_modes.pop(id(browser), None)
+        self._attach_failures.pop(id(browser), None)
         entry = self._gates.pop(id(browser), None)
         if entry is not None:
             await entry[1].detach()
@@ -468,3 +519,74 @@ class RequestGates:
     async def release_all(self) -> None:
         for browser, _gate in list(self._gates.values()):
             await self.release(browser)
+
+    # ── what a session's pages ran into ──────────────────────────────────────
+
+    def blocked_count(self, browser: Any, context_id: str | None) -> int:
+        """A context's block count now: what an action compares against after its operation."""
+        gate = self.get(browser)
+        return gate.blocked_count(context_id) if gate is not None and context_id else 0
+
+    async def blocks_on_page(self, browser: Any, context_id: str | None, page: Any, *, since: int) -> list[GateBlock]:
+        """The blocks recorded on ``page`` after the context's count was ``since``: its own, never another tab's."""
+        gate = self.get(browser)
+        if gate is None or not context_id:
+            return []
+        new = gate.blocked_count(context_id) - since
+        if new <= 0:
+            return []
+        recent = gate.blocks(context_id)[-new:]
+        target_id = await self.target_id_of(page)
+        return [block for block in recent if block.target_id == target_id]
+
+    async def last_block_on_page(self, browser: Any, context_id: str | None, page: Any) -> GateBlock | None:
+        """The most recent block on ``page`` (a tab whose navigation was stopped shows Chrome's error page)."""
+        gate = self.get(browser)
+        if gate is None or not context_id:
+            return None
+        blocks = gate.blocks(context_id)
+        if not blocks:
+            return None
+        target_id = await self.target_id_of(page)
+        return next((block for block in reversed(blocks) if block.target_id == target_id), None)
+
+    async def target_id_of(self, page: Any) -> str | None:
+        """A page's targetId (the frameId of its main frame's requests), read once through a page session."""
+        known = self._target_ids.get(page)
+        if known is not None:
+            return known
+        try:
+            session = await page.context.new_cdp_session(page)
+            try:
+                target_id = (await session.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
+            finally:
+                with contextlib.suppress(Exception):
+                    await session.detach()
+        except Exception as exc:
+            logger.debug("could not read a page's targetId: %s", exc)
+            return None
+        self._target_ids[page] = target_id
+        return target_id
+
+    # ── readiness ────────────────────────────────────────────────────────────
+
+    def status(self) -> dict[str, Any]:
+        """Each browser's gate as /readiness reports it: attached, lost or attach failed, and its attach mode."""
+        if not self._enabled():
+            return {"state": "off", "gates": []}
+        gates: list[dict[str, Any]] = [
+            {
+                "state": "attached" if gate.live else "lost",
+                "attach_mode": gate.attach_mode,
+                "switch_declared": gate.origin_switch_declared,
+            }
+            for _browser, gate in self._gates.values()
+        ]
+        gates += [
+            {"state": "attach_failed", "error": message[:300]}
+            for key, (_browser, message) in self._attach_failures.items()
+            if key not in self._gates
+        ]
+        states = {gate["state"] for gate in gates}
+        state = next((name for name in ("attach_failed", "lost", "attached") if name in states), "idle")
+        return {"state": state, "gates": gates}

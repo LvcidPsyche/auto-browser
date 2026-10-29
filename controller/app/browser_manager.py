@@ -23,7 +23,7 @@ from .auth_state import AuthStateManager
 from .browser.element_ids import ElementIds
 from .browser.page_provenance import CLOSED_PAGE_GRACE_SECONDS, REFUSED_FAILURES_KEPT, PageProvenance
 from .browser.page_read import start_read
-from .browser.request_gate import RequestGates
+from .browser.request_gate import GateBlock, RequestGates
 from .browser.services import (
     BrowserActionService,
     BrowserApprovalService,
@@ -58,6 +58,7 @@ from .session_ownership import as_system
 from .session_store import DurableSessionStore
 from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
 from .url_safety import browser_equivalent_url
+from .utils import spawn_background_task
 from .witness import (
     WitnessActionContext,
     WitnessApproval,
@@ -188,6 +189,7 @@ class BrowserManager:
             origin_switch_declared=lambda: self.settings.cdp_block_origin_on_redirect_disabled,
             default_attach_mode=lambda: bool(self.settings.cdp_connect_url),
             on_lost=lambda gate: self.runtime.gate_lost(gate),
+            on_block=self._on_navigation_stopped,
         )
         self.action_pipeline = BrowserActionPipeline()
         self.element_ids = ElementIds(settings)
@@ -404,8 +406,8 @@ class BrowserManager:
         """Public API for getting a session summary by ID."""
         return await self.session_lifecycle.get_summary(session_id)
 
-    async def close_session(self, session_id: str) -> dict[str, Any]:
-        return await self.session_lifecycle.close(session_id)
+    async def close_session(self, session_id: str, *, reason: str | None = None) -> dict[str, Any]:
+        return await self.session_lifecycle.close(session_id, reason=reason)
 
     async def fork_session(
         self,
@@ -793,6 +795,21 @@ class BrowserManager:
         except PermissionError:
             return True
         return False
+
+    def _on_navigation_stopped(self, block: GateBlock) -> None:
+        """Audit a navigation the gate stopped, by its origin only, once the gate has answered Chromium."""
+        session = next((s for s in list(self.sessions.values()) if s.gate_context_id == block.context_id), None)
+        if session is None:
+            return
+        spawn_background_task(
+            self.audit.append(
+                event_type="navigation_blocked",
+                status="blocked",
+                action="navigate",
+                session_id=session.id,
+                details={"url": block.origin, "source": "request", "reason": block.reason},
+            )
+        )
 
     def _pre_request_blocking_on(self) -> bool:
         """Whether browsers get the pre-request gate: PRE_REQUEST_BLOCKING, and an ALLOWED_HOSTS that refuses something."""

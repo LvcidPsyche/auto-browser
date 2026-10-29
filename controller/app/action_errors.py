@@ -6,6 +6,10 @@ from typing import Any
 SCREENSHOT_WITHHELD = "screenshot_withheld"
 # The page's isolated world did not answer a message within its deadline: the renderer may have crashed or hung.
 PAGE_NOT_RESPONDING = "page_not_responding"
+# A policy refusal (ALLOWED_HOSTS, the witness policy, a navigation stopped before it was sent): 403, not retryable.
+BROWSER_ACTION_BLOCKED = "browser_action_blocked"
+# No pre-request gate on the browser (app/browser/request_gate.py): 503, retryable, the next session attaches one.
+PRE_REQUEST_GATE_UNAVAILABLE = "pre_request_gate_unavailable"
 
 
 class RefusedPageError(PermissionError):
@@ -14,6 +18,14 @@ class RefusedPageError(PermissionError):
     A PermissionError still, for every caller that catches one; a route that answers other
     PermissionErrors generically tells this one apart (the fork route).
     """
+
+
+# Why the controller itself closed a session (SessionRecord.close_reason): its pre-request gate was lost.
+SESSION_CLOSED_GATE_LOST = "request_gate_lost"
+
+
+class NavigationStoppedError(PermissionError):
+    """A navigation the pre-request gate stopped before it was sent. The text names only the refused origin."""
 
 
 class BrowserActionError(Exception):
@@ -58,10 +70,18 @@ class SessionNotFoundError(KeyError):
     replaces surfaced to agents as an error whose entire text was the id.
     """
 
-    def __init__(self, session_id: str, *, status: str | None = None) -> None:
+    def __init__(self, session_id: str, *, status: str | None = None, reason: str | None = None) -> None:
         self.session_id = session_id
         self.status = status
-        if status == "closed":
+        self.reason = reason
+        if status == "closed" and reason == SESSION_CLOSED_GATE_LOST:
+            self.code = "session_closed"
+            message = (
+                f"Session {session_id} was closed by the controller: its pre-request gate detached from the "
+                "browser, so its pages could no longer be stopped before loading a host ALLOWED_HOSTS does not "
+                "allow. Create a new session."
+            )
+        elif status == "closed":
             self.code = "session_closed"
             message = f"Session {session_id} is closed. Create a new session, or list sessions to find a live one."
         elif status in {"interrupted", "failed"}:

@@ -20,7 +20,7 @@ from ...session_ownership import may_use, verified_operator
 from ...url_safety import refuse_another_navigation_host
 from ...utils import UTC
 from ..page_read import PageRead
-from ..request_gate import RequestGateUnavailable
+from ..request_gate import RequestGateUnavailable, navigation_blocked_error
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext
@@ -256,8 +256,17 @@ class BrowserSessionService:
                 # about:blank between the load and the check: that would turn a
                 # refused redirect into a session parked on a blank page.
                 async with session.lock:
-                    with self.manager.page_provenance.controller_navigation(page) as navigation:
-                        navigation.response = await page.goto(start_url, wait_until="domcontentloaded")
+                    try:
+                        with self.manager.page_provenance.controller_navigation(page) as navigation:
+                            navigation.response = await page.goto(start_url, wait_until="domcontentloaded")
+                    except PlaywrightError as exc:
+                        # Outside the action pipeline, so mapped here: a block, not a failed load.
+                        stopped = await self.manager.request_gates.blocks_on_page(
+                            browser, gate_context_id, page, since=0
+                        )
+                        if stopped:
+                            raise navigation_blocked_error(stopped[-1], action="create_session") from exc
+                        raise
                     await self.manager._settle(page)
                     # The check navigate() makes after the page loads: an allowlisted
                     # start URL can redirect somewhere that is not. Raising here rolls
@@ -430,7 +439,8 @@ class BrowserSessionService:
     async def get(self, session_id: str) -> "BrowserSession":
         session = self.manager.sessions.get(session_id)
         if session is None:
-            raise SessionNotFoundError(session_id, status=await self._recorded_status(session_id))
+            status, reason = await self._recorded_end(session_id)
+            raise SessionNotFoundError(session_id, status=status, reason=reason)
         if not may_use(session.owner):
             # Another operator's session answers as if it did not exist.
             raise SessionNotFoundError(session_id)
@@ -482,8 +492,8 @@ class BrowserSessionService:
         if not await self.accessible(session_id):
             raise SessionNotFoundError(session_id)
 
-    async def _recorded_status(self, session_id: str) -> str | None:
-        """Status of a session that is not live, from its persisted record, if any.
+    async def _recorded_end(self, session_id: str) -> tuple[str | None, str | None]:
+        """Status, and the controller's own close reason, of a session that is not live, from its record, if any.
 
         Only consulted on the failure path, to tell a caller *why* the id does
         not work: closed, interrupted, or never existed.
@@ -492,10 +502,11 @@ class BrowserSessionService:
             record = await self.manager.session_store.get(session_id)
         except Exception:  # message enrichment only; any store failure means "unknown"
             logger.debug("no readable record for session %s", session_id, exc_info=True)
-            return None
-        return record.status if may_use(record.owner) else None
+            return None, None
+        return (record.status, record.close_reason) if may_use(record.owner) else (None, None)
 
-    async def close(self, session_id: str) -> dict[str, Any]:
+    async def close(self, session_id: str, *, reason: str | None = None) -> dict[str, Any]:
+        """Close a session; ``reason`` is the controller's own (SessionRecord.close_reason), the next call names it."""
         session = await self.manager.get_session(session_id)
         locked = await self._lock_for_close(session)
         try:
@@ -550,6 +561,7 @@ class BrowserSessionService:
                 },
             )
             summary["witness_remote"] = session.witness_remote_state.model_dump()
+            summary["close_reason"] = reason
             await self.manager.session_store.upsert(SessionRecord.model_validate(summary))
             return {"closed": True, "trace_path": str(session.trace_path), "session": summary}
         finally:

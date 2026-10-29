@@ -170,7 +170,7 @@ def create_system_router(
     async def get_readiness(mode: str = "normal") -> JSONResponse:
         if mode not in {"normal", "confidential"}:
             raise HTTPException(status_code=400, detail="mode must be 'normal' or 'confidential'")
-        report = run_readiness_checks(settings, mode=mode)
+        report = run_readiness_checks(settings, mode=mode, request_gates=manager.request_gates.status())
         return JSONResponse(
             content=report.to_dict(),
             status_code=200 if report.overall != "fail" else 503,
