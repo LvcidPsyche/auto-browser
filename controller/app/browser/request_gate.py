@@ -66,6 +66,11 @@ REQUEST_URLS_KEPT = 1024
 BLOCKS_KEPT = 50
 # Pages whose blocks are kept (each dropped when its target is destroyed); the oldest goes past this.
 PAGES_KEPT = 512
+# Opening a page's service-worker bypass (it runs under the session lock in tabs.open); a waiter gets the same bound.
+BYPASS_TIMEOUT_SECONDS = 5.0
+# Network.enable on the bypass session keeps no bodies: the bypass needs the domain on, not its buffers (measured on
+# Chromium 151, round 4: 0 keeps the bypass working; Network.disable ends it).
+BYPASS_NETWORK_BUFFER_BYTES = 0
 # How Playwright reports a request the gate failed (Fetch.failRequest BlockedByClient).
 BLOCKED_BY_CLIENT_TEXT = "net::ERR_BLOCKED_BY_CLIENT"
 # How long a frame's lookup may take before it counts as failed (a refused URL then fails).
@@ -488,6 +493,21 @@ class RequestGate:
         return block
 
 
+async def _open_bypass(page: Any) -> Any:
+    session = await page.context.new_cdp_session(page)
+    await session.send(
+        "Network.enable",
+        {"maxTotalBufferSize": BYPASS_NETWORK_BUFFER_BYTES, "maxResourceBufferSize": BYPASS_NETWORK_BUFFER_BYTES},
+    )
+    await session.send("Network.setBypassServiceWorker", {"bypass": True})
+    return session
+
+
+def _page_closed(page: Any) -> bool:
+    is_closed = getattr(page, "is_closed", None)
+    return callable(is_closed) and is_closed() is True
+
+
 async def _read_target_id(page: Any) -> str:
     session = await page.context.new_cdp_session(page)
     try:
@@ -587,25 +607,40 @@ class RequestGates:
         pending = self._bypass_pending.get(page)
         if pending is not None:
             # The caller that must not navigate first (tabs.open) waits for the one in flight (the page event's).
-            await asyncio.shield(pending)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(pending), timeout=BYPASS_TIMEOUT_SECONDS)
             return
         if page in self._bypass_sessions:
             return
         done = asyncio.get_running_loop().create_future()
         self._bypass_pending[page] = done
         try:
-            session = await page.context.new_cdp_session(page)
-            await session.send("Network.enable")
-            await session.send("Network.setBypassServiceWorker", {"bypass": True})
+            session = await asyncio.wait_for(_open_bypass(page), timeout=BYPASS_TIMEOUT_SECONDS)
         except Exception as exc:
-            self.bypass_failures += 1
-            logger.warning("pre-request gate: could not bypass service workers on a page: %s", exc)
+            if not _page_closed(page):
+                # A page that closed first needed no bypass: not a failure readiness should warn about.
+                self.bypass_failures += 1
+                logger.warning(
+                    "pre-request gate: could not bypass service workers on a page: %s", f"{type(exc).__name__}: {exc}"
+                )
             return
         finally:
             self._bypass_pending.pop(page, None)
             if not done.done():
                 done.set_result(None)
         self._bypass_sessions[page] = session
+        page_ref = weakref.ref(page)  # the session's listener must not keep the page alive
+        session.on("close", lambda _session: self._bypass_lost(page_ref, session))
+
+    def _bypass_lost(self, page_ref: Any, session: Any) -> None:
+        """A bypass session closed while its page is open: the bypass is gone with it."""
+        page = page_ref()
+        if page is None or self._bypass_sessions.get(page) is not session:
+            return
+        self._bypass_sessions.pop(page, None)
+        if not _page_closed(page):
+            self.bypass_failures += 1
+            logger.warning("pre-request gate: a page's service-worker bypass session closed while the page is open")
 
     async def require(self, browser: Any) -> RequestGate | None:
         """The browser's live gate, attached now if need be; None while pre-request blocking is off."""

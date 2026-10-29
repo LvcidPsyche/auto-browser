@@ -949,3 +949,62 @@ async def test_r15_a_replacement_gate_knows_the_previous_url_of_a_hop() -> None:
 
     method, _ = await cdp.wait_for_reply("hop")
     assert method == "Fetch.continueRequest"
+
+
+# ── round 4: the service-worker bypass (F3) ──────────────────────────────────
+
+
+def _gates() -> request_gate.RequestGates:
+    return request_gate.RequestGates(
+        url_refused=refused,
+        enabled=lambda: True,
+        origin_switch_declared=lambda: False,
+        default_attach_mode=lambda: False,
+        on_lost=lambda _gate: None,
+    )
+
+
+def _page(session_factory, *, closed: bool = False) -> Mock:
+    return Mock(
+        context=SimpleNamespace(new_cdp_session=AsyncMock(side_effect=session_factory)), is_closed=lambda: closed
+    )
+
+
+async def test_f3_a_bypass_session_that_closes_under_an_open_page_is_dropped_and_counted() -> None:
+    gates, session = _gates(), FakeCDPSession()
+    page = _page(lambda _page: session)
+    await gates.bypass_service_workers(page)
+    assert ("Network.enable", {"maxTotalBufferSize": 0, "maxResourceBufferSize": 0}) in session.sent
+
+    session.emit("close", session)
+
+    assert page not in gates._bypass_sessions
+    assert gates.bypass_failures == 1
+    await gates.bypass_service_workers(page)
+    assert page in gates._bypass_sessions, "a later call could not set the bypass again"
+
+
+async def test_f3_b_a_failure_on_a_page_that_has_closed_is_not_counted() -> None:
+    gates = _gates()
+
+    await gates.bypass_service_workers(
+        _page(lambda _page: (_ for _ in ()).throw(RuntimeError("Target closed")), closed=True)
+    )
+
+    assert gates.bypass_failures == 0
+
+
+async def test_f3_c_a_bypass_that_never_answers_is_bounded_for_both_callers(monkeypatch) -> None:
+    monkeypatch.setattr(request_gate, "BYPASS_TIMEOUT_SECONDS", 0.05)
+    gates = _gates()
+
+    async def never(_page):
+        await asyncio.Event().wait()
+
+    page = _page(never)
+    first = asyncio.create_task(gates.bypass_service_workers(page))
+    await asyncio.sleep(0)
+
+    await asyncio.wait_for(asyncio.gather(first, gates.bypass_service_workers(page)), timeout=2.0)
+
+    assert gates.bypass_failures == 1
