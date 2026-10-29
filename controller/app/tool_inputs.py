@@ -27,6 +27,7 @@ from .models import (
     PerceptionPreset,
     ProviderName,
     StrictInputModel,
+    WorkflowProfile,
     validate_coordinate_pair,
     validate_url,
 )
@@ -594,6 +595,9 @@ class CreateCronJobInput(StrictInputModel):
     max_steps: int = Field(default=20, ge=1, le=AGENT_RUN_MAX_STEPS)
     enabled: bool = True
     webhook_enabled: bool = False
+    # Set by the gateway from the creating call's workflow_profile, not by the caller:
+    # every run of the job starts under it.
+    workflow_profile: SkipJsonSchema[WorkflowProfile] = "fast"
 
     @field_validator("start_url")
     @classmethod

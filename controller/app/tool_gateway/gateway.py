@@ -262,6 +262,11 @@ class McpToolGateway:
                 # advertised — so the tool in the default set could only fail.
                 # The server now routes every call through approval itself.
                 policy_profile = "governed"
+            if spec.name == "browser.create_cron_job":
+                # The job's runs keep what the creating caller was held to. Read before
+                # the force override below: force decides at call time (the orchestrator
+                # applies it to every run), and is not stored on the job.
+                raw_arguments["workflow_profile"] = "governed" if policy_profile == "governed" else "fast"
             if spec.governed_kind is not None and self.manager.settings.force_governed_approvals:
                 # workflow_profile is the caller's argument, and the caller is
                 # the agent the approval is meant to check: on a deployment that
@@ -1089,6 +1094,7 @@ class McpToolGateway:
             max_steps=payload.max_steps,
             enabled=payload.enabled,
             webhook_enabled=payload.webhook_enabled,
+            workflow_profile=payload.workflow_profile,
         )
 
     async def _delete_cron_job(self, payload: CronJobIdInput) -> dict[str, Any]:

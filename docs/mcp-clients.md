@@ -397,8 +397,9 @@ Use `workflow_profile=governed` when starting convergence against a live browser
 
 ### Governed approvals on tool calls
 
-Pass `workflow_profile=governed` on a tool call (it defaults to `fast`) and every tool that
-writes asks for an operator's approval first: the call returns `approval_required` with an
+Pass `workflow_profile=governed` on a tool call (it defaults to `fast`) and every tool with a
+governed kind asks for an operator's approval first (not every tool that changes state has one:
+creating a session or a proxy persona does not): the call returns `approval_required` with an
 `approval_id`, an operator approves it, and the agent repeats the same call with that
 `approval_id`. An approval covers exactly one call with exactly those arguments.
 
@@ -409,11 +410,20 @@ session owner, so under named credentials (`API_BEARER_TOKENS`) such an approval
 the operator who asked and to nobody else: another operator cannot list, decide, reuse or
 spend it. `POST /approvals/{id}/execute` does not run it (the agent repeats the tool call).
 
+The cron tools are governed too: `browser.create_cron_job` and `browser.trigger_cron_job` are
+`write` and `browser.delete_cron_job` is `destructive`. A job keeps the `workflow_profile` of the
+call that created it, and every run, scheduled or triggered, starts under it, so a job created by a
+`governed` caller cannot be used to run writes without approval. A job created through REST
+(`POST /crons`) stores `fast`, and so does a job created before this release: it keeps running as
+`fast` unless `FORCE_GOVERNED_APPROVALS=true` (below). A job's profile cannot be changed by an
+update. To govern an existing job, delete it and create it again from a `governed` caller, or turn
+on `FORCE_GOVERNED_APPROVALS`.
+
 `workflow_profile` is the caller's argument, so by default governed approvals are the agent's
 choice. A deployment that wants them as a rule sets `FORCE_GOVERNED_APPROVALS=true`: every tool
 with a governed kind then runs as `governed` whatever the call passed, with or without a
-session, and `fast` is no longer available for them. Tools without a governed kind (reads)
-are unchanged. It also forces every step of the agent loop to `governed`, whatever
+session, and `fast` is no longer available for them. Tools without a governed kind
+(reads, and some that change state, such as `browser.create_session`) are unchanged. It also forces every step of the agent loop to `governed`, whatever
 `request.workflow_profile` says, so `browser.queue_agent_step` and `browser.queue_agent_run`, REST
 `/agent/step` and `/agent/run`, and cron runs cannot be used to get around it.
 

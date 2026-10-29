@@ -19,6 +19,7 @@ Job schema:
     "auth_profile":str | null,
     "proxy_persona":str | null,
     "max_steps":   int (default 20),
+    "workflow_profile": "fast" | "governed" (the creating caller's; absent in jobs from older versions = "fast"),
     "owner":       str | null (token-verified operator who created it),
     "created_at":  ISO datetime,
     "last_run_at": ISO datetime | null,
@@ -39,13 +40,16 @@ import logging
 import secrets
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
 from .session_ownership import ANONYMOUS, acting_as, as_system, may_use, owner_identity, verified_operator
 from .utils import PRIVATE_FILE_MODE, UTC, atomic_write_text
+
+if TYPE_CHECKING:
+    from .models import WorkflowProfile
 
 try:
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -110,6 +114,7 @@ class CronService:
         max_steps: int = 20,
         enabled: bool = True,
         webhook_enabled: bool = False,
+        workflow_profile: WorkflowProfile = "fast",
     ) -> dict[str, Any]:
         self._validate_schedule(schedule)
         self._require_profile_access(auth_profile, owner=verified_operator())
@@ -133,6 +138,8 @@ class CronService:
                 "auth_profile": auth_profile,
                 "proxy_persona": proxy_persona,
                 "max_steps": max_steps,
+                # Every run starts under the profile the creating call ran under.
+                "workflow_profile": workflow_profile,
                 # A job fires as the operator who created it: its session is
                 # theirs, and it may open only auth profiles they may open.
                 "owner": verified_operator(),
@@ -320,6 +327,7 @@ class CronService:
             provider=job.get("provider") or "openai",
             goal=job["goal"],
             max_steps=min(job.get("max_steps") or 20, AGENT_RUN_MAX_STEPS),
+            workflow_profile=job.get("workflow_profile") or "fast",
         )
 
         # Claim the slot before the first await, so a webhook and a scheduled
