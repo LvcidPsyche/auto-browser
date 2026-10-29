@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+
+from ...approval_display import APPROVAL_DISPLAY
+
 _DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -53,6 +57,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .empty { padding: 32px; text-align: center; color: var(--muted); }
   .section-note { padding: 10px 20px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--border); }
   .wrap { white-space: pre-wrap; word-break: break-word; max-width: 360px; }
+  .arguments-viewer pre { margin: 0; padding: 12px 20px; max-height: 50vh; overflow: auto;
+                          white-space: pre-wrap; word-break: break-word; }
   .refresh-btn { background: none; border: 1px solid var(--border); color: var(--muted);
                  padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
   .refresh-btn:hover { color: var(--text); }
@@ -88,8 +94,15 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div class="section-note" id="approvals-status">Once approved, the waiting agent retries its action with the approval id.</div>
     <table><thead><tr>
-      <th>Requested</th><th>Session</th><th>Kind</th><th>Action</th><th>Reason</th><th>Decision</th>
-    </tr></thead><tbody id="approvals-tbody"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody></table>
+      <th>Requested</th><th>Approval</th><th>Session</th><th>Kind</th><th>Action</th><th>Reason</th><th>Decision</th>
+    </tr></thead><tbody id="approvals-tbody"><tr><td colspan="7" class="empty">Loading...</td></tr></tbody></table>
+    <div class="arguments-viewer" id="approval-arguments" hidden>
+      <div class="section-header">
+        <h2 id="approval-arguments-title">Arguments</h2>
+        <button class="refresh-btn" id="approval-arguments-close" type="button">Close</button>
+      </div>
+      <pre class="mono" id="approval-arguments-text"></pre>
+    </div>
   </div>
 
   <!-- Sessions -->
@@ -279,6 +292,16 @@ const apiPost = (path, payload = null) => {
 const asText = (value, fallback = '—') => {
   if (value === null || value === undefined || value === '') return fallback;
   return String(value);
+};
+// What would hide or reorder text written as its code point, as the server's shown_code_points
+// does (app.approval_display): format characters (bidi controls, zero-width marks), controls (a
+// newline shows as \\n), line and paragraph separators, and default-ignorable code points (variation
+// selectors, Hangul fillers). Agents and pages write approval reasons and actions, so what the
+// operator reads could otherwise differ from what they approve. Letters of other scripts stay.
+const shownText = (value, fallback = '—') => {
+  return asText(value, fallback).replace(
+    /[\\p{Cf}\\p{Cc}\\p{Zl}\\p{Zp}\\p{Default_Ignorable_Code_Point}]/gu,
+    (char) => (char === '\\n' ? '\\\\n' : `[U+${char.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}]`));
 };
 const statusBadge = (s) => {
   const map = {active:'green', running:'green', completed:'green', ok:'green',
@@ -522,22 +545,97 @@ async function loadAgentJobs() {
 // Reasons and actions come from pages and agents, so they are written as text
 // only. An approval stores the exact action it authorises, typed text
 // included; a type action marked sensitive never shows that text here.
-const describeAction = (action) => {
+// The fields and how they read come from the server (app.approval_display), so
+// the queue says what the webhook and SSE summary say, field for field.
+const APPROVAL_DISPLAY = __APPROVAL_DISPLAY__;
+// A string's first `cut` characters (code points, never half a pair), and how many more there are.
+const cutChars = (value, cut) => {
+  const chars = Array.from(value);
+  return chars.length <= cut ? [value, 0] : [chars.slice(0, cut).join(''), chars.length - cut];
+};
+const leftOut = (count) => (count ? `… (${count} more characters not shown)` : '');
+// A field's value as JSON, so a string shows its quotes and a newline in it shows as \\n.
+const shownValue = (value, cut) => {
+  // As String(n), as the server's js_number: JSON.stringify writes Infinity (an integer past a double,
+  // as JSON.parse reads it) as null.
+  if (typeof value === 'number') return String(value);
+  if (typeof value !== 'string' || cut === undefined) return JSON.stringify(value);
+  const [kept, more] = cutChars(value, cut);
+  return JSON.stringify(kept) + leftOut(more);
+};
+const describeAction = (action, origin, cut) => {
   if (!action || typeof action !== 'object') return '—';
   // A governed tool call (eval_js, set_cookies, ...) is approved through a
   // stand-in action whose text is "<tool> sha256:<digest of its arguments>"
   // (McpToolGateway._governed_call_decision); its reason previews the arguments.
-  const toolCall = action.action === 'request_human_takeover'
+  // Only the server's origin says the gateway built it: a caller can write the
+  // same action, and then it is shown as the action it is.
+  const toolCall = origin === 'tool_call'
     && /^([a-z_.]+) sha256:[0-9a-f]{64}$/.exec(String(action.text || ''));
-  if (toolCall) return `tool call ${toolCall[1]} (arguments under Reason)`;
-  const parts = [asText(action.action, 'unknown')];
-  [action.url, action.selector || action.element_id, action.file_path, action.key].forEach((value) => {
-    if (value) parts.push(String(value));
+  if (toolCall) return shownText(`tool call ${toolCall[1]} (arguments under Reason)`);
+  // Everything the approval covers (it must match exactly) is shown, the target first: a click by
+  // coordinates, or an option picked behind an opaque element id, read as a bare "click".
+  const verb = asText(action.action, 'unknown');
+  const parts = [verb];
+  const reads = Object.hasOwn(APPROVAL_DISPLAY.reads, verb) ? APPROVAL_DISPLAY.reads[verb] : [];
+  // An empty string is set: only a value and a label can be one, and either runs (select_option).
+  const isSet = (value) => value !== null && value !== undefined;
+  // Why a set field does not act, as the server's unused_note says: the action does not read it, or
+  // a field set beside it runs instead.
+  const unusedNote = (name) => {
+    if (!reads.includes(name)) return APPROVAL_DISPLAY.notUsedBy.replace('{action}', verb);
+    const others = Object.hasOwn(APPROVAL_DISPLAY.overriddenBy, name) ? APPROVAL_DISPLAY.overriddenBy[name] : [];
+    const runs = others.find((other) => reads.includes(other) && isSet(action[other]));
+    return runs === undefined ? null : APPROVAL_DISPLAY.notUsedFor.replace('{field}', runs);
+  };
+  APPROVAL_DISPLAY.fields.forEach(([name, actions]) => {
+    const value = action[name];
+    if ((actions && !actions.includes(action.action)) || !isSet(value)) return;
+    const part = name === 'text' && action.sensitive
+      ? APPROVAL_DISPLAY.sensitiveTextHidden
+      : `${name}=${shownValue(value, cut)}`;
+    const note = unusedNote(name)
+      ?? (verb === 'select_option' && name === 'value' ? APPROVAL_DISPLAY.valueOrLabel : null);
+    parts.push(note ? `${part} ${note}` : part);
   });
-  if (action.text) {
-    parts.push(action.sensitive ? '(sensitive text hidden)' : JSON.stringify(String(action.text).slice(0, 200)));
+  return shownText(parts.join(' · '));
+};
+// What confirm() asks: short, the target first, each string cut with what it leaves out. Chromium
+// cuts a long dialog itself without saying so; the queue row shows the whole approval. A tool call's
+// reason is the server's preview of its arguments, which the row shows too: the viewer has the rest.
+// The note the server ends a cut tool-call preview with (McpToolGateway._governed_call_decision).
+const SERVER_CUT_NOTE = /… \\(\\d+ characters in all: View all shows them\\)$/;
+// A tool call's preview cut for the dialog: the server's note kept, and no count of the dialog's own,
+// which counted the preview, not the call, beside the note's total.
+const cutPreview = (preview) => {
+  const note = SERVER_CUT_NOTE.exec(preview);
+  const [kept, more] = cutChars(note ? preview.slice(0, note.index) : preview, APPROVAL_DISPLAY.cut);
+  if (note) return kept + note[0];
+  return more ? `${kept}…` : kept;
+};
+const approvalConfirmText = (approval) => {
+  const toolCall = approval.origin === 'tool_call';
+  const text = asText(approval.reason, '');
+  const [reason, more] = cutChars(text, APPROVAL_DISPLAY.cut);
+  const shown = toolCall ? cutPreview(text) : reason + leftOut(more);
+  let whole = 'The queue row shows the whole approval.';
+  if (toolCall) {
+    whole = approval.arguments_size
+      ? `View all ${approval.arguments_size} characters in the queue shows the whole call, credentials left out.`
+      : 'Nothing more of the call is kept than this preview.';
   }
-  return parts.join(' · ');
+  return `Approve this ${asText(approval.kind, 'unknown')} action in session ${asText(approval.session_id)}?\\n\\n`
+    + `${describeAction(approval.action, approval.origin, APPROVAL_DISPLAY.cut)}\\n\\n`
+    + `${toolCall ? 'Arguments (server preview)' : 'Reason, as the agent wrote it'}: `
+    + `${shownText(shown)}\\n\\n${whole}`;
+};
+
+// What the queue says after a decision: the server's message when it gives one (a reject that waits
+// on a claimed action, an approve that withdraws it), else the record's new status.
+const decisionStatusText = (approvalId, result) => {
+  const message = result && result.message;
+  if (message) return shownText(asText(message, ''));
+  return `Approval ${approvalId} ${asText(result && result.status, 'updated')}.`;
 };
 
 async function decideApproval(approval, decision) {
@@ -545,21 +643,60 @@ async function decideApproval(approval, decision) {
   const approvalId = asText(approval.id, '');
   let comment = null;
   if (decision === 'approve') {
-    const summary = `${asText(approval.kind, 'unknown')} action in session ${asText(approval.session_id)}:\n\n`
-      + `${describeAction(approval.action)}\n\n${asText(approval.reason, '')}`;
-    if (!confirm(`Approve this ${summary}`)) return;
+    if (!confirm(approvalConfirmText(approval))) return;
   } else {
     comment = prompt('Reason for rejecting (optional):', '');
     if (comment === null) return;
   }
   try {
     const result = await apiPost(`/approvals/${encodeURIComponent(approvalId)}/${decision}`, {comment: comment || null});
-    statusEl.textContent = `Approval ${approvalId} ${asText(result && result.status, 'updated')}.`;
+    statusEl.textContent = decisionStatusText(approvalId, result);
   } catch (err) {
     statusEl.textContent = `Could not ${decision} approval ${approvalId}: ${err.message}`;
   }
   loadApprovals();
 }
+
+// A tool call's whole arguments, which its reason only previews: fetched when asked for and shown as
+// text, each line with what would hide or reorder it written as code points (the server writes ASCII).
+const argumentsText = (text) => asText(text, '').split('\\n').map((line) => shownText(line, '')).join('\\n');
+// One viewer serves every row, so an answer is shown only while its approval is the one viewed: a slow
+// one used to land under the title of the approval the operator had moved on to.
+async function viewArguments(approval) {
+  const approvalId = asText(approval.id, '');
+  const viewer = document.getElementById('approval-arguments');
+  const shown = document.getElementById('approval-arguments-text');
+  viewer.dataset.approvalId = approvalId;
+  document.getElementById('approval-arguments-title').textContent = `Arguments of approval ${approvalId}`;
+  shown.textContent = 'Loading...';
+  viewer.hidden = false;
+  let text;
+  try {
+    const result = await api(`/approvals/${encodeURIComponent(approvalId)}/arguments`);
+    text = argumentsText(result && result.arguments);
+  } catch (err) {
+    text = `Could not load the arguments: ${err.message}`;
+  }
+  if (viewer.dataset.approvalId === approvalId) shown.textContent = text;
+}
+const closeArguments = () => {
+  const viewer = document.getElementById('approval-arguments');
+  viewer.hidden = true;
+  delete viewer.dataset.approvalId;
+  document.getElementById('approval-arguments-text').textContent = '';
+};
+
+// A queue row's cells, as text and class: the agent's reason with what would hide or reorder it shown.
+const approvalCells = (a) => {
+  return [
+    [formatEventTime(a.created_at), 'mono'],
+    [asText(a.id, ''), 'mono'],
+    [asText(a.session_id, '').slice(0, 12), 'mono'],
+    [a.kind, undefined],
+    [describeAction(a.action, a.origin), 'mono wrap'],
+    [shownText(a.reason), 'wrap'],
+  ];
+};
 
 async function loadApprovals() {
   const tbody = document.getElementById('approvals-tbody');
@@ -568,24 +705,27 @@ async function loadApprovals() {
     d = await api('/approvals?status=pending');
   } catch (err) {
     document.getElementById('stat-approvals').textContent = '—';
-    appendLoadError(tbody, 6, 'approvals', err);
+    appendLoadError(tbody, 7, 'approvals', err);
     return;
   }
   const items = Array.isArray(d) ? d : [];
   document.getElementById('stat-approvals').textContent = items.length;
-  if (!items.length) { appendEmptyRow(tbody, 6, 'No approvals waiting'); return; }
+  // Its approval decided, or gone: the viewer closes rather than stay open beside rows it is not.
+  const viewing = document.getElementById('approval-arguments').dataset.approvalId;
+  if (viewing !== undefined && !items.some((a) => asText(a.id, '') === viewing)) closeArguments();
+  if (!items.length) { appendEmptyRow(tbody, 7, 'No approvals waiting'); return; }
   tbody.replaceChildren();
   items.forEach(a => {
     const row = document.createElement('tr');
-    appendCell(row, formatEventTime(a.created_at), {className: 'mono'});
-    appendCell(row, asText(a.session_id, '').slice(0, 12), {className: 'mono'});
-    appendCell(row, a.kind);
-    appendCell(row, describeAction(a.action), {className: 'mono wrap'});
-    appendCell(row, a.reason, {className: 'wrap'});
+    approvalCells(a).forEach(([text, className]) => appendCell(row, text, {className}));
     const actions = document.createElement('div');
     actions.className = 'btn-row';
     actions.appendChild(jobActionButton('Approve', 'btn btn-primary btn-sm', () => decideApproval(a, 'approve')));
     actions.appendChild(jobActionButton('Reject', 'btn btn-danger btn-sm', () => decideApproval(a, 'reject')));
+    if (a.arguments_size) {
+      const view = `View all ${a.arguments_size} characters`;
+      actions.appendChild(jobActionButton(view, 'refresh-btn', () => viewArguments(a)));
+    }
     appendNodeCell(row, actions);
     tbody.appendChild(row);
   });
@@ -729,12 +869,17 @@ async function loadReplay() {
     const forRun = list.filter((a) => !sessionId || a.session_id === sessionId);
     const apprBody = replaySection(`Approvals (${forRun.length})`);
     if (!forRun.length) {
-      appendEmptyRow(apprBody, 3, 'No approvals for this run.');
+      appendEmptyRow(apprBody, 5, 'No approvals for this run.');
     } else {
       forRun.forEach((a) => {
         const row = document.createElement('tr');
+        // Which approval, and what it bound, as the queue describes it: the reason is the agent's own
+        // account, which the approval does not bind.
+        appendCell(row, a.id);
         appendCell(row, a.kind);
-        appendCell(row, a.reason);
+        appendCell(row, describeAction(a.action, a.origin));
+        // As the queue shows it: what would hide or reorder the agent's words, as its code point.
+        appendCell(row, shownText(a.reason));
         appendNodeCell(row, statusBadge(a.status));
         apprBody.appendChild(row);
       });
@@ -856,6 +1001,7 @@ document.getElementById('wizard-reopen').addEventListener('click', wizardReopen)
 document.getElementById('refresh-auth-profiles').addEventListener('click', loadAuthProfiles);
 
 document.getElementById('refresh-approvals').addEventListener('click', loadApprovals);
+document.getElementById('approval-arguments-close').addEventListener('click', closeArguments);
 document.getElementById('refresh-sessions').addEventListener('click', loadSessions);
 document.getElementById('refresh-agent-jobs').addEventListener('click', loadAgentJobs);
 document.getElementById('refresh-peers').addEventListener('click', loadPeers);
@@ -867,3 +1013,5 @@ setInterval(loadAll, 15000);
 </script>
 </body>
 </html>"""
+# The server's account of an approval, so the queue renders the same fields (app.approval_display).
+_DASHBOARD_HTML = _DASHBOARD_HTML.replace("__APPROVAL_DISPLAY__", json.dumps(APPROVAL_DISPLAY))

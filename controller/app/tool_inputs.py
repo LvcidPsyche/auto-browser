@@ -32,6 +32,7 @@ from .models import (
     validate_url,
 )
 from .result_shaping import ResultDetail
+from .url_safety import refuse_ambiguous_host
 
 __all__ = [
     "AgentJobIdInput",
@@ -114,6 +115,15 @@ class HarnessStartConvergenceInput(StrictInputModel):
         default=None, description="Fixed final page (url, text) for a deterministic run with no browser."
     )
     max_attempts: int | None = Field(default=None, ge=1, le=20)
+
+    @field_validator("mock_final_observation")
+    @classmethod
+    def validate_mock_final_url(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        # Its url is shown with its credentials left out, read as a browser reads it (previews.py), so
+        # one a browser reads as another host is refused, as the other URLs a preview redacts are.
+        if value is not None and isinstance(value.get("url"), str):
+            refuse_ambiguous_host(value["url"], field_name="mock_final_observation.url")
+        return value
 
 
 class HarnessGetStatusInput(StrictInputModel):
@@ -467,6 +477,7 @@ class SetCookiesInput(SessionIdInput):
                     field_name=f"cookies[{index}].url",
                     allowed_schemes=HTTP_URL_SCHEMES,
                 )
+                refuse_ambiguous_host(str(cookie["url"]), field_name=f"cookies[{index}].url")
         return self
 
 
@@ -559,7 +570,8 @@ class CdpAttachInput(StrictInputModel):
     @field_validator("cdp_url")
     @classmethod
     def validate_cdp_url(cls, value: str) -> str:
-        return validate_url(value, field_name="cdp_url", allowed_schemes=CDP_URL_SCHEMES)
+        validate_url(value, field_name="cdp_url", allowed_schemes=CDP_URL_SCHEMES)
+        return refuse_ambiguous_host(value, field_name="cdp_url")
 
 
 class VisionFindInput(SessionIdInput):

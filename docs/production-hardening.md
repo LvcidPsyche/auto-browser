@@ -33,7 +33,8 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   is not inside a session directory with a stored record is served to anyone.
   Agent jobs run as the operator who queued them, and cron jobs fire as their creator, opening only the auth
   profiles their creator may open. Sessions created under the shared token are
-  unowned and open to every operator. The audit log stays operator-wide, and
+  unowned and open to every operator. The audit log stays operator-wide (an
+  approval's id, kind, origin and tool, and its decision's comment, included), and
   the takeover desktop is shared by every session on a browser node; use
   `docker_ephemeral` isolation to give each session its own.
 - `browser.cdp_attach` swaps the one browser every session runs on, so it is refused
@@ -44,12 +45,16 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   and the browser it replaces is disconnected.
 - Governed approvals are the calling agent's choice unless the server makes them its own:
   `workflow_profile` is an argument the agent supplies and defaults to `fast`, so on a
-  multi-operator deployment an agent that leaves it out runs its writes without approval.
+  multi-operator deployment an agent that leaves it out can run ordinary writes without
+  governed approval; the runtime approvals still apply (an upload's, with
+  `REQUIRE_APPROVAL_FOR_UPLOADS` on by default, and those of `post`, `payment`,
+  `account_change` and `destructive` decisions), and `browser.eval_js` always asks.
   `FORCE_GOVERNED_APPROVALS=true` takes the choice away. It is off by default because it
   stalls an existing agent loop on its first write until an operator approves. Readiness
-  (`GET /readiness`, `browser.readiness_check`) warns `governed_approvals` when more than one
-  operator credential is configured and it is off. What it covers and what it does not:
-  - It covers every MCP tool call that has a governed kind (19 in the full tool profile, including the cron tools,
+  (`GET /readiness`, `browser.readiness_check`) warns `governed_approvals` when more than
+  one operator credential is configured and it is off. What it covers and what it does not:
+  - It covers every MCP tool call that has a governed kind (19 in the full tool profile, including
+    the cron tools,
     `browser.execute_action`, `browser.set_cookies` and `browser.delete_memory_profile` among
     them) and every step of the agent loop: MCP-queued steps and runs (`browser.queue_agent_step`,
     `browser.queue_agent_run`), REST `/agent/step` and `/agent/run`, and cron runs. Each runs as

@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 from playwright.async_api import Error as PlaywrightError
 
-from .approvals import ApprovalRequiredError, held_for_execution
+from .approvals import ApprovalRequiredError, given_back_notes, held_for_execution
 from .browser_manager import BrowserManager
 from .models import AgentRunResult, AgentStepResult, ProviderName, WorkflowProfile
 from .provider_registry import ProviderRegistry
@@ -155,7 +155,9 @@ class BrowserOrchestrator:
                 status="error",
                 observation=observation,
                 decision={},
-                execution=None,
+                # A refusal before the effect gave the step's approvals back: say so,
+                # or the caller asks again and queues a second approval for the action.
+                execution=given_back_notes(exc) or None,
                 usage=None,
                 raw_text=None,
                 error=error_message,
@@ -299,6 +301,10 @@ class BrowserOrchestrator:
         }:
             approval = None
             if workflow_profile == "governed":
+                if decision.action == "upload":
+                    # The file first, as execute_decision does: not asked for, nor claimed, for a missing file.
+                    session = await self.manager.get_session(session_id)
+                    await self.manager.uploads.safe_path(decision.file_path or "", session=session)
                 approval = await self.manager.require_governed_approval(
                     session_id,
                     decision,
@@ -310,9 +316,8 @@ class BrowserOrchestrator:
                 # The governed approval is consumed here: for a write the
                 # runtime does not itself require approval for, nothing below
                 # this would, and the same approval ran the action every step.
-                async with held_for_execution(self.manager.approvals, approval.id) as held:
+                async with held_for_execution(self.manager.approvals, approval.id, may_give_back=True):
                     execution = await self.manager.execute_decision(session_id, decision, approval_id=approval_id)
-                    await held.executed()
             status = "acted"
         else:  # pragma: no cover - guarded by schema
             raise ValueError(f"Unsupported action: {decision.action}")

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+from app.action_errors import BrowserActionError
 from app.approvals import ApprovalRequiredError, ApprovalStore
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
@@ -155,25 +156,34 @@ class ApprovalQueueTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError):
             await self.manager.execute_decision(self.session.id, decision, approval_id=approval_id)
 
-    async def test_failed_action_releases_its_approval_for_a_retry(self) -> None:
-        self.manager.click = AsyncMock(side_effect=[RuntimeError("detached"), {"action": "click"}])  # type: ignore[method-assign]
+    async def test_an_action_refused_before_it_starts_gives_its_approval_back_for_a_retry(self) -> None:
+        # The pipeline refuses before the click's operation (the page is on a
+        # host ALLOWED_HOSTS does not allow): nothing ran, so the approval is
+        # given back. A click that raised once it had started stays spent.
         decision = BrowserActionDecision(
             action="click",
             reason="This button submits a payment",
-            element_id="op-pay",
+            selector="#pay",
             risk_category="payment",
         )
         with self.assertRaises(ApprovalRequiredError) as ctx:
             await self.manager.execute_decision(self.session.id, decision)
         approval_id = ctx.exception.approval.id
         await self.manager.approve(approval_id, comment="approved")
+        self.session.page.url = "https://elsewhere.test/"
 
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(BrowserActionError) as refused:
             await self.manager.execute_decision(self.session.id, decision, approval_id=approval_id)
+        self.assertEqual(refused.exception.code, "browser_action_blocked")
+        self.assertEqual((await self.manager.get_approval(approval_id))["status"], "approved")
+
+        self.session.page.url = "https://example.com"
+        self.manager.click = AsyncMock(return_value={"action": "click"})  # type: ignore[method-assign]
         await self.manager.execute_decision(self.session.id, decision, approval_id=approval_id)
 
         stored = await self.manager.get_approval(approval_id)
         self.assertEqual(stored["status"], "executed")
+        self.manager.click.assert_awaited_once()
 
     async def test_governed_write_decision_requires_write_approval(self) -> None:
         decision = BrowserActionDecision(

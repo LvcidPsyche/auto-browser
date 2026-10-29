@@ -175,7 +175,7 @@ The prompt tells all providers to choose `request_human_takeover` for:
 Approval stays in the controller, not the model.
 
 If a provider still proposes a side effect, the controller does not trust it blindly:
-- in `fast`, uploads and high-risk `post`, `payment`, `account_change`, and `destructive` decisions use the approval queue
+- in `fast`, uploads (with `REQUIRE_APPROVAL_FOR_UPLOADS=true`, the default) and high-risk `post`, `payment`, `account_change`, and `destructive` decisions use the approval queue
 - in `governed`, every non-read decision requires approval, including ordinary click/type writes
 - the step/run returns `approval_required` until an approval token is supplied
   (with `AUTONOMOUS_APPROVALS=true` the agent approves its own action instead; the

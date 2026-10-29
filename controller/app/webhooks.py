@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .approval_display import approval_summary, shown_code_points
 from .models import ApprovalRecord
 from .version import __version__
 
@@ -86,7 +87,13 @@ async def dispatch_approval_event(
         "session_id": approval.session_id,
         "kind": approval.kind,
         "status": approval.status,
-        "reason": approval.reason,
+        # The reason is agent-written for an action approval; these two are the server's.
+        "origin": approval.origin,
+        "action_summary": approval_summary(approval),
+        # Agent-written: shown with its code points, as the dashboard shows it.
+        "reason": shown_code_points(approval.reason),
+        # A tool call's whole arguments stay on the controller (GET /approvals/{id}/arguments).
+        "arguments_size": approval.arguments_size,
         "created_at": approval.created_at,
         "updated_at": approval.updated_at,
     }

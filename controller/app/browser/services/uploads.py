@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ...approvals import held_for_execution
+from ...approvals import effect_started, held_for_execution
 from ...models import BrowserActionDecision
 from ...session_ownership import may_use
 from .sessions import SESSION_ID_HEX_DIGITS, is_session_id
 
 if TYPE_CHECKING:
     from ...browser_manager import BrowserSession
-
-logger = logging.getLogger(__name__)
 
 
 class BrowserUploadService:
@@ -49,21 +46,34 @@ class BrowserUploadService:
         target = self.manager.actions.resolve_target(selector=selector, element_id=element_id)
         payload = {**target, "file_path": str(safe_path), "approved": approval is not None, "approval_id": approval_id}
         transferred = False
+        began = False
+
+        def begin_transfer() -> None:
+            # The effect first: refused there, the upload has not begun, and a block has nothing to roll back.
+            nonlocal began
+            effect_started()
+            began = True
 
         def mark_transferred() -> None:
             # Called the moment the raw transfer returns, before anything else is awaited: from then
-            # on the pipeline reports a step that fails with the upload, never as a failure to retry,
-            # and a raise or cancellation spends the approval, since a retry would upload the file again.
+            # on the pipeline reports a step that fails with the upload, never as a failure to retry.
             nonlocal transferred
             transferred = True
 
         async def operation() -> None:
+            # effect_started just before each transfer, not once it returns: a file can go in and the
+            # call still raise (a timeout, a lost reply), and the approval held for it, here or by an
+            # outer layer, must stay spent, since executing it again would upload the file again. A
+            # refusal before the transfer (not a file input, a marker moved) gives it back.
             if target.get("element_id"):
                 element = self.manager.element_ids.element(session.page, target["element_id"])
                 # Recorded with the action: whether the registered input holds the file (best-effort).
-                payload["delivery"] = await element.set_input_files(str(safe_path), on_transfer=mark_transferred)
+                payload["delivery"] = await element.set_input_files(
+                    str(safe_path), before_transfer=begin_transfer, on_transfer=mark_transferred
+                )
             else:
                 locator = session.page.locator(target["selector"]).first
+                begin_transfer()
                 await locator.set_input_files(str(safe_path))
                 mark_transferred()
             await self.manager._settle(session.page)
@@ -71,20 +81,17 @@ class BrowserUploadService:
         def change_made() -> bool:
             return transferred
 
+        def has_begun() -> bool:
+            return began
+
         if approval is None:
-            return await self.manager._run_action(session, "upload", payload, operation, change_made=change_made)
-        async with held_for_execution(self.manager.approvals, approval.id) as held:
-            try:
-                result = await self.manager._run_action(session, "upload", payload, operation, change_made=change_made)
-            except BaseException:
-                if transferred:
-                    # Raised after the file went in (a policy block, a bot challenge, a cancelled
-                    # request): the approval is spent all the same, here and not by an outer layer that
-                    # held it, since executing it again would upload the file again.
-                    await _spend(self.manager.approvals, approval.id)
-                raise
-            await held.executed()
-        return result
+            return await self.manager._run_action(
+                session, "upload", payload, operation, change_made=change_made, began=has_begun
+            )
+        async with held_for_execution(self.manager.approvals, approval.id, may_give_back=True):
+            return await self.manager._run_action(
+                session, "upload", payload, operation, change_made=change_made, began=has_begun
+            )
 
     async def safe_path(self, file_path: str, *, session: "BrowserSession" | None = None) -> Path:
         """Resolve a staged file: inside UPLOAD_ROOT, and not in another operator's session directory.
@@ -172,14 +179,6 @@ class BrowserUploadService:
             return
         if not may_use(await self.manager.session_owner(parts[0])):
             raise PermissionError("file_path must stay inside upload root")
-
-
-async def _spend(approvals: Any, approval_id: str) -> None:
-    try:
-        await approvals.mark_executed(approval_id)
-    except PermissionError as exc:
-        # It expired while the upload ran (or was already spent): it cannot be claimed again either way.
-        logger.warning("upload approval %s not marked executed after the file went in: %s", approval_id, exc)
 
 
 def _missing_upload(file_path: str) -> str:

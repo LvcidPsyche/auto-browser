@@ -148,6 +148,23 @@ class ControllerScopeApprovalTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([(event.status, event.session_id) for event in events], [("approved", CONTROLLER_SCOPE)])
 
+    async def test_the_audit_names_the_tool_a_controller_approval_is_for(self) -> None:
+        approval_id = await self._request(None)
+        await self._approve(None, approval_id)
+
+        events = [
+            *await self.manager.audit.list(event_type="approval"),
+            *await self.manager.audit.list(event_type="approval_decision"),
+        ]
+
+        self.assertEqual(
+            [(event.action, event.details.get("origin"), event.details.get("tool")) for event in events],
+            [
+                ("approval_requested", "tool_call", "browser.delete_memory_profile"),
+                ("approve", "tool_call", "browser.delete_memory_profile"),
+            ],
+        )
+
     async def test_a_controller_approval_cannot_be_run_through_the_execute_endpoint(self) -> None:
         approval_id = await self._request(None)
         await self._approve(None, approval_id)

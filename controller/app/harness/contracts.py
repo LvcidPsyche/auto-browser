@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..url_safety import refuse_ambiguous_host
+
 PostconditionKind = Literal[
     "url_contains",
     "url_matches",
@@ -35,6 +37,13 @@ class Precondition(HarnessModel):
     kind: Literal["start_url", "auth_profile", "fixture", "note"]
     value: str = Field(min_length=1, max_length=2000)
     required: bool = True
+
+    @model_validator(mode="after")
+    def validate_start_url(self) -> "Precondition":
+        # The run loads it as a browser reads it; the approval shows it as urllib does.
+        if self.kind == "start_url":
+            refuse_ambiguous_host(self.value, field_name="start_url")
+        return self
 
 
 class Postcondition(HarnessModel):
