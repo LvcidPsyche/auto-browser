@@ -405,6 +405,21 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(first, lost["details"]["failed_sessions"])
         self.assertNotIn(first, lost["details"]["closed_sessions"])
 
+    async def test_containment_reports_a_session_whose_context_did_not_close(self) -> None:
+        """X3 (b): close_session returned, but the context's close raised inside the teardown: not "closed"."""
+        first, second = await self._two_sessions()
+        self.manager.sessions[first].context.close = AsyncMock(side_effect=RuntimeError("context close failed"))
+
+        self.browser.cdp_sessions[0].emit("close", self.browser.cdp_sessions[0])
+        await self._settled()
+
+        [lost] = [
+            c.kwargs
+            for c in self.manager.audit.append.await_args_list
+            if c.kwargs.get("event_type") == "request_gate_lost"
+        ]
+        self.assertEqual((lost["details"]["failed_sessions"], lost["details"]["closed_sessions"]), ([first], [second]))
+
     async def test_close_releases_the_context_even_when_the_summary_fails(self) -> None:
         """X3 (a): the summary raised, the session was dropped, and its context stayed open with its slot freed."""
         self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
