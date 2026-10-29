@@ -312,8 +312,6 @@ class BrowserSessionService:
         except BaseException:
             # BaseException so a cancelled create (the caller gave up, shutdown)
             # also closes the context and releases the isolated runtime.
-            if gate is not None and gate_context_id is not None:
-                gate.forget_context(gate_context_id)
             await self.cleanup_failed(
                 session_id,
                 session=session,
@@ -511,8 +509,11 @@ class BrowserSessionService:
                     await self._teardown_step(
                         session, "release session tunnel", lambda: self.manager.tunnel_broker.release(session.tunnel)
                     )
-                summary = await self.manager._session_summary(session, status="closed", live=False)
-                await self._release_resources(session)
+                try:
+                    summary = await self.manager._session_summary(session, status="closed", live=False)
+                finally:
+                    # Released even when the summary fails: the context must not outlive the session.
+                    await self._release_resources(session)
             finally:
                 # Whatever teardown step failed, the session is gone. It used to
                 # stay registered when context.close() or the runtime release
@@ -588,7 +589,6 @@ class BrowserSessionService:
         if session.network_inspector is not None:
             session.network_inspector.detach()
             session.network_inspector = None
-        self.manager.request_gates.forget_context(session.browser, session.gate_context_id)
         await self._teardown_step(session, "close browser context", session.context.close)
         if session.browser is not None and session.owns_browser:
             await self._teardown_step(

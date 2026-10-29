@@ -59,6 +59,7 @@ class Hit:
     method: str
     path: str
     body: bytes
+    origin: str | None = None
 
 
 @dataclass
@@ -86,7 +87,9 @@ class _Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b""
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
         parsed = urlparse(self.path)
-        server.hits.append(Hit(host=host, method=self.command, path=parsed.path, body=body))
+        server.hits.append(
+            Hit(host=host, method=self.command, path=parsed.path, body=body, origin=self.headers.get("Origin"))
+        )
         if parsed.path.startswith("/r/"):
             self.send_response(int(parsed.path.removeprefix("/r/")))
             self.send_header("Location", parse_qs(parsed.query)["to"][0])
@@ -202,6 +205,28 @@ async def test_a_popups_first_request_is_stopped(tmp_path: Path) -> None:
         [block] = env.gate().blocks(session.gate_context_id)
         main_target = await _target_id(session.context, session.page)
         assert block.target_id != main_target, "the popup's block was pinned on the opener"
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
+        "(url) => { window.open(url, '_blank', 'noopener'); }",
+        "(url) => { const a = Object.assign(document.createElement('a'), "
+        "{href: url, target: '_blank', rel: 'noopener noreferrer'}); document.body.append(a); a.click(); }",
+    ],
+    ids=["window_open_noopener", "link_target_blank_noopener"],
+)
+async def test_a_popup_with_no_opener_is_stopped_too(tmp_path: Path, opener: str) -> None:
+    async with gated(tmp_path) as env:
+        session_id = await env.create()
+        session = env.manager.sessions[session_id]
+
+        await session.page.evaluate(opener, env.server.url(REFUSED, "/popup"))
+        await eventually(lambda: env.gate().blocked_count(session.gate_context_id) == 1)
+
+        assert env.server.hits_on(REFUSED) == []
+        [block] = env.gate().blocks(session.gate_context_id)
+        assert block.target_id != await _target_id(session.context, session.page), "pinned on the opener"
 
 
 async def test_every_hop_of_a_redirect_chain_is_judged(tmp_path: Path) -> None:

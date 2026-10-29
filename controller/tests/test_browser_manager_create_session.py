@@ -47,13 +47,19 @@ class FakeContext:
         self.page = page
         self.pages = [page]
         self.on = unittest.mock.Mock()
-        self.close = AsyncMock()
+        # Runs the "close" listeners, as Playwright does once a context has closed.
+        self.close = AsyncMock(side_effect=self._closed)
         self.new_page = AsyncMock(return_value=page)
         self.set_default_timeout = unittest.mock.Mock()
         self.add_init_script = AsyncMock()
         # What the pre-request gate reads from the first page to own the context (app/browser/request_gate.py).
         self.context_id = new_context_id()
         self.new_cdp_session = AsyncMock(side_effect=lambda _page: page_session_for(self.context_id))
+
+    async def _closed(self) -> None:
+        for call in self.on.call_args_list:
+            if call.args[0] == "close":
+                call.args[1](self)
 
 
 class FakeBrowser:
@@ -132,7 +138,9 @@ class BrowserManagerCreateSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.metadata["memory_context"], "remember this")
         self.assertEqual(page.url, "https://example.com")
         # Popups, and the first navigation of a popup the context has not reported yet.
-        self.assertEqual([c.args[0] for c in context.on.call_args_list], ["page", "request", "requestfailed"])
+        # The pre-request gate's "close" (it owns the context until then), popups, and the first navigation of a
+        # popup the context has not reported yet.
+        self.assertEqual([c.args[0] for c in context.on.call_args_list], ["close", "page", "request", "requestfailed"])
         page.on.assert_called()
         browser.new_context.assert_awaited_once()
         context_kwargs = browser.new_context.await_args.kwargs

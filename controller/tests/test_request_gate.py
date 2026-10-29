@@ -9,14 +9,17 @@ session detaching. tests/test_request_gate_chromium.py checks the same rules aga
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from urllib.parse import urlsplit
 
 import pytest
 
+from app.browser import request_gate
 from app.browser.request_gate import (
     BLOCKED_ERROR_REASON,
+    BLOCKS_KEPT,
     FETCH_PATTERNS,
     REDIRECT_ORIGIN_SETTING,
     REDIRECT_ORIGIN_SWITCH,
@@ -406,6 +409,8 @@ async def test_a_reply_that_fails_is_logged_not_raised(harness: Harness, caplog)
 
     assert method == "Fetch.failRequest"
     assert harness.gate.blocks(harness.owned), "the block is recorded even when Chromium had dropped the request"
+    [record] = [r for r in caplog.records if r.name == "app.browser.request_gate"]
+    assert record.levelname == "WARNING" and "Invalid InterceptionId." in record.getMessage()
 
 
 # ── ownership ────────────────────────────────────────────────────────────────
@@ -490,3 +495,251 @@ async def test_a_context_registered_while_the_gate_detaches_is_refused() -> None
     with pytest.raises(RequestGateUnavailable):
         await h.gate.register_context(context, object())
     assert not h.gate.owns("c")
+
+
+# ── checkpoint 1 corrections ─────────────────────────────────────────────────
+
+
+def _lenient(url: str) -> bool:
+    """A matcher that never raises, so an unparseable URL reaches the hop rule."""
+    return "://refused" in url
+
+
+async def test_an_unparseable_previous_url_counts_as_a_cross_origin_post_hop() -> None:
+    h = await _attach_mode(url_refused=_lenient)
+    _, params = await h.pause("https://[::1/form", method="POST", headers=ORIGIN)
+
+    method, _ = await h.pause(
+        f"{OTHER_ALLOWED}/target", method="POST", headers=ORIGIN, redirected_from=params["requestId"]
+    )
+
+    assert method == "Fetch.failRequest"
+    [block] = h.gate.blocks(h.owned)
+    assert block.reason == "cross_origin_post_redirect"
+    assert h.gate.handler_errors == 0, "the hop rule raised instead of judging the hop"
+
+
+async def test_an_unparseable_hop_url_counts_as_a_cross_origin_post_hop() -> None:
+    h = await _attach_mode(url_refused=_lenient)
+    _, params = await h.pause(f"{ALLOWED}/r/307", method="POST", headers=ORIGIN)
+
+    method, _ = await h.pause("https://[::1/target", method="POST", headers=ORIGIN, redirected_from=params["requestId"])
+
+    assert method == "Fetch.failRequest"
+    assert [block.reason for block in h.gate.blocks(h.owned)] == ["cross_origin_post_redirect"]
+    assert h.gate.handler_errors == 0
+
+
+async def test_an_attach_mode_gate_without_the_switch_warns_once(caplog) -> None:
+    h = Harness(attach_mode=True)
+
+    with caplog.at_level("WARNING", logger="app.browser.request_gate"):
+        await h.gate.attach()
+
+    [record] = [r for r in caplog.records if r.name == "app.browser.request_gate"]
+    assert record.levelname == "WARNING"
+    text = record.getMessage()
+    assert REDIRECT_ORIGIN_SWITCH in text and REDIRECT_ORIGIN_SETTING in text
+    assert "operator's own tabs" in text
+
+
+@pytest.mark.parametrize(("attach_mode", "declared"), [(False, False), (True, True)])
+async def test_no_switch_warning_when_it_does_not_apply(caplog, attach_mode: bool, declared: bool) -> None:
+    h = Harness(attach_mode=attach_mode, origin_switch_declared=declared)
+
+    with caplog.at_level("WARNING", logger="app.browser.request_gate"):
+        await h.gate.attach()
+
+    assert [r for r in caplog.records if r.name == "app.browser.request_gate"] == []
+
+
+async def test_the_reply_goes_out_before_the_block_is_recorded(harness: Harness) -> None:
+    seen_at_reply: list[tuple[int, int]] = []
+
+    def fail_request(params: dict) -> dict:
+        seen_at_reply.append((harness.gate.blocked_count(harness.owned), len(harness.gate.blocks(harness.owned))))
+        return {}
+
+    harness.cdp.replies["Fetch.failRequest"] = fail_request
+
+    await harness.pause(f"{REFUSED}/")
+
+    assert seen_at_reply == [(0, 0)], "the block was recorded before Chromium had its answer"
+    assert harness.gate.blocked_count(harness.owned) == 1
+
+
+async def test_the_hop_url_map_forgets_its_oldest_entry(monkeypatch) -> None:
+    monkeypatch.setattr(request_gate, "REQUEST_URLS_KEPT", 2)
+    h = await _attach_mode()
+    _, oldest = await h.pause(f"{ALLOWED}/r/307?n=1", method="POST", headers=ORIGIN)
+    await h.pause(f"{ALLOWED}/r/307?n=2", method="POST", headers=ORIGIN)
+    _, newest = await h.pause(f"{ALLOWED}/r/307?n=3", method="POST", headers=ORIGIN)
+
+    forgotten, _ = await h.pause(f"{ALLOWED}/a", method="POST", headers=ORIGIN, redirected_from=oldest["requestId"])
+    kept, _ = await h.pause(f"{ALLOWED}/b", method="POST", headers=ORIGIN, redirected_from=newest["requestId"])
+
+    assert (forgotten, kept) == ("Fetch.failRequest", "Fetch.continueRequest")
+
+
+async def test_blocks_keep_the_last_fifty_and_the_count_keeps_counting(harness: Harness) -> None:
+    for n in range(BLOCKS_KEPT + 5):
+        await harness.pause(f"{REFUSED}/{n}")
+
+    blocks = harness.gate.blocks(harness.owned)
+    assert len(blocks) == BLOCKS_KEPT == 50
+    assert harness.gate.blocked_count(harness.owned) == BLOCKS_KEPT + 5
+    assert blocks[0].at <= blocks[-1].at
+
+
+# ── review findings (X1-X5) ──────────────────────────────────────────────────
+
+
+class ClosingContext:
+    """A context whose "close" handlers run when the test closes it, as Playwright's do."""
+
+    def __init__(self, context_id: str, target_id: str) -> None:
+        self.session = page_session_for(context_id, target_id)
+        self.handlers: list = []
+
+    async def new_cdp_session(self, _page):
+        return self.session
+
+    def on(self, event: str, handler) -> None:
+        if event == "close":
+            self.handlers.append(handler)
+
+    def closed(self) -> None:
+        for handler in self.handlers:
+            handler(self)
+
+
+async def _closing_context(h: Harness) -> tuple[ClosingContext, str, str]:
+    context_id, target_id = new_context_id(), f"closing-page-{id(h)}"
+    context = ClosingContext(context_id, target_id)
+    h.target(target_id, "page", context_id)
+    assert await h.gate.register_context(context, object()) == context_id
+    return context, context_id, target_id
+
+
+async def test_a_close_during_attach_leaves_the_gate_dead_and_says_so() -> None:
+    """X1: the session closing between setDiscoverTargets and Fetch.enable must not leave a live-looking gate."""
+    h = Harness()
+
+    def close_midway(params: dict) -> dict:
+        h.cdp.emit("close", h.cdp)
+        return {}
+
+    h.cdp.replies["Fetch.enable"] = close_midway
+
+    with pytest.raises(RequestGateUnavailable, match="closed while"):
+        await h.gate.attach()
+
+    assert not h.gate.live
+    assert h.lost == []
+
+
+async def test_a_context_stays_owned_until_it_has_closed(harness: Harness) -> None:
+    """X2: a page still navigating while its context closes is gated; ownership ends with the close event."""
+    context, context_id, target_id = await _closing_context(harness)
+
+    method, _ = await harness.pause(f"{REFUSED}/during-close", frame=target_id)
+    assert method == "Fetch.failRequest"
+    assert harness.gate.owns(context_id)
+
+    context.closed()
+
+    assert not harness.gate.owns(context_id)
+
+
+async def test_a_context_whose_close_never_happened_stays_owned(harness: Harness) -> None:
+    """X2: a close that raised never fires "close": its refused requests are still failed."""
+    _, context_id, target_id = await _closing_context(harness)
+
+    method, _ = await harness.pause(f"{REFUSED}/after-a-failed-close", frame=target_id)
+
+    assert method == "Fetch.failRequest"
+    assert harness.gate.owns(context_id)
+
+
+async def test_a_replacement_gate_keeps_the_lost_gates_contexts() -> None:
+    """X3 (c): what survived containment stays gated by the gate attached after the loss."""
+    from app.browser.request_gate import RequestGates
+
+    sessions: list[FakeCDPSession] = []
+
+    async def new_session() -> FakeCDPSession:
+        sessions.append(FakeCDPSession())
+        return sessions[-1]
+
+    browser = SimpleNamespace(new_browser_cdp_session=new_session)
+    lost: list = []
+    gates = RequestGates(
+        url_refused=refused,
+        enabled=lambda: True,
+        origin_switch_declared=lambda: False,
+        default_attach_mode=lambda: False,
+        on_lost=lost.append,
+    )
+    first = await gates.require(browser)
+    context = ClosingContext("survivor", "survivor-page")
+    await first.register_context(context, object())
+    sessions[0].emit("close", sessions[0])
+
+    second = await gates.require(browser)
+    second._on_target({"targetInfo": {"targetId": "survivor-page", "type": "page", "browserContextId": "survivor"}})
+    sessions[1].emit(
+        "Fetch.requestPaused",
+        {
+            "requestId": "r1",
+            "request": {"url": f"{REFUSED}/", "method": "GET", "headers": {}},
+            "frameId": "survivor-page",
+        },
+    )
+    method, _ = await sessions[1].wait_for_reply("r1")
+
+    assert second is not first and lost == [first]
+    assert second.owns("survivor") and method == "Fetch.failRequest"
+    context.closed()
+    assert not second.owns("survivor"), "the inherited context outlived its close"
+
+
+async def test_the_previous_url_is_known_before_the_reply_goes_out() -> None:
+    """X4: the next hop's verdict needs the URL even if that hop is judged before this reply returns."""
+    h = await _attach_mode()
+    seen: list[bool] = []
+
+    def continue_request(params: dict) -> dict:
+        seen.append(params["requestId"] in h.gate._request_urls)
+        return {}
+
+    h.cdp.replies["Fetch.continueRequest"] = continue_request
+
+    await h.pause(f"{ALLOWED}/r/307", method="POST", headers=ORIGIN)
+
+    assert seen == [True]
+
+
+async def test_a_lookup_that_never_answers_is_a_failed_lookup(monkeypatch) -> None:
+    """X5: the lookup is bounded: a hung Target.getTargetInfo fails a refused URL and continues an allowed one."""
+    monkeypatch.setattr(request_gate, "LOOKUP_TIMEOUT_SECONDS", 0.05)
+    h = Harness()
+    await h.start()
+
+    async def never(*_args) -> dict:
+        await asyncio.Event().wait()
+        return {}
+
+    original_send = h.cdp.send
+
+    async def send(method: str, params: dict | None = None) -> dict:
+        if method == "Target.getTargetInfo":
+            return await never()
+        return await original_send(method, params)
+
+    h.cdp.send = send  # type: ignore[method-assign]
+
+    refused_reply, _ = await h.pause(f"{REFUSED}/", frame="hung-frame")
+    allowed_reply, _ = await h.pause(f"{ALLOWED}/", frame="hung-frame-2")
+
+    assert (refused_reply, allowed_reply) == ("Fetch.failRequest", "Fetch.continueRequest")
+    assert h.gate.unattributed_blocks == 1

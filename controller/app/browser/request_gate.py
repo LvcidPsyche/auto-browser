@@ -55,6 +55,8 @@ REDIRECT_ORIGIN_SETTING = "CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED"
 REQUEST_URLS_KEPT = 1024
 # Blocks kept per owned context, for what the agent is told about them.
 BLOCKS_KEPT = 50
+# How long a frame's lookup may take before it counts as failed (a refused URL then fails).
+LOOKUP_TIMEOUT_SECONDS = 5.0
 
 OFF_LIST = "off_list"
 CROSS_ORIGIN_POST_REDIRECT = "cross_origin_post_redirect"
@@ -94,11 +96,16 @@ class _Verdict:
 _CONTINUE = _Verdict(fail=False)
 
 
-def _origin_of(url: str) -> str:
+def _parsed_origin(url: str) -> str | None:
+    """A URL's origin, or None when urlsplit refuses it (a malformed IPv6 host)."""
     try:
         return url_origin(url)
-    except ValueError:  # urlsplit refuses some URLs Chromium sends (a malformed IPv6 host)
-        return "(unparseable URL)"
+    except ValueError:
+        return None
+
+
+def _origin_of(url: str) -> str:
+    return _parsed_origin(url) or "(unparseable URL)"
 
 
 def _has_origin_header(request: dict[str, Any]) -> bool:
@@ -116,6 +123,7 @@ class RequestGate:
         attach_mode: bool,
         origin_switch_declared: bool,
         on_lost: Callable[["RequestGate"], None],
+        inherit_from: "RequestGate | None" = None,
     ) -> None:
         self.browser = browser
         self._url_refused = url_refused
@@ -124,16 +132,20 @@ class RequestGate:
         self._on_lost = on_lost
         self._cdp: Any = None
         self._live = False
+        # Set by the session's close, whenever it comes: during attach() too.
+        self._closed = False
         self._deliberate = False
         self._targets: dict[str, tuple[str | None, str | None]] = {}
-        self._owned: dict[str, _OwnedContext] = {}
+        # A gate attached after a loss shares the lost one's contexts: what outlived containment stays gated,
+        # and the close listener register_context wired forgets it here too.
+        self._owned: dict[str, _OwnedContext] = inherit_from._owned if inherit_from is not None else {}
         self._request_urls: OrderedDict[str, str] = OrderedDict()
         self.unattributed_blocks = 0
         self.handler_errors = 0
 
     @property
     def live(self) -> bool:
-        return self._live
+        return self._live and not self._closed
 
     @property
     def attach_mode(self) -> bool:
@@ -160,7 +172,19 @@ class RequestGate:
             with contextlib.suppress(Exception):
                 await cdp.detach()
             raise RequestGateUnavailable(f"the pre-request gate could not attach: {exc}") from exc
+        if self._closed:
+            raise RequestGateUnavailable("the pre-request gate's session closed while it attached")
         self._live = True
+        if self._attach_mode and not self._origin_switch_declared:
+            logger.warning(
+                "pre-request gate attached to a Chrome the controller did not launch, without %s=true: it stops "
+                "cross-origin 307/308 POST redirects of the controller's sessions itself, and the same redirects "
+                "in the operator's own tabs fail in Chrome (net::ERR_INVALID_ARGUMENT) while the gate is attached. "
+                "Start that Chrome with %s and set %s=true.",
+                REDIRECT_ORIGIN_SETTING,
+                REDIRECT_ORIGIN_SWITCH,
+                REDIRECT_ORIGIN_SETTING,
+            )
 
     async def detach(self) -> None:
         """Detach on purpose (the controller is closing or replacing the browser): not a loss."""
@@ -171,7 +195,8 @@ class RequestGate:
                 await self._cdp.detach()
 
     def _on_close(self, _session: Any = None) -> None:
-        was_live, self._live = self._live, False
+        was_live = self.live
+        self._closed = True
         if was_live and not self._deliberate:
             self._on_lost(self)
 
@@ -179,7 +204,7 @@ class RequestGate:
 
     async def register_context(self, context: Any, page: Any) -> str:
         """Own a context the controller created, from its first page, before that page navigates."""
-        if not self._live:
+        if not self.live:
             raise RequestGateUnavailable("the pre-request gate is not attached to this browser")
         try:
             session = await context.new_cdp_session(page)
@@ -191,13 +216,16 @@ class RequestGate:
             context_id = info["browserContextId"]
         except Exception as exc:
             raise RequestGateUnavailable(f"the pre-request gate could not read the new context: {exc}") from exc
-        if not self._live:
+        if not self.live:
             raise RequestGateUnavailable("the pre-request gate detached while the session was starting")
         self._owned[context_id] = _OwnedContext()
+        if hasattr(context, "on"):
+            # Owned until it has really closed: a page still navigating while it closes, or after a close
+            # that failed, stays gated. browserContextIds are not reused, so a context that never closes is harmless.
+            context.on("close", lambda _context: self.forget_context(context_id))
         return context_id
 
     def forget_context(self, context_id: str) -> None:
-        """Drop a context the session closing it owned (BrowserSessionService closes and forgets both)."""
         self._owned.pop(context_id, None)
 
     def owns(self, context_id: str | None) -> bool:
@@ -236,6 +264,9 @@ class RequestGate:
             # Nothing could be ruled out: a refused URL fails, as for a page that could be owned.
             handler_error = exc
             verdict = _Verdict(fail=not self._known_allowed(url), reason=UNCLASSIFIED)
+        if verdict.owned_page:
+            # Decision state, not bookkeeping: the next hop's verdict reads it, so it is written before the reply.
+            self._remember_url(event.get("requestId"), url)
         reply_error: BaseException | None = None
         try:
             if verdict.fail:
@@ -271,7 +302,11 @@ class RequestGate:
         if not frame_id:
             return "lookup_error", None, "the paused request names no frame"
         try:
-            reply = await self._cdp.send("Target.getTargetInfo", {"targetId": frame_id})
+            reply = await asyncio.wait_for(
+                self._cdp.send("Target.getTargetInfo", {"targetId": frame_id}), timeout=LOOKUP_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            return "lookup_error", None, f"Target.getTargetInfo did not answer within {LOOKUP_TIMEOUT_SECONDS:g} s"
         except Exception as exc:
             text = str(exc)
             return ("no_target" if NO_TARGET_TEXT in text else "lookup_error"), None, text[:300]
@@ -291,7 +326,19 @@ class RequestGate:
         if not previous_id or (request.get("method") or "").upper() != "POST" or not _has_origin_header(request):
             return False
         previous = self._request_urls.get(previous_id)
-        return previous is None or url_origin(previous) != url_origin(url)
+        if previous is None:
+            return True
+        # An origin that cannot be read is not known to be the same: the hop fails with the gate's own error.
+        before, after = _parsed_origin(previous), _parsed_origin(url)
+        return before is None or after is None or before != after
+
+    def _remember_url(self, request_id: str | None, url: str) -> None:
+        if not request_id:
+            return
+        self._request_urls[request_id] = url
+        self._request_urls.move_to_end(request_id)
+        while len(self._request_urls) > REQUEST_URLS_KEPT:
+            self._request_urls.popitem(last=False)
 
     def _after_reply(
         self,
@@ -301,12 +348,6 @@ class RequestGate:
         handler_error: BaseException | None,
         reply_error: BaseException | None,
     ) -> None:
-        request_id = event.get("requestId")
-        if verdict.owned_page and request_id:
-            self._request_urls[request_id] = url
-            self._request_urls.move_to_end(request_id)
-            while len(self._request_urls) > REQUEST_URLS_KEPT:
-                self._request_urls.popitem(last=False)
         if handler_error is not None:
             self.handler_errors += 1
             logger.error("pre-request gate: the handler failed for a paused request", exc_info=handler_error)
@@ -401,12 +442,14 @@ class RequestGates:
             if gate is not None and gate.live:
                 return gate
             known = self._attach_modes.get(id(browser))
+            previous = gate
             gate = RequestGate(
                 browser,
                 url_refused=self._url_refused,
                 attach_mode=known[1] if known is not None else self._default_attach_mode(),
                 origin_switch_declared=self._origin_switch_declared(),
                 on_lost=self._on_lost,
+                inherit_from=previous,
             )
             try:
                 await gate.attach()
@@ -414,11 +457,6 @@ class RequestGates:
                 raise RequestGateUnavailable(f"{exc}. {GATE_REQUIRED}") from exc
             self._gates[id(browser)] = (browser, gate)
             return gate
-
-    def forget_context(self, browser: Any, context_id: str | None) -> None:
-        gate = self.get(browser)
-        if gate is not None and context_id:
-            gate.forget_context(context_id)
 
     async def release(self, browser: Any) -> None:
         """Detach a browser's gate on purpose, before the controller closes or drops that browser."""
