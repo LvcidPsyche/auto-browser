@@ -33,6 +33,7 @@ from app.tool_gateway import McpToolGateway
 from app.witness import WitnessRecorder
 from app.witness_anchor import anchor_path, read_anchor
 from tests.test_browser_manager_create_session import _settings
+from tests.test_witness_signing import requires_verifier
 
 SCOPE = "sess-1"
 VERIFIER = Path(__file__).resolve().parents[2] / "scripts" / "verify_witness_bundle.py"
@@ -271,6 +272,7 @@ async def test_an_export_of_a_deleted_chain_does_not_claim_a_valid_chain(manager
     assert bundle["chain_valid_at_export"] is False
 
 
+@requires_verifier
 async def test_the_standalone_verifier_rejects_a_bundle_with_no_receipts(manager, tmp_path: Path) -> None:
     await _record(manager, 3)
     manager.witness._path(SCOPE).unlink()

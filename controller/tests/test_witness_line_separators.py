@@ -18,7 +18,7 @@ import pytest
 from app.witness import WitnessRecorder
 from app.witness_signing import WitnessSigner
 from tests.test_witness_missing_evidence import VERIFIER
-from tests.test_witness_signing import _receipt_kwargs
+from tests.test_witness_signing import _receipt_kwargs, requires_verifier
 
 SCOPE = "sess-1"
 SEPARATORS = ["\u2028", "\u2029", "\u0085"]
@@ -63,6 +63,7 @@ async def test_list_still_skips_a_torn_last_record(recorder: WitnessRecorder) ->
     assert len(await recorder.list(SCOPE, limit=10)) == 4
 
 
+@requires_verifier
 async def test_export_bundle_holds_all_four_and_the_standalone_verifier_accepts_it(
     recorder: WitnessRecorder, tmp_path: Path
 ) -> None:
