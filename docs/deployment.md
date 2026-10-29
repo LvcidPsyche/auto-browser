@@ -250,7 +250,8 @@ own sessions in Chromium (DevTools `Fetch`, one session per browser) and fails t
   every redirect hop and a popup's first request.
 - **Still caught after the fact by NAV-07** (the guard that sends a refused page back to `about:blank` once it
   commits):
-  - speculation-rules prefetch in attach modes;
+  - speculation-rules prefetch in attach modes, and in a launched browser where it could not be turned off
+    (launched browsers turn it off when the controller acquires them; `/readiness` warns when that failed);
   - a navigation served by a service worker that a same-site refused iframe registered, for a popup's first
     navigation in every mode;
   - `blob:` navigations a refused iframe makes;
@@ -260,9 +261,15 @@ own sessions in Chromium (DevTools `Fetch`, one session per browser) and fails t
 
 What the agent sees:
 
-- `navigate`, a session's `start_url` and a tab opened onto a URL answer `browser_action_blocked` (REST 403,
-  `retryable: false`), naming only the refused origin, where they answered a retryable failure before. A
-  cross-origin POST redirect stopped in an attach mode (below) answers the same code with what to change.
+- When the gate stops the navigation of `navigate`, a session's `start_url` or a tab opened onto a URL (a
+  redirect into a refused host), they answer `browser_action_blocked` (REST 403, `retryable: false`), naming
+  only the refused origin, where they answered a retryable failure before. A cross-origin POST redirect stopped
+  in an attach mode (below) answers the same code with what to change. A URL that `ALLOWED_HOSTS` refuses as
+  written is refused before anything exists or is sent, as before (a 403); that is not a
+  stop of the gate.
+- Only the gate's own failure of the page's request (`net::ERR_BLOCKED_BY_CLIENT`) counts: an action that fails
+  for another reason (a selector timeout) keeps its own error even if the page tried a refused navigation
+  meanwhile.
 - An action that did its work and whose page was then stopped (a click on a link) succeeds, and its result
   carries `target.blocked_navigations` (origin, reason, explanation) for blocks on the action's own page only;
   a background tab's block is not pinned on it.
@@ -273,9 +280,12 @@ What the agent sees:
   (503, retryable), naming `PRE_REQUEST_BLOCKING`. If the gate detaches on its own, every session on that
   browser is closed, and the next call on one names the reason (`request_gate_lost`); the next session
   attaches a new gate.
-- `/readiness` reports a `pre_request_gate` check: its state (off, idle, attached, lost, attach failed),
-  whether it is an attach mode with the switch declared, and the prefetch preference read back. It warns at
-  worst, so a health check never restart-loops on it.
+- `/readiness` reports a `pre_request_gate` check: its state (off and why, idle, attached, lost, attach
+  failed), whether it is an attach mode with the switch declared, the prefetch preference read back, and counts
+  of service-worker bypass failures, handler errors and blocks of frames the gate could not look up. It warns
+  on a launched browser whose prefetch preference did not read back 2, and on any bypass failure or handler
+  error (a service worker may then serve an owned page's navigation, which NAV-07 refuses after it loads). It
+  warns at worst, so a health check never restart-loops on it.
 
 Classification relies on a page's target existing when its first request pauses, which was measured on
 Chromium 151 and is guarded by the popup tests. If a Chromium change broke that, a refused page would fall back
@@ -284,8 +294,12 @@ to NAV-07 after the fact.
 In the browsers the controller launches (browser-node, `docker_ephemeral`, shadow browsing):
 
 - speculation-rules prefetch is turned off: the controller sets `net.network_prediction_options` to 2 in the
-  browser's default profile when it acquires it, and the browser-node image sets the `NetworkPredictionOptions`
-  policy. A prefetch is fetched without DevTools seeing it, so the refused host would get the request;
+  browser's default profile when it acquires it, whatever the gate's attach did, and reads it back. That is the
+  control, measured on Chromium 151. If it cannot be set, the controller logs a warning, `/readiness` warns, a
+  prefetch of a refused host is sent, and the page is refused after it loads. The browser-node image also
+  installs the `NetworkPredictionOptions` managed policy at both the Chromium and the Chrome for Testing policy
+  paths, as a second layer: which path that Chromium build reads is unverified. A prefetch is fetched without
+  DevTools seeing it, so the refused host would get the request;
 - owned pages bypass service workers (`Network.setBypassServiceWorker`), so a worker cannot answer their
   navigations without a request the gate sees (except a popup's first, which starts before the controller
   sees the popup);

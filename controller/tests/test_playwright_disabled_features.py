@@ -7,6 +7,13 @@ disables, or dropping something it added. Both copies are compared with the list
 
 The browser-node half and the managed-policy half read the repo's browser-node/ directory, absent from the
 controller image, so they skip there.
+
+These compare the lists, not where the switch lands on the command line. That the appended --disable-features
+comes after Playwright's own, and so wins, is proven on Chromium: with partitioning re-enabled a third-party
+iframe's localStorage is keyed to the top-level site
+(tests/test_storage_partitioning_chromium.py::test_what_partitioning_changes_for_a_third_party_iframes_local_storage),
+and a cross-site iframe's worker does not serve a popup's first navigation
+(tests/test_request_gate_hardening_chromium.py::test_a_cross_site_iframes_worker_does_not_serve_a_popups_first_navigation).
 """
 
 from __future__ import annotations

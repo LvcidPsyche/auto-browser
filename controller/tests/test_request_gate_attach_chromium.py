@@ -165,6 +165,22 @@ async def test_a_cross_origin_post_redirect_is_stopped_with_an_error_naming_the_
         assert REDIRECT_ORIGIN_SWITCH in block.explanation and REDIRECT_ORIGIN_SETTING in block.explanation
 
 
+async def test_r16_a_click_whose_post_redirect_is_stopped_succeeds_and_says_which_switch_it_needs(
+    tmp_path: Path,
+) -> None:
+    """The agent's surface for decision 10: the click did its work; its result names the switch and the setting."""
+    async with attached(tmp_path) as env:
+        env.server.pages["/form"] = _post_form(env, 307, env.server.url(ALLOWED_TOO, "/target"))
+        session_id = await env.create("/form")
+
+        result = await env.manager.click(session_id, selector="#go")
+
+        [block] = result["target"]["blocked_navigations"]
+        assert block["reason"] == CROSS_ORIGIN_POST_REDIRECT
+        assert REDIRECT_ORIGIN_SWITCH in block["explanation"] and REDIRECT_ORIGIN_SETTING in block["explanation"]
+        assert env.server.hits_on(ALLOWED_TOO) == []
+
+
 async def test_with_the_switch_declared_the_cross_origin_post_redirect_arrives_as_chrome_sends_it(
     tmp_path: Path,
 ) -> None:

@@ -27,7 +27,8 @@ A report that breaks one of these is in scope:
   every redirect hop and a popup's first request.
 - **Still caught after the fact by NAV-07** (the guard that sends a refused page back to `about:blank` once it
   commits):
-  - speculation-rules prefetch in attach modes;
+  - speculation-rules prefetch in attach modes, and in a launched browser where it could not be turned off
+    (launched browsers turn it off when the controller acquires them; `/readiness` warns when that failed);
   - a navigation served by a service worker that a same-site refused iframe registered, for a popup's first
     navigation in every mode;
   - `blob:` navigations a refused iframe makes;

@@ -10,7 +10,8 @@ All notable changes to auto-browser are documented here.
   is now stopped before Chromium sends it: every redirect hop and a popup's first request included
   (`PRE_REQUEST_BLOCKING`, default true; off when `ALLOWED_HOSTS` is empty or `*`). The guard that refuses
   such a page after it commits stays on behind it, and still catches what the gate cannot see: speculation-rules
-  prefetch and bfcache restores in attach modes, a same-site refused iframe's service worker serving a popup's
+  prefetch and bfcache restores in attach modes (and prefetch in a launched browser where it could not be turned
+  off, which `/readiness` warns about), a same-site refused iframe's service worker serving a popup's
   first navigation, `blob:` navigations a refused iframe makes, and requests held when the gate detaches.
   Iframes and subresources of other hosts are still not filtered. See
   [`docs/deployment.md`](./docs/deployment.md#stopped-before-the-request-is-sent).
@@ -20,17 +21,21 @@ All notable changes to auto-browser are documented here.
 
 ### Changed
 
-- In the browsers the controller launches, speculation-rules prefetch is off (a runtime preference, and the
-  `NetworkPredictionOptions` policy in the browser-node image), owned pages bypass service workers, and
+- In the browsers the controller launches, speculation-rules prefetch is turned off at acquisition: a runtime
+  preference, read back and reported by `/readiness`, is the verified control; the browser-node image's
+  `NetworkPredictionOptions` managed policy (installed at both policy paths, since which one that Chromium build
+  reads is unverified) is a second layer. If it cannot be turned off, `/readiness` warns, a prefetch of a refused
+  host is sent, and the page is refused after it loads. Owned pages bypass service workers, and
   third-party storage partitioning is back on, as in Chrome. With partitioning, a third-party iframe's
   `localStorage` is keyed to the top-level site and is not carried by a saved auth profile; its cookies and
   first-party logins are.
 
 ### Upgrade notes
 
-- **Agent-visible errors change.** `navigate`, a session's `start_url` and a tab opened onto a URL that the gate
-  stops answer `browser_action_blocked` (REST 403, `retryable: false`), naming only the refused origin, instead
-  of a retryable failure. A click whose page was stopped succeeds and reports `target.blocked_navigations`; the
+- **Agent-visible errors change.** `navigate`, a session's `start_url`, a tab opened onto a URL and a shadow
+  browse whose navigation the gate stops (`net::ERR_BLOCKED_BY_CLIENT`) answer `browser_action_blocked` (REST
+  403, `retryable: false`), naming only the refused origin, instead of a retryable failure. A URL refused as
+  written is refused before anything is sent, as before. A click whose page was stopped succeeds and reports `target.blocked_navigations`; the
   tab list marks such a tab with `blocked_navigation`. Blocks are audited as `navigation_blocked` with
   `source: "request"`.
 - A browser the gate cannot attach to gets no sessions: `pre_request_gate_unavailable` (503, retryable). When
