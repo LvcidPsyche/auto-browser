@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from playwright.async_api import Error as PlaywrightError
 
 from app.action_errors import PRE_REQUEST_GATE_UNAVAILABLE, BrowserActionError, SessionNotFoundError
 from app.browser.request_gate import GateBlock, RequestGateUnavailable
@@ -29,8 +30,8 @@ from app.models import McpToolCallRequest
 from app.readiness import pre_request_gate_check, run_readiness_checks
 from app.routes.sessions import create_sessions_router
 from app.tool_gateway import McpToolGateway
-from tests._fake_cdp import FakeCDPSession
-from tests.test_browser_manager_create_session import _settings
+from tests._fake_cdp import FakeCDPSession, page_session_for
+from tests.test_browser_manager_create_session import FakePage, _settings
 from tests.test_request_gate_wiring import _browser
 
 
@@ -303,6 +304,47 @@ class ReadinessTests(unittest.TestCase):
         [check] = [check for check in report.checks if check.name == "pre_request_gate"]
         self.assertEqual(check.status, "warn")
         self.assertNotEqual(report.overall, "fail")
+
+
+class NewTabConversionTests(_Base):
+    """R6 for tabs.open: only the gate's own failure of the new page's request is a block."""
+
+    async def open_with(self, error: str) -> BrowserActionError:
+        self.manager._persist_session = AsyncMock()  # type: ignore[method-assign]
+        session_id = (await self.manager.create_session(name="s"))["id"]
+        session = self.manager.sessions[session_id]
+        context_id = session.gate_context_id
+        tab = FakePage()
+        tab.context = session.context  # as a Playwright page has
+        session.context.new_page = AsyncMock(return_value=tab)
+        session.context.new_cdp_session = AsyncMock(side_effect=lambda _page: page_session_for(context_id, "tab-2"))
+        cdp = self.browser.cdp_sessions[0]
+
+        async def stopped_then_failed(url: str, wait_until: str = "domcontentloaded") -> None:
+            cdp.replies["Target.getTargetInfo"] = {
+                "targetInfo": {"targetId": "tab-2", "type": "page", "browserContextId": context_id}
+            }
+            cdp.emit(
+                "Fetch.requestPaused",
+                {"requestId": "t1", "frameId": "tab-2", "request": {"url": "https://refused.example/", "headers": {}}},
+            )
+            await cdp.wait_for_reply("t1")
+            raise PlaywrightError(error)
+
+        tab.goto = AsyncMock(side_effect=stopped_then_failed)
+        with self.assertRaises(BrowserActionError) as caught:
+            await self.manager.open_tab(session_id, "https://example.com/tab", True)
+        return caught.exception
+
+    async def test_the_gates_own_failure_is_the_block(self) -> None:
+        error = await self.open_with("Page.goto: net::ERR_BLOCKED_BY_CLIENT at https://example.com/tab")
+
+        self.assertEqual((error.code, error.action), ("browser_action_blocked", "open_tab"))
+
+    async def test_another_failure_keeps_its_own_error_though_the_page_was_stopped(self) -> None:
+        error = await self.open_with("Page.goto: Timeout 3000ms exceeded.")
+
+        self.assertEqual((error.code, error.retryable), ("browser_action_failed", True))
 
 
 class GatesStatusTests(_Base):

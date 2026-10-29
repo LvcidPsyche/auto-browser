@@ -201,9 +201,10 @@ async def test_each_block_is_audited_by_origin_with_its_source(tmp_path: Path) -
 async def test_r6_a_selector_timeout_while_the_page_was_stopped_keeps_its_own_error(tmp_path: Path) -> None:
     """The page sends itself to a refused host while the click waits for an element that never comes."""
     async with gated(tmp_path) as env:
-        env.manager.settings.action_timeout_ms = 1500
+        env.manager.settings.action_timeout_ms = 3000
+        # Late enough to land while the click waits, not before the action counts the page's blocks.
         env.server.pages["/wanders"] = (
-            f"<script>setTimeout(() => {{ location.href = '{env.server.url(REFUSED, '/away')}'; }}, 200)</script>"
+            f"<script>setTimeout(() => {{ location.href = '{env.server.url(REFUSED, '/away')}'; }}, 1200)</script>"
         )
         session_id = await env.create("/wanders")
         session = env.manager.sessions[session_id]
