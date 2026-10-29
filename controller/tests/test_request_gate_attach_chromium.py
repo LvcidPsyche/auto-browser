@@ -28,6 +28,7 @@ from app.browser.request_gate import CROSS_ORIGIN_POST_REDIRECT, REDIRECT_ORIGIN
 from app.browser_manager import BrowserManager
 from tests._chromium import chromium_executable, requires_chromium
 from tests.test_browser_manager_create_session import _settings
+from tests.test_request_gate_backstop_chromium import caught_after_the_fact
 from tests.test_request_gate_chromium import (
     ALLOWED,
     ALLOWED_TOO,
@@ -223,3 +224,52 @@ async def _target_info(page) -> dict:
         return (await session.send("Target.getTargetInfo"))["targetInfo"]
     finally:
         await session.detach()
+
+
+# ── what an attach mode leaves to NAV-07 (decision 8) ────────────────────────
+
+
+async def test_an_attach_modes_prefetch_reaches_the_refused_host_and_its_page_is_refused_after_it_commits(
+    tmp_path: Path,
+) -> None:
+    """The operator's Chrome keeps its own prefetch setting, so the prefetch goes out and the navigation commits
+    from it with no pause; NAV-07 still refuses the page."""
+    async with attached(tmp_path) as env:
+        target = env.server.url(REFUSED, "/prefetched")
+        env.server.pages["/rules"] = (
+            '<script type="speculationrules">'
+            f'{{"prefetch": [{{"source": "list", "urls": ["{target}"], "eagerness": "immediate"}}]}}'
+            "</script><p>rules</p>"
+        )
+        session_id = await env.create("/rules")
+        session = env.manager.sessions[session_id]
+        await eventually(lambda: "/prefetched" in env.server.pages_on(REFUSED))  # the control: the prefetch went out
+
+        await session.page.evaluate("(url) => { location.href = url; }", target)
+
+        refused = await caught_after_the_fact(env, session_id)
+        assert refused == [{"url": env.server.url(REFUSED, ""), "source": "page"}]
+        assert env.gate().blocked_count(session.gate_context_id) == 0, "the gate saw it: this path is not a gap"
+        await eventually(lambda: session.page.url == "about:blank")
+
+
+async def test_an_attach_modes_bfcache_restore_of_a_refused_page_is_refused_after_it_commits(tmp_path: Path) -> None:
+    """A page that committed while its host was allowed comes back from the back/forward cache with no request."""
+    async with attached(tmp_path) as env:
+        session_id = await env.create("/")
+        session = env.manager.sessions[session_id]
+        allowed = env.manager.settings.allowed_hosts
+        env.manager.settings.allowed_hosts = f"{allowed},{REFUSED}"
+        try:
+            await session.page.goto(env.server.url(REFUSED, "/kept"))
+            await session.page.goto(env.server.url(ALLOWED, "/after"))
+        finally:
+            env.manager.settings.allowed_hosts = allowed
+
+        with contextlib.suppress(Exception):
+            await session.page.go_back()
+
+        refused = await caught_after_the_fact(env, session_id)
+        assert refused == [{"url": env.server.url(REFUSED, ""), "source": "page"}]
+        assert env.server.pages_on(REFUSED) == ["/kept"], "the control: restored from the cache, not reloaded"
+        assert env.gate().blocked_count(session.gate_context_id) == 0, "the gate saw it: this path is not a gap"

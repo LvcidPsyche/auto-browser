@@ -26,6 +26,7 @@ from playwright.async_api import Browser, async_playwright
 from app.action_errors import BROWSER_ACTION_BLOCKED, BrowserActionError
 from app.browser.launch_flags import STORAGE_PARTITIONING_ON
 from tests._chromium import chromium_executable, requires_chromium
+from tests.test_request_gate_backstop_chromium import caught_after_the_fact
 from tests.test_request_gate_chromium import ALLOWED, REFUSED, REFUSED_SAME_SITE, eventually, gated
 
 _HEADLESS_SHELL = "headless-shell" in (chromium_executable() or "")
@@ -209,3 +210,21 @@ async def test_a_popup_is_bypassed_from_its_second_navigation(tmp_path: Path) ->
         await eventually(lambda: popup in bypassed)
 
         await _refused_top_level_is_stopped(env, popup, scope, session.gate_context_id, 0)
+
+
+async def test_a_same_site_workers_popup_first_navigation_is_still_refused_after_it_commits(tmp_path: Path) -> None:
+    """The gap decision 8 names: the popup's first navigation is served before its page can be bypassed."""
+    async with gated(tmp_path, browser=_BROWSER["browser"]) as env:
+        scope = "/sw/gap/"
+        session_id = await _worker_ready(env, REFUSED_SAME_SITE, scope)
+        session = env.manager.sessions[session_id]
+
+        await session.page.evaluate(
+            "(url) => { window.open(url); }", env.server.url(REFUSED_SAME_SITE, scope + "served/pop")
+        )
+
+        refused = await caught_after_the_fact(env, session_id)
+        assert refused == [{"url": env.server.url(REFUSED_SAME_SITE, ""), "source": "page"}]
+        assert env.gate().blocked_count(session.gate_context_id) == 0, "the gate saw it: this path is not a gap"
+        assert f"{scope}served/pop" not in env.server.pages_on(REFUSED_SAME_SITE), "the worker served it"
+        await eventually(lambda: all(page.url == "about:blank" for page in session.context.pages[1:]))
