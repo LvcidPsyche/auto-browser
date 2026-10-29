@@ -14,6 +14,7 @@ from ..action_errors import (
     SCREENSHOT_WITHHELD,
     BrowserActionError,
     NavigationStoppedError,
+    SessionNotFoundError,
 )
 from ..approvals import ApprovalRefusal, effect_started, held_status, refused_before_effect
 from ..browser.request_gate import block_summary, stopped_by_gate
@@ -115,6 +116,15 @@ class BrowserActionPipeline:
 
     async def _run(self, context: ActionRunContext) -> dict[str, Any]:
         async with context.session.lock:
+            if context.manager.sessions.get(context.session.id) is not context.session:
+                # Closed while this action waited for the lock (containment among others): say so, with the
+                # recorded reason, rather than run on a closed context.
+                await context.manager.get_session(context.session.id)
+                raise SessionNotFoundError(context.session.id, status="closed")
+            gates = getattr(context.manager, "request_gates", None)
+            if gates is not None:
+                # Nothing the action does (its snapshot, its effect) starts on a lost gate.
+                gates.assert_live(context.session)
             # Right after a refused tab closed (the refusal's advice), what the page commits because of this
             # action would count as that tab's choice: the action waits out the grace (bounded), before its
             # snapshot and before its effect is marked, so a cancellation meanwhile gives an approval back.
@@ -214,11 +224,14 @@ class BrowserActionPipeline:
             await manager._ensure_witness_remote_ready(session, action=context.action_name)
         if witness_state.outcome.should_block:
             raise PermissionError(witness_state.outcome.block_reason or "Witness policy blocked this action")
+        gates = getattr(manager, "request_gates", None)
+        if gates is not None:
+            # Again before the effect and the operation: the gate can be lost while the action prepares.
+            gates.assert_live(session)
         if context.action_name not in MARKS_OWN_EFFECT:
             effect_started()
             witness_state.operation_started = True
         page = session.page
-        gates = getattr(manager, "request_gates", None)
         browser = getattr(session, "browser", None)
         # The page's own count: a background tab's blocks are not this action's.
         blocked_before = await gates.page_block_count(browser, page) if gates is not None else 0

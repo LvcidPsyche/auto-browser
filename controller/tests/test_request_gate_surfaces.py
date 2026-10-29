@@ -351,6 +351,7 @@ class GatesStatusTests(_Base):
     async def test_status_reports_each_gates_state(self) -> None:
         await self.manager.create_session(name="s")
         self.assertEqual(self.manager.request_gates.status()["state"], "attached")
+        self.manager.runtime.gate_lost = lambda _gate: None  # type: ignore[method-assign]  # before containment reattaches
 
         self.browser.cdp_sessions[0].emit("close", self.browser.cdp_sessions[0])
         await self.settled()

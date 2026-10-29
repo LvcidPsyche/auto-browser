@@ -63,6 +63,8 @@ class BrowserTabService:
                 # after a refused tab closed, would count as that tab's choice.
                 await self.manager._wait_out_closed_page_grace(session)
             gates = self.manager.request_gates
+            # Before the tab exists: on a lost gate its navigation would go out unjudged.
+            gates.assert_live(session)
             new_page = await session.context.new_page()
             # The new page's own count, before it navigates: another tab's blocks are not this one's.
             blocked_before = await gates.page_block_count(session.browser, new_page)

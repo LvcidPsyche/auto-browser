@@ -41,7 +41,13 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from ..action_errors import BROWSER_ACTION_BLOCKED, PRE_REQUEST_GATE_UNAVAILABLE, BrowserActionError
+from ..action_errors import (
+    BROWSER_ACTION_BLOCKED,
+    PRE_REQUEST_GATE_UNAVAILABLE,
+    SESSION_CLOSED_GATE_LOST,
+    BrowserActionError,
+    SessionNotFoundError,
+)
 from ..network_inspector import url_origin
 from ..utils import spawn_background_task
 from .prefetch import PREFETCH_OFF, turn_prefetch_off
@@ -259,6 +265,11 @@ class RequestGate:
         if self._cdp is not None:
             with contextlib.suppress(Exception):
                 await self._cdp.detach()
+
+    def ending(self, ending: bool = True) -> None:
+        """The controller is closing this gate's browser: the close takes the gate's session down with it, which is
+        not a loss. ``ending(False)`` undoes it when that close failed, so a later loss is reported again."""
+        self._deliberate = ending
 
     def _on_close(self, _session: Any = None) -> None:
         was_live = self.live
@@ -537,6 +548,9 @@ class RequestGates:
         self.bypass_failures = 0
         self._lock = asyncio.Lock()
 
+    def enabled(self) -> bool:
+        return self._enabled()
+
     def get(self, browser: Any) -> RequestGate | None:
         entry = self._gates.get(id(browser))
         return entry[1] if entry is not None else None
@@ -629,6 +643,23 @@ class RequestGates:
         entry = self._gates.pop(id(browser), None)
         if entry is not None:
             await entry[1].detach()
+
+    def ending(self, browser: Any, ending: bool = True) -> None:
+        """Before the controller closes a browser it owns: its gate stays attached (still gating) until the close
+        has succeeded, and the close's end of the gate's session is not reported as a loss."""
+        gate = self.get(browser)
+        if gate is not None:
+            gate.ending(ending)
+
+    def assert_live(self, session: Any) -> None:
+        """Refuse to start anything on a gated session whose browser has no live gate (lost, and not yet replaced):
+        the error the next call gets once containment has closed it."""
+        if getattr(session, "gate_context_id", None) is None:
+            return
+        gate = self.get(getattr(session, "browser", None))
+        if gate is not None and gate.live:
+            return
+        raise SessionNotFoundError(session.id, status="closed", reason=SESSION_CLOSED_GATE_LOST)
 
     async def release_all(self) -> None:
         for browser, _gate in list(self._gates.values()):

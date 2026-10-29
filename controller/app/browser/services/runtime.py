@@ -172,28 +172,51 @@ class BrowserRuntimeService:
         """A browser's pre-request gate detached on its own: Chromium resumes what it held (decision 2)."""
         spawn_background_task(self._contain_lost_gate(gate))
 
-    async def _regate_survivors(self, browser: Any, failed: list[str]) -> None:
-        """Attach a replacement gate now, which inherits the contexts that did not close, rather than at some
-        later create."""
-        names = ", ".join(failed)
+    async def _reattach(self, browser: Any) -> bool:
+        """A replacement gate first, before any close: it inherits every owned context, so what still runs there is
+        gated again within one attach, not after every close (decision 2a)."""
         try:
             replacement = await self.manager.request_gates.require(browser)
         except RequestGateUnavailable as exc:
             logger.error(
-                "pre-request gate loss: session(s) %s did not close and no replacement gate attached (%s): their "
-                "context runs on the post-load guard alone",
-                names,
+                "pre-request gate loss: no replacement gate attached (%s); closing the sessions, whose actions are "
+                "refused meanwhile",
                 exc.message,
             )
-            return
-        if replacement is not None and replacement.live:
-            logger.error("pre-request gate loss: session(s) %s did not close; they stay gated by a new gate", names)
-            return
+            return False
+        return replacement is not None and replacement.live
+
+    async def _end_survivors(self, browser: Any, failed: list[str], *, owned: bool) -> bool:
+        """No context outlives containment. A shared browser is disconnected, which clears every context Playwright
+        created there (an operator's own Chrome keeps running); ensure_browser reconnects at the next use. An owned
+        browser was closed by its session's teardown, which keeps the gate attached when that close failed.
+        Returns whether the browser was disconnected."""
+        manager = self.manager
+        names = ", ".join(failed)
+        if owned:
+            logger.error(
+                "pre-request gate loss: session(s) %s did not close; their own browser's teardown closed it or kept "
+                "its gate attached",
+                names,
+            )
+            return False
+        await manager.request_gates.release(browser)
+        try:
+            await asyncio.wait_for(browser.close(), timeout=PREVIOUS_BROWSER_CLOSE_TIMEOUT_SECONDS)
+        except Exception as exc:
+            logger.error(
+                "pre-request gate loss: session(s) %s did not close, and disconnecting the shared browser failed "
+                "(%s): their context runs on the post-load guard alone",
+                names,
+                f"{type(exc).__name__}: {exc}"[:200],
+            )
+            return False
         logger.error(
-            "pre-request gate loss: session(s) %s did not close and no gate is live: their context runs on the "
-            "post-load guard alone",
+            "pre-request gate loss: session(s) %s did not close; disconnected the shared browser, which clears "
+            "their context, and the next session reconnects",
             names,
         )
+        return True
 
     async def _contain_lost_gate(self, gate: RequestGate) -> None:
         """Close every session on the gate's browser; the next session there attaches a new gate.
@@ -213,6 +236,7 @@ class BrowserRuntimeService:
             len(sessions),
             ", ".join(session.id for session in sessions) or "-",
         )
+        reattached = await self._reattach(browser)
         closed: list[str] = []
         failed: list[str] = []
         # Every operator's sessions, as shutdown closes them.
@@ -229,12 +253,17 @@ class BrowserRuntimeService:
                 # A context that did not really close (its close raised inside the teardown) stays owned, and
                 # the next gate inherits it: still gated, but not closed.
                 (failed if gate.owns(session.gate_context_id) else closed).append(session.id)
-        if failed:
-            await self._regate_survivors(browser, failed)
+        owned = any(session.owns_browser for session in sessions if session.id in failed)
+        disconnected = await self._end_survivors(browser, failed, owned=owned) if failed else False
         await manager.audit.append(
             event_type="request_gate_lost",
             status="error",
             action="request_gate",
             session_id=None,
-            details={"closed_sessions": closed, "failed_sessions": failed},
+            details={
+                "closed_sessions": closed,
+                "failed_sessions": failed,
+                "reattached": reattached,
+                "disconnected": disconnected,
+            },
         )

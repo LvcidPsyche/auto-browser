@@ -417,11 +417,7 @@ class BrowserSessionService:
             except Exception as exc:
                 logger.warning("failed to close browser context during create_session rollback: %s", exc)
         if browser is not None and runtime is not None:
-            await self.manager.request_gates.release(browser)
-            try:
-                await browser.close()
-            except Exception as exc:
-                logger.warning("failed to close isolated browser during create_session rollback: %s", exc)
+            await self._close_owned_browser(browser, session_id)
         if runtime is not None:
             try:
                 await self.manager.runtime_provisioner.release(runtime)
@@ -595,25 +591,40 @@ class BrowserSessionService:
             session.network_inspector = None
         await self._teardown_step(session, "close browser context", session.context.close)
         if session.browser is not None and session.owns_browser:
-            await self._teardown_step(
-                session,
-                "release the isolated browser's gate",
-                lambda: self.manager.request_gates.release(session.browser),
-            )
-            await self._teardown_step(session, "close isolated browser", session.browser.close)
+            await self._close_owned_browser(session.browser, session.id)
         if session.runtime is not None:
             await self._teardown_step(
                 session, "release isolated runtime", lambda: self.manager.runtime_provisioner.release(session.runtime)
             )
 
+    async def _close_owned_browser(self, browser: Any, session_id: str) -> None:
+        """Close a browser the session owns, then release its gate. Until the close has succeeded the gate stays
+        attached, still gating whatever runs there, and the close taking the gate's session down is no loss."""
+        gates = self.manager.request_gates
+        gates.ending(browser)
+        try:
+            await asyncio.wait_for(browser.close(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
+        except Exception as exc:
+            gates.ending(browser, False)
+            logger.error(
+                "the isolated browser of session %s did not close (%s): its pre-request gate stays attached",
+                session_id,
+                f"{type(exc).__name__}: {exc}"[:200],
+            )
+            return
+        await gates.release(browser)
+
     @staticmethod
-    async def _teardown_step(session: "BrowserSession", label: str, step: Any) -> None:
+    async def _teardown_step(session: "BrowserSession", label: str, step: Any) -> bool:
         try:
             await asyncio.wait_for(step(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
         except TimeoutError:
             logger.warning("gave up waiting to %s for session %s", label, session.id)
         except Exception as exc:
             logger.warning("failed to %s for session %s: %s", label, session.id, exc)
+        else:
+            return True
+        return False
 
     async def fork(
         self,
@@ -705,6 +716,7 @@ class BrowserSessionService:
             headless=False,
             args=["--no-sandbox", "--disable-setuid-sandbox", STORAGE_PARTITIONING_ON],
         )
+        context = None
         try:
             # Launched by the controller (not an attach mode), and gated before its first context.
             await manager.request_gates.attach(headed_browser, attach_mode=False)
@@ -754,11 +766,13 @@ class BrowserSessionService:
             await manager._persist_session(shadow_session, status="active")
         except Exception:
             manager.sessions.pop(shadow_session_id, None)
-            await manager.request_gates.release(headed_browser)
-            try:
-                await headed_browser.close()
-            except Exception as exc:  # pragma: no cover - best effort rollback
-                logger.warning("failed to close shadow browser during rollback: %s", exc)
+            # As create's rollback: the context first, then the browser, and its gate only once that has closed.
+            if context is not None:
+                try:
+                    await context.close()
+                except Exception as exc:
+                    logger.warning("failed to close the shadow context during rollback: %s", exc)
+            await self._close_owned_browser(headed_browser, shadow_session_id)
             raise
 
         await manager.audit.append(
@@ -780,6 +794,13 @@ class BrowserSessionService:
         """The controller's own navigation outside the action pipeline, a stop by the gate mapped to the block it
         is (R6's rule: the gate's own failure, and a block on this page since the navigation started)."""
         gates = self.manager.request_gates
+        gate = gates.get(browser)
+        if gates.enabled() and (gate is None or not gate.live):
+            # Before the navigation, not after: on a lost gate it would go out unjudged.
+            raise RequestGateUnavailable(
+                "The pre-request gate detached from the browser while the session was starting, so it was closed. "
+                "Try again."
+            )
         since = await gates.page_block_count(browser, page)
         try:
             with self.manager.page_provenance.controller_navigation(page) as navigation:
