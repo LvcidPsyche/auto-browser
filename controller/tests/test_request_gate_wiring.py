@@ -1,0 +1,350 @@
+"""Where the pre-request gate is attached, and what the controller does when it is missing or lost.
+
+The gate (app/browser/request_gate.py) has to be on a browser before the controller opens its first
+context there, in every way a browser is acquired: browser-node over chromium.connect, CDP_CONNECT_URL,
+browser.cdp_attach, a docker_ephemeral container and the shadow launch. Each new context is owned from
+its first page before that page navigates. Without a gate, sessions on that browser are refused while
+PRE_REQUEST_BLOCKING is on (decision 7); a gate whose session detaches on its own closes every session on
+its browser, and the next session attaches a new one (decision 2).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+from app.browser.request_gate import RequestGateUnavailable
+from app.browser_manager import BrowserManager
+from tests._fake_cdp import FakeCDPSession
+from tests.test_browser_manager_create_session import FakeBrowser, FakeContext, FakePage, _settings
+
+START_URL = "https://example.com/start"
+
+
+def _browser() -> FakeBrowser:
+    """A fake browser whose log orders the gate's commands against new_context and the page's goto."""
+    page = FakePage()
+    context = FakeContext(page)
+    browser = FakeBrowser(context)
+    browser.is_connected = lambda: True  # type: ignore[attr-defined]
+    browser.close = AsyncMock()  # type: ignore[attr-defined]
+    browser.version = "fake"  # type: ignore[attr-defined]
+
+    def new_context(**_kwargs):
+        browser.log.append(("new_context",))
+        return context
+
+    async def goto(url: str, wait_until: str = "domcontentloaded") -> None:
+        browser.log.append(("goto", url))
+        page.url = url
+
+    browser.new_context.side_effect = new_context
+    context.new_cdp_session = AsyncMock(side_effect=lambda _page: _registering(browser, context))
+    page.goto = AsyncMock(side_effect=goto)
+    return browser
+
+
+def _registering(browser: FakeBrowser, context: FakeContext) -> FakeCDPSession:
+    browser.log.append(("register",))
+    return FakeCDPSession(
+        {
+            "Target.getTargetInfo": {
+                "targetInfo": {"targetId": "first-page", "type": "page", "browserContextId": context.context_id}
+            }
+        }
+    )
+
+
+class GateWiringTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.manager = BrowserManager(_settings(self.root))
+        self.manager.audit.append = AsyncMock()  # type: ignore[method-assign]
+        self.manager._persist_session = AsyncMock()  # type: ignore[method-assign]
+        self.manager._settle = AsyncMock()  # type: ignore[method-assign]
+        self.manager._maybe_provision_session_tunnel = AsyncMock()  # type: ignore[method-assign]
+        self.browser = _browser()
+
+    async def asyncTearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _playwright(self, **chromium) -> None:
+        self.manager.playwright = SimpleNamespace(chromium=SimpleNamespace(**chromium))  # type: ignore[assignment]
+
+    def _assert_gate_first(self, browser: FakeBrowser) -> None:
+        steps = [entry[1] if entry[0] == "cdp" else entry[0] for entry in browser.log]
+        self.assertEqual(
+            steps[:5], ["Target.setDiscoverTargets", "Fetch.enable", "new_context", "register", "goto"], browser.log
+        )
+
+    # ── each way a browser is acquired ───────────────────────────────────────
+
+    async def test_browser_node_over_chromium_connect(self) -> None:
+        self.manager.settings.browser_ws_endpoint = "ws://browser-node:9223/x"
+        self._playwright(connect=AsyncMock(return_value=self.browser))
+
+        await self.manager.ensure_browser()
+        attached = list(self.browser.log)
+        session_id = (await self.manager.create_session(name="s", start_url=START_URL))["id"]
+
+        self.assertEqual([m for _, m in attached], ["Target.setDiscoverTargets", "Fetch.enable"])
+        self._assert_gate_first(self.browser)
+        gate = self.manager.request_gates.get(self.browser)
+        self.assertFalse(gate.attach_mode)
+        self.assertTrue(gate.owns(self.manager.sessions[session_id].gate_context_id))
+        self.assertEqual(len(self.browser.cdp_sessions), 1, "create_session attached a second gate")
+
+    async def test_cdp_connect_url_is_an_attach_mode(self) -> None:
+        self.manager.settings.cdp_connect_url = "http://127.0.0.1:9222"
+        self._playwright(connect_over_cdp=AsyncMock(return_value=self.browser))
+
+        await self.manager.ensure_browser()
+        await self.manager.create_session(name="s", start_url=START_URL)
+
+        self._assert_gate_first(self.browser)
+        self.assertTrue(self.manager.request_gates.get(self.browser).attach_mode)
+
+    async def test_cdp_attach_gates_the_new_browser_and_releases_the_old_one(self) -> None:
+        previous = _browser()
+        self.manager.browser = previous  # type: ignore[assignment]
+        await self.manager.request_gates.attach(previous, attach_mode=False)
+        old_gate = self.manager.request_gates.get(previous)
+        self._playwright(connect_over_cdp=AsyncMock(return_value=self.browser))
+
+        await self.manager.cdp_attach("http://127.0.0.1:9222")
+        await self.manager.create_session(name="s", start_url=START_URL)
+
+        self._assert_gate_first(self.browser)
+        self.assertTrue(self.manager.request_gates.get(self.browser).attach_mode)
+        self.assertFalse(old_gate.live)
+        self.assertTrue(previous.cdp_sessions[0].detached)
+        self.assertIsNone(self.manager.request_gates.get(previous))
+        previous.close.assert_awaited_once()
+
+    async def test_docker_ephemeral_gates_each_isolated_browser(self) -> None:
+        self.manager.settings.session_isolation_mode = "docker_ephemeral"
+        runtime = SimpleNamespace(
+            ws_endpoint="ws://isolated:9223/x",
+            ws_endpoint_file=self.root / "ws.txt",
+            takeover_url="http://127.0.0.1:6080/",
+            browser_node_name="isolated-1",
+            container_id="c1",
+            container_name="n1",
+            network_name="net",
+            profile_dir=self.root / "profile",
+            downloads_dir=self.root / "downloads",
+            novnc_port=None,
+        )
+        self.manager.runtime_provisioner.provision = AsyncMock(return_value=runtime)  # type: ignore[method-assign]
+        self.manager.runtime_provisioner.release = AsyncMock()  # type: ignore[method-assign]
+        self._playwright(connect=AsyncMock(return_value=self.browser))
+
+        session_id = (await self.manager.create_session(name="s", start_url=START_URL))["id"]
+
+        self._assert_gate_first(self.browser)
+        self.assertFalse(self.manager.request_gates.get(self.browser).attach_mode)
+
+        await self.manager.close_session(session_id)
+
+        self.browser.close.assert_awaited_once()
+        self.assertTrue(self.browser.cdp_sessions[0].detached, "the closed browser's gate was not released")
+        self.assertIsNone(self.manager.request_gates.get(self.browser))
+
+    async def test_the_shadow_launch_gates_its_headed_browser(self) -> None:
+        self.manager.settings.shadow_browse_enabled = True
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
+        self.manager.sessions[source_id].context.storage_state = AsyncMock(return_value={})
+        headed = _browser()
+        self._playwright(launch=AsyncMock(return_value=headed))
+
+        shadow_id = (await self.manager.enable_shadow_browse(source_id))["shadow_session_id"]
+
+        self._assert_gate_first(headed)
+        gate = self.manager.request_gates.get(headed)
+        self.assertFalse(gate.attach_mode)
+        self.assertTrue(gate.owns(self.manager.sessions[shadow_id].gate_context_id))
+
+    async def test_a_browser_acquired_some_other_way_is_gated_at_create(self) -> None:
+        """A browser the gate has not seen (a reconnect it missed) is attached before its first context."""
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+
+        await self.manager.create_session(name="s", start_url=START_URL)
+
+        self._assert_gate_first(self.browser)
+
+    # ── decision 7: no gate, no session ──────────────────────────────────────
+
+    async def test_a_browser_the_gate_cannot_attach_to_gets_no_sessions(self) -> None:
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+
+        async def refusing() -> FakeCDPSession:
+            return FakeCDPSession({"Fetch.enable": RuntimeError("Fetch.enable failed")})
+
+        self.browser.new_browser_cdp_session.side_effect = refusing
+
+        with self.assertRaisesRegex(RequestGateUnavailable, "PRE_REQUEST_BLOCKING"):
+            await self.manager.create_session(name="s", start_url=START_URL)
+
+        self.browser.new_context.assert_not_awaited()
+        self.assertEqual(self.manager.sessions, {})
+
+    async def test_an_attach_failure_at_acquisition_is_logged_and_sessions_are_refused(self) -> None:
+        self.manager.settings.browser_ws_endpoint = "ws://browser-node:9223/x"
+        self._playwright(connect=AsyncMock(return_value=self.browser))
+        self.browser.new_browser_cdp_session.side_effect = RuntimeError("no browser target")
+
+        with self.assertLogs("app.browser.request_gate", level="WARNING") as logs:
+            await self.manager.ensure_browser()
+        self.assertIn("no browser target", "\n".join(logs.output))
+
+        with self.assertRaises(RequestGateUnavailable):
+            await self.manager.create_session(name="s")
+        self.browser.new_context.assert_not_awaited()
+
+    async def test_a_context_the_gate_cannot_own_is_closed_and_refused(self) -> None:
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        context = self.browser.context
+        context.new_cdp_session = AsyncMock(
+            return_value=FakeCDPSession({"Target.getTargetInfo": RuntimeError("Target closed")})
+        )
+
+        with self.assertRaisesRegex(RequestGateUnavailable, "Target closed"):
+            await self.manager.create_session(name="s", start_url=START_URL)
+
+        context.close.assert_awaited()
+        context.page.goto.assert_not_awaited()
+        self.assertEqual(self.manager.sessions, {})
+
+    async def test_pre_request_blocking_off_opens_no_gate(self) -> None:
+        self.manager.settings.pre_request_blocking = False
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+
+        session_id = (await self.manager.create_session(name="s", start_url=START_URL))["id"]
+
+        self.browser.new_browser_cdp_session.assert_not_awaited()
+        self.assertIsNone(self.manager.sessions[session_id].gate_context_id)
+
+    async def test_an_allowlist_that_allows_every_host_opens_no_gate(self) -> None:
+        self.manager.settings.allowed_hosts = "*"
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+
+        await self.manager.create_session(name="s", start_url=START_URL)
+
+        self.browser.new_browser_cdp_session.assert_not_awaited()
+
+    # ── decision 2: a gate that detaches on its own ──────────────────────────
+
+    async def _two_sessions(self) -> tuple[str, str]:
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        first = (await self.manager.create_session(name="one"))["id"]
+        self.browser.context = FakeContext(FakePage())
+        self.browser.new_context.side_effect = lambda **_: self.browser.context
+        second = (await self.manager.create_session(name="two"))["id"]
+        return first, second
+
+    async def _settled(self) -> None:
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+    async def test_a_lost_gate_closes_every_session_on_its_browser(self) -> None:
+        self.manager.settings.max_sessions = 3
+        first, second = await self._two_sessions()
+        other = _browser()
+        self.manager._acquire_session_browser = AsyncMock(return_value=(other, None))  # type: ignore[method-assign]
+        elsewhere = (await self.manager.create_session(name="elsewhere"))["id"]
+
+        self.browser.cdp_sessions[0].emit("close", self.browser.cdp_sessions[0])
+        await self._settled()
+
+        self.assertNotIn(first, self.manager.sessions)
+        self.assertNotIn(second, self.manager.sessions)
+        self.assertIn(elsewhere, self.manager.sessions, "a session on another browser was closed")
+        events = [call.kwargs.get("event_type") for call in self.manager.audit.append.await_args_list]
+        self.assertIn("request_gate_lost", events)
+
+    async def test_the_next_session_after_a_loss_attaches_a_new_gate(self) -> None:
+        first, _ = await self._two_sessions()
+        lost = self.manager.request_gates.get(self.browser)
+        self.browser.cdp_sessions[0].emit("close", self.browser.cdp_sessions[0])
+        await self._settled()
+        self.browser.context = FakeContext(FakePage())
+        self.browser.new_context.side_effect = lambda **_: self.browser.context
+
+        session_id = (await self.manager.create_session(name="after"))["id"]
+
+        gate = self.manager.request_gates.get(self.browser)
+        self.assertIsNot(gate, lost)
+        self.assertTrue(gate.live)
+        self.assertEqual(len(self.browser.cdp_sessions), 2)
+        self.assertTrue(gate.owns(self.manager.sessions[session_id].gate_context_id))
+
+    async def test_a_session_still_starting_when_the_gate_is_lost_is_refused(self) -> None:
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        page = self.browser.context.page
+
+        async def goto_and_lose_the_gate(url: str, wait_until: str = "domcontentloaded") -> None:
+            page.url = url
+            self.browser.cdp_sessions[0].emit("close", self.browser.cdp_sessions[0])
+
+        page.goto = AsyncMock(side_effect=goto_and_lose_the_gate)
+
+        with self.assertRaisesRegex(RequestGateUnavailable, "detached"):
+            await self.manager.create_session(name="s", start_url=START_URL)
+        await self._settled()
+
+        self.assertEqual(self.manager.sessions, {})
+        self.browser.context.close.assert_awaited()
+
+    async def test_a_browser_that_disconnected_is_left_to_playwright(self) -> None:
+        """A whole-connection drop closes the contexts itself; the sessions read as interrupted."""
+        first, second = await self._two_sessions()
+        self.browser.is_connected = lambda: False  # type: ignore[attr-defined]
+
+        self.browser.cdp_sessions[0].emit("close", self.browser.cdp_sessions[0])
+        await self._settled()
+
+        self.assertIn(first, self.manager.sessions)
+        self.assertIn(second, self.manager.sessions)
+
+    async def test_closing_a_session_does_not_release_the_shared_browsers_gate(self) -> None:
+        first, second = await self._two_sessions()
+        closed_context = self.manager.sessions[first].gate_context_id
+        gate = self.manager.request_gates.get(self.browser)
+        self.assertTrue(gate.owns(closed_context))
+
+        await self.manager.close_session(first)
+
+        self.assertTrue(gate.live)
+        self.assertIs(self.manager.request_gates.get(self.browser), gate)
+        self.assertIn(second, self.manager.sessions)
+        self.assertFalse(gate.owns(closed_context), "the closed session's context is still owned")
+        self.assertTrue(gate.owns(self.manager.sessions[second].gate_context_id))
+
+    async def test_shutdown_releases_the_gates_without_a_loss(self) -> None:
+        self.manager.settings.browser_ws_endpoint = "ws://browser-node:9223/x"
+        self.manager.playwright = SimpleNamespace(  # type: ignore[assignment]
+            chromium=SimpleNamespace(connect=AsyncMock(return_value=self.browser)), stop=AsyncMock()
+        )
+        await self.manager.ensure_browser()
+        gate = self.manager.request_gates.get(self.browser)
+        self.manager.tunnel_broker.shutdown = AsyncMock()  # type: ignore[method-assign]
+        self.manager.witness_remote.shutdown = AsyncMock()  # type: ignore[method-assign]
+        self.manager.session_store.shutdown = AsyncMock()  # type: ignore[method-assign]
+
+        await self.manager.shutdown()
+        await self._settled()
+
+        self.assertFalse(gate.live)
+        self.assertTrue(self.browser.cdp_sessions[0].detached)
+        events = [call.kwargs.get("event_type") for call in self.manager.audit.append.await_args_list]
+        self.assertNotIn("request_gate_lost", events)
+
+
+if __name__ == "__main__":
+    unittest.main()

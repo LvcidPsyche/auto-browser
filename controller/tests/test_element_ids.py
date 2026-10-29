@@ -130,6 +130,10 @@ class _TrackedBrowser:
         self._env.contexts.append(context)
         return context
 
+    async def new_browser_cdp_session(self):
+        # The pre-request gate's session, on the real browser.
+        return await self._real.new_browser_cdp_session()
+
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module", autouse=True)
 async def _shared_chromium() -> AsyncIterator[None]:
@@ -164,6 +168,8 @@ async def browser_env(tmp_path: Path, pages: dict[str, str]) -> AsyncIterator[En
             for context in list(env.contexts):
                 with contextlib.suppress(Exception):
                     await context.close()
+            # The gate's session stays on the shared browser otherwise, pausing every later test's navigations.
+            await manager.request_gates.release_all()
     finally:
         server.shutdown()
         server.server_close()

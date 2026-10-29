@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 from app.browser_manager import BrowserManager
 from app.config import Settings
+from tests._fake_cdp import FakeCDPSession, new_context_id, page_session_for
 
 
 def _settings(root: Path) -> Settings:
@@ -50,12 +51,24 @@ class FakeContext:
         self.new_page = AsyncMock(return_value=page)
         self.set_default_timeout = unittest.mock.Mock()
         self.add_init_script = AsyncMock()
+        # What the pre-request gate reads from the first page to own the context (app/browser/request_gate.py).
+        self.context_id = new_context_id()
+        self.new_cdp_session = AsyncMock(side_effect=lambda _page: page_session_for(self.context_id))
 
 
 class FakeBrowser:
     def __init__(self, context: FakeContext) -> None:
         self.context = context
         self.new_context = AsyncMock(return_value=context)
+        # The pre-request gate's browser-level session, one per attach.
+        self.cdp_sessions: list[FakeCDPSession] = []
+        self.log: list = []
+        self.new_browser_cdp_session = AsyncMock(side_effect=self._new_browser_cdp_session)
+
+    async def _new_browser_cdp_session(self) -> FakeCDPSession:
+        session = FakeCDPSession(log=self.log)
+        self.cdp_sessions.append(session)
+        return session
 
 
 class BrowserManagerCreateSessionTests(unittest.IsolatedAsyncioTestCase):

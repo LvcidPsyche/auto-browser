@@ -12,6 +12,7 @@ from app.config import Settings
 from app.session_isolation import DockerBrowserNodeProvisioner, IsolatedBrowserRuntime
 from app.session_tunnel import IsolatedSessionTunnel
 from app.utils import UTC
+from tests._fake_cdp import FakeCDPSession, new_context_id, page_session_for
 
 
 def _link_dir(link: Path, target: Path) -> None:
@@ -130,6 +131,10 @@ class FakeContext:
     async def close(self) -> None:
         return None
 
+    async def new_cdp_session(self, _page):
+        # What the pre-request gate reads to own the context (app/browser/request_gate.py).
+        return page_session_for(new_context_id())
+
 
 class FakePage:
     def __init__(self, url: str = "https://example.com") -> None:
@@ -166,6 +171,9 @@ class FakeBrowser:
 
     async def new_context(self, **kwargs):
         return self.context
+
+    async def new_browser_cdp_session(self):
+        return FakeCDPSession()
 
     async def close(self) -> None:
         self.closed = True

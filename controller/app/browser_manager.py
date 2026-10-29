@@ -23,6 +23,7 @@ from .auth_state import AuthStateManager
 from .browser.element_ids import ElementIds
 from .browser.page_provenance import CLOSED_PAGE_GRACE_SECONDS, REFUSED_FAILURES_KEPT, PageProvenance
 from .browser.page_read import start_read
+from .browser.request_gate import RequestGates
 from .browser.services import (
     BrowserActionService,
     BrowserApprovalService,
@@ -154,6 +155,8 @@ class BrowserSession:
     # The token-verified operator who created it; None for an unowned session
     # (see app/session_ownership.py).
     owner: str | None = None
+    # The browserContextId the pre-request gate owns for this session's context (None while it is off).
+    gate_context_id: str | None = None
 
 
 SessionCreatedHook = Callable[[str, Page], Awaitable[None]]
@@ -179,6 +182,13 @@ class BrowserManager:
         self.sessions: dict[str, BrowserSession] = {}
         self.page_provenance = PageProvenance(url_refused=self._url_off_list)
         self._browser_lock = asyncio.Lock()
+        self.request_gates = RequestGates(
+            url_refused=self._url_off_list,
+            enabled=self._pre_request_blocking_on,
+            origin_switch_declared=lambda: self.settings.cdp_block_origin_on_redirect_disabled,
+            default_attach_mode=lambda: bool(self.settings.cdp_connect_url),
+            on_lost=lambda gate: self.runtime.gate_lost(gate),
+        )
         self.action_pipeline = BrowserActionPipeline()
         self.element_ids = ElementIds(settings)
         self.actions = BrowserActionService(self)
@@ -302,6 +312,7 @@ class BrowserManager:
                 except Exception as exc:  # pragma: no cover - best effort cleanup
                     logger.warning("failed to close session %s during shutdown: %s", session_id, exc)
 
+        await self.request_gates.release_all()
         self.browser = None
         if self.playwright is not None:
             await self.playwright.stop()
@@ -782,6 +793,11 @@ class BrowserManager:
         except PermissionError:
             return True
         return False
+
+    def _pre_request_blocking_on(self) -> bool:
+        """Whether browsers get the pre-request gate: PRE_REQUEST_BLOCKING, and an ALLOWED_HOSTS that refuses something."""
+        patterns = self.settings.allowed_host_patterns
+        return self.settings.pre_request_blocking and bool(patterns) and "*" not in patterns
 
     def _cookie_off_list(self, domain: str) -> bool:
         """Whether no host ALLOWED_HOSTS allows would receive a cookie stored for ``domain``.

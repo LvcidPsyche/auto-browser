@@ -62,8 +62,7 @@ class Harness:
             new_cdp_session=AsyncMock(return_value=page_session_for(context_id, target_id)), on=Mock()
         )
         self.target(target_id, "page", context_id)
-        assert await self.gate.register_context(context, object(), key="session-1") == context_id
-        self.last_context = context
+        assert await self.gate.register_context(context, object()) == context_id
         return context_id, target_id
 
     def target(self, target_id: str, kind: str, context_id: str) -> None:
@@ -419,7 +418,7 @@ async def test_register_context_reads_the_first_pages_context_id() -> None:
     context = SimpleNamespace(new_cdp_session=AsyncMock(return_value=session), on=Mock())
     page = object()
 
-    context_id = await h.gate.register_context(context, page, key="s")
+    context_id = await h.gate.register_context(context, page)
 
     assert context_id == "ctx-from-page"
     context.new_cdp_session.assert_awaited_once_with(page)
@@ -435,17 +434,15 @@ async def test_a_context_whose_page_cannot_be_read_is_refused() -> None:
     context = SimpleNamespace(new_cdp_session=AsyncMock(return_value=session), on=Mock())
 
     with pytest.raises(RequestGateUnavailable, match="Target closed"):
-        await h.gate.register_context(context, object(), key="s")
+        await h.gate.register_context(context, object())
 
 
-async def test_a_closed_context_is_forgotten(harness: Harness) -> None:
+async def test_a_forgotten_context_is_no_longer_owned(harness: Harness) -> None:
     context_id, target_id = await harness.owned_context()
-    context = harness.last_context
     await harness.pause(f"{REFUSED}/", frame=target_id)
     assert harness.gate.blocked_count(context_id) == 1
-    [close_handler] = [call.args[1] for call in context.on.call_args_list if call.args[0] == "close"]
 
-    close_handler(context)
+    harness.gate.forget_context(context_id)
 
     assert not harness.gate.owns(context_id)
     assert harness.gate.blocks(context_id) == []
@@ -475,7 +472,7 @@ async def test_a_lost_gate_registers_no_more_contexts(harness: Harness) -> None:
     context = SimpleNamespace(new_cdp_session=AsyncMock(return_value=page_session_for("late")), on=Mock())
 
     with pytest.raises(RequestGateUnavailable):
-        await harness.gate.register_context(context, object(), key="late")
+        await harness.gate.register_context(context, object())
 
 
 async def test_a_context_registered_while_the_gate_detaches_is_refused() -> None:
@@ -491,5 +488,5 @@ async def test_a_context_registered_while_the_gate_detaches_is_refused() -> None
     )
 
     with pytest.raises(RequestGateUnavailable):
-        await h.gate.register_context(context, object(), key="s")
+        await h.gate.register_context(context, object())
     assert not h.gate.owns("c")

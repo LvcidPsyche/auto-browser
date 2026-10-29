@@ -20,6 +20,7 @@ from ...session_ownership import may_use, verified_operator
 from ...url_safety import refuse_another_navigation_host
 from ...utils import UTC
 from ..page_read import PageRead
+from ..request_gate import RequestGateUnavailable
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext
@@ -155,6 +156,8 @@ class BrowserSessionService:
         session: BrowserSession | None = None
         browser: Browser | None = None
         runtime: IsolatedBrowserRuntime | None = None
+        gate = None
+        gate_context_id: str | None = None
         created_hook_started = False
         # No await since check_limit, so nothing slipped in between.
         self._creating += 1
@@ -163,6 +166,8 @@ class BrowserSessionService:
             from ...browser_manager import BrowserSession
 
             browser, runtime = await self.manager._acquire_session_browser(session_id)
+            # Before the first context: no session runs on a browser without its pre-request gate.
+            gate = await self.manager.request_gates.require(browser)
             context = await browser.new_context(**context_kwargs)
             if self.manager.settings.enable_tracing:
                 await context.tracing.start(screenshots=True, snapshots=True, sources=False)
@@ -174,6 +179,9 @@ class BrowserSessionService:
             if self.manager.settings.stealth_enabled:
                 await apply_stealth(context)
             page = await context.new_page()
+            if gate is not None:
+                # Owned from the first page, before anything navigates: its popups and tabs inherit it.
+                gate_context_id = await gate.register_context(context, page)
             session = BrowserSession(
                 id=session_id,
                 name=name or f"session-{session_id}",
@@ -206,6 +214,7 @@ class BrowserSessionService:
                 totp_hosts=resolved_totp_hosts,
                 witness_remote_state=self.manager._initial_witness_remote_state(resolved_protection_mode),
                 owner=verified_operator(),
+                gate_context_id=gate_context_id,
             )
             if source_path is not None:
                 session.last_auth_state_path = source_path
@@ -256,6 +265,12 @@ class BrowserSessionService:
                     self.manager._assert_runtime_url_allowed(page.url)
 
             await self.manager._maybe_provision_session_tunnel(session)
+            if gate is not None and not gate.live:
+                # Lost while this session started: the containment may have missed it (decision 2).
+                raise RequestGateUnavailable(
+                    "The pre-request gate detached from the browser while the session was starting, "
+                    "so the session was closed. Create it again."
+                )
             if memory is not None:
                 session.metadata["memory_context"] = memory.to_system_prompt()
                 session.metadata["memory_profile"] = memory_profile
@@ -297,6 +312,8 @@ class BrowserSessionService:
         except BaseException:
             # BaseException so a cancelled create (the caller gave up, shutdown)
             # also closes the context and releases the isolated runtime.
+            if gate is not None and gate_context_id is not None:
+                gate.forget_context(gate_context_id)
             await self.cleanup_failed(
                 session_id,
                 session=session,
@@ -401,6 +418,7 @@ class BrowserSessionService:
             except Exception as exc:
                 logger.warning("failed to close browser context during create_session rollback: %s", exc)
         if browser is not None and runtime is not None:
+            await self.manager.request_gates.release(browser)
             try:
                 await browser.close()
             except Exception as exc:
@@ -570,8 +588,14 @@ class BrowserSessionService:
         if session.network_inspector is not None:
             session.network_inspector.detach()
             session.network_inspector = None
+        self.manager.request_gates.forget_context(session.browser, session.gate_context_id)
         await self._teardown_step(session, "close browser context", session.context.close)
         if session.browser is not None and session.owns_browser:
+            await self._teardown_step(
+                session,
+                "release the isolated browser's gate",
+                lambda: self.manager.request_gates.release(session.browser),
+            )
             await self._teardown_step(session, "close isolated browser", session.browser.close)
         if session.runtime is not None:
             await self._teardown_step(
@@ -678,12 +702,16 @@ class BrowserSessionService:
             args=["--no-sandbox", "--disable-setuid-sandbox"],
         )
         try:
+            # Launched by the controller (not an attach mode), and gated before its first context.
+            await manager.request_gates.attach(headed_browser, attach_mode=False)
+            gate = await manager.request_gates.require(headed_browser)
             context = await headed_browser.new_context(**context_kwargs)
             # On the context, as in create_session: every tab and popup needs both.
             context.set_default_timeout(manager.settings.action_timeout_ms)
             if manager.settings.stealth_enabled:
                 await apply_stealth(context)
             page = await context.new_page()
+            gate_context_id = await gate.register_context(context, page) if gate is not None else None
 
             shadow_session = BrowserSession(
                 id=shadow_session_id,
@@ -701,6 +729,7 @@ class BrowserSessionService:
                 headless=False,
                 # Same logins as the source, so the same operator and nobody else.
                 owner=session.owner,
+                gate_context_id=gate_context_id,
             )
             manager._attach_page_listeners(page, shadow_session)
             # As in create_session: popups need the listeners too, the page guard among them.
@@ -714,6 +743,7 @@ class BrowserSessionService:
             await manager._persist_session(shadow_session, status="active")
         except Exception:
             manager.sessions.pop(shadow_session_id, None)
+            await manager.request_gates.release(headed_browser)
             try:
                 await headed_browser.close()
             except Exception as exc:  # pragma: no cover - best effort rollback

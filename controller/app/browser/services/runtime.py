@@ -7,8 +7,12 @@ from typing import Any
 
 from playwright.async_api import Browser
 
+from ...action_errors import SessionNotFoundError
 from ...auth_policy import credentials_for
 from ...session_isolation import IsolatedBrowserRuntime
+from ...session_ownership import as_system
+from ...utils import spawn_background_task
+from ..request_gate import RequestGate
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +31,16 @@ class BrowserRuntimeService:
                 return manager.browser
             if manager.playwright is None:
                 raise RuntimeError("Playwright not started")
+            if manager.browser is not None:
+                # Disconnected: its gate went with it.
+                await manager.request_gates.release(manager.browser)
 
             if manager.settings.cdp_connect_url:
                 logger.info("connecting to existing Chrome via CDP at %s", manager.settings.cdp_connect_url)
-                manager.browser = await manager.playwright.chromium.connect_over_cdp(manager.settings.cdp_connect_url)
+                browser = await manager.playwright.chromium.connect_over_cdp(manager.settings.cdp_connect_url)
                 logger.info("CDP attach succeeded")
+                await manager.request_gates.attach(browser, attach_mode=True)
+                manager.browser = browser
                 return manager.browser
 
             manager.browser = await self.connect_browser(
@@ -70,9 +79,11 @@ class BrowserRuntimeService:
                 )
             previous = manager.browser
             browser = await manager.playwright.chromium.connect_over_cdp(cdp_url)
+            await manager.request_gates.attach(browser, attach_mode=True)
             manager.browser = browser
             logger.info("attached to Chrome via CDP at %s", cdp_url)
             if previous is not None and previous is not browser:
+                await manager.request_gates.release(previous)
                 await self._close_previous_browser(previous)
             await manager.audit.append(
                 event_type="cdp_attach",
@@ -119,6 +130,8 @@ class BrowserRuntimeService:
                     attempt,
                     ws_target,
                 )
+                # Playwright launched it (browser-node's launchServer): not an attach mode.
+                await manager.request_gates.attach(browser, attach_mode=False)
                 return browser
             except Exception as exc:  # pragma: no cover - depends on external service
                 last_error = exc
@@ -154,3 +167,42 @@ class BrowserRuntimeService:
         except BaseException:  # cancellation included, or the container leaks
             await manager.runtime_provisioner.release(runtime)
             raise
+
+    def gate_lost(self, gate: RequestGate) -> None:
+        """A browser's pre-request gate detached on its own: Chromium resumes what it held (decision 2)."""
+        spawn_background_task(self._contain_lost_gate(gate))
+
+    async def _contain_lost_gate(self, gate: RequestGate) -> None:
+        """Close every session on the gate's browser; the next session there attaches a new gate.
+
+        Not for a browser that disconnected: Playwright closes its contexts itself, and its sessions read as
+        interrupted. What the gate held, or what started before the sessions closed, may have gone out.
+        """
+        manager = self.manager
+        browser = gate.browser
+        is_connected = getattr(browser, "is_connected", None)
+        if callable(is_connected) and not is_connected():
+            logger.info("pre-request gate ended with its browser's connection; nothing to contain")
+            return
+        doomed = [session.id for session in list(manager.sessions.values()) if session.browser is browser]
+        logger.error(
+            "pre-request gate detached from a live browser: closing its %d session(s) %s",
+            len(doomed),
+            ", ".join(doomed) or "-",
+        )
+        # Every operator's sessions, as shutdown closes them.
+        with as_system():
+            for session_id in doomed:
+                try:
+                    await manager.close_session(session_id)
+                except SessionNotFoundError:
+                    continue
+                except Exception as exc:
+                    logger.warning("could not close session %s after the gate detached: %s", session_id, exc)
+        await manager.audit.append(
+            event_type="request_gate_lost",
+            status="error",
+            action="request_gate",
+            session_id=None,
+            details={"closed_sessions": doomed},
+        )

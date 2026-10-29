@@ -32,6 +32,7 @@ where Chrome sends ``null`` is a CSRF downgrade.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import time
@@ -77,7 +78,6 @@ class GateBlock:
 
 @dataclass
 class _OwnedContext:
-    key: str
     blocked: int = 0
     blocks: deque[GateBlock] = field(default_factory=lambda: deque(maxlen=BLOCKS_KEPT))
 
@@ -135,10 +135,17 @@ class RequestGate:
     def live(self) -> bool:
         return self._live
 
+    @property
+    def attach_mode(self) -> bool:
+        return self._attach_mode
+
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     async def attach(self) -> None:
-        cdp = await self.browser.new_browser_cdp_session()
+        try:
+            cdp = await self.browser.new_browser_cdp_session()
+        except Exception as exc:
+            raise RequestGateUnavailable(f"the pre-request gate could not attach: {exc}") from exc
         self._cdp = cdp
         cdp.on("Target.targetCreated", self._on_target)
         cdp.on("Target.targetInfoChanged", self._on_target)
@@ -170,7 +177,7 @@ class RequestGate:
 
     # ── ownership ────────────────────────────────────────────────────────────
 
-    async def register_context(self, context: Any, page: Any, *, key: str) -> str:
+    async def register_context(self, context: Any, page: Any) -> str:
         """Own a context the controller created, from its first page, before that page navigates."""
         if not self._live:
             raise RequestGateUnavailable("the pre-request gate is not attached to this browser")
@@ -186,12 +193,11 @@ class RequestGate:
             raise RequestGateUnavailable(f"the pre-request gate could not read the new context: {exc}") from exc
         if not self._live:
             raise RequestGateUnavailable("the pre-request gate detached while the session was starting")
-        self._owned[context_id] = _OwnedContext(key=key)
-        if hasattr(context, "on"):
-            context.on("close", lambda _context: self.forget_context(context_id))
+        self._owned[context_id] = _OwnedContext()
         return context_id
 
     def forget_context(self, context_id: str) -> None:
+        """Drop a context the session closing it owned (BrowserSessionService closes and forgets both)."""
         self._owned.pop(context_id, None)
 
     def owns(self, context_id: str | None) -> bool:
@@ -336,3 +342,91 @@ class RequestGate:
             return
         owned.blocked += 1
         owned.blocks.append(block)
+
+
+GATE_REQUIRED = (
+    "Sessions are refused on this browser while PRE_REQUEST_BLOCKING is on; PRE_REQUEST_BLOCKING=false runs "
+    "on the guard that refuses a page after it loads alone."
+)
+
+
+class RequestGates:
+    """The gate of every Browser the controller uses, attached where the browser is acquired.
+
+    ``attach`` runs at acquisition and only logs a failure; ``require`` runs before a session opens its
+    context there, attaches a gate when none is live (one never attached, or one lost), and raises when it
+    cannot, so no session runs on a browser without one (decision 7). ``release`` detaches on purpose, before
+    the controller closes or drops a browser. A gate lost on its own goes to ``on_lost`` (decision 2).
+    """
+
+    def __init__(
+        self,
+        *,
+        url_refused: Callable[[str], bool],
+        enabled: Callable[[], bool],
+        origin_switch_declared: Callable[[], bool],
+        default_attach_mode: Callable[[], bool],
+        on_lost: Callable[[RequestGate], None],
+    ) -> None:
+        self._url_refused = url_refused
+        self._enabled = enabled
+        self._origin_switch_declared = origin_switch_declared
+        self._default_attach_mode = default_attach_mode
+        self._on_lost = on_lost
+        # By id: a browser is held until it is released, so its id is not reused meanwhile.
+        self._gates: dict[int, tuple[Any, RequestGate]] = {}
+        self._attach_modes: dict[int, tuple[Any, bool]] = {}
+        self._lock = asyncio.Lock()
+
+    def get(self, browser: Any) -> RequestGate | None:
+        entry = self._gates.get(id(browser))
+        return entry[1] if entry is not None else None
+
+    async def attach(self, browser: Any, *, attach_mode: bool) -> None:
+        """At acquisition: attach the browser's gate, or log why not (its sessions are then refused)."""
+        self._attach_modes[id(browser)] = (browser, attach_mode)
+        if not self._enabled():
+            return
+        try:
+            await self.require(browser)
+        except RequestGateUnavailable as exc:
+            logger.warning("%s", exc)
+
+    async def require(self, browser: Any) -> RequestGate | None:
+        """The browser's live gate, attached now if need be; None while pre-request blocking is off."""
+        if not self._enabled():
+            return None
+        async with self._lock:
+            gate = self.get(browser)
+            if gate is not None and gate.live:
+                return gate
+            known = self._attach_modes.get(id(browser))
+            gate = RequestGate(
+                browser,
+                url_refused=self._url_refused,
+                attach_mode=known[1] if known is not None else self._default_attach_mode(),
+                origin_switch_declared=self._origin_switch_declared(),
+                on_lost=self._on_lost,
+            )
+            try:
+                await gate.attach()
+            except RequestGateUnavailable as exc:
+                raise RequestGateUnavailable(f"{exc}. {GATE_REQUIRED}") from exc
+            self._gates[id(browser)] = (browser, gate)
+            return gate
+
+    def forget_context(self, browser: Any, context_id: str | None) -> None:
+        gate = self.get(browser)
+        if gate is not None and context_id:
+            gate.forget_context(context_id)
+
+    async def release(self, browser: Any) -> None:
+        """Detach a browser's gate on purpose, before the controller closes or drops that browser."""
+        self._attach_modes.pop(id(browser), None)
+        entry = self._gates.pop(id(browser), None)
+        if entry is not None:
+            await entry[1].detach()
+
+    async def release_all(self) -> None:
+        for browser, _gate in list(self._gates.values()):
+            await self.release(browser)
