@@ -245,6 +245,21 @@ async def test_iframes_of_a_refused_host_still_load(tmp_path: Path) -> None:
         assert (env.gate().unattributed_blocks, env.gate().handler_errors) == (0, 0)
 
 
+async def test_an_out_of_process_iframe_navigating_again_still_loads(tmp_path: Path) -> None:
+    """A cross-site iframe's first load pauses before its target exists (no target); once it is a target of
+    type iframe, its next navigation is looked up as one, and continues too."""
+    async with gated(tmp_path) as env:
+        env.server.pages["/frame"] = f'<iframe id="f" src="{env.server.url(REFUSED, "/first")}"></iframe>'
+        session_id = await env.create("/frame")
+        page = env.manager.sessions[session_id].page
+        await eventually(lambda: env.server.pages_on(REFUSED) == ["/first"])
+
+        await page.evaluate("(url) => { document.getElementById('f').src = url; }", env.server.url(REFUSED, "/second"))
+
+        await eventually(lambda: env.server.pages_on(REFUSED) == ["/first", "/second"])
+        assert env.gate().blocked_count(env.manager.sessions[session_id].gate_context_id) == 0
+
+
 async def test_a_context_the_controller_did_not_create_is_not_gated(tmp_path: Path) -> None:
     async with gated(tmp_path) as env:
         await env.create()  # the gate is on this browser and owns that session's context
