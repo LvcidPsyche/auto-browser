@@ -17,6 +17,7 @@ from ...browser_scripts import apply_stealth
 from ...models import SessionRecord, SessionStatus, resolve_totp_hosts
 from ...network_inspector import NetworkInspector
 from ...session_ownership import may_use, verified_operator
+from ...url_safety import refuse_another_navigation_host
 from ...utils import UTC
 from ..page_read import PageRead
 
@@ -107,6 +108,8 @@ class BrowserSessionService:
         if proxy_persona and any((request_proxy_server, request_proxy_username, request_proxy_password)):
             raise ValueError("Provide proxy_persona or explicit proxy_server credentials, not both")
         if start_url:
+            # Also for a start_url no request model read: a cron job's, stored by an earlier version.
+            refuse_another_navigation_host(start_url, field_name="start_url")
             self.manager._assert_url_allowed(start_url)
         resolved_totp_hosts = tuple(resolve_totp_hosts(totp_hosts, start_url)) if totp_secret else ()
         resolved_protection_mode = protection_mode or self.manager.settings.witness_protection_mode_default

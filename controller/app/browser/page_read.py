@@ -113,12 +113,16 @@ async def locked_read(manager: Any, session: Any) -> AsyncIterator[PageRead]:
         session.lock.release()
 
 
-async def bounded(call: Awaitable[T]) -> T:
-    """A page call made under the session lock, bounded so a stuck renderer cannot keep it."""
+async def bounded(call: Awaitable[T], *, seconds: float | None = None) -> T:
+    """A page call made under the session lock, bounded so a stuck renderer cannot keep it.
+
+    ``seconds`` replaces PAGE_READ_TIMEOUT_SECONDS for a call that waits on the page by design (a drag).
+    """
+    limit = PAGE_READ_TIMEOUT_SECONDS if seconds is None else seconds
     try:
-        return await asyncio.wait_for(call, timeout=PAGE_READ_TIMEOUT_SECONDS)
+        return await asyncio.wait_for(call, timeout=limit)
     except TimeoutError:
-        raise RuntimeError(f"The page did not answer within {PAGE_READ_TIMEOUT_SECONDS:g} seconds.") from None
+        raise RuntimeError(f"The page did not answer within {limit:g} seconds.") from None
 
 
 async def title_or_blank(manager: Any, session: Any) -> str:

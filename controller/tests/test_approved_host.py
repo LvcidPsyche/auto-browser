@@ -15,17 +15,33 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock
 from urllib.parse import urlsplit
 
 import playwright
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from app.approval_display import approval_summary, describe_action
+from app.browser_manager import BrowserManager
 from app.harness.contracts import Precondition
+from app.models import BrowserActionDecision, CreateSessionRequest, NavigateRequest, OpenTabRequest
+from app.routes.sessions import create_sessions_router
 from app.tool_gateway.previews import redacted_url
-from app.tool_inputs import CdpAttachInput, HarnessStartConvergenceInput, SetCookiesInput
+from app.tool_inputs import (
+    CdpAttachInput,
+    CreateCronJobInput,
+    ForkSessionInput,
+    HarnessStartConvergenceInput,
+    SetCookiesInput,
+)
 from app.url_safety import host_as_sent
+from tests.test_approval_spend import SESSION, SpendBase
+from tests.test_browser_manager_create_session import _settings
 from tests.test_url_safety import BROWSER_HOSTS
 
 BS = chr(92)
@@ -75,6 +91,14 @@ CONTROLLED = [
     f"https://bank.exa{chr(9)}mple/",
     f"wss://evil.example{chr(0)}@bank.example/",
 ]
+# A special-scheme URL written with another run of slashes (or backslashes) than // after its colon: a browser
+# skips the run and reads the authority after it (WHATWG special authority ignore slashes), urllib reads none.
+SLASHES_SKIPPED = [
+    "https:u:SECRET@bank.example/",
+    "https:/u:SECRET@bank.example/",
+    "https:////u:SECRET@bank.example/",
+    "https:///bank.example/",
+]
 ACCEPTED = [
     "wss://browser.example/devtools/browser/abc",
     "wss://user:pw@browser.example:9222/devtools/browser/abc?token=T&mode=x",
@@ -87,6 +111,44 @@ ACCEPTED = [
     "https://bank.example/#@evil.example",
     "https://bank.example/?@evil.example",
     f"https://{IDN_HOST}/a?token=T",
+]
+
+
+# The navigation sites: a navigate action (its approval shows the url), and the navigate and open-tab requests.
+NAVIGATION_BUILDS = {
+    "navigate action": lambda url: BrowserActionDecision(action="navigate", reason="r", url=url),
+    "navigate request": lambda url: NavigateRequest(url=url),
+    "open tab request": lambda url: OpenTabRequest(url=url),
+}
+# A backslash or a control where it moves no host: in the query, in the path after its first slash, and
+# percent-encoded. A browser loads each on the host urllib reads.
+NAVIGATION_ACCEPTED = [
+    f"https://example.com/search?q=C:{BS}Users{BS}me",
+    f"https://example.com/a{BS}b",
+    "https://example.com/search?q=%00%0A%1F",
+]
+# A Cyrillic a for a Latin one: the host a browser sends for it is xn--pple-43d.com.
+CYRILLIC_APPLE, CYRILLIC_APPLE_SENT = f"https://{chr(0x430)}pple.com/", "xn--pple-43d.com"
+# A control in a navigation URL's scheme or authority, which a browser drops (item 25): a tab or a newline in
+# the host, a tab in the scheme or between its slashes, a control before it.
+CONTROL_BEFORE_THE_PATH = [
+    f"https://{chr(0x430)}pp{chr(9)}le.com/",
+    f"https://{chr(0x430)}pp{chr(10)}le.com/",
+    f"h{chr(9)}ttps://{chr(0x430)}pple.com/",
+    f"https:/{chr(9)}/{chr(0x430)}pple.com/",
+    f"{chr(1)}https://{chr(0x430)}pple.com/",
+]
+# A control after the host: in the path or the query, the page's to read (item 23).
+CONTROL_AFTER_THE_HOST = [
+    f"https://{chr(0x430)}pple.com/a{chr(9)}b?q={chr(1)}",
+    f"https://example.com/a{chr(10)}b",
+]
+# Hosts a browser reads otherwise, at a navigation site too: IPv4 not as a dotted quad, a full-width name,
+# segmented digits (each pinned by node in MappedHostTests and test_url_safety).
+NAVIGATION_REFUSED = [
+    "http://127.1/",
+    f"https://{full_width('bank')}.example/",
+    "http://" + segmented("127") + "." + segmented("1") + "/",
 ]
 
 
@@ -158,6 +220,121 @@ class RefusedAtValidationTests(RefusalTestCase):
         self.assert_refused(lambda: CdpAttachInput(cdp_url=url), url)
         self.assert_refused(lambda: SetCookiesInput(cookies=[{"name": "sid", "value": "v", "url": url}]), url)
         self.assert_refused(lambda: Precondition(kind="start_url", value=url), url)
+
+    def test_a_navigation_url_a_browser_reads_another_way_is_refused(self) -> None:
+        """B-DISP-4 / Codex B 1: a navigate action's url, which an approval shows, was checked by validate_url
+        alone, so "http://evil.example\\@bank.example/" was approved as written and loaded evil.example."""
+        refused = [*map(as_https, CONFUSED), *NAVIGATION_REFUSED, *SLASHES_SKIPPED]
+        for name, build in NAVIGATION_BUILDS.items():
+            for url in refused:
+                self.assert_refused(lambda build=build, url=url: build(url), f"{name}: {url}")
+            for url in map(as_https, ACCEPTED):
+                with self.subTest(accepted=f"{name}: {url}"):
+                    self.assertEqual(build(url).url, url)
+
+    def test_a_sessions_start_url_is_checked_by_its_host_as_a_navigation_url_is(self) -> None:
+        """Item 32 (Opus C): browser.create_session, browser.fork_session and their REST routes took a start_url
+        with validate_url alone, while navigate and open_tab check its host; a cron run's start_url ends there
+        too (CronGovernedTests' stored-job case)."""
+        builds = {
+            "create session": lambda url: CreateSessionRequest(start_url=url),
+            "fork session": lambda url: ForkSessionInput(session_id="abcdef123456", start_url=url),
+        }
+        refused = [*map(as_https, CONFUSED), *NAVIGATION_REFUSED, *SLASHES_SKIPPED, *CONTROL_BEFORE_THE_PATH]
+        for name, build in builds.items():
+            for url in refused:
+                self.assert_refused(lambda build=build, url=url: build(url), f"{name}: {url!a}")
+            for url in [*map(as_https, ACCEPTED), *NAVIGATION_ACCEPTED]:
+                with self.subTest(accepted=f"{name}: {url!a}"):
+                    self.assertEqual(build(url).start_url, url)
+
+    def test_the_rest_fork_routes_start_url_is_checked_by_its_host(self) -> None:
+        """Item 32: POST /sessions/{id}/fork takes start_url as a query parameter, outside the request models."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            manager = BrowserManager(_settings(Path(tempdir)))
+            manager.fork_session = AsyncMock(return_value={"id": "fork"})  # type: ignore[method-assign]
+            app = FastAPI()
+            app.include_router(create_sessions_router(manager=manager))
+            client = TestClient(app, raise_server_exceptions=False)
+            for url in ("https:example.com/", f"https://ex{chr(9)}ample.com/", "http://127.1/"):
+                with self.subTest(url=ascii(url)):
+                    response = client.post("/sessions/abcdef123456/fork", params={"start_url": url})
+                    self.assertEqual(response.status_code, 400, response.text)
+            manager.fork_session.assert_not_called()
+            control = client.post("/sessions/abcdef123456/fork", params={"start_url": NAVIGATION_ACCEPTED[0]})
+            self.assertEqual(control.status_code, 200, control.text)
+
+    @unittest.skipIf(NODE is None, "no node binary")
+    def test_a_navigation_url_with_a_control_in_its_scheme_or_host_is_refused(self) -> None:
+        """Item 25 (Codex C 2): a browser drops a tab or a newline anywhere, and a leading control, so each of
+        these loads xn--pple-43d.com (node pins it), and urllib read the same host: the host-only check passed
+        them. The summary punycoded the host with the tab in it (xn--pp\\tle-3ve.com), or, with a control in
+        the scheme or before it, found no host and showed the Cyrillic name as written."""
+        self.assertEqual(
+            whatwg_hostnames(CONTROL_BEFORE_THE_PATH), [CYRILLIC_APPLE_SENT] * len(CONTROL_BEFORE_THE_PATH)
+        )
+        for name, build in NAVIGATION_BUILDS.items():
+            for url in CONTROL_BEFORE_THE_PATH:
+                self.assert_refused(lambda build=build, url=url: build(url), f"{name}: {url!a}")
+            for url in CONTROL_AFTER_THE_HOST:
+                with self.subTest(accepted=f"{name}: {url!a}"):
+                    self.assertEqual(build(url).url, url)
+
+    def test_a_space_or_whitespace_at_either_end_of_a_navigation_url_is_stripped_before_it_is_shown(self) -> None:
+        """Item 25: what a browser strips at either end, the models strip first (str_strip_whitespace), so the
+        URL shown is the one loaded, its host as sent; a control the models keep there is refused above."""
+        for url in (
+            f" {CYRILLIC_APPLE}",
+            f"{CYRILLIC_APPLE} ",
+            f"{chr(9)}{CYRILLIC_APPLE}",
+            f"{CYRILLIC_APPLE}{chr(10)}",
+        ):
+            for name, build in NAVIGATION_BUILDS.items():
+                with self.subTest(url=ascii(url), site=name):
+                    self.assertEqual(build(url).url, CYRILLIC_APPLE)
+            shown = describe_action(NAVIGATION_BUILDS["navigate action"](url), cut=None)
+            self.assertIn(f'url="https://{CYRILLIC_APPLE_SENT}/"', shown)
+
+    @unittest.skipIf(NODE is None, "no node binary")
+    def test_a_navigation_url_with_a_backslash_or_a_control_that_moves_no_host_is_accepted(self) -> None:
+        """Item 23: the navigation sites took refuse_ambiguous_host's blanket rule, which refuses any backslash or
+        control anywhere, so a search for a Windows path, or a path a browser reads with a slash, could no longer be
+        opened, fast profile included. A browser reads each on the host urllib reads (node pins it); the fields an
+        operator approves by reading them keep the blanket rule."""
+        self.assertEqual(whatwg_hostnames(NAVIGATION_ACCEPTED), [urlsplit(url).hostname for url in NAVIGATION_ACCEPTED])
+        for name, build in NAVIGATION_BUILDS.items():
+            for url in NAVIGATION_ACCEPTED:
+                with self.subTest(accepted=f"{name}: {url}"):
+                    self.assertEqual(build(url).url, url)
+        for url in (url for url in NAVIGATION_ACCEPTED if BS in url):
+            with self.subTest(cron=url), self.assertRaisesRegex(ValidationError, "backslash"):
+                CreateCronJobInput(name="j", goal="g", webhook_enabled=True, start_url=url)
+            self.assert_refused(lambda url=url: Precondition(kind="start_url", value=url), url)
+
+    def test_a_url_written_with_other_slashes_after_its_scheme_is_refused_for_every_field(self) -> None:
+        """B-DISP-2 / Codex B 2: a browser reads a special-scheme URL written with no slash, one, or several
+        after the colon as one whose authority follows them; urllib reads no host in it, so the check saw
+        None == None and accepted it, and the preview showed its password."""
+        contract = {"id": "c1", "goal": "g", "postconditions": [{"kind": "text_contains", "value": "done"}]}
+        builds = {
+            "cdp_url": lambda url: CdpAttachInput(cdp_url=url.replace("https:", "wss:", 1)),
+            "cookie url": lambda url: SetCookiesInput(cookies=[{"name": "sid", "value": "v", "url": url}]),
+            "harness start_url": lambda url: Precondition(kind="start_url", value=url),
+            "harness mock final url": lambda url: HarnessStartConvergenceInput(
+                contract=contract, mock_final_observation={"url": url}
+            ),
+            "cron start_url": lambda url: CreateCronJobInput(name="j", goal="g", webhook_enabled=True, start_url=url),
+            "navigate url": lambda url: BrowserActionDecision(action="navigate", reason="r", url=url),
+        }
+        for name, build in builds.items():
+            for url in SLASHES_SKIPPED:
+                with self.subTest(field=name, url=url), self.assertRaises(ValidationError):
+                    build(url)
+
+    @unittest.skipIf(NODE is None, "no node binary")
+    def test_a_browser_reads_the_host_after_those_slashes(self) -> None:
+        self.assertEqual(whatwg_hostnames(SLASHES_SKIPPED), ["bank.example"] * len(SLASHES_SKIPPED))
+        self.assertEqual(whatwg_hostnames(["wss:u:SECRET@bank.example:9222/"]), ["bank.example"])
 
     def test_the_same_urls_stay_accepted_where_they_are_no_url(self) -> None:
         # A note is text, not a URL a browser loads.
@@ -245,6 +422,22 @@ IDN_ACCEPTED = [
     ("STRA" + chr(0x1E9E) + "E.example", "xn--strae-oqa.example"),
     (chr(0x1F600) + ".example", "xn--e28h.example"),
 ]
+# Names a browser maps only by case or by composition, as written and as it sends them (node pins each):
+# Cherokee capital and small letters (UTS 46 maps small to capital, str.lower capital to small), a name
+# written decomposed (NFD), and the Kelvin sign, which both map to an ASCII k.
+CASE_ONLY = [
+    (chr(0x13A0) + ".example", "xn--58d.example"),
+    (chr(0xAB70) + ".example", "xn--58d.example"),
+    ("bu" + chr(0x308) + "cher.example", "xn--bcher-kva.example"),
+    (chr(0x212A) + "elvin.example", "kelvin.example"),
+]
+# Compatibility forms str.casefold maps as UTS 46 does, as written and as a browser sends them (node pins
+# each): the fi ligature, the long s, the micro sign (to a Greek mu). f8ae122 refused them (item 31).
+CASEFOLD_COMPATIBILITY = [
+    (chr(0xFB01) + "le.example", "file.example"),
+    (chr(0x17F) + "ecure.example", "secure.example"),
+    (chr(0xB5) + "site.example", "xn--site-knd.example"),
+]
 # A host with a code point a browser refuses (private use): no host to it.
 DISALLOWED = "https://a" + chr(0xE000) + "b.example/"
 # A capital sigma that ends a host: urlsplit lower-cases it to a final small sigma (str.lower's rule), and
@@ -303,6 +496,36 @@ class MappedHostTests(RefusalTestCase):
                 CdpAttachInput(cdp_url=url)
                 self.assertEqual(redacted_url(url), f"https://{sent}:8443/x{HOST_WRITTEN_NOTE}{host})")
 
+    @unittest.skipIf(NODE is None, "no node binary")
+    def test_a_name_a_browser_maps_only_by_case_or_composition_is_accepted(self) -> None:
+        """B-DISP-6: compared with Python's lower(), UTS 46's mapping refused every Cherokee host (it maps small
+        letters to capitals, lower() the other way) and a name written decomposed (NFD), though a browser loads
+        each as one valid host, with the message naming an identical-looking host."""
+        urls = [f"https://{host}:8443/x" for host, _ in CASE_ONLY]
+        self.assertEqual(whatwg_hostnames(urls), [sent for _, sent in CASE_ONLY])
+        for url, (host, sent) in zip(urls, CASE_ONLY, strict=True):
+            with self.subTest(url=ascii(url)):
+                CdpAttachInput(cdp_url=url)
+                Precondition(kind="start_url", value=url)
+                SetCookiesInput(cookies=[{"name": "sid", "value": "v", "url": url}])
+                shown = redacted_url(url)
+                self.assertTrue(shown.startswith(f"https://{sent}:8443/x"), shown)
+
+    @unittest.skipIf(NODE is None, "no node binary")
+    def test_a_compatibility_form_casefold_maps_as_a_browser_does_is_accepted_and_shown_as_sent(self) -> None:
+        """Item 31 (Opus C): item 16 compares the mapping with the host as written, case-folded, and casefold
+        maps these as UTS 46 does, so they are accepted where f8ae122 refused them; each is shown as the host a
+        browser sends."""
+        urls = [f"https://{host}:8443/x" for host, _ in CASEFOLD_COMPATIBILITY]
+        self.assertEqual(whatwg_hostnames(urls), [sent for _, sent in CASEFOLD_COMPATIBILITY])
+        for url, (_host, sent) in zip(urls, CASEFOLD_COMPATIBILITY, strict=True):
+            with self.subTest(url=ascii(url)):
+                CdpAttachInput(cdp_url=url)
+                Precondition(kind="start_url", value=url)
+                self.assertEqual(NAVIGATION_BUILDS["navigate request"](url).url, url)
+                shown = redacted_url(url)
+                self.assertTrue(shown.startswith(f"https://{sent}:8443/x"), shown)
+
     def test_a_host_with_a_code_point_a_browser_refuses_is_refused(self) -> None:
         with self.assertRaises(ValidationError) as refused:
             CdpAttachInput(cdp_url=DISALLOWED)
@@ -344,3 +567,30 @@ class PreviewHostTests(unittest.TestCase):
             with self.subTest(url=url):
                 shown = redacted_url(url)
                 self.assertEqual(urlsplit(shown_url(shown)).hostname, host, shown)
+
+
+class GovernedNavigationTests(SpendBase):
+    """A navigate an approval holds, through the real gateway and the manager (item 23, B-DISP-4)."""
+
+    async def ask(self, url: str):
+        self.settings.allowed_hosts = f"example.com,{IDN_ASCII},{IDN_HOST}"
+        return await self.call(
+            "browser.execute_action",
+            session_id=SESSION,
+            workflow_profile="governed",
+            action={"action": "navigate", "reason": "pay", "url": url, "risk_category": "payment"},
+        )
+
+    async def test_a_governed_navigate_approval_shows_an_idn_as_the_host_a_browser_sends(self) -> None:
+        ask = await self.ask(f"https://{IDN_HOST}/a")
+
+        self.assertEqual(ask.structuredContent.get("status"), "approval_required", ask.content[0].text)
+        approval = await self.manager.approvals.get(ask.structuredContent["approval_id"])
+        self.assertEqual(
+            approval_summary(approval), f'navigate \u00b7 url="https://{IDN_ASCII}/a"{HOST_WRITTEN_NOTE}{IDN_HOST})'
+        )
+
+    async def test_a_governed_navigate_with_a_backslash_in_its_query_asks_for_approval(self) -> None:
+        ask = await self.ask(NAVIGATION_ACCEPTED[0])
+
+        self.assertEqual(ask.structuredContent.get("status"), "approval_required", ask.content[0].text)

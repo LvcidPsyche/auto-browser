@@ -18,7 +18,7 @@ import unittest
 from typing import Any
 
 from app.action_errors import BrowserActionError
-from app.approval_execution import _run_through
+from app.approval_execution import ApprovalRefusal, _run_through, effect_started, refused_before_effect
 from app.approvals import held_for_execution
 from app.models import BrowserActionDecision
 from tests.test_approval_spend import OFF_LIST_URL, SESSION, START_URL, SpendBase
@@ -143,6 +143,27 @@ class ClaimMessageTests(ClaimWindowBase):
         self.assertEqual(refused.exception.payload["approval_given_back"]["status"], "approved")
         self.assertEqual((await self.status(approval_id), self.page.clicks), ("approved", 0))
 
+    async def test_a_withdraw_before_the_refusal_is_recorded_still_says_it_was_already_refused(self) -> None:
+        # An upload by element id calls effect_started in its before_transfer hook, inside cleanup that awaits
+        # (the handle's disposal, the marker's removal) before the pipeline records the refusal: an approve in
+        # that moment has only the hold's own mark to read that the rejection stopped the action.
+        _, approval_id = await self.approved_click()
+        answers: list[dict[str, Any]] = []
+
+        with self.assertRaises(ApprovalRefusal):
+            async with held_for_execution(self.manager.approvals, approval_id, may_give_back=True):
+                await self.manager.reject(approval_id, comment="wait")  # deferred on the claim
+                try:
+                    effect_started()
+                except ApprovalRefusal as exc:
+                    answers.append(await self.manager.approve(approval_id, comment="go ahead after all"))
+                    refused_before_effect(exc)
+                    raise
+
+        self.assertIn("was already refused before it began", answers[0]["message"])
+        self.assertNotIn("may start", answers[0]["message"])
+        self.assertEqual(await self.status(approval_id), "approved")
+
     async def test_a_withdraw_during_a_give_back_for_another_refusal_says_it_was_already_refused(self) -> None:
         decision, approval_id, go, task = await self.claimed_and_waiting()
         await self.manager.reject(approval_id, comment="wait")
@@ -158,6 +179,24 @@ class ClaimMessageTests(ClaimWindowBase):
 
         self.assertIn("was already refused before it began", answer["message"])
         self.assertEqual(await self.status(approval_id), "approved")
+
+    async def test_a_withdraw_during_a_give_back_for_a_cancellation_is_not_told_the_action_may_start(self) -> None:
+        # Cancelled while it waited (an agent job cancelled, the controller stopping), the action never began
+        # and its approval goes back: the claim a withdraw then finds is no longer active, with no refusal on it.
+        decision, approval_id, go, task = await self.claimed_and_waiting()
+        await self.manager.reject(approval_id, comment="wait")
+        paused = self.pause_decision_until_the_give_back_starts("operator-approve")
+        approve = asyncio.create_task(self.manager.approve(approval_id, comment="go ahead"), name="operator-approve")
+        await asyncio.wait_for(paused.wait(), WAIT_SECONDS)
+
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, WAIT_SECONDS)
+        answer = await asyncio.wait_for(approve, WAIT_SECONDS)
+
+        self.assertIn("was already refused before it began", answer["message"])
+        self.assertNotIn("may start", answer["message"])
+        self.assertEqual((await self.status(approval_id), self.page.clicks), ("approved", 0))
 
     async def test_a_second_execution_while_the_claim_waits_is_told_to_wait_not_to_ask_again(self) -> None:
         decision, approval_id, go, task = await self.claimed_and_waiting()

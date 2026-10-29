@@ -12,13 +12,27 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+from app.action_errors import RefusedPageError
+from app.browser.page_provenance import CLOSED_PAGE_GRACE_SECONDS
 from app.models import McpToolCallRequest
+from app.routes._utils import OFF_LIST_PAGE_DETAIL
+from app.routes.sessions import create_sessions_router
 from app.tool_gateway import McpToolGateway
 from app.tool_inputs import GetCookiesInput
 from tests.test_allowed_hosts_reads import full_gateway
 from tests.test_allowed_hosts_rechecks import ALLOWED, REFUSED, MovingPage, manager_for, tab_session
 from tests.test_auth_state_ownership import StateContext, build_manager
+
+# Item 27: a tab is refused for another tab also when its navigation came just after a refused tab closed.
+CLOSED_TAB_CLAUSE = f"within {CLOSED_PAGE_GRACE_SECONDS:g} seconds after a refused tab closed"
+# Item 36: closing the refused tab does not clear this one (only the agent's navigate does, and a tab that is not
+# active cannot be navigated), so the advice is REFUSED_TAB_MESSAGE's.
+TAB_ADVICE = "and cannot be activated. Close it, or open a new tab."
+# Item 51: the active page can be navigated, but the refused tab may have closed already.
+PAGE_ADVICE = "close the refused tab if it is still open, then navigate this one"
 
 # How long a test waits for a capture thread and the loop callbacks after it.
 SETTLE_SECONDS = 2.0
@@ -191,3 +205,63 @@ async def test_activating_a_refused_tab_over_mcp_says_to_close_it(tmp_path: Path
     # The active page's own refusal still says how to go on.
     with pytest.raises(PermissionError, match="until it is navigated to an allowed URL"):
         manager._assert_page_object_allowed(tainted)
+
+
+def refused_by_another_tab(manager):
+    """A session whose second tab, on an allowed page, is refused only because another tab was refused when it loaded."""
+    active, other = MovingPage(ALLOWED, ALLOWED), MovingPage(ALLOWED, ALLOWED)
+    session = tab_session(active)
+    session.context.pages.append(other)
+    session.lock = asyncio.Lock()
+    manager.get_session = AsyncMock(return_value=session)
+    manager.page_provenance.committed(other, ALLOWED, url_refused=False, by_another_page=True)
+    return session, active
+
+
+async def test_activating_a_tab_refused_only_by_another_tab_over_mcp_names_the_cause(tmp_path: Path) -> None:
+    """F13: the refusal blamed the tab's own host ("on a host ALLOWED_HOSTS does not allow, or came from
+    one"), though the tab is on an allowed page and the way out is closing the tab that was refused."""
+    manager = manager_for(tmp_path)
+    session, active = refused_by_another_tab(manager)
+
+    response = await full_gateway(manager)._call_tool(
+        McpToolCallRequest(name="browser.activate_tab", arguments={"session_id": "s1", "index": 1})
+    )
+
+    text = response.content[0].text
+    assert response.isError and "another tab of this session was refused" in text, text
+    assert CLOSED_TAB_CLAUSE in text, text  # item 27: the grace after a refused tab closed counts too
+    assert text.endswith(TAB_ADVICE) and "does not allow" not in text, text
+    assert session.page is active
+
+
+def test_activating_a_tab_refused_only_by_another_tab_over_rest_names_the_cause(tmp_path: Path) -> None:
+    manager = manager_for(tmp_path)
+    refused_by_another_tab(manager)
+    app = FastAPI()
+    app.include_router(create_sessions_router(manager=manager))
+
+    response = TestClient(app, raise_server_exceptions=False).post("/sessions/s1/tabs/activate", json={"index": 1})
+
+    assert response.status_code == 403, response.text
+    detail = response.json()["detail"]
+    assert "another tab of this session was refused" in detail and "does not allow" not in detail, detail
+    assert CLOSED_TAB_CLAUSE in detail, detail
+    assert detail.endswith(TAB_ADVICE), detail
+
+
+def test_the_active_pages_refusal_by_another_tab_names_the_grace_and_a_tab_that_may_be_gone(tmp_path: Path) -> None:
+    """Item 51 (Fable E-NAV-5): the active page's refusal, and the routes' fixed text, said only "while another
+    tab of this session was refused" and "close the refused tab", though within the grace after it closed the
+    refused tab is already gone."""
+    manager = manager_for(tmp_path)
+    page = MovingPage(ALLOWED, ALLOWED)
+    manager.page_provenance.committed(page, ALLOWED, url_refused=False, by_another_page=True)
+
+    with pytest.raises(RefusedPageError) as refused:
+        manager._assert_page_object_allowed(page)
+
+    for text in (str(refused.value), OFF_LIST_PAGE_DETAIL):
+        assert "another tab of this session was refused" in text, text
+        assert CLOSED_TAB_CLAUSE in text, text
+        assert PAGE_ADVICE in text.lower(), text

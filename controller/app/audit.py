@@ -173,7 +173,8 @@ class FileAuditStore:
     def _trim_locked(self) -> None:
         if not self.events_path.exists() or self.max_events <= 0:
             return
-        lines = [line for line in self.events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        # On "\n" only: splitlines() also breaks at U+2028, U+2029 and U+0085, which an event's JSON holds raw.
+        lines = [line for line in self.events_path.read_text(encoding="utf-8").split("\n") if line.strip()]
         if len(lines) <= self.max_events:
             return
         trimmed = "\n".join(lines[-self.max_events :]) + "\n"

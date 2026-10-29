@@ -68,16 +68,60 @@ def _put_in_place(staged_state: Path, state_path: Path, staged_metadata: Path, m
     left the profile with no state file between the renames, which a reader in another thread saw (an
     export, Playwright reading a plaintext state). No await in here, so nothing on the event loop sees
     one file without the other.
+
+    The metadata goes first on a first save, and on a re-save that names an owner the metadata on disk does
+    not (a named operator's re-save of a profile saved under the shared token or before owners). A state
+    beside metadata that names no owner is open to every operator under named credentials, and a process
+    killed between the renames, or a rollback that fails, left just that; now it
+    leaves at most metadata naming the owner beside no state or the previous one. On a failure the previous
+    metadata goes back (none, on a first save) once the state is as it was. Any other re-save keeps the
+    state first, the order that keeps the previous login on a failure: its metadata names the owner already,
+    or neither the old nor the new names one, and the order changes nothing about who may open it.
     """
+    metadata_first = not metadata_path.exists() or (
+        _names_an_owner(staged_metadata) and not _names_an_owner(metadata_path)
+    )
+    previous_metadata = metadata_path.read_text(encoding="utf-8") if metadata_first and metadata_path.exists() else None
     previous = _keep_previous(state_path)
     try:
-        replace_retrying(staged_state, state_path)
-        replace_retrying(staged_metadata, metadata_path)
+        if metadata_first:
+            replace_retrying(staged_metadata, metadata_path)
+            replace_retrying(staged_state, state_path)
+        else:
+            replace_retrying(staged_state, state_path)
+            replace_retrying(staged_metadata, metadata_path)
     except BaseException:
-        _roll_back(previous, state_path)
+        # Metadata put first goes back only once the state is as it was: kept, it names the owner.
+        if _roll_back(previous, state_path) and metadata_first:
+            _put_metadata_back(previous_metadata, metadata_path)
         raise
     if previous is not None:
         _remove_quietly(previous, "the previous state after a save")
+
+
+def _names_an_owner(metadata_path: Path) -> bool:
+    """Whether the profile metadata on disk names an owner: not when it is missing, unreadable or has none."""
+    try:
+        owner = json.loads(metadata_path.read_text(encoding="utf-8")).get("owner")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return isinstance(owner, str) and bool(owner.strip())
+
+
+def _put_metadata_back(previous: str | None, metadata_path: Path) -> None:
+    """After a failed save whose metadata went first: the previous metadata back, or none after a first save."""
+    if previous is None:
+        _remove_quietly(metadata_path, "the metadata of a first save that failed")
+        return
+    try:
+        atomic_write_text(metadata_path, previous, mode=PRIVATE_FILE_MODE)
+    except OSError as exc:
+        logger.error(
+            "could not put back the metadata of an auth profile's failed save, %s (%s): it names the saving "
+            "operator as owner of the previous login",
+            metadata_path,
+            exc,
+        )
 
 
 def _keep_previous(state_path: Path) -> Path | None:
@@ -95,8 +139,12 @@ def _keep_previous(state_path: Path) -> Path | None:
     return previous
 
 
-def _roll_back(previous: Path | None, state_path: Path) -> None:
-    """Put the previous state back after a failed save (none on a first save), logging where it is kept if not."""
+def _roll_back(previous: Path | None, state_path: Path) -> bool:
+    """Put the previous state back after a failed save (none on a first save): whether it is as it was.
+
+    If not, an error is logged with where the previous state is kept, or, on a first save, that the new
+    state stays.
+    """
     try:
         if previous is None:
             state_path.unlink(missing_ok=True)
@@ -105,11 +153,18 @@ def _roll_back(previous: Path | None, state_path: Path) -> None:
         else:
             replace_retrying(previous, state_path)
     except OSError as exc:
-        logger.error(
-            "could not put an auth profile's previous state back after a failed save; it is kept at %s (%s)",
-            previous,
-            exc,
-        )
+        if previous is None:
+            logger.error(
+                "could not remove the new state of an auth profile's failed first save, %s (%s)", state_path, exc
+            )
+        else:
+            logger.error(
+                "could not put an auth profile's previous state back after a failed save; it is kept at %s (%s)",
+                previous,
+                exc,
+            )
+        return False
+    return True
 
 
 def _add_tree(tar: tarfile.TarFile, path: Path, arcname: str, skipped) -> None:

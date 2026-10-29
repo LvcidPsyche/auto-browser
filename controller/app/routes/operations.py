@@ -143,6 +143,8 @@ def create_operations_router(
                 max_steps=payload.max_steps,
                 enabled=payload.enabled,
                 webhook_enabled=payload.webhook_enabled,
+                # REST callers are operators: the profile the body names, fast by default.
+                workflow_profile=payload.workflow_profile,
             )
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="Invalid request") from None

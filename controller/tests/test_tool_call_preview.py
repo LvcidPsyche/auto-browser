@@ -21,6 +21,7 @@ from app.tool_gateway.gateway import _APPROVAL_PREVIEW_CHARS, McpToolGateway
 from app.tool_gateway.previews import preview_arguments, redacted_url
 from app.tool_inputs import (
     CdpAttachInput,
+    CreateCronJobInput,
     EvalJsInput,
     HarnessStartConvergenceInput,
     SaveMemoryProfileInput,
@@ -210,6 +211,10 @@ class PreviewRedactionTests(unittest.TestCase):
             "id_token",
             "private_token",
             "accessToken",
+            # camelCase names the whole-name list does not hold: only the camelCase split finds their parts
+            "githubToken",
+            "uploadTicket",
+            "sessionKey",
             "authorization",
             "SAMLResponse",
         )
@@ -326,6 +331,28 @@ class PreviewRedactionTests(unittest.TestCase):
         for shown in (reason, whole):
             self.assertNotIn("Hunter2", shown)
             self.assertNotIn("ST-SECRET", shown)
+
+    def test_a_cron_jobs_start_url_credentials_are_left_out(self) -> None:
+        """B-COMPOSE-1: a governed browser.create_cron_job showed its start_url whole, a password and tokens in
+        it, in the reason and the arguments file, where the harness's start URL is left out."""
+        url = "https://user:hunter2@bank.example/login?access_token=abc123&next=https://x:y4ss@a.example/?token=z9"
+        arguments = CreateCronJobInput(name="j", goal="g", webhook_enabled=True, start_url=url)
+
+        reason = preview("browser.create_cron_job", arguments)
+        whole = McpToolGateway._governed_call_arguments(Spec("browser.create_cron_job"), arguments)
+
+        self.assertIn("https://<redacted>@bank.example/login?access_token=<redacted>", whole)
+        for shown in (reason, whole):
+            for secret in ("hunter2", "abc123", "y4ss", "z9"):
+                self.assertNotIn(secret, shown)
+
+    def test_a_cron_jobs_start_url_that_a_browser_reads_as_another_host_is_refused(self) -> None:
+        """B-DISP-1: the operator approves the host shown, and the job's runs open the one a browser reads."""
+        for url in ("https://evil.example\\@bank.example/", "https://2130706433/", "https://１２７.１/"):
+            with self.subTest(url=ascii(url)), self.assertRaisesRegex(ValueError, "start_url"):
+                CreateCronJobInput(name="j", goal="g", webhook_enabled=True, start_url=url)
+        control = CreateCronJobInput(name="j", goal="g", webhook_enabled=True, start_url="https://bank.example/")
+        self.assertEqual(control.start_url, "https://bank.example/")
 
     def test_the_hash_still_covers_what_the_preview_leaves_out(self) -> None:
         first, first_reason = approval_for(

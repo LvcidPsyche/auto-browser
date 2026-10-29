@@ -14,7 +14,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from .models import OperatorIdentity, ProtectionMode
-from .utils import atomic_write_text, record_path, utc_now
+from .utils import atomic_write_text, record_path, utc_now, without_lone_surrogates
 from .witness_anchor import (
     anchor_fields,
     anchor_path,
@@ -383,7 +383,9 @@ class WitnessRecorder:
     async def append(self, scope: str, receipt: WitnessReceipt) -> WitnessReceipt:
         async with self._lock:
             path = self._path(scope)
-            item = receipt.model_copy(deep=True)
+            # A copy, its lone surrogates replaced before it is hashed: UTF-8 cannot encode one, so the receipt
+            # could not be written, and the action it records had already run.
+            item = WitnessReceipt.model_validate(without_lone_surrogates(receipt.model_dump()))
             item.scope = scope
             # Reading the head, signing, and appending are one critical section
             # under a lock on the chain file. The asyncio lock above only orders

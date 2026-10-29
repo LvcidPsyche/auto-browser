@@ -10,6 +10,7 @@ from app.browser.services.diagnostics import BrowserDiagnosticsService
 
 class FakePage:
     def __init__(self) -> None:
+        self.url = "https://allowed.example/"
         self.handlers: dict[str, list] = {}
         self.closed = False
 
@@ -25,9 +26,15 @@ class FakePage:
             handler(self)
 
 
+def fake_manager() -> SimpleNamespace:
+    """What the close listener reads of the manager: provenance, and whether ALLOWED_HOSTS refuses a URL."""
+    return SimpleNamespace(page_provenance=PageProvenance(), _url_off_list=lambda _url: False)
+
+
 class ActiveTabCloseTests(unittest.TestCase):
     def _session(self, *pages: FakePage) -> SimpleNamespace:
         return SimpleNamespace(
+            id="s1",
             page=pages[0],
             context=SimpleNamespace(pages=list(pages)),
             attached_pages=weakref.WeakSet(),
@@ -39,7 +46,7 @@ class ActiveTabCloseTests(unittest.TestCase):
     def test_session_moves_to_another_tab_when_its_active_tab_closes_itself(self) -> None:
         """A page calling window.close() left session.page on a closed page,
         so every later action failed while other tabs were open."""
-        service = BrowserDiagnosticsService(SimpleNamespace(page_provenance=PageProvenance()), None, None)  # type: ignore[arg-type]
+        service = BrowserDiagnosticsService(fake_manager(), None, None)  # type: ignore[arg-type]
         opener, popup = FakePage(), FakePage()
         session = self._session(opener, popup)
         for page in (opener, popup):
@@ -51,7 +58,7 @@ class ActiveTabCloseTests(unittest.TestCase):
         self.assertIs(session.page, opener)
 
     def test_closing_a_background_tab_keeps_the_active_one(self) -> None:
-        service = BrowserDiagnosticsService(SimpleNamespace(page_provenance=PageProvenance()), None, None)  # type: ignore[arg-type]
+        service = BrowserDiagnosticsService(fake_manager(), None, None)  # type: ignore[arg-type]
         active, background = FakePage(), FakePage()
         session = self._session(active, background)
         for page in (active, background):

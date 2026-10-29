@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .utils import UTC
+from .utils import UTC, without_lone_surrogates
 
 
 class SessionArtifactService:
@@ -43,7 +43,8 @@ class SessionArtifactService:
 
     async def append_jsonl(self, path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(payload, ensure_ascii=False)
+        # A lone surrogate (UTF-8 cannot encode one) is written as U+FFFD, or the write fails after the action ran.
+        line = without_lone_surrogates(json.dumps(payload, ensure_ascii=False))
         await asyncio.to_thread(self.append_text, path, line + "\n")
 
     @staticmethod

@@ -195,7 +195,8 @@ class TraceRecorder:
     ) -> TraceEnvelope:
         events = []
         if self.jsonl_path.exists():
-            for line in self.jsonl_path.read_text(encoding="utf-8").splitlines():
+            # On "\n" only: splitlines() also breaks at U+2028, U+2029 and U+0085, which an event's JSON holds raw.
+            for line in self.jsonl_path.read_text(encoding="utf-8").split("\n"):
                 if line.strip():
                     events.append(TraceEvent.model_validate_json(line))
         envelope = TraceEnvelope(

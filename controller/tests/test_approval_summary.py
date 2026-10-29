@@ -258,6 +258,21 @@ class CodePointTests(unittest.TestCase):
         with patch.object(approval_display, "unicodedata", Unicode14()):
             self.assertEqual(shown_code_points("a\U00013439b"), "a[U+13439]b")
 
+    def test_a_format_character_newer_than_the_servers_lists_is_still_shown(self) -> None:
+        # The lists are Unicode 17.0's, and hold every format character this Python (Unicode 15.0) knows; a
+        # Python on a later Unicode may know one they do not have. U+0378, unassigned in 17.0, stands in for it:
+        # the format category is what catches it.
+        later = chr(0x378)
+        real = unicodedata.category
+
+        class LaterUnicode:
+            @staticmethod
+            def category(char: str) -> str:
+                return "Cf" if char == later else real(char)
+
+        with patch.object(approval_display, "unicodedata", LaterUnicode()):
+            self.assertEqual(shown_code_points(f"a{later}b"), "a[U+0378]b")
+
     def test_the_format_table_holds_every_format_character_the_running_python_knows(self) -> None:
         table = approval_display._FORMAT_CHARACTERS
         unknown = [

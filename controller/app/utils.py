@@ -33,6 +33,25 @@ PRIVATE_FILE_MODE = 0o600
 
 _RECORD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
+# A UTF-16 surrogate code point, which a Python string holds only on its own (a JSON "\ud800" escape
+# decodes to one, and a valid pair decodes to the character it encodes). UTF-8 cannot encode it.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def without_lone_surrogates(value: Any) -> Any:
+    """``value`` with each lone surrogate in its strings, dict keys included, replaced by U+FFFD.
+
+    For a record about to be written as UTF-8 (a JSONL line, a witness receipt): a string holding one
+    could not be encoded, so the write failed after the action it records had run.
+    """
+    if isinstance(value, str):
+        return _LONE_SURROGATE.sub("\ufffd", value)
+    if isinstance(value, dict):
+        return {without_lone_surrogates(key): without_lone_surrogates(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [without_lone_surrogates(item) for item in value]
+    return value
+
 
 def record_path(root: Path, record_id: str, suffix: str) -> Path:
     """The file a file-backed store keeps ``record_id`` in, for one plain name only.

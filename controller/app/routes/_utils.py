@@ -8,7 +8,9 @@ from logging import Logger
 from fastapi import HTTPException, Request
 
 from ..action_errors import BrowserActionError
-from ..browser.services.tabs import REFUSED_TAB_MESSAGE
+from ..approvals import CONTROLLER_SCOPE
+from ..browser.page_provenance import CLOSED_PAGE_GRACE_SECONDS
+from ..browser.services.tabs import REFUSED_BY_ANOTHER_TAB_MESSAGE, REFUSED_TAB_MESSAGE
 
 _SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -30,7 +32,10 @@ async def require_session_access(request: Request) -> None:
     """
     session_id = request.path_params.get("session_id") or request.query_params.get("session_id")
     manager = getattr(request.app.state, "browser_manager", None)
-    if session_id and manager is not None:
+    # Controller-wide approvals are listed by their owner: their scope names no session.
+    route = getattr(request.scope.get("route"), "path", None)
+    listing_controller = route == "/approvals" and session_id == CONTROLLER_SCOPE
+    if session_id and manager is not None and not listing_controller:
         await manager.ensure_session_accessible(session_id)
 
 
@@ -38,10 +43,12 @@ async def require_session_access(request: Request) -> None:
 # them names the host; these routes answer generically everywhere else.
 OFF_LIST_PAGE_DETAIL = (
     "The page is on a host ALLOWED_HOSTS does not allow, or came from one, and is not read until it is "
-    "navigated to an allowed URL. A page that loaded while another tab of this session was refused is "
-    "refused too: close that tab, then navigate this one."
+    "navigated to an allowed URL. A page that loaded while another tab of this session was refused, or within "
+    f"{CLOSED_PAGE_GRACE_SECONDS:g} seconds after a refused tab closed, is refused too: close the refused tab "
+    "if it is still open, then navigate this one."
 )
 OFF_LIST_TAB_DETAIL = REFUSED_TAB_MESSAGE
+OFF_LIST_OTHER_TAB_DETAIL = REFUSED_BY_ANOTHER_TAB_MESSAGE
 
 
 def internal_error(logger: Logger, message: str, *args: object) -> HTTPException:

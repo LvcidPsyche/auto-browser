@@ -53,6 +53,19 @@ class TraceRecorderTests(unittest.TestCase):
             self.assertIn("idx_trace_events_run", indexes)
             self.assertIn("idx_trace_events_type", indexes)
 
+    def test_finalize_reads_an_event_whose_text_holds_a_line_separator(self) -> None:
+        # Item 47 (Fable E1-F6): finalize split trace.jsonl with splitlines(), which also breaks at U+2028,
+        # U+2029 and U+0085, and model_dump_json writes them raw: a goal holding one failed the run.
+        goal = "Find the sale\u2028then\u2029check out\u0085now"
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = TraceRecorder(tmp, run_id="run-1", contract_hash="abc")
+            recorder.append("run_started", {"goal": goal})
+            recorder.append("action", {"action": "click", "selector": "#go"}, step_idx=1)
+
+            trace = recorder.finalize()
+
+        self.assertEqual([event.payload.get("goal") for event in trace.events], [goal, None])
+
     def test_trace_read_rejects_tampered_hash_chain(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             recorder = TraceRecorder(tmp, run_id="run-2", contract_hash="abc")

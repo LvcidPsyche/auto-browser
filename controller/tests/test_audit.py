@@ -110,6 +110,28 @@ class AuditStoreTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(events[0].session_id, "session-3")
             self.assertEqual(events[-1].session_id, "session-2")
 
+    async def test_file_store_trim_keeps_events_holding_unicode_line_separators(self) -> None:
+        """SG-5: the trim split the log with str.splitlines(), which also breaks at U+2028, U+2029 and U+0085.
+        The JSON of an event holds those raw, so each such event came back as fragments that no longer parse,
+        and listing skipped them for good, as ACT-01 found for the witness chain."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir) / "audit"
+            store = AuditStore(root, max_events=2, file_trim_interval=1)
+            await store.startup()
+            texts = [f"line{index} next para\x85end" for index in range(3)]
+
+            for index, text in enumerate(texts):
+                await store.append(
+                    event_type="browser_action",
+                    status="ok",
+                    action="click",
+                    session_id=f"session-{index}",
+                    details={"title": text},
+                )
+
+            events = await store.list(limit=10)
+            self.assertEqual([event.details["title"] for event in events], [texts[2], texts[1]])
+
 
 class FileAuditListTests(unittest.IsolatedAsyncioTestCase):
     async def _store(self, tempdir: str) -> AuditStore:

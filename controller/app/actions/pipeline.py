@@ -20,6 +20,10 @@ ActionOperation = Callable[[], Awaitable[None]]
 # The only actions that may run while the page sits on a host ALLOWED_HOSTS refuses:
 # they are how a session gets off it. Everything else would act on, or read, that page.
 LEAVES_DISALLOWED_PAGE = frozenset({"navigate", "go_back"})
+# Actions a block is not rolled back from with go_back: after a go_back it goes one page further back, after
+# a reload to the page before the reloaded one; a refused page is blanked instead. A go_forward is rolled back:
+# a redirect replaces the entry it moved to, so a go_back returns to the page the action left.
+NOT_ROLLED_BACK = frozenset({"go_back", "reload"})
 # Errors that mean only the page's state was not read: the snapshot or observation reports them in place.
 _UNOBSERVED = frozenset({SCREENSHOT_WITHHELD, PAGE_NOT_RESPONDING})
 # Where an action's target records the step that failed after its change was made (see ActionRunContext).
@@ -104,6 +108,10 @@ class BrowserActionPipeline:
 
     async def _run(self, context: ActionRunContext) -> dict[str, Any]:
         async with context.session.lock:
+            # Right after a refused tab closed (the refusal's advice), what the page commits because of this
+            # action would count as that tab's choice: the action waits out the grace (bounded), before its
+            # snapshot and before its effect is marked, so a cancellation meanwhile gives an approval back.
+            await context.manager._wait_out_closed_page_grace(context.session)
             witness_state = await self._prepare(context)
             try:
                 await self._execute(context, witness_state)
@@ -239,7 +247,11 @@ class BrowserActionPipeline:
         started = witness_state.operation_started or context.began()
         try:
             # The before-snapshot shows a refused page by its origin; compared the same way.
-            if started and context.manager._shown_url(session.page) != witness_state.before.get("url"):
+            if (
+                started
+                and context.action_name not in NOT_ROLLED_BACK
+                and context.manager._shown_url(session.page) != witness_state.before.get("url")
+            ):
                 # Back on the page the agent read before the action, the taint the action left clears.
                 with context.manager.page_provenance.escape(session.page, witness_state.escape_url):
                     await session.page.go_back(wait_until="domcontentloaded")
