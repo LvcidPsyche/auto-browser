@@ -25,6 +25,7 @@ import pytest
 import pytest_asyncio
 from playwright.async_api import Browser, async_playwright
 
+from app.action_errors import BROWSER_ACTION_BLOCKED, BrowserActionError
 from app.browser.request_gate import CROSS_ORIGIN_POST_REDIRECT, OFF_LIST
 from app.browser_manager import BrowserManager
 from tests._chromium import chromium_executable, requires_chromium
@@ -173,8 +174,11 @@ async def test_a_start_url_that_redirects_to_a_refused_host_never_reaches_it(tmp
     async with gated(tmp_path) as env:
         refused_target = env.server.url(REFUSED, "/landing")
 
-        with pytest.raises(Exception, match="ERR_BLOCKED_BY_CLIENT"):
+        # Mapped to the block it is (step 3), naming only the origin.
+        with pytest.raises(BrowserActionError) as caught:
             await env.create(f"/r/302?to={refused_target}")
+        assert caught.value.code == BROWSER_ACTION_BLOCKED
+        assert "/landing" not in caught.value.message
 
         assert env.server.hits_on(REFUSED) == []
         assert env.server.pages_on(ALLOWED) == ["/r/302"]
