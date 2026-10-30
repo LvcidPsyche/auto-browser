@@ -27,6 +27,7 @@ from ...utils import UTC, utc_now
 from ..launch_flags import STORAGE_PARTITIONING_ON
 from ..page_read import PageRead
 from ..request_gate import RequestGateUnavailable, navigation_blocked_error, stopped_by_gate
+from ..request_gates import CHROME_ERROR_SCHEME
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext
@@ -60,8 +61,6 @@ PAGE_TITLE_TIMEOUT_SECONDS = 2.0
 CLOSE_LOCK_WAIT_SECONDS = 10.0
 # Each teardown step (trace, context, isolated runtime) gets at most this long.
 TEARDOWN_STEP_TIMEOUT_SECONDS = 30.0
-# Chrome's error page, left by a navigation the pre-request gate stopped or one that failed.
-CHROME_ERROR_SCHEME = "chrome-error:"
 
 
 def _on_error_page(page: Any) -> bool:
