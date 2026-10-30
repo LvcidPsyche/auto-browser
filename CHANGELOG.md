@@ -13,8 +13,9 @@ The client, LangChain and MCP bridge packages are unchanged.
   failed, sits on `chrome-error://chromewebdata/`. `POST /sessions/{id}/fork` without `start_url`, and
   `POST /sessions/{id}/shadow-browse`, now answer 400 before exporting any state, and `detail` says the page is
   Chrome's error page for a navigation that was stopped or failed; for fork, it says to pass `start_url`, which
-  works as before. In 1.12.0 both exported the session's state and then refused the new session's URL with
-  "URL scheme 'chrome-error' is not allowed; only http and https are".
+  works as before. In 1.12.0, fork exported the session's state before refusing, and both answered REST callers
+  403 "Not permitted" (MCP: "URL scheme 'chrome-error' is not allowed; only http and https are"). A REST client
+  that branches on the status now sees 400 where it saw 403.
 - **A DevTools session left attached after a slow target lookup.** The read of a page's target id is bounded. When
   the bound fired while the browser was still opening the session the read uses, the session it then opened stayed
   attached for the life of the page. It is now detached once it opens.
