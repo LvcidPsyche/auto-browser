@@ -255,3 +255,25 @@ async def test_f7_a_later_navigation_that_failed_for_another_reason_drops_the_la
 
         assert tab["url"].startswith("chrome-error:")
         assert "blocked_navigation" not in tab, tab
+
+
+async def test_f5_a_block_from_the_totp_follow_up_is_reported(tmp_path: Path) -> None:
+    """The TOTP autofill's submit leads to a refused host: the gate stops it, and the action reports it."""
+    async with gated(tmp_path) as env:
+        env.server.pages["/form"] = '<button id="noop">noop</button>'
+        session_id = await env.create("/form")
+        page = env.manager.sessions[session_id].page
+
+        async def auto_submit(_session):
+            with contextlib.suppress(Exception):
+                await page.evaluate("url => { location.href = url; }", env.server.url(REFUSED, SECRET_PATH))
+            await eventually(lambda: page.url.startswith("chrome-error:"))
+            return {"filled": True}
+
+        env.manager._maybe_handle_totp = auto_submit
+
+        result = await env.manager.click(session_id, selector="#noop")
+
+        [block] = result["target"]["blocked_navigations"]
+        assert block["origin"] == env.server.url(REFUSED, "")
+        assert env.server.hits_on(REFUSED) == []

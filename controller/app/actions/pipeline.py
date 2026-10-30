@@ -247,10 +247,6 @@ class BrowserActionPipeline:
             if stopped:
                 raise NavigationStoppedError(stopped[-1].explanation, origin=stopped[-1].origin) from exc
             raise NavigationStoppedError(UNATTRIBUTED_STOP) from exc
-        stopped = await self._blocks_during(context, page, blocked_before)
-        if stopped:
-            # The action did its work; a navigation it led to on its own page was stopped before it was sent.
-            context.target["blocked_navigations"] = [block_summary(block) for block in stopped]
         # Checked before the TOTP autofill, which types a live code into the
         # page: a redirect to a disallowed host must not receive one first.
         try:
@@ -261,10 +257,13 @@ class BrowserActionPipeline:
                 f"The change was made, then the page it led to was blocked: {str(exc)[:300]}. Observe the page "
                 "before acting again, and do not repeat the action: that would make the change twice."
             )
+            await self._note_blocks(context, page, blocked_before)
             raise
         totp_result = await manager._maybe_handle_totp(session)
         if totp_result is not None:
             context.target.setdefault("totp", totp_result)
+        # After the TOTP follow-up, whose submit is the action's too: a navigation it led to counts.
+        await self._note_blocks(context, page, blocked_before)
         challenge = await manager._check_bot_challenge(session)
         if challenge is not None:
             await manager.request_human_takeover(session.id, reason=f"Bot challenge detected: {challenge['signal']}")
@@ -275,6 +274,12 @@ class BrowserActionPipeline:
                 retryable=False,
                 details=challenge,
             )
+
+    async def _note_blocks(self, context: ActionRunContext, page: Any, since: int) -> None:
+        """The action did its work; a navigation it led to on its own page was stopped before it was sent."""
+        stopped = await self._blocks_during(context, page, since)
+        if stopped:
+            context.target["blocked_navigations"] = [block_summary(block) for block in stopped]
 
     @staticmethod
     async def _blocks_during(context: ActionRunContext, page: Any, since: int) -> list[Any]:
