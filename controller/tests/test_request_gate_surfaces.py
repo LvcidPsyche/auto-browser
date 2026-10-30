@@ -332,7 +332,7 @@ class ReadinessSurfaceTests(_Base):
             await finish.wait()
             return 2
 
-        with patch("app.browser.request_gate.turn_prefetch_off", new=slow_prefetch):
+        with patch("app.browser.request_gates.turn_prefetch_off", new=slow_prefetch):
             attaching = asyncio.create_task(gates.attach(self.browser, attach_mode=False))
             await started.wait()
             [entry] = gates.status()["gates"]
@@ -355,7 +355,7 @@ class ReadinessSurfaceTests(_Base):
         for key in ("attach_mode", "switch_declared", "handler_errors"):
             self.assertIn(key, entry)
         launched = _browser()
-        with patch("app.browser.request_gate.turn_prefetch_off", new=AsyncMock(return_value=2)):
+        with patch("app.browser.request_gates.turn_prefetch_off", new=AsyncMock(return_value=2)):
             await gates.attach(launched, attach_mode=False)
         self.assertIn("prefetch_pref", gates.status()["gates"][1])
         self.manager.settings.pre_request_blocking = False

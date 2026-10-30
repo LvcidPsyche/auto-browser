@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .auth_policy import credentials_for
-from .browser.request_gate import PREFETCH_PENDING
+from .browser.request_gates import PREFETCH_PENDING
 from .ocr import tesseract_available
 
 

@@ -220,7 +220,7 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         self._playwright(connect=AsyncMock(return_value=self.browser))
         self.browser.new_browser_cdp_session.side_effect = RuntimeError("no browser target")
 
-        with self.assertLogs("app.browser.request_gate", level="WARNING") as logs:
+        with self.assertLogs("app.browser.request_gates", level="WARNING") as logs:
             await self.manager.ensure_browser()
         self.assertIn("no browser target", "\n".join(logs.output))
 
@@ -581,7 +581,7 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         self.browser.new_browser_cdp_session.side_effect = failing_first
         prefetch = AsyncMock(return_value=2)
 
-        with patch("app.browser.request_gate.turn_prefetch_off", prefetch):
+        with patch("app.browser.request_gates.turn_prefetch_off", prefetch):
             await self.manager.ensure_browser()
             await self.manager.create_session(name="s", start_url=START_URL)
 

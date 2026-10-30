@@ -23,7 +23,8 @@ from .auth_state import AuthStateManager
 from .browser.element_ids import ElementIds
 from .browser.page_provenance import CLOSED_PAGE_GRACE_SECONDS, REFUSED_FAILURES_KEPT, PageProvenance
 from .browser.page_read import start_read
-from .browser.request_gate import GateBlock, RequestGates
+from .browser.request_gate import GateBlock
+from .browser.request_gates import RequestGates
 from .browser.services import (
     BrowserActionService,
     BrowserApprovalService,

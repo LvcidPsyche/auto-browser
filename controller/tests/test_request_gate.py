@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from app.browser import request_gate
+from app.browser import request_gate, request_gates
 from app.browser.request_gate import (
     BLOCKED_ERROR_REASON,
     BLOCKS_KEPT,
@@ -708,7 +708,7 @@ async def test_a_context_whose_close_never_happened_stays_owned(harness: Harness
 
 async def test_a_replacement_gate_keeps_the_lost_gates_contexts() -> None:
     """X3 (c): what survived containment stays gated by the gate attached after the loss."""
-    from app.browser.request_gate import RequestGates
+    from app.browser.request_gates import RequestGates
 
     sessions: list[FakeCDPSession] = []
 
@@ -797,8 +797,8 @@ class StallingPageSession(FakeCDPSession):
 
 
 async def test_r5_reading_a_pages_target_id_is_bounded(monkeypatch) -> None:
-    monkeypatch.setattr(request_gate, "TARGET_ID_TIMEOUT_SECONDS", 0.05)
-    gates = request_gate.RequestGates(
+    monkeypatch.setattr(request_gates, "TARGET_ID_TIMEOUT_SECONDS", 0.05)
+    gates = request_gates.RequestGates(
         url_refused=refused,
         enabled=lambda: True,
         origin_switch_declared=lambda: False,
@@ -882,7 +882,7 @@ async def harness_with_audit() -> tuple[Harness, list]:
 async def test_r6_blocks_on_page_finds_a_lookup_error_block_by_the_pages_target() -> None:
     cdp = FakeCDPSession()
     browser = SimpleNamespace(new_browser_cdp_session=AsyncMock(return_value=cdp))
-    gates = request_gate.RequestGates(
+    gates = request_gates.RequestGates(
         url_refused=refused,
         enabled=lambda: True,
         origin_switch_declared=lambda: False,
@@ -920,7 +920,7 @@ def test_r6_only_a_blocked_by_client_failure_is_the_gates(error: str, converted:
 
 
 async def test_r12_a_page_gets_one_bypass_session_however_often_and_concurrently_asked() -> None:
-    gates = request_gate.RequestGates(
+    gates = request_gates.RequestGates(
         url_refused=refused,
         enabled=lambda: True,
         origin_switch_declared=lambda: False,
@@ -981,8 +981,8 @@ async def test_r15_a_replacement_gate_knows_the_previous_url_of_a_hop() -> None:
 # ── round 4: the service-worker bypass (F3) ──────────────────────────────────
 
 
-def _gates() -> request_gate.RequestGates:
-    return request_gate.RequestGates(
+def _gates() -> request_gates.RequestGates:
+    return request_gates.RequestGates(
         url_refused=refused,
         enabled=lambda: True,
         origin_switch_declared=lambda: False,
@@ -1022,7 +1022,7 @@ async def test_f3_b_a_failure_on_a_page_that_has_closed_is_not_counted() -> None
 
 
 async def test_f3_c_a_bypass_that_never_answers_is_bounded_for_both_callers(monkeypatch) -> None:
-    monkeypatch.setattr(request_gate, "BYPASS_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(request_gates, "BYPASS_TIMEOUT_SECONDS", 0.05)
     gates = _gates()
 
     async def never(_page):
@@ -1054,7 +1054,7 @@ def test_f4_only_the_first_line_of_the_error_counts() -> None:
     assert request_gate.stopped_by_gate(bare)
 
 
-async def _gates_on(cdp: FakeCDPSession) -> tuple[request_gate.RequestGates, SimpleNamespace]:
+async def _gates_on(cdp: FakeCDPSession) -> tuple[request_gates.RequestGates, SimpleNamespace]:
     browser = SimpleNamespace(new_browser_cdp_session=AsyncMock(return_value=cdp))
     gates = _gates()
     await gates.require(browser)
@@ -1285,7 +1285,7 @@ async def test_f6_a_mark_from_before_a_loss_still_finds_the_replacements_block()
 
 async def test_f3c_a_waiter_on_a_setup_that_never_settles_is_bounded(monkeypatch) -> None:
     """The waiter's own bound, apart from the first caller's: a pending setup that never settles."""
-    monkeypatch.setattr(request_gate, "BYPASS_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(request_gates, "BYPASS_TIMEOUT_SECONDS", 0.05)
     gates = _gates()
     page = _page(lambda _page: FakeCDPSession())
     gates._bypass_pending[page] = asyncio.get_running_loop().create_future()
