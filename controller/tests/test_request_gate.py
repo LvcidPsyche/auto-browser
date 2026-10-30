@@ -1281,3 +1281,13 @@ async def test_f6_a_mark_from_before_a_loss_still_finds_the_replacements_block()
 
     [block] = await gates.blocks_on_page(browser, page, since=since)
     assert block.seq > since
+
+
+async def test_f3c_a_waiter_on_a_setup_that_never_settles_is_bounded(monkeypatch) -> None:
+    """The waiter's own bound, apart from the first caller's: a pending setup that never settles."""
+    monkeypatch.setattr(request_gate, "BYPASS_TIMEOUT_SECONDS", 0.05)
+    gates = _gates()
+    page = _page(lambda _page: FakeCDPSession())
+    gates._bypass_pending[page] = asyncio.get_running_loop().create_future()
+
+    await asyncio.wait_for(gates.bypass_service_workers(page), timeout=2.0)
