@@ -23,7 +23,7 @@ from app.action_errors import BrowserActionError, SessionNotFoundError
 from app.browser.launch_flags import STORAGE_PARTITIONING_ON
 from app.browser.request_gate import RequestGateUnavailable
 from app.browser_manager import BrowserManager
-from tests._fake_cdp import FakeCDPSession
+from tests._fake_cdp import FakeCDPSession, settle_background
 from tests.test_browser_manager_create_session import FakeBrowser, FakeContext, FakePage, _settings
 
 START_URL = "https://example.com/start"
@@ -270,8 +270,7 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         return first, second
 
     async def _settled(self) -> None:
-        for _ in range(20):
-            await asyncio.sleep(0)
+        await settle_background()
 
     async def test_a_lost_gate_closes_every_session_on_its_browser(self) -> None:
         self.manager.settings.max_sessions = 3

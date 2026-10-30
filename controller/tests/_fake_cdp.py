@@ -14,6 +14,33 @@ from collections import defaultdict
 from typing import Any, Callable
 
 _IDS = itertools.count(1)
+# How long settle_background waits for the controller's background tasks (containment, the gate's handlers).
+SETTLE_DEADLINE_SECONDS = 5.0
+SETTLE_EXTRA_YIELDS = 5
+
+
+async def settle_background() -> None:
+    """Wait for the controller's background tasks (app.utils.spawn_background_task: gate containment, the gate's
+    request handlers) to finish, including the ones they spawn, then yield a few more times for their callbacks.
+
+    A fixed number of yields raced them: containment has more awaits since round 4, and Python 3.11's
+    asyncio.wait_for takes more loop iterations than 3.12+, so tests read before it finished (CI, 3.11).
+    A task still pending at the deadline is left running; the test's own assertion then says what is missing.
+    """
+    from app.utils import _BACKGROUND_TASKS
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + SETTLE_DEADLINE_SECONDS
+    current = asyncio.current_task()
+    while True:
+        await asyncio.sleep(0)  # let what was just scheduled register itself first
+        pending = {task for task in _BACKGROUND_TASKS if not task.done() and task is not current}
+        remaining = deadline - loop.time()
+        if not pending or remaining <= 0:
+            break
+        await asyncio.wait(pending, timeout=remaining)
+    for _ in range(SETTLE_EXTRA_YIELDS):
+        await asyncio.sleep(0)
 
 
 class FakeCDPSession:

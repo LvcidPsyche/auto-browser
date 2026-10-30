@@ -31,7 +31,7 @@ from app.readiness import pre_request_gate_check, run_readiness_checks
 from app.routes.sessions import create_sessions_router
 from app.tool_gateway import McpToolGateway
 from app.tool_inputs import ReadinessCheckInput
-from tests._fake_cdp import FakeCDPSession, page_session_for
+from tests._fake_cdp import FakeCDPSession, page_session_for, settle_background
 from tests.test_browser_manager_create_session import FakePage, _settings
 from tests.test_request_gate_wiring import _browser
 
@@ -56,8 +56,7 @@ class _Base(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     async def settled() -> None:
-        for _ in range(20):
-            await asyncio.sleep(0)
+        await settle_background()
 
 
 class RefusedCreateTests(_Base):
