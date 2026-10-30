@@ -80,6 +80,11 @@ class BrowserTabService:
                     with self.manager.page_provenance.controller_navigation(new_page) as navigation:
                         navigation.response = await new_page.goto(url, wait_until="domcontentloaded")
                     await self.manager._settle(new_page)
+                    # As _goto_or_blocked: the page loaded, then left for a refused host (a meta refresh, a
+                    # script) while it settled, and the gate stopped it. Raised here, so the tab is closed below.
+                    stopped = await gates.blocks_on_page(session.browser, new_page, since=blocked_before)
+                    if stopped:
+                        raise navigation_blocked_error(stopped[-1], action="open_tab")
                     # The check navigate() makes after the page loads: an
                     # allowlisted URL can redirect somewhere that is not.
                     self.manager._assert_runtime_url_allowed(new_page.url)

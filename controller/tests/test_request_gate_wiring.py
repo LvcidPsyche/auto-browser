@@ -1185,6 +1185,49 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.reason, "request_gate_lost")
         tab.goto.assert_not_awaited()
 
+    async def test_p2_a_new_tab_that_leaves_for_a_refused_host_while_it_settles_is_a_block(self) -> None:
+        """Codex P2 on #240: goto returned, then the page headed for a refused host during the settle."""
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        session_id = (await self.manager.create_session(name="s"))["id"]
+        session = self.manager.sessions[session_id]
+        first_page = session.page
+        tab = FakePage()
+        tab.context = session.context
+        tab.close = AsyncMock()  # FakePage's goto reaches domcontentloaded on the allowed URL
+        session.context.new_page = AsyncMock(return_value=tab)
+        self.manager.request_gates.target_id_of = AsyncMock(return_value="tab-2")  # type: ignore[method-assign]
+        settle = self.manager._settle
+
+        async def settles_then_leaves(page) -> None:
+            if page is not tab:
+                return await settle(page)
+            [gate_session] = _gate_sessions(self.browser)
+            gate_session.replies["Target.getTargetInfo"] = {
+                "targetInfo": {"targetId": "tab-2", "type": "page", "browserContextId": session.gate_context_id}
+            }
+            gate_session.emit(
+                "Fetch.requestPaused",
+                {
+                    "requestId": "tab-refresh",
+                    "frameId": "tab-2",
+                    "request": {"url": "https://refused.example/secret", "method": "GET", "headers": {}},
+                },
+            )
+            await gate_session.wait_for_reply("tab-refresh")
+            tab.url = "chrome-error://chromewebdata/"
+
+        self.manager._settle = settles_then_leaves  # type: ignore[method-assign]
+
+        with self.assertRaises(BrowserActionError) as caught:
+            await self.manager.open_tab(session_id, "https://example.com/tab", True)
+
+        self.assertEqual(
+            (caught.exception.code, caught.exception.action, caught.exception.url),
+            ("browser_action_blocked", "open_tab", "https://refused.example"),
+        )
+        tab.close.assert_awaited_once()
+        self.assertIs(session.page, first_page, "the refused tab was activated")
+
 
 if __name__ == "__main__":
     unittest.main()
