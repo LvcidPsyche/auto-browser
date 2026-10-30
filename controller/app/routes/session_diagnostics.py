@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse
 from starlette.responses import StreamingResponse
 
 from .. import events as _events
-from ..action_errors import ErrorPageSourceError
+from ..action_errors import ErrorPageSourceError, RefusedPageError
 from ..playwright_export import export_session_script
 from ._utils import OFF_LIST_PAGE_DETAIL, require_safe_segment, typed_route_errors
 
@@ -191,13 +191,19 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
 
     @router.post("/sessions/{session_id}/shadow-browse")
     async def enable_shadow_browse(session_id: str) -> dict[str, Any]:
-        try:
-            return await manager.enable_shadow_browse(session_id)
-        except ErrorPageSourceError as exc:
-            # Its fixed text says what to do instead, and names no host or path.
-            raise HTTPException(status_code=400, detail=str(exc)) from None
-        except RuntimeError:
-            raise HTTPException(status_code=400, detail="Invalid request") from None
+        with typed_route_errors(logger, "shadow browse failed for session %s", session_id):
+            try:
+                return await manager.enable_shadow_browse(session_id)
+            except ErrorPageSourceError as exc:
+                # Its fixed text says what to do instead, and names no host or path.
+                raise HTTPException(status_code=400, detail=str(exc)) from None
+            except RefusedPageError:
+                # The page checks' refusal, as the page routes and fork answer it. Every other PermissionError
+                # (a data: or blob: page, a page another tab refused) is typed_route_errors' generic 403: a 500
+                # with a traceback, before.
+                raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
+            except RuntimeError:
+                raise HTTPException(status_code=400, detail="Invalid request") from None
 
     @router.get("/sessions/{session_id}/audit")
     async def get_session_audit(

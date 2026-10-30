@@ -16,7 +16,8 @@ from unittest.mock import AsyncMock, MagicMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.action_errors import ERROR_PAGE_SOURCE_FORK, ERROR_PAGE_SOURCE_SHADOW, ErrorPageSourceError
+from app.action_errors import ERROR_PAGE_SOURCE_FORK, ERROR_PAGE_SOURCE_SHADOW, ErrorPageSourceError, RefusedPageError
+from app.routes._utils import OFF_LIST_PAGE_DETAIL
 from app.routes.session_diagnostics import create_session_diagnostics_router
 from app.routes.sessions import create_sessions_router
 from app.session_ownership import acting_as
@@ -118,6 +119,26 @@ class RestSurfaceTests(unittest.TestCase):
             response = client.post("/sessions/s1/shadow-browse")
 
         self.assertEqual((response.status_code, response.json()["detail"]), (400, ERROR_PAGE_SOURCE_SHADOW))
+
+    # ── round 2: the shadow-browse route's other refusals answer as fork's do, not as a 500 ────────────────
+
+    def test_shadow_browse_from_a_refused_page_answers_the_page_routes_403(self) -> None:
+        with self.client(RefusedPageError("the page is refused")) as client:
+            response = client.post("/sessions/s1/shadow-browse")
+
+        self.assertEqual((response.status_code, response.json()["detail"]), (403, OFF_LIST_PAGE_DETAIL))
+
+    def test_shadow_browse_from_a_data_page_answers_the_generic_403(self) -> None:
+        with self.client(PermissionError("URL scheme 'data' is not allowed; only http and https are")) as client:
+            response = client.post("/sessions/s1/shadow-browse")
+
+        self.assertEqual((response.status_code, response.json()["detail"]), (403, "Not permitted"))
+
+    def test_shadow_browse_still_answers_a_runtime_error_400(self) -> None:
+        with self.client(RuntimeError("shadow browse is disabled")) as client:
+            response = client.post("/sessions/s1/shadow-browse")
+
+        self.assertEqual((response.status_code, response.json()["detail"]), (400, "Invalid request"))
 
 
 if __name__ == "__main__":
