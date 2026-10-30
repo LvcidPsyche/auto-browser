@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse
 from starlette.responses import StreamingResponse
 
 from .. import events as _events
+from ..action_errors import ErrorPageSourceError
 from ..playwright_export import export_session_script
 from ._utils import OFF_LIST_PAGE_DETAIL, require_safe_segment, typed_route_errors
 
@@ -192,6 +193,9 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
     async def enable_shadow_browse(session_id: str) -> dict[str, Any]:
         try:
             return await manager.enable_shadow_browse(session_id)
+        except ErrorPageSourceError as exc:
+            # Its fixed text says what to do instead, and names no host or path.
+            raise HTTPException(status_code=400, detail=str(exc)) from None
         except RuntimeError:
             raise HTTPException(status_code=400, detail="Invalid request") from None
 

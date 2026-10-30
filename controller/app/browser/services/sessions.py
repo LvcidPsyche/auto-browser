@@ -11,7 +11,12 @@ from uuid import uuid4
 from playwright.async_api import Error as PlaywrightError
 
 from ... import events as _events
-from ...action_errors import SessionNotFoundError
+from ...action_errors import (
+    ERROR_PAGE_SOURCE_FORK,
+    ERROR_PAGE_SOURCE_SHADOW,
+    ErrorPageSourceError,
+    SessionNotFoundError,
+)
 from ...auth_policy import has_named_credentials
 from ...browser_scripts import apply_stealth
 from ...models import SessionRecord, SessionStatus, resolve_totp_hosts
@@ -55,6 +60,12 @@ PAGE_TITLE_TIMEOUT_SECONDS = 2.0
 CLOSE_LOCK_WAIT_SECONDS = 10.0
 # Each teardown step (trace, context, isolated runtime) gets at most this long.
 TEARDOWN_STEP_TIMEOUT_SECONDS = 30.0
+# Chrome's error page, left by a navigation the pre-request gate stopped or one that failed.
+CHROME_ERROR_SCHEME = "chrome-error:"
+
+
+def _on_error_page(page: Any) -> bool:
+    return str(getattr(page, "url", "") or "").startswith(CHROME_ERROR_SCHEME)
 
 
 class BrowserSessionService:
@@ -670,6 +681,9 @@ class BrowserSessionService:
             # cookies, and a refused page chose that URL, so a refused page is not forked onto it and the
             # URL is recorded as shown. A start_url the caller names is judged by create_session.
             if start_url is None:
+                if _on_error_page(session.page):
+                    # Before anything is exported: Chrome's error page is no URL to open.
+                    raise ErrorPageSourceError(ERROR_PAGE_SOURCE_FORK)
                 self.manager._assert_page_allowed(session)
             current_url = self.manager._shown_url(session.page)
             # Export through AuthStateManager so the state file is encrypted
@@ -721,6 +735,9 @@ class BrowserSessionService:
         async with session.lock:
             # The shadow opens the page's URL in a second browser: a refused page is not read
             # (its URL is the refused page's choice), and only an allowed http(s) URL is opened.
+            if _on_error_page(session.page):
+                # Before the state is exported or a browser launched: Chrome's error page is no URL to open.
+                raise ErrorPageSourceError(ERROR_PAGE_SOURCE_SHADOW)
             manager._assert_page_allowed(session)
             current_url = manager._shown_url(session.page)
             if current_url != "about:blank":
