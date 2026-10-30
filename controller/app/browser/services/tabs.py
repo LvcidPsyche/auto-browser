@@ -217,7 +217,7 @@ class BrowserTabService:
         ]
         for tab, page in zip(tabs, pages):
             # A tab whose navigation the pre-request gate stopped shows Chrome's error page: say what was stopped.
-            block = await self.manager.request_gates.error_page_block(session.browser, page)
+            block = await self.manager.request_gates.error_page_block(getattr(session, "browser", None), page)
             if block is not None:
                 tab["blocked_navigation"] = block_summary(block)
         return tabs

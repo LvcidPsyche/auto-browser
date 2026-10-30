@@ -178,7 +178,7 @@ class BrowserObservationService:
         read.check(payload.get("screenshot_path"))
         # On Chrome's error page for a navigation the gate stopped, the controller's own statement of it (origin,
         # reason, explanation), next to the page as it is read.
-        block = await self.manager.request_gates.error_page_block(session.browser, session.page)
+        block = await self.manager.request_gates.error_page_block(getattr(session, "browser", None), session.page)
         if block is not None:
             payload["blocked_navigation"] = block_summary(block)
         return payload
