@@ -252,21 +252,32 @@ own sessions in Chromium (DevTools `Fetch`, one session per browser) and fails t
   commits):
   - speculation-rules prefetch in attach modes, and in a launched browser where it could not be turned off
     (launched browsers turn it off when the controller acquires them; `/readiness` warns when that failed);
-  - a navigation served by a service worker that a same-site refused iframe registered, for a popup's first
-    navigation in every mode;
+  - a navigation a service worker serves (one a same-site refused iframe registered) for a popup's first
+    navigation, and for any the popup makes before its service-worker bypass is set (a background task once
+    the controller sees the popup), in every mode;
   - `blob:` navigations a refused iframe makes;
   - bfcache restores in attach modes;
-  - requests held when the gate detaches. They go out; no window is promised.
+  - requests held when the gate detaches, and any navigation a page starts itself before the replacement gate
+    attaches. They go out. The controller attaches the replacement before it closes that browser's sessions,
+    so the window is one attach, and it refuses their actions meanwhile.
+- **Any tab, rarely:** a navigation to a refused host fails closed in any tab of a gated browser, the
+  operator's own included in attach modes, when the gate cannot classify its frame (its lookup failed).
 - **Not covered:** iframes and subresources of other hosts.
 
 What the agent sees:
 
-- When the gate stops the navigation of `navigate`, a session's `start_url` or a tab opened onto a URL (a
-  redirect into a refused host), they answer `browser_action_blocked` (REST 403, `retryable: false`), naming
-  only the refused origin, where they answered a retryable failure before. A cross-origin POST redirect stopped
-  in an attach mode (below) answers the same code with what to change. A URL that `ALLOWED_HOSTS` refuses as
-  written is refused before anything exists or is sent, as before (a 403); that is not a
-  stop of the gate.
+- When the gate stops the navigation of `navigate`, a session's `start_url` (also when the page leaves for
+  a refused host while it settles, by a meta refresh or a script), a shadow browse or a tab opened onto a URL,
+  they answer `browser_action_blocked` (REST 403, `retryable: false`), with the message and `url` naming only
+  the refused origin. A cross-origin POST redirect stopped in an attach mode (below) answers the same code with
+  what to change. In 1.11.2 a `navigate` redirected into a refused host already answered
+  `browser_action_blocked` ("Action blocked by policy"), and a `start_url` or a new tab's URL answered
+  `not_permitted` (REST 403 `{"detail": "Not permitted"}`). Which layer refuses decides the code:
+  - a URL `ALLOWED_HOSTS` refuses as written is refused before anything exists or is sent, as before (a 403);
+  - a navigation the gate stops answers `browser_action_blocked`, as above;
+  - a page NAV-07 refuses once it has committed (one of the gaps above, or `PRE_REQUEST_BLOCKING=false`)
+    answers as in 1.11.2: `browser_action_blocked` for `navigate`, `not_permitted` for a `start_url` or a new
+    tab's URL.
 - Only the gate's own failure of the page's request (`net::ERR_BLOCKED_BY_CLIENT`) counts: an action that fails
   for another reason (a selector timeout) keeps its own error even if the page tried a refused navigation
   meanwhile.
@@ -277,9 +288,10 @@ What the agent sees:
   `blocked_navigation`.
 - Each block is audited as `navigation_blocked` with `source: "request"` and the origin only.
 - A browser the gate cannot attach to gets no sessions: creating one answers `pre_request_gate_unavailable`
-  (503, retryable), naming `PRE_REQUEST_BLOCKING`. If the gate detaches on its own, every session on that
-  browser is closed, and the next call on one names the reason (`request_gate_lost`); the next session
-  attaches a new gate.
+  (503, retryable), naming `PRE_REQUEST_BLOCKING`. If the gate detaches on its own, the controller attaches
+  a replacement, then closes every session on that browser (a shared browser whose context will not close is
+  disconnected, and the next session reconnects). An action on one of them meanwhile is refused before it
+  starts, and the next call on one answers `session_closed` with `reason: "request_gate_lost"` (REST and MCP).
 - `/readiness` reports a `pre_request_gate` check: its state (off and why, idle, attached, lost, attach
   failed), whether it is an attach mode with the switch declared, the prefetch preference read back, and counts
   of service-worker bypass failures, handler errors and blocks of frames the gate could not look up. It warns
@@ -291,7 +303,8 @@ Classification relies on a page's target existing when its first request pauses,
 Chromium 151 and is guarded by the popup tests. If a Chromium change broke that, a refused page would fall back
 to NAV-07 after the fact.
 
-In the browsers the controller launches (browser-node, `docker_ephemeral`, shadow browsing):
+In the browsers the controller launches (browser-node, `docker_ephemeral`, shadow browsing), while the gate
+is on (prefetch and the bypass; partitioning always):
 
 - speculation-rules prefetch is turned off: the controller sets `net.network_prediction_options` to 2 in the
   browser's default profile when it acquires it, whatever the gate's attach did, and reads it back. That is the
@@ -301,17 +314,18 @@ In the browsers the controller launches (browser-node, `docker_ephemeral`, shado
   paths, as a second layer: which path that Chromium build reads is unverified. A prefetch is fetched without
   DevTools seeing it, so the refused host would get the request;
 - owned pages bypass service workers (`Network.setBypassServiceWorker`), so a worker cannot answer their
-  navigations without a request the gate sees (except a popup's first, which starts before the controller
-  sees the popup);
+  navigations without a request the gate sees (except a popup's first navigation, which starts before the
+  controller sees the popup, and any it makes before its bypass is set; NAV-07 refuses those after they load);
 - third-party storage partitioning is back on, as in Chrome: Playwright turns it off, and the controller passes
   Playwright's own `--disable-features` list without `ThirdPartyStoragePartitioning`. What changes for sites:
   a third-party iframe's `localStorage` is keyed to the top-level site, so the same origin opened top-level
   does not see it, and a saved auth profile (`storage_state`) does not carry it. Its cookies and first-party
   logins round-trip as before.
 
-In the attach modes (`CDP_CONNECT_URL`, `browser.cdp_attach`) the gate acts only on the contexts the controller
-creates: the operator's own tabs and windows are never stopped, and their prefetch setting is left alone.
-The gate adds about 13 ms to each navigation there (the median measured on Chromium 151). Start that Chrome with
+In the attach modes (`CDP_CONNECT_URL`, `browser.cdp_attach`) the gate stops navigations only in the contexts the
+controller creates (apart from a frame it cannot classify, above), and the operator's prefetch setting is left
+alone. Every navigation in that Chrome, the operator's own tabs included, waits on the gate's reply: about 13 ms
+each (the median measured on Chromium 151). Start that Chrome with
 `--disable-features=BlockOriginHeaderModificationOnRedirect` and set `CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true`:
 without the switch, Chrome fails a cross-origin 307/308 POST redirect hop that a DevTools `Fetch` handler lets
 through, so the controller stops such a hop in its sessions itself, with an error naming the switch, and the
@@ -499,10 +513,12 @@ seconds.
 
 ### What a refused page still does
 
-- **Its request has already gone out when it is refused.** Checks run when a request starts or a
-  navigation commits, and the navigation request itself, with whatever the page put in its URL, reaches
-  the refused host. The page runs, sets cookies and shows in the takeover (noVNC) view until it is
-  blanked.
+- **Its request has already gone out when it is refused.** A top-level navigation the pre-request gate
+  stops never reaches the host ([above](#stopped-before-the-request-is-sent)), so a refused page that
+  commits got past it: one of the gaps listed there, or `PRE_REQUEST_BLOCKING=false`. NAV-07's checks run
+  when a request starts or a navigation commits, and that navigation request, with whatever the page put in
+  its URL, reached the refused host. The page runs, sets cookies and shows in the takeover (noVNC) view
+  until it is blanked.
 - **Blanking waits for any call in flight on the session to finish.** The page-reading MCP tools hold
   the session at most 30 seconds each (`browser.eval_js` up to its `timeout_ms`), a drag also
   `ACTION_TIMEOUT_MS` for each end named by a selector or `element_id`, and 7 seconds more: 2 to remove
