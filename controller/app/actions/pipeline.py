@@ -17,7 +17,7 @@ from ..action_errors import (
     SessionNotFoundError,
 )
 from ..approvals import ApprovalRefusal, effect_started, held_status, refused_before_effect
-from ..browser.request_gate import block_summary, stopped_by_gate
+from ..browser.request_gate import UNATTRIBUTED_STOP, block_summary, stopped_by_gate
 from ..utils import utc_now
 from ..witness import WitnessApproval
 
@@ -233,17 +233,20 @@ class BrowserActionPipeline:
             witness_state.operation_started = True
         page = session.page
         browser = getattr(session, "browser", None)
-        # The page's own count: a background tab's blocks are not this action's.
-        blocked_before = await gates.page_block_count(browser, page) if gates is not None else 0
+        # The browser's request sequence now: a block after it on this page is this action's.
+        blocked_before = gates.mark(browser) if gates is not None else 0
         try:
             await context.operation()
         except PlaywrightError as exc:
-            # Only the gate's own failure of this page's request: a selector timeout keeps its error.
-            stopped = await self._blocks_during(context, page, blocked_before) if stopped_by_gate(exc) else []
+            # Only the gate's own failure (its first line): a selector timeout keeps its error.
+            if not stopped_by_gate(exc):
+                raise
+            stopped = await self._blocks_during(context, page, blocked_before)
+            # A block, not a retryable failure; with no block tied to the page (its targetId could not be read),
+            # a text that names no URL.
             if stopped:
-                # The operation failed because the gate stopped its navigation: a block, not a retryable failure.
-                raise NavigationStoppedError(stopped[-1].explanation) from exc
-            raise
+                raise NavigationStoppedError(stopped[-1].explanation, origin=stopped[-1].origin) from exc
+            raise NavigationStoppedError(UNATTRIBUTED_STOP) from exc
         stopped = await self._blocks_during(context, page, blocked_before)
         if stopped:
             # The action did its work; a navigation it led to on its own page was stopped before it was sent.

@@ -864,7 +864,7 @@ async def test_r6_blocks_on_page_finds_a_lookup_error_block_by_the_pages_target(
     )
     await gates.require(browser)
     page = Mock(context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=page_session_for("ctx", "the-page"))))
-    since = await gates.page_block_count(browser, page)
+    since = gates.mark(browser)
     cdp.replies["Target.getTargetInfo"] = RuntimeError("Target.getTargetInfo: boom")
 
     cdp.emit(
@@ -1008,3 +1008,87 @@ async def test_f3_c_a_bypass_that_never_answers_is_bounded_for_both_callers(monk
     await asyncio.wait_for(asyncio.gather(first, gates.bypass_service_workers(page)), timeout=2.0)
 
     assert gates.bypass_failures == 1
+
+
+# ── round 4: the gate's own failure (F4), sequence numbers (F6) ──────────────
+
+
+def test_f4_only_the_first_line_of_the_error_counts() -> None:
+    from playwright.async_api import Error as PlaywrightError
+
+    selector = PlaywrightError(
+        'Locator.click: Timeout 1000ms exceeded.\nCall log:\n  - waiting for locator("text=net::ERR_BLOCKED_BY_CLIENT")'
+    )
+    stopped = PlaywrightError("Page.goto: net::ERR_BLOCKED_BY_CLIENT at https://allowed.example/r\nCall log:\n  - x")
+    bare = PlaywrightError("net::ERR_BLOCKED_BY_CLIENT at https://allowed.example/r")
+
+    assert not request_gate.stopped_by_gate(selector)
+    assert request_gate.stopped_by_gate(stopped)
+    assert request_gate.stopped_by_gate(bare)
+
+
+async def _gates_on(cdp: FakeCDPSession) -> tuple[request_gate.RequestGates, SimpleNamespace]:
+    browser = SimpleNamespace(new_browser_cdp_session=AsyncMock(return_value=cdp))
+    gates = _gates()
+    await gates.require(browser)
+    return gates, browser
+
+
+async def test_f4_the_first_pages_target_id_is_seeded_at_registration() -> None:
+    gates, browser = await _gates_on(FakeCDPSession())
+    context = SimpleNamespace(new_cdp_session=AsyncMock(return_value=page_session_for("ctx", "seeded")), on=Mock())
+    page = Mock(context=context)
+    await gates.get(browser).register_context(context, page)
+    context.new_cdp_session.side_effect = RuntimeError("no page session now")
+
+    assert await gates.target_id_of(page) == "seeded"
+
+
+def _pause(cdp: FakeCDPSession, request_id: str, frame: str, url: str = f"{REFUSED}/") -> None:
+    cdp.emit(
+        "Fetch.requestPaused",
+        {"requestId": request_id, "frameId": frame, "request": {"url": url, "method": "GET", "headers": {}}},
+    )
+
+
+async def test_f6_a_page_entry_evicted_and_recreated_still_reports_its_new_block(monkeypatch) -> None:
+    monkeypatch.setattr(request_gate, "PAGES_KEPT", 1)
+    cdp = FakeCDPSession()
+    gates, browser = await _gates_on(cdp)
+    context_id = new_context_id()
+    for target in ("page-a", "page-b"):
+        cdp.emit(
+            "Target.targetCreated", {"targetInfo": {"targetId": target, "type": "page", "browserContextId": context_id}}
+        )
+    context = SimpleNamespace(new_cdp_session=AsyncMock(return_value=page_session_for(context_id, "page-a")), on=Mock())
+    page_a = Mock(context=context)
+    await gates.get(browser).register_context(context, page_a)
+    _pause(cdp, "a1", "page-a")
+    await cdp.wait_for_reply("a1")
+    since = gates.mark(browser)
+    _pause(cdp, "b1", "page-b")  # evicts page-a's entry
+    await cdp.wait_for_reply("b1")
+
+    _pause(cdp, "a2", "page-a", f"{REFUSED}/again")
+    await cdp.wait_for_reply("a2")
+
+    [block] = await gates.blocks_on_page(browser, page_a, since=since)
+    assert block.origin == REFUSED and block.seq > since
+
+
+async def test_f6_a_mark_needs_no_target_read_and_attributes_nothing_earlier() -> None:
+    cdp = FakeCDPSession()
+    gates, browser = await _gates_on(cdp)
+    context_id = new_context_id()
+    cdp.emit("Target.targetCreated", {"targetInfo": {"targetId": "p", "type": "page", "browserContextId": context_id}})
+    context = SimpleNamespace(new_cdp_session=AsyncMock(return_value=page_session_for(context_id, "p")), on=Mock())
+    page = Mock(context=context)
+    await gates.get(browser).register_context(context, page)
+    _pause(cdp, "earlier", "p")
+    await cdp.wait_for_reply("earlier")
+    context.new_cdp_session.reset_mock()
+
+    since = gates.mark(browser)
+
+    context.new_cdp_session.assert_not_awaited()
+    assert await gates.blocks_on_page(browser, page, since=since) == []

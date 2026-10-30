@@ -801,15 +801,15 @@ class BrowserSessionService:
                 "The pre-request gate detached from the browser while the session was starting, so it was closed. "
                 "Try again."
             )
-        since = await gates.page_block_count(browser, page)
+        since = gates.mark(browser)
         try:
             with self.manager.page_provenance.controller_navigation(page) as navigation:
                 navigation.response = await page.goto(url, wait_until="domcontentloaded")
         except PlaywrightError as exc:
-            stopped = await gates.blocks_on_page(browser, page, since=since) if stopped_by_gate(exc) else []
-            if stopped:
-                raise navigation_blocked_error(stopped[-1], action=action) from exc
-            raise
+            if not stopped_by_gate(exc):
+                raise
+            stopped = await gates.blocks_on_page(browser, page, since=since)
+            raise navigation_blocked_error(stopped[-1] if stopped else None, action=action) from exc
 
     async def _page_snapshot(self, session: "BrowserSession") -> tuple[str, str, bool]:
         page = session.page

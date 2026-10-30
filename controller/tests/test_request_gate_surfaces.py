@@ -395,3 +395,18 @@ class GatesStatusTests(_Base):
         self.assertEqual(status["bypass_failures"], failures_before + 1)
         [gate] = status["gates"]
         self.assertEqual((gate["handler_errors"], gate["lookup_error_blocks"]), (0, 1))
+
+
+class UnattributedStopTests(_Base):
+    """F4: the gate's own failure converts even when no block can be attributed to the page."""
+
+    async def test_a_stop_whose_page_cannot_be_read_is_converted_with_a_generic_text(self) -> None:
+        self.manager.request_gates.target_id_of = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+        error = await self.open_with("Page.goto: net::ERR_BLOCKED_BY_CLIENT at https://example.com/tab")
+
+        self.assertEqual(error.code, "browser_action_blocked")
+        self.assertEqual(error.message, "A navigation was stopped before it was sent by the pre-request gate.")
+        self.assertIsNone(error.url)
+
+    open_with = NewTabConversionTests.open_with

@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 import weakref
 from collections import OrderedDict, deque
@@ -71,8 +72,12 @@ BYPASS_TIMEOUT_SECONDS = 5.0
 # Network.enable on the bypass session keeps no bodies: the bypass needs the domain on, not its buffers (measured on
 # Chromium 151, round 4: 0 keeps the bypass working; Network.disable ends it).
 BYPASS_NETWORK_BUFFER_BYTES = 0
-# How Playwright reports a request the gate failed (Fetch.failRequest BlockedByClient).
+# How Playwright reports a request the gate failed (Fetch.failRequest BlockedByClient): the first line of its
+# error, as "Page.goto: net::ERR_BLOCKED_BY_CLIENT at <url>" (or without the "Page.goto: " prefix).
 BLOCKED_BY_CLIENT_TEXT = "net::ERR_BLOCKED_BY_CLIENT"
+_STOPPED_FIRST_LINE = re.compile(r"^(?:[\w.]+: )?net::ERR_BLOCKED_BY_CLIENT(?: at |$)")
+# What the agent is told when the gate's failure is certain but no block could be tied to the page.
+UNATTRIBUTED_STOP = "A navigation was stopped before it was sent by the pre-request gate."
 # How long a frame's lookup may take before it counts as failed (a refused URL then fails).
 LOOKUP_TIMEOUT_SECONDS = 5.0
 # How long reading a page's targetId may take (it runs under the session lock, in error handling too).
@@ -112,19 +117,21 @@ class GateBlock:
     origin: str
     reason: str
     explanation: str
+    # The gate-wide sequence of the request it stopped (shared by replacement gates): what "since" compares.
+    seq: int = 0
     at: float = field(default_factory=time.monotonic)
 
 
-def navigation_blocked_error(block: GateBlock, *, action: str) -> BrowserActionError:
+def navigation_blocked_error(block: GateBlock | None, *, action: str) -> BrowserActionError:
     """What the agent is told about a navigation the gate stopped outside the action pipeline (a start URL, a new
-    tab's URL): a block, not a retryable failure, naming only the origin."""
+    tab's URL): a block, not a retryable failure, naming only the origin, or no URL when no block was attributed."""
     return BrowserActionError(
-        block.explanation,
+        block.explanation if block is not None else UNATTRIBUTED_STOP,
         code=BROWSER_ACTION_BLOCKED,
         action=action,
         status_code=403,
         retryable=False,
-        url=block.origin,
+        url=block.origin if block is not None else None,
     )
 
 
@@ -133,9 +140,10 @@ def block_summary(block: GateBlock) -> dict[str, str]:
 
 
 def stopped_by_gate(exc: BaseException) -> bool:
-    """Whether a Playwright failure is a request the gate failed: anything else (a selector timeout while the page
-    tried a refused navigation) keeps its own error."""
-    return BLOCKED_BY_CLIENT_TEXT in str(exc)
+    """Whether a Playwright failure is a request the gate failed, by the first line of its error only: a selector,
+    or a call log, that contains the token is not one, and keeps its own error."""
+    text = getattr(exc, "message", None) or str(exc)
+    return bool(_STOPPED_FIRST_LINE.match(str(text).splitlines()[0] if text else ""))
 
 
 @dataclass
@@ -144,8 +152,23 @@ class _OwnedContext:
     blocks: deque[GateBlock] = field(default_factory=lambda: deque(maxlen=BLOCKS_KEPT))
 
 
-# A page's blocks: the same shape, keyed by its targetId, whether or not its context was known.
-_PageBlocks = _OwnedContext
+@dataclass
+class _PageBlocks(_OwnedContext):
+    """A page's blocks, keyed by its targetId whether or not its context was known, and the sequence of its last
+    main-frame request the gate judged (continued or failed)."""
+
+    last_request: int = 0
+
+
+@dataclass
+class _Sequence:
+    """The gate-wide request sequence, one object shared by a gate and its replacements."""
+
+    value: int = 0
+
+    def next(self) -> int:
+        self.value += 1
+        return self.value
 
 
 @dataclass(frozen=True)
@@ -189,9 +212,12 @@ class RequestGate:
         on_lost: Callable[["RequestGate"], None],
         on_block: Callable[[GateBlock], None] | None = None,
         inherit_from: "RequestGate | None" = None,
+        on_page_target: Callable[[Any, str], None] | None = None,
     ) -> None:
         self.browser = browser
         self._on_block = on_block
+        # Told each registered context's first page and its targetId (RequestGates seeds its cache from it).
+        self._on_page_target = on_page_target
         self._url_refused = url_refused
         self._attach_mode = attach_mode
         self._origin_switch_declared = origin_switch_declared
@@ -207,6 +233,7 @@ class RequestGate:
         self._owned: dict[str, _OwnedContext] = inherit_from._owned if inherit_from is not None else {}
         # Blocks by page targetId, shared the same way: a caller's count from before a loss still compares.
         self._pages: OrderedDict[str, _PageBlocks] = inherit_from._pages if inherit_from is not None else OrderedDict()
+        self._sequence: _Sequence = inherit_from._sequence if inherit_from is not None else _Sequence()
         # Shared too: a hop paused at the replacement right after a loss finds the URL it redirects from.
         self._request_urls: OrderedDict[str, str] = (
             inherit_from._request_urls if inherit_from is not None else OrderedDict()
@@ -298,6 +325,8 @@ class RequestGate:
             context_id = info["browserContextId"]
         except Exception as exc:
             raise RequestGateUnavailable(f"the pre-request gate could not read the new context: {exc}") from exc
+        if self._on_page_target is not None and info.get("targetId"):
+            self._on_page_target(page, info["targetId"])
         if not self.live:
             raise RequestGateUnavailable("the pre-request gate detached while the session was starting")
         self._owned[context_id] = _OwnedContext()
@@ -329,6 +358,24 @@ class RequestGate:
         page = self._pages.get(target_id) if target_id else None
         return page.blocked if page is not None else 0
 
+    @property
+    def sequence(self) -> int:
+        """The last request sequence handed out: an operation's "before" mark, with no page read."""
+        return self._sequence.value
+
+    def last_request(self, target_id: str | None) -> int:
+        page = self._pages.get(target_id) if target_id else None
+        return page.last_request if page is not None else 0
+
+    def _page(self, target_id: str) -> _PageBlocks:
+        page = self._pages.get(target_id)
+        if page is None:
+            page = self._pages[target_id] = _PageBlocks()
+        self._pages.move_to_end(target_id)
+        while len(self._pages) > PAGES_KEPT:
+            self._pages.popitem(last=False)
+        return page
+
     # ── events ───────────────────────────────────────────────────────────────
 
     def _on_target(self, event: dict[str, Any]) -> None:
@@ -359,7 +406,8 @@ class RequestGate:
             # Decision state, not bookkeeping: the next hop's verdict reads it, so it is written before the reply.
             self._remember_url(event.get("requestId"), url)
         # On record before the reply (memory only): whoever reads once Playwright reports the failure finds it.
-        block = self._record_block(event, url, verdict) if verdict.fail else None
+        seq = self._note_request(event, verdict)
+        block = self._record_block(event, url, verdict, seq) if verdict.fail else None
         reply_error: BaseException | None = None
         try:
             if verdict.fail:
@@ -453,7 +501,16 @@ class RequestGate:
             except Exception:
                 logger.exception("pre-request gate: the block listener failed")
 
-    def _record_block(self, event: dict[str, Any], url: str, verdict: _Verdict) -> GateBlock:
+    def _note_request(self, event: dict[str, Any], verdict: _Verdict) -> int:
+        """Number a main-frame request the gate judged (an owned page's, or one it could not classify), and keep it
+        as its page's last: the tab list labels a block only while it is the page's last such request."""
+        seq = self._sequence.next()
+        target_id = event.get("frameId")
+        if target_id and (verdict.owned_page or verdict.fail or verdict.lookup_error is not None):
+            self._page(target_id).last_request = seq
+        return seq
+
+    def _record_block(self, event: dict[str, Any], url: str, verdict: _Verdict, seq: int = 0) -> GateBlock:
         """Keep the block by its page, and by its context when that is known. Memory only: it runs before the reply."""
         origin = _origin_of(url)
         if verdict.reason == CROSS_ORIGIN_POST_REDIRECT:
@@ -473,16 +530,12 @@ class RequestGate:
             origin=origin,
             reason=verdict.reason or UNCLASSIFIED,
             explanation=explanation,
+            seq=seq,
         )
         if block.target_id:
-            page = self._pages.get(block.target_id)
-            if page is None:
-                page = self._pages[block.target_id] = _PageBlocks()
-            self._pages.move_to_end(block.target_id)
+            page = self._page(block.target_id)
             page.blocked += 1
             page.blocks.append(block)
-            while len(self._pages) > PAGES_KEPT:
-                self._pages.popitem(last=False)
         if verdict.lookup_error is not None:
             self.lookup_error_blocks += 1
         if owned is None:
@@ -557,8 +610,6 @@ class RequestGates:
         self._attach_failures: dict[int, tuple[Any, str]] = {}
         # Each page's targetId, read once (a block names the page by it).
         self._target_ids: weakref.WeakKeyDictionary[Any, str] = weakref.WeakKeyDictionary()
-        # When each page last committed a main-frame document other than Chrome's error page (monotonic).
-        self._commits: weakref.WeakKeyDictionary[Any, float] = weakref.WeakKeyDictionary()
         # The prefetch preference read back from each launched browser (decision 5), for readiness.
         self._prefetch: dict[int, tuple[Any, Any]] = {}
         # Each owned page's session holding Network.setBypassServiceWorker; the bypass lasts as long as it does.
@@ -660,6 +711,7 @@ class RequestGates:
                 on_lost=self._on_lost,
                 on_block=self._on_block,
                 inherit_from=previous,
+                on_page_target=self._seed_target_id,
             )
             try:
                 await gate.attach()
@@ -702,38 +754,33 @@ class RequestGates:
 
     # ── what a session's pages ran into ──────────────────────────────────────
 
-    async def page_block_count(self, browser: Any, page: Any) -> int:
-        """A page's own block count now: what an operation on it compares against afterwards."""
+    def mark(self, browser: Any) -> int:
+        """The browser's request sequence now: an operation's "before", read without touching the page."""
         gate = self.get(browser)
-        if gate is None:
-            return 0
-        return gate.page_blocked_count(await self.target_id_of(page))
+        return gate.sequence if gate is not None else 0
 
     async def blocks_on_page(self, browser: Any, page: Any, *, since: int) -> list[GateBlock]:
-        """The blocks on ``page`` since its count was ``since``: its own, never another tab's."""
+        """The blocks on ``page`` after the mark ``since``: its own, never another tab's, nor an earlier one."""
         gate = self.get(browser)
         if gate is None:
             return []
-        target_id = await self.target_id_of(page)
-        new = gate.page_blocked_count(target_id) - since
-        return gate.page_blocks(target_id)[-new:] if new > 0 else []
+        return [block for block in gate.page_blocks(await self.target_id_of(page)) if block.seq > since]
 
     async def last_block_on_page(self, browser: Any, page: Any) -> GateBlock | None:
-        """The most recent block on ``page`` (a tab whose navigation was stopped shows Chrome's error page)."""
+        """The block that is ``page``'s last main-frame request (its tab shows Chrome's error page for it); none
+        once a later request of the page continued, whatever became of that one."""
         gate = self.get(browser)
         if gate is None:
             return None
-        blocks = gate.page_blocks(await self.target_id_of(page))
-        if not blocks or blocks[-1].at <= self._commits.get(page, float("-inf")):
-            # Older than the page's last real commit: its error page now is some other failure's.
+        target_id = await self.target_id_of(page)
+        blocks = gate.page_blocks(target_id)
+        if not blocks or blocks[-1].seq != gate.last_request(target_id):
             return None
         return blocks[-1]
 
-    def note_commit(self, page: Any, url: str) -> None:
-        """A main-frame commit of ``page`` (the page guard reports each); Chrome's error page is not one."""
-        if not url.startswith("chrome-error:"):
-            with contextlib.suppress(TypeError):  # a page that cannot be weakly referenced (a test double)
-                self._commits[page] = time.monotonic()
+    def _seed_target_id(self, page: Any, target_id: str) -> None:
+        with contextlib.suppress(TypeError):  # a page that cannot be weakly referenced (a test double)
+            self._target_ids[page] = target_id
 
     def known_target_id(self, page: Any) -> str | None:
         """A page's targetId if it was read already: no I/O (the audit's attribution reads it)."""

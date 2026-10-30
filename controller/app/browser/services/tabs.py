@@ -66,8 +66,8 @@ class BrowserTabService:
             # Before the tab exists: on a lost gate its navigation would go out unjudged.
             gates.assert_live(session)
             new_page = await session.context.new_page()
-            # The new page's own count, before it navigates: another tab's blocks are not this one's.
-            blocked_before = await gates.page_block_count(session.browser, new_page)
+            # The browser's request sequence before the tab navigates: a block after it on this page is its own.
+            blocked_before = gates.mark(session.browser)
             # Reported by the context like a popup, but with no opener to judge it.
             self.manager.page_provenance.opened_by_controller(new_page)
             if session.gate_context_id is not None:
@@ -83,10 +83,9 @@ class BrowserTabService:
                     self.manager._assert_runtime_url_allowed(new_page.url)
             except BaseException as exc:
                 # Read while the tab is open: a block names its page by the page's targetId.
+                stopped_here = isinstance(exc, PlaywrightError) and stopped_by_gate(exc)
                 stopped = (
-                    await gates.blocks_on_page(session.browser, new_page, since=blocked_before)
-                    if isinstance(exc, PlaywrightError) and stopped_by_gate(exc)
-                    else []
+                    await gates.blocks_on_page(session.browser, new_page, since=blocked_before) if stopped_here else []
                 )
                 # A failed open (DNS error, timeout, refused redirect) left the
                 # blank tab behind, unreported, and answered with a raw 500.
@@ -95,8 +94,8 @@ class BrowserTabService:
                 except Exception as close_exc:
                     logger.debug("could not close the failed new tab: %s", close_exc)
                 if isinstance(exc, PlaywrightError):
-                    if stopped:
-                        raise navigation_blocked_error(stopped[-1], action="open_tab") from exc
+                    if stopped_here:
+                        raise navigation_blocked_error(stopped[-1] if stopped else None, action="open_tab") from exc
                     raise BrowserActionError(
                         "Could not open the tab. Check the URL and retry.",
                         code="browser_action_failed",

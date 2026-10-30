@@ -25,7 +25,12 @@ SESSION_CLOSED_GATE_LOST = "request_gate_lost"
 
 
 class NavigationStoppedError(PermissionError):
-    """A navigation the pre-request gate stopped before it was sent. The text names only the refused origin."""
+    """A navigation the pre-request gate stopped before it was sent. The text names only the refused origin, which
+    ``origin`` carries for the error's ``url`` (None when no block could be tied to the page)."""
+
+    def __init__(self, message: str, *, origin: str | None = None) -> None:
+        super().__init__(message)
+        self.origin = origin
 
 
 class BrowserActionError(Exception):

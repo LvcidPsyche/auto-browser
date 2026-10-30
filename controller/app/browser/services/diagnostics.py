@@ -352,10 +352,6 @@ class BrowserDiagnosticsService:
         """
         if frame.parent_frame is not None:
             return
-        gates = getattr(self.manager, "request_gates", None)
-        if gates is not None:
-            # Dates the page's last real commit, so the tab list labels only a block newer than it.
-            gates.note_commit(page, frame.url)
         url_refused = self.manager._url_off_list(frame.url)
         session_refused = (
             not url_refused

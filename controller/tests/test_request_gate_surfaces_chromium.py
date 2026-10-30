@@ -235,3 +235,23 @@ async def test_r7_a_tab_that_loaded_an_allowed_page_since_its_block_is_not_label
         [tab] = await env.manager.list_tabs(session_id)
 
         assert "blocked_navigation" not in tab, tab
+
+
+async def test_f7_a_later_navigation_that_failed_for_another_reason_drops_the_label(tmp_path: Path) -> None:
+    """A block, then an allowed navigation that fails (the port refuses) with no commit between: no label."""
+    async with gated(tmp_path) as env:
+        session_id = await env.create()
+        page = env.manager.sessions[session_id].page
+        with contextlib.suppress(Exception):
+            await page.goto(env.server.url(REFUSED, "/x"))
+        await eventually(lambda: page.url.startswith("chrome-error:"))
+        [tab] = await env.manager.list_tabs(session_id)
+        assert "blocked_navigation" in tab, "the control: labelled first"
+
+        with contextlib.suppress(Exception):
+            await page.goto(f"http://{ALLOWED}:9/unreachable")
+        await asyncio.sleep(0.5)
+        [tab] = await env.manager.list_tabs(session_id)
+
+        assert tab["url"].startswith("chrome-error:")
+        assert "blocked_navigation" not in tab, tab
