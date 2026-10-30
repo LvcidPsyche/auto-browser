@@ -47,13 +47,33 @@ def _page_closed(page: Any) -> bool:
     return callable(is_closed) and is_closed() is True
 
 
+# Page-session opens a timed-out targetId read left running: kept until they resolve, then detached.
+_OPENING: set[asyncio.Task[Any]] = set()
+
+
 async def _read_target_id(page: Any) -> str:
-    session = await page.context.new_cdp_session(page)
+    # A task, shielded: when the caller's bound fires while the session is still opening, the open goes on (the
+    # browser creates the session anyway) and the session is detached once it exists, rather than left attached.
+    opening = asyncio.ensure_future(page.context.new_cdp_session(page))
+    try:
+        session = await asyncio.shield(opening)
+    except BaseException:
+        if not opening.done():
+            _OPENING.add(opening)
+            opening.add_done_callback(_detach_once_opened)
+        raise
     try:
         return (await session.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
     finally:
         # Not awaited here: a detach that stalls must not hold the bound above, or the session lock.
         spawn_background_task(_detach_quietly(session))
+
+
+def _detach_once_opened(opening: asyncio.Task[Any]) -> None:
+    _OPENING.discard(opening)
+    if opening.cancelled() or opening.exception() is not None:
+        return  # nothing opened; the read already reported its own failure
+    spawn_background_task(_detach_quietly(opening.result()))
 
 
 async def _detach_quietly(session: Any) -> None:

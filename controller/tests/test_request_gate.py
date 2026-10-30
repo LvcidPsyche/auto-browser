@@ -1291,3 +1291,59 @@ async def test_f3c_a_waiter_on_a_setup_that_never_settles_is_bounded(monkeypatch
     gates._bypass_pending[page] = asyncio.get_running_loop().create_future()
 
     await asyncio.wait_for(gates.bypass_service_workers(page), timeout=2.0)
+
+
+# ── follow-ups: no page session leaked by a timed-out targetId read (FU3) ────
+
+
+async def test_fu3_a_page_session_that_opens_after_the_bound_is_detached_once_it_opens(monkeypatch) -> None:
+    monkeypatch.setattr(request_gates, "TARGET_ID_TIMEOUT_SECONDS", 0.05)
+    gates = _gates()
+    late = FakeCDPSession()
+    opened = asyncio.Event()
+
+    async def browser_side_open() -> FakeCDPSession:
+        await asyncio.sleep(0.2)
+        opened.set()
+        return late
+
+    opening: list[asyncio.Task] = []
+
+    async def opens_late(_page) -> FakeCDPSession:
+        # As Playwright: the request is sent, and the session is created whether or not its awaiter is cancelled.
+        opening.append(asyncio.ensure_future(browser_side_open()))
+        return await asyncio.shield(opening[0])
+
+    page = Mock(context=SimpleNamespace(new_cdp_session=opens_late))
+
+    assert await gates.target_id_of(page) is None
+    await asyncio.wait_for(opened.wait(), timeout=2.0)
+    for _ in range(20):
+        if late.detached:
+            break
+        await asyncio.sleep(0.01)
+
+    assert late.detached, "the session opened after the bound was left attached"
+
+
+async def test_fu3_a_page_session_that_fails_to_open_after_the_bound_is_quiet(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(request_gates, "TARGET_ID_TIMEOUT_SECONDS", 0.05)
+    gates = _gates()
+
+    async def browser_side_failure() -> FakeCDPSession:
+        await asyncio.sleep(0.1)
+        raise RuntimeError("Target closed")
+
+    opening: list[asyncio.Task] = []
+
+    async def fails_late(_page) -> FakeCDPSession:
+        opening.append(asyncio.ensure_future(browser_side_failure()))
+        return await asyncio.shield(opening[0])
+
+    page = Mock(context=SimpleNamespace(new_cdp_session=fails_late))
+
+    with caplog.at_level("WARNING"):
+        assert await gates.target_id_of(page) is None
+        await asyncio.sleep(0.2)
+
+    assert "Target closed" not in caplog.text
