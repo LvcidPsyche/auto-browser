@@ -962,19 +962,26 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PlaywrightError):
             await self.manager.enable_shadow_browse(source_id)
 
-    async def _run(self, session, operation) -> dict:
-        """The action pipeline over the fake browser, its observations stubbed."""
+    async def _run(self, session, operation, *, target_id: str | None = "the-page", on_snapshot=None) -> dict:
+        """The action pipeline over the fake browser, its observations stubbed (``on_snapshot`` runs in the
+        action's before-snapshot)."""
         from app.browser_manager import BrowserManager as Manager
 
         before = {"url": START_URL, "title": "Before"}
         allowed = SimpleNamespace(should_block=False, block_reason=None, require_approval=False)
         self.manager.witness_policy.evaluate_action = Mock(return_value=allowed)  # type: ignore[method-assign]
-        self.manager._light_snapshot = AsyncMock(return_value=before)  # type: ignore[method-assign]
+
+        async def snapshot(*_args, **_kwargs) -> dict:
+            if on_snapshot is not None:
+                on_snapshot()
+            return before
+
+        self.manager._light_snapshot = AsyncMock(side_effect=snapshot)  # type: ignore[method-assign]
         self.manager._observation_payload = AsyncMock(return_value=before)  # type: ignore[method-assign]
         self.manager._ensure_witness_remote_ready = AsyncMock()  # type: ignore[method-assign]
         self.manager._check_bot_challenge = AsyncMock(return_value=None)  # type: ignore[method-assign]
         self.manager._maybe_handle_totp = AsyncMock(return_value=None)  # type: ignore[method-assign]
-        self.manager.request_gates.target_id_of = AsyncMock(return_value="the-page")  # type: ignore[method-assign]
+        self.manager.request_gates.target_id_of = AsyncMock(return_value=target_id)  # type: ignore[method-assign]
         return await Manager._run_action(self.manager, session, "click", {"selector": "#go"}, operation)
 
     def _stop(self, session, request_id: str) -> None:
@@ -1023,6 +1030,86 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             (caught.exception.code, caught.exception.url), ("browser_action_blocked", "https://refused.example")
+        )
+
+    # ── round 4: F2 and F4 through the pipeline and the controller's own navigations ──
+
+    async def _gated_session(self):
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        return self.manager.sessions[(await self.manager.create_session(name="s", start_url=START_URL))["id"]]
+
+    def _lose_the_gate(self) -> None:
+        self.manager.runtime.gate_lost = lambda _gate: None  # type: ignore[method-assign]  # containment not yet run
+        [gate_session] = _gate_sessions(self.browser)
+        gate_session.emit("close", gate_session)
+
+    async def test_f2_an_action_on_a_lost_gate_takes_no_snapshot_and_does_not_run(self) -> None:
+        session = await self._gated_session()
+        self._lose_the_gate()
+        operation = AsyncMock()
+
+        with self.assertRaises(SessionNotFoundError) as caught:
+            await self._run(session, operation)
+
+        self.assertEqual(caught.exception.reason, "request_gate_lost")
+        self.manager._light_snapshot.assert_not_awaited()
+        operation.assert_not_awaited()
+
+    async def test_f2_a_gate_lost_while_the_action_prepares_stops_it_before_the_operation(self) -> None:
+        session = await self._gated_session()
+        operation = AsyncMock()
+
+        with self.assertRaises(SessionNotFoundError) as caught:
+            await self._run(session, operation, on_snapshot=self._lose_the_gate)
+
+        self.assertEqual(caught.exception.reason, "request_gate_lost")
+        self.manager._light_snapshot.assert_awaited()
+        operation.assert_not_awaited()
+
+    async def test_f2_a_start_url_on_a_gate_lost_while_the_session_starts_is_not_sent(self) -> None:
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        self.manager.runtime.gate_lost = lambda _gate: None  # type: ignore[method-assign]
+
+        async def bypass_then_lose(_page) -> None:
+            [gate_session] = _gate_sessions(self.browser)
+            gate_session.emit("close", gate_session)
+
+        self.manager.request_gates.bypass_service_workers = bypass_then_lose  # type: ignore[method-assign]
+        page = self.browser.context.page
+        page.goto = AsyncMock()
+
+        with self.assertRaises(RequestGateUnavailable):
+            await self.manager.create_session(name="s", start_url=START_URL)
+
+        page.goto.assert_not_awaited()
+
+    async def test_f4_a_pipeline_stop_with_no_attributable_block_is_a_block_naming_no_url(self) -> None:
+        session = await self._gated_session()
+
+        async def stopped() -> None:
+            raise PlaywrightError("Page.click: net::ERR_BLOCKED_BY_CLIENT at https://refused.example/secret")
+
+        self.manager.action_pipeline._failure_snapshot = AsyncMock(return_value={})  # type: ignore[method-assign]
+        with self.assertRaises(BrowserActionError) as caught:
+            await self._run(session, stopped, target_id=None)
+
+        self.assertEqual(
+            (caught.exception.code, caught.exception.message, caught.exception.url),
+            ("browser_action_blocked", "A navigation was stopped before it was sent by the pre-request gate.", None),
+        )
+
+    async def test_f4_a_start_url_stop_with_no_attributable_block_is_a_block_naming_no_url(self) -> None:
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        self.browser.context.page.goto = AsyncMock(
+            side_effect=PlaywrightError("Page.goto: net::ERR_BLOCKED_BY_CLIENT at https://example.com/")
+        )
+
+        with self.assertRaises(BrowserActionError) as caught:
+            await self.manager.create_session(name="s", start_url=START_URL)
+
+        self.assertEqual(
+            (caught.exception.code, caught.exception.message, caught.exception.url),
+            ("browser_action_blocked", "A navigation was stopped before it was sent by the pre-request gate.", None),
         )
 
 

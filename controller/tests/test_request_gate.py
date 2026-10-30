@@ -1253,3 +1253,31 @@ async def test_f13_bookkeeping_that_raises_still_replies_and_counts_a_handler_er
 
     assert method == "Fetch.failRequest"
     assert harness.gate.handler_errors == 1
+
+
+async def test_f6_a_mark_from_before_a_loss_still_finds_the_replacements_block() -> None:
+    """The sequence is shared by a replacement gate: a mark taken before the loss compares with its blocks."""
+    cdp = FakeCDPSession()
+    gates, browser = await _gates_on(cdp)
+    context_id = new_context_id()
+    cdp.emit("Target.targetCreated", {"targetInfo": {"targetId": "p", "type": "page", "browserContextId": context_id}})
+    context = SimpleNamespace(new_cdp_session=AsyncMock(return_value=page_session_for(context_id, "p")), on=Mock())
+    page = Mock(context=context)
+    await gates.get(browser).register_context(context, page)
+    for n in range(3):
+        _pause(cdp, f"before-{n}", "p", f"{ALLOWED}/{n}")
+        await cdp.wait_for_reply(f"before-{n}")
+    since = gates.mark(browser)
+    cdp.emit("close", cdp)
+    replacement = FakeCDPSession()
+    browser.new_browser_cdp_session.return_value = replacement
+    await gates.require(browser)
+    replacement.emit(
+        "Target.targetCreated", {"targetInfo": {"targetId": "p", "type": "page", "browserContextId": context_id}}
+    )
+
+    _pause(replacement, "after", "p")
+    await replacement.wait_for_reply("after")
+
+    [block] = await gates.blocks_on_page(browser, page, since=since)
+    assert block.seq > since
