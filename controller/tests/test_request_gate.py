@@ -1092,3 +1092,119 @@ async def test_f6_a_mark_needs_no_target_read_and_attributes_nothing_earlier() -
 
     context.new_cdp_session.assert_not_awaited()
     assert await gates.blocks_on_page(browser, page, since=since) == []
+
+
+# ── round 4: lifecycle hardening (F8) ────────────────────────────────────────
+
+
+class _HangingCDP(FakeCDPSession):
+    """A session whose ``hang`` method never answers, and whose detach can hang too."""
+
+    def __init__(self, hang: str | None = None, *, detach_hangs: bool = False) -> None:
+        super().__init__()
+        self.hang = hang
+        self.detach_hangs = detach_hangs
+
+    async def send(self, method, params=None):
+        if method == self.hang:
+            self.sent.append((method, dict(params or {})))
+            await asyncio.Event().wait()
+        return await super().send(method, params)
+
+    async def detach(self) -> None:
+        if self.detach_hangs:
+            await asyncio.Event().wait()
+        await super().detach()
+
+
+def _bare_gate(cdp: FakeCDPSession, **options) -> RequestGate:
+    return RequestGate(
+        SimpleNamespace(new_browser_cdp_session=AsyncMock(return_value=cdp)),
+        url_refused=refused,
+        attach_mode=options.pop("attach_mode", False),
+        origin_switch_declared=False,
+        on_lost=options.pop("on_lost", lambda _gate: None),
+    )
+
+
+async def test_f8a_a_cancelled_attach_detaches_its_session() -> None:
+    cdp = _HangingCDP("Fetch.enable")
+    attaching = asyncio.create_task(_bare_gate(cdp).attach())
+    while not any(method == "Fetch.enable" for method, _ in cdp.sent):
+        await asyncio.sleep(0)
+
+    attaching.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await attaching
+
+    assert cdp.detached
+
+
+async def test_f8c_an_attach_that_never_answers_is_bounded_and_detached(monkeypatch) -> None:
+    monkeypatch.setattr(request_gate, "ATTACH_TIMEOUT_SECONDS", 0.05)
+    cdp = _HangingCDP("Target.setDiscoverTargets")
+
+    with pytest.raises(RequestGateUnavailable, match="did not attach within"):
+        await asyncio.wait_for(_bare_gate(cdp).attach(), timeout=2.0)
+
+    assert cdp.detached
+
+
+async def test_f8c_a_detach_that_never_answers_is_bounded(monkeypatch) -> None:
+    monkeypatch.setattr(request_gate, "DETACH_TIMEOUT_SECONDS", 0.05)
+    cdp = _HangingCDP(detach_hangs=True)
+    gate = _bare_gate(cdp)
+    await gate.attach()
+
+    await asyncio.wait_for(gate.detach(), timeout=2.0)
+
+    assert not gate.live
+
+
+async def test_f8b_release_waits_for_an_attach_in_flight() -> None:
+    gates, browser = await _gates_on(FakeCDPSession())
+    await gates._lock.acquire()
+    releasing = asyncio.create_task(gates.release(browser))
+    await asyncio.sleep(0.01)
+
+    assert gates.get(browser) is not None, "release ran while require held the lock"
+    gates._lock.release()
+    await releasing
+    assert gates.get(browser) is None
+
+
+async def test_f8e_a_page_target_known_without_its_context_is_looked_up(harness: Harness) -> None:
+    harness.cdp.emit("Target.targetCreated", {"targetInfo": {"targetId": "half-known", "type": "page"}})
+    harness.cdp.replies["Target.getTargetInfo"] = {
+        "targetInfo": {"targetId": "half-known", "type": "page", "browserContextId": harness.owned}
+    }
+
+    method, _ = await harness.pause(f"{REFUSED}/", frame="half-known")
+
+    assert method == "Fetch.failRequest"
+    assert harness.lookups(), "judged unowned from an entry with no context"
+
+
+async def test_f8f_a_lost_gates_status_carries_the_failed_reattach() -> None:
+    cdp = FakeCDPSession()
+    gates, browser = await _gates_on(cdp)
+    cdp.emit("close", cdp)
+    browser.new_browser_cdp_session.side_effect = RuntimeError("no more sessions")
+
+    with pytest.raises(RequestGateUnavailable):
+        await gates.require(browser)
+
+    [entry] = gates.status()["gates"]
+    assert entry["state"] == "lost"
+    assert "no more sessions" in entry["error"]
+
+
+async def test_f8h_a_lookup_error_requests_url_is_remembered_for_its_next_hop() -> None:
+    harness = Harness(attach_mode=True)
+    await harness.start()
+    harness.cdp.replies["Target.getTargetInfo"] = RuntimeError("Target.getTargetInfo: boom")
+
+    method, params = await harness.pause(f"{ALLOWED}/form", frame="unknown-frame")
+
+    assert method == "Fetch.continueRequest"
+    assert harness.gate._request_urls[params["requestId"]] == f"{ALLOWED}/form"

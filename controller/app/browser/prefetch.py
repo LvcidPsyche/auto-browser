@@ -35,7 +35,8 @@ _SET = f"new Promise(r => chrome.settingsPrivate.setPref('{PREF}', {PREFETCH_OFF
 # The whole route: open the page, wait for its API, read, set, read back.
 PREF_TIMEOUT_SECONDS = 20.0
 _READY_POLL_SECONDS = 0.25
-# Each cleanup step (closing the settings tab, detaching), so the outer bound holds through the cleanup too.
+# Each cleanup step (closing the settings tab, detaching). They run as the route is cancelled at its bound, so
+# the whole call takes at most PREF_TIMEOUT_SECONDS plus two of these.
 CLEANUP_TIMEOUT_SECONDS = 2.0
 
 
@@ -98,7 +99,8 @@ async def _set_pref(browser: Any) -> Any:
 
 
 async def _bounded_cleanup(step: Any, what: str) -> None:
-    """One cleanup step, bounded on its own, so PREF_TIMEOUT_SECONDS holds through a cleanup that stalls."""
+    """One cleanup step, bounded on its own: a stalled cleanup adds at most CLEANUP_TIMEOUT_SECONDS to the route's
+    PREF_TIMEOUT_SECONDS."""
     try:
         await asyncio.wait_for(step, timeout=CLEANUP_TIMEOUT_SECONDS)
     except Exception as exc:

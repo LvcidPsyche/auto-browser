@@ -18,7 +18,7 @@ from ...models import SessionRecord, SessionStatus, resolve_totp_hosts
 from ...network_inspector import NetworkInspector
 from ...session_ownership import may_use, verified_operator
 from ...url_safety import refuse_another_navigation_host
-from ...utils import UTC
+from ...utils import UTC, utc_now
 from ..launch_flags import STORAGE_PARTITIONING_ON
 from ..page_read import PageRead
 from ..request_gate import RequestGateUnavailable, navigation_blocked_error, stopped_by_gate
@@ -510,6 +510,10 @@ class BrowserSessionService:
                     )
                 try:
                     summary = await self.manager._session_summary(session, status="closed", live=False)
+                except BaseException:
+                    # The session is closing all the same: its record says so, with the reason the next call names.
+                    await self._persist_closed_without_summary(session, reason)
+                    raise
                 finally:
                     # Released even when the summary fails: the context must not outlive the session.
                     await self._release_resources(session)
@@ -555,6 +559,33 @@ class BrowserSessionService:
         finally:
             if locked:
                 session.lock.release()
+
+    async def _persist_closed_without_summary(self, session: "BrowserSession", reason: str | None) -> None:
+        store = self.manager.session_store
+        try:
+            try:
+                record = await store.get(session.id)
+            except KeyError:
+                record = SessionRecord(
+                    id=session.id,
+                    name=session.name,
+                    created_at=session.created_at.isoformat(),
+                    updated_at=session.created_at.isoformat(),
+                    status="closed",
+                    current_url="",
+                    title="",
+                    artifact_dir=str(session.artifact_dir),
+                    takeover_url=session.takeover_url,
+                    remote_access={},
+                    owner=getattr(session, "owner", None),
+                )
+            await store.upsert(
+                record.model_copy(
+                    update={"status": "closed", "live": False, "close_reason": reason, "updated_at": utc_now()}
+                )
+            )
+        except Exception as exc:
+            logger.error("could not record session %s as closed: %s", session.id, f"{type(exc).__name__}: {exc}"[:200])
 
     async def _lock_for_close(self, session: "BrowserSession") -> bool:
         """Take the session lock for closing, even from an action stuck on its page.

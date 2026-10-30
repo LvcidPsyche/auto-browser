@@ -67,6 +67,9 @@ REQUEST_URLS_KEPT = 1024
 BLOCKS_KEPT = 50
 # Pages whose blocks are kept (each dropped when its target is destroyed); the oldest goes past this.
 PAGES_KEPT = 512
+# The gate's whole attach (its session, target discovery, Fetch.enable), and a deliberate detach.
+ATTACH_TIMEOUT_SECONDS = 10.0
+DETACH_TIMEOUT_SECONDS = 2.0
 # Opening a page's service-worker bypass (it runs under the session lock in tabs.open); a waiter gets the same bound.
 BYPASS_TIMEOUT_SECONDS = 5.0
 # Network.enable on the bypass session keeps no bodies: the bypass needs the domain on, not its buffers (measured on
@@ -259,6 +262,15 @@ class RequestGate:
 
     async def attach(self) -> None:
         try:
+            await asyncio.wait_for(self._attach(), timeout=ATTACH_TIMEOUT_SECONDS)
+        except TimeoutError as exc:
+            raise RequestGateUnavailable(
+                f"the pre-request gate did not attach within {ATTACH_TIMEOUT_SECONDS:g} s"
+            ) from exc
+        self._attached()
+
+    async def _attach(self) -> None:
+        try:
             cdp = await self.browser.new_browser_cdp_session()
         except Exception as exc:
             raise RequestGateUnavailable(f"the pre-request gate could not attach: {exc}") from exc
@@ -271,11 +283,15 @@ class RequestGate:
         try:
             await cdp.send("Target.setDiscoverTargets", {"discover": True})
             await cdp.send("Fetch.enable", {"patterns": FETCH_PATTERNS})
-        except Exception as exc:
+        except BaseException as exc:
+            # Cancellation (the attach bound among others) too: a session left attached would hold requests.
             self._deliberate = True
-            with contextlib.suppress(Exception):
-                await cdp.detach()
-            raise RequestGateUnavailable(f"the pre-request gate could not attach: {exc}") from exc
+            await self._detach_cdp()
+            if isinstance(exc, Exception):
+                raise RequestGateUnavailable(f"the pre-request gate could not attach: {exc}") from exc
+            raise
+
+    def _attached(self) -> None:
         if self._closed:
             raise RequestGateUnavailable("the pre-request gate's session closed while it attached")
         self._live = True
@@ -294,9 +310,15 @@ class RequestGate:
         """Detach on purpose (the controller is closing or replacing the browser): not a loss."""
         self._deliberate = True
         self._live = False
-        if self._cdp is not None:
-            with contextlib.suppress(Exception):
-                await self._cdp.detach()
+        await self._detach_cdp()
+
+    async def _detach_cdp(self) -> None:
+        if self._cdp is None:
+            return
+        try:
+            await asyncio.wait_for(self._cdp.detach(), timeout=DETACH_TIMEOUT_SECONDS)
+        except Exception as exc:
+            logger.warning("pre-request gate: could not detach its session: %s", f"{type(exc).__name__}: {exc}"[:200])
 
     def ending(self, ending: bool = True) -> None:
         """The controller is closing this gate's browser: the close takes the gate's session down with it, which is
@@ -402,8 +424,9 @@ class RequestGate:
             # Nothing could be ruled out: a refused URL fails, as for a page that could be owned.
             handler_error = exc
             verdict = _Verdict(fail=not self._known_allowed(url), reason=UNCLASSIFIED)
-        if verdict.owned_page:
+        if verdict.owned_page or verdict.lookup_error is not None:
             # Decision state, not bookkeeping: the next hop's verdict reads it, so it is written before the reply.
+            # A frame that could not be looked up may be an owned page's.
             self._remember_url(event.get("requestId"), url)
         # On record before the reply (memory only): whoever reads once Playwright reports the failure finds it.
         seq = self._note_request(event, verdict)
@@ -438,7 +461,7 @@ class RequestGate:
 
     async def _classify(self, frame_id: str | None) -> tuple[str, str | None, str | None]:
         known = self._targets.get(frame_id) if frame_id else None
-        if known is not None and known[0] == "page":
+        if known is not None and known[0] == "page" and known[1] is not None:
             return "page", known[1], None
         if not frame_id:
             return "lookup_error", None, "the paused request names no frame"
@@ -723,13 +746,15 @@ class RequestGates:
             return gate
 
     async def release(self, browser: Any) -> None:
-        """Detach a browser's gate on purpose, before the controller closes or drops that browser."""
-        self._attach_modes.pop(id(browser), None)
-        self._attach_failures.pop(id(browser), None)
-        self._prefetch.pop(id(browser), None)
-        entry = self._gates.pop(id(browser), None)
-        if entry is not None:
-            await entry[1].detach()
+        """Detach a browser's gate on purpose, before the controller closes or drops that browser. After an attach
+        in flight (require), so the gate it attaches is not left registered."""
+        async with self._lock:
+            self._attach_modes.pop(id(browser), None)
+            self._attach_failures.pop(id(browser), None)
+            self._prefetch.pop(id(browser), None)
+            entry = self._gates.pop(id(browser), None)
+            if entry is not None:
+                await entry[1].detach()
 
     def ending(self, browser: Any, ending: bool = True) -> None:
         """Before the controller closes a browser it owns: its gate stays attached (still gating) until the close
@@ -815,6 +840,11 @@ class RequestGates:
                 "handler_errors": gate.handler_errors,
                 "lookup_error_blocks": gate.lookup_error_blocks,
                 **({"prefetch_pref": self._prefetch[key][1]} if key in self._prefetch else {}),
+                **(
+                    {"error": self._attach_failures[key][1][:300]}
+                    if not gate.live and key in self._attach_failures
+                    else {}
+                ),
             }
             for key, (_browser, gate) in self._gates.items()
         ]

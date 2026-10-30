@@ -827,6 +827,18 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((caught.exception.code, caught.exception.reason), ("session_closed", "request_gate_lost"))
         session.page.goto.assert_not_awaited()
 
+    async def test_f8g_a_close_whose_summary_fails_still_records_it_as_closed_with_its_reason(self) -> None:
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        session_id = (await self.manager.create_session(name="s"))["id"]
+        self.manager._session_summary = AsyncMock(side_effect=RuntimeError("summary failed"))  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(RuntimeError, "summary failed"):
+            await self.manager.close_session(session_id, reason="request_gate_lost")
+
+        with self.assertRaises(SessionNotFoundError) as caught:
+            await self.manager.get_session(session_id)
+        self.assertEqual((caught.exception.status, caught.exception.reason), ("closed", "request_gate_lost"))
+
 
 if __name__ == "__main__":
     unittest.main()
