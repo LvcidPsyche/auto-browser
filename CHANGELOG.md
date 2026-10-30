@@ -2,11 +2,19 @@
 
 All notable changes to auto-browser are documented here.
 
-## [Unreleased]
+## [1.12.1] — 2026-10-30
 
-Controller fixes. Most concern the page a navigation the gate stopped leaves behind, Chrome's error page
-(`chrome-error://chromewebdata/`); one closes a DevTools session leak that any page could hit. The client, LangChain
-and MCP bridge packages are unchanged.
+A controller patch release over 1.12.0. Most of its fixes concern the page a navigation the gate stopped leaves
+behind, Chrome's error page (`chrome-error://chromewebdata/`). One closes a DevTools session leak that any page could
+hit. The client, LangChain and MCP bridge packages change only in version; update the controller image to get it.
+
+### Upgrade notes
+
+- **Status codes that changed.** Over REST, a fork without `start_url` and a shadow browse from Chrome's error page
+  answer 400 (1.12.0: 403 and 500). Over MCP, both answer a fixed `error` with no `code` (1.12.0:
+  `not_permitted`). A shadow browse from a refused, `data:` or `blob:` page answers 403 (1.12.0: 500).
+- **A new key, absent unless a navigation was stopped.** `blocked_navigation` can now appear on observe,
+  `browser.get_html` and an action result's `after` observation, beside the tab list's.
 
 ### Fixed
 
