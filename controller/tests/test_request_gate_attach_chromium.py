@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import AsyncIterator
@@ -61,6 +62,8 @@ def operator_chrome(profile: Path, *extra: str):
             f"--user-data-dir={profile}",
             "--no-first-run",
             "--no-default-browser-check",
+            # As every Playwright launch: CI's Linux runner may not give Chrome's sandbox its user namespaces.
+            *([] if sys.platform == "win32" else ["--no-sandbox"]),
             *extra,
             "about:blank",
         ],

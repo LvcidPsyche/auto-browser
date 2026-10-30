@@ -561,29 +561,56 @@ async def test_the_block_is_on_record_at_the_reply_and_audited_and_logged_only_a
     await h.start()
     seen_at_reply: list = []
 
+    unknown = "unknown-frame"
+
     def fail_request(params: dict) -> dict:
         seen_at_reply.append(
-            (h.gate.page_blocked_count(h.page), h.gate.blocked_count(h.owned), len(audited), caplog.text)
+            (
+                h.gate.page_blocked_count(unknown),
+                h.gate.page_blocked_count(h.page),
+                h.gate.blocked_count(h.owned),
+                len(audited),
+                caplog.text,
+            )
         )
         return {}
 
     h.cdp.replies["Fetch.failRequest"] = fail_request
     h.cdp.replies["Target.getTargetInfo"] = RuntimeError("Target.getTargetInfo: boom")
-    unknown = "unknown-frame"
 
     with caplog.at_level("WARNING", "app.browser.request_gate"):
         await h.pause(f"{REFUSED}/", frame=unknown)
         await asyncio.sleep(0)
 
-    [(page_count, _context_count, audits, logged)] = seen_at_reply
-    assert page_count == 0 and h.gate.page_blocked_count(unknown) == 1, "the page's record at the reply"
-    seen_at_reply.clear()
-    await h.pause(f"{REFUSED}/2")
-    [(page_count, context_count, audits, logged)] = seen_at_reply
+        [(unknown_count, _page_count, _context_count, audits, logged)] = seen_at_reply
+        assert unknown_count == 1, "the unknown frame's block was not on record when Chromium got its answer"
+        assert audits == 0, "the audit of this block ran before the reply"
+        assert "could not classify" not in logged, "logged before the reply"
+        assert "could not classify" in caplog.text, "never logged"
+        seen_at_reply.clear()
+        del h.cdp.replies["Target.getTargetInfo"]
+        await h.pause(f"{REFUSED}/2")
+
+    [(_unknown_count, page_count, context_count, audits, _logged)] = seen_at_reply
     assert (page_count, context_count) == (1, 1), "the block was not on record when Chromium got its answer"
     assert audits == 1, "the audit of this block ran before the reply"
     assert len(audited) == 2
-    assert "could not classify" in caplog.text
+
+
+async def test_a_block_listener_that_raises_is_logged_and_the_gate_keeps_answering(caplog) -> None:
+    def broken(_block) -> None:
+        raise RuntimeError("listener broke")
+
+    h = Harness(on_block=broken)
+    await h.start()
+
+    with caplog.at_level("ERROR", "app.browser.request_gate"):
+        first, _ = await h.pause(f"{REFUSED}/")
+        await asyncio.sleep(0)
+        second, _ = await h.pause(f"{ALLOWED}/")
+
+    assert (first, second) == ("Fetch.failRequest", "Fetch.continueRequest")
+    assert "the block listener failed" in caplog.text
 
 
 async def test_the_hop_url_map_forgets_its_oldest_entry(monkeypatch) -> None:

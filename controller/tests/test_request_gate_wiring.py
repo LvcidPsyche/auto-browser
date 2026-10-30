@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from playwright.async_api import Error as PlaywrightError
 
@@ -914,6 +914,116 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
             (caught.exception.code, caught.exception.action), ("browser_action_blocked", "enable_shadow_browse")
         )
         headed.close.assert_awaited_once()
+
+    # ── round 4: F12, guards no test held ────────────────────────────────────
+
+    async def test_f12b_a_reconnect_releases_the_disconnected_browsers_gate(self) -> None:
+        self.manager.settings.browser_ws_endpoint = "ws://browser-node:9223/x"
+        fresh = _browser()
+        self._playwright(connect=AsyncMock(side_effect=[self.browser, fresh]))
+        await self.manager.ensure_browser()
+        self.browser.is_connected = lambda: False  # type: ignore[attr-defined]  # browser-node restarted
+        self.browser.cdp_sessions[0].emit("close", self.browser.cdp_sessions[0])
+        await self._settled()
+
+        await self.manager.ensure_browser()
+
+        self.assertIsNone(self.manager.request_gates.get(self.browser))
+        self.assertEqual([gate["state"] for gate in self.manager.request_gates.status()["gates"]], ["attached"])
+
+    async def test_f12b_a_failed_isolated_create_leaves_no_gate_entry(self) -> None:
+        self._isolated()
+        self.browser.context.page.goto = AsyncMock(side_effect=PlaywrightError("Page.goto: Timeout 30000ms exceeded."))
+
+        with self.assertRaises(PlaywrightError):
+            await self.manager.create_session(name="s", start_url=START_URL)
+
+        self.assertIsNone(self.manager.request_gates.get(self.browser))
+        self.assertEqual(self.manager.request_gates.status()["gates"], [])
+
+    async def test_f12e_a_start_url_that_fails_for_another_reason_keeps_its_own_error(self) -> None:
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        self.browser.context.page.goto = AsyncMock(
+            side_effect=PlaywrightError("Page.goto: net::ERR_NAME_NOT_RESOLVED at https://example.com/")
+        )
+
+        with self.assertRaises(PlaywrightError):
+            await self.manager.create_session(name="s", start_url=START_URL)
+
+    async def test_f12e_a_shadow_page_that_fails_for_another_reason_keeps_its_own_error(self) -> None:
+        self.manager.settings.shadow_browse_enabled = True
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
+        self.manager.sessions[source_id].context.storage_state = AsyncMock(return_value={})
+        headed = _browser()
+        headed.context.page.goto = AsyncMock(side_effect=PlaywrightError("Page.goto: Timeout 30000ms exceeded."))
+        self._playwright(launch=AsyncMock(return_value=headed))
+
+        with self.assertRaises(PlaywrightError):
+            await self.manager.enable_shadow_browse(source_id)
+
+    async def _run(self, session, operation) -> dict:
+        """The action pipeline over the fake browser, its observations stubbed."""
+        from app.browser_manager import BrowserManager as Manager
+
+        before = {"url": START_URL, "title": "Before"}
+        allowed = SimpleNamespace(should_block=False, block_reason=None, require_approval=False)
+        self.manager.witness_policy.evaluate_action = Mock(return_value=allowed)  # type: ignore[method-assign]
+        self.manager._light_snapshot = AsyncMock(return_value=before)  # type: ignore[method-assign]
+        self.manager._observation_payload = AsyncMock(return_value=before)  # type: ignore[method-assign]
+        self.manager._ensure_witness_remote_ready = AsyncMock()  # type: ignore[method-assign]
+        self.manager._check_bot_challenge = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        self.manager._maybe_handle_totp = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        self.manager.request_gates.target_id_of = AsyncMock(return_value="the-page")  # type: ignore[method-assign]
+        return await Manager._run_action(self.manager, session, "click", {"selector": "#go"}, operation)
+
+    def _stop(self, session, request_id: str) -> None:
+        [gate_session] = _gate_sessions(self.browser)
+        gate_session.replies["Target.getTargetInfo"] = {
+            "targetInfo": {"targetId": "the-page", "type": "page", "browserContextId": session.gate_context_id}
+        }
+        gate_session.emit(
+            "Fetch.requestPaused",
+            {
+                "requestId": request_id,
+                "frameId": "the-page",
+                "request": {"url": "https://refused.example/secret", "method": "GET", "headers": {}},
+            },
+        )
+
+    async def test_f12e_an_action_reports_only_the_blocks_it_led_to(self) -> None:
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        session = self.manager.sessions[(await self.manager.create_session(name="s", start_url=START_URL))["id"]]
+        self._stop(session, "earlier")
+        await _gate_sessions(self.browser)[0].wait_for_reply("earlier")
+
+        quiet = await self._run(session, AsyncMock())
+
+        async def leads_to_a_block() -> None:
+            self._stop(session, "this-one")
+            await _gate_sessions(self.browser)[0].wait_for_reply("this-one")
+
+        stopped = await self._run(session, leads_to_a_block)
+
+        self.assertNotIn("blocked_navigations", quiet["target"], "an earlier block was reported as this action's")
+        self.assertEqual([b["origin"] for b in stopped["target"]["blocked_navigations"]], ["https://refused.example"])
+
+    async def test_f9b_a_stop_the_pipeline_reports_names_the_refused_origin_in_url(self) -> None:
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        session = self.manager.sessions[(await self.manager.create_session(name="s", start_url=START_URL))["id"]]
+
+        async def stopped() -> None:
+            self._stop(session, "nav")
+            await _gate_sessions(self.browser)[0].wait_for_reply("nav")
+            raise PlaywrightError("Page.click: net::ERR_BLOCKED_BY_CLIENT at https://refused.example/secret")
+
+        self.manager.action_pipeline._failure_snapshot = AsyncMock(return_value={})  # type: ignore[method-assign]
+        with self.assertRaises(BrowserActionError) as caught:
+            await self._run(session, stopped)
+
+        self.assertEqual(
+            (caught.exception.code, caught.exception.url), ("browser_action_blocked", "https://refused.example")
+        )
 
 
 if __name__ == "__main__":

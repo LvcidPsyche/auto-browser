@@ -33,6 +33,15 @@ BROWSER_NODE = Path(__file__).resolve().parents[2] / "browser-node"
 _LIST = re.compile(r"disabledFeatures = \[(.*?)\]\.filter\(Boolean\)", re.S)
 _JS_LIST = re.compile(r"const PLAYWRIGHT_DISABLED_FEATURES_BUT_PARTITIONING = \[(.*?)\];", re.S)
 _STRING = re.compile(r'"([^"]*)"')
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+
+
+def code_only(text: str, comment: str) -> str:
+    """The file without its comments (whole comment lines, and /* */ blocks in JavaScript): a switch or a COPY
+    that is commented out is not there."""
+    if comment == "//":
+        text = _BLOCK_COMMENT.sub("", text)
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(comment))
 
 
 def strings_only(array_source: str, where: str) -> list[str]:
@@ -63,7 +72,7 @@ def test_the_controllers_list_is_playwrights_without_partitioning() -> None:
 
 @pytest.mark.skipif(not BROWSER_NODE.is_dir(), reason="browser-node/ is not shipped inside the controller image")
 def test_browser_nodes_list_is_playwrights_without_partitioning() -> None:
-    source = (BROWSER_NODE / "server.mjs").read_text(encoding="utf-8")
+    source = code_only((BROWSER_NODE / "server.mjs").read_text(encoding="utf-8"), "//")
     match = _JS_LIST.search(source)
     assert match, "browser-node/server.mjs: PLAYWRIGHT_DISABLED_FEATURES_BUT_PARTITIONING not found"
     expected = [feature for feature in playwright_disabled_features() if feature != PARTITIONING]
@@ -75,8 +84,18 @@ def test_browser_nodes_list_is_playwrights_without_partitioning() -> None:
 @pytest.mark.skipif(not BROWSER_NODE.is_dir(), reason="browser-node/ is not shipped inside the controller image")
 def test_the_browser_node_image_turns_prediction_off_by_policy_in_both_paths() -> None:
     policy = json.loads((BROWSER_NODE / "policies" / "auto-browser.json").read_text(encoding="utf-8"))
-    dockerfile = (BROWSER_NODE / "Dockerfile").read_text(encoding="utf-8")
+    dockerfile = code_only((BROWSER_NODE / "Dockerfile").read_text(encoding="utf-8"), "#")
 
     assert policy == {"NetworkPredictionOptions": 2}
     for managed in ("/etc/chromium/policies/managed/", "/etc/opt/chrome_for_testing/policies/managed/"):
         assert f"COPY policies/auto-browser.json {managed}auto-browser.json" in dockerfile
+
+
+def test_f12c_a_commented_out_line_does_not_count() -> None:
+    js = "const a = 1;\n  // `--disable-features=${X}`,\n/* COPY x y */\n"
+    docker = "# COPY policies/auto-browser.json /etc/x\nRUN true\n"
+
+    assert "--disable-features" not in code_only(js, "//")
+    assert "COPY" not in code_only(js, "//")
+    assert "COPY" not in code_only(docker, "#")
+    assert "RUN true" in code_only(docker, "#")
