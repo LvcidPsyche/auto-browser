@@ -11,6 +11,7 @@ from ...action_errors import SCREENSHOT_WITHHELD, BrowserActionError
 from ...browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
 from ..aria_outline import outline_from_aria_snapshot, unavailable_outline
 from ..page_read import bounded, start_read
+from ..request_gate import block_summary
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -175,6 +176,11 @@ class BrowserObservationService:
             read.refuse_raised()
             raise
         read.check(payload.get("screenshot_path"))
+        # On Chrome's error page for a navigation the gate stopped, the controller's own statement of it (origin,
+        # reason, explanation), next to the page as it is read.
+        block = await self.manager.request_gates.error_page_block(session.browser, session.page)
+        if block is not None:
+            payload["blocked_navigation"] = block_summary(block)
         return payload
 
     async def _read_observation(

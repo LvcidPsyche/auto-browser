@@ -28,6 +28,8 @@ BYPASS_TIMEOUT_SECONDS = 5.0
 # Network.enable on the bypass session keeps no bodies: the bypass needs the domain on, not its buffers (measured on
 # Chromium 151, round 4: 0 keeps the bypass working; Network.disable ends it).
 BYPASS_NETWORK_BUFFER_BYTES = 0
+# Chrome's error page: where a navigation the gate stopped leaves its page.
+CHROME_ERROR_SCHEME = "chrome-error:"
 # How long reading a page's targetId may take (it runs under the session lock, in error handling too).
 TARGET_ID_TIMEOUT_SECONDS = 2.0
 
@@ -288,6 +290,13 @@ class RequestGates:
         if not blocks or blocks[-1].seq != gate.last_request(target_id):
             return None
         return blocks[-1]
+
+    async def error_page_block(self, browser: Any, page: Any) -> GateBlock | None:
+        """The block that left ``page`` on Chrome's error page, while it is the page's last main-frame request;
+        none on any other page, or once a later request of the page continued (last_block_on_page)."""
+        if not str(getattr(page, "url", "") or "").startswith(CHROME_ERROR_SCHEME):
+            return None
+        return await self.last_block_on_page(browser, page)
 
     def _seed_target_id(self, page: Any, target_id: str) -> None:
         with contextlib.suppress(TypeError):  # a page that cannot be weakly referenced (a test double)

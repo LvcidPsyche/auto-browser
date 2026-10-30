@@ -76,7 +76,11 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
             # browser.readiness_check reports the pre-request gate as GET /readiness does.
-            request_gates=SimpleNamespace(status=lambda: {"state": "off", "off_reason": "disabled", "gates": []}),
+            request_gates=SimpleNamespace(
+                status=lambda: {"state": "off", "off_reason": "disabled", "gates": []},
+                # browser.get_html says what was stopped on Chrome's error page; none here.
+                error_page_block=AsyncMock(return_value=None),
+            ),
             settings=SimpleNamespace(
                 auth_state_encryption_key=None,
                 require_auth_state_encryption=False,
