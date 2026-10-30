@@ -1208,3 +1208,21 @@ async def test_f8h_a_lookup_error_requests_url_is_remembered_for_its_next_hop() 
 
     assert method == "Fetch.continueRequest"
     assert harness.gate._request_urls[params["requestId"]] == f"{ALLOWED}/form"
+
+
+# ── round 4: bookkeeping before the reply (F13) ──────────────────────────────
+
+
+@pytest.mark.parametrize("step", ["_record_block", "_note_request", "_remember_url"])
+async def test_f13_bookkeeping_that_raises_still_replies_and_counts_a_handler_error(
+    harness: Harness, step: str
+) -> None:
+    def broken(*_args, **_kwargs):
+        raise RuntimeError(f"{step} broke")
+
+    setattr(harness.gate, step, broken)
+
+    method, _ = await harness.pause(f"{REFUSED}/")
+
+    assert method == "Fetch.failRequest"
+    assert harness.gate.handler_errors == 1

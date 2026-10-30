@@ -426,13 +426,18 @@ class RequestGate:
             # Nothing could be ruled out: a refused URL fails, as for a page that could be owned.
             handler_error = exc
             verdict = _Verdict(fail=not self._known_allowed(url), reason=UNCLASSIFIED)
-        if verdict.owned_page or verdict.lookup_error is not None:
-            # Decision state, not bookkeeping: the next hop's verdict reads it, so it is written before the reply.
-            # A frame that could not be looked up may be an owned page's.
-            self._remember_url(event.get("requestId"), url)
-        # On record before the reply (memory only): whoever reads once Playwright reports the failure finds it.
-        seq = self._note_request(event, verdict)
-        block = self._record_block(event, url, verdict, seq) if verdict.fail else None
+        block: GateBlock | None = None
+        try:
+            if verdict.owned_page or verdict.lookup_error is not None:
+                # Decision state, not bookkeeping: the next hop's verdict reads it, so it is written before the
+                # reply. A frame that could not be looked up may be an owned page's.
+                self._remember_url(event.get("requestId"), url)
+            # On record before the reply (memory only): whoever reads once Playwright reports the failure finds it.
+            seq = self._note_request(event, verdict)
+            block = self._record_block(event, url, verdict, seq) if verdict.fail else None
+        except Exception as exc:
+            # The verdict stands and its reply still goes out; the failure is logged after it.
+            handler_error = handler_error or exc
         reply_error: BaseException | None = None
         try:
             if verdict.fail:
