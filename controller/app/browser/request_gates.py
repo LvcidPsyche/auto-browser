@@ -60,9 +60,11 @@ async def _read_target_id(page: Any) -> str:
     try:
         session = await asyncio.shield(opening)
     except BaseException:
-        if not opening.done():
-            _OPENING.add(opening)
-            opening.add_done_callback(_detach_once_opened)
+        # Whether or not the open is done: one that finished in the iteration the read was cancelled had its
+        # session dropped by shield (its outer future cancelled), and a done task still runs this callback (soon).
+        # An open that raised is a no-op there.
+        _OPENING.add(opening)
+        opening.add_done_callback(_detach_once_opened)
         raise
     try:
         return (await session.send("Target.getTargetInfo"))["targetInfo"]["targetId"]

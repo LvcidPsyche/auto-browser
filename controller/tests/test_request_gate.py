@@ -1347,3 +1347,29 @@ async def test_fu3_a_page_session_that_fails_to_open_after_the_bound_is_quiet(mo
         await asyncio.sleep(0.2)
 
     assert "Target closed" not in caplog.text
+
+
+async def test_fu3_an_open_that_completes_as_the_read_is_cancelled_is_still_detached() -> None:
+    """The open finishes, and the bound cancels the read, in the same loop iteration: shield then drops the
+    session (its outer future is cancelled), and the read sees the open as done."""
+    opened: asyncio.Future = asyncio.get_running_loop().create_future()
+    late = FakeCDPSession()
+
+    async def opens(_page) -> FakeCDPSession:
+        return await opened
+
+    page = Mock(context=SimpleNamespace(new_cdp_session=opens))
+    reading = asyncio.create_task(request_gates._read_target_id(page))
+    for _ in range(3):
+        await asyncio.sleep(0)  # the read waits on the open now
+
+    opened.set_result(late)
+    reading.cancel()  # no yield in between
+    with pytest.raises(asyncio.CancelledError):
+        await reading
+    for _ in range(20):
+        if late.detached:
+            break
+        await asyncio.sleep(0)
+
+    assert late.detached, "the session opened as the read was cancelled was left attached"
