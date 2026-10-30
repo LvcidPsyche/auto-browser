@@ -1111,6 +1111,80 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
             ("browser_action_blocked", "A navigation was stopped before it was sent by the pre-request gate.", None),
         )
 
+    # ── round 5 ──────────────────────────────────────────────────────────────
+
+    async def test_s1_a_shared_browser_whose_disconnect_fails_keeps_its_survivors_gated(self) -> None:
+        self.manager.settings.browser_ws_endpoint = "ws://browser-node:9223/x"
+        self._playwright(connect=AsyncMock(return_value=self.browser))
+        self.browser.close = AsyncMock(side_effect=RuntimeError("disconnect failed"))  # type: ignore[attr-defined]
+        survivor_id = (await self.manager.create_session(name="one"))["id"]
+        survivor = self.manager.sessions[survivor_id]
+        survivor.context.close = AsyncMock(side_effect=RuntimeError("context close failed"))
+
+        with self.assertLogs("app.browser.services.runtime", level="ERROR") as logs:
+            self.browser.cdp_sessions[0].emit("close", self.browser.cdp_sessions[0])
+            await self._settled()
+
+        self.browser.close.assert_awaited_once()
+        gate = self.manager.request_gates.get(self.browser)
+        self.assertTrue(gate is not None and gate.live, "the replacement gate was released before the disconnect")
+        self.assertTrue(gate.owns(survivor.gate_context_id), "the survivor's context is no longer gated")
+        self.assertIn("disconnecting the shared browser failed", " ".join(logs.output))
+        replacement = _gate_sessions(self.browser)[-1]
+        replacement.replies["Target.getTargetInfo"] = {
+            "targetInfo": {"targetId": "left", "type": "page", "browserContextId": survivor.gate_context_id}
+        }
+        replacement.emit(
+            "Fetch.requestPaused",
+            {"requestId": "r1", "frameId": "left", "request": {"url": "https://refused.example/", "headers": {}}},
+        )
+        method, _ = await replacement.wait_for_reply("r1")
+        self.assertEqual(method, "Fetch.failRequest")
+
+    async def test_s2_a_shadow_rollback_whose_context_close_never_settles_still_returns_and_closes(self) -> None:
+        from app.browser.services import sessions as sessions_module
+
+        self.manager.settings.shadow_browse_enabled = True
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
+        self.manager.sessions[source_id].context.storage_state = AsyncMock(return_value={})
+        headed = _browser()
+        headed.context.page.goto = AsyncMock(side_effect=RuntimeError("shadow goto failed"))
+
+        async def never() -> None:
+            await asyncio.Event().wait()
+
+        headed.context.close = AsyncMock(side_effect=never)
+        self._playwright(launch=AsyncMock(return_value=headed))
+
+        with patch.object(sessions_module, "TEARDOWN_STEP_TIMEOUT_SECONDS", 0.05):
+            with self.assertRaisesRegex(RuntimeError, "shadow goto failed"):
+                await asyncio.wait_for(self.manager.enable_shadow_browse(source_id), timeout=5.0)
+
+        headed.close.assert_awaited_once()
+
+    async def test_s3_a_gate_lost_while_a_tabs_bypass_is_set_stops_it_before_goto(self) -> None:
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        session_id = (await self.manager.create_session(name="s"))["id"]
+        context = self.manager.sessions[session_id].context
+        tab = FakePage()
+        tab.context = context
+        tab.goto = AsyncMock()
+        context.new_page = AsyncMock(return_value=tab)
+        self.manager.runtime.gate_lost = lambda _gate: None  # type: ignore[method-assign]  # containment not yet run
+
+        async def bypass_then_lose(_page) -> None:
+            [gate_session] = _gate_sessions(self.browser)
+            gate_session.emit("close", gate_session)
+
+        self.manager.request_gates.bypass_service_workers = bypass_then_lose  # type: ignore[method-assign]
+
+        with self.assertRaises(SessionNotFoundError) as caught:
+            await self.manager.open_tab(session_id, "https://example.com/tab", True)
+
+        self.assertEqual(caught.exception.reason, "request_gate_lost")
+        tab.goto.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

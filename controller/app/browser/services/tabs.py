@@ -75,6 +75,8 @@ class BrowserTabService:
             try:
                 self.manager._attach_page_listeners(new_page, session)
                 if url:
+                    # Again right before the navigation: the gate can be lost while the bypass is set.
+                    gates.assert_live(session)
                     with self.manager.page_provenance.controller_navigation(new_page) as navigation:
                         navigation.response = await new_page.goto(url, wait_until="domcontentloaded")
                     await self.manager._settle(new_page)

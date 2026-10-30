@@ -200,17 +200,22 @@ class BrowserRuntimeService:
                 names,
             )
             return False
-        await manager.request_gates.release(browser)
+        gates = manager.request_gates
+        # As _close_owned_browser: the replacement gate stays attached, gating the survivors, until the disconnect
+        # has succeeded, and the disconnect taking its session down is no loss.
+        gates.ending(browser)
         try:
             await asyncio.wait_for(browser.close(), timeout=PREVIOUS_BROWSER_CLOSE_TIMEOUT_SECONDS)
         except Exception as exc:
+            gates.ending(browser, False)
             logger.error(
                 "pre-request gate loss: session(s) %s did not close, and disconnecting the shared browser failed "
-                "(%s): their context runs on the post-load guard alone",
+                "(%s): the replacement gate stays attached, so their context stays gated",
                 names,
                 f"{type(exc).__name__}: {exc}"[:200],
             )
             return False
+        await gates.release(browser)
         logger.error(
             "pre-request gate loss: session(s) %s did not close; disconnected the shared browser, which clears "
             "their context, and the next session reconnects",

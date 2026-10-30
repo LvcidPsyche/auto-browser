@@ -797,10 +797,14 @@ class BrowserSessionService:
             manager.sessions.pop(shadow_session_id, None)
             # As create's rollback: the context first, then the browser, and its gate only once that has closed.
             if context is not None:
+                # Bounded as each teardown step is: a stalled close must not keep the original error from
+                # returning, nor the browser from being closed.
                 try:
-                    await context.close()
+                    await asyncio.wait_for(context.close(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
                 except Exception as exc:
-                    logger.warning("failed to close the shadow context during rollback: %s", exc)
+                    logger.warning(
+                        "failed to close the shadow context during rollback: %s", f"{type(exc).__name__}: {exc}"
+                    )
             await self._close_owned_browser(headed_browser, shadow_session_id)
             raise
 
