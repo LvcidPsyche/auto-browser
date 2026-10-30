@@ -967,7 +967,8 @@ class McpToolGateway:
                 kind = "html"
             # The DOM is returned as it is; on Chrome's error page for a navigation the gate stopped, the
             # controller says what was stopped next to it.
-            block = await self.manager.request_gates.error_page_block(getattr(session, "browser", None), session.page)
+            gates = getattr(self.manager, "request_gates", None)
+            block = await gates.error_page_block(getattr(session, "browser", None), session.page) if gates else None
         return {
             "session_id": payload.session_id,
             "type": kind,
