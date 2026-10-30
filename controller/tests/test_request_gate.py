@@ -10,6 +10,7 @@ session detaching. tests/test_request_gate_chromium.py checks the same rules aga
 from __future__ import annotations
 
 import asyncio
+import gc
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from urllib.parse import urlsplit
@@ -1326,27 +1327,42 @@ async def test_fu3_a_page_session_that_opens_after_the_bound_is_detached_once_it
     assert late.detached, "the session opened after the bound was left attached"
 
 
-async def test_fu3_a_page_session_that_fails_to_open_after_the_bound_is_quiet(monkeypatch, caplog) -> None:
+async def test_fu3_a_page_session_that_fails_to_open_after_the_bound_is_quiet(monkeypatch) -> None:
+    """The open's exception must be retrieved (``_detach_once_opened`` does), or asyncio reports "Task exception
+    was never retrieved" when the task is finalised. Codex on #242: a check of the log before that finalisation
+    passed against main, so this waits for ``_OPENING`` to drain, drops its references, collects, and reads what
+    the loop's exception handler was given."""
     monkeypatch.setattr(request_gates, "TARGET_ID_TIMEOUT_SECONDS", 0.05)
     gates = _gates()
+    loop = asyncio.get_running_loop()
+    reported: list[dict] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
 
     async def browser_side_failure() -> FakeCDPSession:
         await asyncio.sleep(0.1)
         raise RuntimeError("Target closed")
 
-    opening: list[asyncio.Task] = []
-
     async def fails_late(_page) -> FakeCDPSession:
-        opening.append(asyncio.ensure_future(browser_side_failure()))
-        return await asyncio.shield(opening[0])
+        # As Playwright: the open fails whether or not its awaiter is cancelled. No reference to it is kept here.
+        return await asyncio.shield(browser_side_failure())
 
-    page = Mock(context=SimpleNamespace(new_cdp_session=fails_late))
-
-    with caplog.at_level("WARNING"):
+    try:
+        page = Mock(context=SimpleNamespace(new_cdp_session=fails_late))
         assert await gates.target_id_of(page) is None
-        await asyncio.sleep(0.2)
+        for _ in range(200):
+            if not request_gates._OPENING:
+                break
+            await asyncio.sleep(0.01)
+        assert not request_gates._OPENING, "the failed open was not taken off _OPENING"
+        del page
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
 
-    assert "Target closed" not in caplog.text
+    unretrieved = [context for context in reported if "never retrieved" in str(context.get("message"))]
+    assert not unretrieved, unretrieved
 
 
 async def test_fu3_an_open_that_completes_as_the_read_is_cancelled_is_still_detached() -> None:
