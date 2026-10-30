@@ -839,6 +839,82 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.get_session(session_id)
         self.assertEqual((caught.exception.status, caught.exception.reason), ("closed", "request_gate_lost"))
 
+    # ── round 4: F9, the agent contract ──────────────────────────────────────
+
+    async def test_f9c_a_start_url_that_leaves_for_a_refused_host_while_create_settles_is_a_block(self) -> None:
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        page = self.browser.context.page
+        page.context = self.browser.context
+
+        async def settles_then_leaves(_page) -> None:
+            [gate_session] = _gate_sessions(self.browser)
+            gate_session.replies["Target.getTargetInfo"] = {
+                "targetInfo": {
+                    "targetId": "start-page",
+                    "type": "page",
+                    "browserContextId": self.browser.context.context_id,
+                }
+            }
+            gate_session.emit(
+                "Fetch.requestPaused",
+                {
+                    "requestId": "meta-refresh",
+                    "frameId": "start-page",
+                    "request": {"url": "https://refused.example/secret", "method": "GET", "headers": {}},
+                },
+            )
+            await gate_session.wait_for_reply("meta-refresh")
+
+        self.manager._settle = settles_then_leaves  # type: ignore[method-assign]
+        self.manager.request_gates.target_id_of = AsyncMock(return_value="start-page")  # type: ignore[method-assign]
+
+        with self.assertRaises(BrowserActionError) as caught:
+            await self.manager.create_session(name="s", start_url=START_URL)
+
+        self.assertEqual(
+            (caught.exception.code, caught.exception.action, caught.exception.url),
+            ("browser_action_blocked", "create_session", "https://refused.example"),
+        )
+        self.assertEqual(self.manager.sessions, {})
+
+    async def test_f9c_a_shadow_page_that_leaves_for_a_refused_host_while_it_settles_is_a_block(self) -> None:
+        self.manager.settings.shadow_browse_enabled = True
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
+        self.manager.sessions[source_id].context.storage_state = AsyncMock(return_value={})
+        headed = _browser()
+        headed.context.page.context = headed.context
+        self._playwright(launch=AsyncMock(return_value=headed))
+        settle = self.manager._settle
+
+        async def settles_then_leaves(page) -> None:
+            if page is not headed.context.page:
+                return await settle(page)
+            [gate_session] = _gate_sessions(headed)
+            gate_session.replies["Target.getTargetInfo"] = {
+                "targetInfo": {"targetId": "shadow-page", "type": "page", "browserContextId": headed.context.context_id}
+            }
+            gate_session.emit(
+                "Fetch.requestPaused",
+                {
+                    "requestId": "shadow-refresh",
+                    "frameId": "shadow-page",
+                    "request": {"url": "https://refused.example/secret", "method": "GET", "headers": {}},
+                },
+            )
+            await gate_session.wait_for_reply("shadow-refresh")
+
+        self.manager._settle = settles_then_leaves  # type: ignore[method-assign]
+        self.manager.request_gates.target_id_of = AsyncMock(return_value="shadow-page")  # type: ignore[method-assign]
+
+        with self.assertRaises(BrowserActionError) as caught:
+            await self.manager.enable_shadow_browse(source_id)
+
+        self.assertEqual(
+            (caught.exception.code, caught.exception.action), ("browser_action_blocked", "enable_shadow_browse")
+        )
+        headed.close.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()

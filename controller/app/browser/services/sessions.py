@@ -259,7 +259,6 @@ class BrowserSessionService:
                 # refused redirect into a session parked on a blank page.
                 async with session.lock:
                     await self._goto_or_blocked(browser, page, start_url, action="create_session")
-                    await self.manager._settle(page)
                     # The check navigate() makes after the page loads: an allowlisted
                     # start URL can redirect somewhere that is not. Raising here rolls
                     # the session back below, so no live session is left on that host.
@@ -787,7 +786,6 @@ class BrowserSessionService:
 
             if current_url != "about:blank":
                 await self._goto_or_blocked(headed_browser, page, current_url, action="enable_shadow_browse")
-                await manager._settle(page)
             if gate is not None and not gate.live:
                 # Lost before the session was in manager.sessions, where containment looks: refused, as in create.
                 raise RequestGateUnavailable(
@@ -822,8 +820,9 @@ class BrowserSessionService:
         }
 
     async def _goto_or_blocked(self, browser: Any, page: Any, url: str, *, action: str) -> None:
-        """The controller's own navigation outside the action pipeline, a stop by the gate mapped to the block it
-        is (R6's rule: the gate's own failure, and a block on this page since the navigation started)."""
+        """The controller's own navigation outside the action pipeline, then the page's settle, a stop by the gate
+        mapped to the block it is: the goto's own failure (R6's rule), or a navigation the page made once loaded
+        (a meta refresh, a script) that the gate stopped while it settled."""
         gates = self.manager.request_gates
         gate = gates.get(browser)
         if gates.enabled() and (gate is None or not gate.live):
@@ -841,6 +840,11 @@ class BrowserSessionService:
                 raise
             stopped = await gates.blocks_on_page(browser, page, since=since)
             raise navigation_blocked_error(stopped[-1] if stopped else None, action=action) from exc
+        await self.manager._settle(page)
+        stopped = await gates.blocks_on_page(browser, page, since=since)
+        if stopped:
+            # The page loaded, then left for a refused host: it now shows Chrome's error page for that block.
+            raise navigation_blocked_error(stopped[-1], action=action)
 
     async def _page_snapshot(self, session: "BrowserSession") -> tuple[str, str, bool]:
         page = session.page

@@ -277,3 +277,34 @@ async def test_f5_a_block_from_the_totp_follow_up_is_reported(tmp_path: Path) ->
         [block] = result["target"]["blocked_navigations"]
         assert block["origin"] == env.server.url(REFUSED, "")
         assert env.server.hits_on(REFUSED) == []
+
+
+async def test_f9b_a_stopped_navigates_url_is_the_refused_origin(tmp_path: Path) -> None:
+    """As for a start URL or a new tab: ``url`` names the refused origin, not the page the action went back to."""
+    async with gated(tmp_path) as env:
+        session_id = await env.create()
+
+        with pytest.raises(BrowserActionError) as caught:
+            await env.manager.navigate(session_id, _redirect_to_refused(env))
+
+        assert caught.value.url == env.server.url(REFUSED, "")
+        assert caught.value.payload["url"] == env.server.url(REFUSED, "")
+
+
+async def test_f9c_a_start_url_that_meta_refreshes_to_a_refused_host_is_a_block(tmp_path: Path) -> None:
+    async with gated(tmp_path) as env:
+        env.server.pages["/leaves"] = (
+            f'<meta http-equiv="refresh" content="0;url={env.server.url(REFUSED, SECRET_PATH)}"><p>leaving</p>'
+        )
+
+        with pytest.raises(BrowserActionError) as caught:
+            await env.create("/leaves")
+
+        assert (caught.value.code, caught.value.action, caught.value.url) == (
+            BROWSER_ACTION_BLOCKED,
+            "create_session",
+            env.server.url(REFUSED, ""),
+        )
+        _assert_names_the_origin_only(env, caught.value.message)
+        assert env.manager.sessions == {}
+        assert env.server.hits_on(REFUSED) == []

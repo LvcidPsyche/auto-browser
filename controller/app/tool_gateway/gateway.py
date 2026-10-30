@@ -370,7 +370,14 @@ class McpToolGateway:
             return self._error_response(f"Invalid arguments for {payload.name}: {details}")
         except SessionNotFoundError as exc:
             return self._refusal_response(
-                exc.message, {"error": exc.message, "code": exc.code, "session_id": exc.session_id}, exc
+                exc.message,
+                {
+                    "error": exc.message,
+                    "code": exc.code,
+                    **({"reason": exc.reason} if exc.reason else {}),
+                    "session_id": exc.session_id,
+                },
+                exc,
             )
         except (ValueError, KeyError, RuntimeError) as exc:
             # Handlers raise these with operator-facing messages ("Provide

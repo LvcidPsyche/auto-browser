@@ -134,11 +134,13 @@ class BrowserActionPipeline:
                 await self._execute(context, witness_state)
             except PermissionError as exc:
                 # The approval guard says what became of the approval; anything else is a policy block.
+                url = context.manager._shown_url(context.session.page)
                 if isinstance(exc, ApprovalRefusal):
                     message, code, status_code = str(exc), exc.code, 409
                 elif isinstance(exc, NavigationStoppedError):
-                    # Stopped before it was sent (the pre-request gate): its text names only the origin.
-                    message, code, status_code = str(exc), BROWSER_ACTION_BLOCKED, 403
+                    # Stopped before it was sent (the pre-request gate): its text and url name only the refused
+                    # origin, as for a start URL or a new tab; not the page the action went back to.
+                    message, code, status_code, url = str(exc), BROWSER_ACTION_BLOCKED, 403, exc.origin
                 else:
                     message, code, status_code = "Action blocked by policy", BROWSER_ACTION_BLOCKED, 403
                 # On the holds now, not once the block's snapshot and trail are written: an operator's
@@ -152,7 +154,7 @@ class BrowserActionPipeline:
                     action=context.action_name,
                     status_code=status_code,
                     retryable=False,
-                    url=context.manager._shown_url(context.session.page),
+                    url=url,
                     details={"snapshot": failed},
                 ) from exc
             except BrowserActionError as exc:
