@@ -9,6 +9,7 @@ from playwright.async_api import Error as PlaywrightError
 from ...action_errors import BrowserActionError
 from ..page_provenance import CLOSED_PAGE_GRACE_SECONDS
 from ..request_gate import block_summary, navigation_blocked_error, stopped_by_gate
+from ..request_gates import CHROME_ERROR_SCHEME
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -217,8 +218,12 @@ class BrowserTabService:
         ]
         gates = getattr(self.manager, "request_gates", None)
         for tab, page in zip(tabs, pages):
-            # A tab whose navigation the pre-request gate stopped shows Chrome's error page: say what was stopped.
-            block = await gates.error_page_block(getattr(session, "browser", None), page) if gates else None
+            # A tab listed on Chrome's error page: say what the pre-request gate stopped, while that block is the
+            # page's last main-frame request. Decided on the URL listed, not the page's live one, so the two
+            # agree; and so the gates are asked about error-page tabs only.
+            if gates is None or not str(tab["url"]).startswith(CHROME_ERROR_SCHEME):
+                continue
+            block = await gates.last_block_on_page(getattr(session, "browser", None), page)
             if block is not None:
                 tab["blocked_navigation"] = block_summary(block)
         return tabs
