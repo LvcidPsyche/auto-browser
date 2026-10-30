@@ -1338,9 +1338,11 @@ async def test_fu3_a_page_session_that_fails_to_open_after_the_bound_is_quiet(mo
     reported: list[dict] = []
     previous = loop.get_exception_handler()
     loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    failed = asyncio.Event()
 
     async def browser_side_failure() -> FakeCDPSession:
         await asyncio.sleep(0.1)
+        failed.set()
         raise RuntimeError("Target closed")
 
     async def fails_late(_page) -> FakeCDPSession:
@@ -1350,8 +1352,10 @@ async def test_fu3_a_page_session_that_fails_to_open_after_the_bound_is_quiet(mo
     try:
         page = Mock(context=SimpleNamespace(new_cdp_session=fails_late))
         assert await gates.target_id_of(page) is None
+        # The open fails after the bound; only then can the read's task finish and _OPENING drain.
+        await asyncio.wait_for(failed.wait(), timeout=2.0)
         for _ in range(200):
-            if not request_gates._OPENING:
+            if not request_gates._OPENING and not [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]:
                 break
             await asyncio.sleep(0.01)
         assert not request_gates._OPENING, "the failed open was not taken off _OPENING"
