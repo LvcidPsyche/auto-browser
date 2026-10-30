@@ -30,6 +30,7 @@ from app.models import McpToolCallRequest
 from app.readiness import pre_request_gate_check, run_readiness_checks
 from app.routes.sessions import create_sessions_router
 from app.tool_gateway import McpToolGateway
+from app.tool_inputs import ReadinessCheckInput
 from tests._fake_cdp import FakeCDPSession, page_session_for
 from tests.test_browser_manager_create_session import FakePage, _settings
 from tests.test_request_gate_wiring import _browser
@@ -206,18 +207,15 @@ class BlockAuditTests(_Base):
 
 
 class ReadinessTests(unittest.TestCase):
-    def settings(self, **values) -> SimpleNamespace:
-        return SimpleNamespace(**{"pre_request_blocking": True, "allowed_hosts": "example.com", **values})
-
     def test_attached(self) -> None:
         gates = {"state": "attached", "gates": [{"state": "attached", "attach_mode": False, "prefetch_pref": 2}]}
 
-        self.assertEqual(pre_request_gate_check(self.settings(), gates).status, "pass")
+        self.assertEqual(pre_request_gate_check(gates).status, "pass")
 
     def test_r3_a_launched_browser_with_no_prefetch_readback_warns(self) -> None:
         gates = {"state": "attached", "gates": [{"state": "attached", "attach_mode": False}]}
 
-        check = pre_request_gate_check(self.settings(), gates)
+        check = pre_request_gate_check(gates)
 
         self.assertEqual(check.status, "warn")
         self.assertIn("prefetch", check.message)
@@ -225,7 +223,7 @@ class ReadinessTests(unittest.TestCase):
     def test_attach_mode_without_the_switch_warns(self) -> None:
         gates = {"state": "attached", "gates": [{"state": "attached", "attach_mode": True, "switch_declared": False}]}
 
-        check = pre_request_gate_check(self.settings(), gates)
+        check = pre_request_gate_check(gates)
 
         self.assertEqual(check.status, "warn")
         self.assertIn("BlockOriginHeaderModificationOnRedirect", check.fix)
@@ -234,11 +232,11 @@ class ReadinessTests(unittest.TestCase):
     def test_attach_mode_with_the_switch_passes(self) -> None:
         gates = {"state": "attached", "gates": [{"state": "attached", "attach_mode": True, "switch_declared": True}]}
 
-        self.assertEqual(pre_request_gate_check(self.settings(), gates).status, "pass")
+        self.assertEqual(pre_request_gate_check(gates).status, "pass")
 
     def test_lost_and_failed_gates_warn_and_never_fail(self) -> None:
         for state in ("lost", "attach_failed"):
-            check = pre_request_gate_check(self.settings(), {"state": state, "gates": [{"state": state}]})
+            check = pre_request_gate_check({"state": state, "gates": [{"state": state}]})
             self.assertEqual(check.status, "warn", state)
 
     def test_a_launched_browser_whose_prefetch_is_still_on_warns(self) -> None:
@@ -248,7 +246,7 @@ class ReadinessTests(unittest.TestCase):
                 "gates": [{"state": "attached", "attach_mode": False, "prefetch_pref": read_back}],
             }
 
-            check = pre_request_gate_check(self.settings(), gates)
+            check = pre_request_gate_check(gates)
 
             self.assertEqual(check.status, "warn", read_back)
             self.assertIn("prefetch", check.message)
@@ -256,12 +254,10 @@ class ReadinessTests(unittest.TestCase):
     def test_a_launched_browser_whose_prefetch_is_off_passes(self) -> None:
         gates = {"state": "attached", "gates": [{"state": "attached", "attach_mode": False, "prefetch_pref": 2}]}
 
-        self.assertEqual(pre_request_gate_check(self.settings(), gates).status, "pass")
+        self.assertEqual(pre_request_gate_check(gates).status, "pass")
 
     def test_switched_off_warns(self) -> None:
-        check = pre_request_gate_check(
-            self.settings(pre_request_blocking=False), {"state": "off", "off_reason": "disabled", "gates": []}
-        )
+        check = pre_request_gate_check({"state": "off", "off_reason": "disabled", "gates": []})
 
         self.assertEqual(check.status, "warn")
         self.assertIn("PRE_REQUEST_BLOCKING=false", check.message)
@@ -269,15 +265,7 @@ class ReadinessTests(unittest.TestCase):
     def test_nothing_to_stop_passes(self) -> None:
         gates = {"state": "off", "off_reason": "allows_every_host", "gates": []}
 
-        self.assertEqual(pre_request_gate_check(self.settings(), gates).status, "pass")
-
-    def test_r9_readiness_reads_the_gates_own_off_reason_not_the_settings(self) -> None:
-        """One source for the on/off rule: settings that say otherwise do not change the verdict."""
-        disabled = {"state": "off", "off_reason": "disabled", "gates": []}
-        every_host = {"state": "off", "off_reason": "allows_every_host", "gates": []}
-
-        self.assertEqual(pre_request_gate_check(self.settings(allowed_hosts="*"), disabled).status, "warn")
-        self.assertEqual(pre_request_gate_check(self.settings(pre_request_blocking=False), every_host).status, "pass")
+        self.assertEqual(pre_request_gate_check(gates).status, "pass")
 
     def test_r13_bypass_failures_and_handler_errors_warn(self) -> None:
         healthy = {"state": "attached", "attach_mode": False, "prefetch_pref": 2, "handler_errors": 0}
@@ -285,11 +273,11 @@ class ReadinessTests(unittest.TestCase):
             {"state": "attached", "bypass_failures": 1, "gates": [healthy]},
             {"state": "attached", "bypass_failures": 0, "gates": [{**healthy, "handler_errors": 2}]},
         ):
-            check = pre_request_gate_check(self.settings(), gates)
+            check = pre_request_gate_check(gates)
             self.assertEqual(check.status, "warn", gates)
             self.assertIn("NAV-07", check.message)
         clean = {"state": "attached", "bypass_failures": 0, "gates": [healthy]}
-        self.assertEqual(pre_request_gate_check(self.settings(), clean).status, "pass")
+        self.assertEqual(pre_request_gate_check(clean).status, "pass")
 
     def test_the_report_carries_it_and_a_lost_gate_does_not_fail_readiness(self) -> None:
         settings = MagicMock(
@@ -304,6 +292,74 @@ class ReadinessTests(unittest.TestCase):
         [check] = [check for check in report.checks if check.name == "pre_request_gate"]
         self.assertEqual(check.status, "warn")
         self.assertNotEqual(report.overall, "fail")
+
+    def test_f10c_a_prefetch_step_in_progress_does_not_warn(self) -> None:
+        gates = {
+            "state": "attached",
+            "gates": [{"state": "attached", "attach_mode": False, "prefetch_pref": "pending"}],
+        }
+
+        self.assertEqual(pre_request_gate_check(gates).status, "pass")
+
+
+class ReadinessSurfaceTests(_Base):
+    """F10 and F12(a): what readiness reads from RequestGates.status(), on every surface."""
+
+    def test_f10b_nothing_refused_is_nothing_to_stop_even_when_switched_off(self) -> None:
+        self.manager.settings.pre_request_blocking = False
+        self.manager.settings.allowed_hosts = "*"
+
+        self.assertEqual(self.manager._pre_request_blocking_off_reason(), "allows_every_host")
+
+    async def test_f10a_mcp_readiness_reports_the_gate(self) -> None:
+        from app.tool_gateway import McpToolGateway
+
+        await self.manager.create_session(name="s")
+        gateway = McpToolGateway(manager=self.manager, orchestrator=MagicMock(), job_queue=MagicMock())
+
+        with patch("app.readiness.tesseract_available", return_value=True):
+            report = await gateway._readiness_check(ReadinessCheckInput())  # the handler behind browser.readiness_check
+
+        names = [check["name"] for check in report["checks"]]
+        self.assertIn("pre_request_gate", names)
+
+    async def test_f10c_a_launched_browsers_prefetch_reads_pending_while_it_is_set(self) -> None:
+        gates = self.manager.request_gates
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def slow_prefetch(_browser) -> int:
+            started.set()
+            await finish.wait()
+            return 2
+
+        with patch("app.browser.request_gate.turn_prefetch_off", new=slow_prefetch):
+            attaching = asyncio.create_task(gates.attach(self.browser, attach_mode=False))
+            await started.wait()
+            [entry] = gates.status()["gates"]
+            self.assertEqual(entry["prefetch_pref"], "pending")
+            self.assertEqual(pre_request_gate_check(gates.status()).status, "pass")
+            finish.set()
+            await attaching
+
+        [entry] = gates.status()["gates"]
+        self.assertEqual(entry["prefetch_pref"], 2)
+
+    async def test_f12a_status_carries_every_key_readiness_reads(self) -> None:
+        gates = self.manager.request_gates
+        await gates.attach(self.browser, attach_mode=True)
+
+        status = gates.status()
+        [entry] = status["gates"]
+
+        self.assertIn("bypass_failures", status)
+        for key in ("attach_mode", "switch_declared", "handler_errors"):
+            self.assertIn(key, entry)
+        launched = _browser()
+        with patch("app.browser.request_gate.turn_prefetch_off", new=AsyncMock(return_value=2)):
+            await gates.attach(launched, attach_mode=False)
+        self.assertIn("prefetch_pref", gates.status()["gates"][1])
+        self.manager.settings.pre_request_blocking = False
+        self.assertIn("off_reason", gates.status())
 
 
 class NewTabConversionTests(_Base):

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .auth_policy import credentials_for
+from .browser.request_gate import PREFETCH_PENDING
 from .ocr import tesseract_available
 
 
@@ -39,7 +40,7 @@ class ReadinessReport:
         }
 
 
-def pre_request_gate_check(settings: Any, gates: dict[str, Any]) -> ReadinessCheck:
+def pre_request_gate_check(gates: dict[str, Any]) -> ReadinessCheck:
     """The pre-request gate's state (RequestGates.status). Reported, never "fail": a health check must not
     restart-loop the controller on it, and sessions are refused on a browser without a gate anyway."""
     name = "pre_request_gate"
@@ -70,9 +71,12 @@ def pre_request_gate_check(settings: Any, gates: dict[str, Any]) -> ReadinessChe
             fix="Check the controller log; set PRE_REQUEST_BLOCKING=false to run on the post-load guard alone.",
             details=details,
         )
-    # A launched browser (not an attach mode) whose preference did not read back 2, or was never read.
+    # A launched browser (not an attach mode) whose preference did not read back 2, or was never read; one still
+    # being set (pending) is not a warning yet.
     prefetch_on = [
-        gate for gate in gates.get("gates", []) if gate.get("attach_mode") is False and gate.get("prefetch_pref") != 2
+        gate
+        for gate in gates.get("gates", [])
+        if gate.get("attach_mode") is False and gate.get("prefetch_pref") not in (2, PREFETCH_PENDING)
     ]
     if prefetch_on:
         return ReadinessCheck(
@@ -372,7 +376,7 @@ def run_readiness_checks(
             )
 
     if request_gates is not None:
-        checks.append(pre_request_gate_check(settings, request_gates))
+        checks.append(pre_request_gate_check(request_gates))
 
     statuses = {check.status for check in checks}
     if "fail" in statuses:

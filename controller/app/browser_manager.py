@@ -831,13 +831,13 @@ class BrowserManager:
         return self._pre_request_blocking_off_reason() is None
 
     def _pre_request_blocking_off_reason(self) -> str | None:
-        """Why there is no gate: ``disabled`` (PRE_REQUEST_BLOCKING=false) or ``allows_every_host`` (an empty
-        ALLOWED_HOSTS, or one with ``*``: nothing to stop); None while it is on."""
-        if not self.settings.pre_request_blocking:
-            return "disabled"
+        """Why there is no gate: ``allows_every_host`` (an empty ALLOWED_HOSTS, or one with ``*``: nothing to stop,
+        whatever PRE_REQUEST_BLOCKING says) or ``disabled`` (PRE_REQUEST_BLOCKING=false); None while it is on."""
         patterns = self.settings.allowed_host_patterns
         if not patterns or "*" in patterns:
             return "allows_every_host"
+        if not self.settings.pre_request_blocking:
+            return "disabled"
         return None
 
     def _cookie_off_list(self, domain: str) -> bool:

@@ -885,7 +885,10 @@ class McpToolGateway:
         return self.manager.get_remote_access_info(payload.session_id)
 
     async def _readiness_check(self, payload: ReadinessCheckInput) -> dict[str, Any]:
-        report = run_readiness_checks(self.manager.settings, mode=payload.mode)
+        # The same report as GET /readiness, the pre-request gate's state included.
+        report = run_readiness_checks(
+            self.manager.settings, mode=payload.mode, request_gates=self.manager.request_gates.status()
+        )
         return report.to_dict()
 
     # ── Extended tool handlers ──────────────────────────────────────────────

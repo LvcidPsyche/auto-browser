@@ -75,6 +75,8 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                     "reason": None,
                 }
             ),
+            # browser.readiness_check reports the pre-request gate as GET /readiness does.
+            request_gates=SimpleNamespace(status=lambda: {"state": "off", "off_reason": "disabled", "gates": []}),
             settings=SimpleNamespace(
                 auth_state_encryption_key=None,
                 require_auth_state_encryption=False,

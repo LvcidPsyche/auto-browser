@@ -70,6 +70,8 @@ PAGES_KEPT = 512
 # The gate's whole attach (its session, target discovery, Fetch.enable), and a deliberate detach.
 ATTACH_TIMEOUT_SECONDS = 10.0
 DETACH_TIMEOUT_SECONDS = 2.0
+# A launched browser's prefetch preference while it is being set (readiness does not warn on it).
+PREFETCH_PENDING = "pending"
 # Opening a page's service-worker bypass (it runs under the session lock in tabs.open); a waiter gets the same bound.
 BYPASS_TIMEOUT_SECONDS = 5.0
 # Network.enable on the bypass session keeps no bodies: the bypass needs the domain on, not its buffers (measured on
@@ -654,6 +656,9 @@ class RequestGates:
         self._attach_modes[id(browser)] = (browser, attach_mode)
         if not self._enabled():
             return
+        if not attach_mode:
+            # Read by readiness as "not yet": the step below can take PREF_TIMEOUT_SECONDS.
+            self._prefetch[id(browser)] = (browser, PREFETCH_PENDING)
         try:
             await self.require(browser)
         except RequestGateUnavailable as exc:
