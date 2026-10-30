@@ -11,7 +11,8 @@ def register(registry, gateway):
             description=(
                 "Fork a session: snapshot its cookies, storage state, and current URL, "
                 "then create a new independent session with that state. "
-                "Useful for branching workflows or running parallel variants."
+                "Useful for branching workflows or running parallel variants. "
+                "Refused without start_url while the page is Chrome's error page for a stopped navigation."
             ),
             input_model=ForkSessionInput,
             handler=gateway._fork_session,

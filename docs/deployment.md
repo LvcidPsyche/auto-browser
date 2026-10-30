@@ -285,7 +285,12 @@ What the agent sees:
   carries `target.blocked_navigations` (origin, reason, explanation) for blocks on the action's own page only;
   a background tab's block is not pinned on it.
 - A tab whose navigation was stopped shows Chrome's error page, and the tab list marks it with
-  `blocked_navigation`.
+  `blocked_navigation` (the origin of the stopped request, the reason and an explanation), decided on the URL
+  it lists. While the active page is that error page, `observe`, `browser.get_html` and an action result's
+  `after` observation (so the `actions.jsonl` record and the witness receipt too) carry the same label; the
+  built-in agent loop's prompt keeps it. The label goes once a later request of the page continues. The error
+  page's DOM is returned as any page's, unchanged: it carries the refused URL in full, path and query included,
+  since the page chose that URL.
 - Each block is audited as `navigation_blocked` with `source: "request"` and the origin only.
 - A browser the gate cannot attach to gets no sessions: creating one answers `pre_request_gate_unavailable`
   (503, retryable), naming `PRE_REQUEST_BLOCKING`. If the gate detaches on its own, the controller attaches
@@ -378,7 +383,10 @@ activated, and so cannot be navigated: close it, or open a new tab. The REST `40
 The TOTP autofill skips a refused page, also on a host in `totp_hosts`, since a refused host's redirect
 can choose that URL. Forking a session onto its page's URL (no `start_url`) refuses while its page is
 refused, and over REST answers the same 403 as observe (any other refusal of a fork answers the generic
-403); a fork onto a `start_url` the caller names is judged by that URL, as a new session is.
+403); a fork onto a `start_url` the caller names is judged by that URL, as a new session is. Shadow browse
+from a refused page answers that 403 too, and from a `data:` or `blob:` page the generic one. From Chrome's
+error page, a fork without `start_url` and a shadow browse answer 400 with a fixed text: the page is Chrome's
+error page for a navigation that was stopped or failed; fork's says to pass `start_url`.
 
 ### Other tabs while one is refused
 
