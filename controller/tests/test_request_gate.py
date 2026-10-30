@@ -10,6 +10,7 @@ session detaching. tests/test_request_gate_chromium.py checks the same rules aga
 from __future__ import annotations
 
 import asyncio
+import gc
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from urllib.parse import urlsplit
@@ -1291,3 +1292,104 @@ async def test_f3c_a_waiter_on_a_setup_that_never_settles_is_bounded(monkeypatch
     gates._bypass_pending[page] = asyncio.get_running_loop().create_future()
 
     await asyncio.wait_for(gates.bypass_service_workers(page), timeout=2.0)
+
+
+# ── follow-ups: no page session leaked by a timed-out targetId read (FU3) ────
+
+
+async def test_fu3_a_page_session_that_opens_after_the_bound_is_detached_once_it_opens(monkeypatch) -> None:
+    monkeypatch.setattr(request_gates, "TARGET_ID_TIMEOUT_SECONDS", 0.05)
+    gates = _gates()
+    late = FakeCDPSession()
+    opened = asyncio.Event()
+
+    async def browser_side_open() -> FakeCDPSession:
+        await asyncio.sleep(0.2)
+        opened.set()
+        return late
+
+    opening: list[asyncio.Task] = []
+
+    async def opens_late(_page) -> FakeCDPSession:
+        # As Playwright: the request is sent, and the session is created whether or not its awaiter is cancelled.
+        opening.append(asyncio.ensure_future(browser_side_open()))
+        return await asyncio.shield(opening[0])
+
+    page = Mock(context=SimpleNamespace(new_cdp_session=opens_late))
+
+    assert await gates.target_id_of(page) is None
+    await asyncio.wait_for(opened.wait(), timeout=2.0)
+    for _ in range(20):
+        if late.detached:
+            break
+        await asyncio.sleep(0.01)
+
+    assert late.detached, "the session opened after the bound was left attached"
+
+
+async def test_fu3_a_page_session_that_fails_to_open_after_the_bound_is_quiet(monkeypatch) -> None:
+    """The open's exception must be retrieved (``_detach_once_opened`` does), or asyncio reports "Task exception
+    was never retrieved" when the task is finalised. Codex on #242: a check of the log before that finalisation
+    passed against main, so this waits for ``_OPENING`` to drain, drops its references, collects, and reads what
+    the loop's exception handler was given."""
+    monkeypatch.setattr(request_gates, "TARGET_ID_TIMEOUT_SECONDS", 0.05)
+    gates = _gates()
+    loop = asyncio.get_running_loop()
+    reported: list[dict] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    failed = asyncio.Event()
+
+    async def browser_side_failure() -> FakeCDPSession:
+        await asyncio.sleep(0.1)
+        failed.set()
+        raise RuntimeError("Target closed")
+
+    async def fails_late(_page) -> FakeCDPSession:
+        # As Playwright: the open fails whether or not its awaiter is cancelled. No reference to it is kept here.
+        return await asyncio.shield(browser_side_failure())
+
+    try:
+        page = Mock(context=SimpleNamespace(new_cdp_session=fails_late))
+        assert await gates.target_id_of(page) is None
+        # The open fails after the bound; only then can the read's task finish and _OPENING drain.
+        await asyncio.wait_for(failed.wait(), timeout=2.0)
+        for _ in range(200):
+            if not request_gates._OPENING and not [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]:
+                break
+            await asyncio.sleep(0.01)
+        assert not request_gates._OPENING, "the failed open was not taken off _OPENING"
+        del page
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+
+    unretrieved = [context for context in reported if "never retrieved" in str(context.get("message"))]
+    assert not unretrieved, unretrieved
+
+
+async def test_fu3_an_open_that_completes_as_the_read_is_cancelled_is_still_detached() -> None:
+    """The open finishes, and the bound cancels the read, in the same loop iteration: shield then drops the
+    session (its outer future is cancelled), and the read sees the open as done."""
+    opened: asyncio.Future = asyncio.get_running_loop().create_future()
+    late = FakeCDPSession()
+
+    async def opens(_page) -> FakeCDPSession:
+        return await opened
+
+    page = Mock(context=SimpleNamespace(new_cdp_session=opens))
+    reading = asyncio.create_task(request_gates._read_target_id(page))
+    for _ in range(3):
+        await asyncio.sleep(0)  # the read waits on the open now
+
+    opened.set_result(late)
+    reading.cancel()  # no yield in between
+    with pytest.raises(asyncio.CancelledError):
+        await reading
+    for _ in range(20):
+        if late.detached:
+            break
+        await asyncio.sleep(0)
+
+    assert late.detached, "the session opened as the read was cancelled was left attached"

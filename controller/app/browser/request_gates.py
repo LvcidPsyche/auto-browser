@@ -28,6 +28,8 @@ BYPASS_TIMEOUT_SECONDS = 5.0
 # Network.enable on the bypass session keeps no bodies: the bypass needs the domain on, not its buffers (measured on
 # Chromium 151, round 4: 0 keeps the bypass working; Network.disable ends it).
 BYPASS_NETWORK_BUFFER_BYTES = 0
+# Chrome's error page: where a navigation the gate stopped leaves its page.
+CHROME_ERROR_SCHEME = "chrome-error:"
 # How long reading a page's targetId may take (it runs under the session lock, in error handling too).
 TARGET_ID_TIMEOUT_SECONDS = 2.0
 
@@ -47,13 +49,35 @@ def _page_closed(page: Any) -> bool:
     return callable(is_closed) and is_closed() is True
 
 
+# Page-session opens a timed-out targetId read left running: kept until they resolve, then detached.
+_OPENING: set[asyncio.Task[Any]] = set()
+
+
 async def _read_target_id(page: Any) -> str:
-    session = await page.context.new_cdp_session(page)
+    # A task, shielded: when the caller's bound fires while the session is still opening, the open goes on (the
+    # browser creates the session anyway) and the session is detached once it exists, rather than left attached.
+    opening = asyncio.ensure_future(page.context.new_cdp_session(page))
+    try:
+        session = await asyncio.shield(opening)
+    except BaseException:
+        # Whether or not the open is done: one that finished in the iteration the read was cancelled had its
+        # session dropped by shield (its outer future cancelled), and a done task still runs this callback (soon).
+        # An open that raised is a no-op there.
+        _OPENING.add(opening)
+        opening.add_done_callback(_detach_once_opened)
+        raise
     try:
         return (await session.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
     finally:
         # Not awaited here: a detach that stalls must not hold the bound above, or the session lock.
         spawn_background_task(_detach_quietly(session))
+
+
+def _detach_once_opened(opening: asyncio.Task[Any]) -> None:
+    _OPENING.discard(opening)
+    if opening.cancelled() or opening.exception() is not None:
+        return  # nothing opened; the read already reported its own failure
+    spawn_background_task(_detach_quietly(opening.result()))
 
 
 async def _detach_quietly(session: Any) -> None:
@@ -268,6 +292,13 @@ class RequestGates:
         if not blocks or blocks[-1].seq != gate.last_request(target_id):
             return None
         return blocks[-1]
+
+    async def error_page_block(self, browser: Any, page: Any) -> GateBlock | None:
+        """The block that left ``page`` on Chrome's error page, while it is the page's last main-frame request;
+        none on any other page, or once a later request of the page continued (last_block_on_page)."""
+        if not str(getattr(page, "url", "") or "").startswith(CHROME_ERROR_SCHEME):
+            return None
+        return await self.last_block_on_page(browser, page)
 
     def _seed_target_id(self, page: Any, target_id: str) -> None:
         with contextlib.suppress(TypeError):  # a page that cannot be weakly referenced (a test double)
