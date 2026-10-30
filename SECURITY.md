@@ -19,6 +19,32 @@ The following are not considered valid security goals for this project:
 - stealth / undetectable automation
 - deceptive fingerprinting
 
+## What ALLOWED_HOSTS promises
+
+For the controller's own sessions, with `PRE_REQUEST_BLOCKING=true` (the default) and an `ALLOWED_HOSTS` that
+refuses something (not empty, not `*`), a report that breaks one of these is in scope:
+
+- **Stopped before it is sent:** a top-level navigation's request to a host off `ALLOWED_HOSTS`, including
+  every redirect hop and a popup's first request.
+- **Still caught after the fact by NAV-07** (the guard that sends a refused page back to `about:blank` once it
+  commits):
+  - speculation-rules prefetch in attach modes, and in a launched browser where it could not be turned off
+    (launched browsers turn it off when the controller acquires them; `/readiness` warns when that failed);
+  - a navigation a service worker serves (one a same-site refused iframe registered) for a popup's first
+    navigation, and for any the popup makes before its service-worker bypass is set (a background task once
+    the controller sees the popup), in every mode;
+  - `blob:` navigations a refused iframe makes;
+  - bfcache restores in attach modes;
+  - requests held when the gate detaches, and any navigation a page starts itself before the replacement gate
+    attaches. They go out. The controller attaches the replacement before it closes that browser's sessions,
+    so the window is one attach, and it refuses their actions meanwhile.
+- **Any tab, rarely:** a navigation to a refused host fails closed in any tab of a gated browser, the
+  operator's own included in attach modes, when the gate cannot classify its frame (its lookup failed).
+- **Not covered:** iframes and subresources of other hosts.
+
+The rules, the attach-mode switch and what the gate does to the operator's own tabs are in
+[`docs/deployment.md`](./docs/deployment.md#what-allowed_hosts-refuses-and-what-it-does-not).
+
 ## Reporting
 
 Report security issues privately via GitHub's private vulnerability reporting:

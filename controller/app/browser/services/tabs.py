@@ -8,6 +8,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from ...action_errors import BrowserActionError
 from ..page_provenance import CLOSED_PAGE_GRACE_SECONDS
+from ..request_gate import block_summary, navigation_blocked_error, stopped_by_gate
 
 if TYPE_CHECKING:
     from playwright.async_api import Page
@@ -61,19 +62,38 @@ class BrowserTabService:
                 # As every action does (the pipeline): what the new page commits while it loads, right
                 # after a refused tab closed, would count as that tab's choice.
                 await self.manager._wait_out_closed_page_grace(session)
+            gates = self.manager.request_gates
+            # Before the tab exists: on a lost gate its navigation would go out unjudged.
+            gates.assert_live(session)
             new_page = await session.context.new_page()
+            # The browser's request sequence before the tab navigates: a block after it on this page is its own.
+            blocked_before = gates.mark(session.browser)
             # Reported by the context like a popup, but with no opener to judge it.
             self.manager.page_provenance.opened_by_controller(new_page)
+            if session.gate_context_id is not None:
+                await gates.bypass_service_workers(new_page)
             try:
                 self.manager._attach_page_listeners(new_page, session)
                 if url:
+                    # Again right before the navigation: the gate can be lost while the bypass is set.
+                    gates.assert_live(session)
                     with self.manager.page_provenance.controller_navigation(new_page) as navigation:
                         navigation.response = await new_page.goto(url, wait_until="domcontentloaded")
                     await self.manager._settle(new_page)
+                    # As _goto_or_blocked: the page loaded, then left for a refused host (a meta refresh, a
+                    # script) while it settled, and the gate stopped it. Raised here, so the tab is closed below.
+                    stopped = await gates.blocks_on_page(session.browser, new_page, since=blocked_before)
+                    if stopped:
+                        raise navigation_blocked_error(stopped[-1], action="open_tab")
                     # The check navigate() makes after the page loads: an
                     # allowlisted URL can redirect somewhere that is not.
                     self.manager._assert_runtime_url_allowed(new_page.url)
             except BaseException as exc:
+                # Read while the tab is open: a block names its page by the page's targetId.
+                stopped_here = isinstance(exc, PlaywrightError) and stopped_by_gate(exc)
+                stopped = (
+                    await gates.blocks_on_page(session.browser, new_page, since=blocked_before) if stopped_here else []
+                )
                 # A failed open (DNS error, timeout, refused redirect) left the
                 # blank tab behind, unreported, and answered with a raw 500.
                 try:
@@ -81,6 +101,8 @@ class BrowserTabService:
                 except Exception as close_exc:
                     logger.debug("could not close the failed new tab: %s", close_exc)
                 if isinstance(exc, PlaywrightError):
+                    if stopped_here:
+                        raise navigation_blocked_error(stopped[-1] if stopped else None, action="open_tab") from exc
                     raise BrowserActionError(
                         "Could not open the tab. Check the URL and retry.",
                         code="browser_action_failed",
@@ -184,7 +206,7 @@ class BrowserTabService:
             else title
             for page, title, (off, commits) in zip(pages, titles, before)
         ]
-        return [
+        tabs = [
             {
                 "index": index,
                 "active": page is session.page,
@@ -193,6 +215,13 @@ class BrowserTabService:
             }
             for index, (page, title) in enumerate(zip(pages, titles))
         ]
+        for tab, page in zip(tabs, pages):
+            # A tab whose navigation the pre-request gate stopped shows Chrome's error page: say what was stopped.
+            if str(tab["url"]).startswith("chrome-error:"):
+                block = await self.manager.request_gates.last_block_on_page(session.browser, page)
+                if block is not None:
+                    tab["blocked_navigation"] = block_summary(block)
+        return tabs
 
     @staticmethod
     async def _title(page: "Page", *, refused: bool) -> str:

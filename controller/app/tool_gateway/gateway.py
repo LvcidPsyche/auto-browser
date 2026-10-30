@@ -370,7 +370,14 @@ class McpToolGateway:
             return self._error_response(f"Invalid arguments for {payload.name}: {details}")
         except SessionNotFoundError as exc:
             return self._refusal_response(
-                exc.message, {"error": exc.message, "code": exc.code, "session_id": exc.session_id}, exc
+                exc.message,
+                {
+                    "error": exc.message,
+                    "code": exc.code,
+                    **({"reason": exc.reason} if exc.reason else {}),
+                    "session_id": exc.session_id,
+                },
+                exc,
             )
         except (ValueError, KeyError, RuntimeError) as exc:
             # Handlers raise these with operator-facing messages ("Provide
@@ -878,7 +885,10 @@ class McpToolGateway:
         return self.manager.get_remote_access_info(payload.session_id)
 
     async def _readiness_check(self, payload: ReadinessCheckInput) -> dict[str, Any]:
-        report = run_readiness_checks(self.manager.settings, mode=payload.mode)
+        # The same report as GET /readiness, the pre-request gate's state included.
+        report = run_readiness_checks(
+            self.manager.settings, mode=payload.mode, request_gates=self.manager.request_gates.status()
+        )
         return report.to_dict()
 
     # ── Extended tool handlers ──────────────────────────────────────────────

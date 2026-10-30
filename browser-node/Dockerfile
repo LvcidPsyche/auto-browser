@@ -44,6 +44,11 @@ RUN npm ci --omit=dev --no-audit --no-fund \
   && npx playwright install chromium \
   && chmod -R a+rX /ms-playwright
 
+# Speculation-rules prefetch is fetched without DevTools' interception, so the controller's pre-request gate
+# never sees it: this managed policy turns prediction off from process start. Both paths, since which one the
+# Playwright Chromium build reads (Chromium's or Chrome for Testing's) is unverified.
+COPY policies/auto-browser.json /etc/chromium/policies/managed/auto-browser.json
+COPY policies/auto-browser.json /etc/opt/chrome_for_testing/policies/managed/auto-browser.json
 COPY entrypoint.sh /entrypoint.sh
 COPY server.mjs /opt/browser-node/server.mjs
 COPY novnc_origin.py /opt/browser-node/novnc_origin.py

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .auth_policy import credentials_for
+from .browser.request_gates import PREFETCH_PENDING
 from .ocr import tesseract_available
 
 
@@ -39,7 +40,99 @@ class ReadinessReport:
         }
 
 
-def run_readiness_checks(settings: Any, mode: str = "normal") -> ReadinessReport:
+def pre_request_gate_check(gates: dict[str, Any]) -> ReadinessCheck:
+    """The pre-request gate's state (RequestGates.status). Reported, never "fail": a health check must not
+    restart-loop the controller on it, and sessions are refused on a browser without a gate anyway."""
+    name = "pre_request_gate"
+    details = dict(gates)
+    state = gates.get("state")
+    # Why it is off comes from the gates' own rule (BrowserManager._pre_request_blocking_off_reason), not re-derived.
+    if state == "off" and gates.get("off_reason") == "allows_every_host":
+        return ReadinessCheck(name=name, status="pass", message="ALLOWED_HOSTS allows every host: nothing to stop.")
+    if state == "off":
+        return ReadinessCheck(
+            name=name,
+            status="warn",
+            message=(
+                "PRE_REQUEST_BLOCKING=false: a page's navigation to a host ALLOWED_HOSTS does not allow is sent, "
+                "and the page is refused only after it loads."
+            ),
+            fix="Set PRE_REQUEST_BLOCKING=true.",
+            details=details,
+        )
+    if state in {"lost", "attach_failed"}:
+        return ReadinessCheck(
+            name=name,
+            status="warn",
+            message=(
+                f"The pre-request gate is {state.replace('_', ' ')} on a browser: sessions there are refused "
+                "until a new gate attaches (the next session tries)."
+            ),
+            fix="Check the controller log; set PRE_REQUEST_BLOCKING=false to run on the post-load guard alone.",
+            details=details,
+        )
+    # A launched browser (not an attach mode) whose preference did not read back 2, or was never read; one still
+    # being set (pending) is not a warning yet.
+    prefetch_on = [
+        gate
+        for gate in gates.get("gates", [])
+        if gate.get("attach_mode") is False and gate.get("prefetch_pref") not in (2, PREFETCH_PENDING)
+    ]
+    if prefetch_on:
+        return ReadinessCheck(
+            name=name,
+            status="warn",
+            message=(
+                "Speculation-rules prefetch could not be turned off in a browser the controller launched: a "
+                "prefetch of a host ALLOWED_HOSTS does not allow is sent, and only the page is refused."
+            ),
+            fix="Check the controller log; the browser-node image also sets the NetworkPredictionOptions policy.",
+            details=details,
+        )
+    handler_errors = sum(gate.get("handler_errors", 0) for gate in gates.get("gates", []))
+    if gates.get("bypass_failures", 0) or handler_errors:
+        return ReadinessCheck(
+            name=name,
+            status="warn",
+            message=(
+                f"The pre-request gate had {gates.get('bypass_failures', 0)} service-worker bypass failure(s) and "
+                f"{handler_errors} handler error(s): a service worker may serve an owned page's navigation, and a "
+                "request the handler could not judge was failed only if its URL is refused; NAV-07 refuses such a "
+                "page after it loads."
+            ),
+            fix="Check the controller log for 'pre-request gate'.",
+            details=details,
+        )
+    unswitched = [
+        gate for gate in gates.get("gates", []) if gate.get("attach_mode") and not gate.get("switch_declared")
+    ]
+    if unswitched:
+        return ReadinessCheck(
+            name=name,
+            status="warn",
+            message=(
+                "The pre-request gate is attached to a Chrome the controller did not launch, without "
+                "CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true: cross-origin 307/308 POST redirects are stopped in the "
+                "controller's sessions and fail in the operator's own tabs too."
+            ),
+            fix=(
+                "Start that Chrome with --disable-features=BlockOriginHeaderModificationOnRedirect and set "
+                "CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true."
+            ),
+            details=details,
+        )
+    message = (
+        "The pre-request gate is attached: a navigation to a host ALLOWED_HOSTS does not allow is stopped before it "
+        "is sent."
+        if state == "attached"
+        else "No browser yet; the pre-request gate attaches with the first."
+    )
+    return ReadinessCheck(name=name, status="pass", message=message, details=details)
+
+
+def run_readiness_checks(
+    settings: Any, mode: str = "normal", *, request_gates: dict[str, Any] | None = None
+) -> ReadinessReport:
     checks: list[ReadinessCheck] = []
 
     enc_key = getattr(settings, "auth_state_encryption_key", None)
@@ -281,6 +374,9 @@ def run_readiness_checks(settings: Any, mode: str = "normal") -> ReadinessReport
                     ),
                 )
             )
+
+    if request_gates is not None:
+        checks.append(pre_request_gate_check(request_gates))
 
     statuses = {check.status for check in checks}
     if "fail" in statuses:

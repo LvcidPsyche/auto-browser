@@ -23,6 +23,8 @@ from .auth_state import AuthStateManager
 from .browser.element_ids import ElementIds
 from .browser.page_provenance import CLOSED_PAGE_GRACE_SECONDS, REFUSED_FAILURES_KEPT, PageProvenance
 from .browser.page_read import start_read
+from .browser.request_gate import GateBlock
+from .browser.request_gates import RequestGates
 from .browser.services import (
     BrowserActionService,
     BrowserApprovalService,
@@ -57,6 +59,7 @@ from .session_ownership import as_system
 from .session_store import DurableSessionStore
 from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
 from .url_safety import browser_equivalent_url
+from .utils import spawn_background_task
 from .witness import (
     WitnessActionContext,
     WitnessApproval,
@@ -154,6 +157,8 @@ class BrowserSession:
     # The token-verified operator who created it; None for an unowned session
     # (see app/session_ownership.py).
     owner: str | None = None
+    # The browserContextId the pre-request gate owns for this session's context (None while it is off).
+    gate_context_id: str | None = None
 
 
 SessionCreatedHook = Callable[[str, Page], Awaitable[None]]
@@ -179,6 +184,15 @@ class BrowserManager:
         self.sessions: dict[str, BrowserSession] = {}
         self.page_provenance = PageProvenance(url_refused=self._url_off_list)
         self._browser_lock = asyncio.Lock()
+        self.request_gates = RequestGates(
+            url_refused=self._url_off_list,
+            enabled=self._pre_request_blocking_on,
+            origin_switch_declared=lambda: self.settings.cdp_block_origin_on_redirect_disabled,
+            default_attach_mode=lambda: bool(self.settings.cdp_connect_url),
+            on_lost=lambda gate: self.runtime.gate_lost(gate),
+            on_block=self._on_navigation_stopped,
+            off_reason=self._pre_request_blocking_off_reason,
+        )
         self.action_pipeline = BrowserActionPipeline()
         self.element_ids = ElementIds(settings)
         self.actions = BrowserActionService(self)
@@ -302,6 +316,7 @@ class BrowserManager:
                 except Exception as exc:  # pragma: no cover - best effort cleanup
                     logger.warning("failed to close session %s during shutdown: %s", session_id, exc)
 
+        await self.request_gates.release_all()
         self.browser = None
         if self.playwright is not None:
             await self.playwright.stop()
@@ -393,8 +408,8 @@ class BrowserManager:
         """Public API for getting a session summary by ID."""
         return await self.session_lifecycle.get_summary(session_id)
 
-    async def close_session(self, session_id: str) -> dict[str, Any]:
-        return await self.session_lifecycle.close(session_id)
+    async def close_session(self, session_id: str, *, reason: str | None = None) -> dict[str, Any]:
+        return await self.session_lifecycle.close(session_id, reason=reason)
 
     async def fork_session(
         self,
@@ -782,6 +797,49 @@ class BrowserManager:
         except PermissionError:
             return True
         return False
+
+    def _on_navigation_stopped(self, block: GateBlock) -> None:
+        """Audit a navigation the gate stopped, by its origin only, once the gate has answered Chromium.
+
+        A block with no context (a frame the gate could not look up) goes to the live session whose page has that
+        targetId, as far as targetIds were read already; otherwise to no session."""
+        sessions = list(self.sessions.values())
+        session = next((s for s in sessions if block.context_id and s.gate_context_id == block.context_id), None)
+        if session is None and block.target_id:
+            session = next(
+                (
+                    s
+                    for s in sessions
+                    if any(
+                        self.request_gates.known_target_id(page) == block.target_id
+                        for page in list(getattr(s.context, "pages", []))
+                    )
+                ),
+                None,
+            )
+        spawn_background_task(
+            self.audit.append(
+                event_type="navigation_blocked",
+                status="blocked",
+                action="navigate",
+                session_id=session.id if session is not None else None,
+                details={"url": block.origin, "source": "request", "reason": block.reason},
+            )
+        )
+
+    def _pre_request_blocking_on(self) -> bool:
+        """Whether browsers get the pre-request gate: PRE_REQUEST_BLOCKING, and an ALLOWED_HOSTS that refuses something."""
+        return self._pre_request_blocking_off_reason() is None
+
+    def _pre_request_blocking_off_reason(self) -> str | None:
+        """Why there is no gate: ``allows_every_host`` (an empty ALLOWED_HOSTS, or one with ``*``: nothing to stop,
+        whatever PRE_REQUEST_BLOCKING says) or ``disabled`` (PRE_REQUEST_BLOCKING=false); None while it is on."""
+        patterns = self.settings.allowed_host_patterns
+        if not patterns or "*" in patterns:
+            return "allows_every_host"
+        if not self.settings.pre_request_blocking:
+            return "disabled"
+        return None
 
     def _cookie_off_list(self, domain: str) -> bool:
         """Whether no host ALLOWED_HOSTS allows would receive a cookie stored for ``domain``.

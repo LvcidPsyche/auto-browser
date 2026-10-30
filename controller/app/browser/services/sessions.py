@@ -18,8 +18,10 @@ from ...models import SessionRecord, SessionStatus, resolve_totp_hosts
 from ...network_inspector import NetworkInspector
 from ...session_ownership import may_use, verified_operator
 from ...url_safety import refuse_another_navigation_host
-from ...utils import UTC
+from ...utils import UTC, utc_now
+from ..launch_flags import STORAGE_PARTITIONING_ON
 from ..page_read import PageRead
+from ..request_gate import RequestGateUnavailable, navigation_blocked_error, stopped_by_gate
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext
@@ -155,6 +157,8 @@ class BrowserSessionService:
         session: BrowserSession | None = None
         browser: Browser | None = None
         runtime: IsolatedBrowserRuntime | None = None
+        gate = None
+        gate_context_id: str | None = None
         created_hook_started = False
         # No await since check_limit, so nothing slipped in between.
         self._creating += 1
@@ -163,6 +167,8 @@ class BrowserSessionService:
             from ...browser_manager import BrowserSession
 
             browser, runtime = await self.manager._acquire_session_browser(session_id)
+            # Before the first context: no session runs on a browser without its pre-request gate.
+            gate = await self.manager.request_gates.require(browser)
             context = await browser.new_context(**context_kwargs)
             if self.manager.settings.enable_tracing:
                 await context.tracing.start(screenshots=True, snapshots=True, sources=False)
@@ -174,6 +180,10 @@ class BrowserSessionService:
             if self.manager.settings.stealth_enabled:
                 await apply_stealth(context)
             page = await context.new_page()
+            if gate is not None:
+                # Owned from the first page, before anything navigates: its popups and tabs inherit it.
+                gate_context_id = await gate.register_context(context, page)
+                await self.manager.request_gates.bypass_service_workers(page)
             session = BrowserSession(
                 id=session_id,
                 name=name or f"session-{session_id}",
@@ -206,6 +216,7 @@ class BrowserSessionService:
                 totp_hosts=resolved_totp_hosts,
                 witness_remote_state=self.manager._initial_witness_remote_state(resolved_protection_mode),
                 owner=verified_operator(),
+                gate_context_id=gate_context_id,
             )
             if source_path is not None:
                 session.last_auth_state_path = source_path
@@ -247,15 +258,19 @@ class BrowserSessionService:
                 # about:blank between the load and the check: that would turn a
                 # refused redirect into a session parked on a blank page.
                 async with session.lock:
-                    with self.manager.page_provenance.controller_navigation(page) as navigation:
-                        navigation.response = await page.goto(start_url, wait_until="domcontentloaded")
-                    await self.manager._settle(page)
+                    await self._goto_or_blocked(browser, page, start_url, action="create_session")
                     # The check navigate() makes after the page loads: an allowlisted
                     # start URL can redirect somewhere that is not. Raising here rolls
                     # the session back below, so no live session is left on that host.
                     self.manager._assert_runtime_url_allowed(page.url)
 
             await self.manager._maybe_provision_session_tunnel(session)
+            if gate is not None and not gate.live:
+                # Lost while this session started: the containment may have missed it (decision 2).
+                raise RequestGateUnavailable(
+                    "The pre-request gate detached from the browser while the session was starting, "
+                    "so the session was closed. Create it again."
+                )
             if memory is not None:
                 session.metadata["memory_context"] = memory.to_system_prompt()
                 session.metadata["memory_profile"] = memory_profile
@@ -401,10 +416,7 @@ class BrowserSessionService:
             except Exception as exc:
                 logger.warning("failed to close browser context during create_session rollback: %s", exc)
         if browser is not None and runtime is not None:
-            try:
-                await browser.close()
-            except Exception as exc:
-                logger.warning("failed to close isolated browser during create_session rollback: %s", exc)
+            await self._close_owned_browser(browser, session_id)
         if runtime is not None:
             try:
                 await self.manager.runtime_provisioner.release(runtime)
@@ -414,7 +426,8 @@ class BrowserSessionService:
     async def get(self, session_id: str) -> "BrowserSession":
         session = self.manager.sessions.get(session_id)
         if session is None:
-            raise SessionNotFoundError(session_id, status=await self._recorded_status(session_id))
+            status, reason = await self._recorded_end(session_id)
+            raise SessionNotFoundError(session_id, status=status, reason=reason)
         if not may_use(session.owner):
             # Another operator's session answers as if it did not exist.
             raise SessionNotFoundError(session_id)
@@ -466,8 +479,8 @@ class BrowserSessionService:
         if not await self.accessible(session_id):
             raise SessionNotFoundError(session_id)
 
-    async def _recorded_status(self, session_id: str) -> str | None:
-        """Status of a session that is not live, from its persisted record, if any.
+    async def _recorded_end(self, session_id: str) -> tuple[str | None, str | None]:
+        """Status, and the controller's own close reason, of a session that is not live, from its record, if any.
 
         Only consulted on the failure path, to tell a caller *why* the id does
         not work: closed, interrupted, or never existed.
@@ -476,10 +489,11 @@ class BrowserSessionService:
             record = await self.manager.session_store.get(session_id)
         except Exception:  # message enrichment only; any store failure means "unknown"
             logger.debug("no readable record for session %s", session_id, exc_info=True)
-            return None
-        return record.status if may_use(record.owner) else None
+            return None, None
+        return (record.status, record.close_reason) if may_use(record.owner) else (None, None)
 
-    async def close(self, session_id: str) -> dict[str, Any]:
+    async def close(self, session_id: str, *, reason: str | None = None) -> dict[str, Any]:
+        """Close a session; ``reason`` is the controller's own (SessionRecord.close_reason), the next call names it."""
         session = await self.manager.get_session(session_id)
         locked = await self._lock_for_close(session)
         try:
@@ -493,8 +507,15 @@ class BrowserSessionService:
                     await self._teardown_step(
                         session, "release session tunnel", lambda: self.manager.tunnel_broker.release(session.tunnel)
                     )
-                summary = await self.manager._session_summary(session, status="closed", live=False)
-                await self._release_resources(session)
+                try:
+                    summary = await self.manager._session_summary(session, status="closed", live=False)
+                except BaseException:
+                    # The session is closing all the same: its record says so, with the reason the next call names.
+                    await self._persist_closed_without_summary(session, reason)
+                    raise
+                finally:
+                    # Released even when the summary fails: the context must not outlive the session.
+                    await self._release_resources(session)
             finally:
                 # Whatever teardown step failed, the session is gone. It used to
                 # stay registered when context.close() or the runtime release
@@ -531,11 +552,39 @@ class BrowserSessionService:
                 },
             )
             summary["witness_remote"] = session.witness_remote_state.model_dump()
+            summary["close_reason"] = reason
             await self.manager.session_store.upsert(SessionRecord.model_validate(summary))
             return {"closed": True, "trace_path": str(session.trace_path), "session": summary}
         finally:
             if locked:
                 session.lock.release()
+
+    async def _persist_closed_without_summary(self, session: "BrowserSession", reason: str | None) -> None:
+        store = self.manager.session_store
+        try:
+            try:
+                record = await store.get(session.id)
+            except KeyError:
+                record = SessionRecord(
+                    id=session.id,
+                    name=session.name,
+                    created_at=session.created_at.isoformat(),
+                    updated_at=session.created_at.isoformat(),
+                    status="closed",
+                    current_url="",
+                    title="",
+                    artifact_dir=str(session.artifact_dir),
+                    takeover_url=session.takeover_url,
+                    remote_access={},
+                    owner=getattr(session, "owner", None),
+                )
+            await store.upsert(
+                record.model_copy(
+                    update={"status": "closed", "live": False, "close_reason": reason, "updated_at": utc_now()}
+                )
+            )
+        except Exception as exc:
+            logger.error("could not record session %s as closed: %s", session.id, f"{type(exc).__name__}: {exc}"[:200])
 
     async def _lock_for_close(self, session: "BrowserSession") -> bool:
         """Take the session lock for closing, even from an action stuck on its page.
@@ -572,20 +621,40 @@ class BrowserSessionService:
             session.network_inspector = None
         await self._teardown_step(session, "close browser context", session.context.close)
         if session.browser is not None and session.owns_browser:
-            await self._teardown_step(session, "close isolated browser", session.browser.close)
+            await self._close_owned_browser(session.browser, session.id)
         if session.runtime is not None:
             await self._teardown_step(
                 session, "release isolated runtime", lambda: self.manager.runtime_provisioner.release(session.runtime)
             )
 
+    async def _close_owned_browser(self, browser: Any, session_id: str) -> None:
+        """Close a browser the session owns, then release its gate. Until the close has succeeded the gate stays
+        attached, still gating whatever runs there, and the close taking the gate's session down is no loss."""
+        gates = self.manager.request_gates
+        gates.ending(browser)
+        try:
+            await asyncio.wait_for(browser.close(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
+        except Exception as exc:
+            gates.ending(browser, False)
+            logger.error(
+                "the isolated browser of session %s did not close (%s): its pre-request gate stays attached",
+                session_id,
+                f"{type(exc).__name__}: {exc}"[:200],
+            )
+            return
+        await gates.release(browser)
+
     @staticmethod
-    async def _teardown_step(session: "BrowserSession", label: str, step: Any) -> None:
+    async def _teardown_step(session: "BrowserSession", label: str, step: Any) -> bool:
         try:
             await asyncio.wait_for(step(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
         except TimeoutError:
             logger.warning("gave up waiting to %s for session %s", label, session.id)
         except Exception as exc:
             logger.warning("failed to %s for session %s: %s", label, session.id, exc)
+        else:
+            return True
+        return False
 
     async def fork(
         self,
@@ -675,15 +744,22 @@ class BrowserSessionService:
         # Launch a local headed browser process
         headed_browser = await manager.playwright.chromium.launch(
             headless=False,
-            args=["--no-sandbox", "--disable-setuid-sandbox"],
+            args=["--no-sandbox", "--disable-setuid-sandbox", STORAGE_PARTITIONING_ON],
         )
+        context = None
         try:
+            # Launched by the controller (not an attach mode), and gated before its first context.
+            await manager.request_gates.attach(headed_browser, attach_mode=False)
+            gate = await manager.request_gates.require(headed_browser)
             context = await headed_browser.new_context(**context_kwargs)
             # On the context, as in create_session: every tab and popup needs both.
             context.set_default_timeout(manager.settings.action_timeout_ms)
             if manager.settings.stealth_enabled:
                 await apply_stealth(context)
             page = await context.new_page()
+            gate_context_id = await gate.register_context(context, page) if gate is not None else None
+            if gate is not None:
+                await manager.request_gates.bypass_service_workers(page)
 
             shadow_session = BrowserSession(
                 id=shadow_session_id,
@@ -701,6 +777,7 @@ class BrowserSessionService:
                 headless=False,
                 # Same logins as the source, so the same operator and nobody else.
                 owner=session.owner,
+                gate_context_id=gate_context_id,
             )
             manager._attach_page_listeners(page, shadow_session)
             # As in create_session: popups need the listeners too, the page guard among them.
@@ -708,16 +785,27 @@ class BrowserSessionService:
             manager.sessions[shadow_session_id] = shadow_session
 
             if current_url != "about:blank":
-                with manager.page_provenance.controller_navigation(page) as navigation:
-                    navigation.response = await page.goto(current_url, wait_until="domcontentloaded")
-                await manager._settle(page)
+                await self._goto_or_blocked(headed_browser, page, current_url, action="enable_shadow_browse")
+            if gate is not None and not gate.live:
+                # Lost before the session was in manager.sessions, where containment looks: refused, as in create.
+                raise RequestGateUnavailable(
+                    "The pre-request gate detached from the shadow browser while it was starting, so it was closed. "
+                    "Enable shadow browsing again."
+                )
             await manager._persist_session(shadow_session, status="active")
         except Exception:
             manager.sessions.pop(shadow_session_id, None)
-            try:
-                await headed_browser.close()
-            except Exception as exc:  # pragma: no cover - best effort rollback
-                logger.warning("failed to close shadow browser during rollback: %s", exc)
+            # As create's rollback: the context first, then the browser, and its gate only once that has closed.
+            if context is not None:
+                # Bounded as each teardown step is: a stalled close must not keep the original error from
+                # returning, nor the browser from being closed.
+                try:
+                    await asyncio.wait_for(context.close(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
+                except Exception as exc:
+                    logger.warning(
+                        "failed to close the shadow context during rollback: %s", f"{type(exc).__name__}: {exc}"
+                    )
+            await self._close_owned_browser(headed_browser, shadow_session_id)
             raise
 
         await manager.audit.append(
@@ -734,6 +822,33 @@ class BrowserSessionService:
             "headless": False,
             "note": "Headed Chrome launched. Close the original session when done debugging.",
         }
+
+    async def _goto_or_blocked(self, browser: Any, page: Any, url: str, *, action: str) -> None:
+        """The controller's own navigation outside the action pipeline, then the page's settle, a stop by the gate
+        mapped to the block it is: the goto's own failure (R6's rule), or a navigation the page made once loaded
+        (a meta refresh, a script) that the gate stopped while it settled."""
+        gates = self.manager.request_gates
+        gate = gates.get(browser)
+        if gates.enabled() and (gate is None or not gate.live):
+            # Before the navigation, not after: on a lost gate it would go out unjudged.
+            raise RequestGateUnavailable(
+                "The pre-request gate detached from the browser while the session was starting, so it was closed. "
+                "Try again."
+            )
+        since = gates.mark(browser)
+        try:
+            with self.manager.page_provenance.controller_navigation(page) as navigation:
+                navigation.response = await page.goto(url, wait_until="domcontentloaded")
+        except PlaywrightError as exc:
+            if not stopped_by_gate(exc):
+                raise
+            stopped = await gates.blocks_on_page(browser, page, since=since)
+            raise navigation_blocked_error(stopped[-1] if stopped else None, action=action) from exc
+        await self.manager._settle(page)
+        stopped = await gates.blocks_on_page(browser, page, since=since)
+        if stopped:
+            # The page loaded, then left for a refused host: it now shows Chrome's error page for that block.
+            raise navigation_blocked_error(stopped[-1], action=action)
 
     async def _page_snapshot(self, session: "BrowserSession") -> tuple[str, str, bool]:
         page = session.page

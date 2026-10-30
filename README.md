@@ -269,6 +269,34 @@ With `APP_ENV=production` the controller refuses to start while any of these is 
 
 By default every session shares one Chromium process and one noVNC desktop (`SESSION_ISOLATION_MODE=shared_browser_node`). Cookies and storage stay separate per session, but a human taking over one session can see the others' windows. When sessions belong to different people, accounts or trust domains, start with `make up-isolation` to give each session its own browser container and takeover surface (`docker_ephemeral`). [`docs/session-isolation-audit.md`](./docs/session-isolation-audit.md) has the details.
 
+`ALLOWED_HOSTS` is held before the request goes out (`PRE_REQUEST_BLOCKING=true`, the default):
+
+- **Stopped before it is sent:** a top-level navigation's request to a host off `ALLOWED_HOSTS`, including
+  every redirect hop and a popup's first request.
+- **Still caught after the fact by NAV-07** (the guard that sends a refused page back to `about:blank` once it
+  commits):
+  - speculation-rules prefetch in attach modes, and in a launched browser where it could not be turned off
+    (launched browsers turn it off when the controller acquires them; `/readiness` warns when that failed);
+  - a navigation a service worker serves (one a same-site refused iframe registered) for a popup's first
+    navigation, and for any the popup makes before its service-worker bypass is set (a background task once
+    the controller sees the popup), in every mode;
+  - `blob:` navigations a refused iframe makes;
+  - bfcache restores in attach modes;
+  - requests held when the gate detaches, and any navigation a page starts itself before the replacement gate
+    attaches. They go out. The controller attaches the replacement before it closes that browser's sessions,
+    so the window is one attach, and it refuses their actions meanwhile.
+- **Any tab, rarely:** a navigation to a refused host fails closed in any tab of a gated browser, the
+  operator's own included in attach modes, when the gate cannot classify its frame (its lookup failed).
+- **Not covered:** iframes and subresources of other hosts.
+
+In an attach mode (`CDP_CONNECT_URL`, `browser.cdp_attach`) the gate stops navigations of the controller's
+sessions only (apart from a frame it cannot classify, above), but every navigation in that Chrome, the
+operator's own tabs included, waits on its reply: about 13 ms each, the median measured on Chromium 151. Start
+that Chrome with `--disable-features=BlockOriginHeaderModificationOnRedirect` and set
+`CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true`, or cross-origin 307/308 POST redirects fail in the operator's own
+tabs too while the controller is attached. Details:
+[`docs/deployment.md`](./docs/deployment.md#stopped-before-the-request-is-sent).
+
 `COMPLIANCE_TEMPLATE` can apply a preconfigured posture at startup:
 
 | Preset | Auth Encryption | Operator ID | PII Scrub | Isolation | Max Session Age |

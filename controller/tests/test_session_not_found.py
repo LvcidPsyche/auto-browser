@@ -131,6 +131,37 @@ class GatewaySurfaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.structuredContent["session_id"], "sess-closed")
         self.assertIn("is closed", response.content[0].text)
 
+    async def test_f9a_mcp_error_carries_the_close_reason(self) -> None:
+        manager = MagicMock()
+        manager.observe = AsyncMock(
+            side_effect=SessionNotFoundError("sess-lost", status="closed", reason="request_gate_lost")
+        )
+        manager.ensure_session_accessible = AsyncMock()
+        gateway = McpToolGateway(manager=manager, orchestrator=MagicMock(), job_queue=MagicMock())
+
+        response = await gateway.call_tool(
+            McpToolCallRequest(name="browser.observe", arguments={"session_id": "sess-lost"})
+        )
+
+        self.assertEqual(
+            (response.structuredContent["code"], response.structuredContent["reason"]),
+            ("session_closed", "request_gate_lost"),
+        )
+
+    async def test_f9a_rest_error_carries_the_close_reason(self) -> None:
+        import json
+
+        import app.main as main_module
+
+        response = await main_module.handle_key_not_found(
+            MagicMock(), SessionNotFoundError("sess-lost", status="closed", reason="request_gate_lost")
+        )
+
+        body = json.loads(response.body)
+        self.assertEqual(
+            (response.status_code, body["code"], body["reason"]), (404, "session_closed", "request_gate_lost")
+        )
+
 
 class RestSurfaceTests(unittest.TestCase):
     def test_rest_404_carries_the_reason_and_code(self) -> None:

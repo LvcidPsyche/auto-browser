@@ -326,6 +326,9 @@ def popup_session(*pages: EventPage) -> SimpleNamespace:
         lock=asyncio.Lock(),
         unframed_hops=[],
         refused_failures=deque(maxlen=REFUSED_FAILURES_KEPT),
+        # A session the pre-request gate does not own (BrowserSession's defaults: no gate in these fakes).
+        browser=None,
+        gate_context_id=None,
     )
 
 
