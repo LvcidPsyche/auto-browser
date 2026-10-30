@@ -10,14 +10,14 @@
 # app.openapi() or a request. The upper bound keeps minor bumps reviewed;
 # Dependabot moves it, so it is deliberately not restated as a number here.
 fastapi>=0.143.2,<0.144
-starlette==1.8.0
+starlette==1.10.0
 uvicorn[standard]==0.54.0
 playwright==1.62.0
-pydantic-settings==2.16.0
+pydantic-settings==2.16.1
 httpx==0.28.1
 # Imported directly (url_safety maps a host through its UTS 46 table, as a browser does);
 # httpx, anyio and requests also need it.
-idna==3.18
+idna==3.20
 redis==8.1.0
 cryptography==50.0.2
 Pillow==13.0.0
