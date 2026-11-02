@@ -5,8 +5,8 @@ All notable changes to auto-browser are documented here.
 ## [1.12.2] — 2026-11-02
 
 A controller patch release over 1.12.1. The OpenAI-compatible providers now work on models that refuse a named
-`tool_choice`, and the controller's dependencies are updated. The client, LangChain and MCP bridge packages change
-only in version; update the controller image to get it.
+`tool_choice`, a provider API key pasted with whitespace around it works, and the controller's dependencies are
+updated. The client, LangChain and MCP bridge packages change only in version; update the controller image to get it.
 
 ### Changed
 
@@ -24,18 +24,22 @@ only in version; update the controller image to get it.
   `browser_action` tool with `tool_choice`, and some models refuse a named choice with a 400: Claude Opus 5.5, Sonnet
   5.5 and Fable 5.1 through `openrouter` (checked live on 2026-11-02), and, as DeepSeek documents, DeepSeek with
   thinking on (`deepseek-flash` and `deepseek-v4-pro`, set as `DEEPSEEK_MODEL` or `provider_model`). A 400 is not
-  retried, so on these models `/agent/step` answered
-  400 and `/agent/run` ended with `status: "error"` at its first step, whose `error_code` was 400: the agent never
-  acted. When the endpoint answers 400 and the error mentions `tool_choice`, the request is now sent once more without
-  `tool_choice`. Both the message and the whole JSON error body are searched, because OpenRouter can carry the
-  upstream text only in `error.metadata`. If the endpoint accepts that request, later requests from that provider to
-  that base URL and model go without `tool_choice` from the start, until the controller restarts, and the controller
-  logs the switch at `INFO`; if it refuses it, its error is raised and nothing is remembered. Endpoints that honour
-  the named choice are unchanged: it is still sent first, and any other error is handled as before. The cost is one
-  extra rejected request per model per controller process, or one per request already in flight when the first
-  refusal comes back. An endpoint that refuses the request without
+  retried, so on these models `/agent/step` answered 400 and `/agent/run` ended with `status: "error"` at its first
+  step, whose `error_code` was 400: the agent never acted. When the endpoint answers 400 and the error mentions
+  `tool_choice`, the request is now sent once more without `tool_choice`. Both the message and the whole JSON error
+  body are searched, because OpenRouter can carry the upstream text only in `error.metadata`. If the endpoint accepts
+  that request, later requests from that provider to that base URL and model go without `tool_choice` from the start,
+  until the controller restarts, and the controller logs the switch at `INFO`; if it refuses it, its error is raised
+  and nothing is remembered. Endpoints that honour the named choice are unchanged: it is still sent first, and any
+  other error is handled as before. The cost is one extra rejected request per model per controller process, or one
+  per request already in flight when the first refusal comes back. An endpoint that refuses the request without
   `tool_choice` too, such as vLLM 0.14 and later started without `--enable-auto-tool-choice` and `--tool-call-parser`,
   is not helped, and pays the extra request on every step.
+- **A provider API key with a space or newline around it now works (#248).** The eight provider keys
+  (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`,
+  `MINIMAX_API_KEY` and `OPENAI_COMPATIBLE_API_KEY`) were sent exactly as set. On OpenRouter, a key pasted with a
+  leading space made every request a 401 ("Missing Authentication header") while `/agent/providers` still showed the
+  provider as configured. Surrounding whitespace is now stripped, and a key that is only whitespace counts as unset.
 
 ## [1.12.1] — 2026-10-30
 
