@@ -10,27 +10,30 @@ only in version; update the controller image to get it.
 
 ### Changed
 
-- Controller dependencies: FastAPI 0.162 (#235), and starlette 1.10.0, pydantic-settings 2.16.1 and idna 3.20 (#239).
-  Building the controller from source now needs setuptools 84.2.1 or later (#234); pip's isolated build fetches it.
-  Dev: ruff 0.17.3 (#239).
+- Controller dependencies: FastAPI 0.162 (`>=0.162.0,<0.163`, up from `>=0.143.2,<0.144`; #235), and starlette
+  1.10.0, pydantic-settings 2.16.1 and idna 3.20 (#239). Building the controller from source now needs setuptools
+  84.2.1 or later (#234); pip's isolated build fetches it. Dev: ruff 0.17.3 (#239).
 - CI and release actions: `actions/setup-python` 7.1.0, `docker/login-action` 4.7.0, and
-  `pypa/gh-action-pypi-publish` 1.14.3, which fixes [GHSA-5xjx-3w67-w9x9](https://github.com/pypa/gh-action-pypi-publish/security/advisories/GHSA-5xjx-3w67-w9x9)
-  in the step that publishes to PyPI (#236).
+  `pypa/gh-action-pypi-publish` 1.14.3 (#236). The last is the step that publishes to PyPI: 1.14.3 drops the revoked
+  emSign root CA from the trust store it uses for Trusted Publishing and attestations
+  ([GHSA-5xjx-3w67-w9x9](https://github.com/advisories/GHSA-5xjx-3w67-w9x9), critical).
 
 ### Fixed
 
 - **OpenAI-compatible providers no longer stop at a 400 on `tool_choice` (#244, #246).** Every request named the
-  `browser_action` tool with `tool_choice`, and some models refuse a named choice with a 400: DeepSeek with thinking
-  on (`deepseek-flash` and `deepseek-v4-pro`, set as `DEEPSEEK_MODEL` or `provider_model`) and Claude Opus 5.5, Sonnet
-  5.5, Fable 5.1 and Mythos 5.1 through `openrouter`. A 400 is not retried, so on these models `/agent/step` answered
+  `browser_action` tool with `tool_choice`, and some models refuse a named choice with a 400: Claude Opus 5.5, Sonnet
+  5.5 and Fable 5.1 through `openrouter` (checked live on 2026-11-02), and, as DeepSeek documents, DeepSeek with
+  thinking on (`deepseek-flash` and `deepseek-v4-pro`, set as `DEEPSEEK_MODEL` or `provider_model`). A 400 is not
+  retried, so on these models `/agent/step` answered
   400 and `/agent/run` ended with `status: "error"` at its first step, whose `error_code` was 400: the agent never
   acted. When the endpoint answers 400 and the error mentions `tool_choice`, the request is now sent once more without
   `tool_choice`. Both the message and the whole JSON error body are searched, because OpenRouter can carry the
   upstream text only in `error.metadata`. If the endpoint accepts that request, later requests from that provider to
   that base URL and model go without `tool_choice` from the start, until the controller restarts, and the controller
-  logs the switch once at `INFO`; if it refuses it, its error is raised and nothing is remembered. Endpoints that
-  honour the named choice are unchanged: it is still sent first, and any other error is handled as before. The cost is
-  one extra rejected request per model per controller process. An endpoint that refuses the request without
+  logs the switch at `INFO`; if it refuses it, its error is raised and nothing is remembered. Endpoints that honour
+  the named choice are unchanged: it is still sent first, and any other error is handled as before. The cost is one
+  extra rejected request per model per controller process, or one per request already in flight when the first
+  refusal comes back. An endpoint that refuses the request without
   `tool_choice` too, such as vLLM 0.14 and later started without `--enable-auto-tool-choice` and `--tool-call-parser`,
   is not helped, and pays the extra request on every step.
 
