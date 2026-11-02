@@ -57,11 +57,21 @@ A 400 is a rejected request (no generation, nothing billed), so the retry is saf
 
 ## Steps
 
-- [ ] Failing tests first (DeepSeek-shaped 400, OpenRouter-shaped 400 with the text only in metadata,
+- [x] Failing tests first (DeepSeek-shaped 400, OpenRouter-shaped 400 with the text only in metadata,
       memory across steps, unrelated 400 not retried, retry failure raises and remembers nothing,
       other models still forced, named choice still sent first).
-- [ ] Adapter change.
-- [ ] docs/llm-adapters.md, CHANGELOG `[Unreleased]`.
-- [ ] Mutation checks: each guard broken in a scratch copy turns a test red.
-- [ ] Production-shape check against local fake endpoints through `ProviderRegistry`.
-- [ ] Independent review; PR.
+- [x] Adapter change.
+- [x] docs/llm-adapters.md, CHANGELOG `[Unreleased]`.
+- [x] Mutation checks: 22 mutants in a scratch copy, all red. No fallback; message-only and
+      raw_error-only matching; remember before the retry, never, or on a named success; always omit;
+      "auto" instead of omit; retry any 400, any status, or 5xx; remembered pair still forced; a second
+      retry; key by model only; the regex narrowed six ways; no log line; a log line with the base URL.
+- [x] Production-shape check: a local HTTP server through `ProviderRegistry`, real httpx, three steps
+      per scenario, 18-24.5 KB requests with a 1280x800 screenshot. main fails every step on DeepSeek
+      thinking and on OpenRouter Opus 5.5 (whose message is only "Provider returned error"); the branch
+      recovers on step 1 and sends one request per step after. vLLM 0.13 without flags and an endpoint
+      honouring the named choice are unchanged; vLLM 0.14+ without flags fails on both, with two
+      requests per step. The endpoints are fakes built from the documented errors, not live APIs.
+- [x] Independent review: four lenses (correctness, endpoint regression, tests, docs); findings
+      triaged into this branch or the follow-ups above.
+- [ ] PR.

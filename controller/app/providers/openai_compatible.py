@@ -10,18 +10,26 @@ providers. In particular this covers:
 - **openai_compatible** — a fully custom base URL for anything else: a self-hosted
   Ollama / vLLM / LM Studio server, Azure OpenAI, Together, Groq, Fireworks, etc.
 
-Vision + function-calling, same request shape as the OpenAI adapter's API path, with a
-content-parsing fallback for endpoints that don't honor tool_choice.
+Vision + function-calling over chat completions. The request names the browser_action tool;
+an endpoint that answers 400 naming tool_choice gets one retry without it, and a
+content-parsing fallback covers a response with no tool call.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from ..config import Settings
 from ..models import BrowserActionDecision, ProviderName
-from .base import BaseProviderAdapter, ProviderDecision
+from .base import BaseProviderAdapter, ProviderAPIError, ProviderDecision
+
+logger = logging.getLogger(__name__)
+
+_TOOL_CHOICE_MENTION = re.compile(r"tool[-_ ]?choice", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -103,6 +111,9 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
         # class can present as many providers.
         self.provider = profile.provider  # type: ignore[assignment]
         self.profile = profile
+        # (base_url, model) pairs that refused the named tool_choice. Per model because one gateway
+        # serves models that accept it and models that do not.
+        self._unforced: set[tuple[str, str]] = set()
 
     def _cfg(self, attr: str) -> Any:
         return getattr(self.settings, attr)
@@ -202,11 +213,11 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
                     },
                 }
             ],
-            "tool_choice": {"type": "function", "function": {"name": "browser_action"}},
         }
 
         base_url = str(self._cfg(self.profile.base_url_attr)).rstrip("/")
-        response = await self._post_json(
+        response = await self._post_naming_the_tool(
+            endpoint=(base_url, model),
             url=f"{base_url}/chat/completions",
             headers={
                 "Authorization": f"Bearer {self._cfg(self.profile.api_key_attr)}",
@@ -224,7 +235,7 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
             raw_text = tool_calls[0]["function"]["arguments"]
             decision = BrowserActionDecision.model_validate_json(raw_text)
         else:
-            # Some OpenAI-compatible endpoints ignore tool_choice; parse the content.
+            # No tool call: an endpoint that ignores tools, or a model sent no forced choice; parse the content.
             raw_text = str(message.get("content") or "").strip()
             if not raw_text:
                 raise RuntimeError(f"{self.profile.label} returned neither a browser_action tool call nor content")
@@ -237,6 +248,45 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
             usage=response.get("usage"),
             raw_text=raw_text,
         )
+
+    async def _post_naming_the_tool(
+        self,
+        *,
+        endpoint: tuple[str, str],
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """POST ``payload`` (which carries no tool_choice), naming browser_action unless the endpoint refuses that."""
+        if endpoint in self._unforced:
+            return await self._post_json(url=url, headers=headers, payload=payload)
+        # Named first, not "auto": vLLM 0.8.3-0.13 without --enable-auto-tool-choice rejects "auto" and
+        # an omitted choice but takes the named form, and several servers hold the arguments to the
+        # schema only under it.
+        named = {**payload, "tool_choice": {"type": "function", "function": {"name": "browser_action"}}}
+        try:
+            return await self._post_json(url=url, headers=headers, payload=named)
+        except ProviderAPIError as exc:
+            if not self._rejects_tool_choice(exc):
+                raise
+        # Omitted, not "auto": the same as "auto" wherever that was checked, and an unconfirmed
+        # report has MiniMax rejecting an explicit "auto".
+        response = await self._post_json(url=url, headers=headers, payload=payload)
+        self._unforced.add(endpoint)
+        logger.info(
+            "%s refused the named tool_choice for model %s; sending it without tool_choice from now on",
+            self.profile.label,
+            endpoint[1],
+        )
+        return response
+
+    @staticmethod
+    def _rejects_tool_choice(exc: ProviderAPIError) -> bool:
+        if exc.status_code != 400:
+            return False
+        # OpenRouter can carry the upstream text only in error.metadata, which message leaves out.
+        text = exc.message if exc.raw_error is None else f"{exc.message} {json.dumps(exc.raw_error)}"
+        return _TOOL_CHOICE_MENTION.search(text) is not None
 
 
 def build_openai_compatible_adapters(settings: Settings) -> dict[ProviderName, OpenAICompatibleAdapter]:
