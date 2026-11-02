@@ -22,6 +22,11 @@ A controller fix. The client, LangChain and MCP bridge packages are unchanged.
   any other error is handled as before. The cost is one extra rejected request per model per controller process. An
   endpoint that refuses the request without `tool_choice` too, such as vLLM 0.14 and later started without
   `--enable-auto-tool-choice` and `--tool-call-parser`, is not helped, and pays the extra request on every step.
+- **A provider API key with a space or newline around it now works.** The eight provider keys (`OPENAI_API_KEY`,
+  `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`
+  and `OPENAI_COMPATIBLE_API_KEY`) were sent exactly as set. On OpenRouter, a key pasted with a leading space made
+  every request a 401 ("Missing Authentication header") while `/agent/providers` still showed the provider as
+  configured. Surrounding whitespace is now stripped, and a key that is only whitespace counts as unset.
 
 ## [1.12.1] — 2026-10-30
 
