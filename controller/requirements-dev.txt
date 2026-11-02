@@ -4,6 +4,6 @@ pytest
 pytest-asyncio>=1.4.0,<1.5
 pytest-cov>=7.1.0
 respx
-ruff==0.17.1
+ruff==0.17.3
 build
 pip-audit
