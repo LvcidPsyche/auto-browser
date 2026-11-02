@@ -7,8 +7,12 @@ from typing import Any
 
 from playwright.async_api import Browser
 
+from ...action_errors import SESSION_CLOSED_GATE_LOST, SessionNotFoundError
 from ...auth_policy import credentials_for
 from ...session_isolation import IsolatedBrowserRuntime
+from ...session_ownership import as_system
+from ...utils import spawn_background_task
+from ..request_gate import RequestGate, RequestGateUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +31,16 @@ class BrowserRuntimeService:
                 return manager.browser
             if manager.playwright is None:
                 raise RuntimeError("Playwright not started")
+            if manager.browser is not None:
+                # Disconnected: its gate went with it.
+                await manager.request_gates.release(manager.browser)
 
             if manager.settings.cdp_connect_url:
                 logger.info("connecting to existing Chrome via CDP at %s", manager.settings.cdp_connect_url)
-                manager.browser = await manager.playwright.chromium.connect_over_cdp(manager.settings.cdp_connect_url)
+                browser = await manager.playwright.chromium.connect_over_cdp(manager.settings.cdp_connect_url)
                 logger.info("CDP attach succeeded")
+                await manager.request_gates.attach(browser, attach_mode=True)
+                manager.browser = browser
                 return manager.browser
 
             manager.browser = await self.connect_browser(
@@ -70,9 +79,11 @@ class BrowserRuntimeService:
                 )
             previous = manager.browser
             browser = await manager.playwright.chromium.connect_over_cdp(cdp_url)
+            await manager.request_gates.attach(browser, attach_mode=True)
             manager.browser = browser
             logger.info("attached to Chrome via CDP at %s", cdp_url)
             if previous is not None and previous is not browser:
+                await manager.request_gates.release(previous)
                 await self._close_previous_browser(previous)
             await manager.audit.append(
                 event_type="cdp_attach",
@@ -119,6 +130,8 @@ class BrowserRuntimeService:
                     attempt,
                     ws_target,
                 )
+                # Playwright launched it (browser-node's launchServer): not an attach mode.
+                await manager.request_gates.attach(browser, attach_mode=False)
                 return browser
             except Exception as exc:  # pragma: no cover - depends on external service
                 last_error = exc
@@ -154,3 +167,108 @@ class BrowserRuntimeService:
         except BaseException:  # cancellation included, or the container leaks
             await manager.runtime_provisioner.release(runtime)
             raise
+
+    def gate_lost(self, gate: RequestGate) -> None:
+        """A browser's pre-request gate detached on its own: Chromium resumes what it held (decision 2)."""
+        spawn_background_task(self._contain_lost_gate(gate))
+
+    async def _reattach(self, browser: Any) -> bool:
+        """A replacement gate first, before any close: it inherits every owned context, so what still runs there is
+        gated again within one attach, not after every close (decision 2a)."""
+        try:
+            replacement = await self.manager.request_gates.require(browser)
+        except RequestGateUnavailable as exc:
+            logger.error(
+                "pre-request gate loss: no replacement gate attached (%s); closing the sessions, whose actions are "
+                "refused meanwhile",
+                exc.message,
+            )
+            return False
+        return replacement is not None and replacement.live
+
+    async def _end_survivors(self, browser: Any, failed: list[str], *, owned: bool) -> bool:
+        """No context outlives containment. A shared browser is disconnected, which clears every context Playwright
+        created there (an operator's own Chrome keeps running); ensure_browser reconnects at the next use. An owned
+        browser was closed by its session's teardown, which keeps the gate attached when that close failed.
+        Returns whether the browser was disconnected."""
+        manager = self.manager
+        names = ", ".join(failed)
+        if owned:
+            logger.error(
+                "pre-request gate loss: session(s) %s did not close; their own browser's teardown closed it or kept "
+                "its gate attached",
+                names,
+            )
+            return False
+        gates = manager.request_gates
+        # As _close_owned_browser: the replacement gate stays attached, gating the survivors, until the disconnect
+        # has succeeded, and the disconnect taking its session down is no loss.
+        gates.ending(browser)
+        try:
+            await asyncio.wait_for(browser.close(), timeout=PREVIOUS_BROWSER_CLOSE_TIMEOUT_SECONDS)
+        except Exception as exc:
+            gates.ending(browser, False)
+            logger.error(
+                "pre-request gate loss: session(s) %s did not close, and disconnecting the shared browser failed "
+                "(%s): the replacement gate stays attached, so their context stays gated",
+                names,
+                f"{type(exc).__name__}: {exc}"[:200],
+            )
+            return False
+        await gates.release(browser)
+        logger.error(
+            "pre-request gate loss: session(s) %s did not close; disconnected the shared browser, which clears "
+            "their context, and the next session reconnects",
+            names,
+        )
+        return True
+
+    async def _contain_lost_gate(self, gate: RequestGate) -> None:
+        """Close every session on the gate's browser; the next session there attaches a new gate.
+
+        Not for a browser that disconnected: Playwright closes its contexts itself, and its sessions read as
+        interrupted. What the gate held, or what started before the sessions closed, may have gone out.
+        """
+        manager = self.manager
+        browser = gate.browser
+        is_connected = getattr(browser, "is_connected", None)
+        if callable(is_connected) and not is_connected():
+            logger.info("pre-request gate ended with its browser's connection; nothing to contain")
+            return
+        sessions = [session for session in list(manager.sessions.values()) if session.browser is browser]
+        logger.error(
+            "pre-request gate detached from a live browser: closing its %d session(s) %s",
+            len(sessions),
+            ", ".join(session.id for session in sessions) or "-",
+        )
+        reattached = await self._reattach(browser)
+        closed: list[str] = []
+        failed: list[str] = []
+        # Every operator's sessions, as shutdown closes them.
+        with as_system():
+            for session in sessions:
+                try:
+                    await manager.close_session(session.id, reason=SESSION_CLOSED_GATE_LOST)
+                except SessionNotFoundError:
+                    pass  # closed meanwhile by its own caller
+                except Exception as exc:
+                    logger.warning("could not close session %s after the gate detached: %s", session.id, exc)
+                    failed.append(session.id)
+                    continue
+                # A context that did not really close (its close raised inside the teardown) stays owned, and
+                # the next gate inherits it: still gated, but not closed.
+                (failed if gate.owns(session.gate_context_id) else closed).append(session.id)
+        owned = any(session.owns_browser for session in sessions if session.id in failed)
+        disconnected = await self._end_survivors(browser, failed, owned=owned) if failed else False
+        await manager.audit.append(
+            event_type="request_gate_lost",
+            status="error",
+            action="request_gate",
+            session_id=None,
+            details={
+                "closed_sessions": closed,
+                "failed_sessions": failed,
+                "reattached": reattached,
+                "disconnected": disconnected,
+            },
+        )

@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from ..action_errors import RefusedPageError
+from ..action_errors import ErrorPageSourceError, RefusedPageError
 from ..browser.services.tabs import TabRefusedByAnotherTabError
 from ..models import (
     HTTP_URL_SCHEMES,
@@ -250,6 +250,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                 return await manager.fork_session(session_id, name=name, start_url=start_url)
             except RuntimeError:
                 raise HTTPException(status_code=409, detail="Conflict") from None
+            except ErrorPageSourceError as exc:
+                # Its fixed text says what to pass instead, and names no host or path.
+                raise HTTPException(status_code=400, detail=str(exc)) from None
             except RefusedPageError:
                 # The page checks' refusal, as the page routes answer it. Every other PermissionError
                 # (create_session's URL check, a fresh page's about:blank among them) stays the generic one.

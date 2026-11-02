@@ -20,6 +20,7 @@ from ..approval_display import shown_code_points
 from ..approvals import CONTROLLER_SCOPE, ApprovalRequiredError, given_back_notes, held_for_execution
 from ..browser.element_ids import refuse_selector_hint
 from ..browser.page_read import MOVED_DETAIL, bounded, locked_read, start_read
+from ..browser.request_gate import block_summary
 from ..browser.services.diagnostics import checked_screenshot
 from ..browser_scripts import PAGE_TEXT_SCRIPT
 from ..models import (
@@ -370,7 +371,14 @@ class McpToolGateway:
             return self._error_response(f"Invalid arguments for {payload.name}: {details}")
         except SessionNotFoundError as exc:
             return self._refusal_response(
-                exc.message, {"error": exc.message, "code": exc.code, "session_id": exc.session_id}, exc
+                exc.message,
+                {
+                    "error": exc.message,
+                    "code": exc.code,
+                    **({"reason": exc.reason} if exc.reason else {}),
+                    "session_id": exc.session_id,
+                },
+                exc,
             )
         except (ValueError, KeyError, RuntimeError) as exc:
             # Handlers raise these with operator-facing messages ("Provide
@@ -878,7 +886,10 @@ class McpToolGateway:
         return self.manager.get_remote_access_info(payload.session_id)
 
     async def _readiness_check(self, payload: ReadinessCheckInput) -> dict[str, Any]:
-        report = run_readiness_checks(self.manager.settings, mode=payload.mode)
+        # The same report as GET /readiness, the pre-request gate's state included.
+        report = run_readiness_checks(
+            self.manager.settings, mode=payload.mode, request_gates=self.manager.request_gates.status()
+        )
         return report.to_dict()
 
     # ── Extended tool handlers ──────────────────────────────────────────────
@@ -954,10 +965,15 @@ class McpToolGateway:
             else:
                 content = await bounded(session.page.content())
                 kind = "html"
+            # The DOM is returned as it is; on Chrome's error page for a navigation the gate stopped, the
+            # controller says what was stopped next to it.
+            gates = getattr(self.manager, "request_gates", None)
+            block = await gates.error_page_block(getattr(session, "browser", None), session.page) if gates else None
         return {
             "session_id": payload.session_id,
             "type": kind,
             **_page_of(content, offset=payload.offset, max_chars=payload.max_chars),
+            **({"blocked_navigation": block_summary(block)} if block is not None else {}),
         }
 
     async def _find_elements(self, payload: FindElementsInput) -> dict[str, Any]:

@@ -497,6 +497,7 @@ async def test_cancelled_create_releases_what_it_acquired(tmp_path: Path) -> Non
     open and its isolated runtime (a docker container) running."""
     from app.browser_manager import BrowserManager
     from app.config import Settings
+    from tests._fake_cdp import FakeCDPSession
 
     settings = Settings(_env_file=None)
     settings.artifact_root = str(tmp_path / "artifacts")
@@ -523,6 +524,10 @@ async def test_cancelled_create_releases_what_it_acquired(tmp_path: Path) -> Non
     class _Browser:
         async def new_context(self, **_kwargs):
             return _Context()
+
+        async def new_browser_cdp_session(self):
+            # The pre-request gate's session (app/browser/request_gate.py).
+            return FakeCDPSession()
 
         async def close(self) -> None:
             pass

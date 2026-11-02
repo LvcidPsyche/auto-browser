@@ -8,7 +8,7 @@ from ...action_errors import SessionNotFoundError
 from ...approvals import effect_started, held_for_execution, refused_before_effect
 from ...models import BrowserActionDecision
 from ...session_ownership import may_use
-from .sessions import SESSION_ID_HEX_DIGITS, is_session_id
+from .session_creation import SESSION_ID_HEX_DIGITS, is_session_id
 
 if TYPE_CHECKING:
     from ...browser_manager import BrowserSession

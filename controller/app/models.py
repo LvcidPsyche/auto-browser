@@ -632,6 +632,8 @@ class SessionRecord(BaseModel):
     witness_remote: WitnessRemoteState = Field(default_factory=WitnessRemoteState)
     # The token-verified operator who created it; None for an unowned session.
     owner: str | None = None
+    # Why the controller closed it itself (action_errors.SESSION_CLOSED_GATE_LOST); None for a close it was asked for.
+    close_reason: str | None = None
 
 
 class AgentJobRecord(BaseModel):

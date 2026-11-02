@@ -2,6 +2,125 @@
 
 All notable changes to auto-browser are documented here.
 
+## [1.12.1] — 2026-10-30
+
+A controller patch release over 1.12.0. Most of its fixes concern the page a navigation the gate stopped leaves
+behind, Chrome's error page (`chrome-error://chromewebdata/`). One closes a DevTools session leak that any page could
+hit. The client, LangChain and MCP bridge packages change only in version; update the controller image to get it.
+
+### Upgrade notes
+
+- **Status codes that changed.** Over REST, a fork without `start_url` and a shadow browse from Chrome's error page
+  answer 400 (1.12.0: 403 and 500). Over MCP, both answer a fixed `error` with no `code` (1.12.0:
+  `not_permitted`). A shadow browse from a refused, `data:` or `blob:` page answers 403 (1.12.0: 500).
+- **A new key, absent unless a navigation was stopped.** `blocked_navigation` can now appear on observe,
+  `browser.get_html` and an action result's `after` observation, beside the tab list's.
+
+### Fixed
+
+- **Fork and shadow browse from Chrome's error page.** A session whose last navigation the gate stopped, or that
+  failed, sits on `chrome-error://chromewebdata/`. `POST /sessions/{id}/fork` without `start_url`, and
+  `POST /sessions/{id}/shadow-browse`, now answer 400 before exporting any state, and `detail` says the page is
+  Chrome's error page for a navigation that was stopped or failed; for fork, it says to pass `start_url`, which
+  works as before. In 1.12.0, fork exported the session's state and then answered 403 "Not permitted", and shadow
+  browse answered an unhandled 500: a REST client that branches on the status now sees 400 where it saw 403 or
+  500. Over MCP, `browser.fork_session` and `browser.enable_shadow_browse` answered
+  `{"error": "URL scheme 'chrome-error' is not allowed; only http and https are", "code": "not_permitted"}`; they
+  now answer the fixed text as `error`, with no `code`.
+- **Shadow browse over REST from a refused, `data:` or `blob:` page** answered an unhandled 500 with a traceback.
+  It answers 403, as fork does: a page `ALLOWED_HOSTS` refuses gets the page routes' detail, any other refusal
+  "Not permitted".
+- **The built-in agent loop saw no label.** `/agent/step`, `/agent/run` and the queued and cron runs prompt the
+  model with a compact observation that dropped `blocked_navigation`, so on Chrome's error page the model saw the
+  page with no word on what was stopped. The compact observation keeps it.
+- **A DevTools session left attached after a slow target lookup.** The read of a page's target id is bounded. When
+  the bound fired while the browser was still opening the session the read uses, the session it then opened stayed
+  attached for the life of the page. It is now detached once it opens.
+
+### Changed
+
+- **The error page says what was stopped.** While a session's page is Chrome's error page for a navigation the gate
+  stopped, `observe` (`GET` and `POST /sessions/{id}/observe`, MCP `browser.observe`), `browser.get_html` and an
+  action result's `after` observation (so the `actions.jsonl` record and the witness receipt built from it) carry
+  `blocked_navigation`: the origin of the stopped request, the reason and an explanation, as the tab list did in
+  1.12.0. The error page's own DOM is returned as before; it carries the refused URL in full, path and query
+  included, since the page chose that URL. The label goes once a later request of the page continues, whatever
+  became of it. The tab list decides it on the URL it lists, as 1.12.0 did, so a tab listed as allowed never
+  carries one; observe takes the active tab's, so the two agree and the block is looked up once per observation.
+
+## [1.12.0] — 2026-10-29
+
+A controller feature release over 1.11.2: pre-request blocking. A top-level navigation to a host `ALLOWED_HOSTS`
+refuses is now stopped before Chromium sends it, rather than refused after the page loads. The client, LangChain and
+MCP bridge packages change only in version; update the controller and browser-node images to get it.
+
+### Upgrade notes
+
+- **On by default.** `PRE_REQUEST_BLOCKING` defaults to true. The gate runs whenever `ALLOWED_HOSTS` refuses
+  something: not when it is empty or contains `*`. `PRE_REQUEST_BLOCKING=false` restores 1.11.2's behaviour.
+- **What a stopped navigation answers.** It answers `browser_action_blocked` (REST 403, `retryable: false`), with a
+  message and `url` that name only the refused origin. That covers:
+  - `navigate`;
+  - a session's `start_url`, including one that leaves for a refused host while it settles;
+  - a tab opened onto a URL;
+  - a shadow browse.
+
+  In 1.11.2 a refused `navigate` already answered `browser_action_blocked` ("Action blocked by policy"). A
+  `start_url` or a new tab's URL answered `not_permitted` (REST 403 `{"detail": "Not permitted"}`), and still does
+  when the page is refused only after it commits. A URL refused as written is refused before anything is sent, as
+  before. A click whose navigation was stopped succeeds and reports `target.blocked_navigations`.
+- **Two new answers.**
+  - A browser the gate cannot attach to gets no sessions: `pre_request_gate_unavailable` (503, retryable).
+  - If the gate detaches from a browser that is still running, a replacement attaches and that browser's sessions
+    are closed. The next call on one answers `session_closed` with `reason: "request_gate_lost"`, over REST and MCP.
+- **Attach modes** (`CDP_CONNECT_URL`, `browser.cdp_attach`).
+  - **The switch.** Start that Chrome with `--disable-features=BlockOriginHeaderModificationOnRedirect` and set
+    `CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true`. Without the switch, the controller stops cross-origin 307/308 POST
+    redirects in its own sessions, and Chrome fails the same redirects in the operator's own tabs while the
+    controller is attached.
+  - **The operator's tabs.** Every navigation in that Chrome, the operator's included, waits on the gate's reply
+    (about 13 ms). Rarely, a navigation to a refused host fails closed in a tab whose frame the gate cannot
+    classify.
+- **Saved auth profiles.** Third-party storage partitioning is back on in the browsers the controller launches, as
+  in Chrome. A third-party iframe's `localStorage` is now keyed to the top-level site, so a saved auth profile no
+  longer carries it. Cookies and first-party logins are still carried.
+
+### Added
+
+- **Pre-request blocking.** One browser-level DevTools Fetch session per browser fails the main-frame request of a
+  controller session's page when `ALLOWED_HOSTS` refuses its URL, every redirect hop and a popup's first request
+  included. Iframes, contexts the controller did not create (an attached Chrome's own tabs) and allowed URLs go
+  through.
+
+  The guard that refuses a page after it commits stays on behind the gate, and still catches what the gate cannot
+  see:
+  - speculation-rules prefetch and bfcache restores in attach modes, and prefetch in a launched browser where it
+    could not be turned off (`/readiness` warns);
+  - a same-site refused iframe's service worker serving a popup's first navigation, or one the popup makes before
+    its bypass is set;
+  - `blob:` navigations a refused iframe makes;
+  - requests held when the gate detaches, or started before its replacement attaches.
+
+  Iframes and subresources of other hosts are still not filtered. See
+  [`docs/deployment.md`](./docs/deployment.md#stopped-before-the-request-is-sent).
+- **Audit and tabs.** Stopped navigations are audited as `navigation_blocked` with `source: "request"`, and the tab
+  list marks a stopped tab with `blocked_navigation`.
+- **Readiness.** `/readiness` and MCP `browser.readiness_check` report a `pre_request_gate` check. It warns at worst;
+  it never fails readiness.
+- **`CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED`,** for an attached Chrome started with
+  `--disable-features=BlockOriginHeaderModificationOnRedirect`.
+
+### Changed
+
+- **Prefetch.** While pre-request blocking is on, the browsers the controller launches turn speculation-rules
+  prefetch off when they are acquired.
+  - A runtime preference, read back and reported by `/readiness`, is the verified control.
+  - The browser-node image also carries the `NetworkPredictionOptions` managed policy as a second layer. It is
+    installed at both policy paths, because which one that Chromium build reads is unverified.
+- **Service workers.** While pre-request blocking is on, pages the controller owns bypass them.
+- **Storage partitioning.** Third-party storage partitioning is back on in the browsers the controller and
+  browser-node launch, whatever the setting. Playwright turns it off by default.
+
 ## [1.11.2] — 2026-10-29
 
 A security release over 1.11.1, with four advisories:

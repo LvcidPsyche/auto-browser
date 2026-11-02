@@ -163,6 +163,9 @@ class BrowserDiagnosticsService:
         self.manager.page_provenance.opener_lookup_started(page)
         self._claim_unframed_hops(session, page)
         self.attach_page_listeners(page, session)
+        if getattr(session, "gate_context_id", None) is not None:
+            # From its next navigation on: Playwright reports a popup only once its first has started.
+            spawn_background_task(self.manager.request_gates.bypass_service_workers(page))
 
     def watch_context(self, context: Any, session: "BrowserSession") -> None:
         """Listen to a session's browser context: the pages it reports, and the first navigation of a

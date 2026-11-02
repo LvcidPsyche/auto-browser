@@ -175,6 +175,12 @@ class BrowserObservationService:
             read.refuse_raised()
             raise
         read.check(payload.get("screenshot_path"))
+        # On Chrome's error page for a navigation the gate stopped, the controller's own statement of it (origin,
+        # reason, explanation), next to the page as it is read: the active tab's, as the tab list of this same
+        # observation decided it, so the two agree and the block is looked up once.
+        active = next((tab for tab in payload.get("tabs") or () if tab.get("active")), None)
+        if active is not None and "blocked_navigation" in active:
+            payload["blocked_navigation"] = active["blocked_navigation"]
         return payload
 
     async def _read_observation(

@@ -177,6 +177,9 @@ async def browser_env(
 ) -> AsyncIterator[Env]:
     settings = _settings(tmp_path)
     settings.allowed_hosts = allowed_hosts
+    # These tests drive refused pages in: with the pre-request gate off, the guard that refuses a page after
+    # it commits is proven on its own (tests/test_request_gate_chromium.py runs with the gate on).
+    settings.pre_request_blocking = False
     manager = BrowserManager(settings)
     manager._maybe_provision_session_tunnel = AsyncMock()
     env = Env(manager=manager, pages=pages)

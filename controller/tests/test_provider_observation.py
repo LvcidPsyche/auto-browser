@@ -56,3 +56,27 @@ class ProviderObservationTests(unittest.TestCase):
         self.assertTrue(compact["ocr"]["available"])
         self.assertEqual(len(compact["tabs"]), 2)
         self.assertNotIn("ignored", compact["interactables"][0])
+
+    def test_compact_observation_keeps_the_stopped_navigation_label(self) -> None:
+        """The agent loop (/agent/step, /agent/run, queued and cron runs) prompts from this: a navigation the
+        pre-request gate stopped must reach it, or the model sees Chrome's error page with no word on why."""
+        label = {
+            "origin": "https://refused.example",
+            "reason": "off_list",
+            "explanation": "A navigation to https://refused.example, a host ALLOWED_HOSTS does not allow, was stopped.",
+        }
+        observation = {
+            "url": "chrome-error://chromewebdata/",
+            "title": "refused.example",
+            "tabs": [{"index": 0, "active": True, "url": "chrome-error://chromewebdata/", "blocked_navigation": label}],
+            "blocked_navigation": label,
+        }
+
+        compact = BaseProviderAdapter.compact_observation(observation)
+
+        self.assertEqual(compact["blocked_navigation"], label)
+
+    def test_compact_observation_has_no_label_key_when_nothing_was_stopped(self) -> None:
+        compact = BaseProviderAdapter.compact_observation({"url": "https://example.com/", "title": "Example"})
+
+        self.assertNotIn("blocked_navigation", compact)

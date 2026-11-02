@@ -71,6 +71,10 @@ async def browser_manager(tmp_path: Path) -> AsyncIterator[tuple[BrowserManager,
                         contexts.append(context)
                         return context
 
+                    async def new_browser_cdp_session(self):
+                        # The pre-request gate's session, on the real browser.
+                        return await real.new_browser_cdp_session()
+
                 manager._acquire_session_browser = AsyncMock(return_value=(_Browser(), None))
                 yield manager, f"http://127.0.0.1:{server.server_address[1]}"
             finally:

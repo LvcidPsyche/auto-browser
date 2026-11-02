@@ -181,6 +181,9 @@ class Settings(BaseSettings):
     isolated_tunnel_local_host: str = Field("host.docker.internal", alias="ISOLATED_TUNNEL_LOCAL_HOST")
     isolated_tunnel_info_root: str = Field("/data/tunnels/sessions", alias="ISOLATED_TUNNEL_INFO_ROOT")
     allowed_hosts: str = Field("example.com,localhost,127.0.0.1,::1", alias="ALLOWED_HOSTS")
+    # Stop a top-level navigation to a host ALLOWED_HOSTS refuses before the browser sends it
+    # (app/browser/request_gate.py). The post-commit guard stays on either way; off, it is the only one.
+    pre_request_blocking: bool = Field(True, alias="PRE_REQUEST_BLOCKING")
     default_viewport_width: int = Field(1280, alias="DEFAULT_VIEWPORT_WIDTH")
     default_viewport_height: int = Field(800, alias="DEFAULT_VIEWPORT_HEIGHT")
     connect_retries: int = Field(60, alias="CONNECT_RETRIES")
@@ -357,6 +360,10 @@ class Settings(BaseSettings):
 
     # CDP attach mode — connect to an already-running Chrome instance
     cdp_connect_url: str | None = Field(None, alias="CDP_CONNECT_URL")
+    # The operator's declaration that the Chrome reached over CDP (CDP_CONNECT_URL, browser.cdp_attach) was
+    # started with --disable-features=BlockOriginHeaderModificationOnRedirect. Without that switch Chrome fails a
+    # cross-origin POST redirect the pre-request gate let through, so the gate stops it itself and says why.
+    cdp_block_origin_on_redirect_disabled: bool = Field(False, alias="CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED")
 
     # Shadow browsing — enable headed mode for debugging
     # Off by default: it launches a headed Chromium inside the controller with

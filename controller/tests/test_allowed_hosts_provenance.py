@@ -317,6 +317,8 @@ def action_session(manager: BrowserManager, page: HistoryPage, tmp_path: Path) -
     manager.audit.append = AsyncMock()
     manager._record_witness_receipt = AsyncMock()
     manager._settle = AsyncMock()
+    # Live, as every session an action runs on is: the pipeline refuses one closed while it waited.
+    manager.sessions[session.id] = session
     return session
 
 

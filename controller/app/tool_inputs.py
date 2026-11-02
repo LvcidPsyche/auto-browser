@@ -381,7 +381,12 @@ class GetNetworkLogInput(SessionIdInput):
 class ForkSessionInput(SessionIdInput):
     name: str | None = Field(default=None, max_length=200, description="Omitted: fork-of-<source name>.")
     start_url: str | None = Field(
-        default=None, max_length=2000, description="Omitted: the source session's current URL."
+        default=None,
+        max_length=2000,
+        description=(
+            "Omitted: the source session's current URL; refused while that is Chrome's error page for a stopped "
+            "or failed navigation."
+        ),
     )
 
     @field_validator("start_url")

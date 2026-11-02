@@ -8,8 +8,16 @@ from typing import Any
 from playwright.async_api import Error as PlaywrightError
 
 from .. import events as _events
-from ..action_errors import PAGE_NOT_RESPONDING, SCREENSHOT_WITHHELD, BrowserActionError
+from ..action_errors import (
+    BROWSER_ACTION_BLOCKED,
+    PAGE_NOT_RESPONDING,
+    SCREENSHOT_WITHHELD,
+    BrowserActionError,
+    NavigationStoppedError,
+    SessionNotFoundError,
+)
 from ..approvals import ApprovalRefusal, effect_started, held_status, refused_before_effect
+from ..browser.request_gate import UNATTRIBUTED_STOP, block_summary, stopped_by_gate
 from ..utils import utc_now
 from ..witness import WitnessApproval
 
@@ -108,6 +116,15 @@ class BrowserActionPipeline:
 
     async def _run(self, context: ActionRunContext) -> dict[str, Any]:
         async with context.session.lock:
+            if context.manager.sessions.get(context.session.id) is not context.session:
+                # Closed while this action waited for the lock (containment among others): say so, with the
+                # recorded reason, rather than run on a closed context.
+                await context.manager.get_session(context.session.id)
+                raise SessionNotFoundError(context.session.id, status="closed")
+            gates = getattr(context.manager, "request_gates", None)
+            if gates is not None:
+                # Nothing the action does (its snapshot, its effect) starts on a lost gate.
+                gates.assert_live(context.session)
             # Right after a refused tab closed (the refusal's advice), what the page commits because of this
             # action would count as that tab's choice: the action waits out the grace (bounded), before its
             # snapshot and before its effect is marked, so a cancellation meanwhile gives an approval back.
@@ -117,10 +134,15 @@ class BrowserActionPipeline:
                 await self._execute(context, witness_state)
             except PermissionError as exc:
                 # The approval guard says what became of the approval; anything else is a policy block.
+                url = context.manager._shown_url(context.session.page)
                 if isinstance(exc, ApprovalRefusal):
                     message, code, status_code = str(exc), exc.code, 409
+                elif isinstance(exc, NavigationStoppedError):
+                    # Stopped before it was sent (the pre-request gate): its text and url name only the refused
+                    # origin, as for a start URL or a new tab; not the page the action went back to.
+                    message, code, status_code, url = str(exc), BROWSER_ACTION_BLOCKED, 403, exc.origin
                 else:
-                    message, code, status_code = "Action blocked by policy", "browser_action_blocked", 403
+                    message, code, status_code = "Action blocked by policy", BROWSER_ACTION_BLOCKED, 403
                 # On the holds now, not once the block's snapshot and trail are written: an operator's
                 # approve meanwhile is told the action was refused, not that it may start. The error
                 # raised below replaces it as the refusal (run).
@@ -132,7 +154,7 @@ class BrowserActionPipeline:
                     action=context.action_name,
                     status_code=status_code,
                     retryable=False,
-                    url=context.manager._shown_url(context.session.page),
+                    url=url,
                     details={"snapshot": failed},
                 ) from exc
             except BrowserActionError as exc:
@@ -204,10 +226,29 @@ class BrowserActionPipeline:
             await manager._ensure_witness_remote_ready(session, action=context.action_name)
         if witness_state.outcome.should_block:
             raise PermissionError(witness_state.outcome.block_reason or "Witness policy blocked this action")
+        gates = getattr(manager, "request_gates", None)
+        if gates is not None:
+            # Again before the effect and the operation: the gate can be lost while the action prepares.
+            gates.assert_live(session)
         if context.action_name not in MARKS_OWN_EFFECT:
             effect_started()
             witness_state.operation_started = True
-        await context.operation()
+        page = session.page
+        browser = getattr(session, "browser", None)
+        # The browser's request sequence now: a block after it on this page is this action's.
+        blocked_before = gates.mark(browser) if gates is not None else 0
+        try:
+            await context.operation()
+        except PlaywrightError as exc:
+            # Only the gate's own failure (its first line): a selector timeout keeps its error.
+            if not stopped_by_gate(exc):
+                raise
+            stopped = await self._blocks_during(context, page, blocked_before)
+            # A block, not a retryable failure; with no block tied to the page (its targetId could not be read),
+            # a text that names no URL.
+            if stopped:
+                raise NavigationStoppedError(stopped[-1].explanation, origin=stopped[-1].origin) from exc
+            raise NavigationStoppedError(UNATTRIBUTED_STOP) from exc
         # Checked before the TOTP autofill, which types a live code into the
         # page: a redirect to a disallowed host must not receive one first.
         try:
@@ -218,10 +259,13 @@ class BrowserActionPipeline:
                 f"The change was made, then the page it led to was blocked: {str(exc)[:300]}. Observe the page "
                 "before acting again, and do not repeat the action: that would make the change twice."
             )
+            await self._note_blocks(context, page, blocked_before)
             raise
         totp_result = await manager._maybe_handle_totp(session)
         if totp_result is not None:
             context.target.setdefault("totp", totp_result)
+        # After the TOTP follow-up, whose submit is the action's too: a navigation it led to counts.
+        await self._note_blocks(context, page, blocked_before)
         challenge = await manager._check_bot_challenge(session)
         if challenge is not None:
             await manager.request_human_takeover(session.id, reason=f"Bot challenge detected: {challenge['signal']}")
@@ -232,6 +276,20 @@ class BrowserActionPipeline:
                 retryable=False,
                 details=challenge,
             )
+
+    async def _note_blocks(self, context: ActionRunContext, page: Any, since: int) -> None:
+        """The action did its work; a navigation it led to on its own page was stopped before it was sent."""
+        stopped = await self._blocks_during(context, page, since)
+        if stopped:
+            context.target["blocked_navigations"] = [block_summary(block) for block in stopped]
+
+    @staticmethod
+    async def _blocks_during(context: ActionRunContext, page: Any, since: int) -> list[Any]:
+        """The pre-request gate's blocks on the action's own page since ``since``: a background tab's are not its."""
+        gates = getattr(context.manager, "request_gates", None)
+        if gates is None:
+            return []
+        return await gates.blocks_on_page(getattr(context.session, "browser", None), page, since=since)
 
     async def _handle_policy_block(
         self,

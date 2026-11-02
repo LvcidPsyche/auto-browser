@@ -105,7 +105,8 @@ def register(registry, gateway):
                 "models. 'fast' — screenshot only, returned as an image, no text/accessibility "
                 "extraction; for vision models. 'normal' (default) — text plus a screenshot URL "
                 "and OCR. 'rich' — normal with twice the interactables and 4,000 characters of "
-                "text. To read a whole page, use browser.get_html with text_only=true."
+                "text. To read a whole page, use browser.get_html with text_only=true. On Chrome's error page "
+                "for a navigation the pre-request gate stopped, blocked_navigation says what was stopped and why."
             ),
             input_model=ObserveInput,
             handler=gateway._observe,

@@ -244,6 +244,13 @@ class BaseProviderAdapter(ABC):
             "tabs": observation.get("tabs", []),
             "recent_downloads": observation.get("recent_downloads", []),
             "takeover_url": observation.get("takeover_url"),
+            # On Chrome's error page for a navigation the pre-request gate stopped: what was stopped and why,
+            # or the model sees the error page with no word on it. Absent otherwise, as in the observation.
+            **(
+                {"blocked_navigation": observation["blocked_navigation"]}
+                if observation.get("blocked_navigation")
+                else {}
+            ),
         }
 
     def build_text_prompt(
