@@ -85,12 +85,13 @@ One shared adapter (`controller/app/providers/openai_compatible.py`) drives ever
 provider that speaks the OpenAI Chat Completions dialect (`POST {base_url}/chat/completions`,
 unlike the OpenAI provider above, which uses the Responses API): screenshot input
 (`image_url`) and a strict `browser_action` tool, no `temperature`. The request names
-that tool with `tool_choice`. Some models refuse a named choice (DeepSeek with thinking
-on, Claude Opus 5.5 and Sonnet 5.5 through OpenRouter): when an endpoint answers 400 and
+that tool with `tool_choice`. Some models refuse a named choice (Claude Opus 5.5, Sonnet
+5.5 and Fable 5.1 through OpenRouter, and, by DeepSeek's documentation, DeepSeek with
+thinking on): when an endpoint answers 400 and
 the error mentions `tool_choice` (or `tool choice`), the adapter sends that request once
 more without it. If the endpoint accepts that, later requests from the same provider to
 the same base URL and model go without it until the controller restarts, and the
-controller logs the switch once; if it refuses that too, its error is raised and nothing
+controller logs the switch; if it refuses that too, its error is raised and nothing
 is remembered. Any other error is handled as before: `429`, `5xx` and network errors keep
 their backoff retries, and other statuses are raised. A fallback parses the decision from
 message content when a response has no tool call. The `deepseek` profile is text-only, so
