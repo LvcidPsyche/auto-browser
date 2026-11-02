@@ -1,5 +1,6 @@
 ---
-status: in-progress
+status: in-review
+pr: 246
 issue: 244
 branch: claude/issue-244-tool-choice
 ---
@@ -74,4 +75,4 @@ A 400 is a rejected request (no generation, nothing billed), so the retry is saf
       requests per step. The endpoints are fakes built from the documented errors, not live APIs.
 - [x] Independent review: four lenses (correctness, endpoint regression, tests, docs); findings
       triaged into this branch or the follow-ups above.
-- [ ] PR.
+- [x] PR #246. Next: the maintainer reviews and merges it; then move this plan to plans/done/.
