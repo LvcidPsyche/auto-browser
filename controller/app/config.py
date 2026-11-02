@@ -2,7 +2,7 @@ import random
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .stealth.fingerprint import CHROME_UA_POOL
@@ -388,6 +388,25 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+    @field_validator(
+        "openai_api_key",
+        "anthropic_api_key",
+        "gemini_api_key",
+        "openrouter_api_key",
+        "xai_api_key",
+        "deepseek_api_key",
+        "minimax_api_key",
+        "openai_compatible_api_key",
+        mode="before",
+    )
+    @classmethod
+    def _strip_provider_api_key(cls, value: object) -> object:
+        # A key pasted with a space or newline around it went out as-is, and the provider
+        # answered 401 (OpenRouter: "Missing Authentication header").
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
 
     @property
     def allowed_host_patterns(self) -> list[str]:
