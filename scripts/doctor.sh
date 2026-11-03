@@ -170,14 +170,11 @@ fi
 # The token header is built on every call (api_token in load_env.sh): a controller
 # this script starts writes data/api-token only once it is up.
 # The ${a[@]+...} form keeps an empty array legal under `set -u` in bash < 4.4 (macOS).
+# The token reaches curl as a config on stdin (curl_auth_config in load_env.sh),
+# never in argv, where every local user could read it.
 api_curl() {
   local args=(${OPERATOR_ID_ARGS[@]+"${OPERATOR_ID_ARGS[@]}"})
-  local token
-  token="$(api_token)"
-  if [[ -n "$token" ]]; then
-    args+=(-H "Authorization: Bearer ${token}")
-  fi
-  curl ${args[@]+"${args[@]}"} "$@"
+  curl_auth_config "$(api_token)" | curl --config - ${args[@]+"${args[@]}"} "$@"
 }
 
 require_bin docker
