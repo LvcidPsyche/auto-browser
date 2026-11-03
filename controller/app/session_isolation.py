@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import secrets
 import shutil
 import string
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
 from typing import Any
 
 try:  # pragma: no cover - optional dependency for local host-only unit runs
@@ -37,6 +38,25 @@ _NO_NEW_PRIVILEGES = "no-new-privileges:true"
 # authentication uses only the first 8 characters: 62**8, about 47 bits.
 _VNC_PASSWORD_ALPHABET = string.ascii_letters + string.digits
 _VNC_PASSWORD_LENGTH = 8
+
+
+# A drive-letter (C:\ or C:/) or UNC (\\server\share) path: what Docker Desktop on
+# Windows reports as a bind mount's Source.
+_WINDOWS_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+
+
+def _host_path(value: str) -> PurePath:
+    r"""A host path as the daemon will read it.
+
+    Docker Desktop on Windows reports the controller's /data source as
+    C:\...\data. Resolved inside the Linux controller it became
+    /app/C:\...\data, which the daemon refuses ("too many colons"). Such a
+    path is kept verbatim and joined with Windows separators; a POSIX path is
+    resolved as before.
+    """
+    if _WINDOWS_PATH.match(value):
+        return PureWindowsPath(value)
+    return Path(value).resolve()
 
 
 def _new_vnc_password() -> str:
@@ -111,7 +131,7 @@ class DockerBrowserNodeProvisioner:
     def __init__(self, settings, *, client: Any | None = None):
         self.settings = settings
         self._client = client
-        self._host_data_root: Path | None = None
+        self._host_data_root: PurePath | None = None
         # Shared mode only: the one network every browser container joins.
         self._network_name: str | None = None
         self._controller_container_id = os.environ.get("HOSTNAME")
@@ -276,8 +296,12 @@ class DockerBrowserNodeProvisioner:
 
         local_profile_dir.mkdir(parents=True, exist_ok=True)
         local_downloads_dir.mkdir(parents=True, exist_ok=True)
-        host_profile_dir.mkdir(parents=True, exist_ok=True)
-        host_downloads_dir.mkdir(parents=True, exist_ok=True)
+        # The host path is usually the same directory as the local one (through
+        # the /data mount). A Windows host path cannot be made from in here; the
+        # local dirs above already are it.
+        if isinstance(host_data_root, Path):
+            host_profile_dir.mkdir(parents=True, exist_ok=True)
+            host_downloads_dir.mkdir(parents=True, exist_ok=True)
 
         network = None
         controller_id: str | None = None
@@ -393,8 +417,8 @@ class DockerBrowserNodeProvisioner:
         *,
         network_name: str,
         network_owned: bool,
-        host_profile_dir: Path,
-        host_downloads_dir: Path,
+        host_profile_dir: PurePath,
+        host_downloads_dir: PurePath,
         local_profile_dir: Path,
         local_downloads_dir: Path,
     ) -> PendingBrowserProvision:
@@ -545,13 +569,13 @@ class DockerBrowserNodeProvisioner:
                 self._client = docker.from_env()
         return self._client
 
-    def _discover_host_data_root(self, client) -> Path:
+    def _discover_host_data_root(self, client) -> PurePath:
         if self.settings.isolated_host_data_root:
-            return Path(self.settings.isolated_host_data_root).resolve()
+            return _host_path(self.settings.isolated_host_data_root)
         container = self._get_controller_container(client)
         for mount in container.attrs.get("Mounts", []):
             if mount.get("Destination") == "/data" and mount.get("Source"):
-                return Path(str(mount["Source"])).resolve()
+                return _host_path(str(mount["Source"]))
         raise RuntimeError(
             "Could not discover the host path that backs /data for isolated browser containers. "
             "Set ISOLATED_HOST_DATA_ROOT explicitly."
