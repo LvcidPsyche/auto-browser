@@ -8,9 +8,11 @@ token, sends the current one.
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import httpx
 import respx
@@ -39,6 +41,12 @@ class ResolveBearerTokenTests(_TokenFileCase, unittest.TestCase):
         path.write_text("  from-file\n", encoding="utf-8")
         self.assertEqual(resolve_bearer_token(None, path), "from-file")
         self.assertEqual(resolve_bearer_token("  ", str(path)), "from-file")
+
+    def test_the_home_directory_is_expanded(self) -> None:
+        path = self.make_token_file()
+        path.write_text("from-home\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"HOME": str(path.parent), "USERPROFILE": str(path.parent)}):
+            self.assertEqual(resolve_bearer_token(None, "~/api-token"), "from-home")
 
     def test_neither_means_no_token(self) -> None:
         self.assertIsNone(resolve_bearer_token(None, None))
@@ -72,6 +80,17 @@ class ToolTokenFileTests(_TokenFileCase, unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(route.calls[0].request.headers["Authorization"], "Bearer first")
         self.assertEqual(route.calls[1].request.headers["Authorization"], "Bearer second")
+
+    @respx.mock
+    async def test_a_path_object_is_accepted(self) -> None:
+        route = respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json=OK))
+        path = self.make_token_file()
+        path.write_text("from-path\n", encoding="utf-8")
+
+        tool = AutoBrowserTool(base_url=BASE_URL, token_file=path)
+        await tool._arun("browser.observe", {})
+
+        self.assertEqual(route.calls[0].request.headers["Authorization"], "Bearer from-path")
 
     @respx.mock
     async def test_arun_prefers_the_bearer_token(self) -> None:

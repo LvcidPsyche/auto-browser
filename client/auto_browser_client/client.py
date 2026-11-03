@@ -42,15 +42,16 @@ def _seg(value: str) -> str:
 
 
 def _read_token_file(path: str | os.PathLike[str]) -> str:
+    path = os.path.expanduser(path)  # "~/auto-browser/data/api-token", as the stdio bridge takes it
     try:
         token = Path(path).read_text(encoding="utf-8").strip()
     except FileNotFoundError as exc:
         raise FileNotFoundError(
-            f"token_file {os.fspath(path)} does not exist: start the controller first, which writes its token "
+            f"token_file {path} does not exist: start the controller first, which writes its token "
             "to data/api-token in the auto-browser folder"
         ) from exc
     if not token:
-        raise ValueError(f"token_file {os.fspath(path)} is empty")
+        raise ValueError(f"token_file {path} is empty")
     return token
 
 
