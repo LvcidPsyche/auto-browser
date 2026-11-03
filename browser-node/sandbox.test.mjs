@@ -5,6 +5,9 @@ import { test } from "node:test";
 import {
   classifyFailure,
   declaredProfile,
+  FALLBACK_LAUNCH_TIMEOUT_MS,
+  SANDBOX_PHASE_BUDGET_MS,
+  SandboxRefusedError,
   launchWithSandboxPolicy,
   makeVerify,
   verifyServer,
@@ -446,4 +449,99 @@ test("a failed first attempt is logged even when the retry succeeds", async () =
 test("a no-seccomp hint does not hide a working namespace", () => {
   const failure = classifyFailure({ ...NAMESPACE_OK, profile: "no-seccomp", chromiumError: CHROMIUM_FATAL });
   assert.equal(failure.cause, "chromium_refused");
+});
+
+// ---- the sandboxed phase's one deadline (hardening4) ----
+
+const BUDGET = { phaseBudgetMs: 120, minAttemptMs: 40, fallbackLaunchMs: 80 };
+const never = () => new Promise(() => {});
+
+test("auto: a sandboxed launch that never resolves falls back within the phase budget, and says why", async () => {
+  const h = harness();
+  const launches = [];
+  h.launch = (sandboxed) => {
+    launches.push(sandboxed);
+    return sandboxed ? never() : Promise.resolve(fakeServer("unsandboxed"));
+  };
+  const started = Date.now();
+  const { state } = await launchWithSandboxPolicy({ setting: "auto", profile: "auto-browser", ...h, ...BUDGET });
+  const elapsed = Date.now() - started;
+  assert.equal(state.sandbox, "off");
+  assert.equal(state.cause, "launch_timeout");
+  assert.match(state.detail, /did not finish within the 0\.12s sandbox phase budget/);
+  assert.deepEqual(launches, [true, false], "no second attempt once the budget is spent");
+  assert.ok(elapsed < BUDGET.phaseBudgetMs + 60, `took ${elapsed} ms`);
+});
+
+test("on: a sandboxed launch that never resolves is refused within the phase budget", async () => {
+  const h = harness();
+  h.launch = (sandboxed) => (sandboxed ? never() : Promise.resolve(fakeServer("unsandboxed")));
+  const started = Date.now();
+  await assert.rejects(
+    launchWithSandboxPolicy({ setting: "on", profile: "auto-browser", ...h, ...BUDGET }),
+    (error) => error instanceof SandboxRefusedError && error.state.cause === "launch_timeout",
+  );
+  assert.ok(Date.now() - started < BUDGET.phaseBudgetMs + 60);
+});
+
+test("a slow first attempt that eats the budget gets no second attempt", async () => {
+  const h = harness({ verified: false });
+  const launches = [];
+  h.launch = async (sandboxed) => {
+    launches.push(sandboxed);
+    if (sandboxed) await new Promise((resolve) => setTimeout(resolve, 90)); // 90 of 120 ms: 30 left, under 40
+    return fakeServer(sandboxed ? "sandboxed" : "unsandboxed");
+  };
+  const { state } = await launchWithSandboxPolicy({ setting: "auto", profile: "auto-browser", ...h, ...BUDGET });
+  assert.equal(state.sandbox, "off");
+  assert.deepEqual(launches, [true, false]);
+  assert.match(h.warnings[0], /first sandboxed attempt failed.*no second attempt/);
+});
+
+test("the unsandboxed fallback launch is bounded too", async () => {
+  const h = harness({ sandboxedLaunch: "throws" });
+  h.launch = (sandboxed) => (sandboxed ? Promise.reject(CHROMIUM_FATAL) : never());
+  const started = Date.now();
+  await assert.rejects(
+    launchWithSandboxPolicy({ setting: "auto", profile: "auto-browser", ...h, ...BUDGET }),
+    /the unsandboxed launch did not finish within 0\.08s/,
+  );
+  assert.ok(Date.now() - started < BUDGET.phaseBudgetMs + BUDGET.fallbackLaunchMs + 60);
+});
+
+test("a launch that resolves after its deadline is closed, not leaked", async () => {
+  const h = harness();
+  let late;
+  const closed = [];
+  h.launch = (sandboxed) => {
+    if (!sandboxed) return Promise.resolve(fakeServer("unsandboxed"));
+    return new Promise((resolve) => {
+      late = () => resolve({ ...fakeServer("late"), close: async () => closed.push("late") });
+    });
+  };
+  await launchWithSandboxPolicy({ setting: "auto", profile: "auto-browser", ...h, ...BUDGET });
+  late();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(closed, ["late"]);
+});
+
+test("the defaults: a 30 s phase, a 10 s fallback launch, under the 45 s isolated wait", () => {
+  assert.equal(SANDBOX_PHASE_BUDGET_MS, 30000);
+  assert.equal(FALLBACK_LAUNCH_TIMEOUT_MS, 10000);
+  assert.ok(SANDBOX_PHASE_BUDGET_MS + FALLBACK_LAUNCH_TIMEOUT_MS < 45000);
+});
+
+test("a verification that hangs ends with the phase, not after its own longer bound", async () => {
+  const h = harness();
+  h.verify = never;
+  const started = Date.now();
+  const { state } = await launchWithSandboxPolicy({
+    setting: "auto",
+    profile: "auto-browser",
+    ...h,
+    ...BUDGET,
+    attemptTimeoutMs: 5000,
+  });
+  assert.equal(state.sandbox, "off");
+  assert.ok(Date.now() - started < BUDGET.phaseBudgetMs + 60, `took ${Date.now() - started} ms`);
 });

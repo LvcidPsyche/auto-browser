@@ -148,6 +148,9 @@ export async function launchWithSandboxPolicy({
   diagnose: runDiagnose,
   log,
   attemptTimeoutMs = ATTEMPT_TIMEOUT_MS,
+  phaseBudgetMs = SANDBOX_PHASE_BUDGET_MS,
+  minAttemptMs = MIN_ATTEMPT_MS,
+  fallbackLaunchMs = FALLBACK_LAUNCH_TIMEOUT_MS,
 }) {
   const base = { setting, seccomp_profile: profile };
   if (setting === "off") {
@@ -165,14 +168,37 @@ export async function launchWithSandboxPolicy({
   }
 
   // Two sandboxed attempts: a transient failure (a renderer exiting mid-check, a slow connect on a loaded host)
-  // must not leave a container unsandboxed for its whole life.
+  // must not leave a container unsandboxed for its whole life. Both share one deadline, launch and verification
+  // included, so a hanging launch is a failed attempt and the phase ends in time for the fallback (auto) or the
+  // refusal (on) to fit inside the controller's ISOLATED_BROWSER_WAIT_TIMEOUT_SECONDS.
+  const deadline = Date.now() + phaseBudgetMs;
+  const budget = `the ${phaseBudgetMs / 1000}s sandbox phase budget`;
   let failure;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
+    if (attempt === 2) {
+      const left = deadline - Date.now();
+      if (left < minAttemptMs) {
+        log.warn(
+          `WARNING: the first sandboxed attempt failed (${failure.cause}: ${failure.detail}); no second attempt: ` +
+            `${Math.max(left, 0) / 1000}s of ${budget} left`,
+        );
+        break;
+      }
+      log.warn(`WARNING: the first sandboxed attempt failed (${failure.cause}: ${failure.detail}); retrying once`);
+    }
     try {
-      const server = await launch(true);
+      const launched = await beforeDeadline(() => launch(true), deadline - Date.now());
+      if (launched.late) {
+        // It may still resolve: close it then, so no sandboxed browser outlives its attempt.
+        launched.late.then((server) => server?.close?.()).catch(() => {});
+        failure = { cause: "launch_timeout", detail: `Chromium's sandboxed launch did not finish within ${budget}` };
+        continue;
+      }
+      const server = launched.value;
       let verdict;
       try {
-        verdict = await withinTimeout(Promise.resolve().then(() => verify(server)), attemptTimeoutMs);
+        const verifyMs = Math.max(0, Math.min(attemptTimeoutMs, deadline - Date.now()));
+        verdict = await withinTimeout(Promise.resolve().then(() => verify(server)), verifyMs);
       } catch (error) {
         verdict = { ok: false, detail: `the sandbox check failed: ${String(error?.message ?? error).split("\n")[0]}` };
       }
@@ -197,9 +223,6 @@ export async function launchWithSandboxPolicy({
     } catch (error) {
       failure = classifyFailure({ ...runDiagnose(), profile, chromiumError: error });
     }
-    if (attempt === 1) {
-      log.warn(`WARNING: the first sandboxed attempt failed (${failure.cause}: ${failure.detail}); retrying once`);
-    }
   }
 
   if (setting === "on") {
@@ -213,8 +236,34 @@ export async function launchWithSandboxPolicy({
     `WARNING: Chromium's sandbox is OFF in this container (BROWSER_SANDBOX=auto fell back to an unsandboxed ` +
       `Chromium). Cause (${failure.cause}): ${failure.detail}`,
   );
-  const server = await launch(false);
-  return { server, state: { ...base, sandbox: "off", ...failure } };
+  const fallback = await beforeDeadline(() => launch(false), fallbackLaunchMs);
+  if (fallback.late) {
+    fallback.late.then((server) => server?.close?.()).catch(() => {});
+    throw new Error(`the unsandboxed launch did not finish within ${fallbackLaunchMs / 1000}s`);
+  }
+  return { server: fallback.value, state: { ...base, sandbox: "off", ...failure } };
+}
+
+// The sandboxed phase (both attempts, launch and verification) ends within SANDBOX_PHASE_BUDGET_MS, a second attempt
+// starts only with MIN_ATTEMPT_MS left, and the unsandboxed fallback launch gets FALLBACK_LAUNCH_TIMEOUT_MS: 30 + 10 s,
+// inside the controller's 45 s ISOLATED_BROWSER_WAIT_TIMEOUT_SECONDS.
+export const SANDBOX_PHASE_BUDGET_MS = 30000;
+export const MIN_ATTEMPT_MS = 10000;
+export const FALLBACK_LAUNCH_TIMEOUT_MS = 10000;
+
+// { value } when `start()` settles within `ms`, or { late } (the still-pending promise) when it does not; a rejection
+// within `ms` is thrown.
+async function beforeDeadline(start, ms) {
+  const pending = Promise.resolve().then(start);
+  let timer;
+  const timedOut = Symbol("timed out");
+  const winner = await Promise.race([
+    pending.then((value) => ({ value })),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(timedOut), Math.max(0, ms));
+    }),
+  ]).finally(() => clearTimeout(timer));
+  return winner === timedOut ? { late: pending } : winner;
 }
 
 // /proc access, injectable for tests.
@@ -380,4 +429,3 @@ export async function writeState(path, state) {
   await writeFile(tmp, `${JSON.stringify(state)}\n`, "utf-8");
   await rename(tmp, path);
 }
-

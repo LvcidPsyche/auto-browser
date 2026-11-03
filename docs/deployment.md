@@ -106,6 +106,11 @@ The causes a fallback names are distinct, so a setup problem never reads like a 
   `chrome://sandbox` did not confirm the seccomp-BPF sandbox. On those kernels the check uses `chrome://sandbox`;
   5.9 or later is the supported minimum for the `/proc` evidence;
 - `chroot_refused`, `chromium_refused`, `not_verified`: the namespace works but Chromium or the check did not.
+- `launch_timeout`: a sandboxed launch did not finish within the sandbox phase budget.
+
+The sandboxed phase, both attempts with their launches and checks, has one 30 s budget: a launch that hangs is a
+failed attempt, and a second attempt starts only with at least 10 s of it left. The unsandboxed fallback launch then
+gets 10 s more. Keep `ISOLATED_BROWSER_WAIT_TIMEOUT_SECONDS` above that budget plus 10 s (the default, 45 s, is).
 
 browser-node prints the outcome (`chromium sandbox: on (verified)`, or the WARNING or refusal) to its log, which is
 `docker compose logs browser-node` (and `/tmp/playwright-server.log` in the container). It also writes the state to
