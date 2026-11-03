@@ -38,6 +38,12 @@ services:
       ISOLATED_TUNNEL_PUBLIC_SCHEME: ${ISOLATED_TUNNEL_PUBLIC_SCHEME:-http}
       ISOLATED_TUNNEL_LOCAL_HOST: ${ISOLATED_TUNNEL_LOCAL_HOST:-host.docker.internal}
       ISOLATED_TUNNEL_INFO_ROOT: ${ISOLATED_TUNNEL_INFO_ROOT:-/data/tunnels/sessions}
+    # The controller joins every session's network. Docker gives its network
+    # namespace ip_forward=1 (measured on Docker Desktop 29.9), so a root process
+    # in one session's browser container could route through the controller
+    # into another session's network. It never needs to forward.
+    sysctls:
+      - net.ipv4.ip_forward=0
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
