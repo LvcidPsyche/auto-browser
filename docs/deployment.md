@@ -77,6 +77,68 @@ token, from either source.
   production controller.
 - `/metrics` needs the token too: give a Prometheus scraper `authorization: { type: Bearer, credentials_file: <path> }`.
 
+## Chromium's sandbox (BROWSER_SANDBOX)
+
+Chromium's own sandbox puts each renderer in a user namespace (with PID and network namespaces) and under a seccomp
+filter, so a renderer exploit does not start with every syscall the container allows. Docker's default seccomp profile
+refuses those namespaces without CAP_SYS_ADMIN, which browser containers drop, so compose and the controller apply
+`controller/app/browser/seccomp/chromium-sandbox.json`: moby's default profile plus one entry allowing `chroot`,
+`clone` and `unshare` (provenance and the refresh procedure are in the README beside it). That lets code in the
+container create user namespaces, which exposes the kernel's user-namespace code to it; in exchange every renderer
+runs sandboxed, which is the better trade for a browser that renders arbitrary pages.
+
+| `BROWSER_SANDBOX` | What happens |
+|---|---|
+| `auto` (default) | Chromium starts sandboxed, and browser-node checks in `/proc` that each renderer is in its own user namespace under one more seccomp filter. Where it cannot, Chromium runs unsandboxed and a WARNING names the cause. |
+| `on` | A browser that cannot run sandboxed does not start: browser-node exits, and an isolated session fails. With `docker_ephemeral`, an unreadable profile file refuses every session. |
+| `off` | Chromium runs unsandboxed (the behaviour before 1.14.0). `docker_ephemeral` containers get no custom profile, only Docker's default. |
+
+The causes a fallback names are distinct, so a setup problem never reads like a host restriction:
+
+- `seccomp_profile_not_applied`: the container runs under Docker's default profile (a plain `docker run`, or
+  `BROWSER_SECCOMP_PROFILE=builtin`);
+- `userns_refused`: the profile allows it, but the kernel or AppArmor refused the user namespace. Expected on Ubuntu
+  23.10 and later (`kernel.apparmor_restrict_unprivileged_userns=1`), where `auto` runs unsandboxed and says so;
+- `chroot_refused`, `chromium_refused`, `not_verified`: the namespace works but Chromium or the check did not.
+
+Each browser writes its state to `browser-sandbox.json` beside its endpoint file. `GET /readiness` reports them in
+the `browser_sandbox` check, one line per browser (the shared browser-node and every live isolated container): it
+passes when every browser is sandboxed and warns, naming the browser, the cause and the detail, when one is not. To
+see the live evidence in a container, run
+`docker compose exec -u browser browser-node node /opt/browser-node/sandbox-report.mjs` (the state, a `/proc` check
+and `chrome://sandbox`).
+
+**To run without Chromium's sandbox under compose, set both** `BROWSER_SANDBOX=off` and
+`BROWSER_SECCOMP_PROFILE=builtin`. Compose cannot make the profile follow the setting, so each does part of it:
+`BROWSER_SANDBOX=off` alone runs Chromium unsandboxed but leaves user namespaces allowed in browser-node, and
+browser-node and readiness warn about that; `BROWSER_SECCOMP_PROFILE=builtin` alone gives browser-node Docker's
+default profile, so `auto` falls back (cause `seccomp_profile_not_applied`) and `on` refuses to start. The controller
+needs no second setting: under `off` it applies no profile to `docker_ephemeral` containers.
+
+## Who the controller runs as (CONTROLLER_RUN_AS)
+
+The controller image's entrypoint runs as root only long enough to choose a user and hand it its files, then runs
+uvicorn as that user:
+
+- the owner of `/data` when that is not root: the user who owns `./data` in a Linux checkout (and CI's runner). That
+  user keeps its files, and `data/api-token` stays theirs at 0600, so the stdio bridge and the scripts read it;
+- otherwise uid 10001, the image's `controller` user: Docker Desktop, where bind mounts show as owned by root, and
+  named volumes.
+
+At start, the root-owned entries of the controller's own `/data` subtrees (what earlier releases wrote as root) are
+given to that user: only entries owned by root, never the browser's `browser-profile` and `downloads`, never anything
+outside `/data`. On Docker Desktop that took 0.37 s for 20,000 files, and a later start that finds none to change
+0.25 s. If one cannot be changed (a read-only or root-squashed mount), the log has an ERROR naming the path; the
+controller still starts as that user, and whatever it then cannot read fails with its own message.
+
+With the isolation overlay, the controller joins the group of the mounted Docker socket. On a Linux host that is the
+`docker` group; **on Docker Desktop the socket is `root:root`, so the controller joins group 0**. It is still not uid 0
+and holds no capabilities, but files in the container that grant group 0 access are open to it. Access to the Docker
+socket is itself equivalent to root on the Docker host, whatever user holds it.
+
+`CONTROLLER_RUN_AS=root` restores the root controller of earlier releases. It is not recommended, and the
+`controller_user` readiness check warns while it is set; that check also reports the uid in use and why.
+
 ## Per-session networks (docker_ephemeral)
 
 With `SESSION_ISOLATION_MODE=docker_ephemeral`, each session's browser container runs on
