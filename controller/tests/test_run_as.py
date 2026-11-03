@@ -593,9 +593,10 @@ class ImageWiringTests(unittest.TestCase):
 
     def test_ci_runs_the_root_step_tests_as_root_and_inspects_the_wheel(self) -> None:
         ci = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        self.assertIn(
-            "docker compose run --no-deps --rm --entrypoint python controller -m pytest tests/test_run_as.py", ci
-        )
+        self.assertIn("docker compose run --no-deps --rm --entrypoint sh controller -c", ci)
+        # Really root: otherwise the root-only tests skip and the step stays green (S3#14).
+        self.assertIn("""'test "$(id -u)" = 0 || { echo "not root: uid $(id -u)" >&2; exit 1; };""", ci)
+        self.assertIn("python -m pytest tests/test_run_as.py -q -rs'", ci)
         self.assertIn('grep -q "app/browser/seccomp/$name" /tmp/controller-wheel.txt', ci)
         # All six capability lines must be there, not just no bad one.
         self.assertIn('if [ "$(echo "$status" | grep -c .)" != 6 ]; then', ci)

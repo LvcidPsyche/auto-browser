@@ -231,6 +231,8 @@ class DockerBrowserNodeProvisioner:
                 self.settings.isolated_browser_network,
             )
         await asyncio.to_thread(self._ensure_context)
+        # Ask docker info now, so readiness knows whether the daemon applies seccomp before the first session.
+        await asyncio.to_thread(self._daemon_supports_seccomp)
         await asyncio.to_thread(self._reap_orphaned_containers)
         # After the container reap, so the orphans' endpoints are already gone.
         await asyncio.to_thread(self._reap_orphaned_networks)
@@ -342,7 +344,8 @@ class DockerBrowserNodeProvisioner:
             # Written before the endpoint file, so it is there now (absent only from an image older than 1.14.0).
             # Read once, here: a browser compromised later cannot rewrite what readiness reports for this run.
             sandbox = read_sandbox_state(pending.local_profile_dir / BROWSER_SANDBOX_STATE_FILENAME)
-            if sandbox is not None and sandbox.get("endpoint") not in (None, ws_endpoint):
+            # Every 1.14 image names the endpoint of the run its state describes: anything else is another run's.
+            if sandbox is not None and sandbox.get("endpoint") != ws_endpoint:
                 sandbox = {"sandbox": "unknown", "detail": "browser-sandbox.json describes another run"}
             if self.settings.browser_sandbox == "on" and not verified_on(sandbox):
                 # Enforced here, not left to the image: an image older than 1.14.0 ignores BROWSER_SANDBOX.
@@ -434,7 +437,7 @@ class DockerBrowserNodeProvisioner:
         return [_NO_NEW_PRIVILEGES, f"seccomp={profile}"], "auto-browser" if shipped else "custom"
 
     def seccomp_support_known(self) -> bool | None:
-        """What docker info said about seccomp, once asked (readiness); None before the first isolated session."""
+        """What docker info said about seccomp: asked at startup under docker_ephemeral (None before, or if it failed)."""
         return self._seccomp_supported
 
     def _daemon_supports_seccomp(self) -> bool:

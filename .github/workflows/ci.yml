@@ -200,7 +200,11 @@ jobs:
       - name: Run the root step's tests as root in the image
         # The suite above runs as the owner of ./data (the runner), so the tests that hand other uids' files over
         # (real chown, the 10001 -> 10002 upgrade) skip there. Here they run as root, past the entrypoint.
-        run: docker compose run --no-deps --rm --entrypoint python controller -m pytest tests/test_run_as.py -q -rs
+        # It must really be root, or the root-only tests skip and the step stays green.
+        run: >-
+          docker compose run --no-deps --rm --entrypoint sh controller -c
+          'test "$(id -u)" = 0 || { echo "not root: uid $(id -u)" >&2; exit 1; };
+          python -m pytest tests/test_run_as.py -q -rs'
 
   compose-smoke:
     runs-on: ubuntu-latest
@@ -314,11 +318,11 @@ jobs:
         # The step above only prints the state, since Ubuntu 24.04's AppArmor refuses unprivileged user namespaces
         # and auto falls back. Here that restriction is lifted and on is required: browser-node must start with the
         # sandbox on, setting on, and /proc evidence (verified renderers in their own user namespace, one more seccomp
-        # filter each), or the job fails. It proves the sandbox engages here; that a check which cannot see the
-        # sandbox refuses is the next step's job.
+        # filter each), or the job fails. The controller runs under on too: it must take that browser-node's state
+        # (naming the endpoint it connected to) as a verified on and run a session on it.
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          BROWSER_SANDBOX=on docker compose up -d --force-recreate browser-node
+          BROWSER_SANDBOX=on docker compose up -d --force-recreate browser-node controller
           container="$(docker compose ps -q browser-node)"
           for _ in $(seq 1 60); do
             [ -s data/browser-profile/browser-sandbox.json ] && [ -s data/browser-profile/browser-ws-endpoint.txt ] && break
@@ -327,10 +331,12 @@ jobs:
           done
           docker compose logs --tail 20 browser-node
           python3 scripts/assert_browser_sandbox.py data/browser-profile/browser-sandbox.json --require-proc
+          api_port="$(docker compose port controller 8000 | awk -F: 'NF {print $NF}' | tail -n1)"
+          python3 scripts/check_sandbox_gate.py --expect 200 --api-port "$api_port"
 
       - name: Without the profile, BROWSER_SANDBOX=on refuses to start
-        # The negative leg: Docker's own profile refuses the user namespace, so verification cannot pass and on must
-        # leave browser-node refused, with its state saying so and no endpoint for the controller.
+        # The negative leg: under Docker's own profile a sandboxed launch cannot start, so on must leave browser-node
+        # refused, with its state saying so and no endpoint, and the controller (still under on) refuse the session.
         run: |
           BROWSER_SANDBOX=on BROWSER_SECCOMP_PROFILE=builtin docker compose up -d --force-recreate --no-deps browser-node || true
           python3 - <<'PY'
@@ -354,3 +360,5 @@ jobs:
           print("OK: refused, no endpoint")
           PY
           docker compose logs --tail 20 browser-node
+          api_port="$(docker compose port controller 8000 | awk -F: 'NF {print $NF}' | tail -n1)"
+          python3 scripts/check_sandbox_gate.py --expect 409 --api-port "$api_port"

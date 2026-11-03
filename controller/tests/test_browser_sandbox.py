@@ -146,8 +146,10 @@ class IsolatedContainerSandboxTests(_ProvisionMixin, unittest.IsolatedAsyncioTes
     async def test_the_state_the_container_wrote_is_tracked_until_release(self) -> None:
         state = {"setting": "auto", "sandbox": "off", "cause": "userns_refused", "detail": "the kernel or AppArmor"}
         runtime = await self._provision(sandbox_state=state)
-        self.assertEqual(runtime.sandbox, state)
-        self.assertEqual(self.provisioner.sandbox_states(), {"sbx": state})
+        # As written, plus the endpoint of the run it describes (the fake writes it, as server.mjs does).
+        expected = {**state, "endpoint": "ws://browser-session-sbx:9223/playwright"}
+        self.assertEqual(runtime.sandbox, expected)
+        self.assertEqual(self.provisioner.sandbox_states(), {"sbx": expected})
         await self.provisioner.release(runtime)
         self.assertEqual(self.provisioner.sandbox_states(), {})
 
@@ -172,7 +174,8 @@ class SandboxStateFileTests(unittest.TestCase):
                 isolated_browser_seccomp_profile=str(SECCOMP_PROFILE_PATH),
             )
             provisioner = SimpleNamespace(sandbox_states=lambda: {"s1": {"sandbox": "on"}})
-            self.assertIsNone(browser_sandbox_status(settings, provisioner)["browser_node"])
+            # Nothing there at all: not reported yet (round 4, S3#3), not absent.
+            self.assertEqual(browser_sandbox_status(settings, provisioner)["browser_node"]["sandbox"], "unknown")
             endpoint.write_text("ws://browser-node:9223/x", encoding="utf-8")
             # An endpoint but no connection yet: unknown, never the file read here (the snapshot is taken at connect).
             (Path(tempdir) / BROWSER_SANDBOX_STATE_FILENAME).write_text('{"sandbox": "on"}', encoding="utf-8")
@@ -429,6 +432,8 @@ class OnEnforcedForIsolatedTests(_ProvisionMixin, unittest.IsolatedAsyncioTestCa
             {"sandbox": "on"},  # no verification evidence
             # a verified on that names another run's endpoint
             {"sandbox": "on", "verified": {"renderers": 1}, "endpoint": "ws://another-run:9223/x"},
+            # a verified on that names no endpoint (S3#15: required for isolated states too)
+            {"sandbox": "on", "verified": {"renderers": 1}, "endpoint": None},
         ):
             with self.subTest(state=state):
                 with self.assertRaisesRegex(
@@ -458,8 +463,12 @@ class OnEnforcedForIsolatedTests(_ProvisionMixin, unittest.IsolatedAsyncioTestCa
         client.containers.exit_before_endpoint = True
         provisioner = DockerBrowserNodeProvisioner(_settings(data_root, BROWSER_SANDBOX="on"), client=client)
         provisioner._controller_container_id = controller.id
-        with self.assertRaisesRegex(RuntimeError, r"exited before.*refused \(userns_refused\): AppArmor said no"):
+        with self.assertRaisesRegex(
+            RuntimeError, r"exited before.*refused \(userns_refused\): AppArmor said no"
+        ) as raised:
             await provisioner.provision("gone")
+        # S#12: the state ends its sentence, and the container's logs start on a line of their own (N13).
+        self.assertIn("AppArmor said no.\n", str(raised.exception))
 
 
 class SeccompSupportTests(_ProvisionMixin, unittest.IsolatedAsyncioTestCase):
@@ -515,6 +524,11 @@ class Round2WiringTests(unittest.TestCase):
         server = (BROWSER_NODE / "server.mjs").read_text(encoding="utf-8")
         # Exactly the factory, unwrapped: anything around it (a .then that forces ok) is a different line.
         self.assertRegex(server, r"(?m)^const verify = makeVerify\(chromium\);$")
+        # And that verify, unwrapped, is what the policy gets (R2c wrapped it in the call).
+        call = server[server.index("await launchWithSandboxPolicy({") :]
+        call = call[: call.index("});")]
+        self.assertRegex(call, r"(?m)^    verify,$")
+        self.assertNotIn("verify:", call)
         self.assertNotIn("async function verify(", server)
         self.assertNotIn("verifySandbox(", server)
         self.assertIn(
@@ -526,6 +540,8 @@ class Round2WiringTests(unittest.TestCase):
         self.assertIn("server.mjs > >(tee /tmp/playwright-server.log) 2>&1 &", entrypoint)
         # PID 1 may exit before tee flushes: a refusal also prints the state directly.
         self.assertIn('its sandbox state: $(cat "$SANDBOX_STATE_FILE" 2>/dev/null || echo none)', entrypoint)
+        # Only for a failure of its own (a refusal exits 1), not for the 143 of every docker stop (S3#9).
+        self.assertIn("if (( status > 0 && status < 128 )); then", entrypoint)
 
     def test_ci_has_a_sandbox_on_leg_that_asserts_it_engaged(self) -> None:
         ci = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
@@ -537,6 +553,12 @@ class Round2WiringTests(unittest.TestCase):
         self.assertIn("BROWSER_SANDBOX=on BROWSER_SECCOMP_PROFILE=builtin docker compose up", job)
         self.assertIn('if state and state.get("sandbox") == "refused":', job)
         self.assertIn('sys.exit("a refused browser-node left an endpoint file")', job)
+        # The controller under on in both legs: a session on the verified node, a 409 on the refused one (S3#5).
+        self.assertIn("BROWSER_SANDBOX=on docker compose up -d --force-recreate browser-node controller", job)
+        self.assertLess(
+            job.index('check_sandbox_gate.py --expect 200 --api-port "$api_port"'),
+            job.index('check_sandbox_gate.py --expect 409 --api-port "$api_port"'),
+        )
         script = (REPO / "scripts" / "assert_browser_sandbox.py").read_text(encoding="utf-8")
         self.assertIn('state.get("sandbox") != "on"', script)
         self.assertIn("renderers", script)

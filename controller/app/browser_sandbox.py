@@ -6,11 +6,14 @@ endpoint file, before the endpoint file. The controller reads that file for the 
 BROWSER_WS_ENDPOINT_FILE) and for each isolated container (in its profile directory, see session_isolation.py).
 
 The state is self-attested: the container it describes writes it, in a directory that container's browser user
-owns. So it is read without following links, from a regular file under a size cap, keeping only known keys of the
-right types with bounded strings, and only once per browser run (an isolated container's at provisioning, the
-shared node's when its endpoint file changes): a browser compromised later cannot rewrite what readiness reports for
-the run it was verified in. Under BROWSER_SANDBOX=on the controller enforces it: a container whose state is not
-"on" is refused (session_isolation.py) or fails readiness (the shared node).
+owns, so it is trustworthy only until that browser runs untrusted content. It is read without following links, from
+a regular file under a size cap, keeping only known keys of the right types with bounded strings (control
+characters removed), and it names the endpoint of the run it describes. An isolated container's is read once at
+provisioning; the shared node's is a snapshot taken when the controller connects (runtime.py), bound to that
+endpoint, reused on a reconnect to the same endpoint and never re-read for it. Under BROWSER_SANDBOX=on the
+controller enforces it: an isolated container whose state is not a verified "on" is refused (session_isolation.py),
+shared-mode sessions are refused (runtime.py), and readiness fails. In docker_ephemeral mode the shared node runs no
+session, so its line is informational.
 """
 
 from __future__ import annotations
@@ -43,13 +46,18 @@ def _unreadable(detail: str) -> dict[str, Any]:
     return {"sandbox": "unreadable", "detail": detail[: _STRING_KEYS["detail"]]}
 
 
+def _printable(text: str) -> str:
+    """The text with control characters as spaces: it reaches logs, readiness and an agent's context."""
+    return "".join(" " if ord(ch) < 32 or 127 <= ord(ch) < 160 else ch for ch in text)
+
+
 def _sanitize(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return _unreadable("browser-sandbox.json is not a JSON object")
     state: dict[str, Any] = {}
     for key, limit in _STRING_KEYS.items():
         if key in raw and (raw[key] is None or isinstance(raw[key], str)):
-            state[key] = raw[key] if raw[key] is None else raw[key][:limit]
+            state[key] = raw[key] if raw[key] is None else _printable(raw[key][:limit])
     if "userns_exposed" in raw and isinstance(raw["userns_exposed"], bool):
         state["userns_exposed"] = raw["userns_exposed"]
     verified = raw.get("verified")
@@ -153,7 +161,8 @@ def refusal(who: str, state: dict[str, Any] | None) -> str:
     elif state.get("sandbox") == "on":
         described = "on without verification evidence"
     else:
-        described = f"{state.get('sandbox')} ({state.get('cause')}): {state.get('detail', '')}"
+        cause = f" ({state['cause']})" if state.get("cause") else ""
+        described = f"{state.get('sandbox')}{cause}: {state.get('detail', '')}".rstrip(": ")
     return f"BROWSER_SANDBOX=on, but {who} reports {described}; the session was refused."
 
 
@@ -162,27 +171,37 @@ def browser_sandbox_status(
 ) -> dict[str, Any]:
     """What readiness reports: the shared browser-node's state and each live isolated container's.
 
-    `shared` is the connect-time snapshot (BrowserRuntimeService.shared_sandbox); it is never re-read from disk. Without
-    one, a state file beside a missing endpoint file is still reported (a browser that refused to start sandboxed
-    writes one and no endpoint), and an endpoint file with no snapshot yet is 'unknown'."""
+    `shared` is the connect-time snapshot (BrowserRuntimeService.shared_sandbox, None while not connected), or
+    {"sandbox": "attached"} for a Chrome attached over CDP. In shared mode, without one: a state file beside a missing
+    endpoint file is reported (a browser that refused to start sandboxed writes one and no endpoint), an endpoint file
+    is 'unknown' until the controller connects, and neither is 'unknown' too (nothing has reported yet).
+
+    In docker_ephemeral mode no session runs on the shared node: its line is read from its state file, as before the
+    snapshot, and is informational (browser_sandbox_check never counts it)."""
     endpoint_file = Path(getattr(settings, "browser_ws_endpoint_file", "") or "")
+    isolation_mode = getattr(settings, "session_isolation_mode", "shared_browser_node")
+    informational = isolation_mode == "docker_ephemeral"
     browser_node: dict[str, Any] | None = shared
     if browser_node is None and endpoint_file.name:
-        if endpoint_file.is_file():
+        state = read_sandbox_state(endpoint_file.with_name(BROWSER_SANDBOX_STATE_FILENAME))
+        if informational:
+            browser_node = state
+        elif endpoint_file.is_file():
             browser_node = {"sandbox": "unknown", "detail": "browser-node has not been connected to yet"}
         else:
-            browser_node = read_sandbox_state(endpoint_file.with_name(BROWSER_SANDBOX_STATE_FILENAME))
+            browser_node = state or {"sandbox": "unknown", "detail": "browser-node has not reported its sandbox yet"}
     states = getattr(provisioner, "sandbox_states", None)
     supports = getattr(provisioner, "seccomp_support_known", None)
     profile_path = getattr(settings, "isolated_browser_seccomp_profile", str(SECCOMP_PROFILE_PATH))
     return {
         "setting": getattr(settings, "browser_sandbox", "auto"),
-        "isolation_mode": getattr(settings, "session_isolation_mode", "shared_browser_node"),
+        "isolation_mode": isolation_mode,
         "profile_path": str(profile_path),
         "profile_readable": _profile_readable(profile_path),
         # None until the provisioner has asked the daemon (its first isolated session).
         "seccomp_supported": supports() if callable(supports) else None,
         "browser_node": browser_node,
+        "browser_node_informational": informational,
         "isolated": dict(states()) if callable(states) else {},
     }
 
@@ -201,6 +220,8 @@ class _Line:
         return verified_on(self.state)
 
     def describe(self) -> str:
+        if self.sandbox == "attached":
+            return f"{self.label}: a Chrome attached over CDP, not checked"
         if self.sandbox in {"unknown", "unreadable"}:
             detail = (self.state or {}).get("detail") or (
                 "no browser-sandbox.json (an image older than 1.14.0, or still starting)"
@@ -254,7 +275,8 @@ def browser_sandbox_check(status: dict[str, Any]):
             details=details,
         )
     lines: list[_Line] = []
-    if status.get("browser_node") is not None:
+    # In docker_ephemeral mode the shared node runs no session: reported in details, never counted.
+    if status.get("browser_node") is not None and not status.get("browser_node_informational"):
         lines.append(_Line("browser-node", status["browser_node"]))
     for session_id, state in sorted((status.get("isolated") or {}).items()):
         lines.append(_Line(f"session {session_id}", state))
@@ -268,7 +290,13 @@ def browser_sandbox_check(status: dict[str, Any]):
     unsandboxed = [line for line in lines if not line.verified]
     # A browser that refused to start, or any browser not verified "on" while BROWSER_SANDBOX=on, is a failure:
     # under on nothing may run unsandboxed, and a refused browser-node is down.
-    failing = [line for line in unsandboxed if line.sandbox == "refused" or status.get("setting") == "on"]
+    # A Chrome attached over CDP is the operator's (CDP_CONNECT_URL) or refused under on (browser.cdp_attach):
+    # never verified, never a failure.
+    failing = [
+        line
+        for line in unsandboxed
+        if line.sandbox != "attached" and (line.sandbox == "refused" or status.get("setting") == "on")
+    ]
     if failing:
         return ReadinessCheck(
             name=name,
