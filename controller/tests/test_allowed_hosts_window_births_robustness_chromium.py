@@ -713,3 +713,50 @@ async def test_a_reported_popup_whose_read_failed_in_passing_spares_the_window_o
         await settle(lambda: not pending(), timeout=TIMEOUT)
         assert wbc.LANDING == []
         assert SECRET not in json.dumps(await env.manager.list_tabs(session_id))
+
+
+# ── round 4: a replacement while a clean popup's read is in flight ─────────────
+
+
+async def test_a_clean_popup_whose_read_was_in_flight_at_a_replacement_is_not_held_against_its_windows(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Reviewer's R2 (R9): a clean popup reported just before the watcher's session died, its targetId read still
+    in flight when the replacement attached. The replacement's replay entered it as unjudged (born refused), its
+    own verdict came out clean from the lost watcher, and every window it opened afterwards was born refused and
+    refused with the host message. The verdict is now adopted by the replacement's entry."""
+    async with browser_env(tmp_path, PAGES) as env:
+        births = env.manager.window_births
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        first = session.page
+        real = rg._read_target_id
+
+        async def slow(page):
+            if page is not first:
+                await asyncio.sleep(1.5)
+            return await real(page)
+
+        monkeypatch.setattr(rg, "_read_target_id", slow)
+        popup = await open_popup(session, f"{env.allowed}/second")
+        old = births._get(session.browser)
+        await old._cdp.detach()  # the watcher's session dies; the eager replacement attaches
+        await nav.wait_for(lambda: births._get(session.browser) not in (None, old), timeout=TIMEOUT)
+        new = births._get(session.browser)
+        await settle(lambda: not pending(), timeout=TIMEOUT)
+        popup_id = env.manager.request_gates.known_target_id(popup)
+        assert popup_id is not None and not env.manager._page_refused(popup)
+        birth = new._births[popup_id]
+        assert (birth.born_refused, birth.unjudged, birth.reported) == (False, False, True), (
+            "the verdict was not adopted"
+        )
+
+        async with session.context.expect_page() as opened:
+            await popup.evaluate("(u) => { window.open(u) }", f"{env.allowed}/second")
+        child = await opened.value
+        await child.wait_for_load_state()
+        await settle(lambda: not pending(), timeout=TIMEOUT)
+
+        assert not env.manager._page_refused(child), "the clean popup's window was refused after the replacement"
+        await env.manager.activate_tab(session_id, session.context.pages.index(child))
+        assert "two" in json.dumps(await env.manager.observe(session_id, preset="text"))

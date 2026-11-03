@@ -417,6 +417,20 @@ class WindowBirthWatcher:
             return BirthVerdict.REFUSED_UNJUDGED
         return BirthVerdict.REFUSED_BY_SESSION if birth.by_session else BirthVerdict.REFUSED
 
+    def adopt_verdict(self, target_id: str, page: Any, verdict: BirthVerdict) -> None:
+        """A reported page's verdict, reached under the watcher that saw its target born, for a target this
+        watcher first saw in the replay (unjudged, so born refused): that verdict is the target's birth, so
+        the entry takes it, as a known page is entered. A verdict that is itself unjudged tells nothing, and
+        a target this watcher judged keeps its own verdict."""
+        birth = self._births.get(target_id)
+        if birth is None or not birth.unjudged or verdict is BirthVerdict.REFUSED_UNJUDGED:
+            return
+        birth.born_refused = verdict is not BirthVerdict.CLEAN
+        birth.by_session = verdict is BirthVerdict.REFUSED_BY_SESSION
+        birth.unjudged = False
+        birth.reported = True
+        birth.hold_page(page)
+
     # ── closing unreported born-refused windows ─────────────────────────────────
 
     def _session_births(self, session: Any) -> list[_Birth]:
@@ -745,7 +759,13 @@ class WindowBirths:
                 self._read_failed.add(page)
             await asyncio.sleep(TARGET_ID_RETRY_SECONDS * attempt)
             target_id = await self._resolve_target_id(page)
-        return watcher.mark_reported(session, target_id, page)
+        verdict = watcher.mark_reported(session, target_id, page)
+        live = self._get(getattr(session, "browser", None))
+        if live is not None and live is not watcher and target_id is not None:
+            # The watcher that saw the page born was lost meanwhile: the replacement first saw its target in the
+            # replay, unjudged. This verdict is that target's birth, so the replacement's entry takes it.
+            live.adopt_verdict(target_id, page, verdict)
+        return verdict
 
     def _unmatched_pages(self, session: Any) -> list[Any]:
         """The session's open pages whose targetId is not cached: a reported popup whose read is in flight."""
