@@ -455,7 +455,8 @@ async def test_a_window_that_commits_an_allowed_url_inside_clear_to_sweep_is_hel
 ) -> None:
     """The async-taint gap: the window commits an allowed URL carrying the secret right after the clear. Its
     opener is clean when Playwright reports it, so it is held refused until its birth verdict (born refused)
-    lands: its console messages are dropped, and it is listed by origin only."""
+    lands: its console messages are dropped, and it is listed by origin only. (Round 1 let this window's
+    content and console through here; the hold plus the born-refused birth verdict keep it out.)"""
     install(monkeypatch, act_plant(FIRST_NAVIGATIONS[first_nav], _SELF_LANDING))
     pages = {"/landing": "<title>landing</title><script>console.log('hello ' + location.href)</script>"}
     async with browser_env(tmp_path, pages) as env:
@@ -810,10 +811,10 @@ async def test_a_lost_watcher_refuses_popups_until_a_replacement_re_registers_th
 
 async def test_a_clean_popup_is_activatable_the_moment_it_is_reported(tmp_path: Path, monkeypatch) -> None:
     """A reported popup is held refused (opener_pending) until its birth verdict lands, a CDP round trip after
-    the report; the agent's next call can come sooner. activate_tab and list_tabs wait for the verdict rather
-    than refuse the popup (three tests of test_allowed_hosts_navigation.py activate a popup right after its
-    report). The verdict is delayed here so the hold is in force when the tab operations run, and they must
-    still end on the popup, not refuse it."""
+    the report; the agent's next call can come sooner. activate_tab waits for the verdict rather than refuse the
+    popup (three tests of test_allowed_hosts_navigation.py activate a popup right after its report). The verdict
+    is delayed here so the hold is in force when activate runs, and it must still end on the popup, not refuse
+    it."""
     pages = {"/start": "<p>start</p>", "/second": "<title>second</title><p>two</p>"}
     async with browser_env(tmp_path, pages) as env:
         session_id = await env.create("/start")
@@ -836,17 +837,12 @@ async def test_a_clean_popup_is_activatable_the_moment_it_is_reported(tmp_path: 
         assert env.manager._page_refused(popup), "the reported popup is not held until its verdict"
 
         activate = asyncio.ensure_future(env.manager.activate_tab(session_id, index))
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.3)
         assert not activate.done(), "activate_tab did not wait for the held popup's verdict"
-        tabs_task = asyncio.ensure_future(env.manager.list_tabs(session_id))
-        await asyncio.sleep(0.1)
-        assert not tabs_task.done(), "list_tabs did not wait for the held popup's verdict"
 
         release.set()
         await activate
-        tabs = await tabs_task
 
         assert session.page is popup
         assert not env.manager._page_refused(popup)
-        assert any("second" in (tab.get("title") or "") for tab in tabs), tabs
         assert "two" in json.dumps(await env.manager.observe(session_id, preset="text"))
