@@ -16,14 +16,14 @@ _USER_AGENT_POOL_SPLIT = re.compile(r"[|\r\n]")
 
 class Settings(BaseSettings):
     app_env: str = Field("development", validation_alias=AliasChoices("APP_ENV", "ENVIRONMENT"))
-    # repr=False: a loopback controller now writes its generated token here, so a
-    # logged or printed Settings must not carry it.
-    api_bearer_token: str | None = Field(None, alias="API_BEARER_TOKEN", repr=False)
+    # repr=False and exclude=True: a loopback controller now writes its generated token
+    # here, so neither a logged Settings nor model_dump() may carry it.
+    api_bearer_token: str | None = Field(None, alias="API_BEARER_TOKEN", repr=False, exclude=True)
     # Named credentials: `alice:token-a,bob:token-b`. A request authenticating
     # against one of these has a *verified* operator identity, as opposed to the
     # self-asserted X-Operator-Id header. The shared API_BEARER_TOKEN above
     # still works and still leaves identity unverified.
-    api_bearer_tokens: str = Field("", alias="API_BEARER_TOKENS", repr=False)
+    api_bearer_tokens: str = Field("", alias="API_BEARER_TOKENS", repr=False, exclude=True)
     # Where the controller keeps its own token when neither setting above is set.
     # A loopback controller generates one here on first start and demands it, and
     # a token placed here is used in any scope. Compose pins it to /data/api-token,

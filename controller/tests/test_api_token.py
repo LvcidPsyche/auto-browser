@@ -321,6 +321,19 @@ def test_the_escape_hatch_serves_tokenless_and_leaves_the_file_alone(tmp_path: P
     assert settings.api_bearer_token is None
 
 
+def test_a_settings_dump_never_carries_a_token(tmp_path: Path):
+    settings = make_settings(
+        tmp_path / "api-token", API_BEARER_TOKEN=STRONG_TOKEN, API_BEARER_TOKENS="alice:" + STRONG_TOKEN
+    )
+
+    dumped = settings.model_dump()
+
+    assert "api_bearer_token" not in dumped and "api_bearer_tokens" not in dumped
+    assert STRONG_TOKEN not in settings.model_dump_json()
+    assert STRONG_TOKEN not in repr(settings)
+    assert settings.api_bearer_token == STRONG_TOKEN  # still readable on the object
+
+
 def test_the_escape_hatch_does_not_apply_in_production(tmp_path: Path):
     path = tmp_path / "api-token"
     path.write_text(STRONG_TOKEN + "\n", encoding="utf-8")
