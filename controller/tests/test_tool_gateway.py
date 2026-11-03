@@ -20,6 +20,8 @@ from app.tool_inputs import EmptyInput
 class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.manager = SimpleNamespace(
+            # The handoff view (#password= for isolated sessions): these sessions have none.
+            remote_access=SimpleNamespace(with_takeover_password=lambda payload: payload),
             ensure_session_accessible=AsyncMock(),
             create_session=AsyncMock(return_value={"id": "session-1"}),
             list_sessions=AsyncMock(return_value=[{"id": "session-1"}]),

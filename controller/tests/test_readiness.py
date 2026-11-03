@@ -172,3 +172,28 @@ def test_no_screenshot_check_when_screenshot_scrubbing_is_off(overrides: dict) -
         report = run_readiness_checks(_settings(ocr_enabled=True, **overrides))
 
     assert _check(report, "screenshot_scrubbing") is None
+
+
+def _isolation_check(report):
+    return next(check for check in report.checks if check.name == "session_isolation")
+
+
+def test_docker_ephemeral_without_vnc_password_warns_about_the_shared_browser_node() -> None:
+    """Isolated sessions get their own noVNC passwords, but the shared
+    browser-node's noVNC is reachable from their containers too, and only
+    the operator's VNC_PASSWORD guards it."""
+    report = run_readiness_checks(_settings(session_isolation_mode="docker_ephemeral", vnc_password=None))
+    check = _isolation_check(report)
+
+    assert check.status == "warn"
+    assert "VNC_PASSWORD" in check.message
+    assert "browser-node" in check.message
+    assert check.details["browser_node_vnc_password"] is False
+
+
+def test_docker_ephemeral_with_vnc_password_passes() -> None:
+    report = run_readiness_checks(_settings(session_isolation_mode="docker_ephemeral", vnc_password="s3cret"))
+    check = _isolation_check(report)
+
+    assert check.status == "pass"
+    assert "s3cret" not in repr(check)

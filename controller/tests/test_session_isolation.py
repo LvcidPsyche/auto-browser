@@ -406,7 +406,10 @@ class DockerBrowserNodeProvisionerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(kwargs["pids_limit"], 512)
             self.assertEqual(kwargs["nano_cpus"], 1_500_000_000)
 
-    async def test_vnc_password_reaches_isolated_containers_only_when_set(self) -> None:
+    async def test_isolated_containers_get_their_own_vnc_password_never_the_operators(self) -> None:
+        """The operator's VNC_PASSWORD guards the shared browser-node; an
+        isolated container can read whatever it is given, so it gets a fresh
+        password of its own instead (test_session_vnc_password has the rest)."""
         for password in ("s3cret", None):
             with self.subTest(password=password), tempfile.TemporaryDirectory() as tempdir:
                 data_root = Path(tempdir) / "data"
@@ -428,7 +431,8 @@ class DockerBrowserNodeProvisionerTests(unittest.IsolatedAsyncioTestCase):
                 runtime = await provisioner.provision("session-vnc")
 
                 environment = client.containers.browser_containers[runtime.container_name].run_kwargs["environment"]
-                self.assertEqual(environment.get("VNC_PASSWORD"), password)
+                self.assertEqual(environment["VNC_PASSWORD"], runtime.vnc_password)
+                self.assertNotEqual(environment["VNC_PASSWORD"], password)
                 self.assertNotIn("s3cret", repr(settings))
                 self.assertEqual(environment["NOVNC_ALLOWED_HOSTS"], settings.isolated_takeover_host)
 

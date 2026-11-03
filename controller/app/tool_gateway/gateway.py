@@ -673,7 +673,9 @@ class McpToolGateway:
         return decision, reason
 
     async def _create_session(self, payload: CreateSessionRequest) -> dict[str, Any]:
-        return await self.manager.create_session(
+        # Human-handoff results (create/get session, remote access, takeover):
+        # their takeover URL carries the session's noVNC password.
+        created = await self.manager.create_session(
             name=payload.name,
             start_url=payload.start_url,
             storage_state_path=payload.storage_state_path,
@@ -688,6 +690,7 @@ class McpToolGateway:
             totp_secret=payload.totp_secret,
             totp_hosts=payload.totp_hosts,
         )
+        return self.manager.remote_access.with_takeover_password(created)
 
     async def _list_sessions(self, _: EmptyInput) -> list[dict[str, Any]]:
         return await self.manager.list_sessions()
@@ -726,7 +729,9 @@ class McpToolGateway:
         return {"name": payload.profile_name, "deleted": deleted}
 
     async def _get_session(self, payload: SessionIdInput) -> dict[str, Any]:
-        return await self.manager.get_session_record(payload.session_id)
+        return self.manager.remote_access.with_takeover_password(
+            await self.manager.get_session_record(payload.session_id)
+        )
 
     async def _observe(self, payload: ObserveInput) -> dict[str, Any]:
         return await self.manager.observe(payload.session_id, limit=payload.limit, preset=payload.preset)
@@ -787,7 +792,9 @@ class McpToolGateway:
         return await self.manager.save_auth_profile(payload.session_id, payload.profile_name)
 
     async def _takeover(self, payload: TakeoverInput) -> dict[str, Any]:
-        return await self.manager.request_human_takeover(payload.session_id, payload.reason)
+        return self.manager.remote_access.with_takeover_password(
+            await self.manager.request_human_takeover(payload.session_id, payload.reason)
+        )
 
     async def _close_session(self, payload: SessionIdInput) -> dict[str, Any]:
         return await self.manager.close_session(payload.session_id)
@@ -883,7 +890,9 @@ class McpToolGateway:
         if payload.session_id and payload.session_id not in self.manager.sessions:
             record = await self.manager.get_session_record(payload.session_id)
             return record["remote_access"]
-        return self.manager.get_remote_access_info(payload.session_id)
+        return self.manager.remote_access.with_takeover_password(
+            self.manager.get_remote_access_info(payload.session_id)
+        )
 
     async def _readiness_check(self, payload: ReadinessCheckInput) -> dict[str, Any]:
         # The same report as GET /readiness, the pre-request gate's state included.

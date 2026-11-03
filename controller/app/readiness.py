@@ -204,13 +204,30 @@ def run_readiness_checks(
         )
 
     isolation = getattr(settings, "session_isolation_mode", "shared_browser_node")
-    if isolation == "docker_ephemeral":
+    if isolation == "docker_ephemeral" and not getattr(settings, "vnc_password", None):
+        # Each isolated session's noVNC has its own password, but the shared
+        # browser-node's noVNC stays reachable from every session container
+        # (host.docker.internal, or its address), and only VNC_PASSWORD guards it.
+        checks.append(
+            ReadinessCheck(
+                name="session_isolation",
+                status="warn",
+                message=(
+                    "Session isolation mode is docker_ephemeral, but VNC_PASSWORD is unset: the shared "
+                    "browser-node's noVNC is reachable from every isolated session's container, and code "
+                    "running there can take over its desktop."
+                ),
+                fix="Set VNC_PASSWORD=<secret> for the shared browser-node.",
+                details={"mode": isolation, "browser_node_vnc_password": False},
+            )
+        )
+    elif isolation == "docker_ephemeral":
         checks.append(
             ReadinessCheck(
                 name="session_isolation",
                 status="pass",
                 message="Session isolation mode is docker_ephemeral.",
-                details={"mode": isolation},
+                details={"mode": isolation, "browser_node_vnc_password": True},
             )
         )
     else:

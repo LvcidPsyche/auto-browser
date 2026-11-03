@@ -30,7 +30,7 @@ def create_operations_router(
                 return record["remote_access"]
             except KeyError:
                 raise HTTPException(status_code=404, detail="Unknown session") from None
-        return manager.get_remote_access_info(session_id)
+        return manager.remote_access.with_takeover_password(manager.get_remote_access_info(session_id))
 
     @router.get("/audit/events")
     async def list_audit_events(
