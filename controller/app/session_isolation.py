@@ -18,6 +18,8 @@ try:  # pragma: no cover - optional dependency for local host-only unit runs
 except Exception:  # pragma: no cover - optional dependency for local host-only unit runs
     docker = None
 
+from .browser_sandbox import BROWSER_SANDBOX_STATE_FILENAME, load_seccomp_profile, read_sandbox_state
+
 logger = logging.getLogger(__name__)
 
 _MANAGED_LABEL = "auto-browser.managed"
@@ -113,6 +115,8 @@ class IsolatedBrowserRuntime:
     # This session's noVNC password. Never logged, stored or put in takeover_url
     # itself: only the human-handoff responses carry it (takeover_url_with_password).
     vnc_password: str = field(default="", repr=False)
+    # What the container's server.mjs wrote to browser-sandbox.json: Chromium sandboxed or not, and why.
+    sandbox: dict[str, Any] | None = None
 
 
 @dataclass
@@ -136,6 +140,9 @@ class DockerBrowserNodeProvisioner:
         self._host_data_root: PurePath | None = None
         # Shared mode only: the one network every browser container joins.
         self._network_name: str | None = None
+        # Each live isolated container's browser-sandbox.json, by session id (readiness reports them).
+        self._sandbox_states: dict[str, dict[str, Any] | None] = {}
+        self._sandbox_lock = threading.Lock()
         self._controller_container_id = os.environ.get("HOSTNAME")
         # The controller's own container, looked up once. per_session joins it
         # to each session network, and _discover_host_data_root reads its mounts.
@@ -320,11 +327,13 @@ class DockerBrowserNodeProvisioner:
         pending = await asyncio.to_thread(self._provision_container_sync, session_id)
         try:
             ws_endpoint = await self._wait_for_ws_endpoint(pending.container, pending.ws_endpoint_file)
+            # Written before the endpoint file, so it is there now (absent only from an image older than 1.14.0).
+            sandbox = read_sandbox_state(pending.local_profile_dir / BROWSER_SANDBOX_STATE_FILENAME)
             await asyncio.to_thread(pending.container.reload)
             ports = pending.container.attrs.get("NetworkSettings", {}).get("Ports", {})
             novnc_port = self._extract_host_port(ports, "6080/tcp")
             takeover_url = self._build_takeover_url(novnc_port)
-            return IsolatedBrowserRuntime(
+            runtime = IsolatedBrowserRuntime(
                 session_id=pending.session_id,
                 container_id=str(pending.container.id),
                 container_name=pending.container_name,
@@ -340,7 +349,11 @@ class DockerBrowserNodeProvisioner:
                 tunnel_local_port=6080,
                 network_owned=pending.network_owned,
                 vnc_password=pending.vnc_password,
+                sandbox=sandbox,
             )
+            with self._sandbox_lock:
+                self._sandbox_states[runtime.session_id] = sandbox
+            return runtime
         except BaseException:
             # BaseException: a cancelled create (client gone, shutdown) left the
             # container running with nothing tracking it until the next restart.
@@ -348,9 +361,46 @@ class DockerBrowserNodeProvisioner:
             raise
 
     async def release(self, runtime: IsolatedBrowserRuntime) -> None:
+        with self._sandbox_lock:
+            self._sandbox_states.pop(runtime.session_id, None)
         await asyncio.to_thread(self._release_sync, runtime)
 
+    def sandbox_states(self) -> dict[str, dict[str, Any] | None]:
+        """Each live isolated container's sandbox state (readiness reports them)."""
+        with self._sandbox_lock:
+            return dict(self._sandbox_states)
+
+    def _browser_security(self) -> tuple[list[str], str]:
+        """The container's security_opt and the BROWSER_SECCOMP_PROFILE it is told it got.
+
+        auto and on add the seccomp profile Chromium's sandbox needs, as its JSON (the daemon reads no host path
+        for a container the API creates); off applies none, so the container keeps Docker's default and the
+        narrower kernel surface. Under on a missing profile refuses the session before anything is created."""
+        setting = self.settings.browser_sandbox
+        if setting == "off":
+            return [_NO_NEW_PRIVILEGES], "builtin"
+        path = self.settings.isolated_browser_seccomp_profile
+        try:
+            profile = load_seccomp_profile(path)
+        except (OSError, ValueError) as exc:
+            if setting == "on":
+                raise RuntimeError(
+                    f"BROWSER_SANDBOX=on, but the seccomp profile {path} cannot be read ({exc}): the session's "
+                    "browser could not be sandboxed, so it was not started. Restore "
+                    "app/browser/seccomp/chromium-sandbox.json or set ISOLATED_BROWSER_SECCOMP_PROFILE."
+                ) from exc
+            logger.warning(
+                "Seccomp profile %s cannot be read (%s): isolated browsers start under Docker's default profile, "
+                "where Chromium's sandbox cannot run, so BROWSER_SANDBOX=auto falls back to an unsandboxed Chromium.",
+                path,
+                exc,
+            )
+            return [_NO_NEW_PRIVILEGES], "builtin"
+        return [_NO_NEW_PRIVILEGES, f"seccomp={profile}"], "auto-browser"
+
     def _provision_container_sync(self, session_id: str) -> PendingBrowserProvision:
+        # First: under BROWSER_SANDBOX=on a missing profile refuses before any network or container exists.
+        security = self._browser_security()
         client = self._ensure_context()
         host_data_root = self._host_data_root or self._discover_host_data_root(client)
         self._host_data_root = host_data_root
@@ -407,6 +457,7 @@ class DockerBrowserNodeProvisioner:
                 host_downloads_dir=host_downloads_dir,
                 local_profile_dir=local_profile_dir,
                 local_downloads_dir=local_downloads_dir,
+                security=security,
             )
         except BaseException:
             # No runtime exists to release, so release() will never run for
@@ -517,7 +568,9 @@ class DockerBrowserNodeProvisioner:
         host_downloads_dir: PurePath,
         local_profile_dir: Path,
         local_downloads_dir: Path,
+        security: tuple[list[str], str] | None = None,
     ) -> PendingBrowserProvision:
+        security_opt, seccomp_profile = security or self._browser_security()
         container_name = self._container_name(session_id)
         self._remove_stale_container(client, container_name)
 
@@ -536,6 +589,9 @@ class DockerBrowserNodeProvisioner:
             "PLAYWRIGHT_SERVER_HOST": "0.0.0.0",
             "PLAYWRIGHT_SERVER_PORT": "9223",
             "PLAYWRIGHT_SERVER_ADVERTISED_HOST": container_name,
+            "BROWSER_SANDBOX": self.settings.browser_sandbox,
+            # Which profile it got, so a fallback names the right cause (browser-node/sandbox.mjs).
+            "BROWSER_SECCOMP_PROFILE": seccomp_profile,
         }
         # Always a fresh password of its own, never the operator's VNC_PASSWORD:
         # the container can read whatever it is given, and that one guards the
@@ -556,8 +612,9 @@ class DockerBrowserNodeProvisioner:
             cap_drop=["ALL"],
             cap_add=list(_BROWSER_NODE_CAP_ADD),
             # setpriv drops privileges by syscall, so no-new-privileges (which
-            # only blocks gains across execve) leaves it working.
-            security_opt=[_NO_NEW_PRIVILEGES],
+            # only blocks gains across execve) leaves it working. Plus, unless
+            # BROWSER_SANDBOX=off, the seccomp profile Chromium's sandbox needs.
+            security_opt=security_opt,
             environment=environment,
             volumes={
                 str(host_profile_dir): {"bind": "/data/profile", "mode": "rw"},

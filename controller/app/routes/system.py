@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, Response
 
 from ..audit import get_current_operator
+from ..browser_sandbox import browser_sandbox_status
 from ..readiness import run_readiness_checks
 
 # A readiness probe must answer within a probe interval, not within the
@@ -175,6 +176,7 @@ def create_system_router(
             mode=mode,
             request_gates=manager.request_gates.status(),
             window_births=manager.window_births.status(),
+            browser_sandbox=browser_sandbox_status(settings, manager.runtime_provisioner),
         )
         return JSONResponse(
             content=report.to_dict(),

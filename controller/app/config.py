@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .browser_sandbox import SECCOMP_PROFILE_PATH
 from .stealth.fingerprint import CHROME_UA_POOL
 
 # USER_AGENT_POOL separates its entries with "|" or newlines. Not commas: every Chrome UA contains
@@ -129,6 +130,16 @@ class Settings(BaseSettings):
     # Handed to each isolated browser container, whose noVNC port is published
     # on ISOLATED_BROWSER_BIND_HOST. See browser-node/entrypoint.sh.
     vnc_password: str | None = Field(None, alias="VNC_PASSWORD", repr=False)
+    # Chromium's own sandbox in browser-node and every isolated container (browser-node/sandbox.mjs). auto runs
+    # it sandboxed and falls back to unsandboxed with a WARNING naming the cause; on refuses to run unsandboxed;
+    # off never tries and applies no custom seccomp profile to isolated containers (Docker's default).
+    browser_sandbox: Literal["auto", "on", "off"] = Field("auto", alias="BROWSER_SANDBOX")
+    # The seccomp profile isolated containers get under auto and on (sent to the daemon as JSON). Under on, a
+    # missing file refuses the session; under auto the container starts with Docker's default and falls back.
+    isolated_browser_seccomp_profile: str = Field(
+        str(SECCOMP_PROFILE_PATH),
+        alias="ISOLATED_BROWSER_SECCOMP_PROFILE",
+    )
     isolated_browser_mem_limit: str = Field("4g", alias="ISOLATED_BROWSER_MEM_LIMIT")
     isolated_browser_pids_limit: int = Field(2048, alias="ISOLATED_BROWSER_PIDS_LIMIT")
     isolated_browser_cpus: float = Field(0.0, alias="ISOLATED_BROWSER_CPUS")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -153,6 +154,8 @@ class FakeDockerContainers:
         self.controller_container = controller_container
         self.browser_containers: dict[str, FakeDockerContainer] = {}
         self.events = events if events is not None else []
+        # When set, run() writes it as browser-sandbox.json, as browser-node's server.mjs does before its endpoint.
+        self.sandbox_state: dict | None = None
         self.networks = networks
 
     def get(self, identifier: str) -> FakeDockerContainer:
@@ -168,6 +171,8 @@ class FakeDockerContainers:
         volumes = kwargs["volumes"]
         profile_dir = Path(next(path for path, mount in volumes.items() if mount["bind"] == "/data/profile"))
         profile_dir.mkdir(parents=True, exist_ok=True)
+        if self.sandbox_state is not None:
+            (profile_dir / "browser-sandbox.json").write_text(json.dumps(self.sandbox_state), encoding="utf-8")
         endpoint = f"ws://{name}:9223/playwright"
         (profile_dir / "browser-ws-endpoint.txt").write_text(endpoint, encoding="utf-8")
         container = FakeDockerContainer(

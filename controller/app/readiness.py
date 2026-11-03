@@ -6,6 +6,7 @@ from typing import Any
 from .auth_policy import credentials_for
 from .browser.request_gate import REDIRECT_ORIGIN_SWITCH
 from .browser.request_gates import PREFETCH_PENDING
+from .browser_sandbox import browser_sandbox_check
 from .ocr import tesseract_available
 
 
@@ -169,6 +170,7 @@ def run_readiness_checks(
     *,
     request_gates: dict[str, Any] | None = None,
     window_births: dict[str, Any] | None = None,
+    browser_sandbox: dict[str, Any] | None = None,
 ) -> ReadinessReport:
     checks: list[ReadinessCheck] = []
 
@@ -433,6 +435,9 @@ def run_readiness_checks(
         checks.append(pre_request_gate_check(request_gates))
     if window_births is not None:
         checks.append(window_birth_watcher_check(window_births))
+
+    if browser_sandbox is not None:
+        checks.append(browser_sandbox_check(browser_sandbox))
 
     statuses = {check.status for check in checks}
     if "fail" in statuses:
