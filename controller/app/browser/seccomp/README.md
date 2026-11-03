@@ -10,7 +10,7 @@ It is moby's default profile plus one entry, the last in `syscalls`, whose `comm
 the user namespace Chromium's layer-1 sandbox builds and the `chroot` it makes inside it (moby allows `chroot` only
 with CAP_SYS_CHROOT). The kernel still requires those capabilities in the caller's own user namespace, so the entry
 lets a process act only inside a namespace it created. What it does open to code in the container is the kernel's
-user-namespace code. `tests/test_browser_sandbox_profile.py` checks that this entry is the only difference.
+user-namespace code. `controller/tests/test_browser_sandbox.py` (SeccompProfileTests) checks that this entry is the only difference.
 
 ## Provenance of `moby-default.json` (byte-for-byte upstream)
 
