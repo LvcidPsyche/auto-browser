@@ -309,3 +309,43 @@ def test_the_unjudged_tab_message_says_a_new_tab_is_judged_as_it_opens_and_does_
     assert "Close it and open its URL in a new tab" in UNJUDGED_TAB_MESSAGE
     assert "judged as it opens" in UNJUDGED_TAB_MESSAGE and "window_birth_watcher" in UNJUDGED_TAB_MESSAGE
     assert "does not allow" not in UNJUDGED_TAB_MESSAGE
+
+
+# ── Round 4: birth_judged and a verdict whose task is cancelled ────────────────
+
+
+async def test_birth_judged_leaves_the_popup_held_when_the_verdicts_task_is_cancelled_from_outside(
+    tmp_path: Path,
+) -> None:
+    """Round-4 B3: the shared targetId read is shielded, so a cancellation of the verdict's task from outside
+    surfaced in activate_tab as a CancelledError rather than the held popup's refusal."""
+    manager = manager_for(tmp_path)
+    popup = MovingPage(ALLOWED, ALLOWED)
+    manager.page_provenance.opener_lookup_started(popup)
+    verdict = asyncio.ensure_future(asyncio.Event().wait())
+    manager.diagnostics._birth_judgements[popup] = verdict
+    waiting = asyncio.ensure_future(manager.diagnostics.birth_judged(popup))
+    await asyncio.sleep(0.05)
+    assert not waiting.done()
+
+    verdict.cancel()
+    await asyncio.wait_for(waiting, timeout=2.0)
+
+    assert waiting.result() is None and not waiting.cancelled()
+    assert manager._page_refused(popup), "the popup was no longer held"
+
+
+async def test_birth_judged_passes_its_own_cancellation_through(tmp_path: Path) -> None:
+    manager = manager_for(tmp_path)
+    popup = MovingPage(ALLOWED, ALLOWED)
+    verdict = asyncio.ensure_future(asyncio.Event().wait())
+    manager.diagnostics._birth_judgements[popup] = verdict
+    waiting = asyncio.ensure_future(manager.diagnostics.birth_judged(popup))
+    await asyncio.sleep(0.05)
+
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+
+    assert waiting.cancelled() and not verdict.done()  # the shielded verdict goes on
+    verdict.cancel()
