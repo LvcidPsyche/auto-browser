@@ -561,3 +561,60 @@ class BridgeCopySyncTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _load_repo_wrapper():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[2] / "scripts" / "mcp_stdio_bridge.py"
+    spec = importlib.util.spec_from_file_location("repo_mcp_stdio_bridge", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class RepoWrapperTokenDefaultTests(unittest.TestCase):
+    """scripts/mcp_stdio_bridge.py defaults the token file for a loopback URL only."""
+
+    def setUp(self) -> None:
+        self.wrapper = _load_repo_wrapper()
+
+    def run_default(self, argv: list[str], environ: dict[str, str]) -> tuple[str | None, dict[str, str]]:
+        skipped = self.wrapper.default_token_file(argv, environ)
+        return skipped, environ
+
+    def test_the_default_url_and_loopback_urls_get_the_checkouts_token_file(self) -> None:
+        expected = str(self.wrapper.ROOT / "data" / "api-token")
+        for argv, environ in (
+            ([], {}),
+            (["--base-url", "http://localhost:9000/mcp"], {}),
+            (["--base-url=http://[::1]:8000/mcp"], {}),
+            ([], {"AUTO_BROWSER_BASE_URL": "http://127.0.0.1:8000/mcp"}),
+        ):
+            with self.subTest(argv=argv, environ=environ):
+                skipped, env = self.run_default(argv, dict(environ))
+                self.assertIsNone(skipped)
+                self.assertEqual(env["AUTO_BROWSER_TOKEN_FILE"], expected)
+
+    def test_a_remote_url_gets_no_default_and_a_reason(self) -> None:
+        for argv, environ in (
+            (["--base-url", "https://browser.example.com/mcp"], {}),
+            (["--base-url=https://browser.example.com/mcp"], {}),
+            ([], {"AUTO_BROWSER_BASE_URL": "http://10.0.0.5:8000/mcp"}),
+        ):
+            with self.subTest(argv=argv, environ=environ):
+                skipped, env = self.run_default(argv, dict(environ))
+                self.assertIn("not a loopback host", skipped)
+                self.assertNotIn("AUTO_BROWSER_TOKEN_FILE", env)
+
+    def test_the_command_line_wins_over_the_environment(self) -> None:
+        skipped, env = self.run_default(
+            ["--base-url", "https://browser.example.com/mcp"], {"AUTO_BROWSER_BASE_URL": "http://127.0.0.1:8000/mcp"}
+        )
+        self.assertIsNotNone(skipped)
+        self.assertNotIn("AUTO_BROWSER_TOKEN_FILE", env)
+
+    def test_a_token_file_the_user_set_is_kept(self) -> None:
+        skipped, env = self.run_default([], {"AUTO_BROWSER_TOKEN_FILE": "/mine"})
+        self.assertIsNone(skipped)
+        self.assertEqual(env["AUTO_BROWSER_TOKEN_FILE"], "/mine")
