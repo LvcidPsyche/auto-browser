@@ -197,6 +197,11 @@ async def browser_env(
         try:
             yield env
         finally:
+            # These tests reuse one shared browser across a module's per-test managers; release this
+            # manager's window-birth watcher so its CDP session does not accumulate on that browser (the
+            # harness never calls manager.shutdown, which would do this).
+            with contextlib.suppress(Exception):
+                await manager.window_births.release_all()
             for context in list(env.contexts):
                 with contextlib.suppress(Exception):
                     await context.close()
