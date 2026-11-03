@@ -19,6 +19,7 @@ Exit codes: 0 = live check passed OR skipped (browsers unavailable);
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -36,6 +37,10 @@ FAILED = 2
 
 
 def _run_live(base_url: str, fixture: str, expect: str) -> int:
+    # A dev harness driving the app in-process, so it keeps the tokenless loopback
+    # API: otherwise the lifespan writes /data/api-token on this host and every
+    # request below answers 401. Set before the import, which reads the settings.
+    os.environ.setdefault("API_ALLOW_TOKENLESS_LOOPBACK", "true")
     # Imported lazily so the module only loads when live mode is actually invoked.
     try:
         from app.main import app

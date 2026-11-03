@@ -161,18 +161,23 @@ if b"200 OK" not in payload:
 PY
 }
 
-# The controller demands API_BEARER_TOKEN whenever one is set (and an operator id
-# when REQUIRE_OPERATOR_ID is on); every API call here used to go without them.
-API_AUTH_ARGS=()
-if [[ -n "${API_BEARER_TOKEN:-}" ]]; then
-  API_AUTH_ARGS+=(-H "Authorization: Bearer ${API_BEARER_TOKEN}")
-fi
+# The controller demands its token (and an operator id when REQUIRE_OPERATOR_ID
+# is on); every API call here used to go without them.
+OPERATOR_ID_ARGS=()
 if [[ "${REQUIRE_OPERATOR_ID:-false}" == "true" ]]; then
-  API_AUTH_ARGS+=(-H "${OPERATOR_ID_HEADER:-X-Operator-Id}: ${DOCTOR_OPERATOR_ID:-doctor}")
+  OPERATOR_ID_ARGS+=(-H "${OPERATOR_ID_HEADER:-X-Operator-Id}: ${DOCTOR_OPERATOR_ID:-doctor}")
 fi
+# The token header is built on every call (api_token in load_env.sh): a controller
+# this script starts writes data/api-token only once it is up.
 # The ${a[@]+...} form keeps an empty array legal under `set -u` in bash < 4.4 (macOS).
 api_curl() {
-  curl ${API_AUTH_ARGS[@]+"${API_AUTH_ARGS[@]}"} "$@"
+  local args=(${OPERATOR_ID_ARGS[@]+"${OPERATOR_ID_ARGS[@]}"})
+  local token
+  token="$(api_token)"
+  if [[ -n "$token" ]]; then
+    args+=(-H "Authorization: Bearer ${token}")
+  fi
+  curl ${args[@]+"${args[@]}"} "$@"
 }
 
 require_bin docker
@@ -216,7 +221,7 @@ if [[ -n "$current_controller_port" ]]; then
   # one) this counted zero sessions and went on to interrupt live work.
   if ! active_sessions_json="$(api_curl -fsS "http://127.0.0.1:${current_controller_port}/sessions")"; then
     echo "Could not list sessions on API port ${current_controller_port}, so doctor cannot tell whether it would interrupt live work." >&2
-    echo "Set API_BEARER_TOKEN (and the operator id, if REQUIRE_OPERATOR_ID=true) to what that controller expects." >&2
+    echo "The token comes from API_BEARER_TOKEN, else data/api-token: make it (and the operator id, if REQUIRE_OPERATOR_ID=true) what that controller expects." >&2
     exit 1
   fi
   active_count="$(echo "$active_sessions_json" | jq '[.[] | select(.status == "active")] | length')"
