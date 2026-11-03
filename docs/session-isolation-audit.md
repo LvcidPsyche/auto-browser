@@ -12,10 +12,32 @@ Two real concerns remain. One is acknowledged in `docs/architecture.md` as a POC
 
 ## Modes under test
 
-| Mode | Browser process | Browser context | Takeover surface |
-|------|-----------------|-----------------|-------------------|
-| `shared_browser_node` (default) | Shared (one Chromium) | Isolated per session via `new_context()` | Shared (one X display, one noVNC) |
-| `docker_ephemeral` | Isolated (one container per session) | Isolated per session | Per-session noVNC, optional per-session reverse-SSH |
+| Mode | Browser process | Browser context | Takeover surface | Network |
+|------|-----------------|-----------------|-------------------|---------|
+| `shared_browser_node` (default) | Shared (one Chromium) | Isolated per session via `new_context()` | Shared (one X display, one noVNC) | One browser on the compose network |
+| `docker_ephemeral` | Isolated (one container per session) | Isolated per session | Per-session noVNC, optional per-session reverse-SSH | Per session (`ISOLATED_BROWSER_NETWORK_MODE=per_session`, the default): the browser reaches only the controller and the internet. `shared` puts all on one network |
+
+### Per-session networks: what remains reachable
+
+Before per-session networks, every `docker_ephemeral` browser shared the compose network, so a page
+in one session could open another session's Playwright server (`:9223/json`, which hands over that
+browser), its noVNC (`:6080`), and the shared browser-node. Each session's browser now has its own
+bridge network that only it and the controller join. What it still reaches:
+
+- **The controller API**, at the controller's address on the session network (the controller listens
+  on `0.0.0.0:8000`). Without a bearer token that is control of every session. Per-session networks
+  do not change this; refusing requests from session subnets would.
+- **noVNC ports published beyond loopback.** With `ISOLATED_BROWSER_BIND_HOST` set to `0.0.0.0` or a
+  LAN address, another session's published noVNC is reachable through the host address. Only
+  `VNC_PASSWORD` protects it there.
+- **Routing through the controller**, in theory: the controller sits on every session network. It
+  does not forward between them (see the `ip_forward` note in `docker-compose.isolation.yml`), and
+  Chromium runs as a non-root user, so this would need a privilege escalation and a forwarding
+  controller.
+- **A daemon without Docker's firewall rules** (`"iptables": false`) routes between bridges, and the
+  networks then separate nothing.
+- **`ISOLATED_BROWSER_NETWORK_MODE=shared`**, the opt-out, restores the old single network and all of
+  the cross-session reach above.
 
 ## What's isolated (verified)
 
