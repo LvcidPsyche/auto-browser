@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, TypedDict
 
 import httpx
 
+from .auth import resolve_bearer_token
 from .errors import AutoBrowserToolError
 
 
@@ -58,16 +60,20 @@ class AutoBrowserNode:
         bearer_token: str | None = None,
         timeout: float = 60.0,
         operator_id: str | None = None,
+        token_file: str | os.PathLike[str] | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.bearer_token = bearer_token.strip() if bearer_token else None
         self.timeout = timeout
         self.operator_id = operator_id
+        # Read on every call when bearer_token is unset (see auth.resolve_bearer_token).
+        self.token_file = token_file
 
     def _headers(self) -> dict[str, str]:
         headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self.bearer_token:
-            headers["Authorization"] = f"Bearer {self.bearer_token}"
+        bearer_token = resolve_bearer_token(self.bearer_token, self.token_file)
+        if bearer_token:
+            headers["Authorization"] = f"Bearer {bearer_token}"
         if self.operator_id:
             headers["X-Operator-Id"] = self.operator_id
         return headers

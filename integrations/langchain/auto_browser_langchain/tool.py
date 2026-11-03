@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Optional, Type
 
 import httpx
+
+from .auth import resolve_bearer_token
 
 try:
     from langchain_core.tools import BaseTool
@@ -56,6 +59,9 @@ class AutoBrowserTool(BaseTool):
 
     base_url: str = "http://localhost:8000"
     bearer_token: Optional[str] = None
+    # A file holding the token, read on every call when bearer_token is unset: a local
+    # controller writes its own to data/api-token in the auto-browser folder.
+    token_file: Optional[str] = None
     # Sent as X-Operator-Id: a controller with REQUIRE_OPERATOR_ID=true needs it
     # unless bearer_token is a named credential.
     operator_id: Optional[str] = None
@@ -72,7 +78,7 @@ class AutoBrowserTool(BaseTool):
 
     async def _arun(self, action: str, arguments: dict[str, Any] | None = None) -> str:
         headers: dict[str, str] = {"Content-Type": "application/json"}
-        bearer_token = self.bearer_token.strip() if self.bearer_token else None
+        bearer_token = resolve_bearer_token(self.bearer_token, self.token_file)
         if bearer_token:
             headers["Authorization"] = f"Bearer {bearer_token}"
         if self.operator_id:
@@ -94,9 +100,10 @@ class AutoBrowserTool(BaseTool):
         base_url: str = "http://localhost:8000",
         bearer_token: str | None = None,
         operator_id: str | None = None,
+        token_file: str | os.PathLike[str] | None = None,
     ) -> list[dict]:
         headers: dict[str, str] = {}
-        bearer_token = bearer_token.strip() if bearer_token else None
+        bearer_token = resolve_bearer_token(bearer_token, token_file)
         if bearer_token:
             headers["Authorization"] = f"Bearer {bearer_token}"
         if operator_id:
