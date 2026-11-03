@@ -256,6 +256,43 @@ def test_control_a_failure_further_along_the_hops_redirect_chain_clears_its_mark
     assert not manager._page_refused(page)
 
 
+# ── Playwright 1.64 reports a navigation Chromium aborts on a 204 as finished, not failed ──
+
+
+def answered(request: object, status: int) -> SimpleNamespace:
+    """The response event's argument: the status, and the request it answers."""
+    return SimpleNamespace(status=status, request=request, url=request.url)
+
+
+def test_a_refused_hop_answered_204_clears_its_mark_as_playwright_1_64_reports_it(tmp_path: Path) -> None:
+    """Up to 1.62 the aborted 204 came as requestfailed. From 1.64 it comes as a 204 response and then
+    requestfinished, so the mark stayed and the page read as refused until its next commit."""
+    manager = manager_for(tmp_path)
+    page = listened_page(manager)
+    hop = NavigationRequest(page, f"{REFUSED}/no-content")
+
+    page.fire("request", hop)
+    page.fire("response", answered(hop, 204))
+    page.fire("requestfinished", hop)
+
+    assert not manager._page_refused(page)
+
+
+@pytest.mark.parametrize("status", [200, 302])
+def test_control_a_refused_hop_answered_otherwise_keeps_its_mark(tmp_path: Path, status: int) -> None:
+    """A 200 commits the refused host's document, and a 302 picks the next hop. Chromium reports both
+    finished, which is why requestfinished alone does not end a hop."""
+    manager = manager_for(tmp_path)
+    page = listened_page(manager)
+    hop = NavigationRequest(page, REFUSED)
+
+    page.fire("request", hop)
+    page.fire("response", answered(hop, status))
+    page.fire("requestfinished", hop)
+
+    assert manager._page_refused(page)
+
+
 # ── A refused opener taints its popup whatever the popup's URL (A2 item 3) ──
 
 
@@ -536,6 +573,34 @@ def test_a_kept_hop_whose_navigation_failed_is_dropped(tmp_path: Path) -> None:
     manager.diagnostics.on_context_request_failed(session, landing)  # a 204 at the end of the chain
 
     assert session.unframed_hops == []
+
+
+def test_a_kept_hop_answered_204_is_dropped_as_playwright_1_64_reports_it(tmp_path: Path) -> None:
+    """Playwright 1.64 reports a popup's first navigation that ends in a 204 as finished, so no requestfailed
+    reaches the context, and the kept hop stayed for the next page the context reported."""
+    manager = manager_for(tmp_path)
+    session = popup_session()
+    hop = UnframedRequest(REFUSED)
+    landing = UnframedRequest(f"{ALLOWED}/no-content", redirected_from=hop)
+    manager.diagnostics.on_context_request(session, hop)
+    manager.diagnostics.on_context_request(session, landing)
+
+    manager.diagnostics.on_context_response(session, answered(landing, 204))
+
+    assert session.unframed_hops == []
+    assert list(session.refused_failures) == [landing.url]
+
+
+@pytest.mark.parametrize("status", [200, 302])
+def test_control_a_kept_hop_answered_otherwise_is_kept(tmp_path: Path, status: int) -> None:
+    manager = manager_for(tmp_path)
+    session = popup_session()
+    hop = UnframedRequest(REFUSED)
+    manager.diagnostics.on_context_request(session, hop)
+
+    manager.diagnostics.on_context_response(session, answered(hop, status))
+
+    assert session.unframed_hops == [hop]
 
 
 # ── The network log for navigations a refused page may have chosen (A2 item 8) ──

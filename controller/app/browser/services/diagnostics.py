@@ -7,6 +7,7 @@ import mimetypes
 import shutil
 import weakref
 from datetime import datetime
+from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -39,6 +40,18 @@ for _type, _extension in (
 # Console text is written by the page and kept for the whole session, and every
 # read scrubbed all of it on the event loop. One message is cut to this length.
 CONSOLE_TEXT_MAX_CHARS = 8_000
+
+
+def _no_content_navigation(response: Any) -> bool:
+    """Whether a response answers a document navigation with 204, which Chromium aborts: nothing commits.
+
+    Playwright reported that abort as requestfailed up to 1.62. From 1.64 it reports it as requestfinished,
+    an event that also ends committed navigations and redirect hops, so the 204 response is the signal.
+    """
+    if response.status != HTTPStatus.NO_CONTENT:
+        return False
+    request = response.request
+    return request.is_navigation_request() and request.resource_type == "document"
 
 
 def _top_level_navigation(request: Any) -> bool:
@@ -174,6 +187,7 @@ class BrowserDiagnosticsService:
         context.on("page", lambda popup: self.manager._attach_popup(popup, session))
         context.on("request", lambda request: self.on_context_request(session, request))
         context.on("requestfailed", lambda request: self.on_context_request_failed(session, request))
+        context.on("response", lambda response: self.on_context_response(session, response))
 
     def on_context_request(self, session: "BrowserSession", request: Any) -> None:
         """A context's request: keep a top-level navigation through a URL off the list (to one, or redirected
@@ -202,6 +216,11 @@ class BrowserDiagnosticsService:
         if any(hop is failed for hop in session.unframed_hops for failed in chain):
             session.refused_failures.append(request.url)
         session.unframed_hops = [hop for hop in session.unframed_hops if not any(hop is failed for failed in chain)]
+
+    def on_context_response(self, session: "BrowserSession", response: Any) -> None:
+        """A context's 204 to a navigation commits nothing, so it ends that navigation as a failure would."""
+        if _no_content_navigation(response):
+            self.on_context_request_failed(session, response.request)
 
     def _claim_unframed_hops(self, session: "BrowserSession", page: "Page") -> None:
         """Mark a page the context reports with a kept hop whose frame is now its main frame.
@@ -243,6 +262,7 @@ class BrowserDiagnosticsService:
         page.on("pageerror", lambda error: self._keep_output(page, session.page_errors, str(error)))
         page.on("request", lambda request: self._on_request_started(session, page, request))
         page.on("requestfailed", lambda request: self._record_request_failure(session, page, request))
+        page.on("response", lambda response: self._on_response(page, response))
         page.on("download", lambda download: self._on_download(session, page, download))
         page.on("popup", lambda popup: self._on_popup(session, page, popup))
         page.on("close", lambda _page: self._on_page_closed(session, page))
@@ -288,6 +308,19 @@ class BrowserDiagnosticsService:
             )
         self._started_refused[request] = self.manager._page_refused(page)
 
+    def _navigation_ended_without_commit(self, page: "Page", request: Any) -> None:
+        """A top-level navigation failed or was aborted (a 204, a download): it committed nothing."""
+        # Remembered first, for the download it may have turned into: navigation_failed clears the hop.
+        if any(self.manager._url_off_list(hop.url) for hop in redirect_chain(request)):
+            self.manager.page_provenance.refused_navigation_failed(page, request.url)
+        # That navigation's hop is no longer marked.
+        self.manager.page_provenance.navigation_failed(page, request)
+
+    def _on_response(self, page: "Page", response: Any) -> None:
+        """A 204 to a top-level navigation ends it with no commit, as its failure did up to Playwright 1.62."""
+        if _no_content_navigation(response) and _top_level_navigation(response.request):
+            self._navigation_ended_without_commit(page, response.request)
+
     def _record_request_failure(self, session: "BrowserSession", page: "Page", request: Any) -> None:
         """Keep a failed request, its URL scrubbed as the network inspector scrubs the URL of a request.
 
@@ -300,11 +333,7 @@ class BrowserDiagnosticsService:
         """
         top_level = _top_level_navigation(request)
         if top_level:
-            # Remembered first, for the download it may have turned into: navigation_failed clears the hop.
-            if any(self.manager._url_off_list(hop.url) for hop in redirect_chain(request)):
-                self.manager.page_provenance.refused_navigation_failed(page, request.url)
-            # Failed or aborted (a 204, a download) with no commit: that navigation's hop is no longer marked.
-            self.manager.page_provenance.navigation_failed(page, request)
+            self._navigation_ended_without_commit(page, request)
         started_refused = self._started_refused.pop(request, False)
         if (
             started_refused
