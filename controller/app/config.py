@@ -1,4 +1,5 @@
 import random
+import re
 from functools import lru_cache
 from typing import Literal
 
@@ -6,6 +7,11 @@ from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .stealth.fingerprint import CHROME_UA_POOL
+
+# USER_AGENT_POOL separates its entries with "|" or newlines. Not commas: every Chrome UA contains
+# "(KHTML, like Gecko)", so a comma split handed contexts half a UA.
+USER_AGENT_POOL_SEPARATOR = "|"
+_USER_AGENT_POOL_SPLIT = re.compile(r"[|\r\n]")
 
 
 class Settings(BaseSettings):
@@ -304,7 +310,7 @@ class Settings(BaseSettings):
     # Defaults to the single authoritative pool in stealth.fingerprint so the
     # context-level UA and the fingerprint layer cannot drift apart.
     user_agent_pool: str = Field(
-        ",".join(CHROME_UA_POOL),
+        USER_AGENT_POOL_SEPARATOR.join(CHROME_UA_POOL),
         alias="USER_AGENT_POOL",
     )
 
@@ -438,7 +444,7 @@ class Settings(BaseSettings):
 
     @property
     def random_user_agent(self) -> str:
-        agents = [a.strip() for a in self.user_agent_pool.split(",") if a.strip()]
+        agents = [a.strip() for a in _USER_AGENT_POOL_SPLIT.split(self.user_agent_pool) if a.strip()]
         return random.choice(agents) if agents else ""
 
 
