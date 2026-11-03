@@ -68,6 +68,21 @@ class MainAuthTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"version": main_module._VERSION})
 
+    def test_api_docs_are_served_without_a_token(self) -> None:
+        # /docs is where the README sends people, in a browser that cannot send a
+        # bearer token. The schema is public (it is in the repo) and holds no data.
+        for path in ("/docs", "/redoc", "/openapi.json"):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path).status_code, 200)
+        self.assertEqual(self.client.get("/sessions").status_code, 401)
+
+    def test_the_schema_declares_the_bearer_token_for_every_operation(self) -> None:
+        # So Swagger's Authorize button sends it with "Try it out".
+        schema = self.client.get("/openapi.json").json()
+
+        self.assertEqual(schema["components"]["securitySchemes"]["bearerAuth"], {"type": "http", "scheme": "bearer"})
+        self.assertEqual(schema["security"], [{"bearerAuth": []}])
+
     def test_deep_health_is_not_exempt_from_bearer_auth(self) -> None:
         response = self.client.get("/healthz/deep")
 

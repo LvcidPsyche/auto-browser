@@ -305,6 +305,9 @@ def _is_bearer_token_exempt_path(path: str) -> bool:
     # nothing; answering 401 for old bookmarks like /ui/foo was inconsistent.
     if path.startswith("/ui/"):
         return True
+    # /docs, /redoc and /openapi.json serve the API schema, which is public (it is
+    # in the repo) and holds no data. A browser opening /docs cannot send the
+    # bearer token; the schema declares it, so Swagger's Authorize sends it from there.
     return path in {
         "/healthz",
         "/readyz",
@@ -314,4 +317,7 @@ def _is_bearer_token_exempt_path(path: str) -> bool:
         "/dashboard/",
         "/ui",
         "/ui/",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
     }

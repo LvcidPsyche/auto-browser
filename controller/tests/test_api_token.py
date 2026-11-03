@@ -448,7 +448,7 @@ def test_the_controller_lifespan_generates_and_enforces_the_token(tmp_path: Path
         assert client.get("/sessions").status_code == 401
         assert client.get("/sessions", headers={"Host": "localhost"}).status_code == 401
         assert client.get("/sessions", headers={"Authorization": f"Bearer {token}"}).status_code == 200
-        for public in ("/healthz", "/dashboard"):
+        for public in ("/healthz", "/dashboard", "/openapi.json"):
             assert client.get(public).status_code == 200, public
 
     assert token not in caplog.text
