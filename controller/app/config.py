@@ -407,9 +407,10 @@ class Settings(BaseSettings):
     cdp_block_origin_on_redirect_disabled: bool = Field(False, alias="CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED")
 
     # Shadow browsing — enable headed mode for debugging
-    # Off by default: it launches a headed Chromium inside the controller with
-    # its sandbox disabled, next to every secret the controller holds, and the
-    # shipped image has neither a browser nor a display for it anyway.
+    # Off by default: it launches a headed Chromium inside the controller (its
+    # sandbox required, so it does not start without one, but not verified),
+    # next to every secret the controller holds, and the shipped image has
+    # neither a browser nor a display for it anyway.
     shadow_browse_enabled: bool = Field(False, alias="SHADOW_BROWSE_ENABLED")
     # Post-session skill review by an LLM. Off unless asked for: it calls a paid
     # model on every session close.
