@@ -95,7 +95,12 @@ class CuratorLLMAdapter:
     @property
     def ready(self) -> bool:
         """True when an API key is present for the configured provider."""
-        return bool(os.environ.get(self._api_key_env()))
+        return bool(self._api_key())
+
+    def _api_key(self) -> str:
+        # Read here rather than through Settings, so its stripping (#248) never applied: a key
+        # pasted with a space or newline went out as-is and the provider answered 401.
+        return os.environ.get(self._api_key_env(), "").strip()
 
     def _default_model(self) -> str:
         return {
@@ -138,7 +143,7 @@ class CuratorLLMAdapter:
 
     def _build_claude(self, prompt: str, system: Optional[str]) -> tuple[str, dict, dict]:
         headers = {
-            "x-api-key": os.environ[self._api_key_env()],
+            "x-api-key": self._api_key(),
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
@@ -153,7 +158,7 @@ class CuratorLLMAdapter:
 
     def _build_openai(self, prompt: str, system: Optional[str]) -> tuple[str, dict, dict]:
         headers = {
-            "Authorization": f"Bearer {os.environ[self._api_key_env()]}",
+            "Authorization": f"Bearer {self._api_key()}",
             "Content-Type": "application/json",
         }
         messages: list[dict[str, str]] = []
@@ -171,7 +176,7 @@ class CuratorLLMAdapter:
         # The key goes in a header: httpx puts the request URL in its error
         # messages, and a ?key= query string put the key in the logs with them.
         url = _GEMINI_URL_TMPL.format(model=self.model)
-        headers = {"Content-Type": "application/json", "x-goog-api-key": os.environ[self._api_key_env()]}
+        headers = {"Content-Type": "application/json", "x-goog-api-key": self._api_key()}
         parts: list[dict[str, str]] = []
         if system:
             parts.append({"text": f"System: {system}\n\n"})

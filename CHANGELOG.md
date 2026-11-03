@@ -2,6 +2,17 @@
 
 All notable changes to auto-browser are documented here.
 
+## [Unreleased]
+
+A controller fix. The client, LangChain and MCP bridge packages are unchanged.
+
+### Fixed
+
+- **The skills curator's API key is stripped too.** 1.12.2 strips whitespace around the eight provider keys in the
+  controller's settings, but the curator (`CURATOR_ENABLED`) reads `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or
+  `GEMINI_API_KEY` from the environment itself, so a key with a space or newline around it still went out as-is and
+  the provider refused it. The curator now strips it as well, and a key that is only whitespace counts as unset.
+
 ## [1.12.2] — 2026-11-02
 
 A controller patch release over 1.12.1. The OpenAI-compatible providers now work on models that refuse a named

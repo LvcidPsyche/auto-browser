@@ -120,6 +120,30 @@ class CuratorLLMAdapterTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "no API key"):
                 await adapter.complete("prompt")
 
+    async def test_whitespace_around_the_key_is_stripped_in_every_header(self) -> None:
+        # The curator reads its key from os.environ, so Settings' stripping (#248) never reached it.
+        cases = (
+            ("claude", "ANTHROPIC_API_KEY", "x-api-key", "anthropic-key", {"content": []}),
+            ("openai", "OPENAI_API_KEY", "Authorization", "Bearer openai-key", {"choices": []}),
+            ("gemini", "GEMINI_API_KEY", "x-goog-api-key", "gemini-key", {"candidates": []}),
+        )
+        for provider, env_var, header, expected, payload in cases:
+            key = expected.removeprefix("Bearer ")
+            for raw in (f" {key}", f"{key}\n", f"\t{key} "):
+                with self.subTest(provider=provider, raw=raw):
+                    fake_client = _FakeAsyncClient(_FakeResponse(payload))
+                    with (
+                        patch.dict(os.environ, {env_var: raw}, clear=True),
+                        patch("app.curator_llm.httpx.AsyncClient", return_value=fake_client),
+                    ):
+                        await CuratorLLMAdapter(provider).complete("prompt")
+                    self.assertEqual(fake_client.calls[0][1][header], expected)
+
+    async def test_a_whitespace_only_key_counts_as_unset(self) -> None:
+        with patch.dict(os.environ, {"CURATOR_PROVIDER": "openai", "OPENAI_API_KEY": "  \n"}, clear=True):
+            self.assertFalse(CuratorLLMAdapter("openai").ready)
+            self.assertIsNone(CuratorLLMAdapter.from_env())
+
     async def test_extract_text_returns_empty_for_malformed_payload(self) -> None:
         adapter = CuratorLLMAdapter("openai")
 
