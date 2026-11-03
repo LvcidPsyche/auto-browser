@@ -54,6 +54,50 @@ class MaintenanceServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(stale_file.exists())
         self.assertEqual(report["roots"][0]["deleted_files"], 1)
 
+    async def test_an_entry_that_cannot_be_removed_is_counted_and_the_sweep_goes_on(self) -> None:
+        # P3#8: one PermissionError used to abort the whole sweep: later roots were never swept.
+        from unittest.mock import patch
+
+        ancient = 1_000_000_000
+        stuck = Path(self.settings.artifact_root) / "stuck.bin"
+        loose = Path(self.settings.artifact_root) / "loose.bin"
+        upload = Path(self.settings.upload_root) / "old-upload.bin"
+        for path in (stuck, loose, upload):
+            path.write_text("x", encoding="utf-8")
+            utime(path, (ancient, ancient))
+        real_unlink = Path.unlink
+
+        def unlink(path, *args, **kwargs):
+            if path.name == "stuck.bin":
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", unlink):
+            report = await self.service.run_cleanup()
+        artifacts, uploads = report["roots"][0], report["roots"][1]
+        self.assertEqual(artifacts["errors"], 1)
+        self.assertTrue(stuck.exists())
+        self.assertFalse(loose.exists(), "the rest of that root is still swept")
+        self.assertFalse(upload.exists(), "and the next root too")
+        self.assertEqual(uploads["errors"], 0)
+
+    async def test_the_startup_summary_reports_errors(self) -> None:
+        from unittest.mock import patch
+
+        stuck = Path(self.settings.artifact_root) / "stuck.bin"
+        stuck.write_text("x", encoding="utf-8")
+        utime(stuck, (1_000_000_000, 1_000_000_000))
+        real_unlink = Path.unlink
+
+        def unlink(path, *args, **kwargs):
+            if path.name == "stuck.bin":
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", unlink), self.assertLogs("app.maintenance", "INFO") as logs:
+            await self.service._startup_sweep()
+        self.assertTrue(any("1 error" in line for line in logs.output), logs.output)
+
     async def test_cleanup_keeps_a_new_empty_directory(self) -> None:
         """A session being created has fresh, empty directories before it is
         registered; the sweep removed them because they were empty."""
