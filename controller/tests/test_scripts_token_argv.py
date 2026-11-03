@@ -120,6 +120,16 @@ class BearerCurlTests(unittest.TestCase):
 
         self.assertNotIn("Authorization", argv + stdin)
 
+    def test_a_token_with_a_line_break_is_refused_loudly_and_never_sent(self) -> None:
+        # No HTTP header can carry one, and in a curl config it would split the line.
+        for broken in (TOKEN[:20] + "\n" + TOKEN[20:], TOKEN + "\r"):
+            with self.subTest(broken=repr(broken[-3:])):
+                _, argv, stdin = self.run_bearer_curl(token=broken)
+
+                self.assertNotIn("Authorization", argv + stdin)
+                self.assertIn("line break", self.trace)
+                self.assertNotIn(TOKEN[:20], self.trace)
+
 
 @unittest.skipUnless(SCRIPTS.is_dir(), "scripts/ is not shipped inside the controller image")
 class NoTokenInArgvTests(unittest.TestCase):
