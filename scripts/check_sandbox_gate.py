@@ -23,7 +23,7 @@ from pathlib import Path
 
 def call(method: str, url: str, token: str, body: dict | None = None) -> tuple[int, dict]:
     data = json.dumps(body).encode() if body is not None else None
-    request = urllib.request.Request(url, data=data, method=method)
+    request = urllib.request.Request(url, data=data, method=method)  # noqa: S310 - a loopback http URL
     request.add_header("Authorization", f"Bearer {token}")
     if data is not None:
         request.add_header("content-type", "application/json")
