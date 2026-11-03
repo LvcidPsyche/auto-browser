@@ -71,6 +71,7 @@ class AutoBrowserClient:
         """
         self.base_url = base_url.rstrip("/")
         self._headers: dict[str, str] = dict(headers or {})
+        token = token.strip() if token else None
         if token:
             self._headers["Authorization"] = f"Bearer {token}"
         if operator_id:

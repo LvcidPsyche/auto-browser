@@ -60,7 +60,7 @@ class AutoBrowserNode:
         operator_id: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
-        self.bearer_token = bearer_token
+        self.bearer_token = bearer_token.strip() if bearer_token else None
         self.timeout = timeout
         self.operator_id = operator_id
 

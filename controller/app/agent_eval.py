@@ -327,6 +327,7 @@ class ControllerEvalClient:
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.headers = {"Content-Type": "application/json"}
+        bearer_token = bearer_token.strip() if bearer_token else None
         if bearer_token:
             self.headers["Authorization"] = f"Bearer {bearer_token}"
         if operator_id:

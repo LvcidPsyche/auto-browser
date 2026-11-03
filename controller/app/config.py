@@ -390,6 +390,8 @@ class Settings(BaseSettings):
     )
 
     @field_validator(
+        "api_bearer_token",
+        "witness_remote_api_key",
         "openai_api_key",
         "anthropic_api_key",
         "gemini_api_key",
@@ -401,9 +403,11 @@ class Settings(BaseSettings):
         mode="before",
     )
     @classmethod
-    def _strip_provider_api_key(cls, value: object) -> object:
+    def _strip_secret(cls, value: object) -> object:
         # A key pasted with a space or newline around it went out as-is, and the provider
         # answered 401 (OpenRouter: "Missing Authentication header").
+        # A whitespace-only API_BEARER_TOKEN was a credential that "Bearer" plus the same
+        # whitespace satisfied (40 spaces even cleared the 32-character floor); it is unset now.
         if isinstance(value, str):
             return value.strip() or None
         return value

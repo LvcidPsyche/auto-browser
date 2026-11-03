@@ -7,6 +7,8 @@ import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
 
+from .auth_policy import normalize_authorization
+
 
 @dataclass(slots=True)
 class RateLimitDecision:
@@ -127,7 +129,7 @@ def build_rate_limit_key(
 
     authorization = get("authorization")
     if authorization:
-        token_hash = hashlib.sha256(str(authorization).encode("utf-8")).hexdigest()[:16]
+        token_hash = hashlib.sha256(normalize_authorization(str(authorization)).encode("utf-8")).hexdigest()[:16]
         return f"auth:{token_hash}"
     operator_id = get(operator_id_header)
     if operator_id:

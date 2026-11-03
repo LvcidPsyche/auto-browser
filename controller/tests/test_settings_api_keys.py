@@ -42,5 +42,25 @@ class ProviderApiKeyWhitespaceTests(unittest.TestCase):
         self.assertEqual(_settings_from_env(OPENROUTER_API_KEY="sk-or-v1-abc").openrouter_api_key, "sk-or-v1-abc")
 
 
+_SECRET_FIELDS = ("api_bearer_token", "witness_remote_api_key")
+
+
+class SecretWhitespaceTests(unittest.TestCase):
+    """The shared bearer token and the witness key are stripped like the provider keys."""
+
+    def test_whitespace_around_a_secret_is_stripped(self):
+        for field in _SECRET_FIELDS:
+            alias = Settings.model_fields[field].alias
+            for raw in (" tok", "tok ", "\ttok\n"):
+                with self.subTest(field=field, raw=raw):
+                    self.assertEqual(getattr(_settings_from_env(**{alias: raw}), field), "tok")
+
+    def test_a_whitespace_only_secret_is_unset(self):
+        for field in _SECRET_FIELDS:
+            alias = Settings.model_fields[field].alias
+            with self.subTest(field=field):
+                self.assertIsNone(getattr(_settings_from_env(**{alias: "  \n"}), field))
+
+
 if __name__ == "__main__":
     unittest.main()

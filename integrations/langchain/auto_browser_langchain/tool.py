@@ -72,8 +72,9 @@ class AutoBrowserTool(BaseTool):
 
     async def _arun(self, action: str, arguments: dict[str, Any] | None = None) -> str:
         headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self.bearer_token:
-            headers["Authorization"] = f"Bearer {self.bearer_token}"
+        bearer_token = self.bearer_token.strip() if self.bearer_token else None
+        if bearer_token:
+            headers["Authorization"] = f"Bearer {bearer_token}"
         if self.operator_id:
             headers["X-Operator-Id"] = self.operator_id
         payload = {"name": action, "arguments": arguments or {}}
@@ -95,6 +96,7 @@ class AutoBrowserTool(BaseTool):
         operator_id: str | None = None,
     ) -> list[dict]:
         headers: dict[str, str] = {}
+        bearer_token = bearer_token.strip() if bearer_token else None
         if bearer_token:
             headers["Authorization"] = f"Bearer {bearer_token}"
         if operator_id:

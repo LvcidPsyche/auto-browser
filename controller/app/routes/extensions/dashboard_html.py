@@ -228,7 +228,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
 const _authHeaders = () => {
   const headers = {};
-  const t = sessionStorage.getItem('ab_token') || '';
+  const t = (sessionStorage.getItem('ab_token') || '').trim();
   const operatorId = sessionStorage.getItem('ab_operator_id') || '';
   const operatorName = sessionStorage.getItem('ab_operator_name') || '';
   if (t) headers['Authorization'] = 'Bearer ' + t;
