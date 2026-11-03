@@ -20,8 +20,9 @@ All notable changes to auto-browser are documented here.
   fails (on Linux it needs unprivileged user namespaces), the error says so, and the controller log has Chromium's
   own message.
 - **`/docs` and `/redoc` load pinned Swagger UI (5.34.0) and ReDoc (2.5.4) with Subresource Integrity hashes,** and
-  nothing else from another origin (no Google Fonts, no third-party favicon). Swagger's Authorize box takes the API
-  token, and the pages loaded a floating major version from a CDN with no integrity check.
+  a Content-Security-Policy that admits nothing else from another origin (no Google Fonts, no third-party favicon,
+  no ReDoc logo from cdn.redoc.ly). Swagger's Authorize box takes the API token, and the pages loaded a floating
+  major version from a CDN with no integrity check.
 - **The smoke and doctor scripts no longer put the API token on curl's command line,** where every local user could
   read it in the process list. It reaches curl as a config on stdin, and stays out of `bash -x` traces.
 
