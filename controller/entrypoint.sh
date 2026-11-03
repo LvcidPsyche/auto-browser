@@ -45,6 +45,13 @@ cap_names() {
 has_setpcap=0
 if (( (16#$cap_eff >> 8) & 1 )); then has_setpcap=1; fi
 
+# CONTROLLER_RUN_AS is checked here too: the branch below never runs app.run_as, which checks it on the main path.
+run_as_setting="$(echo "${CONTROLLER_RUN_AS:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+case "$run_as_setting" in
+  "" | auto | root) ;;
+  *) fail "CONTROLLER_RUN_AS must be auto or root, got '${CONTROLLER_RUN_AS}'" ;;
+esac
+
 # Switching users needs CAP_SETUID (bit 7) and CAP_SETGID (bit 6). Without them (cap_drop ALL, or a cap_drop of
 # either) the container still starts as uid 0, with no_new_privs and every capability it can clear cleared; the
 # WARNING and the readiness reason name whatever remains.
@@ -65,15 +72,35 @@ if (( ((16#$cap_eff >> 7) & 1) == 0 || ((16#$cap_eff >> 6) & 1) == 0 )); then
     "$kept and no_new_privs. To run as the controller user instead, start it as that user: compose" \
     "user: \"10002:10002\" (or docker run --user 10002:10002), with ./data owned by 10002; or add cap_add CHOWN," \
     "DAC_READ_SEARCH, SETUID and SETGID." >&2
-  # Measured: on a /data another uid owns, uid 0 without CAP_DAC_OVERRIDE (bit 1) cannot read its 0600 files, and
-  # the controller exits at startup on the API token. Say so now rather than leave only a PermissionError.
+  # Measured: on a /data another uid owns, uid 0 without CAP_DAC_OVERRIDE (bit 1) or CAP_DAC_READ_SEARCH (bit 2)
+  # cannot read its 0600 files, and the controller exits at startup on the API token.
   data_root="${CONTROLLER_DATA_ROOT:-/data}"
   data_owner="$(stat -c %u "$data_root" 2>/dev/null || true)"
-  if [[ "$data_owner" =~ ^[0-9]+$ ]] && (( data_owner != 0 && ((16#$remaining >> 1) & 1) == 0 )); then
-    echo "entrypoint: WARNING: $data_root belongs to uid $data_owner, and uid 0 without CAP_DAC_OVERRIDE cannot" \
-      "read its private files (the API token among them): the controller will fail to start. Start it as that" \
-      "uid (compose user: \"$data_owner:$data_owner\", or docker run --user $data_owner:$data_owner), or add the" \
-      "capabilities above." >&2
+  if [[ "$data_owner" =~ ^[0-9]+$ ]] && (( data_owner != 0 )); then
+    # Never browser-node's uid (10001), nor nobody (65534, root-squash): the controller's own user then.
+    as_uid="$data_owner"
+    chown_hint=""
+    if (( data_owner == 10001 || data_owner == 65534 )); then
+      as_uid=10002
+      chown_hint=" (chown ./data to 10002 first)"
+    fi
+    way_out="start it as uid $as_uid$chown_hint (compose user: \"$as_uid:$as_uid\", or docker run --user $as_uid:$as_uid), or add the capabilities above"
+    token_file="${API_TOKEN_FILE:-$data_root/api-token}"
+    # The read check runs through the same drop as the exec, so it sees the capabilities that will remain.
+    if [[ -e "$token_file" ]] && ! setpriv "${drop[@]}" test -r "$token_file"; then
+      fail "$data_root belongs to uid $data_owner, and uid 0 with $kept cannot read the API token" \
+        "$token_file, so the controller cannot start: $way_out."
+    fi
+    can_read=$(( ((16#$remaining >> 1) & 1) || ((16#$remaining >> 2) & 1) ))
+    can_write=$(( (16#$remaining >> 1) & 1 ))
+    if (( ! can_read )); then
+      echo "entrypoint: WARNING: $data_root belongs to uid $data_owner, and uid 0 without CAP_DAC_OVERRIDE or" \
+        "CAP_DAC_READ_SEARCH cannot read its private files: the controller will likely fail to start. To fix it," \
+        "$way_out." >&2
+    elif (( ! can_write )); then
+      echo "entrypoint: WARNING: $data_root belongs to uid $data_owner, and uid 0 without CAP_DAC_OVERRIDE" \
+        "cannot write into it: the controller will likely fail to start. To fix it, $way_out." >&2
+    fi
   fi
   exec setpriv "${drop[@]}" "$@"
 fi
