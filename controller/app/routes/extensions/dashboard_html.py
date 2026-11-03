@@ -204,7 +204,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 // The parent server applies bearer-token middleware to API routes, while the
 // dashboard page itself bootstraps credentials in-browser. Token and operator
 // identity are stored in sessionStorage only and cleared when the tab closes.
-// Supports #token=... in the URL hash for one-click bookmarkable access.
+// Supports #token=... in the URL hash for one-click bookmarkable access. The
+// server never puts the token in this page: anyone who can load it would get it.
 (function initAuthState() {
   const h = window.location.hash || '';
   const m = h.match(/token=([^&]+)/);
@@ -213,7 +214,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     history.replaceState(null, '', window.location.pathname);  // strip from URL
   }
   if (!sessionStorage.getItem('ab_token')) {
-    const t = prompt('Enter API bearer token (leave blank for dev/no-auth):', '');
+    const t = prompt('Enter the API token (data/api-token in your auto-browser folder):', '');
     if (t !== null) sessionStorage.setItem('ab_token', t);
   }
   if (!sessionStorage.getItem('ab_operator_id')) {
@@ -254,10 +255,10 @@ const errorText = (body, status) => {
   }
   return `request failed (HTTP ${status})`;
 };
-// Resolves with the parsed body of a successful request and rejects with an Error
+// Resolves with the response to a successful request and rejects with an Error
 // carrying the server's own text otherwise, so no caller can mistake a failed
 // request for a done one. Callers show err.message.
-const api = async (path, options = {}) => {
+const apiResponse = async (path, options = {}) => {
   const headers = {..._authHeaders(), ...(options.headers || {})};
   let r;
   try {
@@ -279,8 +280,9 @@ const api = async (path, options = {}) => {
     }
     throw new Error(errorText(body, r.status));
   }
-  return r.json();
+  return r;
 };
+const api = async (path, options = {}) => (await apiResponse(path, options)).json();
 const apiPost = (path, payload = null) => {
   const options = {method: 'POST'};
   if (payload !== null) {
@@ -840,12 +842,28 @@ function renderReplayScreenshots(steps) {
   }
   urls.forEach((url) => {
     const img = document.createElement('img');
-    img.src = url;
     img.alt = 'run screenshot';
     img.style.maxWidth = '320px';
     img.style.margin = '4px';
     document.getElementById('replay-output').appendChild(img);
+    loadScreenshot(img, url);
   });
+}
+// /artifacts sits behind the bearer token, which an <img src> cannot send, so a
+// screenshot from this controller loads through api() into an object URL. One on
+// any other origin keeps a plain src: the token never leaves this controller.
+async function loadScreenshot(img, url) {
+  if (new URL(url).origin !== window.location.origin) {
+    img.src = url;
+    return;
+  }
+  try {
+    const objectUrl = URL.createObjectURL(await (await apiResponse(url)).blob());
+    img.addEventListener('load', () => URL.revokeObjectURL(objectUrl), {once: true});
+    img.src = objectUrl;
+  } catch (err) {
+    img.alt = `screenshot unavailable: ${err.message}`;
+  }
 }
 async function loadReplay() {
   const jobId = (document.getElementById('replay-job-id').value || '').trim();

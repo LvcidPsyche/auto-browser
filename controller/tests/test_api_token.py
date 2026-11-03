@@ -450,6 +450,9 @@ def test_the_controller_lifespan_generates_and_enforces_the_token(tmp_path: Path
         assert client.get("/sessions", headers={"Authorization": f"Bearer {token}"}).status_code == 200
         for public in ("/healthz", "/dashboard", "/openapi.json"):
             assert client.get(public).status_code == 200, public
+        # The page asks for the token; the server never hands it over, or a forged
+        # Host: localhost would get it.
+        assert token not in client.get("/dashboard", headers={"Host": "localhost"}).text
 
     assert token not in caplog.text
     assert main_module.settings.api_bearer_token is None
