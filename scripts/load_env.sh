@@ -53,12 +53,17 @@ api_token() {
   fi
 }
 
-# The bearer header as a curl config line, for `curl --config -` on stdin. A
-# command line is readable by every local user (ps, /proc/<pid>/cmdline), so the
-# token never goes in argv, and a config on stdin is never written to disk.
-# Prints nothing without a token. printf is a builtin: the token reaches no argv.
+# The controller's bearer header as a curl config line, for `curl --config -` on
+# stdin (pipe it in: curl_auth_config | curl --config - ...). A command line is
+# readable by every local user (ps, /proc/<pid>/cmdline), so the token never goes
+# in argv, and a config on stdin is never written to disk. It takes no argument
+# and turns xtrace off for itself (it runs in the pipeline's subshell, so the
+# caller's trace is untouched): `bash -x` would otherwise print the token as a
+# function argument or a printf operand. Prints nothing without a token.
 curl_auth_config() {
-  local token="${1:-}"
+  { set +x; } 2>/dev/null
+  local token
+  token="$(api_token)"
   if [[ -n "$token" ]]; then
     token="${token//\\/\\\\}"
     printf 'header = "Authorization: Bearer %s"\n' "${token//\"/\\\"}"
@@ -68,5 +73,5 @@ curl_auth_config() {
 # curl that sends the controller's bearer token. Without it every API call is a
 # 401 and the smoke scripts could only pass against an open controller.
 bearer_curl() {
-  curl_auth_config "$(api_token)" | curl --config - "$@"
+  curl_auth_config | curl --config - "$@"
 }
