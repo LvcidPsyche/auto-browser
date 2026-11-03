@@ -245,6 +245,18 @@ jobs:
             echo "the controller runs as uid $controller_uid, not as the owner of ./data ($data_owner)" >&2
             exit 1
           fi
+          # setpriv leaves it no capability in any set, and no_new_privs.
+          status="$(docker compose exec -T controller grep -E '^(CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs):' /proc/1/status)"
+          echo "$status"
+          if ! echo "$status" | awk '/^Cap/ && $2 != "0000000000000000" {bad=1} /^NoNewPrivs/ && $2 != "1" {bad=1} END {exit bad}'; then
+            echo "the controller kept a capability or runs without no_new_privs" >&2
+            exit 1
+          fi
+
+      - name: A download reaches the controller
+        # The controller runs as the runner's uid here, not browser-node's 10001: a real Chromium download must
+        # still be captured and read back by it.
+        run: python3 scripts/smoke_download.py
 
       - name: Check browser-node serves VNC only through noVNC
         # x11vnc listened on TCP 5900, where libvncserver takes a WebSocket from any
@@ -281,3 +293,19 @@ jobs:
 
       - name: Run isolated session smoke test
         run: DOCTOR_BUILD=1 API_PORT=8010 ./scripts/smoke_isolated_session.sh
+
+      - name: Chromium's sandbox engages and is verified (BROWSER_SANDBOX=on)
+        # The step above only prints the state, since Ubuntu 24.04's AppArmor refuses unprivileged user namespaces
+        # and auto falls back. Here that restriction is lifted and on is required: browser-node must start with the
+        # sandbox on and verified renderers, or the job fails (it catches a vacuous verification, too).
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          BROWSER_SANDBOX=on docker compose up -d --force-recreate browser-node
+          container="$(docker compose ps -q browser-node)"
+          for _ in $(seq 1 60); do
+            [ -s data/browser-profile/browser-sandbox.json ] && [ -s data/browser-profile/browser-ws-endpoint.txt ] && break
+            [ "$(docker inspect -f '{{.State.Status}}' "$container")" = running ] || break
+            sleep 2
+          done
+          docker compose logs --tail 20 browser-node
+          python3 scripts/assert_browser_sandbox.py data/browser-profile/browser-sandbox.json
