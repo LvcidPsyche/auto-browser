@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -75,6 +76,28 @@ class MainAuthTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path).status_code, 200)
         self.assertEqual(self.client.get("/sessions").status_code, 401)
+
+    def test_the_docs_pages_load_only_pinned_assets_with_integrity_hashes(self) -> None:
+        # Swagger's Authorize box takes the API token, so every script and stylesheet the page loads from
+        # another origin is an exact version with an SRI hash: a changed CDN file is refused, not run.
+        for path in ("/docs", "/redoc"):
+            with self.subTest(path=path):
+                html = self.client.get(path).text
+                tags = re.findall(r"<(?:script|link)\b[^>]*>", html)
+                external = [tag for tag in tags if re.search(r'(?:src|href)="https?://', tag)]
+                self.assertTrue(external, "the page loads its UI from a CDN")
+                for tag in external:
+                    self.assertRegex(tag, r'integrity="sha384-[A-Za-z0-9+/]{64}"')
+                    self.assertIn('crossorigin="anonymous"', tag)
+                    self.assertRegex(tag, r"@\d+\.\d+\.\d+/", "an exact version, not a floating major")
+                self.assertNotIn("fonts.googleapis.com", html)
+                self.assertIn("/openapi.json", html)
+
+    def test_a_changed_page_template_fails_loudly_rather_than_dropping_the_hash(self) -> None:
+        from app.docs_pages import SWAGGER_JS, _with_integrity
+
+        with self.assertRaisesRegex(RuntimeError, "no longer has exactly one"):
+            _with_integrity('<script src="https://elsewhere.example/bundle.js"></script>', "src", SWAGGER_JS)
 
     def test_the_schema_declares_the_bearer_token_for_every_operation(self) -> None:
         # So Swagger's Authorize button sends it with "Try it out".

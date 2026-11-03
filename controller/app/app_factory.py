@@ -21,6 +21,7 @@ from .auth_policy import has_named_credentials
 from .browser_manager import BrowserManager
 from .config import Settings
 from .cron_service import CronService
+from .docs_pages import install_docs_pages
 from .maintenance import MaintenanceService
 from .mcp_transport import McpHttpTransport
 from .metrics import MetricsRecorder
@@ -235,8 +236,12 @@ def create_controller_app(
         lifespan=lifespan,
         summary="Visual Auto Browser control plane for LLM workflows.",
         dependencies=[Depends(require_session_access)],
+        # Served by install_docs_pages, with pinned, integrity-checked assets.
+        docs_url=None,
+        redoc_url=None,
     )
     _declare_bearer_auth(application)
+    install_docs_pages(application)
 
     application.state.browser_manager = services.manager
     application.state.tool_gateway = services.tool_gateway
