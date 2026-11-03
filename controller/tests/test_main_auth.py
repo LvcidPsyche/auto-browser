@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import atexit
+import base64
+import hashlib
 import os
 import re
 import shutil
@@ -92,6 +94,29 @@ class MainAuthTests(unittest.TestCase):
                     self.assertRegex(tag, r"@\d+\.\d+\.\d+/", "an exact version, not a floating major")
                 self.assertNotIn("fonts.googleapis.com", html)
                 self.assertIn("/openapi.json", html)
+
+    def test_the_docs_pages_policy_lets_in_only_their_own_assets(self) -> None:
+        # ReDoc fetched its footer logo from cdn.redoc.ly: the page's policy now admits scripts only by exact
+        # URL (and Swagger's inline init by its hash), images and fonts only from here, and requests only here.
+        for path in ("/docs", "/redoc"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                policy = dict(
+                    part.strip().split(" ", 1)
+                    for part in response.headers["Content-Security-Policy"].split(";")
+                    if part.strip()
+                )
+                self.assertEqual(policy["default-src"], "'none'")
+                self.assertEqual(policy["img-src"], "'self' data:")
+                self.assertEqual(policy["connect-src"], "'self'")
+                scripts = policy["script-src"].split()
+                external = re.findall(r'<script src="([^"]+)"', response.text)
+                self.assertEqual(sorted(s for s in scripts if s.startswith("https://")), sorted(external))
+                self.assertNotIn("'unsafe-inline'", scripts)
+                inline = re.findall(r"<script>(.*?)</script>", response.text, re.S)
+                for body in inline:
+                    digest = base64.b64encode(hashlib.sha256(body.encode("utf-8")).digest()).decode()
+                    self.assertIn(f"'sha256-{digest}'", scripts)
 
     def test_a_changed_page_template_fails_loudly_rather_than_dropping_the_hash(self) -> None:
         from app.docs_pages import SWAGGER_JS, _with_integrity
