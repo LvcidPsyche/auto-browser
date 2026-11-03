@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.browser.services.tabs import TabUnjudgedError
-from app.browser.window_births import BirthVerdict
+from app.browser.window_births import BirthVerdict, WindowBirthWatcher
 from app.readiness import window_birth_watcher_check
 from tests import test_allowed_hosts_navigation as nav
 from tests import test_allowed_hosts_window_births_chromium as wbc
@@ -173,11 +173,19 @@ async def test_a_window_born_while_the_watcher_was_lost_is_closed_by_the_replace
         await past_the_grace(monkeypatch)
         assert len(await page_targets(context_id)) == 2, "the refused page's window is not open to be found"
 
+        seen_late: list[dict] = []  # the replacement sweeps at once, so its entry is observed as it is made
+        original = WindowBirthWatcher._seen_late
+
+        def spy(self, info):
+            seen_late.append(dict(info))
+            original(self, info)
+
+        monkeypatch.setattr(WindowBirthWatcher, "_seen_late", spy)
         await env.create()  # the replacement watcher attaches: the first session is registered before discovery
         new = births._get(session.browser)
         assert new is not None and new is not old
-        late = [birth for birth in new._session_births(session) if birth.born_refused]
-        assert len(late) == 1 and late[0].unjudged, "the replacement did not enter the window from the replay"
+        late = [info for info in seen_late if info.get("browserContextId") == context_id and info.get("openerId")]
+        assert len(late) == 1, "the replacement did not enter the window from the replay"
 
         await settle(lambda: len(new._session_births(session)) == 1, timeout=TIMEOUT)
         assert len(await page_targets(context_id)) == 1, "the window outlived the refusal after the replacement"
