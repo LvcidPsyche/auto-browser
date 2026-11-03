@@ -117,8 +117,9 @@ PLAYWRIGHT_SERVER_PID=$!
 
 status=0
 wait "$PLAYWRIGHT_SERVER_PID" || status=$?
-if [[ "$status" -ne 0 ]]; then
-  # tee may not have flushed the server's last lines before this PID 1 exits: print the outcome directly.
+if (( status > 0 && status < 128 )); then
+  # tee may not have flushed the server's last lines before this PID 1 exits: print the outcome directly. Only for
+  # an exit of its own (a refusal exits 1); 128 and above is a signal, as on every docker stop.
   echo "browser-node: server.mjs exited with status $status; its sandbox state: $(cat "$SANDBOX_STATE_FILE" 2>/dev/null || echo none)"
 fi
 exit "$status"

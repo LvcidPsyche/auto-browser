@@ -17,6 +17,9 @@ from ..request_gate import RequestGate, RequestGateUnavailable
 
 logger = logging.getLogger(__name__)
 
+# What shared_sandbox holds for a Chrome reached over CDP: readiness reports it as attached, not checked.
+ATTACHED: dict[str, Any] = {"sandbox": "attached"}
+
 # Closing the browser a CDP attach replaces must not hang the browser lock.
 PREVIOUS_BROWSER_CLOSE_TIMEOUT_SECONDS = 10.0
 
@@ -24,10 +27,13 @@ PREVIOUS_BROWSER_CLOSE_TIMEOUT_SECONDS = 10.0
 class BrowserRuntimeService:
     def __init__(self, manager: Any) -> None:
         self.manager = manager
-        # The shared browser-node's sandbox state, read once when the controller connects to it and bound to that
-        # run's endpoint (browser_sandbox.snapshot_shared_state). Never re-read for the same connection: the browser
-        # user can rewrite the file later. None while not connected, or when attached to a Chrome over CDP.
+        # The shared browser-node's sandbox state as readiness and the on gate see it: the snapshot taken when the
+        # controller connected (browser_sandbox.snapshot_shared_state), bound to that run's endpoint, while that
+        # connection lasts; {"sandbox": "attached"} for a Chrome reached over CDP; None while not connected.
         self.shared_sandbox: dict[str, Any] | None = None
+        # (endpoint, state) of the last snapshot. A reconnect to the same endpoint reuses it and never re-reads the
+        # file, which the browser user can rewrite; a new endpoint (a new run) is read afresh.
+        self._snapshot: tuple[str, dict[str, Any]] | None = None
 
     async def ensure_browser(self) -> Browser:
         manager = self.manager
@@ -48,6 +54,9 @@ class BrowserRuntimeService:
                 logger.info("CDP attach succeeded")
                 await manager.request_gates.attach(browser, attach_mode=True)
                 manager.browser = browser
+                # The operator's own Chrome: not a browser-node, so nothing to verify, and never called verified.
+                self.shared_sandbox = dict(ATTACHED)
+                self._watch_disconnect(browser)
                 return manager.browser
 
             connected: dict[str, str] = {}
@@ -65,9 +74,27 @@ class BrowserRuntimeService:
                     f"and direct endpoint {manager.settings.browser_ws_endpoint or '<not configured>'}."
                 ),
             )
-            self.shared_sandbox = snapshot_shared_state(manager.settings, connected.get("endpoint", ""))
+            endpoint_used = connected.get("endpoint", "")
+            if self._snapshot is not None and self._snapshot[0] == endpoint_used:
+                state = self._snapshot[1]  # the same run: never re-read
+            else:
+                state = snapshot_shared_state(manager.settings, endpoint_used)
+                self._snapshot = (endpoint_used, state)
+            self.shared_sandbox = state
+            self._watch_disconnect(manager.browser)
             logger.info("shared browser-node sandbox: %s", self.shared_sandbox.get("sandbox"))
             return manager.browser
+
+    def _watch_disconnect(self, browser: Any) -> None:
+        """Report the snapshot only while its browser is connected: a dead connection's state describes nothing."""
+
+        def disconnected(*_args: Any) -> None:
+            if self.manager.browser is browser:
+                self.shared_sandbox = None
+
+        on = getattr(browser, "on", None)
+        if callable(on):
+            on("disconnected", disconnected)
 
     async def cdp_attach(self, cdp_url: str) -> dict[str, Any]:
         """Swap the browser every new session runs on for one reached over CDP.
@@ -86,6 +113,16 @@ class BrowserRuntimeService:
             )
         if manager.playwright is None:
             raise RuntimeError("Playwright not started")
+        if manager.settings.browser_sandbox == "on":
+            # An agent's tool, not the operator's configuration (CDP_CONNECT_URL): under on it must not move every new
+            # session onto a Chrome the controller cannot verify.
+            reason = (
+                "browser.cdp_attach is refused under BROWSER_SANDBOX=on: the controller cannot verify the sandbox of "
+                "a Chrome reached over CDP. Set CDP_CONNECT_URL at startup to use your own Chrome, or use "
+                "BROWSER_SANDBOX=auto."
+            )
+            logger.warning("%s", reason)
+            raise RuntimeError(reason)
         async with manager._browser_lock:
             in_use = self._sessions_on_shared_browser()
             if in_use:
@@ -97,6 +134,8 @@ class BrowserRuntimeService:
             browser = await manager.playwright.chromium.connect_over_cdp(cdp_url)
             await manager.request_gates.attach(browser, attach_mode=True)
             manager.browser = browser
+            self.shared_sandbox = dict(ATTACHED)
+            self._watch_disconnect(browser)
             logger.info("attached to Chrome via CDP at %s", cdp_url)
             if previous is not None and previous is not browser:
                 await manager.request_gates.release(previous)
@@ -174,6 +213,7 @@ class BrowserRuntimeService:
             if (
                 manager.settings.browser_sandbox == "on"
                 and not manager.settings.cdp_connect_url
+                and self.shared_sandbox != ATTACHED
                 and not verified_on(self.shared_sandbox)
             ):
                 reason = refusal("the shared browser-node", self.shared_sandbox)

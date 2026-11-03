@@ -184,9 +184,11 @@ class FakeDockerContainers:
         volumes = kwargs["volumes"]
         profile_dir = Path(next(path for path, mount in volumes.items() if mount["bind"] == "/data/profile"))
         profile_dir.mkdir(parents=True, exist_ok=True)
-        if self.sandbox_state is not None:
-            (profile_dir / "browser-sandbox.json").write_text(json.dumps(self.sandbox_state), encoding="utf-8")
         endpoint = f"ws://{name}:9223/playwright"
+        if self.sandbox_state is not None:
+            # As server.mjs writes it: naming this run's endpoint, unless the test says otherwise.
+            state = {"endpoint": endpoint, **self.sandbox_state}
+            (profile_dir / "browser-sandbox.json").write_text(json.dumps(state), encoding="utf-8")
         if not self.exit_before_endpoint:
             (profile_dir / "browser-ws-endpoint.txt").write_text(endpoint, encoding="utf-8")
         container = FakeDockerContainer(
