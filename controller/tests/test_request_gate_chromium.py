@@ -154,6 +154,8 @@ async def gated(
             with contextlib.suppress(Exception):
                 await manager.close_session(session_id)
         await manager.request_gates.release_all()
+        # The window-birth watcher too: each gated test's manager attached one to the module's shared Chromium.
+        await manager.window_births.release_all()
         http.shutdown()
         http.server_close()
 
