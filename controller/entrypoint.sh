@@ -20,16 +20,52 @@ fail() {
   exit 70
 }
 
-# Switching users needs CAP_SETUID (bit 7) and CAP_SETGID (bit 6). A container started with cap_drop ALL has
-# neither: it still starts, as a uid 0 that holds no capabilities, with no_new_privs, and readiness warns.
-cap_eff="$(awk '/^CapEff:/ {print $2}' /proc/self/status)"
-if (( (16#$cap_eff & ((1 << 7) | (1 << 6))) != ((1 << 7) | (1 << 6)) )); then
-  export CONTROLLER_RUN_AS_REASON="no CAP_SETUID/CAP_SETGID (cap_drop ALL?), so uid 0 with no capabilities"
+# The capability sets, read once and strictly: anything but 16 hex digits stops the container (exit 70) rather than
+# letting a failed arithmetic test fall through to a drop that may not happen.
+read_caps() {
+  local value
+  value="$(awk -v key="$1:" '$1 == key {print $2}' /proc/self/status)"
+  [[ "$value" =~ ^[0-9a-fA-F]{16}$ ]] || fail "unreadable $1 in /proc/self/status: '$value'"
+  echo "$value"
+}
+cap_eff="$(read_caps CapEff)"
+cap_bnd="$(read_caps CapBnd)"
+CAP_NAMES=(chown dac_override dac_read_search fowner fsetid kill setgid setuid setpcap linux_immutable
+  net_bind_service net_broadcast net_admin net_raw ipc_lock ipc_owner sys_module sys_rawio sys_chroot sys_ptrace
+  sys_pacct sys_admin sys_boot sys_nice sys_resource sys_time sys_tty_config mknod lease audit_write audit_control
+  setfcap mac_override mac_admin syslog wake_alarm block_suspend audit_read perfmon bpf checkpoint_restore)
+cap_names() {
+  local mask=$((16#$1)) bit names=()
+  for ((bit = 0; bit < ${#CAP_NAMES[@]}; bit++)); do
+    if (( (mask >> bit) & 1 )); then names+=("${CAP_NAMES[bit]}"); fi
+  done
+  echo "${names[*]:-none}"
+}
+# The bounding set can only be cleared while CAP_SETPCAP (bit 8) is in the effective set.
+has_setpcap=0
+if (( (16#$cap_eff >> 8) & 1 )); then has_setpcap=1; fi
+
+# Switching users needs CAP_SETUID (bit 7) and CAP_SETGID (bit 6). Without them (cap_drop ALL, or a cap_drop of
+# either) the container still starts as uid 0, with no_new_privs and every capability it can clear cleared; the
+# WARNING and the readiness reason name whatever remains.
+if (( ((16#$cap_eff >> 7) & 1) == 0 || ((16#$cap_eff >> 6) & 1) == 0 )); then
+  drop=(--inh-caps=-all --ambient-caps=-all --no-new-privs)
+  remaining="$cap_bnd"
+  if (( has_setpcap )); then
+    drop+=(--bounding-set=-all)
+    remaining=0000000000000000
+  fi
+  if (( 16#$remaining == 0 )); then
+    kept="no capabilities"
+  else
+    kept="capabilities $remaining ($(cap_names "$remaining"))"
+  fi
+  export CONTROLLER_RUN_AS_REASON="no CAP_SETUID/CAP_SETGID, so uid 0 with $kept"
   echo "entrypoint: WARNING: this container cannot switch users (no CAP_SETUID/CAP_SETGID): running as uid 0 with" \
-    "no capabilities and no_new_privs. To run as the controller user instead, start it as that user: compose" \
+    "$kept and no_new_privs. To run as the controller user instead, start it as that user: compose" \
     "user: \"10002:10002\" (or docker run --user 10002:10002), with ./data owned by 10002; or add cap_add SETUID," \
     "SETGID and CHOWN." >&2
-  exec setpriv --inh-caps=-all --ambient-caps=-all --no-new-privs "$@"
+  exec setpriv "${drop[@]}" "$@"
 fi
 
 # run_as prints exactly three lines; logs, and any ERROR, go to stderr. A bad CONTROLLER_RUN_AS exits non-zero
@@ -82,10 +118,9 @@ if [[ "$docker_host" == unix://* ]]; then
 fi
 
 # No capabilities in any set, and no_new_privs even without compose's no-new-privileges. The bounding set can only
-# be cleared while CAP_SETPCAP (bit 8) is in it; a container started with cap_drop ALL has nothing to clear there.
+# be cleared while CAP_SETPCAP (bit 8) is in the effective set.
 caps=(--inh-caps=-all --ambient-caps=-all --no-new-privs)
-cap_bnd="$(awk '/^CapBnd:/ {print $2}' /proc/self/status)"
-if (( (16#$cap_bnd & (1 << 8)) != 0 )); then
+if (( has_setpcap )); then
   caps+=(--bounding-set=-all)
 fi
 

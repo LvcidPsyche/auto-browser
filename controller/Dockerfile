@@ -58,8 +58,10 @@ RUN useradd --uid 10002 --user-group --create-home --home-dir /home/controller -
 # in the image is writable through group 0 alone: apt leaves the man dirs and debconf's tmp.ci g+w, so the group
 # write bit comes off everything but the sticky, world-writable dirs (/tmp, /var/tmp, /run/lock).
 RUN find / -xdev -group 0 -perm -g+w ! -type l ! -perm -1000 -exec chmod g-w {} +
-COPY entrypoint.sh /entrypoint.sh
-RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
+# 0755 whatever mode the build context gives it (a clone under umask 002 makes it group-writable), and the mode
+# set again after sed: it runs as root on every start.
+COPY --chmod=0755 entrypoint.sh /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod 0755 /entrypoint.sh
 
 EXPOSE 8000
 

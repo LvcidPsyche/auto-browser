@@ -73,6 +73,15 @@ def _is_image_system_group(gid: int) -> bool:
     return True
 
 
+# Never the controller's primary group: root, the browser user's group (the decided design shares no group with
+# the browser), and nogroup.
+_REFUSED_GIDS = frozenset({0, BROWSER_UID, 65534})
+
+
+def _safe_gid(gid: int, is_system_group: Callable[[int], bool]) -> bool:
+    return gid not in _REFUSED_GIDS and not is_system_group(gid)
+
+
 def decide_user(
     run_as: str,
     *,
@@ -93,17 +102,20 @@ def decide_user(
             f"{root} belongs to root, so the image's controller user (uid {CONTROLLER_UID})",
         )
     if owner_uid == BROWSER_UID:
+        # A 1.14 pre-release left it so, or a host user happens to have uid 10001 (docs: chown ./data to another uid).
         return UserDecision(
             CONTROLLER_UID,
             CONTROLLER_UID,
-            f"{root} belongs to the browser's uid {BROWSER_UID} (a 1.14 pre-release), so the image's controller user "
-            f"(uid {CONTROLLER_UID})",
+            f"{root} is owned by uid {BROWSER_UID}, browser-node's uid, which the controller never runs as, so the "
+            f"image's controller user (uid {CONTROLLER_UID})",
         )
     reason = f"the owner of {root} (uid {owner_uid})"
     gid = owner_gid
-    if gid == 0 or is_system_group(gid):
-        reason += f"; its group {gid} is {'root' if gid == 0 else 'a system group'}, so the uid's own group {owner_uid}"
-        gid = owner_uid
+    if not _safe_gid(gid, is_system_group):
+        fallback = owner_uid if _safe_gid(owner_uid, is_system_group) else CONTROLLER_UID
+        kind = {0: "root", BROWSER_UID: "browser-node's group", 65534: "nogroup"}.get(gid, "a system group")
+        reason += f"; its group {gid} is {kind}, so group {fallback}"
+        gid = fallback
     return UserDecision(owner_uid, gid, reason)
 
 
@@ -136,11 +148,19 @@ def controller_owned_paths(settings: Any, data_root: Path = DATA_ROOT) -> list[P
         candidates.append(Path(settings.cli_home))
     # The browser containers own these (browser-node's entrypoint hands them to its own user).
     browser_owned = {parent(settings.browser_ws_endpoint_file), data_root / "browser-profile", data_root / "downloads"}
+
+    def lexically_clean(path: Path) -> bool:
+        # A ".." would let /data/../etc pass is_relative_to; a "." is noise that could hide one.
+        return not any(part in {"..", "."} for part in path.parts) and os.path.normpath(path) == str(path)
+
     inside = sorted(
         {
             path
             for path in candidates
-            if path != data_root and path.is_relative_to(data_root) and path not in browser_owned
+            if lexically_clean(path)
+            and path != data_root
+            and path.is_relative_to(data_root)
+            and path not in browser_owned
         },
         key=lambda path: len(path.parts),
     )
@@ -169,6 +189,34 @@ def _open_dir_nofollow(name: str, dir_fd: int) -> int:
     return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
 
 
+def _unescape_mountinfo(field: str) -> str:
+    # mountinfo escapes space, tab, newline and backslash as \040, \011, \012, \134.
+    for code, char in (("\\040", " "), ("\\011", "\t"), ("\\012", "\n"), ("\\134", "\\")):
+        field = field.replace(code, char)
+    return field
+
+
+def mount_points_under(data_root: Path, mountinfo: str | None = None) -> set[str]:
+    """Paths (relative to data_root) that are mount points inside it, from /proc/self/mountinfo.
+
+    st_dev alone misses a bind mount from the same filesystem, and on Docker Desktop every host bind shares one."""
+    if mountinfo is None:
+        try:
+            mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return set()
+    root = os.path.normpath(str(data_root))
+    found = set()
+    for line in mountinfo.splitlines():
+        fields = line.split()
+        if len(fields) < 5:
+            continue
+        point = os.path.normpath(_unescape_mountinfo(fields[4]))
+        if point != root and point.startswith(root.rstrip("/") + "/"):
+            found.add(point[len(root.rstrip("/")) + 1 :])
+    return found
+
+
 def fix_ownership(
     data_root: Path,
     paths: list[Path],
@@ -177,95 +225,135 @@ def fix_ownership(
     *,
     from_uids: frozenset[int] = frozenset({0}),
     lstat: Callable[..., os.stat_result] = os.stat,
-    after_dir: Callable[[str], None] | None = None,
+    before_open: Callable[[str], None] | None = None,
+    mountinfo: str | None = None,
 ) -> OwnershipReport:
     """Give entries owned by one of from_uids to uid:gid: data_root itself (not recursively) and each path's tree.
 
-    Everything goes through directory fds: each entry is stat'ed and chowned relative to its directory's fd with
-    follow_symlinks=False, and os.fwalk only descends into a directory after checking the fd it opened is the one
-    it stat'ed. Entries on another device than data_root, non-directories with more than one link, and the browser's
-    directories are skipped. `lstat` and `after_dir` are test hooks (a fake st_dev; a swap between steps)."""
+    Everything goes through directory fds, bottom-up: an entry is lstat'ed relative to its directory's fd; a
+    directory is opened O_NOFOLLOW and checked to be the entry that was lstat'ed before it is entered, its contents are
+    handed over, and only then is the directory itself fchown'ed through the fd still held. So a directory swapped
+    for a symlink between the stat and the open is not entered, and root, even without CAP_DAC_OVERRIDE, never loses
+    access to a 0700 directory it has not finished. Skipped and logged: entries on another device, mount points under
+    data_root (from mountinfo), non-directories with more than one link, the browser containers' directories, and
+    any path with "..". Every OSError is an error in the report, never an exception (no marker is then written).
+    `lstat`, `before_open` and `mountinfo` are test hooks."""
     report = OwnershipReport()
     started = time.monotonic()
-    root_fd = os.open(str(data_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        root_st = os.fstat(root_fd)
-        report.examined += 1
-        if root_st.st_uid in from_uids:
-            try:
-                os.fchown(root_fd, uid, gid)
-                report.changed += 1
-                report.changed_paths.append(".")
-            except OSError as exc:
-                report.errors.append(f"{data_root}: {exc.strerror or exc}")
+    mounts = mount_points_under(data_root, mountinfo)
 
-        def handle(dir_fd: int, name: str, relative: str, *, is_dir: bool) -> bool:
-            """Chown one entry; False when it must not be descended into."""
+    def chown_fd(fd: int, relative: str, st: os.stat_result) -> None:
+        if st.st_uid in from_uids:
             try:
-                st = lstat(name, dir_fd=dir_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                return False
+                os.fchown(fd, uid, gid)
+                report.changed += 1
+                report.changed_paths.append(relative)
             except OSError as exc:
                 report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
-                return False
-            report.examined += 1
-            if st.st_dev != root_st.st_dev:
-                report.skipped.append(f"{relative}: another filesystem (a mount under {data_root})")
-                return False
-            if not stat.S_ISDIR(st.st_mode) and st.st_nlink > 1:
-                report.skipped.append(f"{relative}: {st.st_nlink} hard links")
-                return False
+
+    def skip(relative: str, st: os.stat_result, root_dev: int) -> bool:
+        if st.st_dev != root_dev:
+            report.skipped.append(f"{relative}: another filesystem (a mount under {data_root})")
+            return True
+        if relative in mounts:
+            report.skipped.append(f"{relative}: a mount point under {data_root}")
+            return True
+        if stat.S_ISDIR(st.st_mode) and _browser_owned(relative):
+            report.skipped.append(f"{relative}: a browser container's directory")
+            return True
+        if not stat.S_ISDIR(st.st_mode) and st.st_nlink > 1:
+            report.skipped.append(f"{relative}: {st.st_nlink} hard links")
+            return True
+        return False
+
+    def visit(parent_fd: int, name: str, relative: str, root_dev: int) -> None:
+        try:
+            st = lstat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
+            return
+        report.examined += 1
+        if skip(relative, st, root_dev):
+            return
+        if not stat.S_ISDIR(st.st_mode):
             if st.st_uid in from_uids:
                 try:
-                    os.chown(name, uid, gid, dir_fd=dir_fd, follow_symlinks=False)
+                    os.chown(name, uid, gid, dir_fd=parent_fd, follow_symlinks=False)
                     report.changed += 1
                     report.changed_paths.append(relative)
                 except OSError as exc:
                     report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
-            return is_dir and stat.S_ISDIR(st.st_mode)
-
-        for top in paths:
-            relative_top = top.relative_to(data_root).as_posix()
-            parts = relative_top.split("/")
-            # Open the top's parent component by component, refusing symlinks and directories a non-root user owns:
-            # a configured path deeper than one level must not be steered elsewhere through its parents.
-            parent_fd = os.dup(root_fd)
+            return
+        if before_open is not None:
+            before_open(relative)
+        try:
+            fd = _open_dir_nofollow(name, parent_fd)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):  # swapped for a symlink or a file since the lstat
+                report.skipped.append(f"{relative}: no longer a directory")
+            else:
+                report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
+            return
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):
+                report.skipped.append(f"{relative}: replaced since it was examined")
+                return
             try:
-                for index, part in enumerate(parts[:-1]):
-                    try:
-                        st = os.stat(part, dir_fd=parent_fd, follow_symlinks=False)
-                    except FileNotFoundError:
-                        break
-                    if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0:
-                        report.errors.append(
-                            f"{data_root / '/'.join(parts[: index + 1])}: a parent of {top} that is not a root-owned "
-                            "directory, so its tree was not handed over"
-                        )
-                        break
-                    next_fd = _open_dir_nofollow(part, parent_fd)
+                children = sorted(entry.name for entry in os.scandir(fd))
+            except OSError as exc:
+                report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
+                return
+            for child in children:
+                visit(fd, child, f"{relative}/{child}", root_dev)
+            chown_fd(fd, relative, opened)  # bottom-up: after its contents
+        finally:
+            os.close(fd)
+
+    try:
+        root_fd = os.open(str(data_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        report.errors.append(f"{data_root}: {exc.strerror or exc}")
+        report.seconds = time.monotonic() - started
+        return report
+    try:
+        root_st = os.fstat(root_fd)
+        report.examined += 1
+        for top in paths:
+            try:
+                relative_top = top.relative_to(data_root).as_posix()
+                parts = relative_top.split("/")
+                if any(part in {"..", ".", ""} for part in parts):
+                    report.errors.append(f"{top}: not a plain path under {data_root}, not handed over")
+                    continue
+                # Open the top's parent component by component, refusing symlinks and directories a non-root user
+                # owns: a configured path deeper than one level must not be steered elsewhere through its parents.
+                parent_fd = os.dup(root_fd)
+                try:
+                    for index, part in enumerate(parts[:-1]):
+                        try:
+                            st = os.stat(part, dir_fd=parent_fd, follow_symlinks=False)
+                        except FileNotFoundError:
+                            break
+                        if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0:
+                            report.errors.append(
+                                f"{data_root / '/'.join(parts[: index + 1])}: a parent of {top} that is not a "
+                                "root-owned directory, so its tree was not handed over"
+                            )
+                            break
+                        next_fd = _open_dir_nofollow(part, parent_fd)
+                        os.close(parent_fd)
+                        parent_fd = next_fd
+                    else:
+                        visit(parent_fd, parts[-1], relative_top, root_st.st_dev)
+                finally:
                     os.close(parent_fd)
-                    parent_fd = next_fd
-                else:
-                    name = parts[-1]
-                    if not handle(parent_fd, name, relative_top, is_dir=True):
-                        continue
-                    for dirpath, dirnames, filenames, dir_fd in os.fwalk(name, dir_fd=parent_fd, follow_symlinks=False):
-                        base = "/".join(parts[:-1] + [dirpath]) if len(parts) > 1 else dirpath
-                        keep = []
-                        for child in sorted(dirnames):
-                            relative = f"{base}/{child}"
-                            if _browser_owned(relative):
-                                report.skipped.append(f"{relative}: a browser container's directory")
-                                continue
-                            if handle(dir_fd, child, relative, is_dir=True):
-                                keep.append(child)
-                        dirnames[:] = keep
-                        for child in sorted(filenames):
-                            handle(dir_fd, child, f"{base}/{child}", is_dir=False)
-                        if after_dir is not None:
-                            after_dir(base)
-            finally:
-                os.close(parent_fd)
+            except OSError as exc:
+                report.errors.append(f"{top}: {exc.strerror or exc}")
+        # /data itself last, after everything under it.
+        chown_fd(root_fd, ".", root_st)
     finally:
         os.close(root_fd)
     report.seconds = time.monotonic() - started

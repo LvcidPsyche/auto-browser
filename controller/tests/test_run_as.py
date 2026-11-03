@@ -63,7 +63,8 @@ class DecideUserTests(unittest.TestCase):
         # A data dir a 1.14 pre-release handed to 10001: the controller must not share browser-node's uid.
         decision = decide_user("auto", data_root=Path("/data"), owner_uid=BROWSER_UID, owner_gid=BROWSER_UID)
         self.assertEqual((decision.uid, decision.gid), (10002, 10002))
-        self.assertIn("browser's uid 10001", decision.reason)
+        self.assertIn("owned by uid 10001, browser-node's uid", decision.reason)
+        self.assertNotIn("pre-release", decision.reason)
 
     def test_the_primary_gid_is_never_0_or_a_system_group(self) -> None:
         zero = decide_user(
@@ -80,6 +81,22 @@ class DecideUserTests(unittest.TestCase):
             "auto", data_root=Path("/data"), owner_uid=1001, owner_gid=121, is_system_group=lambda g: False
         )
         self.assertEqual(user_group.gid, 121)
+
+    def test_the_browsers_group_nogroup_and_a_bad_fallback_are_refused(self) -> None:
+        no_system = lambda g: False  # noqa: E731
+        browser = decide_user(
+            "auto", data_root=Path("/data"), owner_uid=1001, owner_gid=10001, is_system_group=no_system
+        )
+        self.assertEqual(browser.gid, 1001)
+        nogroup = decide_user(
+            "auto", data_root=Path("/data"), owner_uid=1001, owner_gid=65534, is_system_group=no_system
+        )
+        self.assertEqual(nogroup.gid, 1001)
+        # The uid's own group is itself a system group (uid 42, shadow): the controller's group, not that.
+        shadow = decide_user(
+            "auto", data_root=Path("/data"), owner_uid=42, owner_gid=0, is_system_group=lambda g: g == 42
+        )
+        self.assertEqual((shadow.uid, shadow.gid), (42, CONTROLLER_UID))
 
     @unittest.skipUnless(LINUX, "grp is POSIX")
     def test_the_default_system_group_check_reads_the_images_groups(self) -> None:
@@ -159,6 +176,12 @@ class OwnedPathsTests(unittest.TestCase):
         self.assertNotIn(data / "browser-profile", paths)
         self.assertNotIn(data / "downloads", paths)
 
+    def test_dot_dot_settings_are_never_included(self) -> None:
+        data = Path("/data")
+        paths = controller_owned_paths(_settings(data, ARTIFACT_ROOT="/data/../etc", AUTH_ROOT="/data/./auth"), data)
+        self.assertFalse(any(".." in path.parts or "." in path.parts for path in paths), paths)
+        self.assertNotIn(Path("/data/../etc"), paths)
+
     def test_paths_outside_the_data_root_are_never_included(self) -> None:
         data = Path("/data")
         paths = controller_owned_paths(_settings(data, ARTIFACT_ROOT="/srv/artifacts", CLI_HOME="/"), data)
@@ -215,15 +238,17 @@ class FixOwnershipLinuxTests(unittest.TestCase):
     def test_a_directory_swapped_for_a_symlink_mid_walk_is_not_entered(self) -> None:
         _tree(self.data, "artifacts/a/1.png", "artifacts/b/2.png")
 
-        def swap(base: str) -> None:
-            # After artifacts/ was read and b handled, before fwalk descends into b.
-            if base == "artifacts":
+        def swap(relative: str) -> None:
+            # Between b's lstat (a directory) and its open: the H3 window. A walk that checks and then opens by
+            # path, or follows the link, would enter the outside tree here.
+            if relative == "artifacts/b":
                 (self.data / "artifacts" / "b").rename(self.data / "artifacts" / "b.real")
                 os.symlink(self.outside, self.data / "artifacts" / "b", target_is_directory=True)
 
-        report = self._fix(["artifacts"], after_dir=swap)
+        report = self._fix(["artifacts"], before_open=swap)
         self.assertFalse(any(p.startswith("artifacts/b/") for p in report.changed_paths), report.changed_paths)
         self.assertFalse(any("secret" in p for p in report.changed_paths))
+        self.assertIn("artifacts/b: no longer a directory", report.skipped)
 
     def test_hard_linked_files_are_skipped_and_reported(self) -> None:
         _tree(self.data, "artifacts/one")
@@ -259,6 +284,46 @@ class FixOwnershipLinuxTests(unittest.TestCase):
         report = self._fix(["browser-sessions"])
         self.assertIn("browser-sessions/s1/notes.json", report.changed_paths)
         self.assertFalse(any("/profile" in p or "/downloads" in p for p in report.changed_paths), report.changed_paths)
+
+    def test_directories_are_handed_over_after_their_contents(self) -> None:
+        # Bottom-up, through the fd still held: without CAP_DAC_OVERRIDE, root could not enter a 0700 directory it
+        # had already handed to another uid.
+        _tree(self.data, "auth/deep/inner/p.json", "auth/top.json")
+        report = self._fix(["auth"])
+        order = report.changed_paths
+        self.assertLess(order.index("auth/deep/inner/p.json"), order.index("auth/deep/inner"))
+        self.assertLess(order.index("auth/deep/inner"), order.index("auth/deep"))
+        self.assertLess(order.index("auth/deep"), order.index("auth"))
+        self.assertEqual(order[-1], ".")
+
+    def test_errors_are_reported_not_raised(self) -> None:
+        if ME == 0:
+            self.skipTest("root reads a mode-000 directory anyway")
+        _tree(self.data, "auth/p.json", "jobs/j.json")
+        (self.data / "auth").chmod(0)
+        try:
+            report = self._fix(["auth", "jobs"])
+        finally:
+            (self.data / "auth").chmod(0o755)
+        self.assertTrue(any("auth" in error for error in report.errors), report.errors)
+        self.assertIn("jobs/j.json", report.changed_paths)  # the next top still ran
+
+    def test_a_mount_point_from_mountinfo_is_skipped(self) -> None:
+        # Same st_dev (a same-filesystem bind, or Docker Desktop's one share): only mountinfo shows it.
+        _tree(self.data, "auth/mounted/inner.json", "auth/own.json")
+        mountinfo = (
+            f"36 25 0:32 / {self.data.as_posix()} rw - ext4 /dev/sda1 rw\n"
+            f"37 36 0:32 /host/auth {self.data.as_posix()}/auth/mounted rw - ext4 /dev/sda1 rw\n"
+        )
+        report = self._fix(["auth"], mountinfo=mountinfo)
+        self.assertIn("auth/own.json", report.changed_paths)
+        self.assertFalse(any(p.startswith("auth/mounted") for p in report.changed_paths), report.changed_paths)
+        self.assertIn("auth/mounted: a mount point under " + str(self.data), report.skipped)
+
+    def test_a_top_with_dot_dot_is_refused(self) -> None:
+        report = fix_ownership(self.data, [self.data / ".." / "outside"], ME, MY_GID, from_uids=frozenset({ME}))
+        self.assertEqual(report.changed_paths, ["."])
+        self.assertTrue(any("not a plain path" in error for error in report.errors), report.errors)
 
     def test_a_deeper_configured_path_needs_root_owned_parents(self) -> None:
         if ME == 0:
@@ -432,6 +497,11 @@ class ImageWiringTests(unittest.TestCase):
         self.assertIn("docker.sock", self.entrypoint)
         self.assertNotRegex(self.entrypoint, r"chown -R")
 
+    def test_the_entrypoint_is_0755_whatever_the_build_context(self) -> None:
+        # The group-0 sweep runs before it is copied, so its mode must not come from the clone's umask.
+        self.assertIn("COPY --chmod=0755 entrypoint.sh /entrypoint.sh", self.dockerfile)
+        self.assertIn("chmod 0755 /entrypoint.sh", self.dockerfile)
+
     def test_nothing_in_the_image_is_writable_through_group_0_alone(self) -> None:
         # The controller joins group 0 for Docker Desktop's root:root socket.
         self.assertIn(
@@ -459,7 +529,16 @@ class ImageWiringTests(unittest.TestCase):
         self.assertIn('--groups="$group_list" "${caps[@]}" "$@"', self.entrypoint)
         self.assertRegex(self.entrypoint, r"--bounding-set=-all")
         # Only when CAP_SETPCAP (bit 8) is in the bounding set, so a cap_drop ALL run still starts.
-        self.assertIn("1 << 8", self.entrypoint)
+        self.assertIn("(16#$cap_eff >> 8) & 1", self.entrypoint)  # CAP_SETPCAP, probed in CapEff (test_entrypoint_caps)
+
+    def test_ci_runs_the_root_step_tests_as_root_and_inspects_the_wheel(self) -> None:
+        ci = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "docker compose run --no-deps --rm --entrypoint python controller -m pytest tests/test_run_as.py", ci
+        )
+        self.assertIn('grep -q "app/browser/seccomp/$name" /tmp/controller-wheel.txt', ci)
+        # All six capability lines must be there, not just no bad one.
+        self.assertIn('if [ "$(echo "$status" | grep -c .)" != 6 ]; then', ci)
 
     def test_ci_checks_the_data_owner_the_token_and_the_dropped_capabilities(self) -> None:
         ci = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
