@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from app.browser.window_births import WindowBirths, WindowBirthWatcher, WindowBirthWatcherUnavailable
 from tests import test_allowed_hosts_navigation as nav
 from tests._background import pending
 from tests._chromium import requires_chromium
@@ -362,3 +363,438 @@ async def test_the_open_tab_tool_opens_a_readable_tab(tmp_path: Path) -> None:
 
         assert result["activated"] is True
         assert "fine" in json.dumps(await env.manager.observe(session_id, preset="text"))
+
+
+# ── round 2: the window acts inside [clear, sweep], nested windows, and the agent's real flows ────────
+#
+# The reviewers' probes, kept as tests. The planted window acts at the moment the agent's navigate has cleared
+# the opener and before the sweep (RELEASED is set from inside the controller's own post-goto settle), or on a
+# fixed timer through the controller's real navigate-redirect and click rollback flows. What the agent sees
+# (list_tabs, observe, the console) is asserted, not only /landing.
+
+
+def _release_in_settle(env: nav.Env, monkeypatch) -> None:
+    """Set RELEASED the moment the navigate's goto has returned (the taint has cleared), before the sweep."""
+    original = env.manager.actions.settle
+
+    async def settle_then(page):
+        RELEASED.set()
+        await original(page)
+
+    monkeypatch.setattr(env.manager.actions, "settle", settle_then)
+
+
+async def _nothing_reached_the_agent(env: nav.Env, session_id: str) -> None:
+    session = env.manager.sessions[session_id]
+    tabs = await env.manager.list_tabs(session_id)
+    assert SECRET not in json.dumps(tabs), tabs
+    assert SECRET not in json.dumps(session.console_messages), session.console_messages
+    assert SECRET not in json.dumps(session.page_errors), session.page_errors
+    observed = await env.manager.observe(session_id, preset="text")
+    assert SECRET not in json.dumps(observed, default=str), observed
+    for index, page in enumerate(list(session.context.pages)):
+        if page is session.page or page.is_closed():
+            continue
+        # Every other tab is refused (not activatable), or shows nothing of the secret.
+        try:
+            await env.manager.activate_tab(session_id, index)
+        except PermissionError:
+            continue
+        observed = await env.manager.observe(session_id, preset="text")
+        assert SECRET not in json.dumps(observed, default=str), (page.url, observed)
+
+
+# What the window does once /released loads (ACT in act_plant): open a child (born now, after the clear), write
+# the secret and a console logger into it, and commit itself to an allowed URL, which reports it and, through it,
+# the child; or commit itself to an allowed URL carrying the secret.
+_NESTED_CHILD_THEN_COMMIT = """function (S) {
+  const c = window.open('');
+  c.document.write('<title>LEAKTITLE ' + S + '</title><p>LEAKBODY ' + S + '</p><scr' + 'ipt>setInterval(() => console.log("LEAKLOG " + document.title), 100)</scr' + 'ipt>');
+  c.document.close();
+  location.href = '{ALLOWED}/ok';
+}"""
+_SELF_LANDING = """function (S) {
+  location.href = '{ALLOWED}/landing?d=' + encodeURIComponent(S);
+}"""
+
+
+def act_plant(open_arg: str, act: str) -> str:
+    """The plant, with the function source ``act`` run with the secret once /released loads."""
+    body = _PLANT.replace("__OPEN__", open_arg).replace("__EXTRA__", "")
+    return body.replace(
+        '__TARGET__.href = "{ALLOWED}/landing?d=" + encodeURIComponent(S)',
+        "(' + " + json.dumps(act) + " + ')(S)",
+    )
+
+
+@pytest.mark.parametrize("first_nav", sorted(FIRST_NAVIGATIONS), ids=sorted(FIRST_NAVIGATIONS))
+async def test_a_window_opened_by_a_born_refused_window_after_the_clear_is_refused(
+    tmp_path: Path, monkeypatch, first_nav: str
+) -> None:
+    """Propagation, every first-navigation variant: the unreported window acts between the clear and the sweep,
+    opening a child that is born now, when nothing in the session counts. The child is born refused because its
+    opener was; the window, reported once it commits, is held refused until its birth verdict lands. Nothing
+    reaches list_tabs, observe or the console."""
+    install(monkeypatch, act_plant(FIRST_NAVIGATIONS[first_nav], _NESTED_CHILD_THEN_COMMIT))
+    async with browser_env(tmp_path, {"/ok": "<title>ok</title><p>fine</p>"}) as env:
+        session_id = await env.create()
+        _release_in_settle(env, monkeypatch)
+
+        await drive_refused_window(env, session_id)
+        await env.manager.navigate(session_id, f"{env.allowed}/")
+        HANG_RELEASE.set()
+        await asyncio.sleep(1.5)
+        await settle(lambda: not pending(), timeout=WINDOW_TIMEOUT_SECONDS)
+
+        await _nothing_reached_the_agent(env, session_id)
+
+
+@pytest.mark.parametrize("first_nav", ["205", "data"])
+async def test_a_window_that_commits_an_allowed_url_inside_clear_to_sweep_is_held_refused(
+    tmp_path: Path, monkeypatch, first_nav: str
+) -> None:
+    """The async-taint gap: the window commits an allowed URL carrying the secret right after the clear. Its
+    opener is clean when Playwright reports it, so it is held refused until its birth verdict (born refused)
+    lands: its console messages are dropped, and it is listed by origin only."""
+    install(monkeypatch, act_plant(FIRST_NAVIGATIONS[first_nav], _SELF_LANDING))
+    pages = {"/landing": "<title>landing</title><script>console.log('hello ' + location.href)</script>"}
+    async with browser_env(tmp_path, pages) as env:
+        session_id = await env.create()
+        session = env.manager.sessions[session_id]
+        _release_in_settle(env, monkeypatch)
+
+        await drive_refused_window(env, session_id)
+        await env.manager.navigate(session_id, f"{env.allowed}/")
+        await asyncio.sleep(1.5)
+        await settle(lambda: not pending(), timeout=WINDOW_TIMEOUT_SECONDS)
+
+        await _nothing_reached_the_agent(env, session_id)
+        landed = [p for p in session.context.pages if "/landing" in p.url]
+        assert all(env.manager._page_refused(p) for p in landed), [p.url for p in landed]
+
+
+_FIRES_ON_A_TIMER = """function (S, FIRE) {
+  setTimeout(() => {
+    const c = window.open('');
+    c.document.write('<title>LEAKTITLE ' + S + '</title><p>LEAKBODY ' + S + '</p><scr' + 'ipt>setInterval(() => console.log("LEAKLOG " + document.title), 200)</scr' + 'ipt>');
+    c.document.close();
+    location.href = '{ALLOWED}/ok';
+  }, FIRE);
+}"""
+
+
+def timer_script(fire_ms: int) -> str:
+    """The refused page's script: open a javascript: window and plant the nested-child act on a timer from load."""
+    return (
+        "<script>(() => { const s = document.body.innerText;"
+        "const w = window.open('javascript:void(0)');"
+        "setTimeout(() => { w.document.write('<scr' + 'ipt>(' + "
+        + json.dumps(_FIRES_ON_A_TIMER)
+        + " + ')(' + JSON.stringify(s) + ',' + "
+        + str(fire_ms)
+        + " + ')</scr' + 'ipt>'); w.document.close(); }, 50);"
+        "})()</script>"
+    )
+
+
+@pytest.mark.parametrize("fire_ms", [500, 800, 950])
+@pytest.mark.parametrize("flow", ["navigate-redirect", "click-link"])
+async def test_the_real_rollback_flows_with_the_window_firing_inside_clear_to_sweep(
+    tmp_path: Path, monkeypatch, flow: str, fire_ms: int
+) -> None:
+    """End to end, no test hook in the timing: the agent's own action lands on the refused page (an allowed URL
+    that 302s there, or a click on a link to it), the controller rolls it back, and the window the refused page
+    opened fires the nested-child act on a fixed timer from that page's load, at offsets across the rollback's
+    [clear, sweep]. The action is blocked, and nothing of the refused page reaches the agent."""
+    monkeypatch.setattr(nav, "_Handler", _Handler)
+    monkeypatch.setattr(nav, "EVIL_PAGE", nav.EVIL_PAGE + timer_script(fire_ms))
+    LANDING.clear()
+    pages = {
+        "/start": "<title>allowed</title><p>start</p><a id=go href='{EVIL}/'>go</a>",
+        "/redir": nav.redirect("{EVIL}/"),
+        "/ok": "<p>ok</p>",
+    }
+    async with browser_env(tmp_path, pages) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+
+        with pytest.raises(Exception) as raised:
+            if flow == "navigate-redirect":
+                await env.manager.navigate(session_id, f"{env.allowed}/redir")
+            else:
+                await env.manager.click(session_id, selector="#go")
+        assert SECRET not in str(raised.value)
+        await asyncio.sleep(3.0)
+        await settle(lambda: not pending(), timeout=WINDOW_TIMEOUT_SECONDS)
+
+        tabs = await env.manager.list_tabs(session_id)
+        assert SECRET not in json.dumps(tabs), tabs
+        assert SECRET not in json.dumps(session.console_messages), session.console_messages
+        if not env.manager._page_refused(session.page):
+            observed = await env.manager.observe(session_id, preset="text")
+            assert SECRET not in json.dumps(observed, default=str), observed
+        for page in session.context.pages:
+            if page is not session.page:
+                assert env.manager._page_refused(page) or page.url == "about:blank", page.url
+
+
+# ── the sweep cannot be outrun ──────────────────────────────────────────────────
+
+_KEEPS_THE_SESSION_COUNTING = (
+    "const s = document.body.innerText;"
+    "window.open('{ALLOWED}/ok');"  # W1: commits at once, reported while the opener is refused: tainted, counts
+    "const w = window.open('{ALLOWED}/no-content');"  # W2: never commits, unreported
+    "await new Promise((r) => setTimeout(r, 300));"
+    "w.document.write('<script>const S = ' + JSON.stringify(s) + ';"
+    " setTimeout(() => { location.href = \"{ALLOWED}/landing?d=\" + encodeURIComponent(S) }, 3000)</scr' + 'ipt>');"
+    "w.document.close();"
+)
+
+
+async def test_a_sibling_refused_tab_does_not_keep_an_unreported_window_alive(tmp_path: Path, monkeypatch) -> None:
+    """Reviewer's P5e: a tainted popup keeps the session counting after the navigate, but the window's own
+    opener is clean, so the window is closed by the navigate's sweep all the same; it never fires."""
+    install(monkeypatch, _KEEPS_THE_SESSION_COUNTING)
+    pages = {"/ok": "<title>ok</title><p>fine</p>", "/landing": "<script>console.log('hello')</script>"}
+    async with browser_env(tmp_path, pages) as env:
+        session_id = await env.create()
+        session = env.manager.sessions[session_id]
+        watcher = env.manager.window_births._get(session.browser)
+
+        await drive_refused_window(env, session_id)
+        await env.manager.navigate(session_id, f"{env.allowed}/ok")
+        await settle(lambda: not pending(), timeout=WINDOW_TIMEOUT_SECONDS)
+
+        assert env.manager._session_has_refused_page(session), "the tainted popup should keep the session counting"
+        assert _live_born_refused(watcher) == [], "the window outlived its opener's refusal"
+        await asyncio.sleep(4.0)
+        assert LANDING == [], LANDING
+        await _nothing_reached_the_agent(env, session_id)
+
+
+_POLL = """function poll(path, then) {
+  const i = new Image();
+  i.onload = then;
+  i.onerror = () => setTimeout(() => poll(path, then), 50);
+  i.src = '{ALLOWED}' + path + '?' + Date.now();
+}"""
+
+# WX opens P (a blank of WX's origin), plants P's script, then closes itself, so P is reported with no opener:
+# refused (opener_pending) and counting while on its blank, until it leaves for an allowed URL on its own.
+_WX = """function (POLL) {
+  const p = window.open('');
+  p.document.write('<scr' + 'ipt>const poll = eval("(" + ' + JSON.stringify(POLL) + ' + ")"); poll("/released-p", () => { location.href = "{ALLOWED}/ok?p" });</scr' + 'ipt>');
+  p.document.close();
+  setTimeout(() => window.close(), 200);
+}"""
+
+_W1_NESTED_ON_RELEASE = """function (S, POLL) {
+  const poll = eval('(' + POLL + ')');
+  poll('/released', () => {
+    const c = window.open('');
+    c.document.write('<title>LEAKTITLE ' + S + '</title><p>LEAKBODY ' + S + '</p>');
+    c.document.close();
+    location.href = '{ALLOWED}/ok';
+  });
+}"""
+
+_NO_RESWEEP = (
+    "const s = document.body.innerText;"
+    "const w1 = window.open('javascript:void(0)');"
+    "const wx = window.open('javascript:void(0)');"
+    "await new Promise((r) => setTimeout(r, 300));"
+    "w1.document.write('<scr' + 'ipt>(' + "
+    + json.dumps(_W1_NESTED_ON_RELEASE)
+    + " + ')(' + JSON.stringify(s) + ',' + JSON.stringify("
+    + json.dumps(_POLL)
+    + ") + ')</scr' + 'ipt>'); w1.document.close();"
+    "wx.document.write('<scr' + 'ipt>(' + "
+    + json.dumps(_WX)
+    + " + ')(' + JSON.stringify("
+    + json.dumps(_POLL)
+    + ") + ')</scr' + 'ipt>'); wx.document.close();"
+    "await new Promise((r) => setTimeout(r, 800));"
+)
+RELEASED_P = threading.Event()
+
+
+class _ReleasePHandler(_Handler):
+    def do_GET(self) -> None:  # noqa: N802 - http.server's name
+        if self.path.startswith("/released-p"):
+            if not RELEASED_P.is_set():
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/gif")
+            self.send_header("Content-Length", str(len(GIF)))
+            self.end_headers()
+            self.wfile.write(GIF)
+            return
+        super().do_GET()
+
+
+async def test_a_window_does_not_outlive_a_refusal_that_ended_without_a_sweep(tmp_path: Path, monkeypatch) -> None:
+    """Reviewer's no-resweep case: the session still counts at the navigate (P, a reported opener-less page on
+    its blank) and stops counting later another way (P leaves its blank for an allowed URL). The windows the
+    refused page opened are closed once their opener is clean, not only at a navigate, rollback or close; and
+    nothing W1 could do later reaches the agent."""
+    install(monkeypatch, _NO_RESWEEP)
+    monkeypatch.setattr(nav, "_Handler", _ReleasePHandler)
+    RELEASED_P.clear()
+    async with browser_env(tmp_path, {"/ok": "<title>ok</title>"}) as env:
+        session_id = await env.create()
+        session = env.manager.sessions[session_id]
+        watcher = env.manager.window_births._get(session.browser)
+
+        await drive_refused_window(env, session_id)
+        await settle(lambda: not pending(), timeout=WINDOW_TIMEOUT_SECONDS)
+        assert _live_born_refused(watcher), "the refused page's windows were not born refused"
+        await env.manager.navigate(session_id, f"{env.allowed}/")
+        await settle(lambda: not pending(), timeout=WINDOW_TIMEOUT_SECONDS)
+        assert _live_born_refused(watcher) == [], "an unreported window outlived its opener's refusal"
+
+        RELEASED_P.set()  # P leaves its blank: the session stops counting, with no agent action
+        await settle(lambda: not env.manager._session_has_refused_page(session), timeout=WINDOW_TIMEOUT_SECONDS)
+        RELEASED.set()  # W1 would act now, long after the clear
+        await asyncio.sleep(1.5)
+        await settle(lambda: not pending(), timeout=WINDOW_TIMEOUT_SECONDS)
+        await _nothing_reached_the_agent(env, session_id)
+
+
+# ── never close a page Playwright has reported ──────────────────────────────────
+
+
+async def test_a_reported_refused_popup_made_active_and_navigated_survives(tmp_path: Path, monkeypatch) -> None:
+    """Reviewer's P1: a refused page's popup that Playwright reported while the opener was refused. The agent
+    closes the opener tab (the popup becomes the active page) and navigates it to an allowed URL, the documented
+    way out: the navigate's sweep must not close the agent's own tab."""
+    monkeypatch.setattr(nav, "EVIL_PAGE", nav.EVIL_PAGE + "<script>window.open('{ALLOWED}/pop')</script>")
+    pages = {"/start": "<p>start</p>", "/pop": "<title>pop</title>", "/ok": "<title>ok</title><p>fine</p>"}
+    async with browser_env(tmp_path, pages) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        reported: list = []
+        session.context.on("page", lambda p: reported.append(p))
+        async with session.lock:
+            await session.page.evaluate("(u) => { location.href = u }", f"{env.evil}/")
+            await nav.wait_for(lambda: len(reported) == 1)
+        popup = reported[0]
+        await settle(lambda: not pending(), timeout=WINDOW_TIMEOUT_SECONDS)
+        assert env.manager._page_refused(popup)
+
+        await env.manager.close_tab(session_id, session.context.pages.index(session.page))
+        assert session.page is popup
+        await past_the_grace(monkeypatch)
+        await env.manager.navigate(session_id, f"{env.allowed}/ok")
+        await settle(lambda: not pending(), timeout=WINDOW_TIMEOUT_SECONDS)
+        await asyncio.sleep(0.5)
+
+        assert not popup.is_closed(), "the sweep closed the agent's own active tab"
+        assert session.page is popup and not env.manager._page_refused(popup)
+        assert "fine" in json.dumps(await env.manager.observe(session_id, preset="text"))
+        await env.manager.navigate(session_id, f"{env.allowed}/start")
+
+
+# ── no over-refusal of legitimate popups ────────────────────────────────────────
+
+
+async def test_a_popup_from_an_open_tab_tab_is_judged_by_that_tab_while_another_tab_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Reviewer's P2: a tab the open-tab tool opened (its targetId cached at open) opens a clean popup while
+    the first tab is refused. The popup is judged by its own opener, not the session: readable, activatable."""
+    pages = {"/start": "<p>start</p>", "/ok": "<title>ok</title>", "/second": "<title>second</title><p>two</p>"}
+    async with browser_env(tmp_path, pages) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        first = session.page
+        await env.manager.open_tab(session_id, f"{env.allowed}/ok", activate=False)
+        tab = next(p for p in session.context.pages if p is not first)
+        assert env.manager.request_gates.known_target_id(tab) is not None
+
+        await first.evaluate("(u) => { location.href = u }", f"{env.evil}/")
+        await settle(lambda: first.url == "about:blank", timeout=WINDOW_TIMEOUT_SECONDS)
+        await settle(lambda: not pending(), timeout=WINDOW_TIMEOUT_SECONDS)
+        assert env.manager._session_has_refused_page(session)
+
+        async with session.context.expect_page() as opened:
+            await tab.evaluate("(u) => { window.open(u) }", f"{env.allowed}/second")
+        popup = await opened.value
+        await popup.wait_for_load_state()
+        await settle(lambda: not pending(), timeout=WINDOW_TIMEOUT_SECONDS)
+
+        assert not env.manager._page_refused(popup), popup.url
+        await env.manager.activate_tab(session_id, session.context.pages.index(popup))
+        assert "two" in json.dumps(await env.manager.observe(session_id, preset="text"))
+
+
+# ── fail closed ─────────────────────────────────────────────────────────────────
+
+
+async def test_a_session_is_not_created_when_the_watcher_cannot_attach(tmp_path: Path, monkeypatch) -> None:
+    """As the gate's require: a 503, retryable, with the session's context closed. Without it the session ran
+    unwatched and the original leak returned."""
+
+    async def boom(self):
+        raise RuntimeError("simulated: browser CDP session unavailable")
+
+    monkeypatch.setattr(WindowBirthWatcher, "attach", boom)
+    async with browser_env(tmp_path, {}) as env:
+        with pytest.raises(WindowBirthWatcherUnavailable) as raised:
+            await env.create()
+
+        assert raised.value.status_code == 503 and raised.value.retryable is True
+        assert env.manager.sessions == {}
+        assert env.closed_contexts == env.contexts, "the failed session's browser context was left open"
+        assert env.manager.window_births.status()["state"] == "attach_failed"
+
+
+async def test_a_session_is_not_created_when_the_contexts_id_cannot_be_read(tmp_path: Path, monkeypatch) -> None:
+    async def times_out(context, page):
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(WindowBirths, "_read_context_id", staticmethod(times_out))
+    async with browser_env(tmp_path, {}) as env:
+        with pytest.raises(WindowBirthWatcherUnavailable):
+            await env.create()
+        assert env.manager.sessions == {}
+
+
+async def test_a_lost_watcher_refuses_popups_until_a_replacement_re_registers_the_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The watcher's own CDP session dies while the browser lives. Until a new watcher attaches, a clean page's
+    popup in that session is refused (fail closed); the next session's attach re-registers the first session,
+    whose popups are judged again."""
+    pages = {"/ok": "<title>ok</title>", "/second": "<title>second</title><p>two</p>"}
+    async with browser_env(tmp_path, pages) as env:
+        births = env.manager.window_births
+        monkeypatch.setattr(births, "_lost", lambda watcher: None)  # no eager re-attach: the hold is observable
+        session_id = await env.create("/ok")
+        session = env.manager.sessions[session_id]
+        old = births._get(session.browser)
+
+        await old._cdp.detach()
+        await settle(lambda: not old.live, timeout=WINDOW_TIMEOUT_SECONDS)
+        assert births.holds_refused(session)
+        assert births.status()["state"] == "lost"
+        async with session.context.expect_page() as opened:
+            await session.page.evaluate("(u) => { window.open(u) }", f"{env.allowed}/second")
+        popup = await opened.value
+        await settle(lambda: not pending(), timeout=WINDOW_TIMEOUT_SECONDS)
+        assert env.manager._page_refused(popup), "a popup born under a lost watcher was let through"
+
+        other_id = await env.create("/ok")
+        new = births._get(session.browser)
+        assert new is not None and new is not old
+        assert new._context_id_of(session) is not None, "the replacement did not re-register the first session"
+        assert new._context_id_of(env.manager.sessions[other_id]) is not None
+        assert not births.holds_refused(session)
+        async with session.context.expect_page() as opened:
+            await session.page.evaluate("(u) => { window.open(u) }", f"{env.allowed}/second")
+        popup = await opened.value
+        await popup.wait_for_load_state()
+        await settle(lambda: not pending(), timeout=WINDOW_TIMEOUT_SECONDS)
+        assert not env.manager._page_refused(popup), popup.url
