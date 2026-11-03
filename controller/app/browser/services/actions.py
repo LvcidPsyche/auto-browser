@@ -153,10 +153,12 @@ class BrowserActionService:
             # still starts the page guard, which waits for the lock and then finds nothing to do.
             with self.manager.page_provenance.controller_navigation(session.page) as navigation:
                 navigation.response = await session.page.goto(url, wait_until="domcontentloaded")
+            # The navigate may have cleared the page's taint. Close every window that page opened while it was
+            # refused that Playwright never reported, now, before the settle gives a script it planted time to
+            # commit an allowed URL or send this tab to one (window_births.close_unreported closes only windows
+            # whose opener is clean or gone), and again after the settle for one that became unjustified during it.
+            await self.manager.window_births.close_unreported(session)
             await self.manager._settle(session.page)
-            # The navigate may have cleared the last refused page. Close any window a refused page opened that
-            # Playwright never reported, so a script it planted cannot later commit an allowed URL or send the
-            # agent's own tab to one (window_births.close_unreported no-ops while the session still counts).
             spawn_background_task(self.manager.window_births.close_unreported(session))
             challenge = await self.manager._check_bot_challenge(session)
             if challenge:

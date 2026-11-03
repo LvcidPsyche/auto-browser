@@ -313,10 +313,12 @@ class BrowserActionPipeline:
                 # Back on the page the agent read before the action, the taint the action left clears.
                 with context.manager.page_provenance.escape(session.page, witness_state.escape_url):
                     await session.page.go_back(wait_until="domcontentloaded")
-                await context.manager._settle(session.page)
-                # The rollback may have cleared the last refused page. A window that refused page opened but
+                # The rollback may have cleared the page's taint. A window that page opened while refused but
                 # Playwright never reported keeps a live opener reference across go_back (the BrowsingInstance
-                # survives), so close it before a script it planted can navigate this tab to an allowed URL.
+                # survives): close it now, before the settle gives a script it planted time to navigate this tab
+                # to an allowed URL, and again after the settle for one that became unjustified during it.
+                await context.manager.window_births.close_unreported(session)
+                await context.manager._settle(session.page)
                 spawn_background_task(context.manager.window_births.close_unreported(session))
         except Exception as exc:
             logger.debug("failed to roll back blocked action navigation for session %s: %s", session.id, exc)
