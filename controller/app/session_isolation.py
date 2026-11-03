@@ -165,7 +165,13 @@ class DockerBrowserNodeProvisioner:
             subnets = [subnet for tracked in self._session_subnets.values() for subnet in tracked]
         return any(address.version == subnet.version and address in subnet for subnet in subnets)
 
-    def _track_session_subnets(self, network) -> None:
+    def _track_session_subnets(self, network) -> bool:
+        """Track a session network's subnets; False when it reports none (provision then fails closed).
+
+        Docker hands a subnet out again only once its old network is gone, so an
+        entry for another network overlapping this one is stale (a release that
+        could neither leave nor remove its network) and is dropped.
+        """
         name = getattr(network, "name", "<unknown>")
         subnets = []
         ipam = (getattr(network, "attrs", None) or {}).get("IPAM") or {}
@@ -178,9 +184,16 @@ class DockerBrowserNodeProvisioner:
             logger.warning(
                 "Session network %s reports no IPAM subnet; requests from it cannot be refused by address", name
             )
-            return
+            return False
         with self._session_subnets_lock:
+            for other, tracked in list(self._session_subnets.items()):
+                if other != name and any(
+                    old.overlaps(new) for old in tracked for new in subnets if old.version == new.version
+                ):
+                    logger.info("Dropping stale subnet tracking for %s: %s now holds its range", other, name)
+                    del self._session_subnets[other]
             self._session_subnets[name] = subnets
+        return True
 
     def _forget_session_subnets(self, network) -> None:
         with self._session_subnets_lock:
@@ -374,8 +387,13 @@ class DockerBrowserNodeProvisioner:
                 self._remove_stale_container(client, container_name)
                 self._remove_stale_session_network(client, network_name, session_id, controller_id)
                 network = self._create_session_network(client, network_name, session_id)
-                # Before the controller joins it: from then on its peers can reach the API.
-                self._track_session_subnets(network)
+                # Before the controller joins it: from then on its peers can reach the API. Without
+                # its subnet they could not be refused, so the session fails closed instead.
+                if not self._track_session_subnets(network):
+                    raise RuntimeError(
+                        f"Session network {network_name} reports no subnet, so the controller could not refuse "
+                        "requests from it; the session was not started. Check the daemon's IPAM configuration."
+                    )
                 # Join before the container starts: the controller reaches it by
                 # name (ws://<name>:9223, autossh to <name>:6080) through Docker
                 # DNS on this network.
