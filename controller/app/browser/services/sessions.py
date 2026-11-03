@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -382,6 +383,14 @@ class BrowserSessionService(SessionCreation):
             raise RuntimeError("Shadow browsing is disabled (SHADOW_BROWSE_ENABLED=false)")
         if manager.playwright is None:
             raise RuntimeError("Playwright not started")
+        # Chromium refuses to start sandboxed as root; refuse rather than drop the sandbox.
+        # Windows has no geteuid, and no root to refuse.
+        geteuid = getattr(os, "geteuid", None)
+        if geteuid is not None and geteuid() == 0:
+            raise RuntimeError(
+                "Shadow browsing launches a sandboxed headed Chromium, and Chromium cannot run sandboxed as root. "
+                "Run the controller as a regular user to use shadow browsing."
+            )
 
         session = await manager.get_session(session_id)
         async with session.lock:
@@ -410,10 +419,12 @@ class BrowserSessionService(SessionCreation):
             "storage_state": storage_state,
         }
 
-        # Launch a local headed browser process
+        # A local headed browser process, sandboxed: shadow browse is a host-run feature (the
+        # controller image has no Chromium or display), and on a host the sandbox works.
         headed_browser = await manager.playwright.chromium.launch(
             headless=False,
-            args=["--no-sandbox", "--disable-setuid-sandbox", STORAGE_PARTITIONING_ON],
+            chromium_sandbox=True,
+            args=[STORAGE_PARTITIONING_ON],
         )
         context = None
         try:
