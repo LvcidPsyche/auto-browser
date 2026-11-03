@@ -31,12 +31,33 @@ resolve_repo_host_path() {
   echo "$root_dir/$raw_path"
 }
 
-# curl that sends the controller's bearer token when API_BEARER_TOKEN is set.
-# Without it every API call to an authenticated controller is a 401 and the
-# smoke scripts can only pass against an open one.
-bearer_curl() {
+# The controller's bearer token: API_BEARER_TOKEN when set, else the token the
+# controller saved in API_TOKEN_FILE (/data/api-token, which is
+# <repo>/data/api-token on the host). Prints nothing when there is none, as for a
+# controller run with API_ALLOW_TOKENLESS_LOOPBACK=true. Callers read it on every
+# call: a controller the script itself starts writes the file only once it is up.
+api_token() {
   if [[ -n "${API_BEARER_TOKEN:-}" ]]; then
-    curl -H "Authorization: Bearer ${API_BEARER_TOKEN}" "$@"
+    printf '%s' "${API_BEARER_TOKEN}"
+    return 0
+  fi
+  local token_file
+  token_file="$(resolve_repo_host_path "${ROOT_DIR}" "${API_TOKEN_FILE:-/data/api-token}")"
+  if [[ -r "$token_file" ]]; then
+    tr -d '[:space:]' < "$token_file"
+  elif [[ -e "$token_file" ]]; then
+    echo "Cannot read the API token in $token_file; rerun with sudo, or read it with:" >&2
+    echo "  docker compose exec -T controller cat /data/api-token" >&2
+  fi
+}
+
+# curl that sends the controller's bearer token. Without it every API call is a
+# 401 and the smoke scripts could only pass against an open controller.
+bearer_curl() {
+  local token
+  token="$(api_token)"
+  if [[ -n "$token" ]]; then
+    curl -H "Authorization: Bearer ${token}" "$@"
   else
     curl "$@"
   fi

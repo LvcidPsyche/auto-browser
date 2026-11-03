@@ -90,6 +90,10 @@ def _cmd_execute() -> int:
 
 
 def _execute_live(contracts: list[TaskContract], run_dir: Path, base_url: str) -> int:
+    # A dev harness driving the app in-process, so it keeps the tokenless loopback
+    # API: otherwise the lifespan writes /data/api-token on this host and every
+    # request below answers 401. Set before the import, which reads the settings.
+    os.environ.setdefault("API_ALLOW_TOKENLESS_LOOPBACK", "true")
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "controller"))
         from app.main import app

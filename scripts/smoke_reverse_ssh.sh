@@ -17,11 +17,6 @@ SMOKE_PUB="${SMOKE_KEY}.pub"
 SMOKE_AUTHORIZED_KEYS="${SSH_DIR}/smoke_authorized_keys"
 SMOKE_KNOWN_HOSTS="${SSH_DIR}/smoke_known_hosts"
 REMOTE_INFO="${TUNNEL_DIR}/reverse-ssh.json"
-# Same token, for the curls that run inside the bastion against the forwarded API.
-BASTION_AUTH=""
-if [[ -n "${API_BEARER_TOKEN:-}" ]]; then
-  BASTION_AUTH="-H 'Authorization: Bearer ${API_BEARER_TOKEN}'"
-fi
 
 cleanup() {
   "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
@@ -72,6 +67,13 @@ chmod 644 "${SMOKE_KNOWN_HOSTS}"
 "${COMPOSE[@]}" up -d --no-recreate browser-node controller reverse-ssh
 
 wait_for "controller readiness" "curl -fsS ${API_BASE_URL}/readyz" 120 2
+# The token, for the curls that run inside the bastion against the forwarded API.
+# Read after readiness: the controller writes data/api-token during startup.
+BASTION_AUTH=""
+BASTION_TOKEN="$(api_token)"
+if [[ -n "${BASTION_TOKEN}" ]]; then
+  BASTION_AUTH="-H 'Authorization: Bearer ${BASTION_TOKEN}'"
+fi
 wait_for "remote access metadata" "[ -f '${REMOTE_INFO}' ]" 60 1
 wait_for \
   "forwarded API through bastion" \
