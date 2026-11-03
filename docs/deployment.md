@@ -157,12 +157,13 @@ than one hard link, never enters the browser containers' directories (`browser-p
 `browser-sessions/*/profile` and `browser-sessions/*/downloads`), and refuses a configured path deeper than one level
 whose parents are not root-owned directories. A pass that hands everything over leaves `data/.auto-browser-owner`,
 and later starts as the same user skip the scan; a root run (`CONTROLLER_RUN_AS=root`) removes it, deleting it forces
-a new pass, and anything unexpected there (a symlink, a FIFO, another owner, other content) just means a new pass.
+a new pass, and anything unexpected there (a symlink, a FIFO, another owner, other content) just means a new pass. The marker belongs to the controller's user, who owns `/data` anyway: that user could forge it, but that only skips the hand-over of its own files.
 Measured on Docker Desktop for 20,000 files: 0.37 s in a named volume, but 103 s once on a Windows bind mount
 (`./data`), whose file operations are slow; with the marker, later starts take under a second. The controller logs
-that it is starting the one-time pass, and `scripts/doctor.sh` waits up to ten minutes for the API. On such a mount
-the API also waits for the startup cleanup sweep (`CLEANUP_ON_STARTUP`), which walks the same files: a first start
-over 20,000 files took 277 s in all, a later one 162 s. Files created later as root (`docker compose exec controller
+that it is starting the one-time pass, and `scripts/doctor.sh` waits up to ten minutes for the API. The startup
+cleanup sweep (`CLEANUP_ON_STARTUP`) runs in the background once the API is up, logging its start and its counts
+when it finishes; it protects live sessions' directories and removes only entries older than the retention period,
+and shutdown cancels it. Files created later as root (`docker compose exec controller
 ...` runs as root unless told otherwise) are not handed over while the marker is there: run such commands as the
 controller's user, `docker compose exec -u 10002 controller ...` (or the data owner's uid, which readiness reports),
 or delete `data/.auto-browser-owner` to force a new pass. If an entry cannot be changed (a read-only or root-squashed
@@ -181,8 +182,9 @@ off everything but the sticky, world-writable `/tmp`, `/var/tmp` and `/run/lock`
 itself equivalent to root on the Docker host, whatever user holds it.
 
 A container started with `cap_drop: [ALL]` cannot switch users (no CAP_SETUID or CAP_SETGID): it still starts, as a
-uid 0 with no capabilities and no_new_privs, and readiness warns. Add `cap_add: [CHOWN, SETUID, SETGID]` to run as the
-controller user.
+uid 0 with no capabilities and no_new_privs, and the log and readiness warn. To run such a container as the
+controller user, start it as that user (`user: "10002:10002"` in compose, or `docker run --user 10002:10002`, with
+`./data` owned by 10002): the entrypoint then runs the controller directly. Or add `cap_add: [CHOWN, SETUID, SETGID]`.
 
 `CONTROLLER_RUN_AS=root` restores the root controller of earlier releases. It is not recommended, and the
 `controller_user` readiness check warns while it is set; that check also reports the uid in use and why.
