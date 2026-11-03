@@ -12,6 +12,7 @@ they hand entries from the current uid to itself, which shows exactly what the w
 
 from __future__ import annotations
 
+import errno
 import io
 import logging
 import os
@@ -22,7 +23,9 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
+from app import run_as
 from app.config import Settings
 from app.readiness import run_readiness_checks
 from app.run_as import (
@@ -295,6 +298,63 @@ class FixOwnershipLinuxTests(unittest.TestCase):
         self.assertLess(order.index("auth/deep/inner"), order.index("auth/deep"))
         self.assertLess(order.index("auth/deep"), order.index("auth"))
         self.assertEqual(order[-1], ".")
+
+    def test_a_directory_replaced_by_another_directory_is_not_entered(self) -> None:
+        # Not a symlink, so O_NOFOLLOW lets it open: the samestat check is what refuses it.
+        _tree(self.data, "artifacts/a/1.png", "spare/x.png")
+
+        def swap(relative):
+            if relative == "artifacts/a":
+                (self.data / "artifacts" / "a").rename(self.data / "artifacts" / "old-a")
+                (self.data / "spare").rename(self.data / "artifacts" / "a")
+
+        report = self._fix(["artifacts"], before_open=swap)
+        self.assertIn("artifacts/a: replaced since it was examined", report.skipped)
+        self.assertNotIn("artifacts/a/x.png", report.changed_paths)
+
+    @unittest.skipUnless(ME == 0, "the parent walk only opens root-owned parents")
+    def test_an_error_opening_a_parent_is_reported_not_raised(self) -> None:
+        (self.data / "artifacts" / "x").mkdir(parents=True)
+        real = run_as._open_dir_nofollow
+
+        def denied(name, dir_fd):
+            if name == "artifacts":
+                raise PermissionError(errno.EACCES, "Permission denied")
+            return real(name, dir_fd)
+
+        with patch.object(run_as, "_open_dir_nofollow", denied):
+            report = self._fix(["artifacts/x"])
+        self.assertTrue(any("Permission denied" in e for e in report.errors), report.errors)
+
+    def test_an_unreadable_directory_already_the_users_is_skipped_not_an_error(self) -> None:
+        # Root with only CHOWN/SETUID/SETGID cannot open a 0700 directory it handed over on an earlier start.
+        _tree(self.data, "auth/p.json")
+        real = run_as._open_dir_nofollow
+
+        def denied(name, dir_fd):
+            if name == "auth":
+                raise PermissionError(errno.EACCES, "Permission denied")
+            return real(name, dir_fd)
+
+        with patch.object(run_as, "_open_dir_nofollow", denied):
+            report = self._fix(["auth"])
+        self.assertEqual(report.errors, [])
+        self.assertTrue(any(s.startswith("auth: already uid") for s in report.skipped), report.skipped)
+        with patch.object(run_as, "_open_dir_nofollow", denied):
+            other = fix_ownership(self.data, [self.data / "auth"], ME + 1, MY_GID, from_uids=frozenset({ME}))
+        self.assertTrue(other.errors, "a directory of another uid that cannot be opened stays an error")
+
+    @unittest.skipUnless(hasattr(os, "fork"), "no fork")
+    def test_root_writes_the_marker_as_the_user(self) -> None:
+        # /data is the user's by then: root without CAP_DAC_OVERRIDE could not create the marker in it.
+        with (
+            patch.object(run_as.os, "geteuid", return_value=0),
+            patch.object(run_as.os, "fork", return_value=4242) as fork,
+            patch.object(run_as.os, "waitpid", return_value=(4242, 0)),
+        ):
+            write_marker(self.data, 10002, 10002)
+        fork.assert_called_once()
+        self.assertFalse((self.data / MARKER_NAME).exists(), "the parent (root) wrote it itself")
 
     def test_errors_are_reported_not_raised(self) -> None:
         if ME == 0:

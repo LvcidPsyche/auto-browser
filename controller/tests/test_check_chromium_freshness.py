@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import http.client
 import importlib.util
 import io
 import json
@@ -353,6 +354,17 @@ class Round3FreshnessTests(unittest.TestCase):
         self.assertIsNone(off_host.get_header("Authorization"))
         same_host = handler.redirect_request(request, None, 302, "Found", {}, "https://api.github.com/repositories/1/x")
         self.assertEqual(same_host.get_header("Authorization"), "Bearer t0k3n")
+
+    def test_fetch_opens_through_the_redirect_handler(self) -> None:
+        built = []
+
+        def build_opener(*handlers):
+            built.append(handlers)
+            raise http.client.IncompleteRead(b"stop here")
+
+        with patch("urllib.request.build_opener", build_opener), self.assertRaises(self.check.SourceError):
+            self.check.fetch("https://api.github.com/repos/moby/moby/releases/latest")
+        self.assertEqual(built, [(self.check.GitHubTokenRedirectHandler,)])
 
     def test_an_unwritable_summary_is_a_warning_not_a_traceback(self) -> None:
         import tempfile
