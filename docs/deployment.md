@@ -84,27 +84,39 @@ filter, so a renderer exploit does not start with every syscall the container al
 refuses those namespaces without CAP_SYS_ADMIN, which browser containers drop, so compose and the controller apply
 `controller/app/browser/seccomp/chromium-sandbox.json`: moby's default profile plus one entry allowing `chroot`,
 `clone` and `unshare` (provenance and the refresh procedure are in the README beside it). That lets code in the
-container create user namespaces, which exposes the kernel's user-namespace code to it; in exchange every renderer
-runs sandboxed, which is the better trade for a browser that renders arbitrary pages.
+container create user namespaces, which exposes the kernel's user-namespace code to it: renderers cannot reach it
+(Chromium's own filter blocks them), but the browser and network-service processes, which Chromium does not filter,
+can. In exchange every renderer runs sandboxed, which is the better trade for a browser that renders arbitrary pages.
 
 | `BROWSER_SANDBOX` | What happens |
 |---|---|
-| `auto` (default) | Chromium starts sandboxed, and browser-node checks in `/proc` that each renderer is in its own user namespace under one more seccomp filter. Where it cannot, Chromium runs unsandboxed and a WARNING names the cause. |
-| `on` | A browser that cannot run sandboxed does not start: browser-node exits, and an isolated session fails. With `docker_ephemeral`, an unreadable profile file refuses every session. |
+| `auto` (default) | Chromium starts sandboxed, and browser-node checks in `/proc` that each renderer is in its own user namespace under one more seccomp filter. A failure is retried once; then Chromium runs unsandboxed and a WARNING names the cause. |
+| `on` | A browser that cannot run sandboxed does not start: browser-node exits, and an isolated session fails. The controller enforces it too: an isolated container whose state is not a verified `on` (an image older than 1.14.0, which ignores the setting, included) is refused and removed, and a shared browser-node that is not `on` fails readiness. With `docker_ephemeral`, an unreadable profile file, or a daemon without seccomp, refuses every session. |
 | `off` | Chromium runs unsandboxed (the behaviour before 1.14.0). `docker_ephemeral` containers get no custom profile, only Docker's default. |
 
 The causes a fallback names are distinct, so a setup problem never reads like a host restriction:
 
 - `seccomp_profile_not_applied`: the container runs under Docker's default profile (a plain `docker run`, or
-  `BROWSER_SECCOMP_PROFILE=builtin`);
+  `BROWSER_SECCOMP_PROFILE=builtin`). On a host that also restricts user namespaces with AppArmor, the detail names
+  both possibilities, since the profile hint is only what the container was told;
 - `userns_refused`: the profile allows it, but the kernel or AppArmor refused the user namespace. Expected on Ubuntu
   23.10 and later (`kernel.apparmor_restrict_unprivileged_userns=1`), where `auto` runs unsandboxed and says so;
+- `seccomp_unsupported`: the Docker daemon reports no seccomp support (`docker info`), so no profile was sent;
+- `verification_unsupported`: the kernel has no `Seccomp_filters` in `/proc/<pid>/status` (Linux before 5.9) and
+  `chrome://sandbox` did not confirm the seccomp-BPF sandbox. On those kernels the check uses `chrome://sandbox`;
+  5.9 or later is the supported minimum for the `/proc` evidence;
 - `chroot_refused`, `chromium_refused`, `not_verified`: the namespace works but Chromium or the check did not.
 
-Each browser writes its state to `browser-sandbox.json` beside its endpoint file. `GET /readiness` reports them in
-the `browser_sandbox` check, one line per browser (the shared browser-node and every live isolated container): it
-passes when every browser is sandboxed and warns, naming the browser, the cause and the detail, when one is not. To
-see the live evidence in a container, run
+browser-node prints the outcome (`chromium sandbox: on (verified)`, or the WARNING or refusal) to its log, which is
+`docker compose logs browser-node` (and `/tmp/playwright-server.log` in the container). It also writes the state to
+`browser-sandbox.json` beside its endpoint file. `GET /readiness` reports them in the `browser_sandbox` check, one
+line per browser (the shared browser-node and every live isolated container): it passes when every browser is
+sandboxed, warns when one fell back (naming the browser, the cause and the detail), and fails when one refused to
+start or when `BROWSER_SANDBOX=on` and one is not verified `on`. The state is self-attested by the container it
+describes: the controller reads it without following links, from a regular file of at most 16 KiB, keeps only known
+keys, and reads it once per browser run (an isolated container's when it is provisioned, the shared node's when its
+endpoint changes), so a browser compromised later cannot rewrite what readiness reports for that run. To see the
+live evidence in a container, run
 `docker compose exec -u browser browser-node node /opt/browser-node/sandbox-report.mjs` (the state, a `/proc` check
 and `chrome://sandbox`).
 
@@ -115,33 +127,62 @@ browser-node and readiness warn about that; `BROWSER_SECCOMP_PROFILE=builtin` al
 default profile, so `auto` falls back (cause `seccomp_profile_not_applied`) and `on` refuses to start. The controller
 needs no second setting: under `off` it applies no profile to `docker_ephemeral` containers.
 
+**A daemon with its own `seccomp-profile`** (daemon.json): 1.13.0 passed no seccomp option, so its containers got the
+daemon's configured profile. 1.14.0's profile replaces it, and `builtin` means moby's built-in profile, not the
+daemon's. To keep a hardened daemon profile, set `BROWSER_SECCOMP_PROFILE` (compose) and
+`ISOLATED_BROWSER_SECCOMP_PROFILE` (the controller) to that profile plus the auto-browser entry. **A kernel without
+seccomp**: a custom profile makes Docker refuse to create the container, where its default only warned. For
+`docker_ephemeral` the controller checks `docker info` and sends no profile there (auto falls back, on refuses); under
+compose, set `BROWSER_SECCOMP_PROFILE=builtin` on such a host.
+
 ## Who the controller runs as (CONTROLLER_RUN_AS)
 
 The controller image's entrypoint runs as root only long enough to choose a user and hand it its files, then runs
-uvicorn as that user:
+uvicorn as that user through `setpriv`, with no capability in any set and no_new_privs (even under a plain `docker run`
+without compose's `no-new-privileges`):
 
-- the owner of `/data` when that is not root: the user who owns `./data` in a Linux checkout (and CI's runner). That
-  user keeps its files, and `data/api-token` stays theirs at 0600, so the stdio bridge and the scripts read it;
-- otherwise uid 10001, the image's `controller` user: Docker Desktop, where bind mounts show as owned by root, and
-  named volumes.
+- the owner of `/data` when that is neither root nor browser-node's uid 10001: the user who owns `./data` in a Linux
+  checkout (and CI's runner). That user keeps its files, and `data/api-token` stays theirs at 0600, so the stdio
+  bridge and the scripts read it. Its group becomes the controller's primary group unless it is group 0 or a system
+  group of the image, in which case the uid's own group is used;
+- otherwise uid 10002, the image's `controller` user: Docker Desktop, where bind mounts show as owned by root, named
+  volumes, and a data dir a 1.14 pre-release left owned by 10001. The controller never shares the browser
+  containers' uid.
 
-At start, the root-owned entries of the controller's own `/data` subtrees (what earlier releases wrote as root) are
-given to that user: only entries owned by root, never the browser's `browser-profile` and `downloads`, never anything
-outside `/data`. A pass that hands everything over leaves `data/.auto-browser-owner`, and later starts as the same
-user skip the scan; a root run (`CONTROLLER_RUN_AS=root`) removes it, and deleting it forces a new pass. Measured on
-Docker Desktop for 20,000 files: 0.37 s in a named volume, but 103 s once on a Windows bind mount (`./data`), whose
-file operations are slow; with the marker, later starts take under a second. The controller logs that it is
-starting the one-time pass, and `scripts/doctor.sh` waits up to ten minutes for the API. On such a mount the API also waits for the startup cleanup sweep (`CLEANUP_ON_STARTUP`), which walks the same files: a first start over 20,000 files took 277 s in all, a later one 162 s. Files created later as root
-(`docker compose exec controller ...` runs as root unless told otherwise) are not handed over while the marker is
-there: run such commands as the controller's user, `docker compose exec -u 10001 controller ...` (or the data
-owner's uid, which readiness reports), or delete `data/.auto-browser-owner` to force a new pass. If one cannot be
-changed (a read-only or root-squashed mount), the log has an ERROR naming the path; the
-controller still starts as that user, and whatever it then cannot read fails with its own message.
+At start, what earlier releases left in the controller's own `/data` subtrees (entries owned by root, or by 10001
+from a pre-release) is given to that user. The walk holds directory file descriptors and changes each entry relative
+to its directory without following links, so swapping a directory for a symlink mid-walk cannot lead it out of the
+tree. It stays on `/data`'s own filesystem (a mount inside a subtree is skipped and logged), skips files with more
+than one hard link, never enters the browser containers' directories (`browser-profile`, `downloads`,
+`browser-sessions/*/profile` and `browser-sessions/*/downloads`), and refuses a configured path deeper than one level
+whose parents are not root-owned directories. A pass that hands everything over leaves `data/.auto-browser-owner`,
+and later starts as the same user skip the scan; a root run (`CONTROLLER_RUN_AS=root`) removes it, deleting it forces
+a new pass, and anything unexpected there (a symlink, a FIFO, another owner, other content) just means a new pass.
+Measured on Docker Desktop for 20,000 files: 0.37 s in a named volume, but 103 s once on a Windows bind mount
+(`./data`), whose file operations are slow; with the marker, later starts take under a second. The controller logs
+that it is starting the one-time pass, and `scripts/doctor.sh` waits up to ten minutes for the API. On such a mount
+the API also waits for the startup cleanup sweep (`CLEANUP_ON_STARTUP`), which walks the same files: a first start
+over 20,000 files took 277 s in all, a later one 162 s. Files created later as root (`docker compose exec controller
+...` runs as root unless told otherwise) are not handed over while the marker is there: run such commands as the
+controller's user, `docker compose exec -u 10002 controller ...` (or the data owner's uid, which readiness reports),
+or delete `data/.auto-browser-owner` to force a new pass. If an entry cannot be changed (a read-only or root-squashed
+mount), the log has an ERROR naming the path; the controller still starts as that user, and whatever it then cannot
+read fails with its own message.
+
+Downloads: the controller never reads Chromium's own download files. Playwright's `save_as` streams each download
+from the browser into the controller's artifacts, which the controller owns, so it works whatever uid either side
+runs as (measured: shared and `docker_ephemeral`, the controller as 10002 and as a host-user uid; Chromium's own
+files are 0644 in every case). CI's compose-smoke downloads a file and reads it back as the runner's uid.
 
 With the isolation overlay, the controller joins the group of the mounted Docker socket. On a Linux host that is the
 `docker` group; **on Docker Desktop the socket is `root:root`, so the controller joins group 0**. It is still not uid 0
-and holds no capabilities, but files in the container that grant group 0 access are open to it. Access to the Docker
-socket is itself equivalent to root on the Docker host, whatever user holds it.
+and holds no capabilities. Nothing in the image is writable through group 0 alone: the image takes the group write bit
+off everything but the sticky, world-writable `/tmp`, `/var/tmp` and `/run/lock`. Access to the Docker socket is
+itself equivalent to root on the Docker host, whatever user holds it.
+
+A container started with `cap_drop: [ALL]` cannot switch users (no CAP_SETUID or CAP_SETGID): it still starts, as a
+uid 0 with no capabilities and no_new_privs, and readiness warns. Add `cap_add: [CHOWN, SETUID, SETGID]` to run as the
+controller user.
 
 `CONTROLLER_RUN_AS=root` restores the root controller of earlier releases. It is not recommended, and the
 `controller_user` readiness check warns while it is set; that check also reports the uid in use and why.
