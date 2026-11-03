@@ -103,9 +103,17 @@ class SessionNetworkTests(unittest.IsolatedAsyncioTestCase):
         provisioner, client = self.provisioner()
         foreign = client.networks.add("browser-session-s1-net", {"com.example.owner": "someone"})
 
-        with self.assertRaisesRegex(RuntimeError, "already exists"):
+        with self.assertRaisesRegex(RuntimeError, "already exists") as raised:
             await provisioner.provision("s1")
 
+        # A guided error, as pool exhaustion is: which network, why it is not
+        # replaced, and what to do. The daemon's own text says only "already exists".
+        message = str(raised.exception)
+        self.assertIn("browser-session-s1-net", message)
+        self.assertIn("not a session network of this controller", message)
+        self.assertIn("docker network rm browser-session-s1-net", message)
+        self.assertIn("ISOLATED_BROWSER_CONTAINER_PREFIX", message)
+        self.assertIsInstance(raised.exception.__cause__, Exception)
         self.assertFalse(foreign.removed)
         self.assertIs(client.networks.by_name["browser-session-s1-net"], foreign)
         self.assertFalse(provisioner._local_runtime_root("s1").exists())
@@ -138,6 +146,25 @@ class SessionNetworkTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(client.events, [])
                 self.assert_nothing_left(provisioner, client)
+
+    async def test_the_daemons_409_conflict_is_mapped_whatever_its_wording(self) -> None:
+        """The real daemon answers 409 Conflict ("network with name ... already exists")."""
+        provisioner, client = self.provisioner()
+
+        class APIError(Exception):
+            status_code = 409
+
+        def conflict(name, **kwargs):
+            raise APIError(
+                f'409 Client Error for http+docker://localnpipe/v1.56/networks/create: Conflict ("{name} is taken")'
+            )
+
+        client.networks.create = conflict  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(RuntimeError, "not a session network of this controller"):
+            await provisioner.provision("s1")
+
+        self.assert_nothing_left(provisioner, client)
 
     async def test_address_pool_exhaustion_names_default_address_pools(self) -> None:
         provisioner, client = self.provisioner()
