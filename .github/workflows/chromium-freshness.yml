@@ -2,8 +2,9 @@ name: chromium-freshness
 
 # Weekly: fails when the Chromium that the pinned Playwright bundles has fallen behind Chrome stable for Linux (a
 # major behind, or a newer Playwright bundles a newer Chromium), or when moby's default seccomp profile has moved
-# away from the one controller/app/browser/seccomp/ ships (minus its auto-browser entry). Public sources only:
-# no secrets, read-only. See scripts/check_chromium_freshness.py.
+# away from the one controller/app/browser/seccomp/ ships (minus its auto-browser entry). A same-build patch gap
+# above 20 is a warning annotation and a job-summary line. Public sources, read-only. GITHUB_TOKEN reaches
+# api.github.com only (the script sends it nowhere else), for its rate limit. See scripts/check_chromium_freshness.py.
 on:
   schedule:
     - cron: "17 6 * * 1"
@@ -17,9 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
       - name: Check the bundled Chromium and the seccomp profile against upstream
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/check_chromium_freshness.py
