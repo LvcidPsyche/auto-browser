@@ -59,7 +59,7 @@ RUN useradd --uid 10002 --user-group --create-home --home-dir /home/controller -
 # write bit comes off everything but the sticky, world-writable dirs (/tmp, /var/tmp, /run/lock).
 RUN find / -xdev -group 0 -perm -g+w ! -type l ! -perm -1000 -exec chmod g-w {} +
 # 0755 whatever mode the build context gives it (a clone under umask 002 makes it group-writable): it runs as root on
-# every start. Set by RUN chmod, not COPY --chmod, which the classic builder refuses.
+# every start. Set by RUN chmod rather than a COPY flag, which only BuildKit understands.
 COPY entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod 0755 /entrypoint.sh
 
