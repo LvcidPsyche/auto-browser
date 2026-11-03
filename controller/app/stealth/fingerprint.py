@@ -22,16 +22,16 @@ import random
 # Chromium-engine UAs only: the browser node runs Chromium, and a Firefox/Safari
 # UA on a Chromium engine is an engine/UA mismatch — itself a detection signal.
 CHROME_UA_POOL = [
-    # Chrome 149 on Windows (June 2026 stable)
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
-    # Chrome 149 on macOS (UA reduction freezes the reported mac version)
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
-    # Chrome 149 on Linux
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
-    # Chrome 148 on Windows (previous stable still common in the wild)
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-    # Edge 149 on Windows (Chromium engine)
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36 Edg/149.0.0.0",
+    # Chrome 156 on Windows (October 2026 stable, the engine browser-node ships)
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+    # Chrome 156 on macOS (UA reduction freezes the reported mac version)
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+    # Chrome 156 on Linux
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+    # Chrome 155 on Windows (previous stable still common in the wild)
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+    # Edge 156 on Windows (Chromium engine)
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36 Edg/156.0.0.0",
 ]
 _UA_POOL = CHROME_UA_POOL
 # NOTE: UA strings go stale fast. Refresh this pool every 2-3 months.
