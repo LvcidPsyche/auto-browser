@@ -1017,6 +1017,34 @@ async def test_the_sweep_does_not_wait_for_a_read_that_failed_once(h: Harness, m
         await report
 
 
+async def test_the_sweep_starts_no_second_read_while_one_is_in_flight(h: Harness, monkeypatch) -> None:
+    """The re-read (above) is for a page whose reads all ended: a page whose first read failed and whose retry
+    is sleeping has a read in flight already, and a sweep meanwhile must not open another CDP session for it."""
+    monkeypatch.setattr(wb, "TARGET_ID_RETRY_SECONDS", 0.3)
+    opener = h.known("OP", refused=True)
+    h.cdp.fire("Target.targetCreated", created("T1", CTX, opener_id="OP"))
+    h.cdp.fire("Target.targetCreated", created("T2", CTX, opener_id="OP"))
+    popup = FakePage()
+    h.pages["T1?"] = popup
+    reads: list[Any] = []
+
+    async def resolve(page: Any) -> str | None:
+        reads.append(page)
+        return h.target_ids.get(page)  # the popup's id is never read
+
+    monkeypatch.setattr(h.births, "_resolve_target_id", resolve)
+    report = asyncio.ensure_future(h.births.verdict(h.session, popup))
+    await asyncio.sleep(0.05)  # the first read failed; the retry is sleeping
+    assert reads.count(popup) == 1 and not report.done()
+    h.refused.discard(opener)
+
+    assert await h.sweep() == []
+    await asyncio.sleep(0.05)
+    assert reads.count(popup) == 1, "the sweep started a second read while the report's read was in flight"
+    assert await report is BirthVerdict.REFUSED_UNJUDGED
+    assert reads.count(popup) == wb.TARGET_ID_READ_ATTEMPTS
+
+
 # ── round 4: a replacement and a page whose verdict its true watcher reached ───
 
 
@@ -1082,3 +1110,44 @@ async def test_a_verdict_adopted_does_not_touch_a_target_this_watcher_judged(h: 
     h.watcher.adopt_verdict("W", FakePage(), BirthVerdict.CLEAN)
 
     assert h.watcher._births["W"].born_refused is True and not h.watcher._births["W"].reported
+
+
+async def test_an_unjudged_verdict_from_a_lost_watcher_leaves_the_replays_entry_unjudged(
+    h: Harness, monkeypatch
+) -> None:
+    """A verdict that is itself unjudged says nothing about the target's birth: a report resolved under a lost
+    watcher that had first seen the target in its own replay (unjudged) must not mark the replacement's entry
+    for it judged, or reported."""
+    await replace_watcher(h, replay=[created("P", CTX, opener_id="GONE")])
+    first = h.watcher
+    assert first._births["P"].unjudged
+    popup = FakePage()
+    h.pages["P?"] = popup  # reported, its id not cached yet
+    release = asyncio.Event()
+
+    async def resolve(page: Any) -> str | None:
+        if page is popup:
+            await release.wait()
+            h.target_ids[popup] = "P"
+            return "P"
+        return h.target_ids.get(page)
+
+    monkeypatch.setattr(h.births, "_resolve_target_id", resolve)
+    report = asyncio.ensure_future(h.births.verdict(h.session, popup))
+    await asyncio.sleep(0)
+    second_cdp = ReplayingCdp([created("P", CTX, opener_id="GONE")])
+
+    async def next_browser_session() -> FakeCdp:
+        h.browser.cdps.append(second_cdp)
+        return second_cdp
+
+    h.browser.new_browser_cdp_session = next_browser_session  # type: ignore[method-assign]
+    first._cdp.fire("close", {})  # the first replacement's session dies too
+    await asyncio.sleep(0.05)
+    second = h.watcher
+    assert second is not first and second._cdp is second_cdp
+
+    release.set()
+    assert await report is BirthVerdict.REFUSED_UNJUDGED
+    birth = second._births["P"]
+    assert (birth.born_refused, birth.by_session, birth.unjudged, birth.reported) == (True, False, True, False)
