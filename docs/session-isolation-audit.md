@@ -15,7 +15,7 @@ Two real concerns remain. One is acknowledged in `docs/architecture.md` as a POC
 | Mode | Browser process | Browser context | Takeover surface | Network |
 |------|-----------------|-----------------|-------------------|---------|
 | `shared_browser_node` (default) | Shared (one Chromium) | Isolated per session via `new_context()` | Shared (one X display, one noVNC) | One browser on the compose network |
-| `docker_ephemeral` | Isolated (one container per session) | Isolated per session | Per-session noVNC, optional per-session reverse-SSH | Per session (`ISOLATED_BROWSER_NETWORK_MODE=per_session`, the default): the browser reaches the internet and other sessions' published noVNC ports; the controller refuses it with 403 (each behind its own random VNC password), not their Playwright servers. `shared` puts all on one network |
+| `docker_ephemeral` | Isolated (one container per session) | Isolated per session | Per-session noVNC, optional per-session reverse-SSH | Per session (`ISOLATED_BROWSER_NETWORK_MODE=per_session`, the default): the browser reaches the internet and other sessions' published noVNC ports (each behind its own random VNC password), not their Playwright servers, and the controller refuses its requests with 403. `shared` puts all on one network |
 
 ### Per-session networks: what remains reachable
 
