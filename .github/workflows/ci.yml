@@ -232,5 +232,27 @@ jobs:
           python3 scripts/check_vnc_exposure.py "$(docker compose ps -q browser-node)" "$novnc_port" \
             ${VNC_PASSWORD:+--expect-password}
 
+      - name: Restart browser-node and check VNC again
+        # A restart runs entrypoint.sh over an existing profile dir: it removes
+        # the endpoint file there as root, which needs DAC_OVERRIDE under the
+        # dropped capability set. A fresh start never takes that path.
+        run: |
+          docker compose restart browser-node
+          container="$(docker compose ps -q browser-node)"
+          for _ in $(seq 1 60); do
+            status="$(docker inspect -f '{{.State.Health.Status}}' "$container")"
+            [ "$status" = healthy ] && break
+            sleep 2
+          done
+          if [ "$status" != healthy ]; then
+            echo "browser-node is $status after restart" >&2
+            docker compose logs --tail 50 browser-node >&2
+            exit 1
+          fi
+          novnc_port="$(docker compose port browser-node 6080 | awk -F: 'NF {print $NF}' | tail -n1)"
+          : "${novnc_port:?browser-node publishes no host port for noVNC (6080)}"
+          python3 scripts/check_vnc_exposure.py "$container" "$novnc_port" \
+            ${VNC_PASSWORD:+--expect-password}
+
       - name: Run isolated session smoke test
         run: DOCTOR_BUILD=1 API_PORT=8010 ./scripts/smoke_isolated_session.sh
