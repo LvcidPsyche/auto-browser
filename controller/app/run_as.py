@@ -75,7 +75,10 @@ def _is_image_system_group(gid: int) -> bool:
 
 # Never the controller's primary group: root, the browser user's group (the decided design shares no group with
 # the browser), and nogroup.
-_REFUSED_GIDS = frozenset({0, BROWSER_UID, 65534})
+NOBODY_UID = 65534
+# The walk is depth-bounded, never recursing into a RecursionError: deeper entries are errors (and no marker).
+MAX_WALK_DEPTH = 200
+_REFUSED_GIDS = frozenset({0, BROWSER_UID, NOBODY_UID})
 
 
 def _safe_gid(gid: int, is_system_group: Callable[[int], bool]) -> bool:
@@ -100,6 +103,14 @@ def decide_user(
             CONTROLLER_UID,
             CONTROLLER_UID,
             f"{root} belongs to root, so the image's controller user (uid {CONTROLLER_UID})",
+        )
+    if owner_uid == NOBODY_UID:
+        # How root-squashed or NFS data looks (or a host's nobody): not a user to become.
+        return UserDecision(
+            CONTROLLER_UID,
+            CONTROLLER_UID,
+            f"{root} is owned by uid {NOBODY_UID} (nobody: root-squashed or NFS data, as it looks), so the image's "
+            f"controller user (uid {CONTROLLER_UID})",
         )
     if owner_uid == BROWSER_UID:
         # A 1.14 pre-release left it so, or a host user happens to have uid 10001 (docs: chown ./data to another uid).
@@ -177,6 +188,8 @@ class OwnershipReport:
     examined: int = 0
     errors: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    # "Already the user's, not readable" skips: their contents were not checked, so no marker is written.
+    unchecked: list[str] = field(default_factory=list)
     changed_paths: list[str] = field(default_factory=list)
     seconds: float = 0.0
 
@@ -266,7 +279,10 @@ def fix_ownership(
             return True
         return False
 
-    def visit(parent_fd: int, name: str, relative: str, root_dev: int) -> None:
+    def visit(parent_fd: int, name: str, relative: str, root_dev: int, depth: int = 0) -> None:
+        if depth > MAX_WALK_DEPTH:
+            report.errors.append(f"{data_root / relative}: deeper than {MAX_WALK_DEPTH} levels, not handed over")
+            return
         try:
             st = lstat(name, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -294,9 +310,14 @@ def fix_ownership(
             if exc.errno in (errno.ELOOP, errno.ENOTDIR):  # swapped for a symlink or a file since the lstat
                 report.skipped.append(f"{relative}: no longer a directory")
             elif exc.errno == errno.EACCES and st.st_uid == uid:
-                # Root without CAP_DAC_READ_SEARCH cannot open a 0700 directory an earlier start handed over: it
-                # is already the user's, so nothing is lost but a check of its contents.
-                report.skipped.append(f"{relative}: already uid {uid}'s, and not readable without CAP_DAC_READ_SEARCH")
+                # Root without CAP_DAC_READ_SEARCH cannot open a 0700 directory an earlier start handed over. It is
+                # the user's, but what is inside was not looked at: reported, and no marker (a later start checks).
+                note = (
+                    f"{relative}: already uid {uid}'s, and not readable without CAP_DAC_READ_SEARCH: its contents "
+                    "were not checked"
+                )
+                report.skipped.append(note)
+                report.unchecked.append(note)
             else:
                 report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
             return
@@ -310,9 +331,13 @@ def fix_ownership(
             except OSError as exc:
                 report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
                 return
+            errors_before = len(report.errors)
             for child in children:
-                visit(fd, child, f"{relative}/{child}", root_dev)
-            chown_fd(fd, relative, opened)  # bottom-up: after its contents
+                visit(fd, child, f"{relative}/{child}", root_dev, depth + 1)
+            # Bottom-up: after its contents, and only when they all went over. A directory whose subtree failed stays
+            # its old owner's, so root (as that owner) can still reach the subtree and the next start retries it.
+            if len(report.errors) == errors_before:
+                chown_fd(fd, relative, opened)
         finally:
             os.close(fd)
 
@@ -341,23 +366,37 @@ def fix_ownership(
                             st = os.stat(part, dir_fd=parent_fd, follow_symlinks=False)
                         except FileNotFoundError:
                             break
+                        parent_relative = "/".join(parts[: index + 1])
+                        if st.st_dev != root_st.st_dev or parent_relative in mounts:
+                            report.errors.append(
+                                f"{data_root / parent_relative}: a parent of {top} that is a mount point under "
+                                f"{data_root}, so its tree was not handed over"
+                            )
+                            break
                         if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0:
                             report.errors.append(
-                                f"{data_root / '/'.join(parts[: index + 1])}: a parent of {top} that is not a "
+                                f"{data_root / parent_relative}: a parent of {top} that is not a "
                                 "root-owned directory, so its tree was not handed over"
                             )
                             break
                         next_fd = _open_dir_nofollow(part, parent_fd)
                         os.close(parent_fd)
                         parent_fd = next_fd
+                        opened_parent = os.fstat(parent_fd)
+                        if (opened_parent.st_dev, opened_parent.st_ino) != (st.st_dev, st.st_ino):
+                            report.errors.append(
+                                f"{data_root / parent_relative}: a parent of {top} replaced since it was examined"
+                            )
+                            break
                     else:
                         visit(parent_fd, parts[-1], relative_top, root_st.st_dev)
                 finally:
                     os.close(parent_fd)
             except OSError as exc:
                 report.errors.append(f"{top}: {exc.strerror or exc}")
-        # /data itself last, after everything under it.
-        chown_fd(root_fd, ".", root_st)
+        # /data itself last, after everything under it, and only when all of it went over.
+        if not report.errors:
+            chown_fd(root_fd, ".", root_st)
     finally:
         os.close(root_fd)
     report.seconds = time.monotonic() - started
@@ -390,6 +429,10 @@ def read_marker(data_root: Path, uid: int) -> bytes | None:
         os.close(fd)
 
 
+# The marker child's exit code for anything but an OSError (whose errno it exits with otherwise).
+_CHILD_UNEXPECTED = 255
+
+
 def write_marker(data_root: Path, uid: int, gid: int) -> None:
     """Replace the marker with a new regular file owned by uid:gid.
 
@@ -411,12 +454,14 @@ def write_marker(data_root: Path, uid: int, gid: int) -> None:
                 os.setresuid(uid, uid, uid)
                 _write_marker_at(root_fd, uid, gid)
             except OSError as exc:
-                code = exc.errno or 1
+                code = exc.errno if exc.errno and 0 < exc.errno < _CHILD_UNEXPECTED else errno.EIO
             except BaseException:
-                code = 1
+                code = _CHILD_UNEXPECTED
             os._exit(code)
         _, status = os.waitpid(pid, 0)
         code = os.waitstatus_to_exitcode(status)
+        if code == _CHILD_UNEXPECTED:
+            raise OSError(errno.EIO, f"writing the marker as uid {uid} failed: an unexpected error in the child")
         if code != 0:
             raise OSError(code, f"writing the marker as uid {uid} failed: {os.strerror(code)}")
     finally:
@@ -476,6 +521,14 @@ def main(*, run_as: str | None = None, settings: Any = None, data_root: Path | N
     except ValueError as exc:
         logger.error("%s", exc)
         return 64
+    if run_as != "root" and st.st_uid == NOBODY_UID:
+        logger.warning(
+            "%s is owned by uid %s (nobody): data on a root-squashed or NFS mount looks like this, and the controller "
+            "runs as uid %s instead. Give ./data to a real uid, or 10002.",
+            data_root,
+            NOBODY_UID,
+            CONTROLLER_UID,
+        )
     if decision.uid is None:
         remove_marker(data_root)
         logger.warning(
@@ -505,7 +558,7 @@ def main(*, run_as: str | None = None, settings: Any = None, data_root: Path | N
             decision.uid,
         )
         report = fix_ownership(data_root, paths, decision.uid, decision.gid, from_uids=from_uids)
-        if not report.errors:
+        if not report.errors and not report.unchecked:
             try:
                 write_marker(data_root, decision.uid, decision.gid)
             except OSError as exc:
