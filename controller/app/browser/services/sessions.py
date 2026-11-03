@@ -441,6 +441,7 @@ class BrowserSessionService(SessionCreation):
                 "log has Chromium's own error."
             ) from exc
         context = None
+        shadow_session = None
         try:
             # Launched by the controller (not an attach mode), and gated before its first context.
             await manager.request_gates.attach(headed_browser, attach_mode=False)
@@ -490,6 +491,9 @@ class BrowserSessionService(SessionCreation):
             await manager._persist_session(shadow_session, status="active")
         except Exception:
             manager.sessions.pop(shadow_session_id, None)
+            if shadow_session is not None:
+                # As create's rollback: a session the window-birth watcher registered is forgotten with it.
+                manager.window_births.forget_session(shadow_session)
             # As create's rollback: the context first, then the browser, and its gate only once that has closed.
             if context is not None:
                 # Bounded as each teardown step is: a stalled close must not keep the original error from
