@@ -91,10 +91,15 @@ class Harness:
         self.target_ids: dict[Any, str] = {}
         self.late_refused: list[tuple[Any, Any]] = []
         self.enabled = True
+        self.seeded: dict[Any, str] = {}
         self.births = WindowBirths(
             enabled=lambda: self.enabled,
+            # The fakes drive born-refused through `counts` directly: a window with an opener is born refused
+            # while the session counts (the manager resolves the opener; here the test sets the outcome).
+            window_born_refused=lambda _session, opener_id: bool(opener_id) and self.counts,
             session_counts_as_refused=lambda _session: self.counts,
             resolve_target_id=self._resolve,
+            seed_target_id=lambda page, tid: self.seeded.__setitem__(page, tid),
             on_late_refused=lambda session, page: self.late_refused.append((session, page)),
         )
 

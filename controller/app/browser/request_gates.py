@@ -304,6 +304,11 @@ class RequestGates:
         with contextlib.suppress(TypeError):  # a page that cannot be weakly referenced (a test double)
             self._target_ids[page] = target_id
 
+    def seed_target_id(self, page: Any, target_id: str) -> None:
+        """Cache a page's targetId from outside (the window-birth watcher seeds the first page when the gate is
+        off, so a window's openerId can be matched to it)."""
+        self._seed_target_id(page, target_id)
+
     def known_target_id(self, page: Any) -> str | None:
         """A page's targetId if it was read already: no I/O (the audit's attribution reads it)."""
         return self._target_ids.get(page)

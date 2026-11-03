@@ -260,8 +260,14 @@ class BrowserDiagnosticsService:
             spawn_background_task(self._taint_if_born_refused(session, popup))
 
     async def _taint_if_born_refused(self, session: "BrowserSession", popup: "Page") -> None:
-        """Mark a reported popup refused when its CDP target was born refused, on top of its opener's verdict."""
-        if await self.manager.window_births.mark_reported(session, popup):
+        """Mark a reported popup refused when its CDP target was born refused, on top of its opener's verdict.
+
+        mark_reported always records the report (so the sweep does not close a window Playwright reported).
+        The taint is added only when the opener-at-report verdict left the popup clean: a window born refused
+        whose opener was already refused is handled by that verdict, and tainting it again would blank it a
+        second time and cut short the refused page's own script that the refused-popup tests observe."""
+        born_refused = await self.manager.window_births.mark_reported(session, popup)
+        if born_refused and not self.manager.page_provenance.refused(popup):
             if self.manager.page_provenance.opener_judged(popup, opener_refused=True):
                 await self._return_to_blank(session, popup)
 
