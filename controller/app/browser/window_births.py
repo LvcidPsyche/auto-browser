@@ -99,6 +99,10 @@ REPORTED_IDS_TIMEOUT_SECONDS = 3.0
 # before each read after the first (times the attempt number).
 TARGET_ID_READ_ATTEMPTS = 3
 TARGET_ID_RETRY_SECONDS = 0.5
+# Once those reads have failed, how often a sweep that needs the page's id reads it again (one read per page
+# per interval, only while the sweep has work): a read that failed in passing does not keep the session's
+# unmatched windows from the sweep for the page's life.
+TARGET_ID_REREAD_SECONDS = 5.0
 # CDP target types that are windows of their own; only these ever become birth entries.
 PAGE_TARGET_TYPE = "page"
 
@@ -536,6 +540,7 @@ class WindowBirths:
         resolve_target_id: Callable[[Any], Awaitable[str | None]],
         known_target_id: Callable[[Any], str | None],
         seed_target_id: Callable[[Any, str], None],
+        opened_by_controller: Callable[[Any], bool] | None = None,
     ) -> None:
         # Whether ALLOWED_HOSTS refuses any host: when every host is allowed nothing is ever born refused, so
         # the watcher attaches to nothing (unlike the gate, it runs with PRE_REQUEST_BLOCKING off).
@@ -549,6 +554,13 @@ class WindowBirths:
         # Cache a page's targetId so a later window's openerId can be matched to it with no I/O; the gate seeds
         # the first page when it is on, this seeds it when it is off.
         self._seed_target_id = seed_target_id
+        # Whether the controller opened a page itself (an open-tab tool tab): such a page has no opener, so no
+        # born-refused window can be it, and the sweep need not know its targetId (page_provenance).
+        self._controller_opened = opened_by_controller or (lambda _page: False)
+        # Pages whose targetId read failed at least once (_resolve_and_mark): the sweep does not wait for their
+        # reads, and reads one again (rate-bounded) when it needs the id and no read is in flight.
+        self._read_failed: "weakref.WeakSet[Any]" = weakref.WeakSet()
+        self._rereads: "weakref.WeakKeyDictionary[Any, float]" = weakref.WeakKeyDictionary()
         # By id(browser): a browser is held until released, so its id is not reused meanwhile.
         self._watchers: dict[int, tuple[Any, WindowBirthWatcher]] = {}
         # Why, and when, the last attach to a browser failed, until one succeeds (readiness, the retry backoff).
@@ -727,7 +739,10 @@ class WindowBirths:
             if target_id is not None or _page_closed(page):
                 break
             # A read that failed (a bound hit on a busy browser) is tried again before the page is refused as
-            # unjudged; the sweep spares the session's unmatched windows meanwhile (_reported_target_ids).
+            # unjudged; the sweep spares the session's unmatched windows meanwhile (_reported_target_ids), and
+            # does not wait for these retries (the id is not expected within its wait).
+            with contextlib.suppress(TypeError):
+                self._read_failed.add(page)
             await asyncio.sleep(TARGET_ID_RETRY_SECONDS * attempt)
             target_id = await self._resolve_target_id(page)
         return watcher.mark_reported(session, target_id, page)
@@ -738,20 +753,24 @@ class WindowBirths:
 
     async def _reported_target_ids(self, session: Any) -> tuple[set[str], bool]:
         """The targetIds of the session's pages whose id the controller knows, so the sweep never closes one
-        Playwright reported, and whether that is every page of the session.
+        Playwright reported, and whether every page that could be an unmatched window has its id among them.
 
         A page Playwright reported is given a report task (``note_reported`` in ``attach_popup``) that resolves
         and caches its targetId; its first page and open-tab tabs are cached when opened. The reads in flight
-        are waited for (bounded), then the cached id of every page is taken. A page whose id is not cached is
-        never read here: resolving an arbitrary window's id would open — and, since the session is kept,
-        retain — a CDP session per window, which a refused page flooding windows would turn into resource
+        are waited for (bounded; not one that has failed already and is being retried, whose id is not expected
+        within the wait), then the cached id of every page is taken. A page whose id is not cached is not read
+        here as part of the sweep: resolving an arbitrary window's id would open — and, since the session is
+        kept, retain — a CDP session per window, which a refused page flooding windows would turn into resource
         exhaustion. Such a page is reported all the same (an unreported window has no Page), so while one is
-        open the sweep closes nothing it cannot match (``close_unreported``)."""
+        open the sweep closes nothing it cannot match (``close_unreported``), unless the controller opened the
+        page itself: that page has no opener, so no born-refused window can be it. Its read is started again,
+        once per TARGET_ID_REREAD_SECONDS, so a read that failed in passing does not spare the session's
+        unmatched windows for the page's life; the next sweep uses the id."""
         pages = list(self._session_pages(session))
         reads = [
             report
-            for report in (self._reports.get(page) for page in pages)
-            if isinstance(report, asyncio.Task) and not report.done()
+            for page, report in ((page, self._reports.get(page)) for page in pages)
+            if isinstance(report, asyncio.Task) and not report.done() and not self._failed_once(page)
         ]
         if reads:
             with contextlib.suppress(Exception):
@@ -760,11 +779,35 @@ class WindowBirths:
         all_known = True
         for page in pages:
             target_id = self._known_target_id(page)
-            if target_id is None:
-                all_known = _page_closed(page) and all_known
-            else:
+            if target_id is not None:
                 ids.add(target_id)
+            elif not _page_closed(page):
+                self._read_again(page)
+                if not self._controller_opened(page):
+                    all_known = False
         return ids, all_known
+
+    def _failed_once(self, page: Any) -> bool:
+        try:
+            return page in self._read_failed
+        except TypeError:
+            return False
+
+    def _read_again(self, page: Any) -> None:
+        """Read an open page's unknown targetId again, in the background, unless a read is in flight or one
+        was started less than TARGET_ID_REREAD_SECONDS ago. The read caches the id (request_gates)."""
+        try:
+            report = self._reports.get(page)
+            if isinstance(report, asyncio.Task) and not report.done():
+                return
+            now = time.monotonic()
+            last = self._rereads.get(page)
+            if last is not None and now - last < TARGET_ID_REREAD_SECONDS:
+                return
+            self._rereads[page] = now
+        except TypeError:  # a page that cannot be weakly referenced (a test double)
+            return
+        spawn_background_task(self._resolve_target_id(page))
 
     async def close_unreported(self, session: Any) -> None:
         watcher = self._get(getattr(session, "browser", None))

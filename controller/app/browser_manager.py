@@ -205,6 +205,7 @@ class BrowserManager:
             resolve_target_id=lambda page: self.request_gates.target_id_of(page),
             known_target_id=self.request_gates.known_target_id,
             seed_target_id=self.request_gates.seed_target_id,
+            opened_by_controller=self.page_provenance.controller_opened,
         )
         self.action_pipeline = BrowserActionPipeline()
         self.element_ids = ElementIds(settings)

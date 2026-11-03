@@ -13,6 +13,7 @@ No real browser: the fakes stand in for the browser-level CDP session and the ta
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 import pytest
@@ -124,6 +125,8 @@ class Harness:
         self.pages: dict[str, Any] = {}
         self.target_ids: dict[Any, str] = {}
         self.refused: set[Any] = set()
+        # Pages the controller opened itself (an open-tab tab): page_provenance.controller_opened.
+        self.controller_opened: set[Any] = set()
         self.enabled = True
         self.seeded: dict[Any, str] = {}
         self.births = WindowBirths(
@@ -135,6 +138,7 @@ class Harness:
             resolve_target_id=self._resolve,
             known_target_id=lambda page: self.target_ids.get(page),
             seed_target_id=lambda page, tid: self.seeded.__setitem__(page, tid),
+            opened_by_controller=lambda page: page in self.controller_opened,
         )
 
     @staticmethod
@@ -925,3 +929,89 @@ async def test_the_backoff_message_says_within_the_last_seconds() -> None:
 
     with pytest.raises(WindowBirthWatcherUnavailable, match="within the last 2 s"):
         await harness.watch()
+
+
+# ── round 4: the sweep and a page whose id stays unknown ──────────────────────
+
+
+async def test_a_page_the_controller_opened_does_not_keep_the_sweep_from_closing(h: Harness) -> None:
+    """Reviewer's R1 (H4): an open-tab tab whose targetId reads all failed has no cached id, yet it has no
+    opener, so no born-refused window can be it. It is left out of the sweep's all-known test: the refused
+    page's unreported window is closed once the opener is clean. A reported popup in the same state still
+    spares the session's unmatched windows (any of them could be that popup)."""
+    opener = h.known("OP", refused=True)
+    h.cdp.fire("Target.targetCreated", created("W", CTX, opener_id="OP"))
+    h.cdp.fire("Target.targetCreated", created("TAB", CTX))  # the open-tab tab's target: no opener
+    tab = FakePage()  # the tab as a page of the session, its id never read
+    h.pages["TAB?"] = tab
+    h.refused.discard(opener)
+
+    assert await h.sweep() == [], "a page whose id is unknown, not known to be the controller's, spared nothing"
+    h.controller_opened.add(tab)
+    assert await h.sweep() == ["W"]
+
+
+async def test_a_reported_pages_failed_read_is_tried_again_by_the_sweep_once_per_interval(
+    h: Harness, monkeypatch
+) -> None:
+    """Reviewer's B1: a reported popup whose reads all failed (REFUSED_UNJUDGED, verdict kept) spared the
+    session's unmatched windows for its life, since nothing read its id again. A sweep that needs the id
+    starts one fresh read when none is in flight, at most once per TARGET_ID_REREAD_SECONDS, and does not
+    wait for it: once the read lands and the id is cached, the next sweep matches the popup and closes the rest."""
+    monkeypatch.setattr(wb, "TARGET_ID_RETRY_SECONDS", 0.0)
+    opener = h.known("OP", refused=True)
+    h.cdp.fire("Target.targetCreated", created("T1", CTX, opener_id="OP"))
+    h.cdp.fire("Target.targetCreated", created("T2", CTX, opener_id="OP"))
+    popup = FakePage()  # T1, reported; its reads fail until `healed`
+    h.pages["T1?"] = popup
+    healed = False
+    reads: list[Any] = []
+
+    async def resolve(page: Any) -> str | None:
+        reads.append(page)
+        if page is popup and healed:
+            h.target_ids[popup] = "T1"  # the gate's cache
+        return h.target_ids.get(page)
+
+    monkeypatch.setattr(h.births, "_resolve_target_id", resolve)
+    assert await h.births.verdict(h.session, popup) is BirthVerdict.REFUSED_UNJUDGED
+    assert reads.count(popup) == wb.TARGET_ID_READ_ATTEMPTS
+    h.refused.discard(opener)
+
+    assert await h.sweep() == []
+    await asyncio.sleep(0)
+    assert reads.count(popup) == wb.TARGET_ID_READ_ATTEMPTS + 1, "the sweep did not read the page's id again"
+    assert await h.sweep() == []
+    await asyncio.sleep(0)
+    assert reads.count(popup) == wb.TARGET_ID_READ_ATTEMPTS + 1, "a second read within the interval"
+
+    healed = True
+    monkeypatch.setattr(wb, "TARGET_ID_REREAD_SECONDS", 0.0)
+    assert await h.sweep() == []  # this sweep starts the read and does not wait for it
+    await asyncio.sleep(0)
+    assert h.target_ids.get(popup) == "T1"
+    assert await h.sweep() == ["T2"]
+    assert h.watcher._births["T1"].reported
+
+
+async def test_the_sweep_does_not_wait_for_a_read_that_failed_once(h: Harness, monkeypatch) -> None:
+    """Reviewer's R7: the sweep (navigate's, under the session lock) waited up to REPORTED_IDS_TIMEOUT_SECONDS
+    for a read whose first attempt had failed and that was sleeping before its retry. Its id is not expected
+    within the wait, and the sweep spares the session's unmatched windows either way: it returns at once."""
+    monkeypatch.setattr(wb, "TARGET_ID_RETRY_SECONDS", 30.0)  # the retry sleeps far past the sweep's wait
+    monkeypatch.setattr(wb, "REPORTED_IDS_TIMEOUT_SECONDS", 1.0)
+    opener = h.known("OP", refused=True)
+    h.cdp.fire("Target.targetCreated", created("T1", CTX, opener_id="OP"))
+    popup = FakePage()
+    h.pages["T1?"] = popup
+    report = asyncio.ensure_future(h.births.verdict(h.session, popup))
+    await asyncio.sleep(0.05)  # the first read failed; the retry is sleeping
+    assert not report.done()
+    h.refused.discard(opener)
+
+    started = asyncio.get_running_loop().time()
+    assert await h.sweep() == []
+    assert asyncio.get_running_loop().time() - started < 0.5, "the sweep waited for a read that failed already"
+    report.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await report

@@ -20,6 +20,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.browser import request_gates as rg
+from app.browser import window_births as wb_module
 from app.browser.services.tabs import TabUnjudgedError
 from app.browser.window_births import BirthVerdict, WindowBirthWatcher
 from app.readiness import window_birth_watcher_check
@@ -611,3 +613,103 @@ async def test_a_window_a_cross_site_iframe_on_an_allowed_page_opens_is_judged_b
         assert not env.manager._page_refused(window) and window.url.endswith("/second?from=frame")
         await env.manager.activate_tab(session_id, session.context.pages.index(window))
         assert "two" in json.dumps(await env.manager.observe(session_id, preset="text"))
+
+
+# ── round 4: a page whose id stays unknown and the sweep ───────────────────────
+
+
+def reads_failing_for(monkeypatch, *, spare, failing: list) -> None:
+    """The real targetId read (request_gates._read_target_id, under its own bound) fails for the pages in
+    ``failing`` (a list, so a page can be added once it exists) and for every page but ``spare`` while the
+    list holds the marker ``all``; the others read as usual."""
+    real = rg._read_target_id
+
+    async def read(page):
+        if page is spare:
+            return await real(page)
+        if "all" in failing or any(page is failed for failed in failing):
+            raise RuntimeError("test: the targetId read failed")
+        return await real(page)
+
+    monkeypatch.setattr(rg, "_read_target_id", read)
+
+
+@pytest.mark.parametrize("failing", ["every-page-but-the-first", "the-tab-only", "none"])
+async def test_an_open_tab_tab_whose_read_fails_does_not_keep_the_sweep_from_closing(
+    tmp_path: Path, monkeypatch, failing: str
+) -> None:
+    """Reviewer's R1 (H4, H4b, with H4c as the control): an open-tab tab whose targetId reads all fail is never
+    refused (it has no opener, so no verdict is applied), yet its unknown id kept the sweep from closing anything
+    in the session: the refused page's unreported window outlived the agent's navigate and sent the secret to an
+    allowed origin's server. A page the controller opened cannot be a born-refused window, so it is left out of
+    the sweep's all-known test, and the window is closed: /landing is never reached."""
+    wbc.install(monkeypatch, wbc.plant(wbc.FIRST_NAVIGATIONS["javascript"]))
+    async with browser_env(tmp_path, PAGES) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        failing_pages: list = ["all"]
+        if failing != "none":
+            reads_failing_for(monkeypatch, spare=session.page, failing=failing_pages)
+        await env.manager.open_tab(session_id, f"{env.allowed}/ok", activate=False)
+        tab = session.context.pages[-1]
+        if failing == "the-tab-only":
+            failing_pages[:] = [tab]  # from here on only this tab's reads fail, its retries included
+        await settle(lambda: not pending(), timeout=TIMEOUT)
+        assert (env.manager.request_gates.known_target_id(tab) is None) is (failing != "none")
+        assert not env.manager._page_refused(tab)
+
+        await wbc.drive_refused_window(env, session_id)
+        watcher = env.manager.window_births._get(session.browser)
+        assert len(wbc._live_born_refused(watcher)) == 1
+        await env.manager.navigate(session_id, f"{env.allowed}/ok")
+        await past_the_grace(monkeypatch)
+
+        assert await settle(lambda: wbc._live_born_refused(watcher) == [], timeout=TIMEOUT), (
+            "the window outlived the refusal while the tab's id was unknown"
+        )
+        wbc.RELEASED.set()
+        await asyncio.sleep(1.5)
+        await settle(lambda: not pending(), timeout=TIMEOUT)
+        assert wbc.LANDING == []
+        tabs = await env.manager.list_tabs(session_id)
+        assert SECRET not in json.dumps(tabs) and SECRET not in json.dumps(session.console_messages)
+        assert not env.manager._page_refused(tab)
+
+
+async def test_a_reported_popup_whose_read_failed_in_passing_spares_the_window_only_until_a_read_lands(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Reviewer's B1: a reported popup whose reads all failed is refused as unjudged, and spared the session's
+    unmatched windows for its whole life, since nothing read its id again. A sweep that needs the id now reads
+    it again (once per TARGET_ID_REREAD_SECONDS): once a read lands, the popup is matched and the refused page's
+    window is closed. The popup itself stays refused as unjudged (its verdict was reached once)."""
+    wbc.install(monkeypatch, wbc.plant(wbc.FIRST_NAVIGATIONS["javascript"]))
+    monkeypatch.setattr(wb_module, "TARGET_ID_REREAD_SECONDS", 0.5, raising=False)  # absent before round 4
+    async with browser_env(tmp_path, PAGES) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        failing_pages: list = ["all"]
+        reads_failing_for(monkeypatch, spare=session.page, failing=failing_pages)
+        popup = await open_popup(session, f"{env.allowed}/second")
+        await settle(lambda: not pending(), timeout=TIMEOUT)
+        assert env.manager.page_provenance.refused_unjudged(popup)
+        assert env.manager.request_gates.known_target_id(popup) is None
+
+        await wbc.drive_refused_window(env, session_id)
+        watcher = env.manager.window_births._get(session.browser)
+        await env.manager.navigate(session_id, f"{env.allowed}/ok")
+        await past_the_grace(monkeypatch)
+        await asyncio.sleep(2.0)  # sweeps ran (the recheck timer), each sparing the window and reading again
+        assert len(wbc._live_born_refused(watcher)) == 1, "the window was closed while the popup's id was unknown"
+
+        failing_pages.clear()  # the reads work again
+        assert await settle(lambda: wbc._live_born_refused(watcher) == [], timeout=TIMEOUT), (
+            "the window was not closed once the popup's id could be read"
+        )
+        assert env.manager.request_gates.known_target_id(popup) is not None
+        assert env.manager.page_provenance.refused_unjudged(popup) and not popup.is_closed()
+        wbc.RELEASED.set()
+        await asyncio.sleep(1.5)
+        await settle(lambda: not pending(), timeout=TIMEOUT)
+        assert wbc.LANDING == []
+        assert SECRET not in json.dumps(await env.manager.list_tabs(session_id))

@@ -74,6 +74,9 @@ class _PageState:
     # Tainted because its birth could not be judged (the window-birth watcher was lost when it was born, or
     # its target could not be read), not for any host: its refusal says so, and names the way out.
     unjudged: bool = False
+    # The controller opened this page itself (an open-tab tool tab): it has no opener, so no window is ever
+    # born refused by it, and the sweep of such windows need not know its target id (window_births).
+    controller_opened: bool = False
     # Final URLs of failed top-level navigations whose redirect chain passed a refused URL
     # (refused_navigation_failed): a download from one of them is refused.
     refused_failures: deque[str] = field(default_factory=lambda: deque(maxlen=REFUSED_FAILURES_KEPT))
@@ -144,6 +147,11 @@ class PageProvenance:
         """Whether the page is refused only because its birth could not be judged (opener_judged's ``unjudged``)."""
         state = self._state(page)
         return state is not None and state.tainted and state.unjudged and state.refused_hop is None
+
+    def controller_opened(self, page: Any) -> bool:
+        """Whether the controller opened the page itself (opened_by_controller): it has no opener."""
+        state = self._state(page)
+        return state is not None and state.controller_opened
 
     def counts_for_its_session(self, page: Any) -> bool:
         """Whether the page can run a refused host's code, so another page's own commit while it is open is
@@ -230,6 +238,7 @@ class PageProvenance:
         state = self._state(page)
         if state is not None:
             state.opener_pending = False
+            state.controller_opened = True
 
     def opener_judged(
         self, page: Any, *, opener_refused: bool, by_another_page: bool = False, unjudged: bool = False
