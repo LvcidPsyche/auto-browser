@@ -798,3 +798,27 @@ async def test_a_lost_watcher_refuses_popups_until_a_replacement_re_registers_th
         await popup.wait_for_load_state()
         await settle(lambda: not pending(), timeout=WINDOW_TIMEOUT_SECONDS)
         assert not env.manager._page_refused(popup), popup.url
+
+
+# ── the hold until the birth verdict is not a refusal ───────────────────────────
+
+
+async def test_a_clean_popup_is_activatable_the_moment_it_is_reported(tmp_path: Path) -> None:
+    """A reported popup is held refused until its birth verdict lands, a CDP round trip after the report; the
+    agent's next call can come sooner. activate_tab and list_tabs wait for the verdict rather than refuse the
+    popup (three tests of test_allowed_hosts_navigation.py activate a popup right after its report)."""
+    pages = {"/start": "<p>start</p>", "/second": "<title>second</title><p>two</p>"}
+    async with browser_env(tmp_path, pages) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        async with session.context.expect_page() as opened:
+            await session.page.evaluate("(u) => { window.open(u) }", f"{env.allowed}/second")
+        popup = await opened.value
+
+        await env.manager.list_tabs(session_id)
+        await env.manager.activate_tab(session_id, session.context.pages.index(popup))
+
+        assert session.page is popup
+        assert not env.manager._page_refused(popup)
+        await popup.wait_for_load_state()
+        assert "two" in json.dumps(await env.manager.observe(session_id, preset="text"))

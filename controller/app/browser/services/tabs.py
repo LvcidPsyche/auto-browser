@@ -140,7 +140,8 @@ class BrowserTabService:
             # A popup or tab the page opened may sit on a host the allowlist
             # refuses, and every later action and observation reads session.page.
             # Refused before it becomes the active page, so the session stays
-            # where it was.
+            # where it was. A popup reported a moment ago is judged first, not refused for being judged.
+            await self.manager.diagnostics.birth_judged(target_page)
             try:
                 self.manager._assert_page_object_allowed(target_page)
             except PermissionError as exc:
@@ -196,6 +197,8 @@ class BrowserTabService:
         pages = self.pages(session)
         for page in pages:
             self.manager._attach_page_listeners(page, session)
+        # A popup reported a moment ago is listed by its birth verdict, not as refused while it is judged.
+        await asyncio.gather(*(self.manager.diagnostics.birth_judged(page) for page in pages))
         # A tab ALLOWED_HOSTS refuses is listed by URL only: checked before the title
         # is read and after, by its count of refused commits too, since the page can
         # move while it is read and come back (see app/browser/page_read.py).
