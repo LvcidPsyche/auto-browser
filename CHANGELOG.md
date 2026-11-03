@@ -2,6 +2,42 @@
 
 All notable changes to auto-browser are documented here.
 
+## [Unreleased]
+
+### Security
+
+- **The controller refuses requests from `docker_ephemeral` session networks.** It joins each session's network to
+  reach that browser, so in 1.13.0 code that broke out of a session's browser could still reach the API at the
+  controller's address there, with only the token in its way. Browser containers never call the
+  controller, so it now answers 403 to any request whose direct peer is on a live session network, before the Host
+  check, the rate limiter and the token check. Forwarded-for headers are ignored. A session network that reports no
+  subnet is not used: the session fails to start rather than run unfenced. On Docker Desktop a session container can
+  still reach the API port published on `127.0.0.1` through `host.docker.internal`, where the controller sees the
+  host's own address; the Host allowlist and the token refuse it there.
+- **Shadow browsing runs its headed Chromium with Chromium's sandbox on.** It launched with `--no-sandbox`, and since
+  the shipped controller image has no browser for it, that meant host runs, where the sandbox works. A controller
+  running as root, where Chromium cannot start sandboxed, now refuses shadow browsing. When the sandboxed launch
+  fails (on Linux it needs unprivileged user namespaces), the error says so, and the controller log has Chromium's
+  own message.
+- **`/docs` and `/redoc` load pinned Swagger UI (5.34.0) and ReDoc (2.5.4) with Subresource Integrity hashes,** and
+  nothing else from another origin (no Google Fonts, no third-party favicon). Swagger's Authorize box takes the API
+  token, and the pages loaded a floating major version from a CDN with no integrity check.
+- **The smoke and doctor scripts no longer put the API token on curl's command line,** where every local user could
+  read it in the process list. It reaches curl as a config on stdin, and stays out of `bash -x` traces.
+
+### Fixed
+
+- **A browser container that could not be removed no longer keeps its session network** (and its address-pool slot)
+  until the next start: it is disconnected first.
+- **A foreign Docker network holding a session network's name** gives an error naming it and what to do, instead of
+  Docker's bare conflict.
+- **The shadow-browse route logs why it refused** (disabled, a root controller, no sandbox); callers still get a
+  generic 400.
+
+### Changed
+
+- CI's compose-smoke runs with a `VNC_PASSWORD` on the shared browser-node, so its VNC-authentication checks run.
+
 ## [1.13.0] — 2026-11-03
 
 A security release over 1.12.4 (GHSA-4c52-f6vr-xrrf). A browser container that a page compromised could take over
