@@ -148,6 +148,11 @@ class PageProvenance:
         state = self._state(page)
         return state is not None and state.tainted and state.unjudged and state.refused_hop is None
 
+    def held_for_verdict(self, page: Any) -> bool:
+        """Whether the page is refused only because its opener's verdict is pending: nothing happened to it."""
+        state = self._state(page)
+        return state is not None and state.opener_pending and not state.tainted and state.refused_hop is None
+
     def controller_opened(self, page: Any) -> bool:
         """Whether the controller opened the page itself (opened_by_controller): it has no opener."""
         state = self._state(page)

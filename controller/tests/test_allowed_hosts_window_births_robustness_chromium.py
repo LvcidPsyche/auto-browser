@@ -448,11 +448,15 @@ async def test_an_open_tab_tab_costs_one_cdp_session(tmp_path: Path) -> None:
 # ── 11. the hold until the verdict ─────────────────────────────────────────────
 
 
-async def test_nothing_a_held_popup_emits_is_kept_and_a_clean_verdict_frees_it(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("outcome", ["clean", "refused"])
+async def test_nothing_a_held_popup_emits_is_kept_until_its_verdict_which_decides_it(
+    tmp_path: Path, monkeypatch, outcome: str
+) -> None:
     """The orchestrator's O2: the hold from a popup's report to its birth verdict, made observable by holding
-    the targetId read on an event. While held, what the popup logs and throws is dropped, it is not read, and
-    its title is not listed; once the verdict (CLEAN) lands, the page is usable, and what it emitted meanwhile
-    is still not in the session's output."""
+    the targetId read on an event. While held, what the popup logs and throws is not in the session's output,
+    it is not read, and its title is not listed. A clean verdict frees the page and appends what it emitted
+    meanwhile (round-4 R5: a legitimate popup's load-time output reached the agent before the hold existed);
+    a refused verdict blanks it and drops that output for good."""
     noisy = (
         f"<title>noisy-title</title><p>noisy-body</p><script>console.log('{SECRET}');"
         f"setTimeout(() => {{ throw new Error('{SECRET}') }}, 0)</script>"
@@ -470,6 +474,13 @@ async def test_nothing_a_held_popup_emits_is_kept_and_a_clean_verdict_frees_it(t
             return await original(page)
 
         monkeypatch.setattr(births, "_resolve_target_id", held)
+        real_verdict = births.verdict
+
+        async def verdict(session, page):
+            result = await real_verdict(session, page)
+            return BirthVerdict.REFUSED if outcome == "refused" and page is not session.page else result
+
+        monkeypatch.setattr(births, "verdict", verdict)
         emitted: list = []
         session.context.on("console", lambda message: emitted.append(message.text))
 
@@ -489,11 +500,19 @@ async def test_nothing_a_held_popup_emits_is_kept_and_a_clean_verdict_frees_it(t
         session.page = session.context.pages[0]
 
         release.set()
+        if outcome == "refused":
+            with pytest.raises(PermissionError):
+                await env.manager.activate_tab(session_id, session.context.pages.index(popup))
+            await settle(lambda: popup.url == "about:blank", timeout=TIMEOUT)
+            assert env.manager._page_refused(popup) and session.page is not popup
+            assert SECRET not in json.dumps(session.console_messages)
+            assert SECRET not in json.dumps(session.page_errors)
+            return
         await env.manager.activate_tab(session_id, session.context.pages.index(popup))
         assert session.page is popup and not env.manager._page_refused(popup)
         assert "noisy-body" in json.dumps(await env.manager.observe(session_id, preset="text"))
-        assert SECRET not in json.dumps(session.console_messages)
-        assert SECRET not in json.dumps(session.page_errors)
+        assert SECRET in json.dumps(session.console_messages), "the clean popup's held console line was dropped"
+        assert SECRET in json.dumps(session.page_errors), "the clean popup's held page error was dropped"
 
 
 # ── 12. inert when every host is allowed ──────────────────────────────────────
@@ -829,3 +848,39 @@ async def test_activate_tab_of_a_session_closed_during_the_wait_is_an_unknown_se
         with pytest.raises(SessionNotFoundError):
             await asyncio.wait_for(activate, timeout=TIMEOUT)
         await settle(lambda: not pending(), timeout=TIMEOUT)
+
+
+# ── round 4: what a held popup logs reaches the agent once it is judged clean ──
+
+CALLBACK_FLOW = {
+    "/start": "<title>start</title><p>start</p>"
+    "<script>window.addEventListener('message', (e) => { window.__code = e.data })</script>",
+    "/authorize": nav.redirect("{ALLOWED}/callback"),
+    "/callback": "<title>cb</title><p>cb</p><script>console.log('callback-loaded');"
+    "window.opener && window.opener.postMessage('code-123', '*');"
+    "setTimeout(() => window.close(), 1500)</script>",
+}
+
+
+@pytest.mark.parametrize("variant", ["clean", "other-refused"])
+async def test_a_clean_popups_console_output_from_its_hold_reaches_the_agent_once_it_is_judged(
+    tmp_path: Path, variant: str
+) -> None:
+    """Reviewer's R5 (L1): an OAuth callback popup logs at load, posts its code to the opener and closes itself.
+    Its load-time console line was emitted while the popup was held for its birth verdict and dropped; base kept
+    it. Held output is kept aside and appended once the verdict is clean, with another tab refused too."""
+    async with browser_env(tmp_path, {**PAGES, **CALLBACK_FLOW}) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        if variant == "other-refused":
+            refused = await open_popup(session, f"{env.evil}/")
+            await settle(lambda: env.manager._page_refused(refused), timeout=TIMEOUT)
+        popup = await open_popup(session, f"{env.allowed}/authorize")
+
+        await nav.wait_for(lambda: session.page.evaluate("() => window.__code === 'code-123'"), timeout=TIMEOUT)
+        await settle(lambda: popup.is_closed(), timeout=TIMEOUT)
+
+        assert any("callback-loaded" in json.dumps(message) for message in session.console_messages), (
+            "the callback's console line did not reach the agent"
+        )
+        assert SECRET not in json.dumps(session.console_messages)

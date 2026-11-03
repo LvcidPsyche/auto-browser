@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import contextlib
 import logging
 import mimetypes
 import shutil
@@ -29,6 +30,10 @@ DOWNLOAD_READ_MAX_BYTES = 10 * 1024 * 1024
 # How long a tab operation waits for a reported popup's birth verdict (its targetId read, retried) before it goes
 # on with the popup still held: longer than the reads it waits for, so only a verdict that never comes hits it.
 BIRTH_VERDICT_WAIT_SECONDS = 10.0
+# Console messages and page errors a reported popup emits while it is held for its birth verdict are kept aside,
+# at most this many per popup, and appended once the verdict is clean (a legitimate popup's load-time output
+# reaches the agent as it did before the hold); a refusal drops them.
+HELD_OUTPUT_MAX = 50
 
 # A fixed type table, not the host's: mimetypes.guess_type reads /etc/mime.types
 # or the Windows registry, and Windows with Office installed maps .csv to
@@ -108,6 +113,8 @@ class BrowserDiagnosticsService:
         # A reported window's pending birth verdict (_judge_birth), so a tab operation can wait for it
         # instead of refusing a clean popup that was reported a moment ago.
         self._birth_judgements: weakref.WeakKeyDictionary[Any, asyncio.Task[None]] = weakref.WeakKeyDictionary()
+        # What a held popup logged and threw meanwhile, as (the session's list, the entry), per popup (_keep_output).
+        self._held_output: weakref.WeakKeyDictionary[Any, list[tuple[list[Any], Any]]] = weakref.WeakKeyDictionary()
 
     async def get_console_messages(self, session_id: str, *, limit: int = 20) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
@@ -298,13 +305,21 @@ class BrowserDiagnosticsService:
         verdict = await self.manager.window_births.verdict(session, popup)
         if popup.is_closed():
             return
-        if self.manager.page_provenance.opener_judged(
+        refused = self.manager.page_provenance.opener_judged(
             popup,
             opener_refused=verdict is not BirthVerdict.CLEAN,
             by_another_page=verdict is BirthVerdict.REFUSED_BY_SESSION,
             unjudged=verdict is BirthVerdict.REFUSED_UNJUDGED,
-        ):
+        )
+        held = self._held_output.pop(popup, [])
+        if refused:
             spawn_background_task(self._return_to_blank(session, popup))
+            return
+        if not self.manager._page_refused(popup):
+            # Clean: what it logged and threw while held is the agent's to see, as it was before the hold. Not
+            # when something else refused the page meanwhile (a commit another tab chose): dropped with it.
+            for items, value in held:
+                self._bounded_append(items, value)
 
     def birth_pending(self, page: Any) -> bool:
         """Whether the page's birth verdict is still being judged (_judge_birth runs): the hold on it is passing."""
@@ -356,11 +371,16 @@ class BrowserDiagnosticsService:
 
         Both lists go into every observation, so a popup opened onto a disallowed host, or a
         page that moved itself there, reached the agent through its console and its errors
-        until the page guard had sent it back to about:blank.
+        until the page guard had sent it back to about:blank. A reported popup refused only
+        because its birth verdict is still being judged has its output kept aside instead
+        (bounded): a clean verdict appends it (_judge_birth), a refusal drops it.
         """
-        if self.manager._page_refused(page):
+        if not self.manager._page_refused(page):
+            self._bounded_append(items, value)
             return
-        self._bounded_append(items, value)
+        if self.birth_pending(page) and self.manager.page_provenance.held_for_verdict(page):
+            with contextlib.suppress(TypeError):
+                self._bounded_append(self._held_output.setdefault(page, []), (items, value), limit=HELD_OUTPUT_MAX)
 
     def _on_download(self, session: "BrowserSession", page: "Page", download: Any) -> None:
         # The page is judged while the event is delivered: by the time the download
