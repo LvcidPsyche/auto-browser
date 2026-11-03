@@ -591,6 +591,22 @@ def test_a_kept_hop_answered_204_is_dropped_as_playwright_1_64_reports_it(tmp_pa
     assert list(session.refused_failures) == [landing.url]
 
 
+def test_the_contexts_own_listener_drops_a_kept_hop_answered_204(tmp_path: Path) -> None:
+    """Through watch_context's listeners, as Playwright delivers the context's events."""
+    manager = manager_for(tmp_path)
+    session = popup_session()
+    context = FiringPage(ALLOWED)  # anything that keeps its listeners and fires them
+    manager.diagnostics.watch_context(context, session)
+    hop = UnframedRequest(REFUSED)
+
+    context.fire("request", hop)
+    assert session.unframed_hops == [hop]
+    context.fire("response", answered(hop, 204))
+    context.fire("requestfinished", hop)
+
+    assert session.unframed_hops == []
+
+
 @pytest.mark.parametrize("status", [200, 302])
 def test_control_a_kept_hop_answered_otherwise_is_kept(tmp_path: Path, status: int) -> None:
     manager = manager_for(tmp_path)
