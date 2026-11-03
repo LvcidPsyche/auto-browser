@@ -174,10 +174,11 @@ class SandboxStateFileTests(unittest.TestCase):
             provisioner = SimpleNamespace(sandbox_states=lambda: {"s1": {"sandbox": "on"}})
             self.assertIsNone(browser_sandbox_status(settings, provisioner)["browser_node"])
             endpoint.write_text("ws://browser-node:9223/x", encoding="utf-8")
-            status = browser_sandbox_status(settings, provisioner)
-            self.assertEqual(status["browser_node"], {"sandbox": "unknown"})
+            # An endpoint but no connection yet: unknown, never the file read here (the snapshot is taken at connect).
             (Path(tempdir) / BROWSER_SANDBOX_STATE_FILENAME).write_text('{"sandbox": "on"}', encoding="utf-8")
             status = browser_sandbox_status(settings, provisioner)
+            self.assertEqual(status["browser_node"]["sandbox"], "unknown")
+            status = browser_sandbox_status(settings, provisioner, shared={"sandbox": "on"})
             self.assertEqual(status["browser_node"], {"sandbox": "on"})
             self.assertEqual(status["isolated"], {"s1": {"sandbox": "on"}})
             self.assertTrue(status["profile_readable"])
@@ -293,7 +294,7 @@ class ComposeAndImageWiringTests(unittest.TestCase):
         self.assertIn("chromiumSandbox: sandboxed", server)
         # The state is written before the endpoint file, so a reader that sees the endpoint sees the state.
         self.assertLess(
-            server.index("await writeState(sandboxStateFile, result.state)"),
+            server.index("await writeState(sandboxStateFile, { ...result.state"),
             server.index("await rename(tmpFile, endpointFile)"),
         )
 
@@ -385,10 +386,10 @@ class HardenedStateFileTests(unittest.TestCase):
 
 
 class SharedNodeStatusTests(unittest.TestCase):
-    def setUp(self) -> None:
-        import app.browser_sandbox as module
+    """The shared node's state comes from the connect-time snapshot (tests/test_shared_sandbox.py), except a refusal:
+    a browser-node that refused to start sandboxed writes its state and no endpoint."""
 
-        module._SHARED_CACHE.clear()
+    def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.endpoint = Path(self.tmp.name) / "browser-ws-endpoint.txt"
@@ -399,16 +400,6 @@ class SharedNodeStatusTests(unittest.TestCase):
             session_isolation_mode="shared_browser_node",
             isolated_browser_seccomp_profile=str(SECCOMP_PROFILE_PATH),
         )
-
-    def test_read_once_per_browser_run(self) -> None:
-        # A compromised browser rewriting its state after the fact changes nothing until its next start.
-        self.endpoint.write_text("ws://browser-node:9223/run-1", encoding="utf-8")
-        self.state.write_text('{"sandbox": "on"}', encoding="utf-8")
-        self.assertEqual(browser_sandbox_status(self.settings)["browser_node"]["sandbox"], "on")
-        self.state.write_text('{"sandbox": "off", "cause": "userns_refused"}', encoding="utf-8")
-        self.assertEqual(browser_sandbox_status(self.settings)["browser_node"]["sandbox"], "on")
-        self.endpoint.write_text("ws://browser-node:9223/run-2", encoding="utf-8")
-        self.assertEqual(browser_sandbox_status(self.settings)["browser_node"]["sandbox"], "off")
 
     def test_a_refusal_without_an_endpoint_file_is_reported_and_fails(self) -> None:
         self.state.write_text(
@@ -423,19 +414,24 @@ class SharedNodeStatusTests(unittest.TestCase):
     def test_under_on_a_shared_node_not_on_fails(self) -> None:
         self.settings.browser_sandbox = "on"
         self.endpoint.write_text("ws://browser-node:9223/run-1", encoding="utf-8")
-        self.state.write_text('{"sandbox": "off", "cause": "setting_off"}', encoding="utf-8")
-        self.assertEqual(browser_sandbox_check(browser_sandbox_status(self.settings)).status, "fail")
-        self.state.unlink()
-        _os.utime(self.endpoint)
-        self.endpoint.write_text("ws://browser-node:9223/run-2", encoding="utf-8")
-        self.assertEqual(browser_sandbox_check(browser_sandbox_status(self.settings)).status, "fail")  # unknown
+        for snapshot in ({"sandbox": "off", "cause": "setting_off"}, {"sandbox": "unknown"}, None):
+            with self.subTest(snapshot=snapshot):
+                status = browser_sandbox_status(self.settings, shared=snapshot)
+                self.assertEqual(browser_sandbox_check(status).status, "fail")
 
 
 class OnEnforcedForIsolatedTests(_ProvisionMixin, unittest.IsolatedAsyncioTestCase):
     async def test_on_refuses_a_container_whose_state_is_not_on(self) -> None:
-        for state in ({"sandbox": "off", "cause": "userns_refused", "detail": "AppArmor"}, None):
+        for state in (
+            {"sandbox": "off", "cause": "userns_refused", "detail": "AppArmor"},
+            None,
+            {"sandbox": "unreadable", "detail": "not valid JSON"},
+            {"sandbox": "on"},  # no verification evidence
+        ):
             with self.subTest(state=state):
-                with self.assertRaisesRegex(RuntimeError, r"BROWSER_SANDBOX=on.*(off \(userns_refused\)|no state)"):
+                with self.assertRaisesRegex(
+                    RuntimeError, r"BROWSER_SANDBOX=on, but .* reports .*; the session was refused"
+                ):
                     await self._provision(sandbox_state=state, BROWSER_SANDBOX="on")
                 self.assertEqual(self.provisioner.sandbox_states(), {})
                 container = next(iter(self.client.containers.browser_containers.values()))
@@ -515,27 +511,33 @@ class SettingParsingTests(unittest.TestCase):
 class Round2WiringTests(unittest.TestCase):
     def test_server_mjs_verifies_through_sandbox_mjs(self) -> None:
         server = (BROWSER_NODE / "server.mjs").read_text(encoding="utf-8")
-        self.assertIn("const verify = (server) => verifyServer(server,", server)
+        # Exactly the factory, unwrapped: anything around it (a .then that forces ok) is a different line.
+        self.assertRegex(server, r"(?m)^const verify = makeVerify\(chromium\);$")
         self.assertNotIn("async function verify(", server)
         self.assertNotIn("verifySandbox(", server)
+        self.assertIn(
+            "await writeState(sandboxStateFile, { ...result.state, endpoint: advertised(browserServer) });", server
+        )
 
     def test_browser_node_output_reaches_docker_logs(self) -> None:
         entrypoint = (BROWSER_NODE / "entrypoint.sh").read_text(encoding="utf-8")
         self.assertIn("server.mjs > >(tee /tmp/playwright-server.log) 2>&1 &", entrypoint)
+        # PID 1 may exit before tee flushes: a refusal also prints the state directly.
+        self.assertIn('its sandbox state: $(cat "$SANDBOX_STATE_FILE" 2>/dev/null || echo none)', entrypoint)
 
     def test_ci_has_a_sandbox_on_leg_that_asserts_it_engaged(self) -> None:
         ci = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         job = ci[ci.index("  compose-smoke:") :]
         self.assertIn("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0", job)
         self.assertIn("BROWSER_SANDBOX=on", job)
-        self.assertIn("scripts/assert_browser_sandbox.py", job)
+        self.assertIn("scripts/assert_browser_sandbox.py data/browser-profile/browser-sandbox.json --require-proc", job)
+        # The negative leg: on without the profile must refuse, leaving no endpoint.
+        self.assertIn("BROWSER_SANDBOX=on BROWSER_SECCOMP_PROFILE=builtin docker compose up", job)
+        self.assertIn('if state and state.get("sandbox") == "refused":', job)
+        self.assertIn('sys.exit("a refused browser-node left an endpoint file")', job)
         script = (REPO / "scripts" / "assert_browser_sandbox.py").read_text(encoding="utf-8")
         self.assertIn('state.get("sandbox") != "on"', script)
         self.assertIn("renderers", script)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 @unittest.skipUnless((REPO / "scripts" / "assert_browser_sandbox.py").is_file(), "scripts/ is not in the image")
@@ -549,8 +551,28 @@ class AssertSandboxScriptTests(unittest.TestCase):
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
 
+    def test_setting_on_and_proc_evidence_are_required(self) -> None:
+        proc = {
+            "renderers": 3,
+            "renderer_userns_differs": True,
+            "browser_seccomp_filters": 2,
+            "renderer_seccomp_filters": [3],
+        }
+        # auto engaging on a lifted runner would hide BROWSER_SANDBOX not reaching browser-node.
+        self.assertTrue(
+            any("setting" in p for p in self.module.problems({"setting": "auto", "sandbox": "on", "verified": proc}))
+        )
+        via_page = {"renderers": 1, "renderer_userns_differs": True, "method": "chrome://sandbox"}
+        state = {"setting": "on", "sandbox": "on", "verified": via_page}
+        self.assertEqual(self.module.problems(state), [])
+        self.assertNotEqual(self.module.problems(state, require_proc=True), [])
+        self.assertEqual(
+            self.module.problems({"setting": "on", "sandbox": "on", "verified": proc}, require_proc=True), []
+        )
+
     def test_an_engaged_verified_sandbox_passes(self) -> None:
         state = {
+            "setting": "on",
             "sandbox": "on",
             "verified": {
                 "renderers": 3,
@@ -587,3 +609,7 @@ class AssertSandboxScriptTests(unittest.TestCase):
         ):
             with self.subTest(state=state):
                 self.assertNotEqual(self.module.problems(state), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

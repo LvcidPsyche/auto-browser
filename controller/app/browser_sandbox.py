@@ -15,6 +15,7 @@ the run it was verified in. Under BROWSER_SANDBOX=on the controller enforces it:
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -25,7 +26,7 @@ from typing import Any
 BROWSER_SANDBOX_STATE_FILENAME = "browser-sandbox.json"
 STATE_MAX_BYTES = 16384
 _STATES = {"on", "off", "refused"}
-_STRING_KEYS = {"setting": 16, "sandbox": 16, "cause": 64, "detail": 1000, "seccomp_profile": 32}
+_STRING_KEYS = {"setting": 16, "sandbox": 16, "cause": 64, "detail": 1000, "seccomp_profile": 32, "endpoint": 512}
 _VERIFIED_KEYS = {
     "renderers": int,
     "renderer_userns_differs": bool,
@@ -33,8 +34,6 @@ _VERIFIED_KEYS = {
     "renderer_seccomp_filters": list,
     "method": str,
 }
-# The shared node's state, keyed by its endpoint file's content: one read per browser run.
-_SHARED_CACHE: dict[str, Any] = {}
 
 # Moby's default seccomp profile plus chroot, clone and unshare; provenance in seccomp/README.md.
 SECCOMP_PROFILE_PATH = Path(__file__).resolve().parent / "browser" / "seccomp" / "chromium-sandbox.json"
@@ -82,7 +81,8 @@ def read_sandbox_state(path: Path) -> dict[str, Any] | None:
     except FileNotFoundError:
         return None
     except OSError as exc:
-        return _unreadable(f"{path} could not be opened safely ({exc.strerror or exc}; a symlink is refused)")
+        reason = "a symlink, which is refused" if exc.errno == errno.ELOOP else (exc.strerror or str(exc))
+        return _unreadable(f"{path} could not be opened ({reason})")
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
@@ -118,42 +118,70 @@ def _profile_readable(path: str | Path) -> bool:
     return True
 
 
-def _shared_node_state(endpoint_file: Path) -> dict[str, Any] | None:
-    state_file = endpoint_file.with_name(BROWSER_SANDBOX_STATE_FILENAME)
-    try:
-        endpoint = endpoint_file.read_text(encoding="utf-8").strip()
-    except OSError:
-        endpoint = None
-    if endpoint is None:
-        # No browser running through this endpoint: report a state file anyway, since a browser that refused to
-        # start sandboxed (BROWSER_SANDBOX=on) writes one and no endpoint.
-        _SHARED_CACHE.clear()
-        return read_sandbox_state(state_file)
-    if _SHARED_CACHE.get("endpoint") == endpoint:
-        return _SHARED_CACHE["state"]
-    state = read_sandbox_state(state_file)
+def verified_on(state: dict[str, Any] | None) -> bool:
+    """'on' with evidence: at least one renderer verified in its own namespace. A bare 'on' is not enough."""
+    if not state or state.get("sandbox") != "on":
+        return False
+    renderers = (state.get("verified") or {}).get("renderers")
+    return isinstance(renderers, int) and not isinstance(renderers, bool) and renderers >= 1
+
+
+def snapshot_shared_state(settings: Any, endpoint: str) -> dict[str, Any]:
+    """The shared browser-node's state for the run at `endpoint`, read once when the controller connects to it.
+
+    Only a state that names this endpoint counts: a browser-node rolled back to an image that writes none (1.13.0)
+    leaves the previous run's 'on' on disk beside its new endpoint."""
+    endpoint_file = Path(getattr(settings, "browser_ws_endpoint_file", "") or "browser-ws-endpoint.txt")
+    state = read_sandbox_state(endpoint_file.with_name(BROWSER_SANDBOX_STATE_FILENAME))
     if state is None:
-        return {"sandbox": "unknown"}  # not cached: an older image, or one still writing
-    _SHARED_CACHE.clear()
-    _SHARED_CACHE.update(endpoint=endpoint, state=state)
+        return {"sandbox": "unknown", "detail": "no browser-sandbox.json (a browser-node image older than 1.14.0)"}
+    if state.get("sandbox") == "unreadable":
+        return state
+    if state.get("endpoint") != endpoint:
+        return {
+            "sandbox": "unknown",
+            "detail": "browser-sandbox.json describes another run of browser-node, not the one connected to (an older "
+            "or rolled-back image, or one still starting)",
+        }
     return state
 
 
-def browser_sandbox_status(settings: Any, provisioner: Any = None) -> dict[str, Any]:
-    """What readiness reports: the shared browser-node's state and each live isolated container's."""
+def refusal(who: str, state: dict[str, Any] | None) -> str:
+    """The error for a session refused under BROWSER_SANDBOX=on (isolated and shared use the same wording)."""
+    if state is None:
+        described = "no state (an image older than 1.14.0 ignores BROWSER_SANDBOX)"
+    elif state.get("sandbox") == "on":
+        described = "on without verification evidence"
+    else:
+        described = f"{state.get('sandbox')} ({state.get('cause')}): {state.get('detail', '')}"
+    return f"BROWSER_SANDBOX=on, but {who} reports {described}; the session was refused."
+
+
+def browser_sandbox_status(
+    settings: Any, provisioner: Any = None, *, shared: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """What readiness reports: the shared browser-node's state and each live isolated container's.
+
+    `shared` is the connect-time snapshot (BrowserRuntimeService.shared_sandbox); it is never re-read from disk. Without
+    one, a state file beside a missing endpoint file is still reported (a browser that refused to start sandboxed
+    writes one and no endpoint), and an endpoint file with no snapshot yet is 'unknown'."""
     endpoint_file = Path(getattr(settings, "browser_ws_endpoint_file", "") or "")
-    browser_node: dict[str, Any] | None = None
-    # A controller that never connects through the endpoint file (its own local Chromium, an attach mode) has no
-    # browser-node to report; one whose endpoint file exists but holds no state runs an older or still-starting image.
-    if endpoint_file.name:
-        browser_node = _shared_node_state(endpoint_file)
+    browser_node: dict[str, Any] | None = shared
+    if browser_node is None and endpoint_file.name:
+        if endpoint_file.is_file():
+            browser_node = {"sandbox": "unknown", "detail": "browser-node has not been connected to yet"}
+        else:
+            browser_node = read_sandbox_state(endpoint_file.with_name(BROWSER_SANDBOX_STATE_FILENAME))
     states = getattr(provisioner, "sandbox_states", None)
+    supports = getattr(provisioner, "seccomp_support_known", None)
     profile_path = getattr(settings, "isolated_browser_seccomp_profile", str(SECCOMP_PROFILE_PATH))
     return {
         "setting": getattr(settings, "browser_sandbox", "auto"),
         "isolation_mode": getattr(settings, "session_isolation_mode", "shared_browser_node"),
         "profile_path": str(profile_path),
         "profile_readable": _profile_readable(profile_path),
+        # None until the provisioner has asked the daemon (its first isolated session).
+        "seccomp_supported": supports() if callable(supports) else None,
         "browser_node": browser_node,
         "isolated": dict(states()) if callable(states) else {},
     }
@@ -168,12 +196,18 @@ class _Line:
     def sandbox(self) -> str:
         return str((self.state or {}).get("sandbox", "unknown"))
 
+    @property
+    def verified(self) -> bool:
+        return verified_on(self.state)
+
     def describe(self) -> str:
         if self.sandbox in {"unknown", "unreadable"}:
             detail = (self.state or {}).get("detail") or (
                 "no browser-sandbox.json (an image older than 1.14.0, or still starting)"
             )
             return f"{self.label}: sandbox state unknown ({detail})"
+        if self.sandbox == "on":
+            return f"{self.label}: sandbox on without verification evidence"
         return (
             f"{self.label}: sandbox {self.sandbox} ({self.state.get('cause')}): {self.state.get('detail', '')}".rstrip(
                 ": "
@@ -204,6 +238,21 @@ def browser_sandbox_check(status: dict[str, Any]):
             fix="Restore app/browser/seccomp/chromium-sandbox.json or point ISOLATED_BROWSER_SECCOMP_PROFILE at it.",
             details=details,
         )
+    if (
+        status.get("setting") == "on"
+        and status.get("isolation_mode") == "docker_ephemeral"
+        and status.get("seccomp_supported") is False
+    ):
+        return ReadinessCheck(
+            name=name,
+            status="fail",
+            message=(
+                "BROWSER_SANDBOX=on, but the Docker daemon reports no seccomp support: every isolated session is "
+                "refused, since Chromium's seccomp sandbox cannot run."
+            ),
+            fix="Run the isolated browsers on a daemon with seccomp, or use BROWSER_SANDBOX=auto.",
+            details=details,
+        )
     lines: list[_Line] = []
     if status.get("browser_node") is not None:
         lines.append(_Line("browser-node", status["browser_node"]))
@@ -216,7 +265,7 @@ def browser_sandbox_check(status: dict[str, Any]):
             message="No browser container is running yet; each reports its sandbox state when it starts.",
             details=details,
         )
-    unsandboxed = [line for line in lines if line.sandbox != "on"]
+    unsandboxed = [line for line in lines if not line.verified]
     # A browser that refused to start, or any browser not verified "on" while BROWSER_SANDBOX=on, is a failure:
     # under on nothing may run unsandboxed, and a refused browser-node is down.
     failing = [line for line in unsandboxed if line.sandbox == "refused" or status.get("setting") == "on"]

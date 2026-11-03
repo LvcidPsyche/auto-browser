@@ -23,6 +23,8 @@ from .browser_sandbox import (
     SECCOMP_PROFILE_PATH,
     load_seccomp_profile,
     read_sandbox_state,
+    refusal,
+    verified_on,
 )
 
 logger = logging.getLogger(__name__)
@@ -336,16 +338,13 @@ class DockerBrowserNodeProvisioner:
             # Written before the endpoint file, so it is there now (absent only from an image older than 1.14.0).
             # Read once, here: a browser compromised later cannot rewrite what readiness reports for this run.
             sandbox = read_sandbox_state(pending.local_profile_dir / BROWSER_SANDBOX_STATE_FILENAME)
-            if self.settings.browser_sandbox == "on" and (sandbox or {}).get("sandbox") != "on":
+            if sandbox is not None and sandbox.get("endpoint") not in (None, ws_endpoint):
+                sandbox = {"sandbox": "unknown", "detail": "browser-sandbox.json describes another run"}
+            if self.settings.browser_sandbox == "on" and not verified_on(sandbox):
                 # Enforced here, not left to the image: an image older than 1.14.0 ignores BROWSER_SANDBOX.
-                described = (
-                    "no state (an image older than 1.14.0 ignores BROWSER_SANDBOX)"
-                    if sandbox is None
-                    else f"{sandbox.get('sandbox')} ({sandbox.get('cause')}): {sandbox.get('detail', '')}"
-                )
                 raise RuntimeError(
-                    f"BROWSER_SANDBOX=on, but isolated browser container {pending.container_name} reports "
-                    f"{described}; the session was refused and its container removed."
+                    refusal(f"isolated browser container {pending.container_name}", sandbox)
+                    + " Its container was removed."
                 )
             await asyncio.to_thread(pending.container.reload)
             ports = pending.container.attrs.get("NetworkSettings", {}).get("Ports", {})
@@ -429,6 +428,10 @@ class DockerBrowserNodeProvisioner:
             return [_NO_NEW_PRIVILEGES], "builtin"
         shipped = Path(path).resolve() == SECCOMP_PROFILE_PATH.resolve()
         return [_NO_NEW_PRIVILEGES, f"seccomp={profile}"], "auto-browser" if shipped else "custom"
+
+    def seccomp_support_known(self) -> bool | None:
+        """What docker info said about seccomp, once asked (readiness); None before the first isolated session."""
+        return self._seccomp_supported
 
     def _daemon_supports_seccomp(self) -> bool:
         """docker info's SecurityOptions lists name=seccomp on a daemon that can apply profiles; read once."""
@@ -857,10 +860,10 @@ class DockerBrowserNodeProvisioner:
                 why = ""
                 if state is not None:
                     why = (
-                        f" Its sandbox state: {state.get('sandbox')} ({state.get('cause')}): {state.get('detail', '')}"
+                        f" Its sandbox state: {state.get('sandbox')} ({state.get('cause')}): {state.get('detail', '')}."
                     )
                 raise RuntimeError(
-                    f"Isolated browser container {container.name} exited before Playwright endpoint was ready.{why} "
+                    f"Isolated browser container {container.name} exited before Playwright endpoint was ready.{why}\n"
                     f"{logs}"
                 )
             if endpoint_file.exists():

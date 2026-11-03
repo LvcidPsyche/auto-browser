@@ -6,7 +6,9 @@ unprivileged user namespaces (kernel.apparmor_restrict_unprivileged_userns=0): t
 least one verified renderer in its own user namespace. Unlike sandbox-report.mjs, which only prints, this exits 1, so
 a regression that stops the sandbox engaging, or makes the verification vacuous, turns CI red.
 
-usage: assert_browser_sandbox.py <path to browser-sandbox.json>
+usage: assert_browser_sandbox.py <path to browser-sandbox.json> [--require-proc]
+
+--require-proc (CI, on a kernel of 5.9 or later) also refuses evidence from chrome://sandbox instead of /proc.
 """
 
 from __future__ import annotations
@@ -16,10 +18,13 @@ import sys
 from pathlib import Path
 
 
-def problems(state: object) -> list[str]:
+def problems(state: object, *, require_proc: bool = False) -> list[str]:
     if not isinstance(state, dict):
         return ["the state is not a JSON object"]
     found = []
+    if state.get("setting") != "on":
+        # Under auto a runner that allows the sandbox engages it too: that would hide BROWSER_SANDBOX not arriving.
+        found.append(f"setting is {state.get('setting')!r}, not 'on'")
     if state.get("sandbox") != "on":
         found.append(f"sandbox is {state.get('sandbox')!r} ({state.get('cause')}): {state.get('detail')}")
     verified = state.get("verified")
@@ -33,6 +38,8 @@ def problems(state: object) -> list[str]:
         found.append("renderers are not shown in a user namespace of their own")
     filters = verified.get("renderer_seccomp_filters")
     browser_filters = verified.get("browser_seccomp_filters")
+    if require_proc and "method" in verified:
+        found.append(f"evidence came from {verified.get('method')}, not /proc (a kernel of 5.9 or later reports it)")
     if verified.get("method") != "chrome://sandbox":
         if not isinstance(filters, list) or not filters or not isinstance(browser_filters, int):
             found.append("no seccomp filter counts")
@@ -42,17 +49,18 @@ def problems(state: object) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print(__doc__.strip().splitlines()[-1])
+    args = [arg for arg in argv[1:] if arg != "--require-proc"]
+    if len(args) != 1:
+        print("usage: assert_browser_sandbox.py <path to browser-sandbox.json> [--require-proc]")
         return 2
-    path = Path(argv[1])
+    path = Path(args[0])
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         print(f"FAIL: could not read {path}: {exc}")
         return 1
     print(f"{path}: {json.dumps(state)}")
-    found = problems(state)
+    found = problems(state, require_proc="--require-proc" in argv)
     for problem in found:
         print(f"FAIL: {problem}")
     if not found:

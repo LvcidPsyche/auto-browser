@@ -177,7 +177,11 @@ def create_system_router(
             mode=mode,
             request_gates=manager.request_gates.status(),
             window_births=manager.window_births.status(),
-            browser_sandbox=browser_sandbox_status(settings, manager.runtime_provisioner),
+            browser_sandbox=browser_sandbox_status(
+                settings,
+                manager.runtime_provisioner,
+                shared=getattr(getattr(manager, "runtime", None), "shared_sandbox", None),
+            ),
             controller_user=controller_user_status(),
         )
         return JSONResponse(
