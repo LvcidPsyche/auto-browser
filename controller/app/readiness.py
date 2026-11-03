@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .auth_policy import credentials_for
+from .browser.request_gate import REDIRECT_ORIGIN_SWITCH
 from .browser.request_gates import PREFETCH_PENDING
 from .ocr import tesseract_available
 
@@ -113,11 +114,11 @@ def pre_request_gate_check(gates: dict[str, Any]) -> ReadinessCheck:
             message=(
                 "The pre-request gate is attached to a Chrome the controller did not launch, without "
                 "CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true: cross-origin 307/308 POST redirects are stopped in the "
-                "controller's sessions and fail in the operator's own tabs too."
+                "controller's sessions and can fail in the operator's own tabs too, and on Chrome 155 and later "
+                "credentialed cross-origin requests that need a CORS preflight fail after a redirect, in every tab."
             ),
             fix=(
-                "Start that Chrome with --disable-features=BlockOriginHeaderModificationOnRedirect and set "
-                "CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true."
+                f"Start that Chrome with {REDIRECT_ORIGIN_SWITCH} and set CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true."
             ),
             details=details,
         )
