@@ -77,6 +77,52 @@ token, from either source.
   production controller.
 - `/metrics` needs the token too: give a Prometheus scraper `authorization: { type: Bearer, credentials_file: <path> }`.
 
+## Per-session networks (docker_ephemeral)
+
+With `SESSION_ISOLATION_MODE=docker_ephemeral`, each session's browser container runs on
+its own Docker bridge network, `<ISOLATED_BROWSER_CONTAINER_PREFIX>-<session id>-net`
+(`ISOLATED_BROWSER_NETWORK_MODE=per_session`, the default). The controller joins that
+network before the container starts and leaves it when the session closes; the network
+is then removed. A session's browser can reach the internet and the controller, but not
+another session's browser (its Playwright server on 9223 or its noVNC on 6080), and not
+the shared `browser-node` or any other service on the compose network.
+
+- **Upgrading:** isolated browsers no longer reach compose-network services. A proxy
+  sidecar named in `DEFAULT_PROXY_SERVER` or a proxy persona must be reachable some
+  other way than by its compose service name, or keep `ISOLATED_BROWSER_NETWORK_MODE=shared`.
+- **`ISOLATED_BROWSER_NETWORK`** now applies only to `ISOLATED_BROWSER_NETWORK_MODE=shared`,
+  which puts every browser on one network as before. In `per_session` mode it is ignored,
+  and the controller logs a warning at startup.
+- **The controller must be a container on the isolation daemon.** A controller run on the
+  host, or an `ISOLATED_DOCKER_HOST` that is a different daemon, cannot join session
+  networks, so `per_session` refuses to start a session there and names
+  `ISOLATED_BROWSER_NETWORK_MODE=shared`. A docker-socket-proxy in front of the daemon
+  needs `NETWORKS=1` besides `CONTAINERS=1` and `POST=1`.
+- **Address pools.** Docker's default address pools allow about 30 bridge networks per
+  daemon, and the default bridge, the compose network and other projects take some of
+  them. Above roughly 25 concurrent sessions (`MAX_SESSIONS`), widen the pools in the
+  daemon's `daemon.json`, for example
+  `"default-address-pools": [{"base": "10.200.0.0/16", "size": 24}]`. When the pools
+  run out, session creation fails with an error that names `default-address-pools`.
+- **Leftover networks** (a controller that was killed, or
+  `ISOLATED_BROWSER_KEEP_CONTAINERS=true`) carry the label `auto-browser.managed=true`
+  and are removed at the next controller start, after the leftover containers. Remove
+  them by hand only after `docker compose down`, so the controller no longer holds an
+  endpoint on them.
+
+What per-session networks do not change:
+
+- **The controller API is reachable from every session's browser** at the controller's
+  address on that session's network (it listens on `0.0.0.0:8000`). Set a bearer token.
+- **A noVNC port published beyond loopback is reachable from other sessions.** With
+  `ISOLATED_BROWSER_BIND_HOST` set to `0.0.0.0` or a LAN address, any session's browser
+  can reach another session's published noVNC through the host address; only
+  `VNC_PASSWORD` protects it there.
+- **Separation relies on Docker's firewall rules** between bridges. A daemon run with
+  `"iptables": false` routes between them, and the networks isolate nothing.
+- **One controller per daemon.** The startup sweep removes every labelled session network
+  on the daemon, as the container sweep removes every labelled container.
+
 ## Auth profiles
 
 Auto Browser now supports reusable named auth profiles under:
@@ -702,7 +748,9 @@ connect to the container; use the noVNC page.
 `VNC_PASSWORD` adds VNC authentication to noVNC, on the shared browser-node and on
 isolated session containers; noVNC prompts for it. Set it whenever 6080 is reachable
 beyond loopback — but treat it as a second layer, not the gateway: the VNC protocol
-uses only the first 8 characters and a DES-based challenge.
+uses only the first 8 characters and a DES-based challenge. With
+`ISOLATED_BROWSER_BIND_HOST` beyond loopback it is also what keeps one isolated session's
+browser out of another session's noVNC, which per-session networks do not cover.
 
 Chromium runs in the same container as noVNC, so every page it loads can reach
 `ws://127.0.0.1:6080`. Two things keep such a page out:
