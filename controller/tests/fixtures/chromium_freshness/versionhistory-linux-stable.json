@@ -1,0 +1,25 @@
+{
+  "versions": [
+    {
+      "name": "chrome/platforms/linux/channels/stable/versions/156.0.8078.79",
+      "version": "156.0.8078.79"
+    },
+    {
+      "name": "chrome/platforms/linux/channels/stable/versions/156.0.8078.73",
+      "version": "156.0.8078.73"
+    },
+    {
+      "name": "chrome/platforms/linux/channels/stable/versions/156.0.8078.47",
+      "version": "156.0.8078.47"
+    },
+    {
+      "name": "chrome/platforms/linux/channels/stable/versions/155.0.8059.84",
+      "version": "155.0.8059.84"
+    },
+    {
+      "name": "chrome/platforms/linux/channels/stable/versions/155.0.8059.79",
+      "version": "155.0.8059.79"
+    }
+  ],
+  "nextPageToken": ""
+}
