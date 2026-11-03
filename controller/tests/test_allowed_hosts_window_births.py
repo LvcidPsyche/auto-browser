@@ -1015,3 +1015,70 @@ async def test_the_sweep_does_not_wait_for_a_read_that_failed_once(h: Harness, m
     report.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await report
+
+
+# ── round 4: a replacement and a page whose verdict its true watcher reached ───
+
+
+@pytest.mark.parametrize(
+    ("verdict", "expected"),
+    [
+        (BirthVerdict.CLEAN, (False, False, False)),
+        (BirthVerdict.REFUSED, (True, False, False)),
+        (BirthVerdict.REFUSED_BY_SESSION, (True, True, False)),
+        (BirthVerdict.REFUSED_UNJUDGED, (True, False, True)),
+    ],
+    ids=["clean", "refused", "by-session", "unjudged"],
+)
+async def test_a_replay_unjudged_birth_takes_the_verdict_its_true_watcher_reached(
+    h: Harness, monkeypatch, verdict: BirthVerdict, expected: tuple[bool, bool, bool]
+) -> None:
+    """Reviewer's R2 (R9): a popup reported before the loss, its targetId read still in flight when the
+    replacement attached, is entered from the replay as unjudged and born refused, though its own verdict
+    (from the watcher that saw it born) comes out clean: every window it opened afterwards was born refused.
+    The verdict, once reached, is adopted by the replacement's entry: clean clears it, a refusal keeps it
+    born refused but judged, and an unjudged verdict leaves the entry as it is (born refused, unjudged)."""
+    h.known("OP", refused=verdict is not BirthVerdict.CLEAN)
+    h.counts = verdict is BirthVerdict.REFUSED_BY_SESSION
+    opener_id = "OP" if verdict in (BirthVerdict.CLEAN, BirthVerdict.REFUSED) else "GONE"
+    h.cdp.fire("Target.targetCreated", created("P", CTX, opener_id=opener_id))
+    popup = FakePage()
+    h.pages["P?"] = popup  # reported, its id not cached yet
+    release = asyncio.Event()
+
+    async def resolve(page: Any) -> str | None:
+        if page is popup:
+            await release.wait()
+            if verdict is not BirthVerdict.REFUSED_UNJUDGED:
+                h.target_ids[popup] = "P"
+                return "P"
+            return "P-UNKNOWN"  # a target no watcher saw born: the report is refused as unjudged
+        return h.target_ids.get(page)
+
+    monkeypatch.setattr(h.births, "_resolve_target_id", resolve)
+    report = asyncio.ensure_future(h.births.verdict(h.session, popup))
+    await asyncio.sleep(0)
+    old = h.watcher
+    await replace_watcher(h, replay=[created("P", CTX, opener_id=opener_id)])
+    new = h.watcher
+    assert (new._births["P"].born_refused, new._births["P"].unjudged) == (True, True)
+
+    release.set()
+    assert await report is verdict
+    assert old is not new
+    birth = new._births["P"]
+    assert (birth.born_refused, birth.by_session, birth.unjudged) == expected
+    assert birth.reported is (verdict is not BirthVerdict.REFUSED_UNJUDGED)
+    if verdict is BirthVerdict.CLEAN:
+        new._cdp.fire("Target.targetCreated", created("C", CTX, opener_id="P"))
+        assert new._births["C"].born_refused is False, "the clean popup's window was born refused"
+
+
+async def test_a_verdict_adopted_does_not_touch_a_target_this_watcher_judged(h: Harness) -> None:
+    """Only a replay-unjudged entry takes an adopted verdict: a target the watcher saw born keeps its verdict."""
+    h.known("OP", refused=True)
+    h.cdp.fire("Target.targetCreated", created("W", CTX, opener_id="OP"))
+
+    h.watcher.adopt_verdict("W", FakePage(), BirthVerdict.CLEAN)
+
+    assert h.watcher._births["W"].born_refused is True and not h.watcher._births["W"].reported
