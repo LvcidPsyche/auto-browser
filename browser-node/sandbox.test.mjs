@@ -6,6 +6,7 @@ import {
   classifyFailure,
   declaredProfile,
   launchWithSandboxPolicy,
+  verifyServer,
   parseSetting,
   verifySandbox,
 } from "./sandbox.mjs";
@@ -80,7 +81,7 @@ test("auto: a sandboxed launch that verifies is kept, sandbox on", async () => {
 test("auto: a refused sandboxed launch relaunches unsandboxed with a WARNING naming the cause", async () => {
   const h = harness({ sandboxedLaunch: "throws", diagnosis: UNSHARE_REFUSED });
   const { server, state } = await launchWithSandboxPolicy({ setting: "auto", profile: "builtin", ...h });
-  assert.deepEqual(h.launches, [true, false]);
+  assert.deepEqual(h.launches, [true, true, false]);
   assert.equal(server.name, "unsandboxed");
   assert.equal(state.sandbox, "off");
   assert.equal(state.cause, "seccomp_profile_not_applied");
@@ -93,7 +94,7 @@ test("auto: a refused sandboxed launch relaunches unsandboxed with a WARNING nam
 test("auto: a launch whose renderers are not actually sandboxed is closed and relaunched unsandboxed", async () => {
   const h = harness({ verified: false });
   const { server, state } = await launchWithSandboxPolicy({ setting: "auto", profile: "auto-browser", ...h });
-  assert.deepEqual(h.launches, [true, false]);
+  assert.deepEqual(h.launches, [true, true, false]);
   assert.equal(server.name, "unsandboxed");
   assert.equal(state.sandbox, "off");
   assert.equal(state.cause, "not_verified");
@@ -112,13 +113,13 @@ test("on: a refused sandboxed launch is an error, and nothing is launched unsand
       return true;
     },
   );
-  assert.deepEqual(h.launches, [true]);
+  assert.deepEqual(h.launches, [true, true]);
 });
 
 test("on: an unverified sandbox is refused too", async () => {
   const h = harness({ verified: false });
   await assert.rejects(launchWithSandboxPolicy({ setting: "on", profile: "auto-browser", ...h }), /not_verified/);
-  assert.deepEqual(h.launches, [true]);
+  assert.deepEqual(h.launches, [true, true]);
 });
 
 test("off: today's behaviour, one unsandboxed launch, and the state says why", async () => {
@@ -220,4 +221,110 @@ test("verification fails for renderers that share the browser's namespace or fil
 
   const none = fakeProc({ 10: { ppid: 1, cmdline: ["chrome"], userns: 1, filters: 2 } });
   assert.match(verifySandbox({ browserPid: "10", proc: none }).detail, /no renderer/);
+});
+
+// ---- round 2 ----
+
+test("verification skips a renderer that exited mid-check and needs one still alive", () => {
+  const table = {
+    10: { ppid: 1, cmdline: ["chrome"], userns: 1, filters: 2 },
+    12: { ppid: 10, cmdline: ["chrome --type=renderer"], userns: 2, filters: 3 },
+    13: { ppid: 10, cmdline: ["chrome --type=renderer"], userns: 2, filters: 3 },
+  };
+  const proc = fakeProc(table);
+  const gone = (pid) => {
+    const error = new Error(`ENOENT: /proc/${pid}/status`);
+    error.code = "ENOENT";
+    return error;
+  };
+  const exitedOne = { ...proc, status: (pid) => { if (pid === "13") throw gone(pid); return proc.status(pid); } };
+  const ok = verifySandbox({ browserPid: "10", proc: exitedOne });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.evidence.renderers, 1);
+
+  const allGone = { ...proc, userns: (pid) => { if (pid !== "10") throw gone(pid); return proc.userns(pid); } };
+  const none = verifySandbox({ browserPid: "10", proc: allGone });
+  assert.equal(none.ok, false);
+  assert.match(none.detail, /no renderer/);
+});
+
+test("verification without Seccomp_filters (kernel < 5.9) uses chrome://sandbox, or says it cannot verify", () => {
+  const table = {
+    10: { ppid: 1, cmdline: ["chrome"], userns: 1 },
+    12: { ppid: 10, cmdline: ["chrome --type=renderer"], userns: 2 },
+  };
+  const proc = { ...fakeProc(table), status: () => "Name:\tchrome\nSeccomp:\t2\n" };
+  const confirmed = verifySandbox({
+    browserPid: "10",
+    proc,
+    sandboxPage: "Layer 1 Sandbox\tNamespace\nSeccomp-BPF sandbox\tYes\nYou are adequately sandboxed.",
+  });
+  assert.equal(confirmed.ok, true);
+  assert.equal(confirmed.evidence.method, "chrome://sandbox");
+  const unknown = verifySandbox({ browserPid: "10", proc });
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.cause, "verification_unsupported");
+  const denied = verifySandbox({ browserPid: "10", proc, sandboxPage: "Seccomp-BPF sandbox\tNo" });
+  assert.equal(denied.cause, "verification_unsupported");
+});
+
+test("verifyServer opens a page through the server and checks it in /proc (what server.mjs runs)", async () => {
+  const events = [];
+  const server = { wsEndpoint: () => "ws://x", process: () => ({ pid: 10 }) };
+  const page = {
+    setContent: async () => events.push("setContent"),
+    goto: async (url) => events.push(`goto ${url}`),
+    innerText: async () => "Seccomp-BPF sandbox\tYes",
+  };
+  const client = { newPage: async () => page, close: async () => events.push("close") };
+  const proc = fakeProc({
+    10: { ppid: 1, cmdline: ["chrome"], userns: 1, filters: 2 },
+    12: { ppid: 10, cmdline: ["chrome --type=renderer"], userns: 2, filters: 3 },
+  });
+  const verdict = await verifyServer(server, { connect: async () => client, proc });
+  assert.equal(verdict.ok, true);
+  assert.deepEqual(events, ["setContent", "close"]);
+  const unsandboxed = fakeProc({
+    10: { ppid: 1, cmdline: ["chrome"], userns: 1, filters: 2 },
+    12: { ppid: 10, cmdline: ["chrome --type=renderer --no-sandbox"], userns: 1, filters: 2 },
+  });
+  assert.equal((await verifyServer(server, { connect: async () => client, proc: unsandboxed })).ok, false);
+});
+
+test("auto retries the sandboxed launch once before falling back", async () => {
+  let attempts = 0;
+  const h = harness();
+  h.verify = async () => {
+    attempts += 1;
+    return attempts === 1 ? { ok: false, detail: "a transient failure" } : { ok: true, evidence: { renderers: 1 } };
+  };
+  const { state } = await launchWithSandboxPolicy({ setting: "auto", profile: "auto-browser", ...h });
+  assert.equal(state.sandbox, "on");
+  assert.deepEqual(h.launches, [true, true]);
+  assert.deepEqual(h.warnings.length, 0);
+});
+
+test("a cause from verification is kept (verification_unsupported)", async () => {
+  const h = harness();
+  h.verify = async () => ({ ok: false, cause: "verification_unsupported", detail: "no Seccomp_filters" });
+  const { state } = await launchWithSandboxPolicy({ setting: "auto", profile: "auto-browser", ...h });
+  assert.equal(state.cause, "verification_unsupported");
+  assert.deepEqual(h.launches, [true, true, false]);
+});
+
+test("builtin on an AppArmor-restricted host names both possible causes", () => {
+  const both = classifyFailure({
+    probe: UNSHARE_REFUSED.probe,
+    kernel: { apparmor_restrict_unprivileged_userns: "1" },
+    profile: "builtin",
+    chromiumError: CHROMIUM_FATAL,
+  });
+  assert.equal(both.cause, "seccomp_profile_not_applied");
+  assert.match(both.detail, /Or AppArmor refused it/);
+});
+
+test("a daemon without seccomp support is its own cause", () => {
+  assert.equal(declaredProfile("no-seccomp"), "no-seccomp");
+  const failure = classifyFailure({ ...UNSHARE_REFUSED, profile: "no-seccomp", chromiumError: CHROMIUM_FATAL });
+  assert.equal(failure.cause, "seccomp_unsupported");
 });
