@@ -265,3 +265,24 @@ def test_the_active_pages_refusal_by_another_tab_names_the_grace_and_a_tab_that_
         assert "another tab of this session was refused" in text, text
         assert CLOSED_TAB_CLAUSE in text, text
         assert PAGE_ADVICE in text.lower(), text
+
+
+# ── Round 3: a window's birth verdict and an opener held for its own ─────────────
+
+
+def test_an_opener_held_only_for_its_own_pending_verdict_does_not_refuse_the_windows_it_opens(tmp_path: Path) -> None:
+    """A reported popup is refused from its report until its birth verdict lands. For judging a window it opens
+    meanwhile, that hold is not a refusal: the window's birth is judged by the popup's own birth (propagated by
+    the watcher). What happened to the page (a taint, a refused hop, a refused URL) still is."""
+    manager = manager_for(tmp_path)
+    held = MovingPage(ALLOWED, ALLOWED)
+    session = tab_session(held)
+    manager.page_provenance.opener_lookup_started(held)
+    assert manager._page_refused(held), "the held popup is not refused while its verdict is pending"
+
+    assert not manager._opener_refuses_its_windows(session, held)
+
+    manager.page_provenance.opener_judged(held, opener_refused=True)
+    assert manager._opener_refuses_its_windows(session, held)
+    off_list = MovingPage(REFUSED, REFUSED)
+    assert manager._opener_refuses_its_windows(tab_session(off_list), off_list)
