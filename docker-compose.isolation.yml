@@ -7,8 +7,9 @@ services:
       ISOLATED_BROWSER_WAIT_TIMEOUT_SECONDS: ${ISOLATED_BROWSER_WAIT_TIMEOUT_SECONDS:-45}
       ISOLATED_BROWSER_KEEP_CONTAINERS: ${ISOLATED_BROWSER_KEEP_CONTAINERS:-false}
       ISOLATED_BROWSER_BIND_HOST: ${ISOLATED_BROWSER_BIND_HOST:-127.0.0.1}
-      # Passed on to every isolated browser container (their noVNC ports are
-      # published on ISOLATED_BROWSER_BIND_HOST).
+      # Guards the shared browser-node's noVNC, which isolated session containers
+      # can reach; readiness warns while it is unset. It is no longer handed to
+      # isolated containers: each gets a random password of its own.
       VNC_PASSWORD: ${VNC_PASSWORD:-}
       ISOLATED_TAKEOVER_HOST: ${ISOLATED_TAKEOVER_HOST:-127.0.0.1}
       ISOLATED_TAKEOVER_SCHEME: ${ISOLATED_TAKEOVER_SCHEME:-http}

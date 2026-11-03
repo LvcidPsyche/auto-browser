@@ -188,6 +188,8 @@ def _manager(**overrides):
         ensure_session_accessible=AsyncMock(),
         list_sessions=AsyncMock(return_value=[]),
         create_session=AsyncMock(return_value={"id": "session-1"}),
+        # The handoff view (#password= for isolated sessions): these sessions have none.
+        remote_access=SimpleNamespace(with_takeover_password=lambda payload: payload),
         **overrides,
     )
 

@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 import shutil
-from dataclasses import dataclass
+import string
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,32 @@ _MODE_LABEL = "auto-browser.mode"
 # browser-node service lists the same set (test_container_hardening checks).
 _BROWSER_NODE_CAP_ADD = ("CHOWN", "DAC_OVERRIDE", "KILL", "SETGID", "SETUID")
 _NO_NEW_PRIVILEGES = "no-new-privileges:true"
+
+# Each isolated session's noVNC gets its own random VNC password. Its 6080 is
+# reachable from other sessions' containers (Docker routes to published ports
+# across bridges), so one password shared by every container would let code in
+# one session, which can read its own copy, open any other's desktop. VNC
+# authentication uses only the first 8 characters: 62**8, about 47 bits.
+_VNC_PASSWORD_ALPHABET = string.ascii_letters + string.digits
+_VNC_PASSWORD_LENGTH = 8
+
+
+def _new_vnc_password() -> str:
+    return "".join(secrets.choice(_VNC_PASSWORD_ALPHABET) for _ in range(_VNC_PASSWORD_LENGTH))
+
+
+def takeover_url_with_password(url: str, password: str) -> str:
+    """The takeover URL a human opens, with the noVNC password in the fragment.
+
+    noVNC reads `password` from the fragment first (webutil.js getConfigVar),
+    and a browser never sends the fragment to a server, so it stays out of
+    access logs. The result is a secret: hand it only to the person taking over.
+    """
+    if not url or not password:
+        return url
+    separator = "&" if "#" in url else "#"
+    return f"{url}{separator}password={password}"
+
 
 # The daemon's error when its default address pools are used up. Docker's
 # defaults give about 31 bridge networks, two of them already taken by the
@@ -60,6 +88,9 @@ class IsolatedBrowserRuntime:
     # True when network_name is this session's own network (per_session mode),
     # which release removes. A shared network is never removed.
     network_owned: bool = False
+    # This session's noVNC password. Never logged, stored or put in takeover_url
+    # itself: only the human-handoff responses carry it (takeover_url_with_password).
+    vnc_password: str = field(default="", repr=False)
 
 
 @dataclass
@@ -73,6 +104,7 @@ class PendingBrowserProvision:
     local_downloads_dir: Path
     ws_endpoint_file: Path
     network_owned: bool = False
+    vnc_password: str = field(default="", repr=False)
 
 
 class DockerBrowserNodeProvisioner:
@@ -213,6 +245,7 @@ class DockerBrowserNodeProvisioner:
                 tunnel_local_host=pending.container_name,
                 tunnel_local_port=6080,
                 network_owned=pending.network_owned,
+                vnc_password=pending.vnc_password,
             )
         except BaseException:
             # BaseException: a cancelled create (client gone, shutdown) left the
@@ -384,10 +417,11 @@ class DockerBrowserNodeProvisioner:
             "PLAYWRIGHT_SERVER_PORT": "9223",
             "PLAYWRIGHT_SERVER_ADVERTISED_HOST": container_name,
         }
-        # Each isolated container publishes its own noVNC port, so a password set
-        # for the shared browser-node has to reach these too.
-        if self.settings.vnc_password:
-            environment["VNC_PASSWORD"] = self.settings.vnc_password
+        # Always a fresh password of its own, never the operator's VNC_PASSWORD:
+        # the container can read whatever it is given, and that one guards the
+        # shared browser-node.
+        vnc_password = _new_vnc_password()
+        environment["VNC_PASSWORD"] = vnc_password
         # noVNC in the container only accepts its own page on a loopback name or
         # a listed host (a DNS-rebinding guard), and the takeover URL for this
         # container uses ISOLATED_TAKEOVER_HOST.
@@ -427,6 +461,7 @@ class DockerBrowserNodeProvisioner:
             ws_endpoint_file=ws_endpoint_file,
             container=container,
             network_owned=network_owned,
+            vnc_password=vnc_password,
         )
 
     def _release_sync(self, runtime: IsolatedBrowserRuntime) -> None:

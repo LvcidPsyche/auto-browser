@@ -44,7 +44,8 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
     async def create_session(payload: CreateSessionRequest) -> dict[str, Any]:
         with typed_route_errors(logger, "create session failed"):
             try:
-                return await manager.create_session(
+                # A human-handoff response: its takeover URL carries the session's noVNC password.
+                created = await manager.create_session(
                     name=payload.name,
                     start_url=payload.start_url,
                     storage_state_path=payload.storage_state_path,
@@ -61,10 +62,11 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                 )
             except RuntimeError:
                 raise HTTPException(status_code=409, detail="Conflict") from None
+            return manager.remote_access.with_takeover_password(created)
 
     @router.get("/sessions/{session_id}")
     async def get_session(session_id: str) -> dict[str, Any]:
-        return await manager.get_session_record(session_id)
+        return manager.remote_access.with_takeover_password(await manager.get_session_record(session_id))
 
     @router.get("/sessions/{session_id}/observe")
     async def observe(session_id: str, limit: int = 40, preset: str | None = None) -> dict[str, Any]:
@@ -231,7 +233,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
     @router.post("/sessions/{session_id}/takeover")
     async def request_human_takeover(session_id: str, payload: HumanTakeoverRequest) -> dict[str, Any]:
         with typed_route_errors(logger, "takeover request failed for session %s", session_id):
-            return await manager.request_human_takeover(session_id, payload.reason)
+            return manager.remote_access.with_takeover_password(
+                await manager.request_human_takeover(session_id, payload.reason)
+            )
 
     @router.delete("/sessions/{session_id}")
     async def close_session(session_id: str) -> dict[str, Any]:
