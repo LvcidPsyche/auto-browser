@@ -41,12 +41,17 @@ FETCH_JS = """async (url) => {
 
 
 class _CorsServer(BaseHTTPRequestHandler):
-    """api.localhost answers 302 to files.localhost, which serves BODY; both allow the credentialed preflight."""
+    """api.localhost answers 302 to files.localhost, which serves BODY; both allow the credentialed preflight.
+
+    The allowed origins are fixed, not echoed from the request: the page's origin at api.localhost, and "null" at
+    files.localhost, the origin a credentialed CORS request carries after a redirect to a third origin.
+    """
 
     hits: list[tuple[str, str]]
 
-    def _cors(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", self.headers.get("Origin") or "*")
+    def _cors(self, host: str) -> None:
+        allowed = "null" if host == FILES_HOST else self.server.page_origin  # type: ignore[attr-defined]
+        self.send_header("Access-Control-Allow-Origin", allowed)
         self.send_header("Access-Control-Allow-Credentials", "true")
         self.send_header("Access-Control-Allow-Headers", "x-app-version")
         self.send_header("Access-Control-Allow-Methods", "GET")
@@ -56,18 +61,18 @@ class _CorsServer(BaseHTTPRequestHandler):
         self.server.hits.append((host, self.command))  # type: ignore[attr-defined]
         if self.command == "OPTIONS":
             self.send_response(204)
-            self._cors()
+            self._cors(host)
             self.end_headers()
             return
         if host == API_HOST:
             self.send_response(302)
-            self._cors()
+            self._cors(host)
             self.send_header("Location", f"http://{FILES_HOST}:{self.server.server_address[1]}/file")
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
         self.send_response(200)
-        self._cors()
+        self._cors(host)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(BODY)))
         self.end_headers()
@@ -84,6 +89,7 @@ class _CorsServer(BaseHTTPRequestHandler):
 def cors_server() -> Iterator[ThreadingHTTPServer]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _CorsServer)
     server.hits = []  # type: ignore[attr-defined]
+    server.page_origin = ""  # type: ignore[attr-defined]  # set once the gated page has loaded
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         yield server
@@ -100,6 +106,7 @@ async def _fetch_through_a_gated_page(tmp_path: Path, server: ThreadingHTTPServe
                 session_id = await env.create("/")
                 assert env.gate() is not None and env.gate().live
                 page = env.manager.sessions[session_id].page
+                server.page_origin = await page.evaluate("location.origin")  # type: ignore[attr-defined]
                 return await page.evaluate(FETCH_JS, f"http://{API_HOST}:{server.server_address[1]}/dl")
         finally:
             await browser.close()
