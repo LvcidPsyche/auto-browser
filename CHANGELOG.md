@@ -27,12 +27,17 @@ that were exploited in the wild. Update the browser-node and controller images t
   - drops `BoundaryEventDispatchTracksNodeRemoval`.
 
   The copy browser-node and the controller pass, which keeps storage partitioning on, follows it.
+- A top-level navigation answered 204 no longer shows up in a session's request failures. Playwright 1.64 reports
+  it as finished, not failed with `net::ERR_ABORTED`. Under `ALLOWED_HOSTS` it still ends the refused navigation it
+  belongs to, as before.
 
 ### Upgrade notes
 
 - **Update the controller and browser-node together.** Both run Playwright 1.64.1, and Playwright's client and
   server must match. If `ISOLATED_BROWSER_IMAGE` names an image explicitly, point it at the new browser-node image,
   and close isolated sessions started before the upgrade.
+- **Running the controller from a checkout** rather than the image: after installing the new requirements, run
+  `python -m playwright install chromium`, so that Playwright's own Chromium is the new one too.
 
 ## [1.12.3] — 2026-11-03
 
