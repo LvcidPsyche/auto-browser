@@ -54,11 +54,12 @@ class SourceError(RuntimeError):
 
 
 class GitHubTokenRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """urllib copies a request's headers onto its redirect: keep Authorization only while it stays on api.github.com."""
+    """urllib copies a request's headers onto its redirect: keep Authorization only for https://api.github.com."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new is not None and urllib.parse.urlsplit(newurl).hostname != _GITHUB_API_HOST:
+        target = urllib.parse.urlsplit(newurl)
+        if new is not None and (target.scheme != "https" or target.hostname != _GITHUB_API_HOST):
             new.remove_header("Authorization")
         return new
 

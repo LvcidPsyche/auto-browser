@@ -355,6 +355,15 @@ class Round3FreshnessTests(unittest.TestCase):
         same_host = handler.redirect_request(request, None, 302, "Found", {}, "https://api.github.com/repositories/1/x")
         self.assertEqual(same_host.get_header("Authorization"), "Bearer t0k3n")
 
+    def test_a_redirect_to_plain_http_drops_the_token_even_on_api_github_com(self) -> None:
+        import urllib.request
+
+        handler = self.check.GitHubTokenRedirectHandler()
+        request = urllib.request.Request("https://api.github.com/repos/moby/moby/releases/latest")
+        request.add_header("Authorization", "Bearer t0k3n")
+        downgraded = handler.redirect_request(request, None, 302, "Found", {}, "http://api.github.com/x")
+        self.assertIsNone(downgraded.get_header("Authorization"))
+
     def test_fetch_opens_through_the_redirect_handler(self) -> None:
         built = []
 
