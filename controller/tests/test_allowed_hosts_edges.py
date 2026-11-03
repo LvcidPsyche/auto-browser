@@ -270,18 +270,28 @@ def test_the_active_pages_refusal_by_another_tab_names_the_grace_and_a_tab_that_
 # ── Round 3: a window's birth verdict and an opener held for its own ─────────────
 
 
-def test_an_opener_held_only_for_its_own_pending_verdict_does_not_refuse_the_windows_it_opens(tmp_path: Path) -> None:
+async def test_an_opener_held_only_while_its_own_verdict_is_judged_does_not_refuse_the_windows_it_opens(
+    tmp_path: Path,
+) -> None:
     """A reported popup is refused from its report until its birth verdict lands. For judging a window it opens
-    meanwhile, that hold is not a refusal: the window's birth is judged by the popup's own birth (propagated by
-    the watcher). What happened to the page (a taint, a refused hop, a refused URL) still is."""
+    meanwhile, that hold is not a refusal while the verdict is being judged (diagnostics._birth_judgements):
+    the window's birth is judged by the popup's own birth (propagated by the watcher). What happened to the
+    page (a taint, a refused hop, a refused URL) still is; and so is a hold no judgement is going to lift
+    (round-4 R6: a popup whose opener closed before Playwright reported it gets no popup event and no verdict,
+    and refused the windows it opened before the watcher)."""
     manager = manager_for(tmp_path)
     held = MovingPage(ALLOWED, ALLOWED)
     session = tab_session(held)
     manager.page_provenance.opener_lookup_started(held)
     assert manager._page_refused(held), "the held popup is not refused while its verdict is pending"
+    assert manager._opener_refuses_its_windows(session, held), "a hold with no judgement running was exempted"
 
+    judgement = asyncio.get_running_loop().create_future()
+    manager.diagnostics._birth_judgements[held] = judgement
     assert not manager._opener_refuses_its_windows(session, held)
 
+    judgement.set_result(None)  # the judgement ended without lifting the hold (the popup closed meanwhile, say)
+    assert manager._opener_refuses_its_windows(session, held)
     manager.page_provenance.opener_judged(held, opener_refused=True)
     assert manager._opener_refuses_its_windows(session, held)
     off_list = MovingPage(REFUSED, REFUSED)

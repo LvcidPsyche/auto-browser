@@ -847,15 +847,24 @@ class BrowserManager:
         that counted for the session closed within the grace (it can have navigated this page just before).
 
         Keyed on the opener, not the whole session, so a window an allowed page opens while an unrelated tab is
-        refused is judged by its allowed opener (it is not born refused), as a reported popup would be. An
-        opener held only for its own pending birth verdict is not refused here: that verdict is its birth's,
-        which the watcher propagates to the window itself (a born-refused page's windows are born refused).
+        refused is judged by its allowed opener (it is not born refused), as a reported popup would be.
         """
-        return (
-            self._url_off_list(opener.url)
-            or self.page_provenance.refused_settled(opener)
-            or self.page_provenance.counting_page_closed_recently(session.id)
-        )
+        return self._opener_refused(opener) or self.page_provenance.counting_page_closed_recently(session.id)
+
+    def _opener_refused(self, opener: Any) -> bool:
+        """Whether a page refuses the windows it opens, as their opener: it is refused for what happened to it
+        (its URL, a taint, a refused hop), or it is held for an opener verdict that is not being judged.
+
+        An opener held only while its own birth verdict is being judged (diagnostics.birth_pending) is not
+        refused here: that verdict is its birth's, which the watcher propagates to the window itself (a
+        born-refused page's windows are born refused). A page held with no judgement running (its opener
+        closed before Playwright reported it, so it got no popup event and no verdict is coming) is refused,
+        as it was before the watcher: nothing will clear its hold but the agent's navigate.
+        """
+        provenance = self.page_provenance
+        if self._url_off_list(opener.url) or provenance.refused_settled(opener):
+            return True
+        return provenance.refused(opener) and not self.diagnostics.birth_pending(opener)
 
     def _page_by_target_id(self, session: BrowserSession, target_id: str) -> Any:
         """The session's open page with this cached targetId, with no I/O (window_births matches an opener by it)."""
