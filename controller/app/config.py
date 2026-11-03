@@ -138,6 +138,15 @@ class Settings(BaseSettings):
         "/vnc.html?autoconnect=true&resize=scale",
         alias="ISOLATED_TAKEOVER_PATH",
     )
+    # per_session gives each docker_ephemeral browser its own bridge network,
+    # joined by the controller, so one session's browser cannot reach another's
+    # Playwright server (9223), noVNC (6080) or the shared browser-node. shared
+    # is the explicit opt-out: every browser on one network, the old behavior.
+    isolated_browser_network_mode: Literal["per_session", "shared"] = Field(
+        "per_session",
+        alias="ISOLATED_BROWSER_NETWORK_MODE",
+    )
+    # Only read in shared mode; per_session ignores it (with a startup warning).
     isolated_browser_network: str | None = Field(None, alias="ISOLATED_BROWSER_NETWORK")
     isolated_host_data_root: str | None = Field(None, alias="ISOLATED_HOST_DATA_ROOT")
     isolated_docker_host: str | None = Field(None, alias="ISOLATED_DOCKER_HOST")

@@ -17,6 +17,20 @@ logger = logging.getLogger(__name__)
 
 _MANAGED_LABEL = "auto-browser.managed"
 _SESSION_ID_LABEL = "auto-browser.session_id"
+_MODE_LABEL = "auto-browser.mode"
+
+# The daemon's error when its default address pools are used up. Docker's
+# defaults give about 31 bridge networks, two of them already taken by the
+# default bridge and the compose network.
+_ADDRESS_POOL_EXHAUSTED = "could not find an available, non-overlapping ipv4 address pool"
+
+
+def _session_labels(session_id: str) -> dict[str, str]:
+    return {
+        _MANAGED_LABEL: "true",
+        _SESSION_ID_LABEL: session_id,
+        _MODE_LABEL: "docker_ephemeral",
+    }
 
 
 @dataclass
@@ -34,6 +48,9 @@ class IsolatedBrowserRuntime:
     novnc_port: int | None
     tunnel_local_host: str = "host.docker.internal"
     tunnel_local_port: int = 6080
+    # True when network_name is this session's own network (per_session mode),
+    # which release removes. A shared network is never removed.
+    network_owned: bool = False
 
 
 @dataclass
@@ -46,6 +63,7 @@ class PendingBrowserProvision:
     local_profile_dir: Path
     local_downloads_dir: Path
     ws_endpoint_file: Path
+    network_owned: bool = False
 
 
 class DockerBrowserNodeProvisioner:
@@ -53,14 +71,30 @@ class DockerBrowserNodeProvisioner:
         self.settings = settings
         self._client = client
         self._host_data_root: Path | None = None
+        # Shared mode only: the one network every browser container joins.
         self._network_name: str | None = None
         self._controller_container_id = os.environ.get("HOSTNAME")
+        # The controller's own container, looked up once. per_session joins it
+        # to each session network, and _discover_host_data_root reads its mounts.
+        self._controller_container: Any | None = None
+
+    @property
+    def _per_session_networks(self) -> bool:
+        return self.settings.isolated_browser_network_mode == "per_session"
 
     async def startup(self) -> None:
         if self.settings.session_isolation_mode != "docker_ephemeral":
             return
+        if self._per_session_networks and self.settings.isolated_browser_network:
+            logger.warning(
+                "ISOLATED_BROWSER_NETWORK=%s is ignored: ISOLATED_BROWSER_NETWORK_MODE=per_session gives each "
+                "session its own network. Set ISOLATED_BROWSER_NETWORK_MODE=shared to keep one shared network.",
+                self.settings.isolated_browser_network,
+            )
         await asyncio.to_thread(self._ensure_context)
         await asyncio.to_thread(self._reap_orphaned_containers)
+        # After the container reap, so the orphans' endpoints are already gone.
+        await asyncio.to_thread(self._reap_orphaned_networks)
 
     def _reap_orphaned_containers(self) -> None:
         """Remove session containers left behind by a previous controller run.
@@ -112,6 +146,41 @@ class DockerBrowserNodeProvisioner:
             if session_id not in keep:
                 self._remove_runtime_dirs(session_id)
 
+    def _reap_orphaned_networks(self) -> None:
+        """Remove per-session networks left behind by a previous controller run.
+
+        A controller restarted by its restart policy is the same container and
+        is still attached to every session network it had joined (attachments
+        survive a restart), so each network refuses removal until the controller
+        disconnects itself. Runs after the container reap, so the orphaned
+        browsers' endpoints are already gone. Inherits the one-controller-per-
+        Docker-host assumption of _reap_orphaned_containers.
+        """
+        if self.settings.isolated_browser_keep_containers:
+            logger.debug("Skipping orphan network sweep: ISOLATED_BROWSER_KEEP_CONTAINERS is enabled")
+            return
+        client = self._ensure_context()
+        try:
+            orphans = client.networks.list(filters={"label": f"{_MANAGED_LABEL}=true"})
+        except Exception as exc:
+            logger.warning("Could not list orphaned browser session networks: %s", exc)
+            return
+        controller_id = self._controller_id_or_none(client)
+        for network in orphans:
+            name = getattr(network, "name", "<unknown>")
+            if controller_id:
+                try:
+                    network.disconnect(controller_id, force=True)
+                except Exception as exc:
+                    # Usually "is not connected": nothing to undo.
+                    logger.debug("Controller was not attached to orphaned network %s: %s", name, exc)
+            try:
+                network.remove()
+            except Exception as exc:
+                logger.warning("Failed to remove orphaned browser session network %s: %s", name, exc)
+                continue
+            logger.info("Reaped orphaned browser session network %s", name)
+
     async def provision(self, session_id: str) -> IsolatedBrowserRuntime:
         pending = await asyncio.to_thread(self._provision_container_sync, session_id)
         try:
@@ -134,6 +203,7 @@ class DockerBrowserNodeProvisioner:
                 novnc_port=novnc_port,
                 tunnel_local_host=pending.container_name,
                 tunnel_local_port=6080,
+                network_owned=pending.network_owned,
             )
         except BaseException:
             # BaseException: a cancelled create (client gone, shutdown) left the
@@ -147,9 +217,13 @@ class DockerBrowserNodeProvisioner:
     def _provision_container_sync(self, session_id: str) -> PendingBrowserProvision:
         client = self._ensure_context()
         host_data_root = self._host_data_root or self._discover_host_data_root(client)
-        network_name = self._network_name or self._discover_network_name(client)
         self._host_data_root = host_data_root
-        self._network_name = network_name
+        container_name = self._container_name(session_id)
+        if self._per_session_networks:
+            network_name = self._session_network_name(container_name)
+        else:
+            network_name = self._network_name or self._discover_network_name(client)
+            self._network_name = network_name
 
         local_runtime_root = self._local_runtime_root(session_id)
         local_profile_dir = local_runtime_root / "profile"
@@ -163,21 +237,112 @@ class DockerBrowserNodeProvisioner:
         host_profile_dir.mkdir(parents=True, exist_ok=True)
         host_downloads_dir.mkdir(parents=True, exist_ok=True)
 
+        network = None
+        controller_id: str | None = None
         try:
+            if self._per_session_networks:
+                # Fail closed before anything exists on the daemon: without the
+                # controller on the session network it cannot reach the browser.
+                controller_id = str(self._get_controller_container(client).id)
+                self._remove_stale_container(client, container_name)
+                self._remove_stale_session_network(client, network_name, session_id, controller_id)
+                network = self._create_session_network(client, network_name, session_id)
+                # Join before the container starts: the controller reaches it by
+                # name (ws://<name>:9223, autossh to <name>:6080) through Docker
+                # DNS on this network.
+                network.connect(controller_id)
             return self._run_container_sync(
                 client,
                 session_id,
                 network_name=network_name,
+                network_owned=network is not None,
                 host_profile_dir=host_profile_dir,
                 host_downloads_dir=host_downloads_dir,
                 local_profile_dir=local_profile_dir,
                 local_downloads_dir=local_downloads_dir,
             )
         except BaseException:
-            # No container exists to release, so release() will never run for
-            # this id and the directories made above would stay.
+            # No runtime exists to release, so release() will never run for
+            # this id. containers.run is create + start: a failed start leaves a
+            # created container behind, and it holds the network's endpoint.
+            self._remove_stale_container(client, container_name)
+            if network is not None:
+                self._remove_session_network(network, session_id, controller_id)
             self._remove_runtime_dirs(session_id)
             raise
+
+    def _container_name(self, session_id: str) -> str:
+        return f"{self.settings.isolated_browser_container_prefix}-{session_id}"
+
+    @staticmethod
+    def _session_network_name(container_name: str) -> str:
+        return f"{container_name}-net"
+
+    def _remove_stale_container(self, client, container_name: str) -> None:
+        existing = self._safe_get_container(client, container_name)
+        if existing is None:
+            return
+        try:
+            existing.remove(force=True)
+        except Exception as exc:
+            logger.debug("Could not remove stale container %s: %s", container_name, exc)
+
+    def _create_session_network(self, client, network_name: str, session_id: str):
+        try:
+            # Not internal: the browser needs egress, and Docker does not publish
+            # ports (noVNC 6080) from an internal network. No check_duplicate:
+            # deprecated in API 1.44, and the daemon now always refuses a
+            # duplicate name.
+            return client.networks.create(
+                network_name,
+                driver="bridge",
+                labels=_session_labels(session_id),
+                internal=False,
+            )
+        except Exception as exc:
+            if _ADDRESS_POOL_EXHAUSTED in str(exc).lower():
+                raise RuntimeError(
+                    f"Docker has no free address pool for the session network {network_name}: every isolated "
+                    "session gets its own bridge network, and the daemon's default pools allow about 30. Close "
+                    "sessions, remove leftover networks (label auto-browser.managed=true), or widen "
+                    '"default-address-pools" in the daemon\'s daemon.json.'
+                ) from exc
+            raise
+
+    def _remove_stale_session_network(self, client, network_name: str, session_id: str, controller_id: str) -> None:
+        """Remove a same-name network a previous run of this session id left.
+
+        Only one that carries this session's labels: a foreign network with the
+        same name is left alone, and networks.create then refuses the duplicate.
+        """
+        network = self._safe_get_network(client, network_name)
+        if network is None or not self._is_session_network(network, session_id):
+            return
+        self._remove_session_network(network, session_id, controller_id)
+
+    def _remove_session_network(self, network, session_id: str, controller_id: str | None) -> None:
+        """Disconnect the controller from this session's network, then remove it.
+
+        Never raises: like the rest of release, every step logs and continues.
+        """
+        name = getattr(network, "name", "<unknown>")
+        if controller_id:
+            try:
+                network.disconnect(controller_id, force=True)
+            except Exception as exc:
+                logger.warning("Could not disconnect the controller from session network %s: %s", name, exc)
+        if not self._is_session_network(network, session_id):
+            logger.warning("Not removing network %s: it does not carry session %s's labels", name, session_id)
+            return
+        try:
+            network.remove()
+        except Exception as exc:
+            logger.warning("Could not remove session network %s: %s", name, exc)
+
+    @staticmethod
+    def _is_session_network(network, session_id: str) -> bool:
+        labels = (getattr(network, "attrs", None) or {}).get("Labels") or {}
+        return labels.get(_MANAGED_LABEL) == "true" and labels.get(_SESSION_ID_LABEL) == session_id
 
     def _run_container_sync(
         self,
@@ -185,18 +350,14 @@ class DockerBrowserNodeProvisioner:
         session_id: str,
         *,
         network_name: str,
+        network_owned: bool,
         host_profile_dir: Path,
         host_downloads_dir: Path,
         local_profile_dir: Path,
         local_downloads_dir: Path,
     ) -> PendingBrowserProvision:
-        container_name = f"{self.settings.isolated_browser_container_prefix}-{session_id}"
-        existing = self._safe_get_container(client, container_name)
-        if existing is not None:
-            try:
-                existing.remove(force=True)
-            except Exception as exc:
-                logger.debug("Could not remove stale container %s before provisioning: %s", container_name, exc)
+        container_name = self._container_name(session_id)
+        self._remove_stale_container(client, container_name)
 
         resource_kwargs: dict[str, Any] = {}
         if self.settings.isolated_browser_mem_limit:
@@ -237,11 +398,7 @@ class DockerBrowserNodeProvisioner:
             ports={
                 "6080/tcp": (self.settings.isolated_browser_bind_host, None),
             },
-            labels={
-                _MANAGED_LABEL: "true",
-                _SESSION_ID_LABEL: session_id,
-                "auto-browser.mode": "docker_ephemeral",
-            },
+            labels=_session_labels(session_id),
             **resource_kwargs,
         )
 
@@ -255,6 +412,7 @@ class DockerBrowserNodeProvisioner:
             local_downloads_dir=local_downloads_dir,
             ws_endpoint_file=ws_endpoint_file,
             container=container,
+            network_owned=network_owned,
         )
 
     def _release_sync(self, runtime: IsolatedBrowserRuntime) -> None:
@@ -273,9 +431,35 @@ class DockerBrowserNodeProvisioner:
                     container.remove(force=True)
                 except Exception as exc:
                     logger.warning("Could not remove browser container %s: %s", runtime.container_name, exc)
+        if runtime.network_owned:
+            self._release_session_network(client, runtime)
+        if not self.settings.isolated_browser_keep_containers:
             # Also when the container is already gone (docker rm, a crashed
             # daemon): its profile directory, cookies included, is still here.
             self._remove_runtime_dirs(runtime.session_id)
+
+    def _release_session_network(self, client, runtime: IsolatedBrowserRuntime) -> None:
+        """Leave this session's network, and remove it unless containers are kept.
+
+        The tunnel and the Playwright connection are already closed by now
+        (sessions.py tears them down before the runtime). With keep_containers
+        the network stays for the kept container, but the controller still
+        leaves it, or it would stay attached to every session ever opened.
+        """
+        network = self._safe_get_network(client, runtime.network_name)
+        if network is None:
+            return
+        controller_id = self._controller_id_or_none(client)
+        if self.settings.isolated_browser_keep_containers:
+            if controller_id:
+                try:
+                    network.disconnect(controller_id, force=True)
+                except Exception as exc:
+                    logger.warning(
+                        "Could not disconnect the controller from session network %s: %s", runtime.network_name, exc
+                    )
+            return
+        self._remove_session_network(network, runtime.session_id, controller_id)
 
     def _remove_runtime_dirs(self, session_id: str) -> None:
         """Delete the per-session profile and downloads tree.
@@ -335,17 +519,42 @@ class DockerBrowserNodeProvisioner:
         if networks:
             return networks[0]
         raise RuntimeError(
-            "Could not discover a Docker network for isolated browser containers. "
-            "Set ISOLATED_BROWSER_NETWORK explicitly."
+            "Could not discover a Docker network for isolated browser containers "
+            "(ISOLATED_BROWSER_NETWORK_MODE=shared). Set ISOLATED_BROWSER_NETWORK explicitly."
         )
 
     def _get_controller_container(self, client):
+        """The controller's own container on the isolation daemon (cached).
+
+        Raises RuntimeError when there is none: a controller run on the host,
+        or an ISOLATED_DOCKER_HOST that is a different daemon.
+        """
+        if self._controller_container is not None:
+            return self._controller_container
+        hint = (
+            "Per-session networks (ISOLATED_BROWSER_NETWORK_MODE=per_session, the default) need the controller "
+            "to run as a container on that Docker daemon, so it can join each session's network. Otherwise set "
+            "ISOLATED_BROWSER_NETWORK_MODE=shared with ISOLATED_BROWSER_NETWORK, and ISOLATED_HOST_DATA_ROOT."
+        )
         if not self._controller_container_id:
+            raise RuntimeError(f"Not running inside Docker and no controller container ID is available. {hint}")
+        try:
+            container = client.containers.get(self._controller_container_id)
+        except Exception as exc:
             raise RuntimeError(
-                "Not running inside Docker and no controller container ID is available. "
-                "Set ISOLATED_HOST_DATA_ROOT and ISOLATED_BROWSER_NETWORK explicitly."
-            )
-        return client.containers.get(self._controller_container_id)
+                f"Could not find the controller container {self._controller_container_id!r} on the isolation "
+                f"Docker daemon ({exc}). {hint}"
+            ) from exc
+        self._controller_container = container
+        return container
+
+    def _controller_id_or_none(self, client) -> str | None:
+        """The controller's id for disconnects during cleanup, which never raise."""
+        try:
+            return str(self._get_controller_container(client).id)
+        except Exception as exc:
+            logger.debug("Controller container lookup failed during cleanup: %s", exc)
+            return self._controller_container_id or None
 
     async def _wait_for_ws_endpoint(self, container, endpoint_file: Path) -> str:
         for _ in range(max(1, self.settings.isolated_browser_wait_timeout_seconds * 4)):
@@ -379,6 +588,7 @@ class DockerBrowserNodeProvisioner:
             novnc_port=None,
             tunnel_local_host=pending.container_name,
             tunnel_local_port=6080,
+            network_owned=pending.network_owned,
         )
         self._release_sync(runtime)
 
@@ -415,5 +625,12 @@ class DockerBrowserNodeProvisioner:
     def _safe_get_container(client, identifier: str):
         try:
             return client.containers.get(identifier)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _safe_get_network(client, identifier: str):
+        try:
+            return client.networks.get(identifier)
         except Exception:
             return None
