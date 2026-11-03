@@ -18,14 +18,15 @@ Cursor speaks MCP's HTTP transport, so it can connect straight to the controller
 {
   "mcpServers": {
     "auto-browser": {
-      "url": "http://127.0.0.1:8000/mcp"
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": { "Authorization": "Bearer <contents of data/api-token>" }
     }
   }
 }
 ```
 
-If the controller has an `API_BEARER_TOKEN`, add
-`"headers": {"Authorization": "Bearer <token>"}` next to `url`.
+On first start the controller saves its API token to `data/api-token` in the
+auto-browser folder. If you set `API_BEARER_TOKEN`, use that instead.
 
 To go through the stdio bridge instead, with [uv](https://docs.astral.sh/uv/)
 installed (no clone needed):
@@ -38,6 +39,7 @@ installed (no clone needed):
       "args": ["auto-browser-mcp"],
       "env": {
         "AUTO_BROWSER_BASE_URL": "http://127.0.0.1:8000/mcp",
+        "AUTO_BROWSER_TOKEN_FILE": "<ABSOLUTE_PATH_TO_AUTO_BROWSER>/data/api-token",
         "AUTO_BROWSER_BEARER_TOKEN": ""
       }
     }
@@ -45,7 +47,11 @@ installed (no clone needed):
 }
 ```
 
-Or from a repo checkout, replace `<ABSOLUTE_PATH_TO_AUTO_BROWSER>` with the real path to your clone:
+Replace `<ABSOLUTE_PATH_TO_AUTO_BROWSER>` with the real path to your clone; the bridge reads the
+token file on every request.
+
+Or from a repo checkout, replace `<ABSOLUTE_PATH_TO_AUTO_BROWSER>` with the real path to your clone.
+This wrapper reads that checkout's `data/api-token` itself:
 
 ```json
 {
@@ -78,9 +84,10 @@ Use auto-browser to create a session at https://example.com and tell me the page
 
 If connected, Cursor will call `browser.create_session` and `browser.observe` and return the title.
 
-## If your API is protected
+## If you set API_BEARER_TOKEN
 
-Set `AUTO_BROWSER_BEARER_TOKEN` to match your `API_BEARER_TOKEN` env var:
+Set `AUTO_BROWSER_BEARER_TOKEN` to match your `API_BEARER_TOKEN` env var (a non-empty one wins
+over the token file):
 
 ```json
 "AUTO_BROWSER_BEARER_TOKEN": "your-token-here"

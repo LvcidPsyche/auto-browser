@@ -7,11 +7,17 @@ Python SDK and MCP stdio bridge for the [Auto Browser](https://github.com/LvcidP
 ```python
 from auto_browser_client import AutoBrowserClient
 
-client = AutoBrowserClient("http://localhost:8000", token="secret")
+client = AutoBrowserClient("http://localhost:8000", token_file="data/api-token")
 session = client.create_session(start_url="https://example.com")
 client.navigate(session["id"], "https://example.com/dashboard")
 client.close_session(session["id"])
 ```
+
+A local controller with no `API_BEARER_TOKEN` saves its generated token to
+`data/api-token` in the auto-browser folder; `token_file` reads it once, when the
+client is built (a relative path is relative to where your code runs). Pass
+`token=` instead for a token you set. A missing file raises `FileNotFoundError`, an
+empty one `ValueError`.
 
 Every method has an `async_` twin (`await client.async_create_session(...)`), and the
 client works as a sync or async context manager. HTTP errors raise
@@ -42,8 +48,13 @@ stdio MCP clients (Claude Desktop, Cursor, ...) to a running Auto Browser
 controller:
 
 ```bash
-auto-browser-mcp --base-url http://127.0.0.1:8000/mcp
+auto-browser-mcp --base-url http://127.0.0.1:8000/mcp \
+  --token-file /ABSOLUTE/PATH/TO/auto-browser/data/api-token
 ```
+
+`--token-file` (or `AUTO_BROWSER_TOKEN_FILE`) is read on every request, so the bridge
+can start before the controller has written it. `--bearer-token` (or
+`AUTO_BROWSER_BEARER_TOKEN`) wins when it is set.
 
 Or zero-install via [uv](https://docs.astral.sh/uv/): `uvx auto-browser-mcp`
 (resolved through the [auto-browser-mcp](https://pypi.org/project/auto-browser-mcp/)

@@ -43,10 +43,38 @@ to the hostnames operators use to reach the controller, such as `browser.example
 or `localhost,127.0.0.1,::1` for a local-only install.
 
 When it is unset and the controller runs without a bearer credential (a loopback
-deployment), only loopback Host names — `localhost`, `127.0.0.1`, `[::1]` — are
-answered. An unauthenticated API that accepts any Host header can be driven by a web
-page through DNS rebinding, so this default holds until you either list the names
-clients use or configure `API_BEARER_TOKEN`. `/healthz` is exempt.
+deployment with `API_ALLOW_TOKENLESS_LOOPBACK=true`), only loopback Host names —
+`localhost`, `127.0.0.1`, `[::1]` — are answered. An unauthenticated API that accepts
+any Host header can be driven by a web page through DNS rebinding, so this default
+holds until you either list the names clients use or let the controller use a token.
+`/healthz` is exempt.
+
+## API token
+
+Every API and MCP request carries `Authorization: Bearer <token>`. `API_BEARER_TOKEN`
+(or named `API_BEARER_TOKENS`) sets it. Without either, the controller uses the token in
+`API_TOKEN_FILE` (`/data/api-token`, which the shipped compose maps to `./data/api-token`
+on the host), and a loopback controller outside production generates one there on first
+start: 0600, and given to the data directory's owner when the controller runs as root
+(the shipped image does), so host clients can read it.
+An exposed or production controller never generates one; it refuses to start without a
+token, from either source.
+
+- Clients read the file: the stdio bridge with `--token-file` /
+  `AUTO_BROWSER_TOKEN_FILE`, the SDK and LangChain adapters with `token_file`, and the
+  repo scripts (`make doctor`, the smoke tests) by themselves.
+- With a custom compose file and a named volume, read it with
+  `docker compose exec controller cat /data/api-token`.
+- A controller run outside compose defaults to `/data/api-token` too, which is
+  often not writable (on Windows, `C:\data\api-token`); set `API_TOKEN_FILE`.
+- To rotate the generated token, delete the file and restart the controller. Once
+  `API_BEARER_TOKEN` is set the file is ignored (the startup log says so), and
+  clients still pointed at it get a 401.
+- `API_ALLOW_TOKENLESS_LOOPBACK=true` serves a loopback controller with no token.
+  Any process that can reach port 8000, containers on the compose network
+  included, can then drive the browser. It never applies to an exposed or
+  production controller.
+- `/metrics` needs the token too: give a Prometheus scraper `bearer_token_file`.
 
 ## Auth profiles
 
@@ -217,9 +245,10 @@ docker compose -f docker-compose.yml -f docker-compose.isolation.yml up -d --bui
 curl -fsS http://127.0.0.1:8000/healthz | jq
 curl -fsS http://127.0.0.1:8000/readyz | jq
 
-# The rest need the bearer token, and with REQUIRE_OPERATOR_ID=true an operator id
-# (/metrics takes the token only). Export API_BEARER_TOKEN from .env first.
-AUTH=(-H "Authorization: Bearer $API_BEARER_TOKEN" -H "X-Operator-Id: ops")
+# The rest need the bearer token (API_BEARER_TOKEN, else data/api-token; run from the
+# auto-browser folder), and with REQUIRE_OPERATOR_ID=true an operator id (/metrics
+# takes the token only).
+AUTH=(-H "Authorization: Bearer ${API_BEARER_TOKEN:-$(cat data/api-token)}" -H "X-Operator-Id: ops")
 curl -fsS "${AUTH[@]}" http://127.0.0.1:8000/readiness | jq
 curl -fsS "${AUTH[@]}" http://127.0.0.1:8000/metrics | head
 curl -fsS "${AUTH[@]}" http://127.0.0.1:8000/maintenance/status | jq

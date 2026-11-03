@@ -6,8 +6,9 @@ JSON-RPC for each — pair it with the tool examples in
 [`claude-desktop-setup.md`](./claude-desktop-setup.md).
 
 All calls go to the MCP transport (default `POST /mcp`) with an
-`MCP-Session-Id` header once a session is established. Bearer auth applies if
-`API_BEARER_TOKEN` is set.
+`MCP-Session-Id` header once a session is established, and every call sends the
+controller's token as `Authorization: Bearer <token>`: the contents of
+`data/api-token` in the auto-browser folder, or `API_BEARER_TOKEN` if you set one.
 
 ## Resource catalog
 

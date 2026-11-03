@@ -21,34 +21,45 @@ Auto Browser exposes:
 - a **stdio bridge**, installable from PyPI (`uvx auto-browser-mcp`) or bundled at `scripts/mcp_stdio_bridge.py` for repo checkouts
 
 That means:
-- MCP clients with HTTP transport support can talk to it directly
-- stdio-first clients can use the bridge with zero setup beyond `uvx`
+- MCP clients with HTTP transport support can talk to it directly, sending the controller's token
+- stdio-first clients can use the bridge, which reads the token from `data/api-token` itself
 
 ## Connect directly over HTTP
 
 Clients that speak MCP's HTTP transport need no bridge: point them at
-`http://127.0.0.1:8000/mcp`.
+`http://127.0.0.1:8000/mcp` and send the controller's token. A controller with no
+`API_BEARER_TOKEN` generates one on first start and saves it to `data/api-token` in
+the auto-browser folder; the commands below run from that folder. If you set
+`API_BEARER_TOKEN`, send that instead of the file's contents.
 
 **Claude Code**
 
 ```bash
-claude mcp add --transport http auto-browser http://127.0.0.1:8000/mcp
+claude mcp add --transport http auto-browser http://127.0.0.1:8000/mcp \
+  --header "Authorization: Bearer $(cat data/api-token)"
 claude mcp list   # auto-browser: http://127.0.0.1:8000/mcp (HTTP) - ✓ Connected
 ```
+
+Claude Code stores the header when you add the server, so if `data/api-token`
+changes, remove the server and add it again.
 
 **Codex**: the CLI, the IDE extension, and the desktop app share
 `~/.codex/config.toml`, so one registration covers all three:
 
 ```bash
-codex mcp add auto-browser --url http://127.0.0.1:8000/mcp
+export AUTO_BROWSER_TOKEN="$(cat data/api-token)"
+codex mcp add auto-browser --url http://127.0.0.1:8000/mcp --bearer-token-env-var AUTO_BROWSER_TOKEN
 codex mcp list
 ```
 
-The same entry written by hand in `~/.codex/config.toml`:
+Codex reads the token from the variable you name, so export it wherever Codex
+runs (a shell profile, for one). The same entry written by hand in
+`~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.auto-browser]
 url = "http://127.0.0.1:8000/mcp"
+bearer_token_env_var = "AUTO_BROWSER_TOKEN"
 ```
 
 Codex renames tools to fit OpenAI's function-name rules, which do not allow the
@@ -63,7 +74,8 @@ workspace, use `.agents/mcp_config.json` instead:
 {
   "mcpServers": {
     "auto-browser": {
-      "serverUrl": "http://127.0.0.1:8000/mcp"
+      "serverUrl": "http://127.0.0.1:8000/mcp",
+      "headers": { "Authorization": "Bearer <contents of data/api-token>" }
     }
   }
 }
@@ -78,7 +90,8 @@ uses, so a copied Cursor entry never connects.
 {
   "mcpServers": {
     "auto-browser": {
-      "url": "http://127.0.0.1:8000/mcp"
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": { "Authorization": "Bearer <contents of data/api-token>" }
     }
   }
 }
@@ -91,20 +104,17 @@ uses, so a copied Cursor entry never connects.
   "servers": {
     "auto-browser": {
       "type": "http",
-      "url": "http://127.0.0.1:8000/mcp"
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": { "Authorization": "Bearer <contents of data/api-token>" }
     }
   }
 }
 ```
 
-If the controller has an `API_BEARER_TOKEN`, send it as a header. With Claude
-Code, add `--header "Authorization: Bearer $API_BEARER_TOKEN"`. Codex reads the
-token from an environment variable you name: export it, then add
-`--bearer-token-env-var API_BEARER_TOKEN` to `codex mcp add` (in
-`config.toml`, `bearer_token_env_var = "API_BEARER_TOKEN"`). With Antigravity,
-Cursor, and VS Code, add `"headers": {"Authorization": "Bearer <token>"}` next
-to the URL. Without the header, the client reports a 401 "Missing or invalid
-bearer token". With `REQUIRE_OPERATOR_ID=true`, also send `X-Operator-Id` (or
+Without the header, the client reports a 401 "Missing or invalid bearer token".
+A controller started with `API_ALLOW_TOKENLESS_LOOPBACK=true` needs no header, but
+then any container on its compose network can drive the browser too. With
+`REQUIRE_OPERATOR_ID=true`, also send `X-Operator-Id` (or
 whatever `OPERATOR_ID_HEADER` names) the same way; in Codex that is
 `http_headers = { "X-Operator-Id" = "<your id>" }` in `config.toml`.
 
@@ -151,17 +161,26 @@ Minimal shape (requires [uv](https://docs.astral.sh/uv/)):
       "args": ["auto-browser-mcp"],
       "env": {
         "AUTO_BROWSER_BASE_URL": "http://127.0.0.1:8000/mcp",
-        "AUTO_BROWSER_BEARER_TOKEN": ""
+        "AUTO_BROWSER_TOKEN_FILE": "/ABSOLUTE/PATH/TO/auto-browser/data/api-token"
       }
     }
   }
 }
 ```
 
-Working from a repo checkout without uv? Point `command` at `python3` with
-`args: ["/ABSOLUTE/PATH/TO/auto-browser/scripts/mcp_stdio_bridge.py"]` instead.
+The bridge reads the token file on every request, so it can start before the
+controller has written it. Working from a repo checkout without uv? Point
+`command` at `python3` with `args: ["/ABSOLUTE/PATH/TO/auto-browser/scripts/mcp_stdio_bridge.py"]`
+instead; that wrapper reads its own checkout's `data/api-token`, so it needs no
+token setting.
 
-If your API is protected, set `AUTO_BROWSER_BEARER_TOKEN`. If it sets
+Bridges older than the one that added `--token-file` ignore
+`AUTO_BROWSER_TOKEN_FILE`, and a 401 from one does not mention it. Use
+`"args": ["auto-browser-mcp@latest"]`, or set `AUTO_BROWSER_BEARER_TOKEN` to the
+file's contents, which every bridge understands.
+
+If you set `API_BEARER_TOKEN` on the controller, put it in
+`AUTO_BROWSER_BEARER_TOKEN`; a non-empty one wins over the file. If the controller sets
 `REQUIRE_OPERATOR_ID=true`, also set `AUTO_BROWSER_OPERATOR_ID`, unless the token is a
 named credential from `API_BEARER_TOKENS`.
 
@@ -222,10 +241,11 @@ tools. Start with a normal MCP initialization, keep the returned
 `MCP-Session-Id` and `MCP-Protocol-Version` headers, then send
 `notifications/initialized`.
 
-Minimal resource listing over the HTTP transport:
+Minimal resource listing over the HTTP transport (with `AUTH` holding the token
+header, as in the raw tool-call example below):
 
 ```bash
-curl -s http://127.0.0.1:8000/mcp \
+curl -s "${AUTH[@]}" http://127.0.0.1:8000/mcp \
   -X POST \
   -H 'accept: application/json, text/event-stream' \
   -H 'content-type: application/json' \
@@ -250,7 +270,7 @@ The default resource set includes:
 Read a resource by URI:
 
 ```bash
-curl -s http://127.0.0.1:8000/mcp \
+curl -s "${AUTH[@]}" http://127.0.0.1:8000/mcp \
   -X POST \
   -H 'accept: application/json, text/event-stream' \
   -H 'content-type: application/json' \
@@ -270,7 +290,7 @@ Clients that support resource updates can subscribe, then keep the MCP event
 stream open with `GET /mcp`:
 
 ```bash
-curl -s http://127.0.0.1:8000/mcp \
+curl -s "${AUTH[@]}" http://127.0.0.1:8000/mcp \
   -X POST \
   -H 'accept: application/json, text/event-stream' \
   -H 'content-type: application/json' \
@@ -285,7 +305,7 @@ curl -s http://127.0.0.1:8000/mcp \
     }
   }' | jq
 
-curl -N http://127.0.0.1:8000/mcp \
+curl -N "${AUTH[@]}" http://127.0.0.1:8000/mcp \
   -H 'accept: text/event-stream' \
   -H "MCP-Session-Id: $MCP_SESSION_ID" \
   -H "MCP-Protocol-Version: $MCP_PROTOCOL_VERSION"
@@ -700,12 +720,15 @@ the effect. See `docs/production-hardening.md`.
 
 ## Raw tool-call example
 
-If you want to see the shape of the tool surface without wiring up a full MCP client yet:
+If you want to see the shape of the tool surface without wiring up a full MCP client yet
+(from the auto-browser folder, so `AUTH` carries the token):
 
 ```bash
-curl -s http://127.0.0.1:8000/mcp/tools | jq
+AUTH=(-H "Authorization: Bearer $(cat data/api-token)")
 
-curl -s http://127.0.0.1:8000/mcp/tools/call \
+curl -s "${AUTH[@]}" http://127.0.0.1:8000/mcp/tools | jq
+
+curl -s "${AUTH[@]}" http://127.0.0.1:8000/mcp/tools/call \
   -X POST \
   -H 'content-type: application/json' \
   -d '{

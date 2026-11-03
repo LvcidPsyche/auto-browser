@@ -9,8 +9,12 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
 - Startup refuses to boot without `API_BEARER_TOKEN` (at least 32 characters)
   whenever the API is reachable off-box — that is, `API_BIND_SCOPE=exposed`,
   which is the default for any deployment that does not declare otherwise. The
-  shipped base compose declares `loopback` to match its `127.0.0.1` publish
-  mapping, which is the only reason `docker compose up` runs without a token.
+  token may also be placed in `API_TOKEN_FILE`. The shipped base compose declares
+  `loopback` to match its `127.0.0.1` publish mapping; with no `API_BEARER_TOKEN`
+  the controller then generates a token in `API_TOKEN_FILE` (`./data/api-token`)
+  and demands it, because every container on the compose network can reach port
+  8000. `API_ALLOW_TOKENLESS_LOOPBACK=true` serves loopback without a token; it
+  never applies to an exposed or production controller.
 - Production startup additionally refuses to boot without:
   - `API_BEARER_TOKEN`
   - `REQUIRE_OPERATOR_ID=true`
@@ -106,8 +110,9 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
 - The dashboard accepts `#token=...` in the URL hash for one-click bookmarkable access.
   The fragment never reaches server logs, but a bookmarked or history-persisted URL
   stores the bearer token in the browser profile. On shared or remote machines,
-  enter the token at the prompt instead of bookmarking it, and rotate
-  `API_BEARER_TOKEN` if such a bookmark may have leaked.
+  enter the token at the prompt instead of bookmarking it, and rotate the token
+  if such a bookmark may have leaked (`API_BEARER_TOKEN`, or delete
+  `data/api-token` and restart the controller to generate a new one).
 
 ## Acceptance criteria
 
