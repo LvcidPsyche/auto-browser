@@ -8,7 +8,7 @@ import {
   launchWithSandboxPolicy,
   parseSetting,
   SandboxRefusedError,
-  verifySandbox,
+  verifyServer,
   writeState,
 } from "./sandbox.mjs";
 
@@ -74,17 +74,9 @@ const launch = (sandboxed) =>
     args: chromiumArgs,
   });
 
-// Opens one page through the server so a renderer exists, then checks it in /proc (sandbox.mjs verifySandbox).
-async function verify(server) {
-  const client = await chromium.connect(server.wsEndpoint(), { timeout: 30000 });
-  try {
-    const page = await client.newPage();
-    await page.setContent("<p>sandbox check</p>");
-    return verifySandbox({ browserPid: server.process().pid });
-  } finally {
-    await client.close();
-  }
-}
+// After a sandboxed launch: sandbox.mjs verifyServer opens one page through the server and checks its renderers
+// in /proc (and chrome://sandbox on kernels without Seccomp_filters).
+const verify = (server) => verifyServer(server, { connect: (endpoint) => chromium.connect(endpoint, { timeout: 30000 }) });
 
 await mkdir(dirname(sandboxStateFile), { recursive: true });
 let browserServer;

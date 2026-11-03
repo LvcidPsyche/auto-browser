@@ -26,7 +26,7 @@ export function parseSetting(raw) {
 export function declaredProfile(raw) {
   const value = String(raw ?? "").trim();
   if (!value || value === "builtin") return "builtin";
-  if (value === "unconfined" || value === "auto-browser") return value;
+  if (value === "unconfined" || value === "auto-browser" || value === "no-seccomp") return value;
   return "custom";
 }
 
@@ -74,6 +74,14 @@ function chromiumReason(error) {
 // One cause per failure, worded so a missing profile never reads like a host that refuses namespaces.
 export function classifyFailure({ probe, kernel = {}, profile, chromiumError }) {
   const chromium = chromiumReason(chromiumError);
+  if (profile === "no-seccomp") {
+    return {
+      cause: "seccomp_unsupported",
+      detail:
+        "the Docker daemon reports no seccomp support, so no seccomp profile was applied and Chromium's " +
+        `seccomp-BPF layer cannot run (${chromium}).`,
+    };
+  }
   if (probe.ok) {
     return {
       cause: "chromium_refused",
@@ -89,13 +97,17 @@ export function classifyFailure({ probe, kernel = {}, profile, chromiumError }) 
     };
   }
   if (profile === "builtin") {
-    return {
-      cause: "seccomp_profile_not_applied",
-      detail:
-        "the auto-browser seccomp profile is not applied to this container, and Docker's default profile refuses " +
-        `the user namespace Chromium's sandbox needs (${probe.stderr}). Start it with docker compose or from the ` +
-        "controller, or pass --security-opt seccomp=controller/app/browser/seccomp/chromium-sandbox.json.",
-    };
+    let detail =
+      "the auto-browser seccomp profile is not applied to this container, and Docker's default profile refuses " +
+      `the user namespace Chromium's sandbox needs (${probe.stderr}). Start it with docker compose or from the ` +
+      "controller, or pass --security-opt seccomp=controller/app/browser/seccomp/chromium-sandbox.json.";
+    if (kernel.apparmor_restrict_unprivileged_userns === "1") {
+      // BROWSER_SECCOMP_PROFILE is only a hint: a plain docker run may have applied the profile without saying so.
+      detail +=
+        " Or AppArmor refused it: this host sets kernel.apparmor_restrict_unprivileged_userns=1 (Ubuntu 23.10 and" +
+        " later), which refuses the namespace even with the profile.";
+    }
+    return { cause: "seccomp_profile_not_applied", detail };
   }
   if (probe.stage === "chroot") {
     return {
@@ -144,31 +156,39 @@ export async function launchWithSandboxPolicy({ setting, profile, launch, verify
     return { server, state: { ...base, sandbox: "off", cause: "setting_off", detail, userns_exposed: exposed } };
   }
 
+  // Two sandboxed attempts: a transient failure (a renderer exiting mid-check, a slow connect on a loaded host)
+  // must not leave a container unsandboxed for its whole life.
   let failure;
-  try {
-    const server = await launch(true);
-    let verdict;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
-      verdict = await verify(server);
-    } catch (error) {
-      verdict = { ok: false, detail: `the sandbox check failed: ${String(error?.message ?? error).split("\n")[0]}` };
-    }
-    if (verdict.ok) {
-      return {
-        server,
-        state: {
-          ...base,
-          sandbox: "on",
-          cause: null,
-          detail: "Chromium runs sandboxed: renderers are in their own user namespace under Chromium's seccomp filter.",
-          verified: verdict.evidence,
-        },
+      const server = await launch(true);
+      let verdict;
+      try {
+        verdict = await verify(server);
+      } catch (error) {
+        verdict = { ok: false, detail: `the sandbox check failed: ${String(error?.message ?? error).split("\n")[0]}` };
+      }
+      if (verdict.ok) {
+        return {
+          server,
+          state: {
+            ...base,
+            sandbox: "on",
+            cause: null,
+            detail:
+              "Chromium runs sandboxed: renderers are in their own user namespace under Chromium's seccomp filter.",
+            verified: verdict.evidence,
+          },
+        };
+      }
+      await server.close().catch(() => {});
+      failure = {
+        cause: verdict.cause || "not_verified",
+        detail: `Chromium launched with its sandbox requested, but ${verdict.detail}`,
       };
+    } catch (error) {
+      failure = classifyFailure({ ...runDiagnose(), profile, chromiumError: error });
     }
-    await server.close().catch(() => {});
-    failure = { cause: "not_verified", detail: `Chromium launched with its sandbox requested, but ${verdict.detail}` };
-  } catch (error) {
-    failure = classifyFailure({ ...runDiagnose(), profile, chromiumError: error });
   }
 
   if (setting === "on") {
@@ -204,9 +224,20 @@ function seccompFilters(status) {
   return match ? Number(match[1]) : undefined;
 }
 
-// Proof from /proc, not from the flag: every renderer under this browser runs in a user namespace other than the
-// browser's and carries more seccomp filters than it (Chromium's on top of the container's).
-export function verifySandbox({ browserPid, proc = realProc }) {
+function exited(error) {
+  return error?.code === "ENOENT" || error?.code === "ESRCH";
+}
+
+// chrome://sandbox's own verdict, for kernels without Seccomp_filters in /proc/<pid>/status (before 5.9).
+function sandboxPageSaysSeccomp(text) {
+  return /Seccomp-BPF sandbox\s*:?\s*Yes/i.test(text || "");
+}
+
+// Proof from /proc, not from the flag: every live renderer under this browser runs in a user namespace other than
+// the browser's and carries more seccomp filters than it (Chromium's on top of the container's). A renderer that
+// exits mid-check is skipped; at least one must remain. Without Seccomp_filters (kernel < 5.9) the seccomp half
+// comes from chrome://sandbox's text (sandboxPage), or the result says it cannot be verified.
+export function verifySandbox({ browserPid, proc = realProc, sandboxPage }) {
   const browser = String(browserPid);
   const parents = new Map();
   for (const pid of proc.pids()) {
@@ -222,21 +253,46 @@ export function verifySandbox({ browserPid, proc = realProc }) {
     }
     return false;
   };
+  let browserNs;
+  let browserFilters;
+  try {
+    browserNs = proc.userns(browser);
+    browserFilters = seccompFilters(proc.status(browser));
+  } catch (error) {
+    if (exited(error)) return { ok: false, detail: "the browser process exited during the check" };
+    throw error;
+  }
   const renderers = [];
   for (const pid of parents.keys()) {
     try {
-      if (descends(pid) && proc.cmdline(pid).join(" ").split(" ").includes("--type=renderer")) renderers.push(pid);
-    } catch {
-      // Exited.
+      if (!descends(pid) || !proc.cmdline(pid).join(" ").split(" ").includes("--type=renderer")) continue;
+      renderers.push({ pid, userns: proc.userns(pid), filters: seccompFilters(proc.status(pid)) });
+    } catch (error) {
+      if (!exited(error)) throw error; // exited mid-check: skipped
     }
   }
   if (!renderers.length) return { ok: false, detail: "no renderer process was found under the browser to check" };
-  const browserNs = proc.userns(browser);
-  const browserFilters = seccompFilters(proc.status(browser));
-  const rendererFilters = renderers.map((pid) => seccompFilters(proc.status(pid)));
-  const userns = renderers.every((pid) => proc.userns(pid) !== browserNs);
-  if (!userns) return { ok: false, detail: "a renderer runs in the browser's own user namespace" };
-  if (browserFilters === undefined || !rendererFilters.every((count) => count > browserFilters)) {
+  if (!renderers.every((renderer) => renderer.userns !== browserNs)) {
+    return { ok: false, detail: "a renderer runs in the browser's own user namespace" };
+  }
+  const filtersKnown = browserFilters !== undefined && renderers.every((renderer) => renderer.filters !== undefined);
+  if (!filtersKnown) {
+    if (sandboxPageSaysSeccomp(sandboxPage)) {
+      return {
+        ok: true,
+        evidence: { renderers: renderers.length, renderer_userns_differs: true, method: "chrome://sandbox" },
+      };
+    }
+    return {
+      ok: false,
+      cause: "verification_unsupported",
+      detail:
+        "this kernel reports no Seccomp_filters in /proc (Linux before 5.9) and chrome://sandbox did not confirm " +
+        "the seccomp-BPF sandbox",
+    };
+  }
+  const rendererFilters = renderers.map((renderer) => renderer.filters);
+  if (!rendererFilters.every((count) => count > browserFilters)) {
     return {
       ok: false,
       detail: `a renderer has no seccomp filter beyond the browser's (${rendererFilters} vs ${browserFilters})`,
@@ -251,6 +307,31 @@ export function verifySandbox({ browserPid, proc = realProc }) {
       renderer_seccomp_filters: rendererFilters,
     },
   };
+}
+
+// What server.mjs runs after a sandboxed launch: one page through the server so a renderer exists, then /proc,
+// and chrome://sandbox only when /proc cannot show the seccomp half. `connect` and `proc` are injectable for tests.
+export async function verifyServer(server, { connect, proc = realProc }) {
+  const client = await connect(server.wsEndpoint());
+  try {
+    const page = await client.newPage();
+    await page.setContent("<p>sandbox check</p>");
+    const browserPid = server.process().pid;
+    let verdict = verifySandbox({ browserPid, proc });
+    if (!verdict.ok && verdict.cause === "verification_unsupported") {
+      let sandboxPage = "";
+      try {
+        await page.goto("chrome://sandbox", { timeout: 15000 });
+        sandboxPage = await page.innerText("body");
+      } catch {
+        // Not reachable: stays unverified.
+      }
+      verdict = verifySandbox({ browserPid, proc, sandboxPage });
+    }
+    return verdict;
+  } finally {
+    await client.close();
+  }
 }
 
 export async function writeState(path, state) {

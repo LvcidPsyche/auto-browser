@@ -110,7 +110,9 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-run_as_browser node /opt/browser-node/server.mjs >/tmp/playwright-server.log 2>&1 &
+# Its output (the sandbox outcome and any WARNING or refusal) goes to docker logs as well as the log file. The
+# process substitution keeps $! the server's pid, not tee's.
+run_as_browser node /opt/browser-node/server.mjs > >(tee /tmp/playwright-server.log) 2>&1 &
 PLAYWRIGHT_SERVER_PID=$!
 
 wait "$PLAYWRIGHT_SERVER_PID"
