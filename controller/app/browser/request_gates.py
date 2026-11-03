@@ -129,6 +129,9 @@ class RequestGates:
         # through, kept attached for the page's life (_read_target_id says why a detach is not an option).
         self._target_ids: weakref.WeakKeyDictionary[Any, str] = weakref.WeakKeyDictionary()
         self._target_sessions: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
+        # A read in flight per page: a second caller (the open-tab tool and the report of the same tab) shares it
+        # rather than open a second page session.
+        self._target_reads: weakref.WeakKeyDictionary[Any, asyncio.Task[str | None]] = weakref.WeakKeyDictionary()
         # The prefetch preference read back from each launched browser (decision 5), for readiness.
         self._prefetch: dict[int, tuple[Any, Any]] = {}
         # Each owned page's session holding Network.setBypassServiceWorker; the bypass lasts as long as it does.
@@ -323,18 +326,33 @@ class RequestGates:
         return self._target_ids.get(page)
 
     async def target_id_of(self, page: Any) -> str | None:
-        """A page's targetId (the frameId of its main frame's requests), read once through a page session."""
+        """A page's targetId (the frameId of its main frame's requests), read once through a page session.
+
+        One read per page at a time: callers that come while it runs await the same read (shielded, so a
+        caller's cancellation does not cancel it for the others). A read that failed is not cached, so the
+        next caller tries again.
+        """
         known = self._target_ids.get(page)
         if known is not None:
             return known
+        try:
+            read = self._target_reads.get(page)
+        except TypeError:  # a page that cannot be weakly referenced (a test double)
+            return await self._read_and_cache(page)
+        if read is None or read.done():
+            read = self._target_reads[page] = spawn_background_task(self._read_and_cache(page))
+        return await asyncio.shield(read)
+
+    async def _read_and_cache(self, page: Any) -> str | None:
         try:
             target_id, session = await asyncio.wait_for(_read_target_id(page), timeout=TARGET_ID_TIMEOUT_SECONDS)
         except Exception as exc:
             # Nothing is attributed to the page then, and the caller's own error stands.
             logger.debug("could not read a page's targetId: %s", f"{type(exc).__name__}: {exc}"[:200])
             return None
-        self._target_ids[page] = target_id
-        self._target_sessions[page] = session
+        with contextlib.suppress(TypeError):
+            self._target_ids[page] = target_id
+            self._target_sessions[page] = session
         return target_id
 
     # ── readiness ────────────────────────────────────────────────────────────
