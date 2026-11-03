@@ -32,6 +32,9 @@ logger = logging.getLogger(__name__)
 _MANAGED_LABEL = "auto-browser.managed"
 _SESSION_ID_LABEL = "auto-browser.session_id"
 _MODE_LABEL = "auto-browser.mode"
+_ROLE_LABEL = "auto-browser.role"
+# browser-node's `browser` user: its entrypoint hands an isolated container's profile/ and downloads/ to it.
+_BROWSER_USER = "10001:10001"
 
 # The capabilities browser-node's entrypoint needs as root before setpriv
 # drops to the browser user (whose processes then hold none): CHOWN for the
@@ -278,9 +281,10 @@ class DockerBrowserNodeProvisioner:
         except OSError as exc:
             logger.warning("Could not list leftover session runtime dirs in %s: %s", root, exc)
             return
+        client = self._ensure_context()
         for session_id in leftovers:
             if session_id not in keep:
-                self._remove_runtime_dirs(session_id)
+                self._remove_runtime_dirs(session_id, client=client)
 
     def _reap_orphaned_networks(self) -> None:
         """Remove per-session networks left behind by a previous controller run.
@@ -512,7 +516,7 @@ class DockerBrowserNodeProvisioner:
             self._remove_stale_container(client, container_name)
             if network is not None:
                 self._remove_session_network(network, session_id, controller_id)
-            self._remove_runtime_dirs(session_id)
+            self._remove_runtime_dirs(session_id, client=client)
             raise
 
     def _container_name(self, session_id: str) -> str:
@@ -711,7 +715,7 @@ class DockerBrowserNodeProvisioner:
         if not self.settings.isolated_browser_keep_containers:
             # Also when the container is already gone (docker rm, a crashed
             # daemon): its profile directory, cookies included, is still here.
-            self._remove_runtime_dirs(runtime.session_id)
+            self._remove_runtime_dirs(runtime.session_id, client=client)
 
     def _release_session_network(self, client, runtime: IsolatedBrowserRuntime, *, stranded: Any = None) -> None:
         """Leave this session's network, and remove it unless containers are kept.
@@ -753,7 +757,7 @@ class DockerBrowserNodeProvisioner:
                 )
         self._remove_session_network(network, runtime.session_id, controller_id)
 
-    def _remove_runtime_dirs(self, session_id: str) -> None:
+    def _remove_runtime_dirs(self, session_id: str, *, client: Any = None) -> None:
         """Delete the per-session profile and downloads tree.
 
         Only the container was ever removed on release. Each isolated session
@@ -761,6 +765,12 @@ class DockerBrowserNodeProvisioner:
         and nothing cleaned it: MaintenanceService sweeps only the artifact,
         upload and auth roots. On a long-lived host that is unbounded growth
         with no signal until the volume fills mid-session.
+
+        profile/ and downloads/ belong to the browser user (browser-node's
+        entrypoint chowns them), so a controller that is not root cannot delete
+        their contents: they are emptied first as that user, by a helper
+        container, and anything that still remains is a WARNING with its path,
+        never silently ignored.
         """
         runtime_root = self._local_runtime_root(session_id)
         try:
@@ -771,10 +781,63 @@ class DockerBrowserNodeProvisioner:
             if base not in resolved.parents:
                 logger.warning("Refusing to remove %s: outside the session runtime root", resolved)
                 return
-            shutil.rmtree(resolved, ignore_errors=True)
-            logger.debug("Removed isolated session runtime dir %s", resolved)
+            if not resolved.exists():
+                return
+            if client is not None and self._has_browser_files(resolved):
+                self._empty_as_browser_user(client, session_id)
+            failures: list[str] = []
+            shutil.rmtree(resolved, onerror=lambda _func, path, exc: failures.append(f"{path}: {exc[1]}"))
+            if resolved.exists():
+                left = sum(1 for _ in resolved.rglob("*"))
+                logger.warning(
+                    "Could not remove the isolated session dir %s: %d entries left (first: %s). It may hold the "
+                    "session's cookies; remove it by hand.",
+                    resolved,
+                    left,
+                    failures[0] if failures else "unknown",
+                )
+            else:
+                logger.debug("Removed isolated session runtime dir %s", resolved)
         except Exception as exc:
             logger.warning("Could not remove runtime dir for session %s: %s", session_id, exc)
+
+    @staticmethod
+    def _has_browser_files(runtime_root: Path) -> bool:
+        for name in ("profile", "downloads"):
+            directory = runtime_root / name
+            try:
+                if directory.is_dir() and any(directory.iterdir()):
+                    return True
+            except OSError:
+                return True  # unreadable to the controller: exactly the case the helper is for
+        return False
+
+    def _empty_as_browser_user(self, client, session_id: str) -> None:
+        """Empty profile/ and downloads/ as the browser user, after its container has stopped.
+
+        A short --rm container from the browser image, with only those two dirs mounted, no network and no
+        capabilities: Chromium writes to its profile as it exits, so this runs after the stop, and it also serves
+        a session whose container is already gone (the startup orphan sweep)."""
+        try:
+            host_data_root = self._host_data_root or self._discover_host_data_root(client)
+            self._host_data_root = host_data_root
+            host_root = host_data_root / "browser-sessions" / session_id
+            client.containers.run(
+                self.settings.isolated_browser_image,
+                ["sh", "-c", "find /data/profile /data/downloads -mindepth 1 -delete"],
+                user=_BROWSER_USER,
+                remove=True,
+                network_mode="none",
+                cap_drop=["ALL"],
+                security_opt=[_NO_NEW_PRIVILEGES],
+                volumes={
+                    str(host_root / "profile"): {"bind": "/data/profile", "mode": "rw"},
+                    str(host_root / "downloads"): {"bind": "/data/downloads", "mode": "rw"},
+                },
+                labels={**_session_labels(session_id), _ROLE_LABEL: "cleanup"},
+            )
+        except Exception as exc:
+            logger.warning("Could not empty session %s's browser dirs as the browser user: %s", session_id, exc)
 
     def _ensure_context(self):
         if self._client is None:
