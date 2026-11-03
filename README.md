@@ -288,7 +288,7 @@ STEALTH_ENABLED=false
 
 With `APP_ENV=production` the controller refuses to start while any of these is missing, and the startup log names the missing ones.
 
-By default every session shares one Chromium process and one noVNC desktop (`SESSION_ISOLATION_MODE=shared_browser_node`). Cookies and storage stay separate per session, but a human taking over one session can see the others' windows. When sessions belong to different people, accounts or trust domains, start with `make up-isolation` to give each session its own browser container, takeover surface and Docker network (`docker_ephemeral`), so one session's browser cannot reach another's. [`docs/session-isolation-audit.md`](./docs/session-isolation-audit.md) has the details.
+By default every session shares one Chromium process and one noVNC desktop (`SESSION_ISOLATION_MODE=shared_browser_node`). Cookies and storage stay separate per session, but a human taking over one session can see the others' windows. When sessions belong to different people, accounts or trust domains, start with `make up-isolation` to give each session its own browser container, takeover surface and Docker network (`docker_ephemeral`), so one session's browser cannot reach another's Playwright server. [`docs/session-isolation-audit.md`](./docs/session-isolation-audit.md) has the details.
 
 `ALLOWED_HOSTS` is held before the request goes out (`PRE_REQUEST_BLOCKING=true`, the default):
 

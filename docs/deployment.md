@@ -84,8 +84,9 @@ its own Docker bridge network, `<ISOLATED_BROWSER_CONTAINER_PREFIX>-<session id>
 (`ISOLATED_BROWSER_NETWORK_MODE=per_session`, the default). The controller joins that
 network before the container starts and leaves it when the session closes; the network
 is then removed. A session's browser can reach the internet and the controller, but not
-another session's browser (its Playwright server on 9223 or its noVNC on 6080), and not
-the shared `browser-node` or any other service on the compose network.
+another session's browser by name, nor its Playwright server (9223), nor the shared
+`browser-node` or any other service on the compose network. Published noVNC ports are
+the exception (below).
 
 - **Upgrading:** isolated browsers no longer reach compose-network services. A proxy
   sidecar named in `DEFAULT_PROXY_SERVER` or a proxy persona must be reachable some
@@ -114,10 +115,27 @@ What per-session networks do not change:
 
 - **The controller API is reachable from every session's browser** at the controller's
   address on that session's network (it listens on `0.0.0.0:8000`). Set a bearer token.
-- **A noVNC port published beyond loopback is reachable from other sessions.** With
-  `ISOLATED_BROWSER_BIND_HOST` set to `0.0.0.0` or a LAN address, any session's browser
-  can reach another session's published noVNC through the host address; only
-  `VNC_PASSWORD` protects it there.
+- **Each session's published noVNC stays reachable from other sessions,** whatever
+  `ISOLATED_BROWSER_BIND_HOST` is. Docker lets a published port be reached at the
+  container's address from other bridge networks, and on Docker Desktop
+  `host.docker.internal` reaches ports published on `127.0.0.1` (both measured on Docker
+  Desktop 29.9). noVNC's WebSocket origin guard refuses a page's connection there, but
+  native code in another session's container can forge the `Host` header. So each
+  isolated session's noVNC has **its own random VNC password**, generated when the
+  container starts; the operator's `VNC_PASSWORD` is no longer handed to isolated
+  containers, where any of them could read it.
+- **The takeover URL is a secret.** The `takeover_url` in the handoff responses (the
+  session from `create_session` and `get_session`, `get_remote_access`, and
+  `request_human_takeover`, over REST and MCP) carries the session's password in its
+  fragment, `#password=…`, so noVNC connects without asking. A browser never sends the
+  fragment to a server, so it stays out of access logs, but treat the URL like the API
+  token. Observations, action results, `list_sessions`, the stored session records, the
+  tunnel metadata file and the audit trail carry the URL without it; opened from there,
+  noVNC asks for the password. noVNC remembers a password it was given in that origin's
+  browser storage, which is harmless: each session has its own random port and password.
+- **The shared browser-node's noVNC is reachable from session containers too,** the same
+  way. Only the operator's `VNC_PASSWORD` guards it, so set it with `docker_ephemeral`;
+  the readiness check warns while it is unset.
 - **Separation relies on Docker's firewall rules** between bridges. A daemon run with
   `"iptables": false` routes between them, and the networks isolate nothing.
 - **One controller per daemon.** The startup sweep removes every labelled session network
@@ -745,12 +763,13 @@ RFB only on a unix socket inside the container, in a directory only the `browser
 can enter, and websockify proxies noVNC to that socket. A native VNC viewer cannot
 connect to the container; use the noVNC page.
 
-`VNC_PASSWORD` adds VNC authentication to noVNC, on the shared browser-node and on
-isolated session containers; noVNC prompts for it. Set it whenever 6080 is reachable
+`VNC_PASSWORD` adds VNC authentication to the shared browser-node's noVNC; noVNC prompts
+for it. Isolated session containers get a random password of their own instead (see
+"Per-session networks" above). Set it whenever 6080 is reachable
 beyond loopback — but treat it as a second layer, not the gateway: the VNC protocol
-uses only the first 8 characters and a DES-based challenge. With
-`ISOLATED_BROWSER_BIND_HOST` beyond loopback it is also what keeps one isolated session's
-browser out of another session's noVNC, which per-session networks do not cover.
+uses only the first 8 characters and a DES-based challenge. With `docker_ephemeral` it is
+also what keeps code in an isolated session's container out of the shared browser-node's
+desktop, which those containers can reach.
 
 Chromium runs in the same container as noVNC, so every page it loads can reach
 `ws://127.0.0.1:6080`. Two things keep such a page out:

@@ -15,7 +15,7 @@ Two real concerns remain. One is acknowledged in `docs/architecture.md` as a POC
 | Mode | Browser process | Browser context | Takeover surface | Network |
 |------|-----------------|-----------------|-------------------|---------|
 | `shared_browser_node` (default) | Shared (one Chromium) | Isolated per session via `new_context()` | Shared (one X display, one noVNC) | One browser on the compose network |
-| `docker_ephemeral` | Isolated (one container per session) | Isolated per session | Per-session noVNC, optional per-session reverse-SSH | Per session (`ISOLATED_BROWSER_NETWORK_MODE=per_session`, the default): the browser reaches only the controller and the internet. `shared` puts all on one network |
+| `docker_ephemeral` | Isolated (one container per session) | Isolated per session | Per-session noVNC, optional per-session reverse-SSH | Per session (`ISOLATED_BROWSER_NETWORK_MODE=per_session`, the default): the browser reaches the controller, the internet and other sessions' published noVNC ports (each behind its own random VNC password), not their Playwright servers. `shared` puts all on one network |
 
 ### Per-session networks: what remains reachable
 
@@ -27,9 +27,18 @@ bridge network that only it and the controller join. What it still reaches:
 - **The controller API**, at the controller's address on the session network (the controller listens
   on `0.0.0.0:8000`). Without a bearer token that is control of every session. Per-session networks
   do not change this; refusing requests from session subnets would.
-- **noVNC ports published beyond loopback.** With `ISOLATED_BROWSER_BIND_HOST` set to `0.0.0.0` or a
-  LAN address, another session's published noVNC is reachable through the host address. Only
-  `VNC_PASSWORD` protects it there.
+- **Every session's published noVNC (6080), whatever `ISOLATED_BROWSER_BIND_HOST` is.** Measured on
+  Docker Desktop 29.9: from session A's container, session B's 6080 answers at B's container address
+  (Docker accepts traffic to a published port from other bridges) and at `host.docker.internal:<port>`
+  even when published on `127.0.0.1`, while B's unpublished 9223 times out and B's name does not
+  resolve. noVNC's origin guard refuses a WebSocket a page can send there (403), but native code that
+  forges `Host: 127.0.0.1` gets the upgrade (101). So each isolated session's noVNC has its own random
+  VNC password, and the operator's `VNC_PASSWORD` is no longer handed to isolated containers, where code
+  in any of them could read it and use it on the others. The password reaches a human only through the
+  takeover URL's fragment in the handoff responses, which makes that URL a secret. Not yet measured on a
+  Linux daemon.
+- **The shared browser-node's noVNC**, the same way (its container address, or `host.docker.internal`).
+  Only the operator's `VNC_PASSWORD` guards it; the readiness check warns while it is unset.
 - **Routing through the controller**, in theory: the controller sits on every session network. It
   does not forward between them (see the `ip_forward` note in `docker-compose.isolation.yml`), and
   Chromium runs as a non-root user, so this would need a privilege escalation and a forwarding
