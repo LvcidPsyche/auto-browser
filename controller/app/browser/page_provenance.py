@@ -215,19 +215,21 @@ class PageProvenance:
         if state is not None:
             state.opener_pending = False
 
-    def opener_judged(self, page: Any, *, opener_refused: bool) -> bool:
+    def opener_judged(self, page: Any, *, opener_refused: bool, by_another_page: bool = False) -> bool:
         """Record the opener's verdict. True when it taints the page, which then goes back to about:blank.
 
         A refused opener taints the popup whatever its URL: on about:, blob: or data: the popup shows
         what the opener wrote, and on an allowed URL the opener chose its path and query, which can
-        carry what it read.
+        carry what it read. ``by_another_page``: the verdict is the session's, not the opener's own (the
+        window-birth watcher could not match the opener, and another page of the session was refused),
+        so the refusal names another tab as its cause.
         """
         state = self._ensure(page)
         state.opener_pending = False
         if not opener_refused:
             return False
         state.tainted = True
-        state.by_another_page = False
+        state.by_another_page = by_another_page
         state.blanked = False
         state.refused_commits += 1
         return True

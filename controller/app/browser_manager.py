@@ -198,11 +198,12 @@ class BrowserManager:
             # Runs whenever ALLOWED_HOSTS refuses a host, even with PRE_REQUEST_BLOCKING off (the no-gate gap);
             # not when every host is allowed, where no window is ever born refused.
             enabled=self._allowed_hosts_restrict,
-            window_born_refused=self._window_born_refused,
+            opener_refused=self._opener_refuses_its_windows,
             session_counts_as_refused=self._session_has_refused_page,
+            page_by_target_id=self._page_by_target_id,
+            session_pages=lambda session: self.tabs.pages(session),
             resolve_target_id=lambda page: self.request_gates.target_id_of(page),
             seed_target_id=self.request_gates.seed_target_id,
-            on_late_refused=lambda session, page: self.diagnostics.taint_reported_window(session, page),
         )
         self.action_pipeline = BrowserActionPipeline()
         self.element_ids = ElementIds(settings)
@@ -839,24 +840,21 @@ class BrowserManager:
             )
         )
 
-    def _window_born_refused(self, session: BrowserSession, opener_id: str | None) -> bool:
-        """Whether a window born with ``opener_id`` is born refused: it is a window a page opened (has an
-        opener) whose opener is refused, born within the grace after a counting page cleared or closed, or —
-        when the opener cannot be matched to a known page — opened while the session counts as refused.
+    def _opener_refuses_its_windows(self, session: BrowserSession, opener: Any) -> bool:
+        """Whether a window this page opens is born refused (window_births): the page is refused now, or a page
+        that counted for the session closed within the grace (it can have navigated this page just before).
 
         Keyed on the opener, not the whole session, so a window an allowed page opens while an unrelated tab is
-        refused is judged by its allowed opener (it is not born refused), as a reported popup would be. The
-        opener is matched by its cached targetId, with no I/O; an unmatched opener fails closed to the session.
+        refused is judged by its allowed opener (it is not born refused), as a reported popup would be.
         """
-        if not opener_id:
-            return False
-        opener = next(
-            (page for page in self.tabs.pages(session) if self.request_gates.known_target_id(page) == opener_id),
+        return self._page_refused(opener) or self.page_provenance.counting_page_closed_recently(session.id)
+
+    def _page_by_target_id(self, session: BrowserSession, target_id: str) -> Any:
+        """The session's open page with this cached targetId, with no I/O (window_births matches an opener by it)."""
+        return next(
+            (page for page in self.tabs.pages(session) if self.request_gates.known_target_id(page) == target_id),
             None,
         )
-        if opener is not None:
-            return self._page_refused(opener) or self.page_provenance.counting_page_closed_recently(session.id)
-        return self._session_has_refused_page(session)
 
     def _allowed_hosts_restrict(self) -> bool:
         """Whether ALLOWED_HOSTS refuses any host: a non-empty allowlist with no ``*``. When it refuses none,
