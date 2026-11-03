@@ -156,6 +156,8 @@ class FakeDockerContainers:
         self.events = events if events is not None else []
         # When set, run() writes it as browser-sandbox.json, as browser-node's server.mjs does before its endpoint.
         self.sandbox_state: dict | None = None
+        # When set, run() writes no endpoint and the container is already exited (a refused browser).
+        self.exit_before_endpoint = False
         self.networks = networks
 
     def get(self, identifier: str) -> FakeDockerContainer:
@@ -174,7 +176,8 @@ class FakeDockerContainers:
         if self.sandbox_state is not None:
             (profile_dir / "browser-sandbox.json").write_text(json.dumps(self.sandbox_state), encoding="utf-8")
         endpoint = f"ws://{name}:9223/playwright"
-        (profile_dir / "browser-ws-endpoint.txt").write_text(endpoint, encoding="utf-8")
+        if not self.exit_before_endpoint:
+            (profile_dir / "browser-ws-endpoint.txt").write_text(endpoint, encoding="utf-8")
         container = FakeDockerContainer(
             container_id=f"{name}-id",
             name=name,
@@ -189,6 +192,8 @@ class FakeDockerContainers:
             labels=kwargs.get("labels") or {},
         )
         container.run_kwargs = kwargs
+        if self.exit_before_endpoint:
+            container.status = "exited"
         container.events = self.events
         container.networks = self.networks
         self.events.append(("container.run", name, kwargs.get("network")))
@@ -213,6 +218,11 @@ class FakeDockerClient:
         self.events: list[tuple] = []
         self.networks = FakeDockerNetworks(self.events)
         self.containers = FakeDockerContainers(controller_container, events=self.events, networks=self.networks)
+        # docker info's SecurityOptions; seccomp present unless a test removes it.
+        self.security_options = ["name=seccomp,profile=builtin", "name=cgroupns"]
+
+    def info(self) -> dict:
+        return {"SecurityOptions": list(self.security_options)}
 
 
 class FakeTracing:

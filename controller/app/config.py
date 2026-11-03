@@ -453,6 +453,23 @@ class Settings(BaseSettings):
             return value.strip() or None
         return value
 
+    @field_validator("browser_sandbox", mode="before")
+    @classmethod
+    def _browser_sandbox_like_browser_node(cls, value: object) -> object:
+        # browser-node/sandbox.mjs parseSetting trims and lowercases, and treats empty as auto: so does this, or
+        # " On " would start the browsers and stop the controller.
+        if isinstance(value, str):
+            return value.strip().lower() or "auto"
+        return value
+
+    @field_validator("isolated_browser_seccomp_profile", mode="before")
+    @classmethod
+    def _empty_profile_is_the_shipped_one(cls, value: object) -> object:
+        # Uncommenting `ISOLATED_BROWSER_SECCOMP_PROFILE=` in .env must not mean "no profile".
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return str(SECCOMP_PROFILE_PATH)
+        return value
+
     @property
     def allowed_host_patterns(self) -> list[str]:
         return [item.strip() for item in self.allowed_hosts.split(",") if item.strip()]

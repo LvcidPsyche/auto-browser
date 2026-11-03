@@ -18,7 +18,12 @@ try:  # pragma: no cover - optional dependency for local host-only unit runs
 except Exception:  # pragma: no cover - optional dependency for local host-only unit runs
     docker = None
 
-from .browser_sandbox import BROWSER_SANDBOX_STATE_FILENAME, load_seccomp_profile, read_sandbox_state
+from .browser_sandbox import (
+    BROWSER_SANDBOX_STATE_FILENAME,
+    SECCOMP_PROFILE_PATH,
+    load_seccomp_profile,
+    read_sandbox_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +148,7 @@ class DockerBrowserNodeProvisioner:
         # Each live isolated container's browser-sandbox.json, by session id (readiness reports them).
         self._sandbox_states: dict[str, dict[str, Any] | None] = {}
         self._sandbox_lock = threading.Lock()
+        self._seccomp_supported: bool | None = None
         self._controller_container_id = os.environ.get("HOSTNAME")
         # The controller's own container, looked up once. per_session joins it
         # to each session network, and _discover_host_data_root reads its mounts.
@@ -328,7 +334,19 @@ class DockerBrowserNodeProvisioner:
         try:
             ws_endpoint = await self._wait_for_ws_endpoint(pending.container, pending.ws_endpoint_file)
             # Written before the endpoint file, so it is there now (absent only from an image older than 1.14.0).
+            # Read once, here: a browser compromised later cannot rewrite what readiness reports for this run.
             sandbox = read_sandbox_state(pending.local_profile_dir / BROWSER_SANDBOX_STATE_FILENAME)
+            if self.settings.browser_sandbox == "on" and (sandbox or {}).get("sandbox") != "on":
+                # Enforced here, not left to the image: an image older than 1.14.0 ignores BROWSER_SANDBOX.
+                described = (
+                    "no state (an image older than 1.14.0 ignores BROWSER_SANDBOX)"
+                    if sandbox is None
+                    else f"{sandbox.get('sandbox')} ({sandbox.get('cause')}): {sandbox.get('detail', '')}"
+                )
+                raise RuntimeError(
+                    f"BROWSER_SANDBOX=on, but isolated browser container {pending.container_name} reports "
+                    f"{described}; the session was refused and its container removed."
+                )
             await asyncio.to_thread(pending.container.reload)
             ports = pending.container.attrs.get("NetworkSettings", {}).get("Ports", {})
             novnc_port = self._extract_host_port(ports, "6080/tcp")
@@ -379,6 +397,19 @@ class DockerBrowserNodeProvisioner:
         setting = self.settings.browser_sandbox
         if setting == "off":
             return [_NO_NEW_PRIVILEGES], "builtin"
+        if not self._daemon_supports_seccomp():
+            # A custom profile makes such a daemon refuse to create the container ("seccomp is not enabled in your
+            # kernel"), where Docker's default only warns.
+            if setting == "on":
+                raise RuntimeError(
+                    "BROWSER_SANDBOX=on, but the Docker daemon reports no seccomp support (docker info "
+                    "SecurityOptions), so Chromium's seccomp sandbox cannot run: the session was not started."
+                )
+            logger.warning(
+                "The Docker daemon reports no seccomp support: isolated browsers start without a seccomp profile, "
+                "and BROWSER_SANDBOX=auto falls back to an unsandboxed Chromium."
+            )
+            return [_NO_NEW_PRIVILEGES], "no-seccomp"
         path = self.settings.isolated_browser_seccomp_profile
         try:
             profile = load_seccomp_profile(path)
@@ -396,7 +427,19 @@ class DockerBrowserNodeProvisioner:
                 exc,
             )
             return [_NO_NEW_PRIVILEGES], "builtin"
-        return [_NO_NEW_PRIVILEGES, f"seccomp={profile}"], "auto-browser"
+        shipped = Path(path).resolve() == SECCOMP_PROFILE_PATH.resolve()
+        return [_NO_NEW_PRIVILEGES, f"seccomp={profile}"], "auto-browser" if shipped else "custom"
+
+    def _daemon_supports_seccomp(self) -> bool:
+        """docker info's SecurityOptions lists name=seccomp on a daemon that can apply profiles; read once."""
+        if self._seccomp_supported is None:
+            try:
+                options = (self._ensure_context().info() or {}).get("SecurityOptions") or []
+            except Exception as exc:  # the API is unreachable here; container creation will say so itself
+                logger.debug("docker info failed (%s); assuming seccomp support", exc)
+                return True
+            self._seccomp_supported = any(str(option).startswith("name=seccomp") for option in options)
+        return self._seccomp_supported
 
     def _provision_container_sync(self, session_id: str) -> PendingBrowserProvision:
         # First: under BROWSER_SANDBOX=on a missing profile refuses before any network or container exists.
@@ -808,8 +851,17 @@ class DockerBrowserNodeProvisioner:
             status = str(getattr(container, "status", "") or container.attrs.get("State", {}).get("Status", ""))
             if status in {"exited", "dead"}:
                 logs = self._container_logs(container)
+                # A browser that refused to run unsandboxed (BROWSER_SANDBOX=on) says why in its state file, which
+                # the cleanup below deletes with the profile dir: read it first.
+                state = read_sandbox_state(endpoint_file.with_name(BROWSER_SANDBOX_STATE_FILENAME))
+                why = ""
+                if state is not None:
+                    why = (
+                        f" Its sandbox state: {state.get('sandbox')} ({state.get('cause')}): {state.get('detail', '')}"
+                    )
                 raise RuntimeError(
-                    f"Isolated browser container {container.name} exited before Playwright endpoint was ready. {logs}"
+                    f"Isolated browser container {container.name} exited before Playwright endpoint was ready.{why} "
+                    f"{logs}"
                 )
             if endpoint_file.exists():
                 endpoint = endpoint_file.read_text(encoding="utf-8").strip()

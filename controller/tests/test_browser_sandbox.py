@@ -85,7 +85,7 @@ def _settings(data_root: Path, **overrides) -> Settings:
     )
 
 
-class IsolatedContainerSandboxTests(unittest.IsolatedAsyncioTestCase):
+class _ProvisionMixin:
     async def _provision(self, sandbox_state: dict | None = None, **overrides):
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
@@ -104,6 +104,8 @@ class IsolatedContainerSandboxTests(unittest.IsolatedAsyncioTestCase):
     def _kwargs(self, runtime) -> dict:
         return self.client.containers.browser_containers[runtime.container_name].run_kwargs
 
+
+class IsolatedContainerSandboxTests(_ProvisionMixin, unittest.IsolatedAsyncioTestCase):
     async def test_auto_carries_the_profile_json_itself_not_a_path(self) -> None:
         runtime = await self._provision()
         security_opt = self._kwargs(runtime)["security_opt"]
@@ -117,7 +119,7 @@ class IsolatedContainerSandboxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(environment["BROWSER_SECCOMP_PROFILE"], "auto-browser")
 
     async def test_on_carries_the_profile_too(self) -> None:
-        runtime = await self._provision(BROWSER_SANDBOX="on")
+        runtime = await self._provision(sandbox_state=ON, BROWSER_SANDBOX="on")
         self.assertEqual(len(self._kwargs(runtime)["security_opt"]), 2)
         self.assertEqual(self._kwargs(runtime)["environment"]["BROWSER_SANDBOX"], "on")
 
@@ -323,5 +325,265 @@ class ComposeAndImageWiringTests(unittest.TestCase):
         self.assertNotIn("process.exit(1)", report)
 
 
+# ---- round 2: a self-attested state, read safely; `on` enforced by the controller; refusals visible ----
+
+import os as _os  # noqa: E402
+import shutil as _shutil  # noqa: E402
+import sys as _sys  # noqa: E402
+
+from app.browser_sandbox import STATE_MAX_BYTES  # noqa: E402
+
+
+class HardenedStateFileTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / BROWSER_SANDBOX_STATE_FILENAME
+
+    def test_forged_keys_are_dropped_and_strings_capped(self) -> None:
+        self.path.write_text(
+            json.dumps(
+                {
+                    "sandbox": "on",
+                    "cause": None,
+                    "detail": "d" * 5000,
+                    "anything": {"x": 1},
+                    "verified": {"renderers": 2, "renderer_seccomp_filters": [3] * 500, "token": "x"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        state = read_sandbox_state(self.path)
+        self.assertEqual(set(state), {"sandbox", "cause", "detail", "verified"})
+        self.assertLessEqual(len(state["detail"]), 1000)
+        self.assertEqual(set(state["verified"]), {"renderers", "renderer_seccomp_filters"})
+        self.assertLessEqual(len(state["verified"]["renderer_seccomp_filters"]), 64)
+
+    def test_wrong_types_and_unknown_states_are_unreadable(self) -> None:
+        self.path.write_text('{"sandbox": 5}', encoding="utf-8")
+        self.assertEqual(read_sandbox_state(self.path)["sandbox"], "unreadable")
+        self.path.write_text('{"sandbox": "maybe"}', encoding="utf-8")
+        self.assertEqual(read_sandbox_state(self.path)["sandbox"], "unreadable")
+        self.path.write_text('["on"]', encoding="utf-8")
+        self.assertEqual(read_sandbox_state(self.path)["sandbox"], "unreadable")
+
+    def test_a_50_mb_file_is_not_read(self) -> None:
+        with self.path.open("wb") as handle:
+            handle.truncate(50 * 1024 * 1024)
+        state = read_sandbox_state(self.path)
+        self.assertEqual(state["sandbox"], "unreadable")
+        self.assertIn(str(STATE_MAX_BYTES), state["detail"])
+
+    @unittest.skipUnless(_sys.platform.startswith("linux"), "O_NOFOLLOW and symlinks: Linux")
+    def test_a_symlink_is_not_followed(self) -> None:
+        secret = Path(self.tmp.name) / "auth-profile.json"
+        secret.write_text('{"sandbox": "on", "detail": "cookies"}', encoding="utf-8")
+        _os.symlink(secret, self.path)
+        state = read_sandbox_state(self.path)
+        self.assertEqual(state["sandbox"], "unreadable")
+        self.assertNotIn("cookies", json.dumps(state))
+
+
+class SharedNodeStatusTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import app.browser_sandbox as module
+
+        module._SHARED_CACHE.clear()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.endpoint = Path(self.tmp.name) / "browser-ws-endpoint.txt"
+        self.state = Path(self.tmp.name) / BROWSER_SANDBOX_STATE_FILENAME
+        self.settings = SimpleNamespace(
+            browser_sandbox="auto",
+            browser_ws_endpoint_file=str(self.endpoint),
+            session_isolation_mode="shared_browser_node",
+            isolated_browser_seccomp_profile=str(SECCOMP_PROFILE_PATH),
+        )
+
+    def test_read_once_per_browser_run(self) -> None:
+        # A compromised browser rewriting its state after the fact changes nothing until its next start.
+        self.endpoint.write_text("ws://browser-node:9223/run-1", encoding="utf-8")
+        self.state.write_text('{"sandbox": "on"}', encoding="utf-8")
+        self.assertEqual(browser_sandbox_status(self.settings)["browser_node"]["sandbox"], "on")
+        self.state.write_text('{"sandbox": "off", "cause": "userns_refused"}', encoding="utf-8")
+        self.assertEqual(browser_sandbox_status(self.settings)["browser_node"]["sandbox"], "on")
+        self.endpoint.write_text("ws://browser-node:9223/run-2", encoding="utf-8")
+        self.assertEqual(browser_sandbox_status(self.settings)["browser_node"]["sandbox"], "off")
+
+    def test_a_refusal_without_an_endpoint_file_is_reported_and_fails(self) -> None:
+        self.state.write_text(
+            '{"setting": "on", "sandbox": "refused", "cause": "userns_refused", "detail": "AppArmor"}', encoding="utf-8"
+        )
+        status = browser_sandbox_status(self.settings)
+        self.assertEqual(status["browser_node"]["sandbox"], "refused")
+        check = browser_sandbox_check(status)
+        self.assertEqual(check.status, "fail")
+        self.assertIn("userns_refused", check.message)
+
+    def test_under_on_a_shared_node_not_on_fails(self) -> None:
+        self.settings.browser_sandbox = "on"
+        self.endpoint.write_text("ws://browser-node:9223/run-1", encoding="utf-8")
+        self.state.write_text('{"sandbox": "off", "cause": "setting_off"}', encoding="utf-8")
+        self.assertEqual(browser_sandbox_check(browser_sandbox_status(self.settings)).status, "fail")
+        self.state.unlink()
+        _os.utime(self.endpoint)
+        self.endpoint.write_text("ws://browser-node:9223/run-2", encoding="utf-8")
+        self.assertEqual(browser_sandbox_check(browser_sandbox_status(self.settings)).status, "fail")  # unknown
+
+
+class OnEnforcedForIsolatedTests(_ProvisionMixin, unittest.IsolatedAsyncioTestCase):
+    async def test_on_refuses_a_container_whose_state_is_not_on(self) -> None:
+        for state in ({"sandbox": "off", "cause": "userns_refused", "detail": "AppArmor"}, None):
+            with self.subTest(state=state):
+                with self.assertRaisesRegex(RuntimeError, r"BROWSER_SANDBOX=on.*(off \(userns_refused\)|no state)"):
+                    await self._provision(sandbox_state=state, BROWSER_SANDBOX="on")
+                self.assertEqual(self.provisioner.sandbox_states(), {})
+                container = next(iter(self.client.containers.browser_containers.values()))
+                self.assertTrue(container.removed)
+
+    async def test_auto_keeps_a_fallen_back_container(self) -> None:
+        runtime = await self._provision(sandbox_state={"sandbox": "off", "cause": "userns_refused"})
+        self.assertEqual(runtime.sandbox["sandbox"], "off")
+
+    async def test_an_exit_before_the_endpoint_carries_the_state(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_root = Path(tempdir.name) / "data"
+        data_root.mkdir(parents=True)
+        controller = FakeDockerContainer(container_id="controller-id", name="controller", attrs={})
+        client = FakeDockerClient(controller)
+        client.containers.sandbox_state = {
+            "sandbox": "refused",
+            "cause": "userns_refused",
+            "detail": "AppArmor said no",
+        }
+        client.containers.exit_before_endpoint = True
+        provisioner = DockerBrowserNodeProvisioner(_settings(data_root, BROWSER_SANDBOX="on"), client=client)
+        provisioner._controller_container_id = controller.id
+        with self.assertRaisesRegex(RuntimeError, r"exited before.*refused \(userns_refused\): AppArmor said no"):
+            await provisioner.provision("gone")
+
+
+class SeccompSupportTests(_ProvisionMixin, unittest.IsolatedAsyncioTestCase):
+    async def _no_seccomp(self, **overrides):
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_root = Path(tempdir.name) / "data"
+        data_root.mkdir(parents=True)
+        controller = FakeDockerContainer(container_id="controller-id", name="controller", attrs={})
+        client = FakeDockerClient(controller)
+        client.security_options = ["name=cgroupns"]
+        client.containers.sandbox_state = {"sandbox": "off", "cause": "seccomp_unsupported"}
+        provisioner = DockerBrowserNodeProvisioner(_settings(data_root, **overrides), client=client)
+        provisioner._controller_container_id = controller.id
+        self.client = client
+        return provisioner
+
+    async def test_auto_sends_no_profile_to_a_daemon_without_seccomp(self) -> None:
+        provisioner = await self._no_seccomp()
+        runtime = await provisioner.provision("noseccomp")
+        kwargs = self.client.containers.browser_containers[runtime.container_name].run_kwargs
+        self.assertEqual(kwargs["security_opt"], [NNP])
+        self.assertEqual(kwargs["environment"]["BROWSER_SECCOMP_PROFILE"], "no-seccomp")
+
+    async def test_on_refuses_before_anything_exists(self) -> None:
+        provisioner = await self._no_seccomp(BROWSER_SANDBOX="on")
+        with self.assertRaisesRegex(RuntimeError, "BROWSER_SANDBOX=on.*no seccomp"):
+            await provisioner.provision("noseccomp")
+        self.assertEqual(self.client.containers.browser_containers, {})
+
+    async def test_a_custom_profile_path_is_named_custom(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        custom = Path(tempdir.name) / "mine.json"
+        _shutil.copy(SECCOMP_PROFILE_PATH, custom)
+        runtime = await self._provision(ISOLATED_BROWSER_SECCOMP_PROFILE=str(custom))
+        self.assertEqual(self._kwargs(runtime)["environment"]["BROWSER_SECCOMP_PROFILE"], "custom")
+
+
+class SettingParsingTests(unittest.TestCase):
+    def test_browser_sandbox_is_trimmed_and_lowercased_like_browser_node(self) -> None:
+        for raw, expected in ((" On ", "on"), ("OFF", "off"), ("auto\n", "auto"), ("", "auto")):
+            self.assertEqual(Settings(_env_file=None, BROWSER_SANDBOX=raw).browser_sandbox, expected)
+
+    def test_an_empty_profile_path_means_the_shipped_one(self) -> None:
+        settings = Settings(_env_file=None, ISOLATED_BROWSER_SECCOMP_PROFILE="  ")
+        self.assertEqual(Path(settings.isolated_browser_seccomp_profile), SECCOMP_PROFILE_PATH)
+
+
+@unittest.skipUnless(COMPOSE.is_file(), "browser-node/ is not shipped in the controller image")
+class Round2WiringTests(unittest.TestCase):
+    def test_server_mjs_verifies_through_sandbox_mjs(self) -> None:
+        server = (BROWSER_NODE / "server.mjs").read_text(encoding="utf-8")
+        self.assertIn("const verify = (server) => verifyServer(server,", server)
+        self.assertNotIn("async function verify(", server)
+        self.assertNotIn("verifySandbox(", server)
+
+    def test_browser_node_output_reaches_docker_logs(self) -> None:
+        entrypoint = (BROWSER_NODE / "entrypoint.sh").read_text(encoding="utf-8")
+        self.assertIn("server.mjs > >(tee /tmp/playwright-server.log) 2>&1 &", entrypoint)
+
+    def test_ci_has_a_sandbox_on_leg_that_asserts_it_engaged(self) -> None:
+        ci = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        job = ci[ci.index("  compose-smoke:") :]
+        self.assertIn("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0", job)
+        self.assertIn("BROWSER_SANDBOX=on", job)
+        self.assertIn("scripts/assert_browser_sandbox.py", job)
+        script = (REPO / "scripts" / "assert_browser_sandbox.py").read_text(encoding="utf-8")
+        self.assertIn('state.get("sandbox") != "on"', script)
+        self.assertIn("renderers", script)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless((REPO / "scripts" / "assert_browser_sandbox.py").is_file(), "scripts/ is not in the image")
+class AssertSandboxScriptTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "assert_browser_sandbox", REPO / "scripts" / "assert_browser_sandbox.py"
+        )
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+
+    def test_an_engaged_verified_sandbox_passes(self) -> None:
+        state = {
+            "sandbox": "on",
+            "verified": {
+                "renderers": 3,
+                "renderer_userns_differs": True,
+                "browser_seccomp_filters": 2,
+                "renderer_seccomp_filters": [3, 3, 3],
+            },
+        }
+        self.assertEqual(self.module.problems(state), [])
+
+    def test_anything_less_fails(self) -> None:
+        for state in (
+            {"sandbox": "off", "cause": "userns_refused"},
+            {"sandbox": "on", "verified": {}},
+            {"sandbox": "on", "verified": {"renderers": 0, "renderer_userns_differs": True}},
+            {
+                "sandbox": "on",
+                "verified": {
+                    "renderers": 1,
+                    "renderer_userns_differs": False,
+                    "browser_seccomp_filters": 2,
+                    "renderer_seccomp_filters": [3],
+                },
+            },
+            {
+                "sandbox": "on",
+                "verified": {
+                    "renderers": 1,
+                    "renderer_userns_differs": True,
+                    "browser_seccomp_filters": 2,
+                    "renderer_seccomp_filters": [2],
+                },
+            },
+        ):
+            with self.subTest(state=state):
+                self.assertNotEqual(self.module.problems(state), [])
