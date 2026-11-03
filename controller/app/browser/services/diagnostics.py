@@ -43,12 +43,13 @@ CONSOLE_TEXT_MAX_CHARS = 8_000
 
 
 def _no_content_navigation(response: Any) -> bool:
-    """Whether a response answers a document navigation with 204, which Chromium aborts: nothing commits.
+    """Whether a response answers a document navigation with 204 or 205, which Chromium aborts: nothing commits.
 
-    Playwright reported that abort as requestfailed up to 1.62. From 1.64 it reports it as requestfinished,
-    an event that also ends committed navigations and redirect hops, so the 204 response is the signal.
+    Playwright reported a 204's abort as requestfailed up to 1.62. From 1.64 it reports it as requestfinished,
+    an event that also ends committed navigations and redirect hops, so the response is the signal. A 205 still
+    comes as requestfailed in 1.64; it is matched too, in case it follows, and a second end clears nothing more.
     """
-    if response.status != HTTPStatus.NO_CONTENT:
+    if response.status not in (HTTPStatus.NO_CONTENT, HTTPStatus.RESET_CONTENT):
         return False
     request = response.request
     return request.is_navigation_request() and request.resource_type == "document"
@@ -218,7 +219,7 @@ class BrowserDiagnosticsService:
         session.unframed_hops = [hop for hop in session.unframed_hops if not any(hop is failed for failed in chain)]
 
     def on_context_response(self, session: "BrowserSession", response: Any) -> None:
-        """A context's 204 to a navigation commits nothing, so it ends that navigation as a failure would."""
+        """A context's 204 or 205 to a navigation commits nothing, so it ends that navigation as a failure would."""
         if _no_content_navigation(response):
             self.on_context_request_failed(session, response.request)
 
@@ -317,7 +318,7 @@ class BrowserDiagnosticsService:
         self.manager.page_provenance.navigation_failed(page, request)
 
     def _on_response(self, page: "Page", response: Any) -> None:
-        """A 204 to a top-level navigation ends it with no commit, as its failure did up to Playwright 1.62."""
+        """A 204 or 205 to a top-level navigation ends it with no commit, as its failure did up to Playwright 1.62."""
         if _no_content_navigation(response) and _top_level_navigation(response.request):
             self._navigation_ended_without_commit(page, response.request)
 

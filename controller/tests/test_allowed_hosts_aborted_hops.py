@@ -1,9 +1,10 @@
 """A page's own navigation to a refused URL that commits nothing leaves the page readable (round 4c, F2).
 
-The top-level request to the refused URL marks the page refused until that navigation commits or fails. A
-204, or an attachment (a download), commits nothing: Chromium reports the navigation's request as failed,
-which clears the mark. The entry reset of the mark, removed in round 4, used to cover a failure that never
-came; these pin that the failure does come, in a real Chromium.
+The top-level request to the refused URL marks the page refused until that navigation commits or ends. A
+204, or an attachment (a download), commits nothing. An attachment's request is reported failed, which clears
+the mark. A 204 was reported failed too up to Playwright 1.62; from 1.64 it is reported finished, and its 204
+response clears the mark. The entry reset of the mark, removed in round 4, used to cover an end that never came;
+these pin that the end does come, in a real Chromium.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from tests.test_allowed_hosts_popups import settle
 
 pytestmark = [requires_chromium, pytest.mark.asyncio(loop_scope="module")]
 
-# How long Chromium may take to report the navigation's request as failed.
+# How long Chromium may take to report the navigation's end.
 FAILURE_EVENT_SECONDS = 10.0
 
 
