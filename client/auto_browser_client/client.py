@@ -4,14 +4,14 @@ auto_browser_client.client — Sync/async Python client for the auto-browser RES
 Usage (sync):
     from auto_browser_client import AutoBrowserClient
 
-    client = AutoBrowserClient("http://localhost:8000", token="secret")
+    client = AutoBrowserClient("http://localhost:8000", token_file="data/api-token")
     session = client.create_session(start_url="https://example.com")
     obs = client.observe(session["id"], preset="fast")
     client.navigate(session["id"], url="https://news.ycombinator.com")
     client.close_session(session["id"])
 
 Usage (async):
-    async with AutoBrowserClient("http://localhost:8000") as client:
+    async with AutoBrowserClient("http://localhost:8000", token="secret") as client:
         session = await client.async_create_session(start_url="https://example.com")
         obs = await client.async_observe(session["id"])
         await client.async_close_session(session["id"])
@@ -19,7 +19,9 @@ Usage (async):
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Generator
 from urllib.parse import quote
 
@@ -37,6 +39,19 @@ def _seg(value: str) -> str:
     if segment in {"", ".", ".."}:
         raise ValueError(f"invalid id for a URL path segment: {segment!r}")
     return quote(segment, safe="")
+
+
+def _read_token_file(path: str | os.PathLike[str]) -> str:
+    try:
+        token = Path(path).read_text(encoding="utf-8").strip()
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"token_file {os.fspath(path)} does not exist: start the controller first, which writes its token "
+            "to data/api-token in the auto-browser folder"
+        ) from exc
+    if not token:
+        raise ValueError(f"token_file {os.fspath(path)} is empty")
+    return token
 
 
 class AutoBrowserError(Exception):
@@ -61,9 +76,14 @@ class AutoBrowserClient:
         *,
         operator_id: str | None = None,
         headers: Mapping[str, str] | None = None,
+        token_file: str | os.PathLike[str] | None = None,
     ):
         """
         token:       the controller's API_BEARER_TOKEN (or a named credential).
+        token_file:  a file holding the token, read here when ``token`` is not given. A local
+                     controller with no API_BEARER_TOKEN writes its own to data/api-token in
+                     the auto-browser folder. A missing file raises FileNotFoundError, an
+                     empty one ValueError.
         operator_id: sent as X-Operator-Id. A controller with REQUIRE_OPERATOR_ID=true
                      needs it unless the token is a named credential. For a renamed
                      OPERATOR_ID_HEADER, pass the header in ``headers`` instead.
@@ -72,6 +92,8 @@ class AutoBrowserClient:
         self.base_url = base_url.rstrip("/")
         self._headers: dict[str, str] = dict(headers or {})
         token = token.strip() if token else None
+        if not token and token_file is not None:
+            token = _read_token_file(token_file)
         if token:
             self._headers["Authorization"] = f"Bearer {token}"
         if operator_id:

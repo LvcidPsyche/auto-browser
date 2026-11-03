@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -70,6 +72,38 @@ class ClientConstructionTests(unittest.TestCase):
         self.assertEqual(requests[0].headers["X-Operator-Id"], "alice")
         self.assertEqual(requests[0].headers["X-Operator-Name"], "Alice")
         self.assertEqual(requests[0].headers["Authorization"], "Bearer sekret")
+
+    def test_token_file_sends_the_saved_token(self) -> None:
+        # A local controller writes its generated token to data/api-token.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "api-token"
+            path.write_text("from-file\n", encoding="utf-8")
+            client, requests = _make_client(_ok, token_file=path)
+            client.health()
+        self.assertEqual(requests[0].headers["Authorization"], "Bearer from-file")
+
+    def test_a_token_wins_over_the_token_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "api-token"
+            path.write_text("from-file\n", encoding="utf-8")
+            client, requests = _make_client(_ok, token="sekret", token_file=str(path))
+            client.health()
+        self.assertEqual(requests[0].headers["Authorization"], "Bearer sekret")
+
+    def test_a_missing_token_file_names_the_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "api-token"
+            with self.assertRaises(FileNotFoundError) as caught:
+                AutoBrowserClient("http://auto-browser.test", token_file=path)
+        self.assertIn(str(path), str(caught.exception))
+
+    def test_an_empty_token_file_is_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "api-token"
+            path.write_text(" \n", encoding="utf-8")
+            with self.assertRaises(ValueError) as caught:
+                AutoBrowserClient("http://auto-browser.test", token_file=path)
+        self.assertIn(str(path), str(caught.exception))
 
     def test_error_class_is_exported_from_the_package(self) -> None:
         import auto_browser_client
