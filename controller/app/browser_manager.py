@@ -195,6 +195,9 @@ class BrowserManager:
             off_reason=self._pre_request_blocking_off_reason,
         )
         self.window_births = WindowBirths(
+            # Runs whenever ALLOWED_HOSTS refuses a host, even with PRE_REQUEST_BLOCKING off (the no-gate gap);
+            # not when every host is allowed, where no window is ever born refused.
+            enabled=self._allowed_hosts_restrict,
             session_counts_as_refused=self._session_has_refused_page,
             resolve_target_id=lambda page: self.request_gates.target_id_of(page),
             on_late_refused=lambda session, page: self.diagnostics.taint_reported_window(session, page),
@@ -833,6 +836,13 @@ class BrowserManager:
                 details={"url": block.origin, "source": "request", "reason": block.reason},
             )
         )
+
+    def _allowed_hosts_restrict(self) -> bool:
+        """Whether ALLOWED_HOSTS refuses any host: a non-empty allowlist with no ``*``. When it refuses none,
+        no page is ever refused and the window-birth watcher has nothing to judge (same test the gate's
+        ``allows_every_host`` off-reason uses)."""
+        patterns = self.settings.allowed_host_patterns
+        return bool(patterns) and "*" not in patterns
 
     def _pre_request_blocking_on(self) -> bool:
         """Whether browsers get the pre-request gate: PRE_REQUEST_BLOCKING, and an ALLOWED_HOSTS that refuses something."""

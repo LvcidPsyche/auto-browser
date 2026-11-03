@@ -248,7 +248,9 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
 
         session_id = (await self.manager.create_session(name="s", start_url=START_URL))["id"]
 
-        self.browser.new_browser_cdp_session.assert_not_awaited()
+        # No gate (no browser session enabled Fetch), though the window-birth watcher attaches its own
+        # browser session: it judges windows with PRE_REQUEST_BLOCKING off, which is where the gap was.
+        self.assertEqual(_gate_sessions(self.browser), [])
         self.assertIsNone(self.manager.sessions[session_id].gate_context_id)
 
     async def test_an_allowlist_that_allows_every_host_opens_no_gate(self) -> None:
@@ -306,7 +308,9 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         gate = self.manager.request_gates.get(self.browser)
         self.assertIsNot(gate, lost)
         self.assertTrue(gate.live)
-        self.assertEqual(len(self.browser.cdp_sessions), 2)
+        # Two gates enabled Fetch (the lost one and its replacement); the window-birth watcher's own browser
+        # session is not a gate, so it is not counted here.
+        self.assertEqual(len(_gate_sessions(self.browser)), 2)
         self.assertTrue(gate.owns(self.manager.sessions[session_id].gate_context_id))
 
     async def test_a_session_still_starting_when_the_gate_is_lost_is_refused(self) -> None:
