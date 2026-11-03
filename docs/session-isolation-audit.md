@@ -35,8 +35,11 @@ bridge network that only it and the controller join. What it still reaches:
   forges `Host: 127.0.0.1` gets the upgrade (101). So each isolated session's noVNC has its own random
   VNC password, and the operator's `VNC_PASSWORD` is no longer handed to isolated containers, where code
   in any of them could read it and use it on the others. The password reaches a human only through the
-  takeover URL's fragment in the handoff responses, which makes that URL a secret. Not yet measured on a
-  Linux daemon.
+  takeover URL's fragment in the handoff responses, which makes that URL a secret. Measured on Docker
+  Desktop. CI's compose-smoke runs the same probes on a Linux daemon (`scripts/smoke_isolated_session.sh`):
+  B's 9223 and name stay out of reach, and B's noVNC offers only VNC authentication. VNC authentication is
+  a DES challenge-response, so someone who can watch the takeover connection can try the 8-character
+  password offline. Put the takeover behind HTTPS (the tunnel modes) when it leaves the machine.
 - **The shared browser-node's noVNC**, the same way (its container address, or `host.docker.internal`).
   Only the operator's `VNC_PASSWORD` guards it; the readiness check warns while it is unset.
 - **Routing through the controller**, in theory: the controller sits on every session network. It

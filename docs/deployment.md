@@ -129,7 +129,9 @@ What per-session networks do not change:
   `request_human_takeover`, over REST and MCP) carries the session's password in its
   fragment, `#password=…`, so noVNC connects without asking. A browser never sends the
   fragment to a server, so it stays out of access logs, but treat the URL like the API
-  token. Observations, action results, `list_sessions`, the stored session records, the
+  token. Over MCP those results reach the calling model, which is how an agent hands you
+  the link, and an MCP client may keep them in its transcript. Observations, action
+  results, `list_sessions`, the stored session records, the
   tunnel metadata file and the audit trail carry the URL without it; opened from there,
   noVNC asks for the password. noVNC remembers a password it was given in that origin's
   browser storage, which is harmless: each session has its own random port and password.

@@ -174,9 +174,11 @@ class BrowserRemoteAccessService:
 
         Only the responses a person opens the desktop from get it: the session
         record from create_session and get_session, get_remote_access, and
-        request_human_takeover (REST and MCP). Everything else stays
-        password-free: observations and the model's context, the stored
-        session records, the tunnel metadata file, the audit trail and logs.
+        request_human_takeover (REST and MCP). Over MCP those results reach the
+        calling model, which is how an agent hands a person the link; that is
+        accepted, since the URL opens a loopback port. Everything else stays
+        password-free: observations, action results, lists, the stored session
+        records, the tunnel metadata file, the audit trail and logs.
         Accepts a session summary, a remote-access payload or a takeover
         result; anything else, or a session without its own password, is
         returned unchanged.
