@@ -241,7 +241,7 @@ class RobustnessTests(unittest.TestCase):
     def test_fetch_wraps_an_incomplete_read(self) -> None:
         import http.client
 
-        with patch("urllib.request.urlopen", side_effect=http.client.IncompleteRead(b"partial")):
+        with patch("urllib.request.OpenerDirector.open", side_effect=http.client.IncompleteRead(b"partial")):
             with self.assertRaises(self.check.SourceError):
                 self.check.fetch("https://registry.npmjs.org/playwright-core/latest")
 
@@ -283,11 +283,11 @@ class TokenTests(unittest.TestCase):
             def __exit__(self, *exc):
                 return False
 
-        def fake_urlopen(request, timeout=0):
+        def fake_open(opener, request, timeout=0):
             seen[request.full_url] = request.get_header("Authorization")
             return Response(b"{}")
 
-        with patch.dict(os.environ, {"GITHUB_TOKEN": "t0k3n"}), patch("urllib.request.urlopen", fake_urlopen):
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "t0k3n"}), patch("urllib.request.OpenerDirector.open", fake_open):
             check.fetch("https://api.github.com/repos/moby/moby/releases/latest")
             check.fetch("https://registry.npmjs.org/playwright-core/latest")
             check.fetch("https://raw.githubusercontent.com/moby/moby/x/default.json")
@@ -337,6 +337,40 @@ class WorkflowTests(unittest.TestCase):
         for pinned in uses:
             self.assertRegex(pinned, r"@[0-9a-f]{40} # v")
             self.assertIn(f"uses: {pinned}", release, f"{pinned} is not pinned as release.yml pins it")
+
+
+class Round3FreshnessTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.check = _load()
+
+    def test_a_redirect_off_api_github_com_drops_the_token(self) -> None:
+        import urllib.request
+
+        handler = self.check.GitHubTokenRedirectHandler()
+        request = urllib.request.Request("https://api.github.com/repos/moby/moby/releases/latest")
+        request.add_header("Authorization", "Bearer t0k3n")
+        off_host = handler.redirect_request(request, None, 302, "Found", {}, "https://objects.example.com/x")
+        self.assertIsNone(off_host.get_header("Authorization"))
+        same_host = handler.redirect_request(request, None, 302, "Found", {}, "https://api.github.com/repositories/1/x")
+        self.assertEqual(same_host.get_header("Authorization"), "Bearer t0k3n")
+
+    def test_an_unwritable_summary_is_a_warning_not_a_traceback(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            out = io.StringIO()
+            # A directory where the summary file should be: opening it for append fails.
+            with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": tempdir}), contextlib.redirect_stdout(out):
+                code = self.check.run(fetcher=FakeSources())
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn("WARNING: could not write the job summary", out.getvalue())
+        self.assertNotIn("Traceback", out.getvalue())
+
+    def test_the_warning_says_patch_numbers(self) -> None:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.check.run(fetcher=FakeSources())
+        self.assertIn("75 patch numbers behind", out.getvalue())
 
 
 if __name__ == "__main__":

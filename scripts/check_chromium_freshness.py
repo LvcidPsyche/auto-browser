@@ -53,6 +53,16 @@ class SourceError(RuntimeError):
     """A source could not be read or did not hold what it should."""
 
 
+class GitHubTokenRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """urllib copies a request's headers onto its redirect: keep Authorization only while it stays on api.github.com."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlsplit(newurl).hostname != _GITHUB_API_HOST:
+            new.remove_header("Authorization")
+        return new
+
+
 def fetch(url: str) -> bytes:
     if not url.startswith("https://"):
         raise SourceError(f"refusing a non-https URL: {url}")
@@ -63,7 +73,8 @@ def fetch(url: str) -> bytes:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)  # noqa: S310
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310 - fixed https URLs above
+        opener = urllib.request.build_opener(GitHubTokenRedirectHandler)
+        with opener.open(request, timeout=60) as response:  # noqa: S310 - fixed https URLs above
             return response.read()
     except (OSError, http.client.HTTPException) as exc:
         raise SourceError(f"could not fetch {url}: {exc!r}") from exc
@@ -169,7 +180,7 @@ def evaluate_chromium(
         lines.append(f"OK: {gap_text}")
         if gap is not None and gap > PATCH_GAP_WARNING:
             warning = (
-                f"The bundled Chromium {bundled} is {gap} patch releases behind Chrome stable {stable} on the same "
+                f"The bundled Chromium {bundled} is {gap} patch numbers behind Chrome stable {stable} on the same "
                 f"build; no Playwright release bundles a newer one yet."
             )
     return ok, lines, warning
@@ -266,8 +277,11 @@ def latest_moby_default(fetcher: Fetch) -> tuple[str, dict[str, Any]]:
 def _summary(line: str) -> None:
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if path:
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+        try:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError as exc:
+            print(f"WARNING: could not write the job summary to {path}: {exc.strerror or exc}")
 
 
 def run(fetcher: Fetch = fetch, lock_path: Path = PACKAGE_LOCK, profile_path: Path = SECCOMP_PROFILE) -> int:
