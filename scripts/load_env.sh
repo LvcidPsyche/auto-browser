@@ -64,6 +64,11 @@ curl_auth_config() {
   { set +x; } 2>/dev/null
   local token
   token="$(api_token)"
+  if [[ "$token" == *$'\n'* || "$token" == *$'\r'* ]]; then
+    # No HTTP header can carry it, and here it would split the config line: send nothing.
+    echo "The API token contains a line break; fix API_BEARER_TOKEN (or data/api-token)." >&2
+    return 1
+  fi
   if [[ -n "$token" ]]; then
     token="${token//\\/\\\\}"
     printf 'header = "Authorization: Bearer %s"\n' "${token//\"/\\\"}"
