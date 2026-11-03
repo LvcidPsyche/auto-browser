@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from ..audit import reset_current_operator, set_current_operator
 from ..auth_policy import (
+    BIND_SCOPE_LOOPBACK,
     AuthPolicy,
     Credential,
     credentials_for,
@@ -37,6 +38,10 @@ def install_controller_http_middleware(
     # gate and the rate limiter, rather than each layer re-deciding from the
     # presence of a token (GHSA-xmh3-cw7j-9gp5).
     bind_scope = resolve_bind_scope(settings)
+    docs_are_public = bind_scope == BIND_SCOPE_LOOPBACK
+
+    def _is_exempt_path(path: str) -> bool:
+        return _is_bearer_token_exempt_path(path, docs_are_public=docs_are_public)
 
     def _auth_policy() -> AuthPolicy:
         return policy_for_scope(
@@ -69,7 +74,7 @@ def install_controller_http_middleware(
     @application.middleware("http")
     async def require_api_bearer_token(request: Request, call_next):
         path = _request_path(request)
-        if not _auth_policy().required or _is_bearer_token_exempt_path(path):
+        if not _auth_policy().required or _is_exempt_path(path):
             return await call_next(request)
 
         if not _has_valid_bearer_token(request):
@@ -90,7 +95,7 @@ def install_controller_http_middleware(
         # /artifacts still demand the token, so a tokenless or wrong-token request to
         # them is a guess and counts against the per-IP bucket like /sessions.
         if is_exempt_path(path, settings.request_rate_limit_exempt_path_list) and (
-            _is_bearer_token_exempt_path(path) or _has_valid_bearer_token(request)
+            _is_exempt_path(path) or _has_valid_bearer_token(request)
         ):
             return await call_next(request)
 
@@ -299,11 +304,14 @@ def install_security_headers(application: FastAPI) -> None:
         return response
 
 
+_DOCS_PATHS = frozenset({"/docs", "/redoc", "/openapi.json"})
+
+
 def _request_path(request: Request) -> str:
     return str(request.scope.get("path") or "")
 
 
-def _is_bearer_token_exempt_path(path: str) -> bool:
+def _is_bearer_token_exempt_path(path: str, *, docs_are_public: bool) -> bool:
     # /share/{token}/... authenticates with the signed share token instead
     # (app/routes/share.py). POST /sessions/{id}/share, which mints one, is not
     # under this prefix and stays behind the bearer token.
@@ -316,6 +324,10 @@ def _is_bearer_token_exempt_path(path: str) -> bool:
     # /docs, /redoc and /openapi.json serve the API schema, which is public (it is
     # in the repo) and holds no data. A browser opening /docs cannot send the
     # bearer token; the schema declares it, so Swagger's Authorize sends it from there.
+    # Only on a loopback deployment, where the browser is the operator's own: an
+    # exposed one answers 401 as it did before they were opened up.
+    if path in _DOCS_PATHS:
+        return docs_are_public
     return path in {
         "/healthz",
         "/readyz",
@@ -325,7 +337,4 @@ def _is_bearer_token_exempt_path(path: str) -> bool:
         "/dashboard/",
         "/ui",
         "/ui/",
-        "/docs",
-        "/redoc",
-        "/openapi.json",
     }

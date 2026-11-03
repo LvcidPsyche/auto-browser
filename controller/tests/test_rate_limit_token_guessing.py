@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.auth_policy import BIND_SCOPE_LOOPBACK
+from app.auth_policy import BIND_SCOPE_EXPOSED, BIND_SCOPE_LOOPBACK
 from app.middleware.http import install_controller_http_middleware
 from app.rate_limits import SlidingWindowRateLimiter
 
@@ -74,6 +74,11 @@ class ExemptPathTokenGuessingTests(unittest.TestCase):
     def test_healthchecks_are_never_throttled(self) -> None:
         client = make_client()
         self.assertEqual(set(self.statuses(client, "/healthz", {}, 30)), {200})
+
+    def test_docs_skip_the_limiter_only_where_they_need_no_token(self) -> None:
+        self.assertEqual(set(self.statuses(make_client(), "/docs", {}, 30)), {200})
+        codes = self.statuses(make_client(BIND_SCOPE_EXPOSED), "/docs", {})
+        self.assertEqual(codes[LIMIT:], [429] * (12 - LIMIT))
 
 
 if __name__ == "__main__":
