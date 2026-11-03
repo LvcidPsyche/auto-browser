@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 import re
 import secrets
 import shutil
 import string
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath, PureWindowsPath
 from typing import Any
@@ -138,6 +140,51 @@ class DockerBrowserNodeProvisioner:
         # The controller's own container, looked up once. per_session joins it
         # to each session network, and _discover_host_data_root reads its mounts.
         self._controller_container: Any | None = None
+        # Subnets of the session networks the controller is (or may still be)
+        # attached to, by network name. Browser containers never call the
+        # controller, so the HTTP layer refuses any peer inside one
+        # (peer_is_in_session_network). Written from provision/release threads,
+        # read on the event loop.
+        self._session_subnets: dict[str, list[ipaddress.IPv4Network | ipaddress.IPv6Network]] = {}
+        self._session_subnets_lock = threading.Lock()
+
+    def peer_is_in_session_network(self, host: str) -> bool:
+        """Whether a request's direct peer address is inside a live session network.
+
+        Only the direct peer (the ASGI client address), never a forwarded-for
+        header. A host that is not an IP address (a test client, a unix socket)
+        is never inside one.
+        """
+        try:
+            address = ipaddress.ip_address((host or "").strip())
+        except ValueError:
+            return False
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        with self._session_subnets_lock:
+            subnets = [subnet for tracked in self._session_subnets.values() for subnet in tracked]
+        return any(address.version == subnet.version and address in subnet for subnet in subnets)
+
+    def _track_session_subnets(self, network) -> None:
+        name = getattr(network, "name", "<unknown>")
+        subnets = []
+        ipam = (getattr(network, "attrs", None) or {}).get("IPAM") or {}
+        for config in ipam.get("Config") or []:
+            try:
+                subnets.append(ipaddress.ip_network(str((config or {}).get("Subnet") or ""), strict=False))
+            except ValueError:
+                continue
+        if not subnets:
+            logger.warning(
+                "Session network %s reports no IPAM subnet; requests from it cannot be refused by address", name
+            )
+            return
+        with self._session_subnets_lock:
+            self._session_subnets[name] = subnets
+
+    def _forget_session_subnets(self, network) -> None:
+        with self._session_subnets_lock:
+            self._session_subnets.pop(getattr(network, "name", None), None)
 
     @property
     def _per_session_networks(self) -> bool:
@@ -217,34 +264,43 @@ class DockerBrowserNodeProvisioner:
         browsers' endpoints are already gone. Inherits the one-controller-per-
         Docker-host assumption of _reap_orphaned_containers.
         """
-        if self.settings.isolated_browser_keep_containers:
-            logger.debug("Skipping orphan network sweep: ISOLATED_BROWSER_KEEP_CONTAINERS is enabled")
-            return
         client = self._ensure_context()
         try:
-            orphans = client.networks.list(filters={"label": f"{_MANAGED_LABEL}=true"})
+            listed = client.networks.list(filters={"label": f"{_MANAGED_LABEL}=true"})
         except Exception as exc:
             logger.warning("Could not list orphaned browser session networks: %s", exc)
+            return
+        orphans = []
+        for network in listed:
+            # Every label a session network carries, as release checks: a network with the
+            # managed label alone is not one of ours to remove.
+            labels = (getattr(network, "attrs", None) or {}).get("Labels") or {}
+            if labels.get(_MODE_LABEL) == "docker_ephemeral" and labels.get(_SESSION_ID_LABEL):
+                orphans.append(network)
+        # Until it is left, the restarted controller may still be attached to each one
+        # (kept browsers included), so their peers are refused like a live session's.
+        for network in orphans:
+            self._track_session_subnets(network)
+        if self.settings.isolated_browser_keep_containers:
+            logger.debug("Skipping orphan network sweep: ISOLATED_BROWSER_KEEP_CONTAINERS is enabled")
             return
         controller_id = self._controller_id_or_none(client)
         for network in orphans:
             name = getattr(network, "name", "<unknown>")
-            # Every label a session network carries, as release checks: a network with the
-            # managed label alone is not one of ours to remove.
-            labels = (getattr(network, "attrs", None) or {}).get("Labels") or {}
-            if labels.get(_MODE_LABEL) != "docker_ephemeral" or not labels.get(_SESSION_ID_LABEL):
-                continue
             if controller_id:
                 try:
                     network.disconnect(controller_id, force=True)
                 except Exception as exc:
                     # Usually "is not connected": nothing to undo.
                     logger.debug("Controller was not attached to orphaned network %s: %s", name, exc)
+                else:
+                    self._forget_session_subnets(network)
             try:
                 network.remove()
             except Exception as exc:
                 logger.warning("Failed to remove orphaned browser session network %s: %s", name, exc)
                 continue
+            self._forget_session_subnets(network)
             logger.info("Reaped orphaned browser session network %s", name)
 
     async def provision(self, session_id: str) -> IsolatedBrowserRuntime:
@@ -318,6 +374,8 @@ class DockerBrowserNodeProvisioner:
                 self._remove_stale_container(client, container_name)
                 self._remove_stale_session_network(client, network_name, session_id, controller_id)
                 network = self._create_session_network(client, network_name, session_id)
+                # Before the controller joins it: from then on its peers can reach the API.
+                self._track_session_subnets(network)
                 # Join before the container starts: the controller reaches it by
                 # name (ws://<name>:9223, autossh to <name>:6080) through Docker
                 # DNS on this network.
@@ -412,6 +470,9 @@ class DockerBrowserNodeProvisioner:
                 network.disconnect(controller_id, force=True)
             except Exception as exc:
                 logger.warning("Could not disconnect the controller from session network %s: %s", name, exc)
+            else:
+                # Its peers can no longer reach the controller on it.
+                self._forget_session_subnets(network)
         if not self._is_session_network(network, session_id):
             logger.warning("Not removing network %s: it does not carry session %s's labels", name, session_id)
             return
@@ -419,6 +480,8 @@ class DockerBrowserNodeProvisioner:
             network.remove()
         except Exception as exc:
             logger.warning("Could not remove session network %s: %s", name, exc)
+            return
+        self._forget_session_subnets(network)
 
     @staticmethod
     def _is_session_network(network, session_id: str) -> bool:
@@ -554,6 +617,8 @@ class DockerBrowserNodeProvisioner:
                     logger.warning(
                         "Could not disconnect the controller from session network %s: %s", runtime.network_name, exc
                     )
+                else:
+                    self._forget_session_subnets(network)
             return
         if stranded is not None and self._is_session_network(network, runtime.session_id):
             try:
