@@ -44,6 +44,9 @@ class FakeDockerContainer:
         self.labels = labels or {}
         self.removed = False
         self.stopped = False
+        # Set by FakeDockerContainers.run: the client's call log and networks.
+        self.events: list[tuple] | None = None
+        self.networks: FakeDockerNetworks | None = None
 
     def reload(self) -> None:
         return None
@@ -51,18 +54,99 @@ class FakeDockerContainer:
     def stop(self, timeout: int = 5) -> None:
         self.stopped = True
         self.status = "exited"
+        if self.events is not None:
+            self.events.append(("container.stop", self.name))
 
     def remove(self, force: bool = False) -> None:
         self.removed = True
+        if self.events is not None:
+            self.events.append(("container.remove", self.name))
+        # Like the daemon: removing a container frees its network endpoints.
+        if self.networks is not None:
+            for network in self.networks.by_name.values():
+                network.attrs["Containers"].pop(self.id, None)
 
     def logs(self, tail: int = 20) -> bytes:
         return b""
 
 
+class FakeDockerNetwork:
+    """A docker SDK Network: connect/disconnect update attrs['Containers'], and
+    remove() refuses while any endpoint is left, as the daemon does."""
+
+    def __init__(self, *, name: str, labels: dict | None, events: list[tuple], owner: FakeDockerNetworks) -> None:
+        self.id = f"{name}-id"
+        self.name = name
+        self.attrs: dict = {"Name": name, "Labels": dict(labels or {}), "Containers": {}}
+        self.events = events
+        self.owner = owner
+        self.removed = False
+
+    def connect(self, container, **kwargs) -> None:
+        container_id = getattr(container, "id", container)
+        self.events.append(("network.connect", self.name, container_id))
+        self.attrs["Containers"][container_id] = {}
+
+    def disconnect(self, container, force: bool = False) -> None:
+        container_id = getattr(container, "id", container)
+        self.events.append(("network.disconnect", self.name, container_id, force))
+        if container_id not in self.attrs["Containers"]:
+            raise RuntimeError(f"container {container_id} is not connected to network {self.name}")
+        del self.attrs["Containers"][container_id]
+
+    def remove(self) -> None:
+        if self.attrs["Containers"]:
+            raise RuntimeError(f"error while removing network: network {self.name} has active endpoints")
+        self.events.append(("network.remove", self.name))
+        self.removed = True
+        self.owner.by_name.pop(self.name, None)
+
+
+class FakeDockerNetworks:
+    def __init__(self, events: list[tuple]) -> None:
+        self.events = events
+        self.by_name: dict[str, FakeDockerNetwork] = {}
+        self.create_kwargs: dict[str, dict] = {}
+
+    def add(self, name: str, labels: dict | None = None) -> FakeDockerNetwork:
+        network = FakeDockerNetwork(name=name, labels=labels, events=self.events, owner=self)
+        self.by_name[name] = network
+        return network
+
+    def create(self, name: str, **kwargs) -> FakeDockerNetwork:
+        if name in self.by_name:
+            raise RuntimeError(f"network with name {name} already exists")
+        self.events.append(("network.create", name))
+        self.create_kwargs[name] = kwargs
+        return self.add(name, kwargs.get("labels"))
+
+    def get(self, identifier: str) -> FakeDockerNetwork:
+        for network in self.by_name.values():
+            if identifier in {network.id, network.name}:
+                return network
+        raise KeyError(identifier)
+
+    def list(self, filters: dict | None = None) -> list[FakeDockerNetwork]:
+        networks = list(self.by_name.values())
+        label_filter = (filters or {}).get("label")
+        if not label_filter:
+            return networks
+        key, _, value = label_filter.partition("=")
+        return [n for n in networks if n.attrs["Labels"].get(key) == value]
+
+
 class FakeDockerContainers:
-    def __init__(self, controller_container: FakeDockerContainer) -> None:
+    def __init__(
+        self,
+        controller_container: FakeDockerContainer,
+        *,
+        events: list[tuple] | None = None,
+        networks: FakeDockerNetworks | None = None,
+    ) -> None:
         self.controller_container = controller_container
         self.browser_containers: dict[str, FakeDockerContainer] = {}
+        self.events = events if events is not None else []
+        self.networks = networks
 
     def get(self, identifier: str) -> FakeDockerContainer:
         if identifier in {self.controller_container.id, self.controller_container.name}:
@@ -93,6 +177,12 @@ class FakeDockerContainers:
             labels=kwargs.get("labels") or {},
         )
         container.run_kwargs = kwargs
+        container.events = self.events
+        container.networks = self.networks
+        self.events.append(("container.run", name, kwargs.get("network")))
+        # A shared network the test never created stands for the compose one.
+        if self.networks is not None and kwargs.get("network") in self.networks.by_name:
+            self.networks.by_name[kwargs["network"]].attrs["Containers"][container.id] = {}
         self.browser_containers[name] = container
         return container
 
@@ -107,7 +197,10 @@ class FakeDockerContainers:
 
 class FakeDockerClient:
     def __init__(self, controller_container: FakeDockerContainer) -> None:
-        self.containers = FakeDockerContainers(controller_container)
+        # One ordered log of every container and network call, for order checks.
+        self.events: list[tuple] = []
+        self.networks = FakeDockerNetworks(self.events)
+        self.containers = FakeDockerContainers(controller_container, events=self.events, networks=self.networks)
 
 
 class FakeTracing:
@@ -209,17 +302,52 @@ class DockerBrowserNodeProvisionerTests(unittest.IsolatedAsyncioTestCase):
 
             runtime = await provisioner.provision("session-1")
 
+            net = "browser-session-session-1-net"
             self.assertEqual(runtime.container_name, "browser-session-session-1")
-            self.assertEqual(runtime.network_name, "auto-browser_default")
+            self.assertEqual(runtime.network_name, net)
+            self.assertTrue(runtime.network_owned)
             self.assertEqual(runtime.ws_endpoint, "ws://browser-session-session-1:9223/playwright")
             self.assertEqual(runtime.takeover_url, "http://127.0.0.1:16080/vnc.html?autoconnect=true&resize=scale")
             self.assertTrue(runtime.ws_endpoint_file.exists())
+            container = client.containers.browser_containers[runtime.container_name]
+            self.assertEqual(container.run_kwargs["network"], net)
+            self.assertEqual(
+                client.networks.create_kwargs[net],
+                {
+                    "driver": "bridge",
+                    "labels": {
+                        "auto-browser.managed": "true",
+                        "auto-browser.session_id": "session-1",
+                        "auto-browser.mode": "docker_ephemeral",
+                    },
+                    "internal": False,
+                },
+            )
+            # The controller joins before the browser starts, so it can resolve it by name.
+            self.assertEqual(
+                client.events,
+                [
+                    ("network.create", net),
+                    ("network.connect", net, "controller-id"),
+                    ("container.run", "browser-session-session-1", net),
+                ],
+            )
+            client.events.clear()
 
             await provisioner.release(runtime)
 
-            container = client.containers.browser_containers[runtime.container_name]
             self.assertTrue(container.stopped)
             self.assertTrue(container.removed)
+            self.assertEqual(
+                client.events,
+                [
+                    ("container.stop", "browser-session-session-1"),
+                    ("container.remove", "browser-session-session-1"),
+                    ("network.disconnect", net, "controller-id", True),
+                    ("network.remove", net),
+                ],
+            )
+            self.assertNotIn(net, client.networks.by_name)
 
     async def test_provision_applies_default_resource_limits(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -387,7 +515,11 @@ class DockerBrowserNodeProvisionerTests(unittest.IsolatedAsyncioTestCase):
             attrs={"Mounts": [], "NetworkSettings": {"Networks": {}}},
         )
         client = FakeDockerClient(controller_container)
-        return DockerBrowserNodeProvisioner(settings, client=client), client
+        provisioner = DockerBrowserNodeProvisioner(settings, client=client)
+        # Not HOSTNAME: it is a real container id in the CI controller-tests job
+        # and unset on Windows, so the lookup would differ by host.
+        provisioner._controller_container_id = controller_container.id
+        return provisioner, client
 
     @staticmethod
     def _write_profile(provisioner: DockerBrowserNodeProvisioner, session_id: str) -> Path:
@@ -529,6 +661,7 @@ class DockerBrowserNodeProvisionerTests(unittest.IsolatedAsyncioTestCase):
                 await provisioner.provision("never-started")
 
             self.assertFalse(provisioner._local_runtime_root("never-started").exists())
+            self.assertEqual(client.networks.by_name, {})
 
 
 class BrowserIsolationSummaryTests(unittest.IsolatedAsyncioTestCase):
