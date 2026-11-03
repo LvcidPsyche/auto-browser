@@ -130,7 +130,12 @@ given to that user: only entries owned by root, never the browser's `browser-pro
 outside `/data`. A pass that hands everything over leaves `data/.auto-browser-owner`, and later starts as the same
 user skip the scan; a root run (`CONTROLLER_RUN_AS=root`) removes it, and deleting it forces a new pass. Measured on
 Docker Desktop for 20,000 files: 0.37 s in a named volume, but 103 s once on a Windows bind mount (`./data`), whose
-file operations are slow; with the marker, later starts take under a second. If one cannot be changed (a read-only or root-squashed mount), the log has an ERROR naming the path; the
+file operations are slow; with the marker, later starts take under a second. The controller logs that it is
+starting the one-time pass, and `scripts/doctor.sh` waits up to ten minutes for the API. On such a mount the API also waits for the startup cleanup sweep (`CLEANUP_ON_STARTUP`), which walks the same files: a first start over 20,000 files took 277 s in all, a later one 162 s. Files created later as root
+(`docker compose exec controller ...` runs as root unless told otherwise) are not handed over while the marker is
+there: run such commands as the controller's user, `docker compose exec -u 10001 controller ...` (or the data
+owner's uid, which readiness reports), or delete `data/.auto-browser-owner` to force a new pass. If one cannot be
+changed (a read-only or root-squashed mount), the log has an ERROR naming the path; the
 controller still starts as that user, and whatever it then cannot read fails with its own message.
 
 With the isolation overlay, the controller joins the group of the mounted Docker socket. On a Linux host that is the
