@@ -167,6 +167,11 @@ class _TrackedBrowser:
         context.on("close", lambda *_: self._env.closed_contexts.append(context))
         return context
 
+    def __getattr__(self, name):
+        # Forward everything else to the real browser (new_browser_cdp_session, is_connected, close …),
+        # so the window-birth watcher attaches its own browser-level CDP session here too.
+        return getattr(self._real, name)
+
 
 @contextlib.asynccontextmanager
 async def browser_env(
