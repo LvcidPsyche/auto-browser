@@ -133,7 +133,11 @@ payload = json.loads(sys.argv[1])
 remote_url = sys.argv[2]
 assert payload["remote_access"]["status"] == "active", payload
 assert payload["remote_access"]["session_tunnel"]["active"] is True, payload
-assert payload["takeover_url"] == remote_url, payload
+# The create response's URL carries the session's noVNC password in its
+# fragment; an observation (it reaches the model) carries the URL without it.
+assert "#password=" in remote_url, remote_url
+assert payload["takeover_url"] == remote_url.split("#", 1)[0], payload
+assert "#password=" not in json.dumps(payload), "observe carries the noVNC password"
 print("isolated tunnel observe ok")
 PY
 
