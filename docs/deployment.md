@@ -246,9 +246,11 @@ docker compose -f docker-compose.yml -f docker-compose.isolation.yml up -d --bui
 curl -fsS http://127.0.0.1:8000/healthz | jq
 curl -fsS http://127.0.0.1:8000/readyz | jq
 
-# The rest need the bearer token (API_BEARER_TOKEN, else data/api-token; run from the
-# auto-browser folder), and with REQUIRE_OPERATOR_ID=true an operator id (/metrics
-# takes the token only).
+# The rest need the bearer token and, with REQUIRE_OPERATOR_ID=true, an operator id
+# (/metrics takes the token only). The token is API_BEARER_TOKEN, else data/api-token
+# (run from the auto-browser folder). For the production setup above, export it from
+# .env first:
+#   set -a; . ./.env; set +a
 AUTH=(-H "Authorization: Bearer ${API_BEARER_TOKEN:-$(cat data/api-token)}" -H "X-Operator-Id: ops")
 curl -fsS "${AUTH[@]}" http://127.0.0.1:8000/readiness | jq
 curl -fsS "${AUTH[@]}" http://127.0.0.1:8000/metrics | head
@@ -751,7 +753,7 @@ Manual run:
 ```bash
 curl -s http://127.0.0.1:8000/maintenance/cleanup \
   -X POST \
-  -H "Authorization: Bearer $API_BEARER_TOKEN" \
+  -H "Authorization: Bearer ${API_BEARER_TOKEN:-$(cat data/api-token)}" \
   -H 'X-Operator-Id: ops' | jq
 ```
 

@@ -16,7 +16,7 @@ python scripts\agent_eval.py --json
 python scripts\agent_eval.py --mock
 python scripts\agent_eval.py --report-file .\eval-report.md
 python scripts\agent_eval.py --results-dir .\eval-results
-python scripts\agent_eval.py --execute --base-url http://127.0.0.1:8000 --operator-id local-eval
+python scripts\agent_eval.py --execute --base-url http://127.0.0.1:8000 --bearer-token "$(cat data/api-token)" --operator-id local-eval
 python scripts\fixture_eval.py
 ```
 

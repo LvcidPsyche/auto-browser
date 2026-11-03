@@ -187,10 +187,11 @@ Auto Browser exposes:
 - a stdio bridge: `uvx auto-browser-mcp` from PyPI, or [`scripts/mcp_stdio_bridge.py`](./scripts/mcp_stdio_bridge.py) in a repo checkout
 
 Clients that speak MCP over HTTP connect directly, sending the controller's token. With Claude
-Code or Codex, from the auto-browser folder:
+Code or Codex, from the auto-browser folder (`--scope user` makes the server available in every
+project, not only this folder):
 
 ```bash
-claude mcp add --transport http auto-browser http://127.0.0.1:8000/mcp \
+claude mcp add --transport http --scope user auto-browser http://127.0.0.1:8000/mcp \
   --header "Authorization: Bearer $(cat data/api-token)"
 
 # Codex reads the token from the variable you name: export it wherever Codex runs.
@@ -213,8 +214,10 @@ Servers, then View raw config), or in `~/.gemini/config/mcp_config.json`. It rea
 }
 ```
 
-Cursor, VS Code, Claude Desktop through the stdio bridge (which reads `data/api-token`
-itself), and pairing Auto Browser with a web-search MCP server are covered in
+Cursor, VS Code, Claude Desktop through the stdio bridge (which reads the file named by
+`AUTO_BROWSER_TOKEN_FILE` / `--token-file`; the repo wrapper, `make stdio-bridge` or
+`scripts/mcp_stdio_bridge.py`, defaults that to its checkout's `data/api-token` for a loopback
+URL), and pairing Auto Browser with a web-search MCP server are covered in
 [`docs/mcp-clients.md`](./docs/mcp-clients.md).
 
 The default MCP tool profile is `curated`: the 20 tools a browsing agent needs (sessions, observe and screenshot, `execute_action`, page and download reading, tabs, auth profiles, human takeover). Every listed tool costs the model context on every request, so the diagnostics, audit, harness, and admin tools are in the full profile. To expose everything, set:

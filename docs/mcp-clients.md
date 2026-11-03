@@ -22,7 +22,7 @@ Auto Browser exposes:
 
 That means:
 - MCP clients with HTTP transport support can talk to it directly, sending the controller's token
-- stdio-first clients can use the bridge, which reads the token from `data/api-token` itself
+- stdio-first clients can use the bridge, which reads the file named by `AUTO_BROWSER_TOKEN_FILE` / `--token-file`; the repo wrapper (`make stdio-bridge`, or `scripts/mcp_stdio_bridge.py`) defaults that to its checkout's `data/api-token` for a loopback URL
 
 ## Connect directly over HTTP
 
@@ -35,12 +35,13 @@ the auto-browser folder; the commands below run from that folder. If you set
 **Claude Code**
 
 ```bash
-claude mcp add --transport http auto-browser http://127.0.0.1:8000/mcp \
+claude mcp add --transport http --scope user auto-browser http://127.0.0.1:8000/mcp \
   --header "Authorization: Bearer $(cat data/api-token)"
 claude mcp list   # auto-browser: http://127.0.0.1:8000/mcp (HTTP) - ✓ Connected
 ```
 
-Claude Code stores the header when you add the server, so if `data/api-token`
+`--scope user` makes the server available in every project, not only the auto-browser
+folder. Claude Code stores the header when you add the server, so if `data/api-token`
 changes, remove the server and add it again.
 
 **Codex**: the CLI, the IDE extension, and the desktop app share
@@ -61,6 +62,19 @@ runs (a shell profile, for one). The same entry written by hand in
 url = "http://127.0.0.1:8000/mcp"
 bearer_token_env_var = "AUTO_BROWSER_TOKEN"
 ```
+
+A Codex desktop app or IDE extension launched from a menu or the Dock may not inherit
+the variable your shell exported. Then write the header statically in
+`~/.codex/config.toml` instead:
+
+```toml
+[mcp_servers.auto-browser]
+url = "http://127.0.0.1:8000/mcp"
+http_headers = { "Authorization" = "Bearer <token>" }
+```
+
+Either way, set it again after the token is regenerated (a deleted `data/api-token`
+or a new `API_BEARER_TOKEN`): export the variable afresh, or edit the header.
 
 Codex renames tools to fit OpenAI's function-name rules, which do not allow the
 dots in names like `browser.observe`, and maps the calls back. Nothing to configure.
@@ -196,7 +210,8 @@ results with the other.
 With Claude Code, for example:
 
 ```bash
-claude mcp add --transport http auto-browser http://127.0.0.1:8000/mcp
+claude mcp add --transport http --scope user auto-browser http://127.0.0.1:8000/mcp \
+  --header "Authorization: Bearer $(cat data/api-token)"
 claude mcp add ...   # your search server, as its docs describe
 ```
 
@@ -205,7 +220,10 @@ Or in a JSON client config, one entry per server:
 ```json
 {
   "mcpServers": {
-    "auto-browser": { "url": "http://127.0.0.1:8000/mcp" },
+    "auto-browser": {
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": { "Authorization": "Bearer <contents of data/api-token>" }
+    },
     "search": { "...": "your search server's entry" }
   }
 }
