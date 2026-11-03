@@ -45,6 +45,19 @@ class RateLimitHelpersTests(unittest.IsolatedAsyncioTestCase):
             "ip:127.0.0.1",
         )
 
+    async def test_padded_spellings_of_one_token_share_a_bucket(self) -> None:
+        # Auth ignores spaces and tabs around the token; a bucket per spelling handed a token
+        # holder a fresh limit per variant, and let them evict other buckets from the LRU.
+        def key(authorization: str) -> str:
+            return build_rate_limit_key(
+                operator_id_header="X-Operator-Id", headers={"authorization": authorization}, client_host="127.0.0.1"
+            )
+
+        for padded in ("Bearer  secret", "Bearer secret ", " Bearer \tsecret\t"):
+            with self.subTest(padded=padded):
+                self.assertEqual(key(padded), key("Bearer secret"))
+        self.assertNotEqual(key("Bearer other"), key("Bearer secret"))
+
     async def test_limiter_evicts_oldest_bucket_at_capacity(self) -> None:
         limiter = SlidingWindowRateLimiter(limit=10, window_seconds=60, max_buckets=2)
 

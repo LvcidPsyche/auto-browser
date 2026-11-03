@@ -161,13 +161,29 @@ def has_named_credentials(settings: Any) -> bool:
     return any(credential.verifies_identity for credential in credentials_for(settings))
 
 
+_HTTP_OPTIONAL_WHITESPACE = " \t"
+
+
+def normalize_authorization(authorization: str) -> str:
+    """The Authorization header as `<scheme> <token>`, without the spaces and tabs around the token.
+
+    Whitespace is not part of a configured token, so it is not part of the presented
+    one either: RFC 7235 allows several spaces after the scheme, and uvicorn's default
+    parser (httptools) keeps trailing whitespace that h11 trims. Only HTTP's optional
+    whitespace counts, so both parsers agree. The rate limiter keys on this too: a
+    bucket per spelling would give a token holder a fresh limit for each one.
+    """
+    scheme, _, token = authorization.strip(_HTTP_OPTIONAL_WHITESPACE).partition(" ")
+    return f"{scheme} {token.strip(_HTTP_OPTIONAL_WHITESPACE)}"
+
+
 def match_credential(credentials: Sequence[Credential], authorization: str) -> Credential | None:
     """The credential this request presented, or None.
 
     Every candidate is compared even after a match, so the work does not depend
     on which token was presented or how many are configured.
     """
-    presented = authorization.encode()
+    presented = normalize_authorization(authorization).encode()
     matched: Credential | None = None
     for credential in credentials:
         expected = f"Bearer {credential.token}".encode()

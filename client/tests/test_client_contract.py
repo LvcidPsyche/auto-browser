@@ -47,6 +47,16 @@ class ClientConstructionTests(unittest.TestCase):
         client.health()
         self.assertEqual(requests[0].headers["Authorization"], "Bearer sekret")
 
+    def test_token_whitespace_is_stripped(self) -> None:
+        client, requests = _make_client(_ok, token=" sekret\n")
+        client.health()
+        self.assertEqual(requests[0].headers["Authorization"], "Bearer sekret")
+
+    def test_whitespace_only_token_sends_no_authorization_header(self) -> None:
+        client, requests = _make_client(_ok, token="  ")
+        client.health()
+        self.assertNotIn("Authorization", requests[0].headers)
+
     def test_no_token_sends_no_authorization_header(self) -> None:
         client, requests = _make_client(_ok)
         client.health()

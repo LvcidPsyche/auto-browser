@@ -47,7 +47,7 @@ class HttpMcpClient:
         operator_id: str | None = None,
     ):
         self.base_url = base_url
-        self.bearer_token = bearer_token
+        self.bearer_token = bearer_token.strip() if bearer_token else None
         self.timeout_seconds = timeout_seconds
         self.operator_id = operator_id
 

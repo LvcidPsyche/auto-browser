@@ -137,6 +137,16 @@ class AutoBrowserToolAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route.calls[0].request.headers["Authorization"], "Bearer s3cret")
 
     @respx.mock
+    async def test_arun_strips_the_bearer_token_and_a_blank_one_sends_no_header(self) -> None:
+        route = respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json=_content("ok")))
+
+        await AutoBrowserTool(base_url=BASE_URL, bearer_token=" s3cret\n")._arun("browser.observe", {})
+        await AutoBrowserTool(base_url=BASE_URL, bearer_token="  ")._arun("browser.observe", {})
+
+        self.assertEqual(route.calls[0].request.headers["Authorization"], "Bearer s3cret")
+        self.assertNotIn("authorization", {k.lower() for k in route.calls[1].request.headers})
+
+    @respx.mock
     async def test_arun_sends_operator_id_when_configured(self) -> None:
         route = respx.post(f"{BASE_URL}/mcp/tools/call").mock(return_value=httpx.Response(200, json=_content("ok")))
 
@@ -175,6 +185,16 @@ class AutoBrowserToolListToolsTests(unittest.TestCase):
 
         self.assertEqual(route.calls[0].request.headers["Authorization"], "Bearer s3cret")
 
+    @respx.mock
+    def test_list_tools_strips_the_bearer_token_and_a_blank_one_sends_no_header(self) -> None:
+        route = respx.get(f"{BASE_URL}/mcp/tools").mock(return_value=httpx.Response(200, json=[]))
+
+        AutoBrowserTool.list_tools(base_url=BASE_URL, bearer_token=" s3cret\n")
+        AutoBrowserTool.list_tools(base_url=BASE_URL, bearer_token="  ")
+
+        self.assertEqual(route.calls[0].request.headers["Authorization"], "Bearer s3cret")
+        self.assertNotIn("authorization", {k.lower() for k in route.calls[1].request.headers})
+
 
 class AutoBrowserNodeTests(unittest.TestCase):
     def test_base_url_trailing_slash_is_stripped(self) -> None:
@@ -186,6 +206,13 @@ class AutoBrowserNodeTests(unittest.TestCase):
             AutoBrowserNode(base_url=BASE_URL, bearer_token="s3cret")._headers()["Authorization"],
             "Bearer s3cret",
         )
+
+    def test_bearer_token_whitespace_is_stripped_and_blank_sends_no_header(self) -> None:
+        self.assertEqual(
+            AutoBrowserNode(base_url=BASE_URL, bearer_token=" s3cret\n")._headers()["Authorization"],
+            "Bearer s3cret",
+        )
+        self.assertNotIn("Authorization", AutoBrowserNode(base_url=BASE_URL, bearer_token="  ")._headers())
 
     def test_headers_include_operator_id_when_set(self) -> None:
         self.assertNotIn("X-Operator-Id", AutoBrowserNode(base_url=BASE_URL)._headers())

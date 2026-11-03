@@ -183,6 +183,16 @@ class HttpMcpClientTests(unittest.TestCase):
         self.assertEqual(request.get_method(), "POST")
         self.assertEqual(result.body, {"ok": True})
 
+    def test_bearer_token_whitespace_is_stripped_and_blank_sends_no_header(self) -> None:
+        self.assertEqual(HttpMcpClient(base_url="http://x/mcp", bearer_token=" s3cret\n").bearer_token, "s3cret")
+        client = HttpMcpClient(base_url="http://x/mcp", bearer_token="  \n")
+        captured, fake = self._capture(_FakeResponse(status=200, headers={}, raw=b"{}"))
+
+        with patch.object(mcp_stdio, "urlopen", fake):
+            client.post_json({"method": "tools/list"})
+
+        self.assertIsNone(captured[0].get_header("Authorization"))
+
     def test_post_json_omits_optional_headers_when_unset(self) -> None:
         client = HttpMcpClient(base_url="http://localhost:8000/mcp")
         captured, fake = self._capture(_FakeResponse(status=200, headers={}, raw=b"{}"))

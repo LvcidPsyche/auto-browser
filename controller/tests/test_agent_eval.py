@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from app.agent_eval import (
+    ControllerEvalClient,
     build_matrix,
     load_cases,
     plan_payload,
@@ -113,6 +114,15 @@ class AgentEvalTests(unittest.TestCase):
             self.assertTrue(fast_score.success)
             self.assertTrue(governed_score.success)
             self.assertFalse(wrong_governed.success)
+
+
+class ControllerEvalClientTests(unittest.TestCase):
+    def test_bearer_token_whitespace_is_stripped(self) -> None:
+        client = ControllerEvalClient("http://x", bearer_token=" s3cret\n")
+        self.assertEqual(client.headers["Authorization"], "Bearer s3cret")
+
+    def test_whitespace_only_bearer_token_sends_no_authorization_header(self) -> None:
+        self.assertNotIn("Authorization", ControllerEvalClient("http://x", bearer_token="  ").headers)
 
 
 if __name__ == "__main__":

@@ -19,7 +19,9 @@ from fastapi.testclient import TestClient
 from app.auth_policy import (
     BIND_SCOPE_EXPOSED,
     BIND_SCOPE_LOOPBACK,
+    Credential,
     is_loopback_host,
+    match_credential,
     resolve_auth_policy,
     resolve_bind_scope,
 )
@@ -102,6 +104,17 @@ class AuthPolicyTests(unittest.TestCase):
         self.assertTrue(policy.required)
         self.assertFalse(policy.satisfiable)
 
+    def test_only_spaces_and_tabs_around_the_presented_token_are_ignored(self) -> None:
+        # HTTP's optional whitespace, so h11 and httptools agree; str.strip() would also drop
+        # \xa0 and \x85, which only one of the parsers lets through.
+        credentials = (Credential(token=STRONG_TOKEN),)
+        for header in (f"Bearer \t{STRONG_TOKEN}", f"Bearer {STRONG_TOKEN}\t", f"\tBearer  {STRONG_TOKEN} "):
+            with self.subTest(header=header):
+                self.assertIsNotNone(match_credential(credentials, header))
+        for header in (f"Bearer {STRONG_TOKEN}\xa0", f"Bearer \x85{STRONG_TOKEN}", f"Bearer\t{STRONG_TOKEN}"):
+            with self.subTest(header=header):
+                self.assertIsNone(match_credential(credentials, header))
+
 
 class RuntimePolicyAuthTests(unittest.TestCase):
     def test_exposed_and_tokenless_is_a_startup_error_in_development(self) -> None:
@@ -183,6 +196,51 @@ class ServedRequestTests(unittest.TestCase):
             client.get("/sessions", headers={"Authorization": f"Bearer {STRONG_TOKEN}"}).status_code,
             200,
         )
+
+    def test_a_token_with_trailing_whitespace_is_accepted_as_the_client_sends_it(self) -> None:
+        # An unstripped "tok\n" in settings never matched a client that sent the bare token.
+        client = self._client(API_BIND_SCOPE=BIND_SCOPE_EXPOSED, API_BEARER_TOKEN=f"{STRONG_TOKEN}\n")
+        self.assertEqual(
+            client.get("/sessions", headers={"Authorization": f"Bearer {STRONG_TOKEN}"}).status_code,
+            200,
+        )
+
+    def test_whitespace_around_the_presented_token_is_not_part_of_it(self) -> None:
+        # uvicorn's default parser (httptools) keeps trailing whitespace that h11 trims, and
+        # RFC 7235 allows more than one space after the scheme: curl, the shell helpers and
+        # third-party clients send whatever the operator pasted.
+        client = self._client(API_BIND_SCOPE=BIND_SCOPE_EXPOSED, API_BEARER_TOKEN=f" {STRONG_TOKEN} ")
+        for header in (
+            f"Bearer {STRONG_TOKEN}",
+            f"Bearer  {STRONG_TOKEN}",
+            f"Bearer {STRONG_TOKEN} ",
+            f" Bearer {STRONG_TOKEN}\t",
+        ):
+            with self.subTest(header=header):
+                self.assertEqual(client.get("/sessions", headers={"Authorization": header}).status_code, 200)
+        for header in (
+            f"Bearer {STRONG_TOKEN}x",
+            f"Bearer {STRONG_TOKEN[:-1]}",
+            "Bearer",
+            "Bearer  ",
+            f"Basic {STRONG_TOKEN}",
+            f"bearer {STRONG_TOKEN}",
+            STRONG_TOKEN,
+        ):
+            with self.subTest(header=header):
+                self.assertEqual(client.get("/sessions", headers={"Authorization": header}).status_code, 401)
+
+    def test_a_whitespace_only_token_counts_as_unset(self) -> None:
+        loopback = self._client(API_BIND_SCOPE=BIND_SCOPE_LOOPBACK, API_BEARER_TOKEN="  ")
+        self.assertEqual(loopback.get("/sessions").status_code, 200)
+        # Before, 40 spaces cleared the 32-character floor and started, and "Bearer" plus the
+        # same spaces authenticated under httptools: a guessable credential.
+        for blank in ("  ", " " * (MIN_PRODUCTION_BEARER_TOKEN_LENGTH + 8)):
+            with self.subTest(length=len(blank)):
+                report = validate_runtime_policy(
+                    settings(APP_ENV="development", API_BIND_SCOPE=BIND_SCOPE_EXPOSED, API_BEARER_TOKEN=blank)
+                )
+                self.assertTrue(any("API_BEARER_TOKEN is required" in error for error in report.errors), report)
 
 
 class ShippedComposeDeclarationTests(unittest.TestCase):
