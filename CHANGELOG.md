@@ -2,6 +2,38 @@
 
 All notable changes to auto-browser are documented here.
 
+## [Unreleased]
+
+A browser update. The browser-node image moves from Chromium 151 to Chromium 156, which has the fixes for two V8 bugs
+that were exploited in the wild. Update the browser-node and controller images together.
+
+### Security
+
+- **Chromium 156.0.8078.4, up from 151.0.7922.34: Playwright 1.64.1 on the pip and npm sides together, up from
+  1.62.0.** The browser that renders pages, in browser-node and in every `docker_ephemeral` session container, now
+  includes the fixes for:
+  - CVE-2026-85046, a V8 type confusion fixed in Chrome 152.0.7977.82;
+  - CVE-2026-87491, a V8 out-of-bounds write fixed in Chrome 153.0.8010.36;
+  - the other security fixes Chrome shipped from 152 to 156.
+
+  Google reported both V8 bugs exploited in the wild, and both are on CISA's Known Exploited Vulnerabilities list.
+  Playwright's build trails Chrome stable, which was 156.0.8078.79 on 2026-10-29, so a few of the latest Chrome 156
+  fixes are not in it yet.
+
+### Changed
+
+- Playwright 1.64's default `--disable-features` list:
+  - adds `AvoidCorsURLLoaderRestartOnRedirect`, `NetworkTimeServiceQuerying` and `AimEnabled`;
+  - drops `BoundaryEventDispatchTracksNodeRemoval`.
+
+  The copy browser-node and the controller pass, which keeps storage partitioning on, follows it.
+
+### Upgrade notes
+
+- **Update the controller and browser-node together.** Both run Playwright 1.64.1, and Playwright's client and
+  server must match. If `ISOLATED_BROWSER_IMAGE` names an image explicitly, point it at the new browser-node image,
+  and close isolated sessions started before the upgrade.
+
 ## [1.12.3] — 2026-11-03
 
 A patch release over 1.12.2. Whitespace around the controller's bearer token and the skills curator's API key no longer

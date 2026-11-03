@@ -217,10 +217,17 @@ async def test_the_operators_own_tab_is_not_gated(tmp_path: Path) -> None:
         assert not env.gate().owns(info.get("browserContextId"))
 
 
-async def test_chrome_fails_the_operators_cross_origin_post_redirect_while_the_gate_is_attached(
+async def test_chrome_156_lets_the_operators_cross_origin_post_redirect_through_while_the_gate_is_attached(
     tmp_path: Path,
 ) -> None:
-    """Documents Chrome's behaviour without the switch: the gate leaves the tab alone, Chrome fails the hop."""
+    """Documents Chrome's behaviour without the switch: the gate leaves the tab alone, and the hop arrives as
+    Chrome sends it.
+
+    Chrome 151 (Playwright 1.62) failed this hop itself with net::ERR_INVALID_ARGUMENT, which is why the gate stops
+    a session's cross-origin POST redirect unless the operator declares the switch (decision 10). Chrome 156
+    (Playwright 1.64, probed 2026-11-03) completes it. The gate still stops the session's own; whether to relax
+    that for newer operator Chromes is a separate decision.
+    """
     async with attached(tmp_path) as env:
         await env.create("/")
         env.server.pages["/form"] = _post_form(env, 307, env.server.url(ALLOWED_TOO, "/target"))
@@ -230,10 +237,11 @@ async def test_chrome_fails_the_operators_cross_origin_post_redirect_while_the_g
         await tab.goto(env.server.url(ALLOWED, "/form"))
 
         await tab.click("#go")
-        await eventually(lambda: bool(failures))
+        await eventually(lambda: "/target" in env.server.pages_on(ALLOWED_TOO))
 
-        assert env.server.hits_on(ALLOWED_TOO) == []
-        assert any("ERR_INVALID_ARGUMENT" in failure for failure in failures), failures
+        [arrived] = [hit for hit in env.server.hits_on(ALLOWED_TOO) if hit.path == "/target"]
+        assert (arrived.method, arrived.body, arrived.origin) == ("POST", b"f=the-body", "null")
+        assert failures == []
         assert env.gate().unattributed_blocks == 0
 
 
