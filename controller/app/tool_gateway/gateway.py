@@ -22,6 +22,7 @@ from ..browser.element_ids import refuse_selector_hint
 from ..browser.page_read import MOVED_DETAIL, bounded, locked_read, start_read
 from ..browser.request_gate import block_summary
 from ..browser.services.diagnostics import checked_screenshot
+from ..browser_sandbox import browser_sandbox_status
 from ..browser_scripts import PAGE_TEXT_SCRIPT
 from ..models import (
     ActionName,
@@ -901,6 +902,7 @@ class McpToolGateway:
             mode=payload.mode,
             request_gates=self.manager.request_gates.status(),
             window_births=self.manager.window_births.status(),
+            browser_sandbox=browser_sandbox_status(self.manager.settings, self.manager.runtime_provisioner),
         )
         return report.to_dict()
 
