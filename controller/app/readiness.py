@@ -131,8 +131,44 @@ def pre_request_gate_check(gates: dict[str, Any]) -> ReadinessCheck:
     return ReadinessCheck(name=name, status="pass", message=message, details=details)
 
 
+def window_birth_watcher_check(watchers: dict[str, Any]) -> ReadinessCheck:
+    """The window-birth watcher's state (WindowBirths.status), next to the gate's. Reported, never "fail", for the
+    same reason: sessions are refused on a browser without a watcher, and a lost watcher refuses the popups of
+    the sessions there until it is replaced."""
+    name = "window_birth_watcher"
+    details = dict(watchers)
+    state = watchers.get("state")
+    if state == "off":
+        return ReadinessCheck(
+            name=name, status="pass", message="ALLOWED_HOSTS allows every host: no window is ever born refused."
+        )
+    if state in {"lost", "attach_failed"}:
+        return ReadinessCheck(
+            name=name,
+            status="warn",
+            message=(
+                f"The window-birth watcher is {state.replace('_', ' ')} on a browser: while it has none, sessions "
+                "are refused there, and the popups of its existing sessions are refused, until a new watcher "
+                "attaches (the next session tries, and a lost one is re-attached at once)."
+            ),
+            fix="Check the controller log for 'window-birth watcher'.",
+            details=details,
+        )
+    message = (
+        "The window-birth watcher is attached: a window a refused page opens is refused at its birth, whatever "
+        "its first navigation does, and closed if Playwright never reports it."
+        if state == "attached"
+        else "No browser yet; the window-birth watcher attaches with the first session."
+    )
+    return ReadinessCheck(name=name, status="pass", message=message, details=details)
+
+
 def run_readiness_checks(
-    settings: Any, mode: str = "normal", *, request_gates: dict[str, Any] | None = None
+    settings: Any,
+    mode: str = "normal",
+    *,
+    request_gates: dict[str, Any] | None = None,
+    window_births: dict[str, Any] | None = None,
 ) -> ReadinessReport:
     checks: list[ReadinessCheck] = []
 
@@ -395,6 +431,8 @@ def run_readiness_checks(
 
     if request_gates is not None:
         checks.append(pre_request_gate_check(request_gates))
+    if window_births is not None:
+        checks.append(window_birth_watcher_check(window_births))
 
     statuses = {check.status for check in checks}
     if "fail" in statuses:
