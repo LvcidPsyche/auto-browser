@@ -3,9 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import which
+from typing import Sequence
 from urllib.parse import urlparse
 
-from .auth_policy import BIND_SCOPE_EXPOSED, credentials_for, resolve_bind_scope, tokenless_loopback_allowed
+from .auth_policy import BIND_SCOPE_EXPOSED, Credential, credentials_for, resolve_bind_scope, tokenless_loopback_allowed
 from .config import Settings
 from .providers.base import BaseProviderAdapter
 
@@ -133,6 +134,20 @@ def _validate_provider_runtime(settings: Settings, report: RuntimePolicyReport) 
         )
 
 
+def _warn_weak_loopback_tokens(credentials: Sequence[Credential], report: RuntimePolicyReport) -> None:
+    """Loopback keeps short tokens legal, but containers on the compose network can reach port 8000."""
+    for credential in credentials:
+        if len(credential.token) >= MIN_PRODUCTION_BEARER_TOKEN_LENGTH:
+            continue
+        name = f"the token for operator '{credential.operator_id}'" if credential.operator_id else "API_BEARER_TOKEN"
+        report.warnings.append(
+            f"{name} is {len(credential.token)} characters, shorter than the {MIN_PRODUCTION_BEARER_TOKEN_LENGTH} "
+            "production floor. A loopback publish mapping does not stop containers on the compose network "
+            "from reaching port 8000, and a short token is brute-forceable from them. Use a longer one, or "
+            "remove it to have the controller generate its own."
+        )
+
+
 def _validate_api_authentication(settings: Settings, report: RuntimePolicyReport) -> None:
     """The API must carry a token whenever it is reachable, or in production.
 
@@ -144,7 +159,9 @@ def _validate_api_authentication(settings: Settings, report: RuntimePolicyReport
     scope = resolve_bind_scope(settings)
     exposed = scope == BIND_SCOPE_EXPOSED
     if not (exposed or settings.is_production):
-        if credentials_for(settings):
+        credentials = credentials_for(settings)
+        if credentials:
+            _warn_weak_loopback_tokens(credentials, report)
             return
         if tokenless_loopback_allowed(settings):
             report.warnings.append(
