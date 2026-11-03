@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import tempfile
 import unittest
 from email.message import Message
 from pathlib import Path
@@ -412,18 +413,86 @@ class BridgeProtocolTests(unittest.TestCase):
         self.assertEqual(client.posts[1]["protocol_version"], "2025-11-25")
 
 
+class TokenFileTests(unittest.TestCase):
+    """--token-file / AUTO_BROWSER_TOKEN_FILE: the file the controller writes its token to, read per request."""
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.token_file = os.path.join(directory.name, "api-token")
+
+    def _write(self, text: str) -> None:
+        with open(self.token_file, "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def _authorization(self, client: HttpMcpClient) -> str | None:
+        captured: list[object] = []
+
+        def fake_urlopen(request, timeout=None):  # noqa: ANN001
+            captured.append(request)
+            return _FakeResponse(status=200, headers={}, raw=b"{}")
+
+        with patch.object(mcp_stdio, "urlopen", fake_urlopen):
+            client.post_json({"method": "tools/list"})
+        return captured[0].get_header("Authorization")
+
+    def test_the_header_comes_from_the_file_and_a_bearer_token_wins(self) -> None:
+        self._write("file-token\n")
+        self.assertEqual(
+            self._authorization(HttpMcpClient(base_url="http://x/mcp", token_file=self.token_file)), "Bearer file-token"
+        )
+        both = HttpMcpClient(base_url="http://x/mcp", bearer_token="flag-token", token_file=self.token_file)
+        self.assertEqual(self._authorization(both), "Bearer flag-token")
+        blank = HttpMcpClient(base_url="http://x/mcp", bearer_token=" ", token_file=self.token_file)
+        self.assertEqual(self._authorization(blank), "Bearer file-token")
+
+    def test_the_file_is_read_on_every_request(self) -> None:
+        client = HttpMcpClient(base_url="http://x/mcp", token_file=self.token_file)
+        self.assertIsNone(self._authorization(client))
+        self._write("first\n")
+        self.assertEqual(self._authorization(client), "Bearer first")
+        self._write("second\n")
+        self.assertEqual(self._authorization(client), "Bearer second")
+
+    def test_a_missing_file_sends_no_header_and_the_401_names_it(self) -> None:
+        client = HttpMcpClient(base_url="http://x/mcp", token_file=self.token_file)
+        self.assertIsNone(self._authorization(client))
+
+        unauthorized = HttpMcpResponse(status_code=401, headers={}, body={"detail": "Missing or invalid bearer token"})
+        with patch.object(client, "_request", return_value=unauthorized):
+            stdout = io.StringIO()
+            StdioMcpBridge(client=client).run(
+                stdin=io.StringIO(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}) + "\n"),
+                stdout=stdout,
+            )
+        message = json.loads(stdout.getvalue())["error"]["message"]
+        for needle in ("AUTO_BROWSER_BEARER_TOKEN", "AUTO_BROWSER_TOKEN_FILE", self.token_file):
+            self.assertIn(needle, message)
+
+    def test_delete_session_does_not_raise_when_the_file_cannot_be_read(self) -> None:
+        os.mkdir(self.token_file)
+        client = HttpMcpClient(base_url="http://x/mcp", token_file=self.token_file)
+
+        with patch.object(mcp_stdio, "urlopen", side_effect=URLError("down")):
+            client.delete_session(session_id="sess-1")  # must not raise
+
+        self.assertIn(self.token_file, client.token_file_problem)
+
+
 class ArgParserTests(unittest.TestCase):
     def test_defaults_come_from_environment(self) -> None:
         env = {
             "AUTO_BROWSER_BASE_URL": "http://example.test/mcp",
             "AUTO_BROWSER_BEARER_TOKEN": "env-token",
             "AUTO_BROWSER_HTTP_TIMEOUT_SECONDS": "12.5",
+            "AUTO_BROWSER_TOKEN_FILE": "/env/api-token",
         }
         with patch.dict(os.environ, env, clear=False):
             args = mcp_stdio.build_arg_parser().parse_args([])
 
         self.assertEqual(args.base_url, "http://example.test/mcp")
         self.assertEqual(args.bearer_token, "env-token")
+        self.assertEqual(args.token_file, "/env/api-token")
         self.assertAlmostEqual(args.timeout_seconds, 12.5)
 
     def test_builtin_default_base_url_when_env_absent(self) -> None:
@@ -432,6 +501,8 @@ class ArgParserTests(unittest.TestCase):
 
         self.assertEqual(args.base_url, "http://127.0.0.1:8000/mcp")
         self.assertIsNone(args.bearer_token)
+        # No default path: a uvx-installed bridge cannot know where the checkout is.
+        self.assertIsNone(args.token_file)
         self.assertAlmostEqual(args.timeout_seconds, 60.0)
 
     def test_explicit_flags_override_environment(self) -> None:
@@ -451,15 +522,20 @@ class ArgParserTests(unittest.TestCase):
             seen["base_url"] = self.client.base_url
             seen["bearer_token"] = self.client.bearer_token
             seen["timeout_seconds"] = self.client.timeout_seconds
+            seen["token_file"] = self.client.token_file
             return 0
 
-        argv = ["prog", "--base-url", "http://main.test/mcp", "--bearer-token", "tok", "--timeout-seconds", "7"]
+        argv = [
+            *("prog", "--base-url", "http://main.test/mcp", "--bearer-token", "tok", "--timeout-seconds", "7"),
+            *("--token-file", "/flag/api-token"),
+        ]
         with patch.object(mcp_stdio.StdioMcpBridge, "run", fake_run), patch.object(mcp_stdio.sys, "argv", argv):
             self.assertEqual(mcp_stdio.main(), 0)
 
         self.assertEqual(seen["base_url"], "http://main.test/mcp")
         self.assertEqual(seen["bearer_token"], "tok")
         self.assertAlmostEqual(seen["timeout_seconds"], 7.0)
+        self.assertEqual(seen["token_file"], "/flag/api-token")
 
 
 class BridgeCopySyncTests(unittest.TestCase):

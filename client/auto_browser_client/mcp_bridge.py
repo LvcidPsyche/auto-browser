@@ -45,16 +45,40 @@ class HttpMcpClient:
         bearer_token: str | None = None,
         timeout_seconds: float = 60.0,
         operator_id: str | None = None,
+        token_file: str | None = None,
     ):
         self.base_url = base_url
         self.bearer_token = bearer_token.strip() if bearer_token else None
         self.timeout_seconds = timeout_seconds
         self.operator_id = operator_id
+        self.token_file = os.path.expanduser(token_file) if token_file else None
+        # Why the last request went without a token from token_file; added to a 401's message.
+        self.token_file_problem: str | None = None
+
+    def _bearer(self) -> str | None:
+        """The token to send: bearer_token when set, else the one in token_file, read now.
+
+        Read on every request, because a stdio client starts the bridge before the
+        controller has written the file, and a regenerated token must not need a
+        restart. A missing or unreadable file sends no header, so a controller
+        running without a token still works.
+        """
+        if self.bearer_token or not self.token_file:
+            return self.bearer_token
+        try:
+            with open(self.token_file, encoding="utf-8") as handle:
+                token = handle.read().strip()
+        except (OSError, UnicodeDecodeError) as exc:
+            self.token_file_problem = f"could not read the token file {self.token_file}: {exc}"
+            return None
+        self.token_file_problem = None if token else f"the token file {self.token_file} is empty"
+        return token or None
 
     def _auth_headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
-        if self.bearer_token:
-            headers["Authorization"] = f"Bearer {self.bearer_token}"
+        bearer = self._bearer()
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
         if self.operator_id:
             headers["X-Operator-Id"] = self.operator_id
         return headers
@@ -77,8 +101,8 @@ class HttpMcpClient:
     def delete_session(self, *, session_id: str | None) -> None:
         if not session_id:
             return
-        headers = {MCP_SESSION_HEADER: session_id, **self._auth_headers()}
         try:
+            headers = {MCP_SESSION_HEADER: session_id, **self._auth_headers()}
             self._request("DELETE", headers=headers, body=None)
         except Exception:
             return
@@ -230,8 +254,7 @@ class StdioMcpBridge:
             "result": {**result, "capabilities": {**capabilities, "resources": {**resources, "subscribe": False}}},
         }
 
-    @staticmethod
-    def _http_error_message(response: HttpMcpResponse) -> str:
+    def _http_error_message(self, response: HttpMcpResponse) -> str:
         if response.body is None:
             return f"Empty or non-JSON response from Auto Browser MCP endpoint ({response.status_code})"
         detail = response.body.get("detail") if isinstance(response.body, dict) else None
@@ -239,7 +262,13 @@ class StdioMcpBridge:
         if detail:
             message += f": {detail}"
         if response.status_code == 401:
-            message += " (set --bearer-token or AUTO_BROWSER_BEARER_TOKEN to the controller's API token)"
+            message += (
+                " (set --token-file or AUTO_BROWSER_TOKEN_FILE to the controller's token file, data/api-token in"
+                " your auto-browser folder, or --bearer-token or AUTO_BROWSER_BEARER_TOKEN to the token itself)"
+            )
+            problem = getattr(self.client, "token_file_problem", None)
+            if problem:
+                message += f"; {problem}"
         elif response.status_code == 400 and "operator" in str(detail).lower():
             message += (
                 " (this controller requires an operator id on every request: pass --operator-id or set"
@@ -317,7 +346,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--bearer-token",
         default=os.environ.get("AUTO_BROWSER_BEARER_TOKEN"),
-        help="API bearer token for a protected controller; env AUTO_BROWSER_BEARER_TOKEN.",
+        help="The controller's API token; env AUTO_BROWSER_BEARER_TOKEN. Wins over --token-file.",
+    )
+    parser.add_argument(
+        "--token-file",
+        default=os.environ.get("AUTO_BROWSER_TOKEN_FILE"),
+        help=(
+            "File holding the controller's API token, read on every request: a local controller writes it to"
+            " data/api-token in the auto-browser folder; env AUTO_BROWSER_TOKEN_FILE."
+        ),
     )
     parser.add_argument(
         "--timeout-seconds",
@@ -341,6 +378,7 @@ def main() -> int:
             bearer_token=args.bearer_token,
             timeout_seconds=args.timeout_seconds,
             operator_id=args.operator_id,
+            token_file=args.token_file,
         )
     )
     return bridge.run()
