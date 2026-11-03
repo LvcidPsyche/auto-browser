@@ -8,63 +8,85 @@ A security release over 1.12.4 (GHSA-4c52-f6vr-xrrf). A browser container that a
 other sessions' browsers and desktops and, on a controller without a token, the controller's API. 1.13.0 isolates each
 `docker_ephemeral` session on its own network with its own noVNC password, makes a local controller generate and
 require a token, and drops the browser containers' Linux capabilities. **It changes a default that clients rely on:
-read the upgrade notes first.** Update the controller and browser-node images, and the client, LangChain and MCP
-bridge packages, together.
+read the upgrade notes first.** Update your checkout (its compose files carry the container hardening), the
+controller and browser-node images, and the client, LangChain and MCP bridge packages, together.
 
 ### Upgrade notes
 
 - **A controller with no `API_BEARER_TOKEN` now requires a token it generates.** On first start, a loopback controller
   with no configured credential writes a random token to `API_TOKEN_FILE` (`/data/api-token`, which is
-  `./data/api-token` in your checkout with the shipped compose). It then demands that token on every request, MCP
-  included. Deployments that already set `API_BEARER_TOKEN` or `API_BEARER_TOKENS` are unchanged. Point each client at
-  the token:
+  `./data/api-token` in your checkout with the shipped compose, which pins that path). It then demands that token on
+  every API and MCP request; health checks, `/version`, the dashboard page and, on loopback, the API docs are exempt.
+  Deployments that already set `API_BEARER_TOKEN` or `API_BEARER_TOKENS` keep using their token, and the file is
+  ignored. Point each client at the token:
   - **stdio MCP clients** (Claude Desktop, Cursor): set `AUTO_BROWSER_TOKEN_FILE` to the absolute path of
     `data/api-token` in your checkout, and use this release's bridge (`uvx auto-browser-mcp@latest`). An older bridge
     ignores that setting, so set `AUTO_BROWSER_BEARER_TOKEN` to the file's contents instead. The repo's own wrapper
     (`make stdio-bridge`, `scripts/mcp_stdio_bridge.py`) finds the file itself for a loopback URL.
   - **HTTP MCP clients:** send `Authorization: Bearer <token>`. For Claude Code, run this from the auto-browser folder:
-    `claude mcp add --transport http --scope user auto-browser http://127.0.0.1:8000/mcp --header "Authorization:
-    Bearer $(cat data/api-token)"`. [`docs/mcp-clients.md`](./docs/mcp-clients.md) covers Codex, Cursor, VS Code and
-    Antigravity.
+
+    ```bash
+    claude mcp add --transport http --scope user auto-browser http://127.0.0.1:8000/mcp \
+      --header "Authorization: Bearer $(cat data/api-token)"
+    ```
+
+    [`docs/mcp-clients.md`](./docs/mcp-clients.md) covers Codex, Cursor, VS Code and Antigravity.
   - **The Python SDK and LangChain:** pass `token_file="data/api-token"` to `AutoBrowserClient`, `AutoBrowserTool`,
-    `AutoBrowserTool.list_tools` and `AutoBrowserNode`.
+    `AutoBrowserTool.list_tools` and `AutoBrowserNode`. A relative path resolves against the working directory. The
+    client reads the file when it is constructed; the LangChain tools and the bridge read it on every call.
   - **The dashboard** asks for the token once per tab, or takes it in the URL as `/dashboard#token=<token>`.
   - **Curl and scripts** send the header.
-  - **A Prometheus scrape of `/metrics`** uses `authorization: { type: Bearer, credentials_file: <path> }`.
+  - **A Prometheus scrape of `/metrics`** uses `authorization: { type: Bearer, credentials_file: <path> }`. The
+    controller resets `data/api-token` to mode 0600 at every start, so a Prometheus running as another user needs its
+    own readable copy, or set `API_BEARER_TOKEN` and give it that.
   - **Pages a browser opens directly,** such as `GET /sessions/{id}/replay` and `/artifacts/...` links, cannot send
-    the header. They now need the token, as they already did on token deployments. Use the dashboard's replay panel
-    instead.
+    the header. They now need the token, as they already did on token deployments. For an agent run, the dashboard's
+    replay panel (which takes the job id) works; a session's `/replay` page has no tokenless replacement.
   - **Update your checkout as well as the images.** This release's `.gitignore` covers `data/api-token`. On an older
     checkout, add `data/api-token` to `.gitignore` yourself, or `git add -A` can commit it.
-  - **Windows host runs** (not Docker): the default `C:\data\api-token` inherits permissions that let other local
-    users read it. Set `API_TOKEN_FILE` to a path under your user profile.
+  - **Host runs** (not Docker): a loopback controller with no token that cannot write `API_TOKEN_FILE` (default
+    `/data/api-token`, rarely writable outside a container) now refuses to start. Set `API_TOKEN_FILE` to a path
+    under your user, or set `API_BEARER_TOKEN`. On Windows the default resolves to `C:\data\api-token` on the
+    current drive, whose inherited permissions let other local users read and replace it, so set it there too.
+  - **A token you place in `API_TOKEN_FILE` yourself** must be at least 32 printable characters, or the controller
+    refuses to start. It is used in every scope, so a mounted secret works for an exposed deployment too.
   - **`API_ALLOW_TOKENLESS_LOOPBACK=true` restores the tokenless loopback API.** It is ignored in production, and it
     reopens the hole: any container on the compose network can drive that controller.
 - **Each `docker_ephemeral` session gets its own Docker network** (`ISOLATED_BROWSER_NETWORK_MODE=per_session`, the
   new default). The controller joins that network for the session's life.
-  - An isolated browser no longer reaches services on the compose network: browser-node, or a proxy sidecar named in
-    `DEFAULT_PROXY_SERVER` or a proxy persona. Publish such a proxy another way, or use
-    `ISOLATED_BROWSER_NETWORK_MODE=shared`.
+  - An isolated browser no longer reaches compose-network services by name or container address: browser-node's
+    Playwright server, or a proxy sidecar named in `DEFAULT_PROXY_SERVER` or a proxy persona. Ports published on the
+    host stay reachable, browser-node's noVNC included, and so does the controller. Publish such a proxy another way,
+    or use `ISOLATED_BROWSER_NETWORK_MODE=shared`.
   - `ISOLATED_BROWSER_NETWORK` now applies only with `ISOLATED_BROWSER_NETWORK_MODE=shared`. With `per_session` it
     is ignored, with a warning.
   - `per_session` needs the controller to run as a container on the isolation Docker daemon. A controller run on the
     host needs `shared`, and so does one that reaches another daemon through `ISOLATED_DOCKER_HOST`. A
-    docker-socket-proxy needs `NETWORKS=1`.
-  - Docker's default address pools allow about 30 networks at once. For more concurrent sessions, widen
-    `default-address-pools` in the daemon's `daemon.json`.
-- **Each isolated session's noVNC has its own random password, and isolated containers no longer receive
-  `VNC_PASSWORD`.**
+    docker-socket-proxy needs `NETWORKS=1` as well as `CONTAINERS=1` and `POST=1`.
+  - Session networks are named `<container>-net`. At startup the controller removes leftover session networks along
+    with leftover containers, so run one isolation controller per Docker daemon.
+  - Docker's default address pools allow about 30 bridge networks per daemon, shared with the default bridge, the
+    compose network and other projects. Above roughly 25 concurrent sessions, widen `default-address-pools` in the
+    daemon's `daemon.json`.
+- **Each isolated session's noVNC has its own random password, and isolated containers no longer receive the
+  operator's `VNC_PASSWORD`.**
   - The takeover URL in a session's own record carries the password in its URL fragment, so noVNC connects without
-    asking. That record is what creating or getting a session, remote access and the takeover request return. Treat
-    that URL as a secret.
+    asking. That record is what creating or getting a session, remote access and the takeover request return, over
+    REST and MCP, so over MCP it reaches the calling model. Treat that URL as a secret.
+  - The password is 8 characters, the most VNC authentication uses, and that authentication can be cracked offline by
+    anyone who watches the connection. Use the HTTPS tunnel modes when the takeover leaves the machine.
   - Lists, observations and stored records keep the password-free URL.
   - `VNC_PASSWORD` now guards only the shared browser-node. Set it in `docker_ephemeral` deployments; readiness warns
     when it is missing.
 - **Browser containers keep only five Linux capabilities** (`CHOWN`, `DAC_OVERRIDE`, `KILL`, `SETGID`, `SETUID`),
-  with `no-new-privileges`. The controller runs with `no-new-privileges`. With the isolation overlay, IP forwarding is
-  also off in the controller. A custom image built on browser-node that needs more capabilities has to add them back.
+  with `no-new-privileges`; browser-node also gets `pids_limit: 2048`, which counts threads. The controller runs with
+  `no-new-privileges`. With the isolation overlay, IP forwarding is also off in the controller. A custom image built
+  on browser-node that needs more capabilities has to add them to the compose service's `cap_add`; isolated session
+  containers always get these five, and no setting widens them.
 - **`/docs`, `/redoc` and `/openapi.json` answer without a token on a loopback deployment only,** so a browser can
-  open them. Swagger's Authorize button takes the token. An exposed deployment still requires the token there.
+  open them, with or without a configured token. Swagger's Authorize button takes the token, and the OpenAPI schema
+  now declares a global `bearerAuth` scheme, which changes generated clients. An exposed deployment still requires
+  the token there.
 
 ### Security
 
@@ -74,7 +96,8 @@ bridge packages, together.
     header, and it reached stored-login export, approvals and agent runs on the operator's provider keys.
   - A wrong-token guess at `/metrics` or `/artifacts` now counts against the per-IP rate limit.
   - The escape hatch never applies in production.
-  - Readiness warns when a loopback token is short enough to guess.
+  - The controller logs a startup warning when a loopback `API_BEARER_TOKEN` or `API_BEARER_TOKENS` entry is shorter
+    than 32 characters.
 - **`docker_ephemeral` sessions no longer share a network.** Every session's browser container used to join the
   controller's network, as did browser-node. Each one's Playwright server answered `GET /json` with its WebSocket
   path and checked neither Host nor Origin. Code in one session's container could therefore drive every other
