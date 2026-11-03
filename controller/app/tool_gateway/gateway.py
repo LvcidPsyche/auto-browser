@@ -902,7 +902,10 @@ class McpToolGateway:
             mode=payload.mode,
             request_gates=self.manager.request_gates.status(),
             window_births=self.manager.window_births.status(),
-            browser_sandbox=browser_sandbox_status(self.manager.settings, self.manager.runtime_provisioner),
+            # A manager without a provisioner (an attach-only setup, a test stand-in) has no isolated browsers to report.
+            browser_sandbox=browser_sandbox_status(
+                self.manager.settings, getattr(self.manager, "runtime_provisioner", None)
+            ),
         )
         return report.to_dict()
 
