@@ -26,7 +26,9 @@ cap_eff="$(awk '/^CapEff:/ {print $2}' /proc/self/status)"
 if (( (16#$cap_eff & ((1 << 7) | (1 << 6))) != ((1 << 7) | (1 << 6)) )); then
   export CONTROLLER_RUN_AS_REASON="no CAP_SETUID/CAP_SETGID (cap_drop ALL?), so uid 0 with no capabilities"
   echo "entrypoint: WARNING: this container cannot switch users (no CAP_SETUID/CAP_SETGID): running as uid 0 with" \
-    "no capabilities and no_new_privs. Add cap_add SETUID, SETGID and CHOWN to run as the controller user." >&2
+    "no capabilities and no_new_privs. To run as the controller user instead, start it as that user: compose" \
+    "user: \"10002:10002\" (or docker run --user 10002:10002), with ./data owned by 10002; or add cap_add SETUID," \
+    "SETGID and CHOWN." >&2
   exec setpriv --inh-caps=-all --ambient-caps=-all --no-new-privs "$@"
 fi
 

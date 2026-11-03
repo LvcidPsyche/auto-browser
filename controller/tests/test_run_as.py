@@ -397,6 +397,15 @@ class ReadinessTests(unittest.TestCase):
         self.assertIn("root", check.message)
         self.assertIn("CONTROLLER_RUN_AS=auto", check.fix)
 
+    def test_root_without_setuid_names_the_way_out(self) -> None:
+        # cap_drop ALL: the entrypoint cannot switch users, so the container starts as a capability-less uid 0.
+        check = controller_user_check(
+            SimpleNamespace(euid=0, reason="no CAP_SETUID/CAP_SETGID (cap_drop ALL?), so uid 0 with no capabilities")
+        )
+        self.assertEqual(check.status, "warn")
+        self.assertIn('user: "10002:10002"', check.fix)
+        self.assertIn("docker run --user 10002:10002", check.fix)
+
     def test_non_root_passes_with_the_uid_and_why(self) -> None:
         check = controller_user_check(SimpleNamespace(euid=1001, reason="the owner of /data (uid 1001)"))
         self.assertEqual(check.status, "pass")
@@ -428,6 +437,12 @@ class ImageWiringTests(unittest.TestCase):
         self.assertIn(
             "RUN find / -xdev -group 0 -perm -g+w ! -type l ! -perm -1000 -exec chmod g-w {} +", self.dockerfile
         )
+
+    def test_the_cap_drop_all_warning_names_the_way_out(self) -> None:
+        start = self.entrypoint.index("cannot switch users")
+        warning = self.entrypoint[start : self.entrypoint.index("exec setpriv", start)]
+        self.assertIn('user: \\"10002:10002\\"', warning)
+        self.assertIn("docker run --user 10002:10002", warning)
 
     def test_no_eval_and_a_strict_parse(self) -> None:
         self.assertNotRegex(self.entrypoint, r"(?m)^\s*eval\b")

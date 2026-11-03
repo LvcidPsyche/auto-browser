@@ -441,7 +441,13 @@ def controller_user_check(user: Any):
             name="controller_user",
             status="warn",
             message=f"The controller runs as root ({reason}): a compromise of it is root in its container.",
-            fix=f"Set CONTROLLER_RUN_AS=auto (the default) so it runs as the owner of /data or uid {CONTROLLER_UID}.",
+            fix=(
+                f"Set CONTROLLER_RUN_AS=auto (the default) so it runs as the owner of /data or uid {CONTROLLER_UID}. "
+                "A container without CAP_SETUID/CAP_SETGID (cap_drop ALL) cannot switch users: start it as the "
+                f'controller user, compose user: "{CONTROLLER_UID}:{CONTROLLER_UID}" (or docker run --user '
+                f"{CONTROLLER_UID}:{CONTROLLER_UID}), with ./data owned by that uid, or add cap_add SETUID, SETGID and "
+                "CHOWN."
+            ),
             details=details,
         )
     return ReadinessCheck(
