@@ -563,16 +563,21 @@ if __name__ == "__main__":
     unittest.main()
 
 
+# The controller image COPYs only app/ and tests/, so scripts/ is absent in the
+# controller-tests CI job; the host-tests jobs run these from a real checkout.
+_REPO_WRAPPER = Path(__file__).resolve().parents[2] / "scripts" / "mcp_stdio_bridge.py"
+
+
 def _load_repo_wrapper():
     import importlib.util
 
-    path = Path(__file__).resolve().parents[2] / "scripts" / "mcp_stdio_bridge.py"
-    spec = importlib.util.spec_from_file_location("repo_mcp_stdio_bridge", path)
+    spec = importlib.util.spec_from_file_location("repo_mcp_stdio_bridge", _REPO_WRAPPER)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
+@unittest.skipUnless(_REPO_WRAPPER.is_file(), "scripts/ is not shipped inside the controller image")
 class RepoWrapperTokenDefaultTests(unittest.TestCase):
     """scripts/mcp_stdio_bridge.py defaults the token file for a loopback URL only."""
 
