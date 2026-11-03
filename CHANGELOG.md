@@ -4,6 +4,101 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+A security release over 1.12.4 (GHSA-4c52-f6vr-xrrf). A browser container that a page compromised could take over
+other sessions' browsers and desktops and, on a controller without a token, the controller's API. 1.13.0 isolates each
+`docker_ephemeral` session on its own network with its own noVNC password, makes a local controller generate and
+require a token, and drops the browser containers' Linux capabilities. **It changes a default that clients rely on:
+read the upgrade notes first.** Update the controller and browser-node images, and the client, LangChain and MCP
+bridge packages, together.
+
+### Upgrade notes
+
+- **A controller with no `API_BEARER_TOKEN` now requires a token it generates.** On first start, a loopback controller
+  with no configured credential writes a random token to `API_TOKEN_FILE` (`/data/api-token`, which is
+  `./data/api-token` in your checkout with the shipped compose). It then demands that token on every request, MCP
+  included. Deployments that already set `API_BEARER_TOKEN` or `API_BEARER_TOKENS` are unchanged. Point each client at
+  the token:
+  - **stdio MCP clients** (Claude Desktop, Cursor): set `AUTO_BROWSER_TOKEN_FILE` to the absolute path of
+    `data/api-token` in your checkout, and use this release's bridge (`uvx auto-browser-mcp@latest`). An older bridge
+    ignores that setting, so set `AUTO_BROWSER_BEARER_TOKEN` to the file's contents instead. The repo's own wrapper
+    (`make stdio-bridge`, `scripts/mcp_stdio_bridge.py`) finds the file itself for a loopback URL.
+  - **HTTP MCP clients:** send `Authorization: Bearer <token>`. For Claude Code, run this from the auto-browser folder:
+    `claude mcp add --transport http --scope user auto-browser http://127.0.0.1:8000/mcp --header "Authorization:
+    Bearer $(cat data/api-token)"`. [`docs/mcp-clients.md`](./docs/mcp-clients.md) covers Codex, Cursor, VS Code and
+    Antigravity.
+  - **The Python SDK and LangChain:** pass `token_file="data/api-token"` to `AutoBrowserClient`, `AutoBrowserTool`,
+    `AutoBrowserTool.list_tools` and `AutoBrowserNode`.
+  - **The dashboard** asks for the token once per tab, or takes it in the URL as `/dashboard#token=<token>`.
+  - **Curl and scripts** send the header.
+  - **A Prometheus scrape of `/metrics`** uses `authorization: { type: Bearer, credentials_file: <path> }`.
+  - **Pages a browser opens directly,** such as `GET /sessions/{id}/replay` and `/artifacts/...` links, cannot send
+    the header. They now need the token, as they already did on token deployments. Use the dashboard's replay panel
+    instead.
+  - **Update your checkout as well as the images.** This release's `.gitignore` covers `data/api-token`. On an older
+    checkout, add `data/api-token` to `.gitignore` yourself, or `git add -A` can commit it.
+  - **Windows host runs** (not Docker): the default `C:\data\api-token` inherits permissions that let other local
+    users read it. Set `API_TOKEN_FILE` to a path under your user profile.
+  - **`API_ALLOW_TOKENLESS_LOOPBACK=true` restores the tokenless loopback API.** It is ignored in production, and it
+    reopens the hole: any container on the compose network can drive that controller.
+- **Each `docker_ephemeral` session gets its own Docker network** (`ISOLATED_BROWSER_NETWORK_MODE=per_session`, the
+  new default). The controller joins that network for the session's life.
+  - An isolated browser no longer reaches services on the compose network: browser-node, or a proxy sidecar named in
+    `DEFAULT_PROXY_SERVER` or a proxy persona. Publish such a proxy another way, or use
+    `ISOLATED_BROWSER_NETWORK_MODE=shared`.
+  - `ISOLATED_BROWSER_NETWORK` now applies only with `ISOLATED_BROWSER_NETWORK_MODE=shared`. With `per_session` it
+    is ignored, with a warning.
+  - `per_session` needs the controller to run as a container on the isolation Docker daemon. A controller run on the
+    host needs `shared`, and so does one that reaches another daemon through `ISOLATED_DOCKER_HOST`. A
+    docker-socket-proxy needs `NETWORKS=1`.
+  - Docker's default address pools allow about 30 networks at once. For more concurrent sessions, widen
+    `default-address-pools` in the daemon's `daemon.json`.
+- **Each isolated session's noVNC has its own random password, and isolated containers no longer receive
+  `VNC_PASSWORD`.**
+  - The takeover URL in a session's own record carries the password in its URL fragment, so noVNC connects without
+    asking. That record is what creating or getting a session, remote access and the takeover request return. Treat
+    that URL as a secret.
+  - Lists, observations and stored records keep the password-free URL.
+  - `VNC_PASSWORD` now guards only the shared browser-node. Set it in `docker_ephemeral` deployments; readiness warns
+    when it is missing.
+- **Browser containers keep only five Linux capabilities** (`CHOWN`, `DAC_OVERRIDE`, `KILL`, `SETGID`, `SETUID`),
+  with `no-new-privileges`. The controller runs with `no-new-privileges`. With the isolation overlay, IP forwarding is
+  also off in the controller. A custom image built on browser-node that needs more capabilities has to add them back.
+- **`/docs`, `/redoc` and `/openapi.json` answer without a token on a loopback deployment only,** so a browser can
+  open them. Swagger's Authorize button takes the token. An exposed deployment still requires the token there.
+
+### Security
+
+- **A local controller generates and requires its own token.**
+  - Before, a controller with no `API_BEARER_TOKEN` (the default compose setup) answered unauthenticated requests
+    whose Host header named a loopback host. Native code in any container on the compose network can send that
+    header, and it reached stored-login export, approvals and agent runs on the operator's provider keys.
+  - A wrong-token guess at `/metrics` or `/artifacts` now counts against the per-IP rate limit.
+  - The escape hatch never applies in production.
+  - Readiness warns when a loopback token is short enough to guess.
+- **`docker_ephemeral` sessions no longer share a network.** Every session's browser container used to join the
+  controller's network, as did browser-node. Each one's Playwright server answered `GET /json` with its WebSocket
+  path and checked neither Host nor Origin. Code in one session's container could therefore drive every other
+  session's browser.
+- **Each isolated session's noVNC has its own password.** A published noVNC port was reachable from other sessions'
+  containers: by container address, and on Docker Desktop through `host.docker.internal`. Native code can forge the
+  Host and Origin headers noVNC checks, so without a password the session's desktop was open to it. A shared
+  `VNC_PASSWORD` did not help, because each container held a copy its browser user could read.
+- **Browser containers drop every Linux capability except the five their entrypoint uses.** Browser-node, the isolated
+  browser containers and the controller run with `no-new-privileges`. Chromium runs without its own sandbox in these
+  containers, so this narrows what a renderer exploit gets.
+- **The isolation controller no longer forwards IP traffic** between the session networks it joins
+  (`net.ipv4.ip_forward=0`).
+- **The stdio bridge never follows a redirect.** Python's urllib re-sent a request answered 301, 302 or 303 as a GET
+  to the redirect's target with the same headers, so a redirecting endpoint received the bridge's token, on any host.
+  MCP never redirects, and the bridge now reports a redirect as an HTTP error.
+
+### Added
+
+- `API_TOKEN_FILE` and `API_ALLOW_TOKENLESS_LOOPBACK` (above).
+- `--token-file` / `AUTO_BROWSER_TOKEN_FILE` for the stdio bridge, read on every request, and `token_file` for the
+  Python SDK and LangChain.
+- `ISOLATED_BROWSER_NETWORK_MODE` (`per_session` or `shared`).
+
 ### Fixed
 
 - **Stealth sessions sent half a user agent.** The `USER_AGENT_POOL` default was joined and split on commas, and every
@@ -21,6 +116,16 @@ All notable changes to auto-browser are documented here.
   with `--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect`. The
   readiness check, the gate's explanation and the docs name both. `browser-node` and every browser the controller
   launches are not affected: Playwright 1.64 disables the feature there.
+- **The stdio bridge on Windows spoke the console's code page, not UTF-8.** A client that launches it with pipes
+  (Claude Desktop, Cursor) handed it cp1252. `tools/list` went out as invalid UTF-8, and observing a page with text
+  outside cp1252 crashed the bridge and left its browser session open. It now reads and writes UTF-8 on every
+  platform.
+- **`docker_ephemeral` on Docker Desktop for Windows:** every isolated session failed to start ("too many colons"),
+  because the controller turned the Windows path behind `/data` into a Linux one. It now passes the Windows path
+  through.
+- **The dashboard's replay screenshots load again on a controller with a token.** They were bare image links, which
+  cannot send a token. The session list's noVNC link now opens the session's own record, which carries its noVNC
+  password.
 
 ## [1.12.4] — 2026-11-03
 
