@@ -33,6 +33,10 @@ CONTROLLER_UID = 10001
 DATA_ROOT = Path("/data")
 # Set by the entrypoint for readiness: why the controller runs as the user it does.
 REASON_ENV = "CONTROLLER_RUN_AS_REASON"
+# Written after a pass that handed everything over, holding "uid:gid": later starts as that user skip the scan,
+# which on a Docker Desktop bind mount took 71.66s for 20102 entries even with nothing to change. A root run
+# removes it (root may write root-owned files); delete it by hand to force a new pass.
+MARKER_NAME = ".auto-browser-owner"
 
 Owner = Callable[[Path], int]
 Chown = Callable[[Path, int, int], None]
@@ -184,12 +188,21 @@ def main(
     except ValueError as exc:
         logger.error("%s", exc)
         return 64
+    marker = data_root / MARKER_NAME
     if decision.uid is None:
+        marker.unlink(missing_ok=True)
         logger.warning(
             "CONTROLLER_RUN_AS=root: the controller runs as root, as before 1.14.0. Not recommended: unset it "
             "(auto) to run as the owner of %s or uid %s.",
             data_root,
             CONTROLLER_UID,
+        )
+    elif _read_marker(marker) == f"{decision.uid}:{decision.gid}":
+        logger.info(
+            "controller runs as uid %s (%s); %s says its files were handed over already (delete it to look again)",
+            decision.uid,
+            decision.reason,
+            marker,
         )
     else:
         if settings is None:
@@ -198,6 +211,11 @@ def main(
             settings = Settings()
         paths = controller_owned_paths(settings, data_root)
         report = fix_ownership(data_root, paths, decision.uid, decision.gid, owner=owner, chown=chown)
+        if not report.errors:
+            try:
+                marker.write_text(f"{decision.uid}:{decision.gid}\n", encoding="utf-8")
+            except OSError as exc:
+                logger.warning("Could not write %s (%s): the next start scans /data again", marker, exc)
         logger.info(
             "controller runs as uid %s (%s); %d root-owned of %d entries under %s handed to it in %.2fs",
             decision.uid,
@@ -220,6 +238,13 @@ def main(
     print(f"RUN_GID={'' if decision.gid is None else decision.gid}")
     print(f"RUN_REASON={shlex.quote(decision.reason)}")
     return 0
+
+
+def _read_marker(marker: Path) -> str | None:
+    try:
+        return marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
 
 
 @dataclass

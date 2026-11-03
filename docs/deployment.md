@@ -127,8 +127,10 @@ uvicorn as that user:
 
 At start, the root-owned entries of the controller's own `/data` subtrees (what earlier releases wrote as root) are
 given to that user: only entries owned by root, never the browser's `browser-profile` and `downloads`, never anything
-outside `/data`. On Docker Desktop that took 0.37 s for 20,000 files, and a later start that finds none to change
-0.25 s. If one cannot be changed (a read-only or root-squashed mount), the log has an ERROR naming the path; the
+outside `/data`. A pass that hands everything over leaves `data/.auto-browser-owner`, and later starts as the same
+user skip the scan; a root run (`CONTROLLER_RUN_AS=root`) removes it, and deleting it forces a new pass. Measured on
+Docker Desktop for 20,000 files: 0.37 s in a named volume, but 103 s once on a Windows bind mount (`./data`), whose
+file operations are slow; with the marker, later starts take under a second. If one cannot be changed (a read-only or root-squashed mount), the log has an ERROR naming the path; the
 controller still starts as that user, and whatever it then cannot read fails with its own message.
 
 With the isolation overlay, the controller joins the group of the mounted Docker socket. On a Linux host that is the

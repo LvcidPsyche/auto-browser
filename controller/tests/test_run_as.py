@@ -222,6 +222,70 @@ class MainTests(unittest.TestCase):
             self.assertIn(str(data / "auth"), message)
             self.assertIn("CONTROLLER_RUN_AS=root", message)
 
+    def test_a_clean_pass_leaves_a_marker_and_the_next_start_skips_the_scan(self) -> None:
+        # A Docker Desktop bind mount took 71.66s just to scan 20102 entries on every start: one pass is enough.
+        with tempfile.TemporaryDirectory() as tempdir:
+            data = Path(tempdir)
+            (data / "auth").mkdir()
+            owners = {str(data).replace("\\", "/"): 0, str(data / "auth").replace("\\", "/"): 0}
+            fs = FakeFs(owners)
+            seen: list[Path] = []
+
+            def owner(path: Path) -> int:
+                seen.append(path)
+                return fs.owner(path)
+
+            with redirect_stdout(io.StringIO()), self.assertLogs("app.run_as", level=logging.INFO):
+                main(
+                    run_as="auto",
+                    settings=_settings(data),
+                    data_root=data,
+                    owner=owner,
+                    owner_gid=lambda p: 0,
+                    chown=fs.chown,
+                )
+            self.assertEqual((data / ".auto-browser-owner").read_text(encoding="utf-8"), "10001:10001\n")
+            scanned = len(seen)
+            out = io.StringIO()
+            with redirect_stdout(out), self.assertLogs("app.run_as", level=logging.INFO) as logs:
+                main(
+                    run_as="auto",
+                    settings=_settings(data),
+                    data_root=data,
+                    owner=owner,
+                    owner_gid=lambda p: 10001,
+                    chown=fs.chown,
+                )
+            self.assertEqual(len(seen) - scanned, 1, "only /data itself is looked at")
+            self.assertIn("RUN_UID=10001\n", out.getvalue())
+            self.assertIn(".auto-browser-owner", "\n".join(logs.output))
+
+    def test_a_pass_with_errors_leaves_no_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            data = Path(tempdir)
+            (data / "auth").mkdir()
+            owners = {str(data).replace("\\", "/"): 0, str(data / "auth").replace("\\", "/"): 0}
+            fs = FakeFs(owners, fail={str(data / "auth").replace("\\", "/")})
+            with redirect_stdout(io.StringIO()), self.assertLogs("app.run_as", level=logging.ERROR):
+                main(
+                    run_as="auto",
+                    settings=_settings(data),
+                    data_root=data,
+                    owner=fs.owner,
+                    owner_gid=lambda p: 0,
+                    chown=fs.chown,
+                )
+            self.assertFalse((data / ".auto-browser-owner").exists())
+
+    def test_a_root_run_removes_the_marker(self) -> None:
+        # Root may write root-owned files, so the next non-root start must look again.
+        with tempfile.TemporaryDirectory() as tempdir:
+            data = Path(tempdir)
+            (data / ".auto-browser-owner").write_text("10001:10001\n", encoding="utf-8")
+            with redirect_stdout(io.StringIO()), self.assertLogs("app.run_as", level=logging.WARNING):
+                main(run_as="root", settings=_settings(data), data_root=data)
+            self.assertFalse((data / ".auto-browser-owner").exists())
+
     def test_root_prints_no_user(self) -> None:
         out = io.StringIO()
         with redirect_stdout(out), self.assertLogs("app.run_as", level=logging.WARNING):
