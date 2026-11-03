@@ -71,6 +71,10 @@ class BrowserTabService:
             blocked_before = gates.mark(session.browser)
             # Reported by the context like a popup, but with no opener to judge it.
             self.manager.page_provenance.opened_by_controller(new_page)
+            if self.manager.window_births.watching(session):
+                # Its targetId, cached before it can open a window: the window-birth watcher then judges that
+                # window by this tab, not by the whole session (which can be refused for another tab).
+                await gates.target_id_of(new_page)
             if session.gate_context_id is not None:
                 await gates.bypass_service_workers(new_page)
             try:
