@@ -16,7 +16,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, TextIO
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 # MCP spec header names, kept as local constants so the bridge has no
 # controller dependency. The controller test suite asserts these match
@@ -28,6 +28,22 @@ MCP_PROTOCOL_HEADER = "MCP-Protocol-Version"
 # stream. This bridge only POSTs and never opens that stream, so a stdio client
 # could subscribe and then never hear anything. Say so up front instead.
 _SUBSCRIPTION_METHODS = frozenset({"resources/subscribe", "resources/unsubscribe"})
+
+
+class _NoRedirects(HTTPRedirectHandler):
+    """Refuse every redirect, so the bridge's headers never reach another URL.
+
+    urllib re-sent a POST answered 301, 302 or 303 as a GET with the same
+    headers, Authorization included, to wherever Location pointed. MCP never
+    redirects; the 3xx reaches the client as an HTTP error instead.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# Module-level, as urllib's own urlopen was, so tests can patch it.
+urlopen = build_opener(_NoRedirects).open
 
 
 @dataclass
