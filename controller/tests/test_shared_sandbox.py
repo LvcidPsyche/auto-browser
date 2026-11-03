@@ -125,6 +125,9 @@ class VerifiedOnTests(unittest.TestCase):
         self.assertFalse(verified_on({"sandbox": "on", "verified": {"renderers": 0}}))
         self.assertFalse(verified_on({"sandbox": "unreadable"}))
         self.assertFalse(verified_on(None))
+        # Renderers do not make a state that is not 'on' count (R11).
+        for name in ("unreadable", "off", "refused", "unknown"):
+            self.assertFalse(verified_on({"sandbox": name, "verified": {"renderers": 2}}), name)
 
     def test_snapshot_binds_to_the_endpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

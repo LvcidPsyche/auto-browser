@@ -293,6 +293,10 @@ def fix_ownership(
         except OSError as exc:
             if exc.errno in (errno.ELOOP, errno.ENOTDIR):  # swapped for a symlink or a file since the lstat
                 report.skipped.append(f"{relative}: no longer a directory")
+            elif exc.errno == errno.EACCES and st.st_uid == uid:
+                # Root without CAP_DAC_READ_SEARCH cannot open a 0700 directory an earlier start handed over: it
+                # is already the user's, so nothing is lost but a check of its contents.
+                report.skipped.append(f"{relative}: already uid {uid}'s, and not readable without CAP_DAC_READ_SEARCH")
             else:
                 report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
             return
@@ -389,24 +393,51 @@ def read_marker(data_root: Path, uid: int) -> bytes | None:
 def write_marker(data_root: Path, uid: int, gid: int) -> None:
     """Replace the marker with a new regular file owned by uid:gid.
 
-    The old entry is unlinked and the new one created O_EXCL|O_NOFOLLOW: O_TRUNC on an existing name would let a
-    hard link planted there make root truncate the linked file."""
+    Root opens /data and writes the marker through that fd as the user, in a child that has switched to it: /data is
+    the user's by then, and root without CAP_DAC_OVERRIDE (cap_drop ALL plus CHOWN, SETUID, SETGID) could not create
+    a file in it. The marker is the user's anyway (it could forge one), so nothing is lost. The old entry is unlinked
+    and the new one created O_EXCL|O_NOFOLLOW, so a hard link planted there is never written through."""
     root_fd = os.open(str(data_root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        try:
-            os.unlink(MARKER_NAME, dir_fd=root_fd)
-        except FileNotFoundError:
-            pass
-        except IsADirectoryError:
-            os.rmdir(MARKER_NAME, dir_fd=root_fd)
-        fd = os.open(MARKER_NAME, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=root_fd)
-        try:
-            os.write(fd, marker_bytes(uid, gid))
-            os.fchown(fd, uid, gid)
-        finally:
-            os.close(fd)
+        if not (hasattr(os, "fork") and os.geteuid() == 0 and uid != 0):
+            _write_marker_at(root_fd, uid, gid)
+            return
+        pid = os.fork()
+        if pid == 0:  # the child: become the user, write, and leave without running any of the parent's cleanup
+            code = 0
+            try:
+                os.setgroups([])
+                os.setresgid(gid, gid, gid)
+                os.setresuid(uid, uid, uid)
+                _write_marker_at(root_fd, uid, gid)
+            except OSError as exc:
+                code = exc.errno or 1
+            except BaseException:
+                code = 1
+            os._exit(code)
+        _, status = os.waitpid(pid, 0)
+        code = os.waitstatus_to_exitcode(status)
+        if code != 0:
+            raise OSError(code, f"writing the marker as uid {uid} failed: {os.strerror(code)}")
     finally:
         os.close(root_fd)
+
+
+def _write_marker_at(root_fd: int, uid: int, gid: int) -> None:
+    try:
+        os.unlink(MARKER_NAME, dir_fd=root_fd)
+    except FileNotFoundError:
+        pass
+    except IsADirectoryError:
+        os.rmdir(MARKER_NAME, dir_fd=root_fd)
+    fd = os.open(MARKER_NAME, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=root_fd)
+    try:
+        os.write(fd, marker_bytes(uid, gid))
+        st = os.fstat(fd)
+        if (st.st_uid, st.st_gid) != (uid, gid):
+            os.fchown(fd, uid, gid)
+    finally:
+        os.close(fd)
 
 
 def remove_marker(data_root: Path) -> None:
@@ -533,8 +564,8 @@ def controller_user_check(user: Any):
                 f"Set CONTROLLER_RUN_AS=auto (the default) so it runs as the owner of /data or uid {CONTROLLER_UID}. "
                 "A container without CAP_SETUID/CAP_SETGID (cap_drop ALL) cannot switch users: start it as the "
                 f'controller user, compose user: "{CONTROLLER_UID}:{CONTROLLER_UID}" (or docker run --user '
-                f"{CONTROLLER_UID}:{CONTROLLER_UID}), with ./data owned by that uid, or add cap_add SETUID, SETGID and "
-                "CHOWN."
+                f"{CONTROLLER_UID}:{CONTROLLER_UID}), with ./data owned by that uid, or add cap_add CHOWN, DAC_READ_SEARCH, SETUID and "
+                "SETGID."
             ),
             details=details,
         )

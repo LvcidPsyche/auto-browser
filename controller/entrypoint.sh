@@ -63,8 +63,8 @@ if (( ((16#$cap_eff >> 7) & 1) == 0 || ((16#$cap_eff >> 6) & 1) == 0 )); then
   export CONTROLLER_RUN_AS_REASON="no CAP_SETUID/CAP_SETGID, so uid 0 with $kept"
   echo "entrypoint: WARNING: this container cannot switch users (no CAP_SETUID/CAP_SETGID): running as uid 0 with" \
     "$kept and no_new_privs. To run as the controller user instead, start it as that user: compose" \
-    "user: \"10002:10002\" (or docker run --user 10002:10002), with ./data owned by 10002; or add cap_add SETUID," \
-    "SETGID and CHOWN." >&2
+    "user: \"10002:10002\" (or docker run --user 10002:10002), with ./data owned by 10002; or add cap_add CHOWN," \
+    "DAC_READ_SEARCH, SETUID and SETGID." >&2
   exec setpriv "${drop[@]}" "$@"
 fi
 
