@@ -392,15 +392,16 @@ async def test_a_window_with_no_opener_is_not_closed(h: Harness) -> None:
 
 
 async def test_the_sweep_never_reads_an_uncached_pages_target_id(h: Harness, monkeypatch) -> None:
-    """A refused page can flood the session with windows: they sit in the session's pages with no cached id.
-    The sweep protects only pages whose id it already knows (reported pages, the first page, open-tab tabs);
-    it must not open a CDP session to identify each flood window, which — kept for the page's life — a refused
-    page could turn into resource exhaustion (it hung the controller before this)."""
+    """A refused page can flood the session with windows that commit: each is reported, and sits in the
+    session's pages until its report's targetId read lands. The sweep must not open a CDP session of its own to
+    identify each one, which — kept for the page's life — a refused page could turn into resource exhaustion (it
+    hung the controller before this). While any reported page's id is unknown it closes nothing it cannot
+    match, since any of it could be that page; once every id is known, the unmatched window goes."""
     opener = h.known("OP", refused=True)
     h.cdp.fire("Target.targetCreated", created("T1", CTX, opener_id="OP"))  # born refused, unreported
     flood = [FakePage() for _ in range(5)]
     for i, page in enumerate(flood):
-        h.pages[f"FLOOD{i}"] = page  # in the session's pages, but its targetId was never read
+        h.pages[f"FLOOD{i}"] = page  # in the session's pages, its targetId not read yet
 
     resolved: list[Any] = []
     original = h.births._resolve_target_id
@@ -412,8 +413,13 @@ async def test_the_sweep_never_reads_an_uncached_pages_target_id(h: Harness, mon
     monkeypatch.setattr(h.births, "_resolve_target_id", spy)
     h.refused.discard(opener)
 
-    assert await h.sweep() == ["T1"]
+    assert await h.sweep() == [], "a window was closed while a reported page's id was unknown: it could be that page"
     assert resolved == [], "the sweep read a page's targetId instead of using only cached ids"
+
+    for i, page in enumerate(flood):
+        h.target_ids[page] = f"FLOOD{i}"  # their reads landed
+    assert await h.sweep() == ["T1"]
+    assert resolved == []
 
 
 async def test_close_target_failure_leaves_the_window_claimable_again(h: Harness) -> None:
@@ -470,12 +476,12 @@ async def test_repeated_info_changes_do_not_multiply_or_downgrade_the_entry(h: H
 
 
 async def test_a_report_with_no_birth_is_refused_and_its_late_birth_is_marked_reported(h: Harness) -> None:
-    """A report the watcher cannot explain (no birth came for it) is refused, whether or not the session
-    counts; the birth, when it lands, is a reported page's, so the sweep never closes it."""
+    """A report the watcher cannot explain (no birth came for it) is refused as unjudged, whether or not the
+    session counts; the birth, when it lands, is a reported page's, so the sweep never closes it."""
     h.counts = False
     page = FakePage()
     h.target_ids[page] = "T1"
-    assert await h.births.verdict(h.session, page) is BirthVerdict.REFUSED
+    assert await h.births.verdict(h.session, page) is BirthVerdict.REFUSED_UNJUDGED
 
     h.counts = True
     h.cdp.fire("Target.targetCreated", created("T1", CTX, opener_id="UNKNOWN"))
@@ -484,11 +490,22 @@ async def test_a_report_with_no_birth_is_refused_and_its_late_birth_is_marked_re
     assert await h.sweep() == []
 
 
-async def test_a_report_whose_target_id_cannot_be_read_is_refused(h: Harness) -> None:
+async def test_a_report_whose_target_id_cannot_be_read_is_refused(h: Harness, monkeypatch) -> None:
+    """Read TARGET_ID_READ_ATTEMPTS times, then refused as unjudged: its birth cannot be told."""
+    monkeypatch.setattr(wb, "TARGET_ID_RETRY_SECONDS", 0.0)
     h.counts = False
     page = FakePage()  # not in target_ids: resolve returns None
+    reads: list[Any] = []
+    original = h.births._resolve_target_id
 
-    assert await h.births.verdict(h.session, page) is BirthVerdict.REFUSED
+    async def counting(page: Any) -> str | None:
+        reads.append(page)
+        return await original(page)
+
+    monkeypatch.setattr(h.births, "_resolve_target_id", counting)
+
+    assert await h.births.verdict(h.session, page) is BirthVerdict.REFUSED_UNJUDGED
+    assert len(reads) == wb.TARGET_ID_READ_ATTEMPTS
 
 
 async def test_a_failed_attach_refuses_the_session_as_the_gate_does() -> None:
@@ -624,3 +641,235 @@ async def test_a_dead_watcher_closes_nothing(h: Harness) -> None:
 
     await h.births.close_unreported(h.session)
     assert h.cdp.closed_targets == []
+
+
+# ── round 3: an unmatched opener born clean ────────────────────────────────────
+
+
+async def test_a_window_of_a_clean_popup_whose_read_is_in_flight_is_born_clean(h: Harness) -> None:
+    """Reviewer's R5: a fresh clean popup opens a window from its inline script before its own targetId read
+    lands, while another tab is refused. The opener is unmatched, but it was born clean and every open page
+    whose id is unknown is clean: the window is born clean, not refused by the session."""
+    h.known("OP")
+    h.known("OTHER", refused=True)
+    h.counts = True
+    h.cdp.fire("Target.targetCreated", created("P", CTX, opener_id="OP"))
+    h.pages["P-unread"] = FakePage()  # reported, in the session's pages, its targetId not cached yet
+
+    h.cdp.fire("Target.targetCreated", created("C", CTX, opener_id="P"))
+
+    assert h.watcher._births["C"].born_refused is False
+    assert await h.report("C") is BirthVerdict.CLEAN
+
+
+async def test_a_window_of_an_unmatched_clean_opener_falls_back_when_an_unread_page_is_refused(h: Harness) -> None:
+    """The opener was born clean but a refused page's id is unknown too: the window could be that page's, so the
+    session decides (fail safe), and the refusal names another tab."""
+    h.known("OP")
+    h.counts = True
+    h.cdp.fire("Target.targetCreated", created("P", CTX, opener_id="OP"))
+    h.pages["P-unread"] = FakePage()
+    refused_unread = FakePage()
+    h.pages["Q-unread"] = refused_unread
+    h.refused.add(refused_unread)
+
+    h.cdp.fire("Target.targetCreated", created("C", CTX, opener_id="P"))
+
+    assert h.watcher._births["C"].born_refused is True
+    assert await h.report("C") is BirthVerdict.REFUSED_BY_SESSION
+
+
+# ── round 3: the replacement watcher ──────────────────────────────────────────
+
+
+class ReplayingCdp(FakeCdp):
+    """A browser session whose discovery replays the targets that exist, before it answers, as Chromium's does."""
+
+    def __init__(self, replay: list[dict] | None = None) -> None:
+        super().__init__()
+        self.replay = replay or []
+        self.sessions_at_discovery: int | None = None
+
+    async def send(self, method: str, params: dict | None = None) -> dict:
+        if method == "Target.setDiscoverTargets":
+            # The handlers are the watcher's bound methods: how many sessions it knows as discovery starts.
+            watcher = self.handlers["Target.targetCreated"][0].__self__
+            self.sessions_at_discovery = watcher.session_count
+            for event in self.replay:
+                self.fire("Target.targetCreated", event)
+        return await super().send(method, params)
+
+
+async def replace_watcher(h: Harness, replay: list[dict] | None = None) -> ReplayingCdp:
+    """The watcher's browser session dies on its own; the replacement attaches on ``replay``'s targets."""
+    replacement = ReplayingCdp(replay)
+
+    async def next_browser_session() -> FakeCdp:
+        h.browser.cdps.append(replacement)
+        return replacement
+
+    h.browser.new_browser_cdp_session = next_browser_session  # type: ignore[method-assign]
+    h.cdp.fire("close", {})
+    await asyncio.sleep(0.05)
+    assert h.watcher is not None and h.watcher._cdp is replacement
+    return replacement
+
+
+async def test_a_replacement_registers_the_sessions_before_it_discovers_the_targets(h: Harness) -> None:
+    """Chromium replays targetCreated for every existing target before setDiscoverTargets returns; a watcher
+    that registered its sessions only after that dropped the replay and knew nothing of the windows born under
+    the lost watcher (the orchestrator's O3 leak)."""
+    other = FakeSession(h.browser, "s2")
+    await h.births.watch(other, context=object(), page=object(), context_id=OTHER_CTX)
+    replacement = await replace_watcher(h)
+
+    assert replacement.sessions_at_discovery == 2
+    assert h.watcher._sessions == {CTX: h.session, OTHER_CTX: other}
+
+
+async def test_targets_a_replacement_first_sees_in_the_replay_fail_closed_unless_known(h: Harness) -> None:
+    """The replay: a known page (a cached targetId) is reported and clean; a window with an opener is unjudged
+    (refused, counted by readiness, swept once the session stops counting, and its report says so); one with
+    no opener is clean."""
+    first = h.known("FIRST")
+    h.counts = True
+    replacement = await replace_watcher(
+        h,
+        [
+            created("FIRST", CTX, opener_id=None),
+            created("W", CTX, opener_id="FIRST"),
+            created("N", CTX, opener_id=None),
+        ],
+    )
+    new = h.watcher
+
+    assert new._births["FIRST"].reported is True and new._births["FIRST"].born_refused is False
+    assert new._births["FIRST"].live_page() is first
+    assert new._births["W"].born_refused is True and new._births["W"].unjudged is True
+    assert new._births["N"].born_refused is False
+    assert h.births.status()["watchers"][0]["born_refused_unreported"] == 1
+
+    # Reported: refused as unjudged. Unreported: swept once the session stops counting.
+    page = FakePage()
+    h.target_ids[page] = "W"
+    assert await h.births.verdict(h.session, page) is BirthVerdict.REFUSED_UNJUDGED
+    new._births["W"].reported = False
+    assert await h.sweep() == []
+    h.counts = False
+    await h.births.close_unreported(h.session)
+    assert replacement.closed_targets == ["W"]
+
+
+async def test_an_info_change_for_an_unknown_target_is_a_late_sight_too(h: Harness) -> None:
+    """A targetInfoChanged for a target the watcher never saw born (it was born while the watcher was lost and
+    moves now): judged as the replay's are, not by its opener's current, cleared state."""
+    h.known("OP")  # clean now; it was refused when the window was born, under a lost watcher
+    h.counts = False
+    h.cdp.fire("Target.targetInfoChanged", created("W", CTX, opener_id="OP"))
+
+    assert h.watcher._births["W"].born_refused is True and h.watcher._births["W"].unjudged is True
+    assert await h.report("W") is BirthVerdict.REFUSED_UNJUDGED
+
+
+async def test_a_known_pages_popup_after_a_replacement_is_judged_by_that_page(h: Harness) -> None:
+    """A reported clean popup from before the loss (its id cached) opens a window after the replacement: the
+    window is judged by it, clean, not refused for the replacement."""
+    popup = h.known("P")
+    replacement = await replace_watcher(h, [created("P", CTX, opener_id="OP")])
+    assert h.watcher._births["P"].live_page() is popup
+    h.counts = True
+
+    replacement.fire("Target.targetCreated", created("C", CTX, opener_id="P"))
+
+    assert await h.report("C") is BirthVerdict.CLEAN
+
+
+async def test_the_recheck_starts_for_the_replays_unjudged_windows(h: Harness, monkeypatch) -> None:
+    monkeypatch.setattr(wb, "RECHECK_INTERVAL_SECONDS", 0.05)
+    h.counts = False
+    replacement = await replace_watcher(h, [created("W", CTX, opener_id="GONE")])
+    await asyncio.sleep(0.3)
+
+    assert replacement.closed_targets == ["W"], "the replay's unjudged window was not swept by the recheck"
+
+
+# ── round 3: the verdict in the loss gap, and no retention ─────────────────────
+
+
+async def test_a_verdict_read_in_the_loss_gap_is_not_clean(h: Harness, monkeypatch) -> None:
+    """Reviewer's finding: a report started under a watcher since lost was mapped to CLEAN. It is awaited all
+    the same; and a page with no report at all is refused as unjudged while its session's watcher is lost."""
+    h.known("OP", refused=True)
+    h.cdp.fire("Target.targetCreated", created("T1", CTX, opener_id="OP"))
+    page = FakePage()
+    h.target_ids[page] = "T1"
+    h.births.note_reported(h.session, page)  # attach_popup: the report task starts while the watcher is live
+    monkeypatch.setattr(h.births, "_lost", lambda watcher: None)  # no replacement: the gap stays open
+    h.cdp.fire("close", {})
+    assert h.births.holds_refused(h.session)
+
+    assert await h.births.verdict(h.session, page) is BirthVerdict.REFUSED
+    other = FakePage()
+    h.target_ids[other] = "T1"
+    assert await h.births.verdict(h.session, other) is BirthVerdict.REFUSED_UNJUDGED
+
+
+async def test_a_resolved_report_keeps_the_verdict_not_the_task(h: Harness) -> None:
+    h.known("OP", refused=True)
+    h.cdp.fire("Target.targetCreated", created("T1", CTX, opener_id="OP"))
+    page = FakePage()
+    h.target_ids[page] = "T1"
+
+    assert await h.births.verdict(h.session, page) is BirthVerdict.REFUSED
+    await asyncio.sleep(0)
+
+    assert h.births._reports[page] is BirthVerdict.REFUSED
+    assert await h.births.verdict(h.session, page) is BirthVerdict.REFUSED  # served from the kept verdict
+
+
+# ── round 3: the sweep and a reported page it cannot match ─────────────────────
+
+
+async def test_the_sweep_spares_the_unmatched_while_a_reported_pages_id_is_unknown(h: Harness, monkeypatch) -> None:
+    """Reviewer's D5: a reported page whose targetId read failed has no cached id and its birth is not marked.
+    The sweep cannot tell it from an unreported window, so it closes nothing it cannot match while that page is
+    open; once the page closes, the unmatched window goes."""
+    monkeypatch.setattr(wb, "TARGET_ID_RETRY_SECONDS", 0.0)
+    opener = h.known("OP", refused=True)
+    h.cdp.fire("Target.targetCreated", created("T1", CTX, opener_id="OP"))
+    reported = FakePage()  # the popup T1, reported; its read fails (not in target_ids)
+    h.pages["T1?"] = reported
+    assert await h.births.verdict(h.session, reported) is BirthVerdict.REFUSED_UNJUDGED
+    h.refused.discard(opener)
+
+    assert await h.sweep() == []
+    reported.closed = True
+    assert await h.sweep() == ["T1"]
+
+
+async def test_a_window_reported_during_the_sweeps_wait_is_not_closed(h: Harness) -> None:
+    """Reviewer's 7c: the sweep waits for the reads in flight, then closes; a report that lands during that wait,
+    or during an earlier close's round trip, marks the birth reported, and the close is checked again first."""
+    opener = h.known("OP", refused=True)
+    h.cdp.fire("Target.targetCreated", created("T1", CTX, opener_id="OP"))
+    h.cdp.fire("Target.targetCreated", created("T2", CTX, opener_id="OP"))
+    h.refused.discard(opener)
+
+    async def reported_ids(session: Any) -> tuple[set[str], bool]:
+        h.watcher.mark_reported(session, "T2", FakePage())  # lands while the sweep waits
+        return set(), True
+
+    await h.watcher.close_unreported(h.session, reported_ids)
+
+    assert h.cdp.closed_targets == ["T1"]
+
+
+async def test_the_backoff_message_says_within_the_last_seconds() -> None:
+    harness = Harness()
+    harness.browser.fail_attach = True
+    with pytest.raises(WindowBirthWatcherUnavailable):
+        await harness.watch()
+    harness.browser.fail_attach = False
+
+    with pytest.raises(WindowBirthWatcherUnavailable, match="within the last 2 s"):
+        await harness.watch()
