@@ -2,10 +2,19 @@
 
 All notable changes to auto-browser are documented here.
 
-## [Unreleased]
+## [1.12.4] — 2026-11-03
 
-A browser update. The browser-node image moves from Chromium 151 to Chromium 156, which has the fixes for two V8 bugs
-that were exploited in the wild. Update the browser-node and controller images together.
+A browser update over 1.12.3. The browser-node image moves from Chromium 151 to Chromium 156, which has the fixes
+for two V8 bugs that were exploited in the wild. Update the browser-node and controller images together. The client,
+LangChain and MCP bridge packages change only in version; updating them alone does not deploy the fix.
+
+### Upgrade notes
+
+- **Update the controller and browser-node together.** Both run Playwright 1.64.1, and Playwright's client and
+  server must match. If `ISOLATED_BROWSER_IMAGE` names an image explicitly, point it at the new browser-node image,
+  and close isolated sessions started before the upgrade.
+- **Running the controller from a checkout** rather than the image: after installing the new requirements, run
+  `python -m playwright install chromium`, so that Playwright's own Chromium is the new one too.
 
 ### Security
 
@@ -30,14 +39,6 @@ that were exploited in the wild. Update the browser-node and controller images t
 - A top-level navigation answered 204 no longer shows up in a session's request failures. Playwright 1.64 reports
   it as finished, not failed with `net::ERR_ABORTED`. Under `ALLOWED_HOSTS` it still ends the refused navigation it
   belongs to, as before.
-
-### Upgrade notes
-
-- **Update the controller and browser-node together.** Both run Playwright 1.64.1, and Playwright's client and
-  server must match. If `ISOLATED_BROWSER_IMAGE` names an image explicitly, point it at the new browser-node image,
-  and close isolated sessions started before the upgrade.
-- **Running the controller from a checkout** rather than the image: after installing the new requirements, run
-  `python -m playwright install chromium`, so that Playwright's own Chromium is the new one too.
 
 ## [1.12.3] — 2026-11-03
 
