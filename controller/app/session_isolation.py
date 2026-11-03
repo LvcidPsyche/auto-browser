@@ -503,26 +503,34 @@ class DockerBrowserNodeProvisioner:
                 container.stop(timeout=5)
             except Exception as exc:
                 logger.debug("Could not stop browser container %s: %s", runtime.container_name, exc)
+        stranded = None
         if not self.settings.isolated_browser_keep_containers:
             if container is not None:
                 try:
                     container.remove(force=True)
                 except Exception as exc:
                     logger.warning("Could not remove browser container %s: %s", runtime.container_name, exc)
+                    # It still holds an endpoint on the session network.
+                    stranded = container
         if runtime.network_owned:
-            self._release_session_network(client, runtime)
+            self._release_session_network(client, runtime, stranded=stranded)
         if not self.settings.isolated_browser_keep_containers:
             # Also when the container is already gone (docker rm, a crashed
             # daemon): its profile directory, cookies included, is still here.
             self._remove_runtime_dirs(runtime.session_id)
 
-    def _release_session_network(self, client, runtime: IsolatedBrowserRuntime) -> None:
+    def _release_session_network(self, client, runtime: IsolatedBrowserRuntime, *, stranded: Any = None) -> None:
         """Leave this session's network, and remove it unless containers are kept.
 
         The tunnel and the Playwright connection are already closed by now
         (sessions.py tears them down before the runtime). With keep_containers
         the network stays for the kept container, but the controller still
         leaves it, or it would stay attached to every session ever opened.
+
+        `stranded` is the session's browser container when removing it failed:
+        its endpoint would block the network removal, and the network (and its
+        address-pool slot) would leak until the next startup sweep, so it is
+        force-disconnected first.
         """
         network = self._safe_get_network(client, runtime.network_name)
         if network is None:
@@ -537,6 +545,16 @@ class DockerBrowserNodeProvisioner:
                         "Could not disconnect the controller from session network %s: %s", runtime.network_name, exc
                     )
             return
+        if stranded is not None and self._is_session_network(network, runtime.session_id):
+            try:
+                network.disconnect(getattr(stranded, "id", stranded), force=True)
+            except Exception as exc:
+                logger.warning(
+                    "Could not disconnect browser container %s from session network %s: %s",
+                    runtime.container_name,
+                    runtime.network_name,
+                    exc,
+                )
         self._remove_session_network(network, runtime.session_id, controller_id)
 
     def _remove_runtime_dirs(self, session_id: str) -> None:
