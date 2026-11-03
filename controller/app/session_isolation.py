@@ -229,6 +229,11 @@ class DockerBrowserNodeProvisioner:
         controller_id = self._controller_id_or_none(client)
         for network in orphans:
             name = getattr(network, "name", "<unknown>")
+            # Every label a session network carries, as release checks: a network with the
+            # managed label alone is not one of ours to remove.
+            labels = (getattr(network, "attrs", None) or {}).get("Labels") or {}
+            if labels.get(_MODE_LABEL) != "docker_ephemeral" or not labels.get(_SESSION_ID_LABEL):
+                continue
             if controller_id:
                 try:
                     network.disconnect(controller_id, force=True)

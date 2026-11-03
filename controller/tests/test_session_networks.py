@@ -312,6 +312,17 @@ class SessionNetworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(unlabeled.removed)
         self.assertIn("controller-id", unlabeled.attrs["Containers"])
 
+    async def test_startup_sweep_leaves_a_managed_network_that_is_not_a_session_network(self) -> None:
+        """Only a network with every label a session network carries is swept, as release checks."""
+        provisioner, client = self.provisioner()
+        foreign = client.networks.add("someone-else-net", {"auto-browser.managed": "true"})
+        foreign.attrs["Containers"]["controller-id"] = {}
+
+        await provisioner.startup()
+
+        self.assertFalse(foreign.removed)
+        self.assertIn("controller-id", foreign.attrs["Containers"])
+
     async def test_startup_sweep_runs_after_the_container_reap(self) -> None:
         provisioner, client = self.provisioner()
         provisioner_run = await provisioner.provision("orphan")
