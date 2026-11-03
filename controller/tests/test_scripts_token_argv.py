@@ -60,7 +60,7 @@ def _bash_path(path: Path) -> str:
 
 @unittest.skipUnless(SCRIPTS.is_dir() and BASH, "scripts/ or bash is not available here")
 class BearerCurlTests(unittest.TestCase):
-    def run_bearer_curl(self, *, token: str | None) -> tuple[str, str, str]:
+    def run_bearer_curl(self, *, token: str | None, xtrace: bool = False) -> tuple[str, str, str]:
         with tempfile.TemporaryDirectory() as tempdir:
             temp = Path(tempdir)
             fake_bin = temp / "bin"
@@ -83,13 +83,25 @@ class BearerCurlTests(unittest.TestCase):
                 f'export PATH="{_bash_path(fake_bin)}:$PATH"; '
                 f'ROOT_DIR="{_bash_path(temp)}"; '
                 f'source "{_bash_path(SCRIPTS / "load_env.sh")}"; '
-                "bearer_curl -fsS http://127.0.0.1:8000/sessions"
+                + ("set -x; " if xtrace else "")
+                + "bearer_curl -fsS http://127.0.0.1:8000/sessions"
             )
             result = subprocess.run([BASH, "-c", script], capture_output=True, text=True, env=env, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
             argv = argv_log.read_text(encoding="utf-8")
             stdin = stdin_log.read_text(encoding="utf-8") if stdin_log.exists() else ""
+            self.trace = result.stderr
             return result.stdout, argv, stdin
+
+    def test_a_set_x_trace_never_shows_the_token(self) -> None:
+        """bash -x traces builtins and function arguments: a debug run must not print the token."""
+        _, argv, stdin = self.run_bearer_curl(token=TOKEN, xtrace=True)
+
+        self.assertIn("+ ", self.trace)  # the trace is on
+        self.assertIn("curl --config -", self.trace)
+        self.assertNotIn(TOKEN, self.trace)
+        self.assertNotIn(TOKEN, argv)
+        self.assertIn(f'header = "Authorization: Bearer {TOKEN}"', stdin)
 
     def test_the_token_reaches_curl_on_stdin_never_in_argv(self) -> None:
         stdout, argv, stdin = self.run_bearer_curl(token=TOKEN)
