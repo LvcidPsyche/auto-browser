@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import anyio.to_thread
 from fastapi import Depends, FastAPI
@@ -200,6 +201,28 @@ class SessionArtifactFiles(StaticFiles):
         return relative.parts[0] if relative.parts else ""
 
 
+def _declare_bearer_auth(application: FastAPI) -> None:
+    """Declare the bearer token in the OpenAPI schema, for every operation.
+
+    /docs is served without a token (a browser cannot send one), and Swagger's
+    Authorize button only appears, and only sends the token with "Try it out",
+    when the schema declares a scheme. The middleware does the enforcing; this
+    changes nothing a request is allowed to do.
+    """
+
+    def openapi() -> dict[str, Any]:
+        if application.openapi_schema is None:
+            schema = FastAPI.openapi(application)  # builds and caches application.openapi_schema
+            schema.setdefault("components", {}).setdefault("securitySchemes", {})["bearerAuth"] = {
+                "type": "http",
+                "scheme": "bearer",
+            }
+            schema["security"] = [{"bearerAuth": []}]
+        return application.openapi_schema
+
+    application.openapi = openapi  # type: ignore[method-assign]
+
+
 def create_controller_app(
     *,
     services: ControllerServices,
@@ -213,6 +236,7 @@ def create_controller_app(
         summary="Visual Auto Browser control plane for LLM workflows.",
         dependencies=[Depends(require_session_access)],
     )
+    _declare_bearer_auth(application)
 
     application.state.browser_manager = services.manager
     application.state.tool_gateway = services.tool_gateway
