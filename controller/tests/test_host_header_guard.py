@@ -85,7 +85,9 @@ class HostParsingTests(unittest.TestCase):
 
 class TokenlessLoopbackHostGuardTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.client = _client(API_BIND_SCOPE="loopback", CONTROLLER_ALLOWED_HOSTS="")
+        self.client = _client(
+            API_BIND_SCOPE="loopback", CONTROLLER_ALLOWED_HOSTS="", API_ALLOW_TOKENLESS_LOOPBACK="true"
+        )
 
     def test_a_rebound_hostname_is_refused(self) -> None:
         response = self.client.get("/sessions", headers={"host": "attacker.example:8000"})
@@ -117,8 +119,21 @@ class HostGuardScopeTests(unittest.TestCase):
         self.assertEqual(refused.status_code, 401)
         self.assertEqual(allowed.status_code, 200)
 
+    def test_without_the_escape_hatch_every_host_needs_the_token(self) -> None:
+        # Loopback with no credential is no longer tokenless: the auth gate refuses
+        # before the Host guard is asked, whatever name the request uses.
+        client = _client(API_BIND_SCOPE="loopback", CONTROLLER_ALLOWED_HOSTS="", API_ALLOW_TOKENLESS_LOOPBACK="false")
+
+        for host in ("attacker.example:8000", "localhost:8000", "127.0.0.1"):
+            with self.subTest(host=host):
+                self.assertEqual(client.get("/sessions", headers={"host": host}).status_code, 401)
+
     def test_configured_hosts_replace_the_loopback_default(self) -> None:
-        client = _client(API_BIND_SCOPE="loopback", CONTROLLER_ALLOWED_HOSTS="controller.internal")
+        client = _client(
+            API_BIND_SCOPE="loopback",
+            CONTROLLER_ALLOWED_HOSTS="controller.internal",
+            API_ALLOW_TOKENLESS_LOOPBACK="true",
+        )
 
         self.assertEqual(client.get("/sessions", headers={"host": "controller.internal"}).status_code, 200)
         self.assertEqual(client.get("/sessions", headers={"host": "127.0.0.1"}).status_code, 400)

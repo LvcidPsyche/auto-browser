@@ -5,7 +5,7 @@ from pathlib import Path
 from shutil import which
 from urllib.parse import urlparse
 
-from .auth_policy import BIND_SCOPE_EXPOSED, credentials_for, resolve_bind_scope
+from .auth_policy import BIND_SCOPE_EXPOSED, credentials_for, resolve_bind_scope, tokenless_loopback_allowed
 from .config import Settings
 from .providers.base import BaseProviderAdapter
 
@@ -144,20 +144,32 @@ def _validate_api_authentication(settings: Settings, report: RuntimePolicyReport
     scope = resolve_bind_scope(settings)
     exposed = scope == BIND_SCOPE_EXPOSED
     if not (exposed or settings.is_production):
-        if not credentials_for(settings):
+        if credentials_for(settings):
+            return
+        if tokenless_loopback_allowed(settings):
             report.warnings.append(
-                "API_BEARER_TOKEN is unset; the controller serves every route unauthenticated. "
-                "That is allowed only because API_BIND_SCOPE=loopback declares this instance "
-                "unreachable off-box — set a token before publishing it anywhere else."
+                "API_BEARER_TOKEN is unset and API_ALLOW_TOKENLESS_LOOPBACK=true, so the controller serves "
+                "every route unauthenticated. API_BIND_SCOPE=loopback keeps it off other machines, but any "
+                "process that can reach port 8000, including containers on the compose network, can drive "
+                "the browser. Remove API_ALLOW_TOKENLESS_LOOPBACK to have the controller use its token."
             )
+            return
+        # ensure_api_credential runs first and loads or generates one; this is the
+        # backstop if it did not.
+        report.errors.append(
+            "No API credential was configured, loaded or generated from API_TOKEN_FILE "
+            f"({getattr(settings, 'api_token_file', '')}), and API_ALLOW_TOKENLESS_LOOPBACK is off, "
+            "so no request could be authorised. Set API_BEARER_TOKEN, make API_TOKEN_FILE writable, "
+            "or set API_ALLOW_TOKENLESS_LOOPBACK=true."
+        )
         return
 
     trigger = "the API is reachable off-box (API_BIND_SCOPE=exposed)" if exposed else "APP_ENV=production"
     credentials = credentials_for(settings)
     if not credentials:
         report.errors.append(
-            f"API_BEARER_TOKEN is required when {trigger}. Set a token, or set "
-            "API_BIND_SCOPE=loopback if this instance is only published on 127.0.0.1."
+            f"API_BEARER_TOKEN is required when {trigger}. Set a token (API_BEARER_TOKEN, or a file at "
+            "API_TOKEN_FILE), or set API_BIND_SCOPE=loopback if this instance is only published on 127.0.0.1."
         )
         return
 

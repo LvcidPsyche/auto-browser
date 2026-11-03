@@ -19,8 +19,15 @@ binds `0.0.0.0`, and it is the host publish mapping — `127.0.0.1:8000:8000` in
 the base compose — that makes it loopback-only. So the scope is *declared*, and
 declared fail-safe: a deployment that says nothing is assumed reachable. Someone
 hand-rolling a compose file that publishes on `0.0.0.0` gets a refusal to start
-instead of a silent open control plane, and `docker compose up` on a clean
-checkout still needs no token because the base compose declares `loopback`.
+instead of a silent open control plane.
+
+Loopback is not a reason to go without a token either. The publish mapping
+decides who on the host can reach port 8000, not who on the compose network
+can: browser-node, and anything else beside the controller, reached a tokenless
+API by sending `Host: localhost`. So a loopback controller with no configured
+credential generates one at startup and demands it (app/api_token.py), and
+`docker compose up` on a clean checkout writes it to ./data/api-token.
+API_ALLOW_TOKENLESS_LOOPBACK=true keeps the old tokenless loopback API.
 """
 
 from __future__ import annotations
@@ -156,6 +163,15 @@ def credentials_for(settings: Any) -> tuple[Credential, ...]:
     )
 
 
+def tokenless_loopback_allowed(settings: Any) -> bool:
+    """Whether API_ALLOW_TOKENLESS_LOOPBACK is on. Read per request, so a patched setting applies.
+
+    `is True`, not truthiness: tests pass MagicMock settings, whose every attribute
+    is truthy, and a stand-in without the attribute must fall to "required".
+    """
+    return getattr(settings, "api_allow_tokenless_loopback", False) is True
+
+
 def has_named_credentials(settings: Any) -> bool:
     """True when operators can be told apart: at least one credential proves who holds it."""
     return any(credential.verifies_identity for credential in credentials_for(settings))
@@ -192,7 +208,12 @@ def match_credential(credentials: Sequence[Credential], authorization: str) -> C
     return matched
 
 
-def policy_for_scope(scope: str, credentials: Sequence[Credential]) -> AuthPolicy:
+def policy_for_scope(
+    scope: str,
+    credentials: Sequence[Credential],
+    *,
+    allow_tokenless_loopback: bool = False,
+) -> AuthPolicy:
     """The decision itself, split out from where its inputs come from.
 
     Bind scope is fixed by the deployment and resolved once; credentials are
@@ -219,13 +240,30 @@ def policy_for_scope(scope: str, credentials: Sequence[Credential]) -> AuthPolic
             has_credential=False,
         )
 
+    if allow_tokenless_loopback:
+        return AuthPolicy(
+            scope=scope,
+            required=False,
+            reason="loopback-only bind, no bearer credential, and API_ALLOW_TOKENLESS_LOOPBACK=true",
+            has_credential=False,
+        )
+
+    # Startup loads or generates a token before any request (app/api_token.py), so
+    # this is reached only if that did not happen: fail closed, never open.
     return AuthPolicy(
         scope=scope,
-        required=False,
-        reason="loopback-only bind with no bearer credential configured",
+        required=True,
+        reason=(
+            "loopback-only bind with no bearer credential configured or loaded from API_TOKEN_FILE, "
+            "and API_ALLOW_TOKENLESS_LOOPBACK is off, so no request can be authorised"
+        ),
         has_credential=False,
     )
 
 
 def resolve_auth_policy(settings: Any, environ: Mapping[str, str] | None = None) -> AuthPolicy:
-    return policy_for_scope(resolve_bind_scope(settings, environ), credentials_for(settings))
+    return policy_for_scope(
+        resolve_bind_scope(settings, environ),
+        credentials_for(settings),
+        allow_tokenless_loopback=tokenless_loopback_allowed(settings),
+    )

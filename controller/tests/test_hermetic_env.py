@@ -40,6 +40,8 @@ print(json.dumps({
     "api_bind_scope": s.api_bind_scope,
     "app_env": s.app_env,
     "artifact_root": s.artifact_root,
+    "api_allow_tokenless_loopback": s.api_allow_tokenless_loopback,
+    "api_token_file": s.api_token_file,
 }))
 """
 
@@ -50,6 +52,8 @@ HOSTILE_ENV = {
     # The second name of `app_env`'s AliasChoices.
     "ENVIRONMENT": "production",
     "ARTIFACT_ROOT": "/data/artifacts",
+    "API_ALLOW_TOKENLESS_LOOPBACK": "false",
+    "API_TOKEN_FILE": "/data/api-token",
 }
 
 HOSTILE_DOTENV = """\
@@ -82,6 +86,8 @@ def test_exported_variables_do_not_change_settings(tmp_path: Path) -> None:
     assert seen["app_env"] == "development"
     assert "testserver" in str(seen["controller_allowed_hosts"]).split(",")
     assert "auto-browser-tests-" in str(seen["artifact_root"])
+    assert seen["api_allow_tokenless_loopback"] is True
+    assert "auto-browser-tests-" in str(seen["api_token_file"])
 
 
 def test_a_dotenv_in_the_working_directory_does_not_change_settings(tmp_path: Path) -> None:
@@ -105,6 +111,7 @@ def test_results_are_the_same_with_and_without_a_hostile_environment(tmp_path: P
     hostile = _settings_seen_by_a_fresh_process(hostile_dir, HOSTILE_ENV)
 
     # Each run makes its own throwaway data root; everything else must match.
-    clean.pop("artifact_root")
-    hostile.pop("artifact_root")
+    for per_run in ("artifact_root", "api_token_file"):
+        clean.pop(per_run)
+        hostile.pop(per_run)
     assert hostile == clean

@@ -16,6 +16,7 @@ from ..auth_policy import (
     match_credential,
     policy_for_scope,
     resolve_bind_scope,
+    tokenless_loopback_allowed,
 )
 from ..rate_limits import build_rate_limit_key, is_exempt_path
 from .hosts import install_controller_host_middleware
@@ -38,7 +39,11 @@ def install_controller_http_middleware(
     bind_scope = resolve_bind_scope(settings)
 
     def _auth_policy() -> AuthPolicy:
-        return policy_for_scope(bind_scope, credentials_for(settings))
+        return policy_for_scope(
+            bind_scope,
+            credentials_for(settings),
+            allow_tokenless_loopback=tokenless_loopback_allowed(settings),
+        )
 
     def _matched_credential(request: Request) -> Credential | None:
         return match_credential(credentials_for(settings), request.headers.get("authorization", ""))
@@ -188,12 +193,12 @@ def install_controller_http_middleware(
         template = getattr(route, "path", None)
         return template or "__unmatched__"
 
-    # An API that answers without a credential is safe on loopback only while it
-    # also refuses requests addressed to any other name. Otherwise DNS rebinding
-    # turns a web page into a same-origin client: the attacker's hostname
-    # re-resolves to 127.0.0.1, the browser sends Host: attacker.example, and —
-    # with no token to present — the page drives sessions and exports stored
-    # logins. The MCP Origin check cannot catch it either, because it accepts the
+    # An API that answers without a credential (API_ALLOW_TOKENLESS_LOOPBACK=true)
+    # is safe on loopback only while it also refuses requests addressed to any
+    # other name. Otherwise DNS rebinding turns a web page into a same-origin
+    # client: the attacker's hostname re-resolves to 127.0.0.1, the browser sends
+    # Host: attacker.example, and — with no token to present — the page drives
+    # sessions and exports stored logins. The MCP Origin check cannot catch it either, because it accepts the
     # origin the Host header claims. Compose sets CONTROLLER_ALLOWED_HOSTS;
     # running the controller directly left it empty, and empty meant any Host.
     # Evaluated per request against the same policy as the auth gate, so a
@@ -212,9 +217,10 @@ def install_controller_http_middleware(
             status_code=400,
             content={
                 "detail": (
-                    "Invalid host header: this controller runs without an API credential, so it only answers "
-                    "to loopback host names. Set CONTROLLER_ALLOWED_HOSTS to the names clients use, or "
-                    "configure API_BEARER_TOKEN."
+                    "Invalid host header: this controller runs without an API credential "
+                    "(API_ALLOW_TOKENLESS_LOOPBACK=true), so it only answers to loopback host names. "
+                    "Set CONTROLLER_ALLOWED_HOSTS to the names clients use, or remove "
+                    "API_ALLOW_TOKENLESS_LOOPBACK so the controller demands its token."
                 )
             },
         )

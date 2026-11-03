@@ -16,12 +16,25 @@ _USER_AGENT_POOL_SPLIT = re.compile(r"[|\r\n]")
 
 class Settings(BaseSettings):
     app_env: str = Field("development", validation_alias=AliasChoices("APP_ENV", "ENVIRONMENT"))
-    api_bearer_token: str | None = Field(None, alias="API_BEARER_TOKEN")
+    # repr=False: a loopback controller now writes its generated token here, so a
+    # logged or printed Settings must not carry it.
+    api_bearer_token: str | None = Field(None, alias="API_BEARER_TOKEN", repr=False)
     # Named credentials: `alice:token-a,bob:token-b`. A request authenticating
     # against one of these has a *verified* operator identity, as opposed to the
     # self-asserted X-Operator-Id header. The shared API_BEARER_TOKEN above
     # still works and still leaves identity unverified.
-    api_bearer_tokens: str = Field("", alias="API_BEARER_TOKENS")
+    api_bearer_tokens: str = Field("", alias="API_BEARER_TOKENS", repr=False)
+    # Where the controller keeps its own token when neither setting above is set.
+    # A loopback controller generates one here on first start and demands it, and
+    # a token placed here is used in any scope. Compose pins it to /data/api-token,
+    # which is ./data/api-token on the host, where clients read it from.
+    # See app/api_token.py.
+    api_token_file: str = Field("/data/api-token", alias="API_TOKEN_FILE")
+    # The old default: a loopback controller with no token serves every
+    # route unauthenticated. "Loopback" is the host publish mapping, not who can
+    # reach port 8000, so any container on the compose network can drive the API;
+    # hence off by default. Never applies to an exposed or production controller.
+    api_allow_tokenless_loopback: bool = Field(False, alias="API_ALLOW_TOKENLESS_LOOPBACK")
     # Whether this API is reachable off-box. Defaults to `exposed` on purpose:
     # an undeclared deployment is assumed reachable and must carry a token, so a
     # hand-rolled compose file that publishes on 0.0.0.0 fails closed. The base

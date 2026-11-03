@@ -36,6 +36,9 @@ data/host-bridge/*
 !data/host-bridge/.gitkeep
 data/cli-home/*
 !data/cli-home/.gitkeep
+# The controller's generated API token, and atomic_write_text's temp file for it.
+data/api-token
+data/.api-token.*
 node_modules/
 __pycache__/
 *.pyc
