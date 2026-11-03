@@ -65,6 +65,16 @@ if (( ((16#$cap_eff >> 7) & 1) == 0 || ((16#$cap_eff >> 6) & 1) == 0 )); then
     "$kept and no_new_privs. To run as the controller user instead, start it as that user: compose" \
     "user: \"10002:10002\" (or docker run --user 10002:10002), with ./data owned by 10002; or add cap_add CHOWN," \
     "DAC_READ_SEARCH, SETUID and SETGID." >&2
+  # Measured: on a /data another uid owns, uid 0 without CAP_DAC_OVERRIDE (bit 1) cannot read its 0600 files, and
+  # the controller exits at startup on the API token. Say so now rather than leave only a PermissionError.
+  data_root="${CONTROLLER_DATA_ROOT:-/data}"
+  data_owner="$(stat -c %u "$data_root" 2>/dev/null || true)"
+  if [[ "$data_owner" =~ ^[0-9]+$ ]] && (( data_owner != 0 && ((16#$remaining >> 1) & 1) == 0 )); then
+    echo "entrypoint: WARNING: $data_root belongs to uid $data_owner, and uid 0 without CAP_DAC_OVERRIDE cannot" \
+      "read its private files (the API token among them): the controller will fail to start. Start it as that" \
+      "uid (compose user: \"$data_owner:$data_owner\", or docker run --user $data_owner:$data_owner), or add the" \
+      "capabilities above." >&2
+  fi
   exec setpriv "${drop[@]}" "$@"
 fi
 

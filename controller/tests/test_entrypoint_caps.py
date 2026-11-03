@@ -32,7 +32,9 @@ STUBS = {
 }
 
 
-def run_entrypoint(cap_eff: str | None, cap_bnd: str | None, script: Path = ENTRYPOINT) -> tuple[int, str]:
+def run_entrypoint(
+    cap_eff: str | None, cap_bnd: str | None, script: Path = ENTRYPOINT, *, data_root: Path | None = None
+) -> tuple[int, str]:
     with tempfile.TemporaryDirectory() as tempdir:
         root = Path(tempdir)
         status = root / "status"
@@ -54,7 +56,13 @@ def run_entrypoint(cap_eff: str | None, cap_bnd: str | None, script: Path = ENTR
             newline="\n",
         )
         result = subprocess.run(
-            [BASH, "-c", f'export PATH="{_bash_path(stubs)}:$PATH"; bash "{_bash_path(copy)}" uvicorn'],
+            [
+                BASH,
+                "-c",
+                f'export PATH="{_bash_path(stubs)}:$PATH"; '
+                f'export CONTROLLER_DATA_ROOT="{_bash_path(data_root) if data_root else "/nonexistent-data"}"; '
+                f'bash "{_bash_path(copy)}" uvicorn',
+            ],
             capture_output=True,
             text=True,
             timeout=60,
@@ -78,6 +86,23 @@ class EntrypointCapabilityTests(unittest.TestCase):
         # The set measured to work for 1.13.0 data and a pre-release's 10001-owned 0700 directories.
         self.assertIn("or add cap_add CHOWN, DAC_READ_SEARCH, SETUID and SETGID.", out)
         self.assertIn("EXEC setpriv --inh-caps=-all --ambient-caps=-all --no-new-privs uvicorn", out)
+
+    def test_cap_drop_all_on_data_of_another_uid_says_it_will_fail(self) -> None:
+        # Measured: uid 0 without CAP_DAC_OVERRIDE cannot read the 0600 api-token of a /data owned by 10002, and the
+        # controller exits. The WARNING says so and names that uid; on data it can read it does not.
+        with tempfile.TemporaryDirectory() as tempdir:
+            code, out = run_entrypoint(ALL_DROPPED, ALL_DROPPED, data_root=Path(tempdir))
+            # The owner as bash sees it (Git Bash maps the Windows user to a uid of its own).
+            owner = subprocess.run(
+                [BASH, "-c", f'stat -c %u "{_bash_path(Path(tempdir))}"'], capture_output=True, text=True
+            ).stdout.strip()
+        self.assertEqual(code, 0, out)
+        self.assertNotEqual(owner, "")
+        if owner != "0":
+            self.assertIn("cannot read its private files (the API token among them)", out)
+            self.assertIn("the controller will fail to start", out)
+        code, out = run_entrypoint(ALL_DROPPED, ALL_DROPPED)
+        self.assertNotIn("will fail to start", out)
 
     def test_setuid_missing_only_clears_the_bounding_set(self) -> None:
         # SETPCAP is still there, so nothing need remain.
