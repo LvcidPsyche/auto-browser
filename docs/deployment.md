@@ -331,10 +331,14 @@ In the attach modes (`CDP_CONNECT_URL`, `browser.cdp_attach`) the gate stops nav
 controller creates (apart from a frame it cannot classify, above), and the operator's prefetch setting is left
 alone. Every navigation in that Chrome, the operator's own tabs included, waits on the gate's reply: about 13 ms
 each (the median measured on Chromium 151). Start that Chrome with
-`--disable-features=BlockOriginHeaderModificationOnRedirect` and set `CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true`:
-without the switch, Chrome fails a cross-origin 307/308 POST redirect hop that a DevTools `Fetch` handler lets
-through, so the controller stops such a hop in its sessions itself, with an error naming the switch, and the
-same redirects fail in the operator's own tabs too while the gate is attached. The controller logs a warning,
+`--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect` and set
+`CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true`.
+- Without the first feature, older Chrome fails a cross-origin 307/308 POST redirect hop that a DevTools `Fetch`
+  handler lets through (Chromium 151 did, in the operator's own tabs too). So the controller stops such a hop in
+  its sessions itself, with an error naming the switch.
+- Without the second, Chrome 155 and later abort a credentialed cross-origin request that needed a CORS preflight
+  once it is redirected, in every tab, while the gate is attached (Playwright #43242; Playwright disables the
+  feature in the browsers it launches, so `browser-node` is not affected). The controller logs a warning,
 and `/readiness` warns, while the switch is not declared.
 
 `PRE_REQUEST_BLOCKING=false` turns the gate off; NAV-07 then refuses such pages only after their request has

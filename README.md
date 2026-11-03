@@ -292,9 +292,10 @@ By default every session shares one Chromium process and one noVNC desktop (`SES
 In an attach mode (`CDP_CONNECT_URL`, `browser.cdp_attach`) the gate stops navigations of the controller's
 sessions only (apart from a frame it cannot classify, above), but every navigation in that Chrome, the
 operator's own tabs included, waits on its reply: about 13 ms each, the median measured on Chromium 151. Start
-that Chrome with `--disable-features=BlockOriginHeaderModificationOnRedirect` and set
-`CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true`, or cross-origin 307/308 POST redirects fail in the operator's own
-tabs too while the controller is attached. Details:
+that Chrome with `--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect`
+and set `CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true`. Without it, cross-origin 307/308 POST redirects can fail, and
+on Chrome 155 and later credentialed cross-origin requests that need a CORS preflight fail after a redirect, in
+the operator's own tabs too, while the controller is attached. Details:
 [`docs/deployment.md`](./docs/deployment.md#stopped-before-the-request-is-sent).
 
 `COMPLIANCE_TEMPLATE` can apply a preconfigured posture at startup:

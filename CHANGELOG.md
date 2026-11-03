@@ -14,6 +14,13 @@ All notable changes to auto-browser are documented here.
 - **The stealth UA pool claims Chrome 156 and 155, and Edge 156,** to match the Chromium 156 that 1.12.4's
   browser-node ships. It claimed Chrome 148 and 149, while the browser's Client Hints (`Sec-CH-UA`,
   `navigator.userAgentData`) report Chromium 156.
+- **Attach modes on Chrome 155 and later: the documented switch names a second feature.** While the pre-request
+  gate is attached (`CDP_CONNECT_URL`, `browser.cdp_attach`), Chrome 155+ aborts a credentialed cross-origin request
+  that needed a CORS preflight once it is redirected (a `fetch` with `credentials: "include"` and a custom header,
+  answered 302 to another origin), in every tab, the operator's own included (Playwright #43242). Start that Chrome
+  with `--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect`. The
+  readiness check, the gate's explanation and the docs name both. `browser-node` and every browser the controller
+  launches are not affected: Playwright 1.64 disables the feature there.
 
 ## [1.12.4] — 2026-11-03
 
