@@ -98,7 +98,9 @@ class WindowBirthWatcher:
         cdp.on("Target.targetInfoChanged", self._on_target)
         cdp.on("Target.targetDestroyed", self._on_target_destroyed)
         cdp.on("close", self._on_close)
-        await asyncio.wait_for(cdp.send("Target.setDiscoverTargets", {"discover": True}), timeout=ATTACH_TIMEOUT_SECONDS)
+        await asyncio.wait_for(
+            cdp.send("Target.setDiscoverTargets", {"discover": True}), timeout=ATTACH_TIMEOUT_SECONDS
+        )
         self._live = True
 
     async def detach(self) -> None:

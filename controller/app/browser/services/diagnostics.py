@@ -473,7 +473,8 @@ class BrowserDiagnosticsService:
             provenance.closed_while_counting(session.id)
             # A window this page opened that Playwright never reported outlives it on a live opener reference
             # (go_back keeps the BrowsingInstance); once the grace is up and nothing counts, close it.
-            spawn_background_task(self._sweep_after_grace(session))
+            if self.manager.window_births.active_for(session):
+                spawn_background_task(self._sweep_after_grace(session))
         provenance.forget(page)
         if session.page is not page:
             return
