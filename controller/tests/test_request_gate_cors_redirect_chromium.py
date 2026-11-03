@@ -20,8 +20,10 @@ import pytest
 from playwright.async_api import async_playwright
 
 from app.browser.launch_flags import PLAYWRIGHT_DISABLED_FEATURES_BUT_PARTITIONING, STORAGE_PARTITIONING_ON
+from app.browser.request_gate import REDIRECT_ORIGIN_SWITCH
 from tests._chromium import chromium_executable, requires_chromium
-from tests.test_request_gate_chromium import gated
+from tests.test_request_gate_attach_chromium import attached
+from tests.test_request_gate_chromium import ALLOWED, gated
 
 pytestmark = [requires_chromium, pytest.mark.asyncio(loop_scope="module")]
 
@@ -129,3 +131,42 @@ async def test_control_without_the_feature_disabled_chromium_aborts_that_redirec
 
     assert result.startswith("ERR "), result
     assert (FILES_HOST, "GET") not in cors_server.hits  # type: ignore[attr-defined]
+
+
+# ── attach modes: the operator starts Chrome, so the operator passes the switch ──
+
+
+async def _fetch_through_an_attached_chrome(
+    tmp_path: Path, server: ThreadingHTTPServer, *chrome_args: str
+) -> tuple[str, str]:
+    """The fetch from a session's page and from the operator's own tab, while the gate is attached."""
+    url = f"http://{API_HOST}:{server.server_address[1]}/dl"
+    async with attached(tmp_path, *chrome_args, switch_declared=bool(chrome_args)) as env:
+        session_id = await env.create("/")
+        page = env.manager.sessions[session_id].page
+        server.page_origin = await page.evaluate("location.origin")  # type: ignore[attr-defined]
+        from_session = await page.evaluate(FETCH_JS, url)
+        [tab] = [tab for context in env.browser.contexts for tab in context.pages if tab.url == "about:blank"][:1]
+        await tab.goto(env.server.url(ALLOWED, "/operator"))
+        server.page_origin = await tab.evaluate("location.origin")  # type: ignore[attr-defined]
+        from_operator_tab = await tab.evaluate(FETCH_JS, url)
+    return from_session, from_operator_tab
+
+
+async def test_an_attached_chrome_started_with_the_documented_switch_follows_the_redirect(
+    tmp_path: Path, cors_server: ThreadingHTTPServer
+) -> None:
+    results = await _fetch_through_an_attached_chrome(tmp_path, cors_server, REDIRECT_ORIGIN_SWITCH)
+
+    assert results == (f"200 {len(BODY)}", f"200 {len(BODY)}")
+
+
+async def test_control_the_old_switch_alone_leaves_every_tab_aborting_the_redirect(
+    tmp_path: Path, cors_server: ThreadingHTTPServer
+) -> None:
+    """The switch 1.12.4 documented: Chrome 155+ still aborts the redirect, in the operator's own tab too."""
+    session, operator_tab = await _fetch_through_an_attached_chrome(
+        tmp_path, cors_server, "--disable-features=BlockOriginHeaderModificationOnRedirect"
+    )
+
+    assert session.startswith("ERR ") and operator_tab.startswith("ERR "), (session, operator_tab)

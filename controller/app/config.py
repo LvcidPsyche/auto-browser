@@ -367,8 +367,10 @@ class Settings(BaseSettings):
     # CDP attach mode — connect to an already-running Chrome instance
     cdp_connect_url: str | None = Field(None, alias="CDP_CONNECT_URL")
     # The operator's declaration that the Chrome reached over CDP (CDP_CONNECT_URL, browser.cdp_attach) was
-    # started with --disable-features=BlockOriginHeaderModificationOnRedirect. Without that switch Chrome fails a
-    # cross-origin POST redirect the pre-request gate let through, so the gate stops it itself and says why.
+    # started with --disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect
+    # (request_gate.REDIRECT_ORIGIN_SWITCH). Without the first, older Chrome fails a cross-origin POST redirect the
+    # pre-request gate let through, so the gate stops it itself and says why; without the second, Chrome 155+
+    # aborts credentialed, preflighted cross-origin redirects in every tab while the gate is attached.
     cdp_block_origin_on_redirect_disabled: bool = Field(False, alias="CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED")
 
     # Shadow browsing — enable headed mode for debugging

@@ -23,11 +23,13 @@ its reply; records and logs follow the reply. When the gate's session detaches o
 resumes what it held, so the gate reports itself lost (``on_lost``) and its owner contains the browser.
 
 Attach modes only (a Chrome the controller did not launch): without
-``--disable-features=BlockOriginHeaderModificationOnRedirect`` Chromium fails a cross-origin POST
+``--disable-features=BlockOriginHeaderModificationOnRedirect`` Chromium 151 failed a cross-origin POST
 redirect hop that any Fetch handler continued, with a bare net::ERR_INVALID_ARGUMENT. Unless the operator
 declares the switch (CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED), the gate fails such a hop of an owned page
 itself, with an explanation that names the fix. The Origin header is never rewritten: a missing Origin
-where Chrome sends ``null`` is a CSRF downgrade.
+where Chrome sends ``null`` is a CSRF downgrade. Chrome 155 and later also abort a credentialed cross-origin
+redirect that needed a CORS preflight while a Fetch handler is enabled, in every tab, unless
+AvoidCorsURLLoaderRestartOnRedirect is disabled too, so the documented switch (REDIRECT_ORIGIN_SWITCH) names both.
 """
 
 from __future__ import annotations
@@ -51,7 +53,12 @@ FETCH_PATTERNS = [{"urlPattern": "*", "resourceType": "Document", "requestStage"
 BLOCKED_ERROR_REASON = "BlockedByClient"
 # Chromium's error text for a targetId that names no target: an in-process iframe's frameId.
 NO_TARGET_TEXT = "No target with given id"
-REDIRECT_ORIGIN_SWITCH = "--disable-features=BlockOriginHeaderModificationOnRedirect"
+# What an attach mode's Chrome is started with. AvoidCorsURLLoaderRestartOnRedirect is there for Chrome 155+, which
+# aborts a credentialed cross-origin redirect that needed a CORS preflight while any Fetch handler is enabled, in
+# every tab (Playwright #43242; Playwright disables it in the browsers it launches).
+REDIRECT_ORIGIN_SWITCH = (
+    "--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect"
+)
 REDIRECT_ORIGIN_SETTING = "CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED"
 # The URL of each recent request of an owned page, for the redirect hop that follows it.
 REQUEST_URLS_KEPT = 1024
@@ -530,7 +537,7 @@ class RequestGate:
             explanation = (
                 f"A cross-origin POST redirect to {origin} was stopped: the attached Chrome must be started with "
                 f"{REDIRECT_ORIGIN_SWITCH} for the controller to let it through, and the operator declares that "
-                f"with {REDIRECT_ORIGIN_SETTING}=true. Without the switch Chrome fails such a redirect itself."
+                f"with {REDIRECT_ORIGIN_SETTING}=true. Without the switch older Chrome fails such a redirect itself."
             )
         else:
             explanation = (
