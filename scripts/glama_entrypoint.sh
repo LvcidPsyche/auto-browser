@@ -45,5 +45,7 @@ while [ $i -lt 60 ]; do
     i=$((i + 1))
 done
 
-# Run the stdio ↔ HTTP MCP bridge (replaces this shell process)
-exec python -m app.mcp_stdio --base-url http://127.0.0.1:8000/mcp
+# Run the stdio ↔ HTTP MCP bridge (replaces this shell process). With no
+# API_BEARER_TOKEN, the controller generated a token in /data/api-token during
+# startup, before /healthz answered; the bridge reads it from there.
+exec python -m app.mcp_stdio --base-url http://127.0.0.1:8000/mcp --token-file /data/api-token
