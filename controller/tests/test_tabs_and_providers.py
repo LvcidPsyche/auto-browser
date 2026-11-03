@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
@@ -145,6 +145,28 @@ class BrowserTabManagementTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(SessionNotFoundError):
             await self.manager.activate_tab(self.session.id, 1)
+
+    async def test_activate_tab_returns_within_the_bound_when_the_verdict_never_comes(self) -> None:
+        """The orchestrator's open item: a held popup whose verdict never comes. activate_tab returns within
+        BIRTH_VERDICT_WAIT_SECONDS, with the popup still held and refused (fail closed), not hung."""
+        from app.browser.services import diagnostics as diagnostics_module
+
+        popup = self.session.context.pages[1]
+        self.manager.page_provenance.opener_lookup_started(popup)
+        never = asyncio.ensure_future(asyncio.Event().wait())
+        self.manager.diagnostics._birth_judgements[popup] = never
+        with patch.object(diagnostics_module, "BIRTH_VERDICT_WAIT_SECONDS", 0.2):
+            started = asyncio.get_running_loop().time()
+            with self.assertRaises(PermissionError):
+                await asyncio.wait_for(self.manager.activate_tab(self.session.id, 1), timeout=5.0)
+            elapsed = asyncio.get_running_loop().time() - started
+
+        self.assertLess(elapsed, 2.0, "activate_tab did not return at the bound")
+        self.assertGreaterEqual(elapsed, 0.2)
+        self.assertTrue(self.manager.page_provenance.refused(popup), "the popup was no longer held")
+        self.assertFalse(never.done(), "the verdict's task was cancelled by the bound")
+        self.assertIsNot(self.session.page, popup)
+        never.cancel()
 
     async def test_close_tab_closes_secondary_page(self) -> None:
         result = await self.manager.close_tab(self.session.id, 1)
