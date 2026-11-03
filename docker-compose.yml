@@ -9,6 +9,19 @@ services:
     image: auto-browser-browser-node:latest
     shm_size: 2gb
     restart: unless-stopped
+    # entrypoint.sh runs as root only until setpriv drops to the browser user,
+    # whose processes then hold no capabilities. As root it needs CHOWN (the
+    # profile and runtime dirs), DAC_OVERRIDE (removing the endpoint file and
+    # writing the VNC password inside browser-owned dirs, on every restart),
+    # KILL (stopping node gracefully on docker stop) and SETGID/SETUID
+    # (setpriv). Isolated session containers get the same set from
+    # controller/app/session_isolation.py; a test keeps the two in step.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, KILL, SETGID, SETUID]
+    security_opt: ["no-new-privileges:true"]
+    # The same cap as isolated session containers (ISOLATED_BROWSER_PIDS_LIMIT).
+    # It counts threads.
+    pids_limit: 2048
     # Health means "the Playwright server the controller connects to is up",
     # not "noVNC answers". This previously checked only :6080 (websockify), so
     # a wedged or dead Chromium reported healthy for as long as noVNC survived
@@ -74,6 +87,9 @@ services:
     # stopped forever. depends_on only gates startup ordering; nothing
     # recovered afterwards, so MCP clients just got connection refused.
     restart: unless-stopped
+    # Nothing in the controller gains privileges through a setuid binary or
+    # file capabilities, so it is refused outright.
+    security_opt: ["no-new-privileges:true"]
     # Sessions are closed sequentially on shutdown and an isolated one can take
     # ~10s (tunnel terminate + container stop), so the 10s default SIGKILLed
     # cleanup mid-flight and orphaned containers and tunnels.
