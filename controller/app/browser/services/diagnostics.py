@@ -249,8 +249,28 @@ class BrowserDiagnosticsService:
     def _on_popup(self, session: "BrowserSession", opener: "Page", popup: "Page") -> None:
         # The opener as it is when the popup opens: it can clear its own taint, or close,
         # before any later look at it, and the popup holds what it wrote either way.
-        if self.manager.page_provenance.opener_judged(popup, opener_refused=self.manager._page_refused(opener)):
+        opener_refused = self.manager._page_refused(opener)
+        if self.manager.window_births.active_for(session):
+            # Judge the window by its CDP target's birth too (window_births): one born while its session
+            # counted as refused is refused even when its opener is clean by the time Playwright reports it,
+            # which is how a window whose first navigation committed nothing leaked. The popup stays refused
+            # (opener_pending, set in attach_popup) until this verdict is in, so nothing reads it meanwhile.
+            spawn_background_task(self._judge_reported_popup(session, popup, opener_refused))
+            return
+        if self.manager.page_provenance.opener_judged(popup, opener_refused=opener_refused):
             spawn_background_task(self._return_to_blank(session, popup))
+
+    async def _judge_reported_popup(self, session: "BrowserSession", popup: "Page", opener_refused: bool) -> None:
+        """Record the opener's verdict for a reported popup, combined with its target-birth verdict."""
+        born_refused = await self.manager.window_births.mark_reported(session, popup)
+        if self.manager.page_provenance.opener_judged(popup, opener_refused=opener_refused or born_refused):
+            await self._return_to_blank(session, popup)
+
+    def taint_reported_window(self, session: "BrowserSession", page: "Page") -> None:
+        """A window Playwright reported before its CDP birth arrived (the event-order race), now known to be
+        born refused: taint it and send it back to about:blank, as its opener's verdict would have."""
+        if self.manager.page_provenance.opener_judged(page, opener_refused=True):
+            spawn_background_task(self._return_to_blank(session, page))
 
     def attach_page_listeners(self, page: "Page", session: "BrowserSession") -> None:
         if not hasattr(page, "on"):
@@ -451,6 +471,9 @@ class BrowserDiagnosticsService:
         if self.manager._url_off_list(page.url) or provenance.counts_for_its_session(page):
             # What it did just before closing (an opener it navigated, a blank it wrote) is delivered after this.
             provenance.closed_while_counting(session.id)
+            # A window this page opened that Playwright never reported outlives it on a live opener reference
+            # (go_back keeps the BrowsingInstance); once the grace is up and nothing counts, close it.
+            spawn_background_task(self._sweep_after_grace(session))
         provenance.forget(page)
         if session.page is not page:
             return
@@ -458,6 +481,12 @@ class BrowserDiagnosticsService:
         remaining = [p for p in getattr(context, "pages", []) if p is not page and not p.is_closed()]
         if remaining:
             session.page = remaining[-1]
+
+    async def _sweep_after_grace(self, session: "BrowserSession") -> None:
+        """Once the grace after a counting page closed is up and the session no longer counts, close every
+        born-refused window Playwright never reported (window_births.close_unreported re-checks the condition)."""
+        await self.manager.page_provenance.after_the_closed_page_grace(session.id)
+        await self.manager.window_births.close_unreported(session)
 
     @staticmethod
     def _bounded_append(items: list[Any], value: Any, limit: int = 50) -> None:

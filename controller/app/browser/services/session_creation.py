@@ -183,6 +183,8 @@ class SessionCreation:
             self.manager._attach_page_listeners(page, session)
             if hasattr(context, "on"):
                 self.manager.diagnostics.watch_context(context, session)
+                # Judge this session's windows by their CDP target birth (runs with the gate off too).
+                await self.manager.window_births.watch(session, context, page, context_id=gate_context_id)
 
             if self.manager.settings.network_inspector_enabled:
                 inspector = NetworkInspector(

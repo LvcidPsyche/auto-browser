@@ -32,8 +32,9 @@ class BrowserRuntimeService:
             if manager.playwright is None:
                 raise RuntimeError("Playwright not started")
             if manager.browser is not None:
-                # Disconnected: its gate went with it.
+                # Disconnected: its gate and window-birth watcher went with it.
                 await manager.request_gates.release(manager.browser)
+                await manager.window_births.release(manager.browser)
 
             if manager.settings.cdp_connect_url:
                 logger.info("connecting to existing Chrome via CDP at %s", manager.settings.cdp_connect_url)
@@ -216,6 +217,7 @@ class BrowserRuntimeService:
             )
             return False
         await gates.release(browser)
+        await self.manager.window_births.release(browser)
         logger.error(
             "pre-request gate loss: session(s) %s did not close; disconnected the shared browser, which clears "
             "their context, and the next session reconnects",
