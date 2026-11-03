@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 from unittest.mock import patch
 
 import httpx
@@ -81,6 +83,14 @@ class ClientConstructionTests(unittest.TestCase):
             client, requests = _make_client(_ok, token_file=path)
             client.health()
         self.assertEqual(requests[0].headers["Authorization"], "Bearer from-file")
+
+    def test_token_file_expands_the_home_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "api-token").write_text("from-home\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"HOME": directory, "USERPROFILE": directory}):
+                client, requests = _make_client(_ok, token_file="~/api-token")
+            client.health()
+        self.assertEqual(requests[0].headers["Authorization"], "Bearer from-home")
 
     def test_a_token_wins_over_the_token_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

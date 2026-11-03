@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Optional, Type
+from pathlib import Path
+from typing import Any, Optional, Type, Union
 
 import httpx
 
@@ -61,7 +62,7 @@ class AutoBrowserTool(BaseTool):
     bearer_token: Optional[str] = None
     # A file holding the token, read on every call when bearer_token is unset: a local
     # controller writes its own to data/api-token in the auto-browser folder.
-    token_file: Optional[str] = None
+    token_file: Optional[Union[str, Path]] = None
     # Sent as X-Operator-Id: a controller with REQUIRE_OPERATOR_ID=true needs it
     # unless bearer_token is a named credential.
     operator_id: Optional[str] = None
