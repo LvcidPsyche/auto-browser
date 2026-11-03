@@ -91,7 +91,7 @@ can. In exchange every renderer runs sandboxed, which is the better trade for a 
 | `BROWSER_SANDBOX` | What happens |
 |---|---|
 | `auto` (default) | Chromium starts sandboxed, and browser-node checks in `/proc` that each renderer is in its own user namespace under one more seccomp filter. A failure is retried once; then Chromium runs unsandboxed and a WARNING names the cause. |
-| `on` | Nothing runs unsandboxed. A browser that cannot run sandboxed does not start (a sandboxed launch that fails is retried once first): browser-node exits, and an isolated session fails. The controller enforces it too: an isolated container whose state is not a verified `on` (an image older than 1.14.0, which ignores the setting, included) is refused and removed, and in shared mode every session is refused, and readiness fails, while the shared browser-node's state is not a verified `on` (`/readyz` is unchanged). With `docker_ephemeral`, an unreadable profile file, or a daemon without seccomp, refuses every session. A Chrome attached over CDP (`CDP_CONNECT_URL`) is the operator's own and is not checked. |
+| `on` | Nothing the controller launches runs unsandboxed. A browser that cannot run sandboxed does not start (a sandboxed launch that fails is retried once first): browser-node exits, and an isolated session fails. The controller enforces it too: an isolated container whose state is not a verified `on` (an image older than 1.14.0, which ignores the setting, included) is refused and removed, and in shared mode every session is refused, and readiness fails, while the shared browser-node's state is not a verified `on` (`/readyz` is unchanged). With `docker_ephemeral`, an unreadable profile file, or a daemon without seccomp, refuses every session. `browser.cdp_attach` is refused; a `CDP_CONNECT_URL` Chrome is the operator's and is not checked (readiness warns: attached, not checked). Shadow browse (`SHADOW_BROWSE_ENABLED`) launches its local Chromium with the sandbox required, so it does not start without one, but the controller does not verify it. |
 | `off` | Chromium runs unsandboxed (the behaviour before 1.14.0). `docker_ephemeral` containers get no custom profile, only Docker's default. |
 
 The causes a fallback names are distinct, so a setup problem never reads like a host restriction:
@@ -119,13 +119,16 @@ line per browser (the shared browser-node and every live isolated container): it
 sandboxed, warns when one fell back (naming the browser, the cause and the detail), and fails when one refused to
 start or when `BROWSER_SANDBOX=on` and one is not verified `on` (at least one renderer verified). The state is
 self-attested by the container it describes, so it is worth what that container was worth when it wrote it: it is
-written before the browser loads any page, and is trustworthy only until the browser runs untrusted content. The
-controller reads it without following links, from a regular file of at most 16 KiB, keeps only known keys, and reads
-it once per browser run, never again for that run: an isolated container's when it is provisioned, the shared
-node's when the controller connects (or reconnects) to it. The state names the endpoint of the run it describes,
-and the controller takes it only when that is the endpoint it just connected to; otherwise the shared node is
-`unknown` (a browser-node rolled back to an image that writes no state leaves the previous run's `on` beside its new
-endpoint). A browser compromised later can rewrite both files, but not what the controller already holds. To see the
+written before the browser loads any page but its own check, and is trustworthy only until the browser runs
+untrusted content. The controller reads it without following links, from a regular file of at most 16 KiB, keeps
+only known keys and strips control characters. An isolated container's is read once, when it is provisioned. The
+shared node's is a snapshot taken when the controller connects to it, reported only while that connection lasts,
+and reused, never re-read, when the controller reconnects to the same endpoint; a new endpoint (a new run) is read
+afresh. The state names the endpoint of the run it describes, and the controller takes it only when that is the
+endpoint it connected to; otherwise it is `unknown` (a browser-node rolled back to an image that writes no state
+leaves the previous run's `on` beside its new endpoint). A browser compromised later can rewrite both files, but not
+what the controller already holds; a controller restart reads them again. In `docker_ephemeral` mode no session
+runs on the shared browser-node, so readiness shows its line for information and never warns or fails on it. To see the
 live evidence in a container, run
 `docker compose exec -u browser browser-node node /opt/browser-node/sandbox-report.mjs` (the state, a `/proc` check
 and `chrome://sandbox`).
@@ -163,12 +166,16 @@ At start, what earlier releases left in the controller's own `/data` subtrees (e
 from a pre-release) is given to that user. The walk holds directory file descriptors and changes each entry relative
 to its directory without following links, so swapping a directory for a symlink mid-walk cannot lead it out of the
 tree; each directory is handed over after its contents, through the descriptor already open, so root never locks
-itself out of a 0700 directory mid-walk. It skips every mount point under `/data` (read from `/proc/self/mountinfo`,
+itself out of a 0700 directory mid-walk, and only when all of its contents went over, so a failed subtree is retried
+on the next start. The walk goes at most 200 levels deep (deeper entries are errors). It skips every mount point
+under `/data`, and a configured path whose parents include one, (read from `/proc/self/mountinfo`,
 so a bind of the same filesystem, or Docker Desktop's single share, is skipped too, not only another device), skips
 files with more than one hard link, never enters the browser containers' directories (`browser-profile`,
 `downloads`, `browser-sessions/*/profile` and `browser-sessions/*/downloads`), refuses a configured path with `.` or
 `..` in it (`ARTIFACT_ROOT=/data/../etc` is not handed over), and refuses one deeper than one level whose parents are
-not root-owned directories. An error on one path is logged and the others are still handed over. A pass that hands everything over leaves `data/.auto-browser-owner`,
+not root-owned directories. An error on one path is logged and the others are still handed over. A pass that
+hands everything over, without errors and without a directory it could not look into, leaves
+`data/.auto-browser-owner`,
 and later starts as the same user skip the scan; a root run (`CONTROLLER_RUN_AS=root`) removes it, deleting it forces
 a new pass, and anything unexpected there (a symlink, a FIFO, another owner, other content) just means a new pass.
 The marker belongs to the controller's user, who owns `/data` anyway, and root writes it as that user: that user
@@ -181,7 +188,9 @@ when it finishes; it protects live sessions' directories and removes only entrie
 and shutdown cancels it. Files created later as root (`docker compose exec controller
 ...` runs as root unless told otherwise) are not handed over while the marker is there: run such commands as the
 controller's user, `docker compose exec -u 10002 controller ...` (or the data owner's uid, which readiness reports),
-or delete `data/.auto-browser-owner` to force a new pass. If an entry cannot be changed (a read-only or root-squashed
+or delete `data/.auto-browser-owner` to force a new pass. **After running an older release on this data** (a
+rollback to 1.13, which runs as root and does not know the marker), delete `data/.auto-browser-owner` before
+starting 1.14 again, or what the older release created as root is not handed over. If an entry cannot be changed (a read-only or root-squashed
 mount), the log has an ERROR naming the path; the controller still starts as that user, and whatever it then cannot
 read fails with its own message.
 
