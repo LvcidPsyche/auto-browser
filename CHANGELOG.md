@@ -2,50 +2,52 @@
 
 All notable changes to auto-browser are documented here.
 
-## [Unreleased]
+## [1.12.3] — 2026-11-03
 
-Whitespace fixes for the controller's bearer token and the skills curator's key. The client, LangChain and MCP bridge
-packages change too: they strip the token they send.
-
-### Security
-
-- **An `API_BEARER_TOKEN` made only of whitespace is no longer a credential.** It was compared like any other token,
-  so `Bearer` followed by the same whitespace authenticated under uvicorn's default HTTP parser, and a run of 32 or
-  more spaces even cleared the production length floor at startup. It now counts as unset, as an empty
-  `API_BEARER_TOKEN=` already did. Without named `API_BEARER_TOKENS`, a controller reachable off the box or running
-  with `APP_ENV=production` refuses to start ("API_BEARER_TOKEN is required"), and one on loopback otherwise runs as
-  the documented no-token default and logs the existing warning. Exploiting it needed an operator to have set such
-  a token; nothing ships one.
-
-### Fixed
-
-- **Whitespace around the bearer token no longer matters.** The controller compared the whole `Authorization` header
-  with `Bearer <API_BEARER_TOKEN>`, byte for byte, so a token pasted with a space or newline around it matched only a
-  client that sent the same whitespace, and a trailing newline (common in secret files) matched nothing the HTTP
-  parser would pass through. The controller now strips `API_BEARER_TOKEN` and `WITNESS_REMOTE_API_KEY` (named
-  `API_BEARER_TOKENS` were already stripped), and ignores spaces and tabs around the token in the header it receives
-  (`Bearer` must still be followed by a space), so curl, the repo's shell helpers and third-party MCP clients that
-  send a padded token still match. The rate limiter keys on the same normalized header, so every spelling of one
-  token shares its bucket. The first-party
-  senders strip the token before sending: the MCP stdio bridge (`--bearer-token`, `AUTO_BROWSER_BEARER_TOKEN`), the
-  Python SDK client, the LangChain `AutoBrowserTool` and `AutoBrowserNode`, the eval client behind
-  `scripts/agent_eval.py`, and the dashboard. A client given a whitespace-only token sends no `Authorization` header.
-  Padding the HTTP library refused (a newline after the bridge's token, a space before the witness key) used to put
-  the whole value in the bridge's error reply and in the controller's witness-delivery warning; it is stripped before
-  sending now.
-- **The skills curator's API key is stripped too.** 1.12.2 strips whitespace around the eight provider keys in the
-  controller's settings, but the curator (`CURATOR_ENABLED`) reads `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or
-  `GEMINI_API_KEY` from the environment itself, so a key with a space or newline around it still went out as-is and
-  the provider refused it. The curator now strips it as well, and a key that is only whitespace counts as unset.
+A patch release over 1.12.2. Whitespace around the controller's bearer token and the skills curator's API key no longer
+matters, and one security fix: an `API_BEARER_TOKEN` made only of whitespace worked as a credential. Update the
+controller (its image, or your source checkout) to get the fixes. The client, LangChain and MCP bridge packages change
+too: they strip the token they send. If your token has spaces or tabs around it, update the controller before the
+clients (Upgrade notes).
 
 ### Upgrade notes
 
 - The 32-character floor for `API_BEARER_TOKEN` (production, or reachable off the box) now measures the token without
-  its surrounding whitespace. A token that cleared it only because of padding is refused at startup; replace it with
-  a longer one.
+  its surrounding whitespace. A token that cleared it only because of padding is refused at startup; replace it with a
+  longer one.
 - If your `API_BEARER_TOKEN` has spaces or tabs around it, update the controller before the clients. The new clients
   send the token stripped, which an older controller compares with the padded value and refuses; the new controller
   accepts both.
+
+### Security
+
+- **An `API_BEARER_TOKEN` made only of whitespace is no longer a credential (#252).** It was compared like any other
+  token, so `Bearer` followed by the same whitespace authenticated under uvicorn's default HTTP parser, and a run of 32
+  or more spaces even cleared the production length floor at startup. It now counts as unset, as an empty
+  `API_BEARER_TOKEN=` already did. Without named `API_BEARER_TOKENS`, a controller reachable off the box or running with
+  `APP_ENV=production` refuses to start ("API_BEARER_TOKEN is required"), and one on loopback otherwise runs as the
+  documented no-token default and logs the existing warning. Exploiting it needed an operator to have set such a token;
+  nothing ships one.
+
+### Fixed
+
+- **Whitespace around the bearer token no longer matters (#252).** The controller compared the whole `Authorization`
+  header with `Bearer <API_BEARER_TOKEN>`, byte for byte, so a token pasted with a space or newline around it matched
+  only a client that sent the same whitespace, and a trailing newline (common in secret files) matched nothing the HTTP
+  parser would pass through. The controller now strips `API_BEARER_TOKEN` and `WITNESS_REMOTE_API_KEY` (named
+  `API_BEARER_TOKENS` were already stripped), and ignores spaces and tabs around the token in the header it receives
+  (`Bearer` must still be followed by a space), so curl, the repo's shell helpers and third-party MCP clients that send
+  a padded token still match. The rate limiter keys on the same normalized header, so every spelling of one token shares
+  its bucket. The first-party senders strip the token before sending: the MCP stdio bridge (`--bearer-token`,
+  `AUTO_BROWSER_BEARER_TOKEN`), the Python SDK client, the LangChain `AutoBrowserTool` and `AutoBrowserNode`, the eval
+  client behind `scripts/agent_eval.py`, and the dashboard. A client given a whitespace-only token sends no
+  `Authorization` header. Padding the HTTP library refused (a newline after the bridge's token, a space before the
+  witness key) used to put the whole value in the bridge's error reply and in the controller's witness-delivery warning;
+  it is stripped before sending now.
+- **The skills curator's API key is stripped too (#251).** 1.12.2 strips whitespace around the eight provider keys in
+  the controller's settings, but the curator (`CURATOR_ENABLED`) reads `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or
+  `GEMINI_API_KEY` from the environment itself, so a key with a space or newline around it still went out as-is and the
+  provider refused it. The curator now strips it as well, and a key that is only whitespace counts as unset.
 
 ## [1.12.2] — 2026-11-02
 
