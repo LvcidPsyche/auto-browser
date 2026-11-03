@@ -20,6 +20,7 @@ Precedence, decided once at startup:
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import logging
 import os
@@ -141,16 +142,28 @@ def _generate_token_file(path: Path) -> str:
 
 
 def _restrict_mode(path: Path) -> None:
-    """Take group and other permissions off a token file. POSIX only: Windows applies the folder's ACL."""
+    """Take group and other permissions off a token file. POSIX only: Windows applies the folder's ACL.
+
+    The file is opened without following a symlink and changed through that
+    descriptor, so swapping the path between the check and the chmod cannot point
+    the chmod at another file. A symlinked token (a Kubernetes secret mount) is
+    left alone: its target is not ours to change.
+    """
     if os.name == "nt":
         return
-    if os.path.islink(path):
-        # A mounted secret (Kubernetes) is a symlink: chmod would change its target, which isn't ours.
-        return
-    mode = stat.S_IMODE(os.stat(path).st_mode)
-    if not mode & _GROUP_OR_OTHER_BITS:
-        return
-    os.chmod(path, PRIVATE_FILE_MODE)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return
+        raise
+    try:
+        mode = stat.S_IMODE(os.fstat(fd).st_mode)
+        if not mode & _GROUP_OR_OTHER_BITS:
+            return
+        os.fchmod(fd, PRIVATE_FILE_MODE)
+    finally:
+        os.close(fd)
     logger.warning("API_TOKEN_FILE %s was readable beyond its owner (mode %o); changed it to 0600", path, mode)
 
 

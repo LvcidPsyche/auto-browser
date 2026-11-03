@@ -13,6 +13,7 @@ models the old default, so every test here sets it explicitly.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import logging
 import os
@@ -380,40 +381,59 @@ def test_group_or_other_bits_are_removed_with_a_warning(
     tightened: bool,
 ):
     path = tmp_path / "api-token"
-    chmods: list[tuple[Path, int]] = []
-    fake_os = SimpleNamespace(
-        name="posix",
-        path=SimpleNamespace(islink=lambda _path: False),
-        stat=lambda _path: SimpleNamespace(st_mode=mode),
-        chmod=lambda target, bits: chmods.append((target, bits)),
+    fchmods: list[tuple[int, int]] = []
+    closed: list[int] = []
+    fake_os = _posix_stand_in(
+        open=lambda target, flags: 7,
+        fstat=lambda fd: SimpleNamespace(st_mode=mode),
+        fchmod=lambda fd, bits: fchmods.append((fd, bits)),
+        close=closed.append,
     )
     monkeypatch.setattr(api_token, "os", fake_os)
 
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         api_token._restrict_mode(path)
 
-    assert chmods == ([(path, 0o600)] if tightened else [])
+    # Changed through the descriptor it opened without following a symlink, never by path.
+    assert fchmods == ([(7, 0o600)] if tightened else [])
+    assert closed == [7]
     assert ("0600" in caplog.text) is tightened
+
+
+def _posix_stand_in(**functions) -> SimpleNamespace:
+    """An os module stand-in for the POSIX branch, so it runs on a Windows test host too."""
+    return SimpleNamespace(name="posix", O_RDONLY=0, O_NOFOLLOW=0o400000, **functions)
 
 
 def test_a_symlinked_token_file_is_left_alone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ):
     # Kubernetes secret mounts are symlinks, and chmod would change the target (a file we may not own).
-    chmods: list[tuple[Path, int]] = []
-    fake_os = SimpleNamespace(
-        name="posix",
-        path=SimpleNamespace(islink=lambda _path: True),
-        stat=lambda _path: SimpleNamespace(st_mode=0o100644),
-        chmod=lambda target, bits: chmods.append((target, bits)),
-    )
+    # O_NOFOLLOW makes opening a symlink fail with ELOOP.
+    opened: list[int] = []
+
+    def refuse_symlink(target, flags):
+        opened.append(flags)
+        raise OSError(errno.ELOOP, "Too many levels of symbolic links")
+
+    fake_os = _posix_stand_in(open=refuse_symlink, fstat=None, fchmod=None, close=None)
     monkeypatch.setattr(api_token, "os", fake_os)
 
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         api_token._restrict_mode(tmp_path / "api-token")
 
-    assert chmods == []
+    assert opened and opened[0] & fake_os.O_NOFOLLOW
     assert caplog.text == ""
+
+
+def test_any_other_open_error_is_raised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def refuse(target, flags):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(api_token, "os", _posix_stand_in(open=refuse))
+
+    with pytest.raises(PermissionError):
+        api_token._restrict_mode(tmp_path / "api-token")
 
 
 @pytest.mark.parametrize(
