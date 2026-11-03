@@ -335,13 +335,19 @@ class BrowserDiagnosticsService:
         A clean popup is held refused from its report until its birth verdict lands (a CDP round trip, retried
         when it fails), and the agent's next call can come sooner than that: activate_tab waits here, before it
         takes the session lock, rather than refuse it. Bounded: a verdict that does not come leaves the page
-        held (fail closed), and this returns all the same.
+        held (fail closed), and this returns all the same; so does a verdict whose task was cancelled from
+        outside (the popup stays held), while the caller's own cancellation goes through.
         """
         task = self._birth_judgements.get(page)
         if task is None:
             return
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=BIRTH_VERDICT_WAIT_SECONDS)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is None or current.cancelling():
+                raise
+            return
         except Exception:
             return
 
