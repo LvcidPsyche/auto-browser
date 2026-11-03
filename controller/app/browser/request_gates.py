@@ -53,7 +53,13 @@ def _page_closed(page: Any) -> bool:
 _OPENING: set[asyncio.Task[Any]] = set()
 
 
-async def _read_target_id(page: Any) -> str:
+async def _read_target_id(page: Any) -> tuple[str, Any]:
+    """The page's targetId and the page session it was read through, which the caller keeps attached.
+
+    Detaching a page session loses events of a same-process window the page opened (real Chromium: a window
+    a refused page opened stopped reporting its failed requests and downloads once the opener's session was
+    detached), so the session is kept for the page's life and the browser drops it when the page closes.
+    """
     # A task, shielded: when the caller's bound fires while the session is still opening, the open goes on (the
     # browser creates the session anyway) and the session is detached once it exists, rather than left attached.
     opening = asyncio.ensure_future(page.context.new_cdp_session(page))
@@ -67,10 +73,11 @@ async def _read_target_id(page: Any) -> str:
         opening.add_done_callback(_detach_once_opened)
         raise
     try:
-        return (await session.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
-    finally:
+        return (await session.send("Target.getTargetInfo"))["targetInfo"]["targetId"], session
+    except BaseException:
         # Not awaited here: a detach that stalls must not hold the bound above, or the session lock.
         spawn_background_task(_detach_quietly(session))
+        raise
 
 
 def _detach_once_opened(opening: asyncio.Task[Any]) -> None:
@@ -118,8 +125,10 @@ class RequestGates:
         self._attach_modes: dict[int, tuple[Any, bool]] = {}
         # Why the last attach to a browser failed, until one succeeds (readiness).
         self._attach_failures: dict[int, tuple[Any, str]] = {}
-        # Each page's targetId, read once (a block names the page by it).
+        # Each page's targetId, read once (a block names the page by it), and the page session it was read
+        # through, kept attached for the page's life (_read_target_id says why a detach is not an option).
         self._target_ids: weakref.WeakKeyDictionary[Any, str] = weakref.WeakKeyDictionary()
+        self._target_sessions: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
         # The prefetch preference read back from each launched browser (decision 5), for readiness.
         self._prefetch: dict[int, tuple[Any, Any]] = {}
         # Each owned page's session holding Network.setBypassServiceWorker; the bypass lasts as long as it does.
@@ -319,12 +328,13 @@ class RequestGates:
         if known is not None:
             return known
         try:
-            target_id = await asyncio.wait_for(_read_target_id(page), timeout=TARGET_ID_TIMEOUT_SECONDS)
+            target_id, session = await asyncio.wait_for(_read_target_id(page), timeout=TARGET_ID_TIMEOUT_SECONDS)
         except Exception as exc:
             # Nothing is attributed to the page then, and the caller's own error stands.
             logger.debug("could not read a page's targetId: %s", f"{type(exc).__name__}: {exc}"[:200])
             return None
         self._target_ids[page] = target_id
+        self._target_sessions[page] = session
         return target_id
 
     # ── readiness ────────────────────────────────────────────────────────────

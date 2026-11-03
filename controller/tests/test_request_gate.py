@@ -811,6 +811,22 @@ async def test_r5_reading_a_pages_target_id_is_bounded(monkeypatch) -> None:
     assert await asyncio.wait_for(gates.target_id_of(page), timeout=2.0) is None
 
 
+async def test_the_page_session_a_target_id_was_read_through_stays_attached() -> None:
+    """Detaching a page-level CDP session loses network and download events of a window the page opened
+    (real Chromium, in tests/test_allowed_hosts_channels.py's window test under module order): the session
+    stays attached for the page's life, and no second one is opened for the same page."""
+    gates = _gates()
+    session = page_session_for("ctx", "T1")
+    page = _page(lambda *_: session)
+
+    assert await gates.target_id_of(page) == "T1"
+    await asyncio.sleep(0)
+
+    assert not session.detached
+    assert await gates.target_id_of(page) == "T1"
+    assert page.context.new_cdp_session.await_count == 1
+
+
 # ── round 3: blocks kept per page (R6) ───────────────────────────────────────
 
 
