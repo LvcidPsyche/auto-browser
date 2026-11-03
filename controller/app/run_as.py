@@ -379,6 +379,8 @@ def fix_ownership(
                                 "root-owned directory, so its tree was not handed over"
                             )
                             break
+                        if before_open is not None:
+                            before_open(parent_relative)
                         next_fd = _open_dir_nofollow(part, parent_fd)
                         os.close(parent_fd)
                         parent_fd = next_fd

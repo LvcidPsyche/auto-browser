@@ -117,6 +117,14 @@ class SessionDirCleanupTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(self._session_dir("s4").exists())
 
+    async def test_a_failed_container_start_empties_what_it_wrote(self) -> None:
+        # M5: the cleanup of a failed start passes the client too, so the helper runs.
+        self.client.containers.start_fails_after_write = True
+        with self.assertRaises(RuntimeError):
+            await self.provisioner.provision("s5")
+        self.assertIn("s5", [run["labels"]["auto-browser.session_id"] for run in self.client.containers.cleanup_runs])
+        self.assertFalse(self._session_dir("s5").exists())
+
     async def test_a_session_id_must_be_one_plain_component(self) -> None:
         # P3#11: 'a/../b' resolves inside browser-sessions, but must never empty or remove session b.
         self._fill("b")

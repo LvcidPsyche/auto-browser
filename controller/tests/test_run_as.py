@@ -400,6 +400,21 @@ class FixOwnershipLinuxTests(unittest.TestCase):
             _remove_deep(self.data / "artifacts")
         self.assertTrue(any(f"deeper than {run_as.MAX_WALK_DEPTH} levels" in e for e in report.errors), report.errors)
 
+    def test_a_parent_replaced_between_its_stat_and_open_is_not_entered(self) -> None:
+        # P3#9: samestat for the parent components too.
+        if ME != 0:
+            self.skipTest("the parent walk only opens root-owned parents")
+        _tree(self.data, "a/b/inside", "spare/b/elsewhere")
+
+        def swap(relative):
+            if relative == "a":
+                (self.data / "a").rename(self.data / "old-a")
+                (self.data / "spare").rename(self.data / "a")
+
+        report = self._fix(["a/b"], before_open=swap)
+        self.assertTrue(any("replaced since it was examined" in e for e in report.errors), report.errors)
+        self.assertNotIn("a/b/elsewhere", report.changed_paths)
+
     def test_a_mount_among_a_deep_tops_parents_is_not_entered(self) -> None:
         # P3#9: the parent components get the mount check too.
         _tree(self.data, "a/b/host-file")
