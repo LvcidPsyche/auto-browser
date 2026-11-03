@@ -18,6 +18,10 @@ Homepage = "https://github.com/LvcidPsyche/auto-browser"
 [tool.setuptools.packages.find]
 include = ["app*"]
 
+# The seccomp profile isolated browser containers get (app/browser_sandbox.py loads it from the package).
+[tool.setuptools.package-data]
+app = ["browser/seccomp/*.json", "browser/seccomp/README.md"]
+
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
 
