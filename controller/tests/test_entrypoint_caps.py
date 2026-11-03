@@ -75,6 +75,8 @@ class EntrypointCapabilityTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("running as uid 0 with no capabilities", out)
         self.assertIn('user: "10002:10002"', out)
+        # The set measured to work for 1.13.0 data and a pre-release's 10001-owned 0700 directories.
+        self.assertIn("or add cap_add CHOWN, DAC_READ_SEARCH, SETUID and SETGID.", out)
         self.assertIn("EXEC setpriv --inh-caps=-all --ambient-caps=-all --no-new-privs uvicorn", out)
 
     def test_setuid_missing_only_clears_the_bounding_set(self) -> None:
