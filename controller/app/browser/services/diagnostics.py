@@ -268,11 +268,18 @@ class BrowserDiagnosticsService:
             if self.manager.page_provenance.opener_judged(popup, opener_refused=True, unjudged=True):
                 spawn_background_task(self._return_to_blank(session, popup))
             return
-        opener_refused = self.manager._page_refused(opener)
-        if opener_refused or not births.active_for(session):
-            # Judged synchronously: a refused opener's popup is refused at once, and without a birth watcher
-            # (ALLOWED_HOSTS allows every host, or the fakes) the opener's verdict is the whole verdict.
-            if self.manager.page_provenance.opener_judged(popup, opener_refused=opener_refused):
+        if not births.active_for(session):
+            # Without a birth watcher (ALLOWED_HOSTS allows every host, or the fakes) the opener's verdict is
+            # the whole verdict, judged synchronously, as before the watcher.
+            if self.manager.page_provenance.opener_judged(popup, opener_refused=self.manager._page_refused(opener)):
+                spawn_background_task(self._return_to_blank(session, popup))
+            return
+        provenance = self.manager.page_provenance
+        if self.manager._url_off_list(opener.url) or provenance.refused_settled(opener):
+            # A refused opener's popup is refused at once. An opener held only for its own pending birth
+            # verdict is not refused here: that verdict is its birth's, and the watcher judged this window's
+            # birth by it (a born-refused page's windows are born refused), which the verdict below applies.
+            if provenance.opener_judged(popup, opener_refused=True):
                 spawn_background_task(self._return_to_blank(session, popup))
             return
         # The opener is clean at report, but the window may have been born while it was refused (its first

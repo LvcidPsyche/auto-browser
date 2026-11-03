@@ -133,6 +133,13 @@ class PageProvenance:
             and state.refused_hop is None
         )
 
+    def refused_settled(self, page: Any) -> bool:
+        """Whether the page is tainted or navigating through a refused hop: refused for something that happened,
+        not for a verdict still pending. A window born to a page whose verdict is pending is judged from that
+        page's own birth (window_births), which carries the verdict the hold waits for."""
+        state = self._state(page)
+        return state is not None and (state.tainted or state.refused_hop is not None)
+
     def refused_unjudged(self, page: Any) -> bool:
         """Whether the page is refused only because its birth could not be judged (opener_judged's ``unjudged``)."""
         state = self._state(page)

@@ -846,9 +846,15 @@ class BrowserManager:
         that counted for the session closed within the grace (it can have navigated this page just before).
 
         Keyed on the opener, not the whole session, so a window an allowed page opens while an unrelated tab is
-        refused is judged by its allowed opener (it is not born refused), as a reported popup would be.
+        refused is judged by its allowed opener (it is not born refused), as a reported popup would be. An
+        opener held only for its own pending birth verdict is not refused here: that verdict is its birth's,
+        which the watcher propagates to the window itself (a born-refused page's windows are born refused).
         """
-        return self._page_refused(opener) or self.page_provenance.counting_page_closed_recently(session.id)
+        return (
+            self._url_off_list(opener.url)
+            or self.page_provenance.refused_settled(opener)
+            or self.page_provenance.counting_page_closed_recently(session.id)
+        )
 
     def _page_by_target_id(self, session: BrowserSession, target_id: str) -> Any:
         """The session's open page with this cached targetId, with no I/O (window_births matches an opener by it)."""
