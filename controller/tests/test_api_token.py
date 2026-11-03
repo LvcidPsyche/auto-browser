@@ -160,6 +160,24 @@ def test_a_loopback_controller_generates_a_private_token(tmp_path: Path, caplog:
     assert settings.api_bearer_token not in caplog.text
 
 
+@pytest.mark.parametrize(("os_name", "says_0600"), [("posix", True), ("nt", False)])
+def test_the_generation_warning_only_promises_0600_where_it_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, os_name: str, says_0600: bool
+):
+    real_os = api_token.os
+    monkeypatch.setattr(api_token, "os", SimpleNamespace(**{**vars(real_os), "name": os_name}))
+    # Skip the POSIX-only ownership step: the stand-in's name is the only thing under test.
+    monkeypatch.setattr(api_token, "_match_parent_owner", lambda _path: None)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_api_credential(make_settings(tmp_path / "api-token"))
+
+    assert ("mode 0600" in caplog.text) is says_0600
+    if not says_0600:
+        assert "inherits the permissions of its folder" in caplog.text
+        assert "API_TOKEN_FILE under your user profile" in caplog.text
+
+
 def test_a_second_start_reuses_the_saved_token(tmp_path: Path, caplog: pytest.LogCaptureFixture):
     path = tmp_path / "api-token"
     first = make_settings(path)

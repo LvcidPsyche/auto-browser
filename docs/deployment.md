@@ -65,8 +65,9 @@ token, from either source.
   repo scripts (`make doctor`, the smoke tests) by themselves.
 - With a custom compose file and a named volume, read it with
   `docker compose exec controller cat /data/api-token`.
-- A controller run outside compose defaults to `/data/api-token` too, which is
-  often not writable (on Windows, `C:\data\api-token`); set `API_TOKEN_FILE`.
+- A controller run outside compose defaults to `/data/api-token` too. On Windows
+  that is `C:\data\api-token`, which inherits permissions that let every local user
+  read and replace it, so set `API_TOKEN_FILE` to a path under your user profile.
 - To rotate the generated token, delete the file and restart the controller. Once
   `API_BEARER_TOKEN` is set the file is ignored (the startup log says so), and
   clients still pointed at it get a 401.
@@ -74,7 +75,7 @@ token, from either source.
   Any process that can reach port 8000, containers on the compose network
   included, can then drive the browser. It never applies to an exposed or
   production controller.
-- `/metrics` needs the token too: give a Prometheus scraper `bearer_token_file`.
+- `/metrics` needs the token too: give a Prometheus scraper `authorization: { type: Bearer, credentials_file: <path> }`.
 
 ## Auth profiles
 
