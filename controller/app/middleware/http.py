@@ -83,7 +83,15 @@ def install_controller_http_middleware(
     @application.middleware("http")
     async def enforce_rate_limits(request: Request, call_next):
         path = _request_path(request)
-        if rate_limiter is None or is_exempt_path(path, settings.request_rate_limit_exempt_path_list):
+        if rate_limiter is None:
+            return await call_next(request)
+        # An exempt path skips the limiter only when it needs no token (healthchecks
+        # hit it unauthenticated) or the request holds a valid one. /metrics and
+        # /artifacts still demand the token, so a tokenless or wrong-token request to
+        # them is a guess and counts against the per-IP bucket like /sessions.
+        if is_exempt_path(path, settings.request_rate_limit_exempt_path_list) and (
+            _is_bearer_token_exempt_path(path) or _has_valid_bearer_token(request)
+        ):
             return await call_next(request)
 
         # Key unauthenticated requests by IP only. Deriving the bucket from the
