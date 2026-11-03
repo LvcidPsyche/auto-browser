@@ -24,6 +24,8 @@ class CleanupStats:
     bytes_reclaimed: int = 0
     skipped_recent: int = 0
     skipped_protected: int = 0
+    # Entries the sweep could not stat or remove (a root-owned leftover, say): counted, logged, and passed over.
+    errors: int = 0
 
 
 @dataclass(slots=True)
@@ -87,12 +89,14 @@ class MaintenanceService:
             return
         roots = report["roots"]
         logger.info(
-            "startup cleanup sweep finished in %.1fs: %d files and %d dirs removed, %d recent and %d protected kept",
+            "startup cleanup sweep finished in %.1fs: %d files and %d dirs removed, %d recent and %d protected kept, "
+            "%d error(s)",
             time.monotonic() - started,
             sum(item["deleted_files"] for item in roots),
             sum(item["deleted_dirs"] for item in roots),
             sum(item["skipped_recent"] for item in roots),
             sum(item["skipped_protected"] for item in roots),
+            sum(item.get("errors", 0) for item in roots),
         )
 
     async def shutdown(self) -> None:
@@ -163,6 +167,43 @@ class MaintenanceService:
                 protected.append(Path(value).resolve())
         return protected
 
+    def _sweep_entry(
+        self, path: Path, cutoff: float, protected_roots: list[Path], stale_dirs: set[Path], stats: CleanupStats
+    ) -> None:
+        """One entry of the first pass: an OSError from it is the caller's to count, never the sweep's end."""
+        resolved = path.resolve()
+        protected_match = self._protected_match(resolved, protected_roots)
+        if protected_match is not None:
+            if resolved == protected_match:
+                stats.skipped_protected += 1
+            return
+        try:
+            mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            return
+        if mtime >= cutoff:
+            stats.skipped_recent += 1
+            return
+        if path.is_dir():
+            stale_dirs.add(path)
+        elif path.is_file():
+            # Same FileNotFoundError race the mtime stat above already
+            # guards: a concurrent writer or another sweep can remove the
+            # file between the two stats. Unguarded, this propagated out of
+            # run_cleanup and killed the loop permanently.
+            try:
+                size = path.stat().st_size
+            except FileNotFoundError:
+                return
+            path.unlink(missing_ok=True)
+            stats.deleted_files += 1
+            stats.bytes_reclaimed += size
+
+    @staticmethod
+    def _entry_error(stats: CleanupStats, path: Path, exc: OSError) -> None:
+        stats.errors += 1
+        logger.warning("cleanup sweep could not handle %s: %s", path, exc.strerror or exc)
+
     def _cleanup_root(self, root: Path, retention_hours: float, protected_roots: list[Path]) -> CleanupStats:
         stats = CleanupStats(root=str(root), retention_hours=retention_hours)
         if retention_hours <= 0 or not root.exists():
@@ -182,7 +223,12 @@ class MaintenanceService:
             if self._abort.is_set():
                 logger.info("cleanup walk of %s stopped for shutdown", root)
                 return stats
-            entries.append(((item.is_file(), len(item.parts)), item))
+            try:
+                is_file = item.is_file()
+            except OSError as exc:
+                self._entry_error(stats, item, exc)
+                continue
+            entries.append(((is_file, len(item.parts)), item))
         entries.sort(key=lambda pair: pair[0])
         for _, path in entries:
             if self._abort.is_set():
@@ -190,37 +236,22 @@ class MaintenanceService:
                 return stats
             if path.name == ".gitkeep":
                 continue
-            resolved = path.resolve()
-            protected_match = self._protected_match(resolved, protected_roots)
-            if protected_match is not None:
-                if resolved == protected_match:
-                    stats.skipped_protected += 1
-                continue
             try:
-                mtime = path.stat().st_mtime
-            except FileNotFoundError:
-                continue
-            if mtime >= cutoff:
-                stats.skipped_recent += 1
-                continue
-            if path.is_dir():
-                stale_dirs.add(path)
-            elif path.is_file():
-                # Same FileNotFoundError race the mtime stat above already
-                # guards: a concurrent writer or another sweep can remove the
-                # file between the two stats. Unguarded, this propagated out of
-                # run_cleanup and killed the loop permanently.
-                try:
-                    size = path.stat().st_size
-                except FileNotFoundError:
-                    continue
-                path.unlink(missing_ok=True)
-                stats.deleted_files += 1
-                stats.bytes_reclaimed += size
+                self._sweep_entry(path, cutoff, protected_roots, stale_dirs, stats)
+            except OSError as exc:
+                self._entry_error(stats, path, exc)
 
-        for path in sorted(
-            (item for item in root.rglob("*") if item.is_dir()), key=lambda item: len(item.parts), reverse=True
-        ):
+        directories: list[Path] = []
+        for item in root.rglob("*"):
+            if self._abort.is_set():
+                logger.info("cleanup walk of %s stopped for shutdown", root)
+                return stats
+            try:
+                if item.is_dir():
+                    directories.append(item)
+            except OSError as exc:
+                self._entry_error(stats, item, exc)
+        for path in sorted(directories, key=lambda item: len(item.parts), reverse=True):
             if self._abort.is_set():
                 logger.info("cleanup walk of %s stopped for shutdown", root)
                 return stats
