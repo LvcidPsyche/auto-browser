@@ -24,6 +24,11 @@ def resolve_bearer_token(bearer_token: str | None, token_file: str | os.PathLike
             f"token_file {token_file} does not exist: start the controller first, which writes its "
             "token to data/api-token in the auto-browser folder"
         ) from exc
+    except PermissionError as exc:
+        raise PermissionError(
+            f"cannot read token_file {token_file}: {exc.strerror}. Run as the user that owns the auto-browser "
+            "folder's data/, or read the token with: docker compose exec -T controller cat /data/api-token"
+        ) from exc
     if not token:
         raise ValueError(f"token_file {token_file} is empty")
     return token

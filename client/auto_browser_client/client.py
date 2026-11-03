@@ -50,6 +50,11 @@ def _read_token_file(path: str | os.PathLike[str]) -> str:
             f"token_file {path} does not exist: start the controller first, which writes its token "
             "to data/api-token in the auto-browser folder"
         ) from exc
+    except PermissionError as exc:
+        raise PermissionError(
+            f"cannot read token_file {path}: {exc.strerror}. Run as the user that owns the auto-browser "
+            "folder's data/, or read the token with: docker compose exec -T controller cat /data/api-token"
+        ) from exc
     if not token:
         raise ValueError(f"token_file {path} is empty")
     return token

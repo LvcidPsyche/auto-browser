@@ -65,6 +65,15 @@ class ResolveBearerTokenTests(_TokenFileCase, unittest.TestCase):
             resolve_bearer_token(None, path)
         self.assertIn(str(path), str(caught.exception))
 
+    def test_an_unreadable_file_says_how_to_read_it(self) -> None:
+        # The controller's root-written file can be unreadable to the host user (Docker Desktop, rootless).
+        denied = PermissionError(13, "Permission denied")
+        with mock.patch.object(Path, "read_text", side_effect=denied):
+            with self.assertRaises(PermissionError) as caught:
+                resolve_bearer_token(None, "data/api-token")
+        self.assertIn("data/api-token", str(caught.exception))
+        self.assertIn("docker compose exec -T controller cat /data/api-token", str(caught.exception))
+
 
 class ToolTokenFileTests(_TokenFileCase, unittest.IsolatedAsyncioTestCase):
     @respx.mock
