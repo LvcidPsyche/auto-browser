@@ -998,6 +998,14 @@ class BrowserManager:
                 "while it is refused on a blank, blob: or data: page other than the controller's own blank; a "
                 "tab on an allowed page refused only because of another tab, or waiting for its opener, does not."
             )
+        if self.page_provenance.refused_unjudged(page):
+            # Nothing is known against the page's host: the controller could not judge the window's birth.
+            raise RefusedPageError(
+                "The page could not be judged when it opened (the controller's window-birth watcher was "
+                "unavailable, or the page's target could not be read), so it was sent back to about:blank and is "
+                "not read: nothing is known against its host. Navigate it to an allowed URL, or close it and open "
+                "its URL in a new tab; /readiness reports the window_birth_watcher."
+            )
         if self.page_provenance.refused(page):
             raise RefusedPageError(
                 "The page was on a host ALLOWED_HOSTS does not allow, was opened by a page there, or "

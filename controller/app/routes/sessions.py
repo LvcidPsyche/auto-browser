@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from ..action_errors import ErrorPageSourceError, RefusedPageError
-from ..browser.services.tabs import TabRefusedByAnotherTabError
+from ..browser.services.tabs import TabRefusedByAnotherTabError, TabUnjudgedError
 from ..models import (
     HTTP_URL_SCHEMES,
     ClickRequest,
@@ -28,7 +28,13 @@ from ..models import (
     validate_url,
 )
 from ..url_safety import refuse_another_navigation_host
-from ._utils import OFF_LIST_OTHER_TAB_DETAIL, OFF_LIST_PAGE_DETAIL, OFF_LIST_TAB_DETAIL, typed_route_errors
+from ._utils import (
+    OFF_LIST_OTHER_TAB_DETAIL,
+    OFF_LIST_PAGE_DETAIL,
+    OFF_LIST_TAB_DETAIL,
+    UNJUDGED_TAB_DETAIL,
+    typed_route_errors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +115,8 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             raise HTTPException(status_code=400, detail="Invalid request") from None
         except TabRefusedByAnotherTabError:
             raise HTTPException(status_code=403, detail=OFF_LIST_OTHER_TAB_DETAIL) from None
+        except TabUnjudgedError:
+            raise HTTPException(status_code=403, detail=UNJUDGED_TAB_DETAIL) from None
         except PermissionError:
             raise HTTPException(status_code=403, detail=OFF_LIST_TAB_DETAIL) from None
 

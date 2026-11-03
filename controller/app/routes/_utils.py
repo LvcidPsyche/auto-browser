@@ -10,7 +10,7 @@ from fastapi import HTTPException, Request
 from ..action_errors import BrowserActionError
 from ..approvals import CONTROLLER_SCOPE
 from ..browser.page_provenance import CLOSED_PAGE_GRACE_SECONDS
-from ..browser.services.tabs import REFUSED_BY_ANOTHER_TAB_MESSAGE, REFUSED_TAB_MESSAGE
+from ..browser.services.tabs import REFUSED_BY_ANOTHER_TAB_MESSAGE, REFUSED_TAB_MESSAGE, UNJUDGED_TAB_MESSAGE
 
 _SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -49,6 +49,7 @@ OFF_LIST_PAGE_DETAIL = (
 )
 OFF_LIST_TAB_DETAIL = REFUSED_TAB_MESSAGE
 OFF_LIST_OTHER_TAB_DETAIL = REFUSED_BY_ANOTHER_TAB_MESSAGE
+UNJUDGED_TAB_DETAIL = UNJUDGED_TAB_MESSAGE
 
 
 def internal_error(logger: Logger, message: str, *args: object) -> HTTPException:
