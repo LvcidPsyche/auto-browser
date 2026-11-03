@@ -190,6 +190,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [host-tests, client-tests, langchain-tests, dependency-audit, package-build, controller-tests]
     timeout-minutes: 25
+    env:
+      # A fixed, CI-only password: it guards nothing real. With it set, both browser-node
+      # VNC checks require VNC authentication (--expect-password) and the isolated
+      # smoke's browser-node probe is strict, which is the setup operators are told to
+      # run; without it CI only ever proved a password-less noVNC.
+      VNC_PASSWORD: ci-smoke-vnc
     steps:
       - uses: actions/checkout@v7
 
