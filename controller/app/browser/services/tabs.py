@@ -197,8 +197,6 @@ class BrowserTabService:
         pages = self.pages(session)
         for page in pages:
             self.manager._attach_page_listeners(page, session)
-        # A popup reported a moment ago is listed by its birth verdict, not as refused while it is judged.
-        await asyncio.gather(*(self.manager.diagnostics.birth_judged(page) for page in pages))
         # A tab ALLOWED_HOSTS refuses is listed by URL only: checked before the title
         # is read and after, by its count of refused commits too, since the page can
         # move while it is read and come back (see app/browser/page_read.py).

@@ -486,8 +486,8 @@ birth is keyed on the opener, not the session:
 
 A born-refused window Playwright reports is refused as a popup of a refused opener is. A reported window
 whose opener is clean at report is held refused until its birth verdict is known (one CDP read of its target
-id): nothing it logs or shows reaches the agent meanwhile, and `activate_tab` and `list_tabs` wait for the
-verdict rather than refuse the window. A born-refused window Playwright never reports is
+id): nothing it logs or shows reaches the agent meanwhile, and `activate_tab` waits for the verdict rather
+than refuse the window. A born-refused window Playwright never reports is
 closed through CDP as soon as nothing justifies it: its opener is clean (the agent's navigate, a blocked
 action's rollback) or gone, past the grace; or, for a window refused by the session fallback, the session no
 longer counts. That sweep runs right after the agent's navigate and a rollback's `go_back`, after a counting
@@ -714,7 +714,7 @@ seconds.
   a window a refused page opened just before the agent's navigate made that page readable again is
   refused by the birth verdict, whatever its first navigation did, and so is any window it opens in
   turn. A reported popup whose opener is clean at report is held refused until its birth verdict is
-  known, a CDP round trip (`activate_tab` and `list_tabs` wait for it rather than refuse the popup), so it
+  known, a CDP round trip (`activate_tab` waits for it rather than refuse the popup), so it
   is readable a moment later than before. A born-refused window Playwright
   never reports is closed once its opener is clean or gone (or, when its opener could not be matched,
   once the session stops counting), so it cannot keep an opener reference across a rollback or send itself
