@@ -176,10 +176,18 @@ class BrowserRuntimeService:
                 and not manager.settings.cdp_connect_url
                 and not verified_on(self.shared_sandbox)
             ):
-                raise RuntimeError(refusal("the shared browser-node", self.shared_sandbox))
+                reason = refusal("the shared browser-node", self.shared_sandbox)
+                # The API answers a bare 409; the operator reads the reason here.
+                logger.warning("%s", reason)
+                raise RuntimeError(reason)
             return browser, None
 
-        runtime = await manager.runtime_provisioner.provision(session_id)
+        try:
+            runtime = await manager.runtime_provisioner.provision(session_id)
+        except RuntimeError as exc:
+            # A refusal under BROWSER_SANDBOX=on among them: the API answers a bare 409, so the reason is logged.
+            logger.warning("isolated session %s was not started: %s", session_id, exc)
+            raise
         try:
             browser = await self.connect_browser(
                 lambda: asyncio.sleep(0, result=runtime.ws_endpoint),

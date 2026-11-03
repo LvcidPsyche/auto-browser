@@ -78,8 +78,13 @@ class SharedSnapshotTests(unittest.IsolatedAsyncioTestCase):
         # A 1.13.0 browser-node rolled back after a 1.14 run: the old 'on' is still on disk beside a new endpoint.
         self._write(RUN_2, _on(RUN_1))
         runtime = self._runtime()
-        with self.assertRaisesRegex(RuntimeError, r"BROWSER_SANDBOX=on, but the shared browser-node reports unknown"):
+        # The API answers a bare 409 (it never returns a RuntimeError's text), so the reason goes to the log.
+        with (
+            self.assertLogs("app.browser.services.runtime", "WARNING") as logs,
+            self.assertRaisesRegex(RuntimeError, r"BROWSER_SANDBOX=on, but the shared browser-node reports unknown"),
+        ):
             await runtime.acquire_session_browser("s1")
+        self.assertTrue(any("the session was refused" in line for line in logs.output), logs.output)
         self.assertEqual(runtime.shared_sandbox["sandbox"], "unknown")
         self.assertIn("another run", runtime.shared_sandbox["detail"])
 
@@ -116,6 +121,25 @@ class SharedSnapshotTests(unittest.IsolatedAsyncioTestCase):
         await runtime.ensure_browser()  # still connected: no new snapshot
         status = browser_sandbox_status(runtime.manager.settings, shared=runtime.shared_sandbox)
         self.assertEqual(status["browser_node"]["sandbox"], "off")
+
+
+class IsolatedRefusalLogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_an_isolated_refusal_is_logged(self) -> None:
+        async def provision(session_id):
+            raise RuntimeError(
+                "BROWSER_SANDBOX=on, but isolated browser container x reports off; the session was refused."
+            )
+
+        manager = SimpleNamespace(
+            settings=SimpleNamespace(session_isolation_mode="docker_ephemeral"),
+            runtime_provisioner=SimpleNamespace(provision=provision),
+        )
+        with (
+            self.assertLogs("app.browser.services.runtime", "WARNING") as logs,
+            self.assertRaises(RuntimeError),
+        ):
+            await BrowserRuntimeService(manager).acquire_session_browser("s9")
+        self.assertIn("isolated session s9 was not started: BROWSER_SANDBOX=on", logs.output[0])
 
 
 class VerifiedOnTests(unittest.TestCase):
