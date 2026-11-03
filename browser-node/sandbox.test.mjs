@@ -6,6 +6,7 @@ import {
   classifyFailure,
   declaredProfile,
   launchWithSandboxPolicy,
+  makeVerify,
   verifyServer,
   parseSetting,
   verifySandbox,
@@ -85,10 +86,10 @@ test("auto: a refused sandboxed launch relaunches unsandboxed with a WARNING nam
   assert.equal(server.name, "unsandboxed");
   assert.equal(state.sandbox, "off");
   assert.equal(state.cause, "seccomp_profile_not_applied");
-  assert.equal(h.warnings.length, 1);
-  assert.match(h.warnings[0], /^WARNING: Chromium's sandbox is OFF/);
-  assert.match(h.warnings[0], /seccomp_profile_not_applied/);
-  assert.match(h.warnings[0], /not applied/);
+  assert.equal(h.warnings.length, 2); // the failed first attempt, then the fallback
+  assert.match(h.warnings[1], /^WARNING: Chromium's sandbox is OFF/);
+  assert.match(h.warnings[1], /seccomp_profile_not_applied/);
+  assert.match(h.warnings[1], /not applied/);
 });
 
 test("auto: a launch whose renderers are not actually sandboxed is closed and relaunched unsandboxed", async () => {
@@ -99,7 +100,7 @@ test("auto: a launch whose renderers are not actually sandboxed is closed and re
   assert.equal(state.sandbox, "off");
   assert.equal(state.cause, "not_verified");
   assert.match(state.detail, /no renderer runs in its own user namespace/);
-  assert.equal(h.warnings.length, 1);
+  assert.equal(h.warnings.length, 2);
 });
 
 test("on: a refused sandboxed launch is an error, and nothing is launched unsandboxed", async () => {
@@ -301,7 +302,7 @@ test("auto retries the sandboxed launch once before falling back", async () => {
   const { state } = await launchWithSandboxPolicy({ setting: "auto", profile: "auto-browser", ...h });
   assert.equal(state.sandbox, "on");
   assert.deepEqual(h.launches, [true, true]);
-  assert.deepEqual(h.warnings.length, 0);
+  assert.deepEqual(h.warnings.length, 1); // the first attempt's failure, logged
 });
 
 test("a cause from verification is kept (verification_unsupported)", async () => {
@@ -327,4 +328,122 @@ test("a daemon without seccomp support is its own cause", () => {
   assert.equal(declaredProfile("no-seccomp"), "no-seccomp");
   const failure = classifyFailure({ ...UNSHARE_REFUSED, profile: "no-seccomp", chromiumError: CHROMIUM_FATAL });
   assert.equal(failure.cause, "seccomp_unsupported");
+});
+
+// ---- round 3 ----
+
+function fakePage(sandboxText, events) {
+  return {
+    setContent: async (_html, options) => events.push(`setContent ${options?.timeout}`),
+    goto: async (url, options) => events.push(`goto ${url} ${options?.timeout}`),
+    waitForFunction: async () => events.push("waitForFunction"),
+    innerText: async () => sandboxText,
+  };
+}
+
+test("makeVerify: what server.mjs uses gives ok:false for an unsandboxed tree", async () => {
+  const events = [];
+  const chromium = {
+    connect: async (endpoint, options) => {
+      events.push(`connect ${endpoint} ${options.timeout}`);
+      return { newPage: async () => fakePage("", events), close: async () => events.push("close") };
+    },
+  };
+  const server = { wsEndpoint: () => "ws://local", process: () => ({ pid: 10 }) };
+  const unsandboxed = fakeProc({
+    10: { ppid: 1, cmdline: ["chrome"], userns: 1, filters: 2 },
+    12: { ppid: 10, cmdline: ["chrome --type=renderer"], userns: 1, filters: 2 },
+  });
+  const verdict = await makeVerify(chromium, { proc: unsandboxed, timeoutMs: 1234 })(server);
+  assert.equal(verdict.ok, false);
+  assert.ok(events.includes("connect ws://local 1234"), events.join(","));
+  const sandboxed = fakeProc({
+    10: { ppid: 1, cmdline: ["chrome"], userns: 1, filters: 2 },
+    12: { ppid: 10, cmdline: ["chrome --type=renderer"], userns: 2, filters: 3 },
+  });
+  assert.equal((await makeVerify(chromium, { proc: sandboxed })(server)).ok, true);
+});
+
+test("verifyServer on an old kernel reads chrome://sandbox, once its table is there", async () => {
+  const events = [];
+  const proc = {
+    ...fakeProc({
+      10: { ppid: 1, cmdline: ["chrome"], userns: 1 },
+      12: { ppid: 10, cmdline: ["chrome --type=renderer"], userns: 2 },
+    }),
+    status: () => "Name:\tchrome\nSeccomp:\t2\n",
+  };
+  const server = { wsEndpoint: () => "ws://x", process: () => ({ pid: 10 }) };
+  const page = fakePage("Layer 1 Sandbox\tNamespace\nSeccomp-BPF sandbox\tYes\nSeccomp-BPF sandbox supports TSYNC\tYes", events);
+  const client = { newPage: async () => page, close: async () => events.push("close") };
+  const verdict = await verifyServer(server, { connect: async () => client, proc, timeoutMs: 5000 });
+  assert.equal(verdict.ok, true);
+  assert.equal(verdict.evidence.method, "chrome://sandbox");
+  assert.deepEqual(events, ["setContent 5000", "goto chrome://sandbox 5000", "waitForFunction", "close"]);
+});
+
+test("the chrome://sandbox match is anchored to its own row", () => {
+  const proc = {
+    ...fakeProc({
+      10: { ppid: 1, cmdline: ["chrome"], userns: 1 },
+      12: { ppid: 10, cmdline: ["chrome --type=renderer"], userns: 2 },
+    }),
+    status: () => "Name:\tchrome\n",
+  };
+  for (const page of [
+    "Seccomp-BPF sandbox\tNo\nSeccomp-BPF sandbox supports TSYNC\tYes",
+    "Seccomp-BPF sandbox\nYes",
+    "Seccomp-BPF sandbox\tNo\nseccomp-bpf sandbox yes? see docs",
+  ]) {
+    assert.equal(verifySandbox({ browserPid: "10", proc, sandboxPage: page }).ok, false, JSON.stringify(page));
+  }
+  assert.equal(verifySandbox({ browserPid: "10", proc, sandboxPage: "Seccomp-BPF sandbox\tYes" }).ok, true);
+});
+
+test("an EACCES reading /proc propagates; only exited processes are skipped", () => {
+  const proc = {
+    ...fakeProc({
+      10: { ppid: 1, cmdline: ["chrome"], userns: 1, filters: 2 },
+      12: { ppid: 10, cmdline: ["chrome --type=renderer"], userns: 2, filters: 3 },
+    }),
+  };
+  const denied = {
+    ...proc,
+    status: (pid) => {
+      if (pid === "12") {
+        const error = new Error("EACCES");
+        error.code = "EACCES";
+        throw error;
+      }
+      return proc.status(pid);
+    },
+  };
+  assert.throws(() => verifySandbox({ browserPid: "10", proc: denied }), /EACCES/);
+});
+
+test("an attempt that never finishes is bounded, then falls back", async () => {
+  const h = harness();
+  h.verify = () => new Promise(() => {});
+  const { state } = await launchWithSandboxPolicy({ setting: "auto", profile: "auto-browser", ...h, attemptTimeoutMs: 20 });
+  assert.equal(state.sandbox, "off");
+  assert.match(state.detail, /did not finish within 0\.02s/);
+  assert.deepEqual(h.launches, [true, true, false]);
+});
+
+test("a failed first attempt is logged even when the retry succeeds", async () => {
+  let attempts = 0;
+  const h = harness();
+  h.verify = async () => {
+    attempts += 1;
+    return attempts === 1 ? { ok: false, detail: "a transient failure" } : { ok: true, evidence: { renderers: 1 } };
+  };
+  const { state } = await launchWithSandboxPolicy({ setting: "auto", profile: "auto-browser", ...h });
+  assert.equal(state.sandbox, "on");
+  assert.equal(h.warnings.length, 1);
+  assert.match(h.warnings[0], /first sandboxed attempt failed.*a transient failure.*retrying/);
+});
+
+test("a no-seccomp hint does not hide a working namespace", () => {
+  const failure = classifyFailure({ ...NAMESPACE_OK, profile: "no-seccomp", chromiumError: CHROMIUM_FATAL });
+  assert.equal(failure.cause, "chromium_refused");
 });

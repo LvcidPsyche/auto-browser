@@ -8,7 +8,7 @@ import {
   launchWithSandboxPolicy,
   parseSetting,
   SandboxRefusedError,
-  verifyServer,
+  makeVerify,
   writeState,
 } from "./sandbox.mjs";
 
@@ -74,9 +74,17 @@ const launch = (sandboxed) =>
     args: chromiumArgs,
   });
 
-// After a sandboxed launch: sandbox.mjs verifyServer opens one page through the server and checks its renderers
-// in /proc (and chrome://sandbox on kernels without Seccomp_filters).
-const verify = (server) => verifyServer(server, { connect: (endpoint) => chromium.connect(endpoint, { timeout: 30000 }) });
+// After a sandboxed launch: sandbox.mjs verifyServer (through makeVerify) opens one page through the server and checks
+// its renderers in /proc (and chrome://sandbox on kernels without Seccomp_filters), each step time-bounded.
+const verify = makeVerify(chromium);
+
+// The endpoint the controller is told (the endpoint file) and the one the state names: the same string.
+function advertised(server) {
+  const endpoint = new URL(server.wsEndpoint());
+  endpoint.hostname = advertisedHost;
+  endpoint.port = String(port);
+  return endpoint.toString();
+}
 
 await mkdir(dirname(sandboxStateFile), { recursive: true });
 let browserServer;
@@ -90,7 +98,8 @@ try {
     log: console,
   });
   browserServer = result.server;
-  await writeState(sandboxStateFile, result.state);
+  // The state names this run's endpoint, so the controller can tell it from a previous run's (or a rolled-back image's).
+  await writeState(sandboxStateFile, { ...result.state, endpoint: advertised(browserServer) });
   console.log(`chromium sandbox: ${result.state.sandbox} (${result.state.cause ?? "verified"}); state in ${sandboxStateFile}`);
 } catch (error) {
   if (error instanceof SandboxRefusedError) {
@@ -101,10 +110,7 @@ try {
   throw error;
 }
 
-const rawEndpoint = new URL(browserServer.wsEndpoint());
-rawEndpoint.hostname = advertisedHost;
-rawEndpoint.port = String(port);
-const advertisedEndpoint = rawEndpoint.toString();
+const advertisedEndpoint = advertised(browserServer);
 
 await mkdir(dirname(endpointFile), { recursive: true });
 const tmpFile = `${endpointFile}.tmp`;

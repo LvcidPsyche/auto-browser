@@ -9,6 +9,7 @@ from playwright.async_api import Browser
 
 from ...action_errors import SESSION_CLOSED_GATE_LOST, SessionNotFoundError
 from ...auth_policy import credentials_for
+from ...browser_sandbox import refusal, snapshot_shared_state, verified_on
 from ...session_isolation import IsolatedBrowserRuntime
 from ...session_ownership import as_system
 from ...utils import spawn_background_task
@@ -23,6 +24,10 @@ PREVIOUS_BROWSER_CLOSE_TIMEOUT_SECONDS = 10.0
 class BrowserRuntimeService:
     def __init__(self, manager: Any) -> None:
         self.manager = manager
+        # The shared browser-node's sandbox state, read once when the controller connects to it and bound to that
+        # run's endpoint (browser_sandbox.snapshot_shared_state). Never re-read for the same connection: the browser
+        # user can rewrite the file later. None while not connected, or when attached to a Chrome over CDP.
+        self.shared_sandbox: dict[str, Any] | None = None
 
     async def ensure_browser(self) -> Browser:
         manager = self.manager
@@ -37,6 +42,7 @@ class BrowserRuntimeService:
                 await manager.window_births.release(manager.browser)
 
             if manager.settings.cdp_connect_url:
+                self.shared_sandbox = None
                 logger.info("connecting to existing Chrome via CDP at %s", manager.settings.cdp_connect_url)
                 browser = await manager.playwright.chromium.connect_over_cdp(manager.settings.cdp_connect_url)
                 logger.info("CDP attach succeeded")
@@ -44,14 +50,23 @@ class BrowserRuntimeService:
                 manager.browser = browser
                 return manager.browser
 
+            connected: dict[str, str] = {}
+
+            async def endpoint() -> str:
+                connected["endpoint"] = await self.resolve_browser_ws_endpoint()
+                return connected["endpoint"]
+
+            self.shared_sandbox = None
             manager.browser = await self.connect_browser(
-                self.resolve_browser_ws_endpoint,
+                endpoint,
                 failure_context=(
                     "Unable to connect to browser node via Playwright server. "
                     f"Checked ws endpoint file {manager.settings.browser_ws_endpoint_file} "
                     f"and direct endpoint {manager.settings.browser_ws_endpoint or '<not configured>'}."
                 ),
             )
+            self.shared_sandbox = snapshot_shared_state(manager.settings, connected.get("endpoint", ""))
+            logger.info("shared browser-node sandbox: %s", self.shared_sandbox.get("sandbox"))
             return manager.browser
 
     async def cdp_attach(self, cdp_url: str) -> dict[str, Any]:
@@ -153,7 +168,16 @@ class BrowserRuntimeService:
     async def acquire_session_browser(self, session_id: str) -> tuple[Browser, IsolatedBrowserRuntime | None]:
         manager = self.manager
         if manager.settings.session_isolation_mode != "docker_ephemeral":
-            return await self.ensure_browser(), None
+            browser = await self.ensure_browser()
+            # Under on nothing runs unsandboxed: the shared browser-node too, unless the controller attached to a
+            # Chrome of the operator's own over CDP (not a browser-node, nothing to verify).
+            if (
+                manager.settings.browser_sandbox == "on"
+                and not manager.settings.cdp_connect_url
+                and not verified_on(self.shared_sandbox)
+            ):
+                raise RuntimeError(refusal("the shared browser-node", self.shared_sandbox))
+            return browser, None
 
         runtime = await manager.runtime_provisioner.provision(session_id)
         try:

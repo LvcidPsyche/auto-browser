@@ -115,4 +115,10 @@ trap cleanup EXIT INT TERM
 run_as_browser node /opt/browser-node/server.mjs > >(tee /tmp/playwright-server.log) 2>&1 &
 PLAYWRIGHT_SERVER_PID=$!
 
-wait "$PLAYWRIGHT_SERVER_PID"
+status=0
+wait "$PLAYWRIGHT_SERVER_PID" || status=$?
+if [[ "$status" -ne 0 ]]; then
+  # tee may not have flushed the server's last lines before this PID 1 exits: print the outcome directly.
+  echo "browser-node: server.mjs exited with status $status; its sandbox state: $(cat "$SANDBOX_STATE_FILE" 2>/dev/null || echo none)"
+fi
+exit "$status"

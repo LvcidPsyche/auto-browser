@@ -905,7 +905,9 @@ class McpToolGateway:
             window_births=self.manager.window_births.status(),
             # A manager without a provisioner (an attach-only setup, a test stand-in) has no isolated browsers to report.
             browser_sandbox=browser_sandbox_status(
-                self.manager.settings, getattr(self.manager, "runtime_provisioner", None)
+                self.manager.settings,
+                getattr(self.manager, "runtime_provisioner", None),
+                shared=getattr(getattr(self.manager, "runtime", None), "shared_sandbox", None),
             ),
             controller_user=controller_user_status(),
         )

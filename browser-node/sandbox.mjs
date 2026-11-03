@@ -74,7 +74,7 @@ function chromiumReason(error) {
 // One cause per failure, worded so a missing profile never reads like a host that refuses namespaces.
 export function classifyFailure({ probe, kernel = {}, profile, chromiumError }) {
   const chromium = chromiumReason(chromiumError);
-  if (profile === "no-seccomp") {
+  if (profile === "no-seccomp" && !probe.ok) {
     return {
       cause: "seccomp_unsupported",
       detail:
@@ -140,7 +140,15 @@ export class SandboxRefusedError extends Error {
   }
 }
 
-export async function launchWithSandboxPolicy({ setting, profile, launch, verify, diagnose: runDiagnose, log }) {
+export async function launchWithSandboxPolicy({
+  setting,
+  profile,
+  launch,
+  verify,
+  diagnose: runDiagnose,
+  log,
+  attemptTimeoutMs = ATTEMPT_TIMEOUT_MS,
+}) {
   const base = { setting, seccomp_profile: profile };
   if (setting === "off") {
     const server = await launch(false);
@@ -164,7 +172,7 @@ export async function launchWithSandboxPolicy({ setting, profile, launch, verify
       const server = await launch(true);
       let verdict;
       try {
-        verdict = await verify(server);
+        verdict = await withinTimeout(Promise.resolve().then(() => verify(server)), attemptTimeoutMs);
       } catch (error) {
         verdict = { ok: false, detail: `the sandbox check failed: ${String(error?.message ?? error).split("\n")[0]}` };
       }
@@ -188,6 +196,9 @@ export async function launchWithSandboxPolicy({ setting, profile, launch, verify
       };
     } catch (error) {
       failure = classifyFailure({ ...runDiagnose(), profile, chromiumError: error });
+    }
+    if (attempt === 1) {
+      log.warn(`WARNING: the first sandboxed attempt failed (${failure.cause}: ${failure.detail}); retrying once`);
     }
   }
 
@@ -229,8 +240,10 @@ function exited(error) {
 }
 
 // chrome://sandbox's own verdict, for kernels without Seccomp_filters in /proc/<pid>/status (before 5.9).
+// Anchored to its own row ("Seccomp-BPF sandbox<tab>Yes"): the next row, "Seccomp-BPF sandbox supports TSYNC<tab>Yes",
+// must not count for it.
 function sandboxPageSaysSeccomp(text) {
-  return /Seccomp-BPF sandbox\s*:?\s*Yes/i.test(text || "");
+  return /^Seccomp-BPF sandbox[\t: ]+Yes[ \t]*$/m.test(text || "");
 }
 
 // Proof from /proc, not from the flag: every live renderer under this browser runs in a user namespace other than
@@ -272,7 +285,8 @@ export function verifySandbox({ browserPid, proc = realProc, sandboxPage }) {
     }
   }
   if (!renderers.length) return { ok: false, detail: "no renderer process was found under the browser to check" };
-  if (!renderers.every((renderer) => renderer.userns !== browserNs)) {
+  const userns = renderers.every((renderer) => renderer.userns !== browserNs);
+  if (!userns) {
     return { ok: false, detail: "a renderer runs in the browser's own user namespace" };
   }
   const filtersKnown = browserFilters !== undefined && renderers.every((renderer) => renderer.filters !== undefined);
@@ -280,7 +294,7 @@ export function verifySandbox({ browserPid, proc = realProc, sandboxPage }) {
     if (sandboxPageSaysSeccomp(sandboxPage)) {
       return {
         ok: true,
-        evidence: { renderers: renderers.length, renderer_userns_differs: true, method: "chrome://sandbox" },
+        evidence: { renderers: renderers.length, renderer_userns_differs: userns, method: "chrome://sandbox" },
       };
     }
     return {
@@ -302,7 +316,7 @@ export function verifySandbox({ browserPid, proc = realProc, sandboxPage }) {
     ok: true,
     evidence: {
       renderers: renderers.length,
-      renderer_userns_differs: true,
+      renderer_userns_differs: userns,
       browser_seccomp_filters: browserFilters,
       renderer_seccomp_filters: rendererFilters,
     },
@@ -311,17 +325,19 @@ export function verifySandbox({ browserPid, proc = realProc, sandboxPage }) {
 
 // What server.mjs runs after a sandboxed launch: one page through the server so a renderer exists, then /proc,
 // and chrome://sandbox only when /proc cannot show the seccomp half. `connect` and `proc` are injectable for tests.
-export async function verifyServer(server, { connect, proc = realProc }) {
+export async function verifyServer(server, { connect, proc = realProc, timeoutMs = VERIFY_STEP_TIMEOUT_MS }) {
   const client = await connect(server.wsEndpoint());
   try {
     const page = await client.newPage();
-    await page.setContent("<p>sandbox check</p>");
+    await page.setContent("<p>sandbox check</p>", { timeout: timeoutMs });
     const browserPid = server.process().pid;
     let verdict = verifySandbox({ browserPid, proc });
     if (!verdict.ok && verdict.cause === "verification_unsupported") {
       let sandboxPage = "";
       try {
-        await page.goto("chrome://sandbox", { timeout: 15000 });
+        await page.goto("chrome://sandbox", { timeout: timeoutMs });
+        // The status table is filled in by script: wait for its row before reading.
+        await page.waitForFunction(() => /Seccomp-BPF sandbox/.test(document.body.innerText), null, { timeout: timeoutMs });
         sandboxPage = await page.innerText("body");
       } catch {
         // Not reachable: stays unverified.
@@ -334,8 +350,34 @@ export async function verifyServer(server, { connect, proc = realProc }) {
   }
 }
 
+// Each step of a verification (connect, the page, chrome://sandbox) waits at most this long, and launchWithSandboxPolicy
+// bounds a whole attempt, so two attempts fit inside the controller's ISOLATED_BROWSER_WAIT_TIMEOUT_SECONDS (45 s).
+export const VERIFY_STEP_TIMEOUT_MS = 8000;
+export const ATTEMPT_TIMEOUT_MS = 15000;
+
+// What server.mjs passes as `verify`: the factory keeps the wiring (connect, /proc, timeouts) testable.
+export function makeVerify(chromium, { proc = realProc, timeoutMs = VERIFY_STEP_TIMEOUT_MS } = {}) {
+  return (server) =>
+    verifyServer(server, {
+      connect: (endpoint) => chromium.connect(endpoint, { timeout: timeoutMs }),
+      proc,
+      timeoutMs,
+    });
+}
+
+function withinTimeout(promise, ms) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ ok: false, detail: `the sandbox check did not finish within ${ms / 1000}s` }), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 export async function writeState(path, state) {
   const tmp = `${path}.tmp`;
   await writeFile(tmp, `${JSON.stringify(state)}\n`, "utf-8");
   await rename(tmp, path);
 }
+
