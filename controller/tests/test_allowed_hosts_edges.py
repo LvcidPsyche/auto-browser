@@ -286,3 +286,16 @@ def test_an_opener_held_only_for_its_own_pending_verdict_does_not_refuse_the_win
     assert manager._opener_refuses_its_windows(session, held)
     off_list = MovingPage(REFUSED, REFUSED)
     assert manager._opener_refuses_its_windows(tab_session(off_list), off_list)
+
+
+def test_the_unjudged_tab_message_says_a_new_tab_is_judged_as_it_opens_and_does_not_advise_a_retry(
+    tmp_path: Path,
+) -> None:
+    """Round-4 R3: the refusal advised retrying activate_tab once /readiness reports the watcher attached, which
+    never succeeds for that tab (its verdict was reached once): an agent that followed it looped."""
+    from app.browser.services.tabs import UNJUDGED_TAB_MESSAGE
+
+    assert "retry" not in UNJUDGED_TAB_MESSAGE
+    assert "Close it and open its URL in a new tab" in UNJUDGED_TAB_MESSAGE
+    assert "judged as it opens" in UNJUDGED_TAB_MESSAGE and "window_birth_watcher" in UNJUDGED_TAB_MESSAGE
+    assert "does not allow" not in UNJUDGED_TAB_MESSAGE
