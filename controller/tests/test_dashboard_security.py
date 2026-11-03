@@ -21,7 +21,10 @@ class DashboardSecurityTests(unittest.TestCase):
 
     def test_the_token_prompt_says_where_the_token_is(self) -> None:
         # A controller with no API_BEARER_TOKEN generates one in data/api-token; blank no longer works.
-        self.assertIn("Enter the API token (data/api-token in your auto-browser folder)", _DASHBOARD_HTML)
+        self.assertIn(
+            "Enter the API token (API_BEARER_TOKEN, or data/api-token in your auto-browser folder on a local install):",
+            _DASHBOARD_HTML,
+        )
         self.assertNotIn("no-auth", _DASHBOARD_HTML)
         self.assertIn("window.location.hash", _DASHBOARD_HTML)  # #token= still works
 

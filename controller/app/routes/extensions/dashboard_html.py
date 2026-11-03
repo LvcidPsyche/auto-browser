@@ -214,7 +214,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     history.replaceState(null, '', window.location.pathname);  // strip from URL
   }
   if (!sessionStorage.getItem('ab_token')) {
-    const t = prompt('Enter the API token (data/api-token in your auto-browser folder):', '');
+    const t = prompt('Enter the API token (API_BEARER_TOKEN, or data/api-token in your auto-browser folder on a local install):', '');
     if (t !== null) sessionStorage.setItem('ab_token', t);
   }
   if (!sessionStorage.getItem('ab_operator_id')) {
