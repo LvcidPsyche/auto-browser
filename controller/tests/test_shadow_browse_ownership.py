@@ -52,7 +52,8 @@ class ShadowBrowseOwnershipTests(unittest.IsolatedAsyncioTestCase):
         context = self.manager.sessions[shadow_id].context
         # The pre-request gate's "close" first: it owns the context until the context has closed.
         self.assertEqual(
-            [call.args[0] for call in context.on.call_args_list], ["close", "page", "request", "requestfailed"]
+            [call.args[0] for call in context.on.call_args_list],
+            ["close", "page", "request", "requestfailed", "response"],
         )
 
     async def test_the_shadow_session_belongs_to_the_source_owner(self) -> None:
