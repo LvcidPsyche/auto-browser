@@ -275,9 +275,9 @@ class BrowserDiagnosticsService:
                 spawn_background_task(self._return_to_blank(session, popup))
             return
         provenance = self.manager.page_provenance
-        if self.manager._url_off_list(opener.url) or provenance.refused_settled(opener):
-            # A refused opener's popup is refused at once. An opener held only for its own pending birth
-            # verdict is not refused here: that verdict is its birth's, and the watcher judged this window's
+        if self.manager._opener_refused(opener):
+            # A refused opener's popup is refused at once. An opener held only while its own birth verdict is
+            # being judged is not refused here: that verdict is its birth's, and the watcher judged this window's
             # birth by it (a born-refused page's windows are born refused), which the verdict below applies.
             if provenance.opener_judged(popup, opener_refused=True):
                 spawn_background_task(self._return_to_blank(session, popup))
@@ -305,6 +305,14 @@ class BrowserDiagnosticsService:
             unjudged=verdict is BirthVerdict.REFUSED_UNJUDGED,
         ):
             spawn_background_task(self._return_to_blank(session, popup))
+
+    def birth_pending(self, page: Any) -> bool:
+        """Whether the page's birth verdict is still being judged (_judge_birth runs): the hold on it is passing."""
+        try:
+            task = self._birth_judgements.get(page)
+        except TypeError:  # a page that cannot be weakly referenced (a test double)
+            return False
+        return task is not None and not task.done()
 
     async def birth_judged(self, page: "Page") -> None:
         """Wait until a reported window's birth verdict is applied, so the page's refusal is its final one.
