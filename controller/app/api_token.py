@@ -134,6 +134,9 @@ def _restrict_mode(path: Path) -> None:
     """Take group and other permissions off a token file. POSIX only: Windows applies the folder's ACL."""
     if os.name == "nt":
         return
+    if os.path.islink(path):
+        # A mounted secret (Kubernetes) is a symlink: chmod would change its target, which isn't ours.
+        return
     mode = stat.S_IMODE(os.stat(path).st_mode)
     if not mode & _GROUP_OR_OTHER_BITS:
         return
@@ -156,7 +159,7 @@ def _match_parent_owner(path: Path) -> None:
     if parent.st_uid == 0:
         return
     try:
-        os.chown(path, parent.st_uid, parent.st_gid)
+        os.chown(path, parent.st_uid, parent.st_gid, follow_symlinks=False)
     except OSError as exc:
         logger.warning(
             "Could not give %s to the owner of %s (uid %s): %s. Clients running as that user may not read it.",
