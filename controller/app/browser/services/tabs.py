@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from playwright.async_api import Error as PlaywrightError
 
-from ...action_errors import BrowserActionError
+from ...action_errors import BrowserActionError, SessionNotFoundError
 from ..page_provenance import CLOSED_PAGE_GRACE_SECONDS
 from ..request_gate import block_summary, navigation_blocked_error, stopped_by_gate
 from ..request_gates import CHROME_ERROR_SCHEME
@@ -149,16 +149,23 @@ class BrowserTabService:
     async def activate(self, session_id: str, index: int) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
         pages = self.pages(session)
-        if 0 <= index < len(pages):
-            # A popup reported a moment ago is held until its birth verdict (a CDP round trip): judged first,
-            # not refused for being judged. Before the lock: a refused verdict's blank takes the lock, and the
-            # session's other calls must not wait on this one's wait. The index is read again under the lock.
-            await self.manager.diagnostics.birth_judged(pages[index])
+        if index < 0 or index >= len(pages):
+            raise ValueError(f"Unknown tab index: {index}")
+        # The tab is bound by its page, not its index: a tab that closes during the wait below (an OAuth popup
+        # closing itself) shifts the indices, and the tab at this index would then be another, not waited for.
+        target_page = pages[index]
+        # A popup reported a moment ago is held until its birth verdict (a CDP round trip): judged first,
+        # not refused for being judged. Before the lock: a refused verdict's blank takes the lock, and the
+        # session's other calls must not wait on this one's wait.
+        await self.manager.diagnostics.birth_judged(target_page)
         async with session.lock:
+            if await self.manager.get_session(session_id) is not session:
+                # Closed during the wait (get_session raises for a closed one, with its recorded end).
+                raise SessionNotFoundError(session_id)
             pages = self.pages(session)
-            if index < 0 or index >= len(pages):
-                raise ValueError(f"Unknown tab index: {index}")
-            target_page = pages[index]
+            if not any(page is target_page for page in pages):
+                raise ValueError(f"Unknown tab index: {index}")  # the tab closed during the wait
+            index = next(position for position, page in enumerate(pages) if page is target_page)
             # A popup or tab the page opened may sit on a host the allowlist
             # refuses, and every later action and observation reads session.page.
             # Refused before it becomes the active page, so the session stays

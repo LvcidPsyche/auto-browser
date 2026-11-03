@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.action_errors import SessionNotFoundError
 from app.browser import request_gates as rg
 from app.browser import window_births as wb_module
 from app.browser.services.tabs import TabUnjudgedError
@@ -760,3 +761,71 @@ async def test_a_clean_popup_whose_read_was_in_flight_at_a_replacement_is_not_he
         assert not env.manager._page_refused(child), "the clean popup's window was refused after the replacement"
         await env.manager.activate_tab(session_id, session.context.pages.index(child))
         assert "two" in json.dumps(await env.manager.observe(session_id, preset="text"))
+
+
+# ── round 4: activate_tab binds the tab before the wait ────────────────────────
+
+
+async def test_activate_tab_activates_the_tab_it_was_asked_for_though_another_closes_during_the_wait(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Reviewer's R4 (R10): activate_tab waited for the verdict of pages[index], then read pages[index] again
+    under the lock. A tab closing during the wait (an OAuth popup closing itself) shifted the indices, and a
+    different tab was activated, its verdict never waited for. The tab is bound by its page before the wait."""
+    pages = {
+        **PAGES,
+        "/b": "<title>b</title><p>b</p>",
+        "/c": "<title>c</title><p>c</p>",
+        "/d": "<title>d</title><p>d</p>",
+    }
+    async with browser_env(tmp_path, pages) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        first = session.page
+        b = await open_popup(session, f"{env.allowed}/b")
+        await b.wait_for_load_state()
+        await settle(lambda: not pending(), timeout=TIMEOUT)
+        real = rg._read_target_id
+
+        async def slow_for_c(page):
+            if page is not first and "/c" in page.url:  # the read runs as a task, after open_popup returned
+                await asyncio.sleep(1.0)
+            return await real(page)
+
+        monkeypatch.setattr(rg, "_read_target_id", slow_for_c)
+        c = await open_popup(session, f"{env.allowed}/c")
+        d = await open_popup(session, f"{env.allowed}/d")
+        await d.wait_for_load_state()
+        index = session.context.pages.index(c)
+
+        activate = asyncio.ensure_future(env.manager.activate_tab(session_id, index))
+        await asyncio.sleep(0.2)
+        assert not activate.done(), "activate_tab did not wait for the tab's verdict"
+        await b.close()  # closes itself during the wait, shifting the indices
+        result = await asyncio.wait_for(activate, timeout=TIMEOUT)
+
+        assert session.page is c, f"activated {session.page.url}, not /c"
+        assert result["index"] == session.context.pages.index(c)
+        assert [tab["url"][-2:] for tab in result["tabs"] if tab["active"]] == ["/c"]
+        assert "c" in json.dumps(await env.manager.observe(session_id, preset="text"))
+
+
+async def test_activate_tab_of_a_session_closed_during_the_wait_is_an_unknown_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Reviewer's H2: close_session during the wait answered 'Unknown tab index' (a 400), not the unknown-session
+    error every other call on a closed session gives."""
+    async with browser_env(tmp_path, PAGES) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        failing_read(monkeypatch, env, spare=session.page)
+        popup = await open_popup(session, f"{env.allowed}/second")
+
+        activate = asyncio.ensure_future(env.manager.activate_tab(session_id, session.context.pages.index(popup)))
+        await asyncio.sleep(0.4)
+        assert not activate.done()
+        await env.manager.close_session(session_id)
+
+        with pytest.raises(SessionNotFoundError):
+            await asyncio.wait_for(activate, timeout=TIMEOUT)
+        await settle(lambda: not pending(), timeout=TIMEOUT)
