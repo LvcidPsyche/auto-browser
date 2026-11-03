@@ -1,0 +1,455 @@
+"""A loopback controller with no configured credential generates one and enforces it.
+
+Until this release a loopback controller with no API_BEARER_TOKEN served every
+route unauthenticated. Loopback described the host publish mapping, not who
+could reach port 8000: every container on the compose network, browser-node
+included, could drive the API by sending `Host: localhost`. The controller now
+loads its token from API_TOKEN_FILE, or generates one there, unless
+API_ALLOW_TOKENLESS_LOOPBACK=true keeps the old behaviour.
+
+tests/__init__.py turns the escape hatch on for the rest of the suite, which
+models the old default, so every test here sets it explicitly.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import os
+import stat
+from contextlib import ExitStack
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app import api_token
+from app.api_token import ensure_api_credential
+from app.auth_policy import resolve_auth_policy
+from app.config import Settings
+from app.middleware.http import install_controller_http_middleware
+from app.runtime_policy import MIN_PRODUCTION_BEARER_TOKEN_LENGTH, validate_runtime_policy
+
+STRONG_TOKEN = "s" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH
+LOGGER = "app.api_token"
+
+
+def make_settings(token_file: Path, *, hatch: bool = False, **overrides: str) -> Settings:
+    values = {
+        "API_BIND_SCOPE": "loopback",
+        "API_ALLOW_TOKENLESS_LOOPBACK": "true" if hatch else "false",
+        "API_TOKEN_FILE": str(token_file),
+        **overrides,
+    }
+    return Settings(_env_file=None, **values)
+
+
+def served_client(settings: Settings) -> TestClient:
+    application = FastAPI()
+
+    @application.get("/sessions")
+    def sessions() -> dict:
+        return {"ok": True}
+
+    @application.get("/healthz")
+    def healthz() -> dict:
+        return {"ok": True}
+
+    install_controller_http_middleware(
+        application,
+        settings=settings,
+        rate_limiter=None,
+        metrics=SimpleNamespace(enabled=False),
+    )
+    return TestClient(application)
+
+
+def fingerprint(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()[:8]
+
+
+# --- Policy -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("scope", "hatch", "token", "required", "satisfiable"),
+    [
+        ("loopback", False, None, True, False),
+        ("loopback", True, None, False, True),
+        ("loopback", False, STRONG_TOKEN, True, True),
+        ("loopback", True, STRONG_TOKEN, True, True),
+        ("exposed", False, None, True, False),
+        ("exposed", True, None, True, False),
+        ("exposed", True, STRONG_TOKEN, True, True),
+    ],
+)
+def test_policy_table(tmp_path: Path, scope: str, hatch: bool, token: str | None, required: bool, satisfiable: bool):
+    overrides = {"API_BIND_SCOPE": scope, **({"API_BEARER_TOKEN": token} if token else {})}
+    policy = resolve_auth_policy(make_settings(tmp_path / "api-token", hatch=hatch, **overrides))
+
+    assert (policy.required, policy.satisfiable) == (required, satisfiable)
+
+
+def test_the_policy_reads_the_escape_hatch_only_when_it_is_really_true(tmp_path: Path):
+    # Some tests pass MagicMock settings, whose every attribute is truthy.
+    settings = SimpleNamespace(
+        api_bind_scope="loopback",
+        model_fields_set=frozenset({"api_bind_scope"}),
+        api_allow_tokenless_loopback="yes",
+    )
+    assert resolve_auth_policy(settings).required
+
+
+@pytest.mark.parametrize(
+    ("app_env", "scope", "hatch", "token", "error", "warning"),
+    [
+        ("development", "loopback", True, None, None, "API_BEARER_TOKEN is unset"),
+        ("development", "loopback", False, None, "API_TOKEN_FILE", None),
+        ("development", "loopback", False, STRONG_TOKEN, None, None),
+        ("development", "exposed", True, None, "API_BEARER_TOKEN is required", None),
+        ("production", "loopback", True, None, "API_BEARER_TOKEN is required", None),
+        ("production", "loopback", False, None, "API_BEARER_TOKEN is required", None),
+        ("production", "loopback", False, STRONG_TOKEN, None, None),
+    ],
+)
+def test_runtime_policy_table(
+    tmp_path: Path,
+    app_env: str,
+    scope: str,
+    hatch: bool,
+    token: str | None,
+    error: str | None,
+    warning: str | None,
+):
+    overrides = {"APP_ENV": app_env, "API_BIND_SCOPE": scope, **({"API_BEARER_TOKEN": token} if token else {})}
+    report = validate_runtime_policy(make_settings(tmp_path / "api-token", hatch=hatch, **overrides))
+
+    auth_errors = [item for item in report.errors if "API_BEARER_TOKEN" in item or "API_TOKEN_FILE" in item]
+    if error is None:
+        assert auth_errors == []
+    else:
+        assert len(auth_errors) == 1 and error in auth_errors[0], report.errors
+    tokenless = [item for item in report.warnings if "API_BEARER_TOKEN is unset" in item]
+    if warning is None:
+        assert tokenless == []
+    else:
+        assert len(tokenless) == 1 and "compose network" in tokenless[0], report.warnings
+
+
+# --- The token file -----------------------------------------------------------
+
+
+def test_a_loopback_controller_generates_a_private_token(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    path = tmp_path / "data" / "api-token"  # the directory does not exist yet
+    settings = make_settings(path)
+
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        ensure_api_credential(settings)
+
+    saved = path.read_text(encoding="utf-8")
+    assert saved.endswith("\n")
+    assert settings.api_bearer_token == saved.strip()
+    assert len(settings.api_bearer_token) >= MIN_PRODUCTION_BEARER_TOKEN_LENGTH
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert any(str(path) in record.getMessage() for record in warnings)
+    assert settings.api_bearer_token not in caplog.text
+
+
+def test_a_second_start_reuses_the_saved_token(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    path = tmp_path / "api-token"
+    first = make_settings(path)
+    ensure_api_credential(first)
+
+    second = make_settings(path)
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        ensure_api_credential(second)
+
+    assert second.api_bearer_token == first.api_bearer_token
+    assert fingerprint(second.api_bearer_token) in caplog.text
+    assert second.api_bearer_token not in caplog.text
+
+
+def test_the_saved_token_is_read_without_the_whitespace_around_it(tmp_path: Path):
+    path = tmp_path / "api-token"
+    path.write_text(f"  {STRONG_TOKEN}\r\n\n", encoding="utf-8")
+    settings = make_settings(path)
+
+    ensure_api_credential(settings)
+
+    assert settings.api_bearer_token == STRONG_TOKEN
+
+
+def test_an_empty_file_is_replaced_with_a_new_token(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    path = tmp_path / "api-token"
+    path.write_text(" \n", encoding="utf-8")
+    settings = make_settings(path)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_api_credential(settings)
+
+    assert len(settings.api_bearer_token) >= MIN_PRODUCTION_BEARER_TOKEN_LENGTH
+    assert path.read_text(encoding="utf-8").strip() == settings.api_bearer_token
+    assert "empty" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "short-token",
+        "has spaces " * 4,
+        "é" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH,
+        "tab\tinside-" + "x" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH,
+    ],
+)
+def test_an_unusable_token_is_refused_not_overwritten(tmp_path: Path, content: str):
+    path = tmp_path / "api-token"
+    path.write_text(content, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="API_TOKEN_FILE") as excinfo:
+        ensure_api_credential(make_settings(path))
+
+    assert path.read_text(encoding="utf-8") == content
+    assert content.strip() not in str(excinfo.value)
+
+
+def test_an_unwritable_location_stops_startup_and_names_the_ways_out(tmp_path: Path):
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("x", encoding="utf-8")
+    path = blocker / "api-token"
+
+    with pytest.raises(RuntimeError) as excinfo:
+        ensure_api_credential(make_settings(path))
+
+    message = str(excinfo.value)
+    for needle in (str(path), "API_TOKEN_FILE", "API_BEARER_TOKEN", "API_ALLOW_TOKENLESS_LOOPBACK"):
+        assert needle in message
+
+
+def test_a_configured_token_wins_and_no_file_is_written(tmp_path: Path):
+    path = tmp_path / "api-token"
+    settings = make_settings(path, API_BEARER_TOKEN=STRONG_TOKEN)
+
+    ensure_api_credential(settings)
+
+    assert settings.api_bearer_token == STRONG_TOKEN
+    assert not path.exists()
+
+
+def test_a_configured_token_ignores_an_existing_file_and_says_so(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    path = tmp_path / "api-token"
+    stale = "f" * 43
+    path.write_text(stale + "\n", encoding="utf-8")
+    settings = make_settings(path, API_BEARER_TOKEN=STRONG_TOKEN)
+
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        ensure_api_credential(settings)
+
+    assert settings.api_bearer_token == STRONG_TOKEN
+    assert path.read_text(encoding="utf-8") == stale + "\n"
+    assert "ignored" in caplog.text and str(path) in caplog.text
+    assert stale not in caplog.text
+
+
+def test_named_tokens_mean_no_file(tmp_path: Path):
+    path = tmp_path / "api-token"
+    settings = make_settings(path, API_BEARER_TOKENS=f"alice:{STRONG_TOKEN}")
+
+    ensure_api_credential(settings)
+
+    assert settings.api_bearer_token is None
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("overrides", [{"API_BIND_SCOPE": "exposed"}, {"APP_ENV": "production"}])
+def test_exposed_or_production_creates_nothing(tmp_path: Path, overrides: dict[str, str]):
+    path = tmp_path / "api-token"
+    settings = make_settings(path, **overrides)
+
+    ensure_api_credential(settings)
+
+    assert settings.api_bearer_token is None
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("overrides", [{"API_BIND_SCOPE": "exposed"}, {"APP_ENV": "production"}])
+def test_an_existing_file_is_used_in_any_scope(tmp_path: Path, overrides: dict[str, str]):
+    path = tmp_path / "api-token"
+    path.write_text(STRONG_TOKEN + "\n", encoding="utf-8")
+    settings = make_settings(path, **overrides)
+
+    ensure_api_credential(settings)
+
+    assert settings.api_bearer_token == STRONG_TOKEN
+
+
+def test_the_escape_hatch_serves_tokenless_and_leaves_the_file_alone(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    path = tmp_path / "api-token"
+    settings = make_settings(path, hatch=True)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_api_credential(settings)
+
+    assert settings.api_bearer_token is None
+    assert not path.exists()
+    assert "API_ALLOW_TOKENLESS_LOOPBACK" in caplog.text
+
+    path.write_text(STRONG_TOKEN + "\n", encoding="utf-8")
+    ensure_api_credential(settings)
+    assert settings.api_bearer_token is None
+
+
+def test_the_escape_hatch_does_not_apply_in_production(tmp_path: Path):
+    path = tmp_path / "api-token"
+    path.write_text(STRONG_TOKEN + "\n", encoding="utf-8")
+    settings = make_settings(path, hatch=True, APP_ENV="production")
+
+    ensure_api_credential(settings)
+
+    assert settings.api_bearer_token == STRONG_TOKEN
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX permission bits")
+def test_a_token_file_others_can_read_is_made_private(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    path = tmp_path / "api-token"
+    path.write_text(STRONG_TOKEN + "\n", encoding="utf-8")
+    os.chmod(path, 0o644)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_api_credential(make_settings(path))
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert "0600" in caplog.text
+
+
+# The two POSIX-only steps, run on every platform through a stand-in `os`.
+
+
+@pytest.mark.parametrize(("mode", "tightened"), [(0o100644, True), (0o100640, True), (0o100600, False)])
+def test_group_or_other_bits_are_removed_with_a_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    mode: int,
+    tightened: bool,
+):
+    path = tmp_path / "api-token"
+    chmods: list[tuple[Path, int]] = []
+    fake_os = SimpleNamespace(
+        name="posix",
+        stat=lambda _path: SimpleNamespace(st_mode=mode),
+        chmod=lambda target, bits: chmods.append((target, bits)),
+    )
+    monkeypatch.setattr(api_token, "os", fake_os)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        api_token._restrict_mode(path)
+
+    assert chmods == ([(path, 0o600)] if tightened else [])
+    assert ("0600" in caplog.text) is tightened
+
+
+@pytest.mark.parametrize(
+    ("euid", "parent_uid", "chowned"),
+    [(0, 1001, True), (0, 0, False), (1001, 1001, False), (None, 1001, False)],
+)
+def test_a_root_written_token_goes_to_the_owner_of_its_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, euid: int | None, parent_uid: int, chowned: bool
+):
+    path = tmp_path / "api-token"
+    chowns: list[tuple[Path, int, int]] = []
+    fake_os = SimpleNamespace(
+        stat=lambda _path: SimpleNamespace(st_uid=parent_uid, st_gid=parent_uid + 1),
+        chown=lambda target, uid, gid: chowns.append((target, uid, gid)),
+    )
+    if euid is not None:  # Windows has no geteuid
+        fake_os.geteuid = lambda: euid
+    monkeypatch.setattr(api_token, "os", fake_os)
+
+    api_token._match_parent_owner(path)
+
+    assert chowns == ([(path, parent_uid, parent_uid + 1)] if chowned else [])
+
+
+def test_a_failed_chown_warns_and_startup_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    def refuse(*_args: object) -> None:
+        raise PermissionError("operation not permitted")
+
+    fake_os = SimpleNamespace(
+        geteuid=lambda: 0,
+        stat=lambda _path: SimpleNamespace(st_uid=1001, st_gid=1001),
+        chown=refuse,
+    )
+    monkeypatch.setattr(api_token, "os", fake_os)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        api_token._match_parent_owner(tmp_path / "api-token")
+
+    assert "operation not permitted" in caplog.text
+
+
+# --- Served requests ------------------------------------------------------------
+
+
+def test_without_a_credential_or_the_escape_hatch_loopback_requests_are_refused(tmp_path: Path):
+    client = served_client(make_settings(tmp_path / "api-token"))
+
+    assert client.get("/sessions").status_code == 401
+    assert client.get("/sessions", headers={"Host": "localhost"}).status_code == 401
+    assert client.get("/healthz").status_code == 200
+
+
+def test_the_generated_token_is_demanded_and_accepted(tmp_path: Path):
+    settings = make_settings(tmp_path / "api-token")
+    ensure_api_credential(settings)
+    client = served_client(settings)
+
+    assert client.get("/sessions").status_code == 401
+    assert client.get("/sessions", headers={"Authorization": f"Bearer {settings.api_bearer_token}"}).status_code == 200
+    # browser-node, or any container on the compose network, forging a loopback Host.
+    assert client.get("/sessions", headers={"Host": "localhost"}).status_code == 401
+    assert client.get("/healthz").status_code == 200
+
+
+def test_the_controller_lifespan_generates_and_enforces_the_token(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    import app.main as main_module
+
+    path = tmp_path / "api-token"
+    if main_module.rate_limiter is not None:
+        main_module.rate_limiter._events.clear()
+    with ExitStack() as stack:
+        for service, method_name in (
+            (main_module.manager, "startup"),
+            (main_module.manager, "shutdown"),
+            (main_module.job_queue, "startup"),
+            (main_module.job_queue, "shutdown"),
+            (main_module.cron_service, "startup"),
+            (main_module.cron_service, "shutdown"),
+            (main_module.maintenance, "startup"),
+            (main_module.maintenance, "shutdown"),
+        ):
+            stack.enter_context(patch.object(service, method_name, new=AsyncMock()))
+        stack.enter_context(patch.object(main_module.manager, "list_sessions", new=AsyncMock(return_value=[])))
+        # patch.object puts each value back afterwards, the generated token included.
+        stack.enter_context(patch.object(main_module.settings, "api_bearer_token", None))
+        stack.enter_context(patch.object(main_module.settings, "api_bearer_tokens", ""))
+        stack.enter_context(patch.object(main_module.settings, "api_allow_tokenless_loopback", False))
+        stack.enter_context(patch.object(main_module.settings, "api_token_file", str(path)))
+        caplog.set_level(logging.INFO)
+        client = stack.enter_context(TestClient(main_module.app))
+
+        token = path.read_text(encoding="utf-8").strip()
+        assert client.get("/sessions").status_code == 401
+        assert client.get("/sessions", headers={"Host": "localhost"}).status_code == 401
+        assert client.get("/sessions", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+        for public in ("/healthz", "/dashboard"):
+            assert client.get(public).status_code == 200, public
+
+    assert token not in caplog.text
+    assert main_module.settings.api_bearer_token is None

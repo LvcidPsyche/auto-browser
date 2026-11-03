@@ -128,12 +128,16 @@ class UnverifiedIdentityTests(unittest.TestCase):
         self.assertEqual(body["source"], "header", "one shared credential cannot distinguish operators")
 
     def test_an_unauthenticated_loopback_request_is_still_attributed_by_header(self) -> None:
-        body = client_for(API_BIND_SCOPE="loopback").get("/whoami", headers={"X-Operator-Id": "local-dev"}).json()
+        body = (
+            client_for(API_BIND_SCOPE="loopback", API_ALLOW_TOKENLESS_LOOPBACK="true")
+            .get("/whoami", headers={"X-Operator-Id": "local-dev"})
+            .json()
+        )
         self.assertEqual(body["id"], "local-dev")
         self.assertEqual(body["source"], "header")
 
     def test_no_claim_at_all_is_anonymous(self) -> None:
-        body = client_for(API_BIND_SCOPE="loopback").get("/whoami").json()
+        body = client_for(API_BIND_SCOPE="loopback", API_ALLOW_TOKENLESS_LOOPBACK="true").get("/whoami").json()
         self.assertEqual(body["id"], "anonymous")
         self.assertEqual(body["source"], "anonymous")
 

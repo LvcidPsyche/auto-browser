@@ -94,10 +94,22 @@ class AuthPolicyTests(unittest.TestCase):
         self.assertTrue(policy.required)
         self.assertTrue(policy.satisfiable)
 
-    def test_loopback_without_a_token_stays_open_for_local_development(self) -> None:
-        policy = resolve_auth_policy(settings(API_BIND_SCOPE=BIND_SCOPE_LOOPBACK))
+    def test_loopback_without_a_token_stays_open_with_the_escape_hatch(self) -> None:
+        policy = resolve_auth_policy(settings(API_BIND_SCOPE=BIND_SCOPE_LOOPBACK, API_ALLOW_TOKENLESS_LOOPBACK="true"))
         self.assertFalse(policy.required)
         self.assertTrue(policy.satisfiable)
+
+    def test_loopback_without_a_token_or_the_escape_hatch_is_required_and_unsatisfiable(self) -> None:
+        # Startup generates a token before this is consulted (app/api_token.py); if none
+        # was loaded, the answer is "no request is authorised", never "every request is".
+        policy = resolve_auth_policy(settings(API_BIND_SCOPE=BIND_SCOPE_LOOPBACK, API_ALLOW_TOKENLESS_LOOPBACK="false"))
+        self.assertTrue(policy.required)
+        self.assertFalse(policy.satisfiable)
+
+    def test_the_escape_hatch_never_opens_an_exposed_api(self) -> None:
+        policy = resolve_auth_policy(settings(API_BIND_SCOPE=BIND_SCOPE_EXPOSED, API_ALLOW_TOKENLESS_LOOPBACK="true"))
+        self.assertTrue(policy.required)
+        self.assertFalse(policy.satisfiable)
 
     def test_exposed_without_a_token_is_required_and_unsatisfiable(self) -> None:
         policy = resolve_auth_policy(settings(API_BIND_SCOPE=BIND_SCOPE_EXPOSED))
@@ -135,10 +147,19 @@ class RuntimePolicyAuthTests(unittest.TestCase):
         )
         self.assertEqual([e for e in report.errors if "API_BEARER_TOKEN" in e], [])
 
-    def test_loopback_without_a_token_warns_but_starts(self) -> None:
-        report = validate_runtime_policy(settings(APP_ENV="development", API_BIND_SCOPE=BIND_SCOPE_LOOPBACK))
+    def test_loopback_without_a_token_warns_but_starts_with_the_escape_hatch(self) -> None:
+        report = validate_runtime_policy(
+            settings(APP_ENV="development", API_BIND_SCOPE=BIND_SCOPE_LOOPBACK, API_ALLOW_TOKENLESS_LOOPBACK="true")
+        )
         self.assertTrue(report.ok)
         self.assertTrue(any("API_BEARER_TOKEN is unset" in warning for warning in report.warnings))
+
+    def test_loopback_without_a_token_or_the_escape_hatch_does_not_start(self) -> None:
+        report = validate_runtime_policy(
+            settings(APP_ENV="development", API_BIND_SCOPE=BIND_SCOPE_LOOPBACK, API_ALLOW_TOKENLESS_LOOPBACK="false")
+        )
+        self.assertFalse(report.ok)
+        self.assertTrue(any("API_TOKEN_FILE" in error for error in report.errors), report.errors)
 
     def test_production_still_requires_a_token_on_a_loopback_bind(self) -> None:
         """APP_ENV=production keeps its own floor; bind scope only widens it."""
@@ -185,9 +206,17 @@ class ServedRequestTests(unittest.TestCase):
         response = self._client(API_BIND_SCOPE=BIND_SCOPE_EXPOSED).get("/healthz")
         self.assertEqual(response.status_code, 200)
 
-    def test_loopback_and_tokenless_still_serves_local_development(self) -> None:
-        response = self._client(API_BIND_SCOPE=BIND_SCOPE_LOOPBACK).get("/sessions")
+    def test_loopback_and_tokenless_serves_local_development_with_the_escape_hatch(self) -> None:
+        response = self._client(API_BIND_SCOPE=BIND_SCOPE_LOOPBACK, API_ALLOW_TOKENLESS_LOOPBACK="true").get(
+            "/sessions"
+        )
         self.assertEqual(response.status_code, 200)
+
+    def test_loopback_and_tokenless_refuses_every_request_without_the_escape_hatch(self) -> None:
+        client = self._client(API_BIND_SCOPE=BIND_SCOPE_LOOPBACK, API_ALLOW_TOKENLESS_LOOPBACK="false")
+        self.assertEqual(client.get("/sessions").status_code, 401)
+        # A container on the compose network forging a loopback name gets no further.
+        self.assertEqual(client.get("/sessions", headers={"Host": "localhost"}).status_code, 401)
 
     def test_a_configured_token_is_demanded_and_accepted(self) -> None:
         client = self._client(API_BIND_SCOPE=BIND_SCOPE_EXPOSED, API_BEARER_TOKEN=STRONG_TOKEN)
@@ -231,8 +260,14 @@ class ServedRequestTests(unittest.TestCase):
                 self.assertEqual(client.get("/sessions", headers={"Authorization": header}).status_code, 401)
 
     def test_a_whitespace_only_token_counts_as_unset(self) -> None:
-        loopback = self._client(API_BIND_SCOPE=BIND_SCOPE_LOOPBACK, API_BEARER_TOKEN="  ")
+        loopback = self._client(
+            API_BIND_SCOPE=BIND_SCOPE_LOOPBACK, API_BEARER_TOKEN="  ", API_ALLOW_TOKENLESS_LOOPBACK="true"
+        )
         self.assertEqual(loopback.get("/sessions").status_code, 200)
+        closed = self._client(
+            API_BIND_SCOPE=BIND_SCOPE_LOOPBACK, API_BEARER_TOKEN="  ", API_ALLOW_TOKENLESS_LOOPBACK="false"
+        )
+        self.assertEqual(closed.get("/sessions", headers={"Authorization": "Bearer   "}).status_code, 401)
         # Before, 40 spaces cleared the 32-character floor and started, and "Bearer" plus the
         # same spaces authenticated under httptools: a guessable credential.
         for blank in ("  ", " " * (MIN_PRODUCTION_BEARER_TOKEN_LENGTH + 8)):
@@ -263,6 +298,12 @@ class ShippedComposeDeclarationTests(unittest.TestCase):
         text = self._compose("docker-compose.yml")
         self.assertIn("API_BIND_SCOPE: ${API_BIND_SCOPE:-loopback}", text)
         self.assertIn('"127.0.0.1:${API_PORT:-8000}:8000"', text)
+
+    def test_base_compose_pins_the_token_file_and_keeps_the_escape_hatch_off(self) -> None:
+        # Pinned, so a host path in .env cannot move the token where clients do not look.
+        text = self._compose("docker-compose.yml")
+        self.assertIn("API_TOKEN_FILE: /data/api-token\n", text)
+        self.assertIn("API_ALLOW_TOKENLESS_LOOPBACK: ${API_ALLOW_TOKENLESS_LOOPBACK:-false}", text)
 
     def test_codespaces_overlay_declares_exposed_because_it_publishes_widely(self) -> None:
         text = self._compose("docker-compose.codespaces.yml")

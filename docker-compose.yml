@@ -93,11 +93,20 @@ services:
       APP_ENV: ${APP_ENV:-development}
       API_BEARER_TOKEN: ${API_BEARER_TOKEN:-}
       # Declares what the publish mapping below already does: this API is bound
-      # to 127.0.0.1 and is not reachable off-box, which is the only reason it
-      # may run without a token. The controller cannot see the host publish
-      # mapping itself, and the setting defaults to `exposed`, so a compose file
-      # that publishes on 0.0.0.0 without saying so refuses to start.
+      # to 127.0.0.1 and is not reachable off-box. The controller cannot see the
+      # host publish mapping itself, and the setting defaults to `exposed`, so a
+      # compose file that publishes on 0.0.0.0 without saying so refuses to start.
+      # Loopback is not a reason to go without a token: every container on this
+      # network can reach port 8000. With API_BEARER_TOKEN unset, the controller
+      # generates a token in API_TOKEN_FILE on first start and demands it.
       API_BIND_SCOPE: ${API_BIND_SCOPE:-loopback}
+      # Pinned like ARTIFACT_ROOT, so a host path in .env cannot point it
+      # elsewhere: /data/api-token is ./data/api-token on the host, where the
+      # stdio bridge, the scripts and the dashboard's user read it. No other
+      # service mounts the /data root.
+      API_TOKEN_FILE: /data/api-token
+      # true restores the old tokenless loopback API (see .env.example).
+      API_ALLOW_TOKENLESS_LOOPBACK: ${API_ALLOW_TOKENLESS_LOOPBACK:-false}
       CONTROLLER_ALLOWED_HOSTS: ${CONTROLLER_ALLOWED_HOSTS:-localhost,127.0.0.1,::1,testserver}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       BROWSER_WS_ENDPOINT_FILE: /data/browser-profile/browser-ws-endpoint.txt

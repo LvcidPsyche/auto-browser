@@ -73,6 +73,7 @@ for _name, _relative in {
     "COMPLIANCE_MANIFEST_PATH": "compliance-manifest.json",
     "REMOTE_ACCESS_INFO_PATH": "tunnels/reverse-ssh.json",
     "ISOLATED_TUNNEL_INFO_ROOT": "tunnels/sessions",
+    "API_TOKEN_FILE": "api-token",
 }.items():
     os.environ[_name] = os.path.join(_DATA_ROOT, _relative)
 
@@ -82,6 +83,13 @@ for _name, _relative in {
 # production-safety default it does not model. Tests that exercise the exposed
 # path build their own Settings and must not rely on this.
 os.environ.setdefault("API_BIND_SCOPE", "loopback")
+
+# A loopback controller with no API_BEARER_TOKEN now generates a token in
+# API_TOKEN_FILE and demands it (app/api_token.py). Most of the suite was written
+# for the old default, a tokenless loopback API, and sends no Authorization
+# header; the escape hatch keeps modelling that. Tests of the new default
+# (test_api_token.py) and of tokenless mode itself set it explicitly.
+os.environ.setdefault("API_ALLOW_TOKENLESS_LOOPBACK", "true")
 
 # A tokenless loopback controller answers only to loopback Host names unless
 # CONTROLLER_ALLOWED_HOSTS says otherwise (app/middleware/http.py) — the guard
