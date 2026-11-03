@@ -264,15 +264,19 @@ def answered(request: object, status: int) -> SimpleNamespace:
     return SimpleNamespace(status=status, request=request, url=request.url)
 
 
-def test_a_refused_hop_answered_204_clears_its_mark_as_playwright_1_64_reports_it(tmp_path: Path) -> None:
+@pytest.mark.parametrize("status", [204, 205])
+def test_a_refused_hop_answered_no_content_clears_its_mark_as_playwright_1_64_reports_it(
+    tmp_path: Path, status: int
+) -> None:
     """Up to 1.62 the aborted 204 came as requestfailed. From 1.64 it comes as a 204 response and then
-    requestfinished, so the mark stayed and the page read as refused until its next commit."""
+    requestfinished, so the mark stayed and the page read as refused until its next commit. Chromium aborts a
+    205 the same way."""
     manager = manager_for(tmp_path)
     page = listened_page(manager)
     hop = NavigationRequest(page, f"{REFUSED}/no-content")
 
     page.fire("request", hop)
-    page.fire("response", answered(hop, 204))
+    page.fire("response", answered(hop, status))
     page.fire("requestfinished", hop)
 
     assert not manager._page_refused(page)
