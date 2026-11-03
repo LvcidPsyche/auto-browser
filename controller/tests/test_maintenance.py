@@ -143,3 +143,103 @@ class MaintenanceServiceTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StartupSweepInBackgroundTests(unittest.IsolatedAsyncioTestCase):
+    """CLEANUP_ON_STARTUP's sweep runs after startup, not inside it: on a 20,000-file Docker Desktop bind mount the
+    lifespan awaited it for ~150 s, and /readyz did not answer until it finished."""
+
+    async def asyncSetUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        root = Path(self.tempdir.name)
+        self.settings = Settings(
+            _env_file=None,
+            ARTIFACT_ROOT=str(root / "artifacts"),
+            UPLOAD_ROOT=str(root / "uploads"),
+            AUTH_ROOT=str(root / "auth"),
+            CLEANUP_ON_STARTUP="true",
+            CLEANUP_INTERVAL_SECONDS="0",
+            ARTIFACT_RETENTION_HOURS="1",
+            UPLOAD_RETENTION_HOURS="1",
+            AUTH_RETENTION_HOURS="1",
+        )
+        for path in (self.settings.artifact_root, self.settings.upload_root, self.settings.auth_root):
+            Path(path).mkdir(parents=True, exist_ok=True)
+        self.active_sessions: list[ActiveSession] = []
+        self.service = MaintenanceService(self.settings, session_provider=lambda: self.active_sessions)
+
+    async def asyncTearDown(self) -> None:
+        await self.service.shutdown()
+
+    def _block_the_walk(self) -> threading.Event:
+        release = threading.Event()
+        original = self.service._cleanup_root
+
+        def slow(root, retention, protected):
+            release.wait(5)
+            return original(root, retention, protected)
+
+        self.service._cleanup_root = slow  # type: ignore[method-assign]
+        return release
+
+    async def test_startup_returns_before_the_sweep_finishes(self) -> None:
+        release = self._block_the_walk()
+        started = time.monotonic()
+        with self.assertLogs("app.maintenance", level="INFO") as logs:
+            await asyncio.wait_for(self.service.startup(), timeout=1)
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertIsNone(self.service.last_report)  # still running
+            release.set()
+            for _ in range(100):
+                if self.service.last_report is not None:
+                    break
+                await asyncio.sleep(0.05)
+        self.assertIsNotNone(self.service.last_report)
+        text = "\n".join(logs.output)
+        self.assertIn("startup cleanup sweep started", text)
+        self.assertRegex(text, r"startup cleanup sweep finished in [0-9.]+s: \d+ files and \d+ dirs removed")
+
+    async def test_shutdown_cancels_a_running_sweep_and_stops_its_walk(self) -> None:
+        stale = Path(self.settings.artifact_root) / "old"
+        stale.mkdir()
+        for index in range(50):
+            path = stale / f"{index}.txt"
+            path.write_text("x", encoding="utf-8")
+            utime(path, (1_000_000_000, 1_000_000_000))
+        release = self._block_the_walk()
+        await self.service.startup()
+        task = self.service._startup_task
+        self.assertIsNotNone(task)
+        shutdown = asyncio.create_task(self.service.shutdown())
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.wait_for(shutdown, timeout=5)
+        self.assertTrue(task.done())
+        self.assertTrue(task.cancelled())
+        # The walk saw the abort flag before deleting anything.
+        await asyncio.sleep(0.2)
+        self.assertEqual(len(list(stale.iterdir())), 50)
+
+    async def test_the_background_sweep_skips_live_sessions(self) -> None:
+        live = Path(self.settings.artifact_root) / "live-session"
+        live.mkdir()
+        old_file = live / "trace.zip"
+        old_file.write_text("x", encoding="utf-8")
+        utime(old_file, (1_000_000_000, 1_000_000_000))
+        utime(live, (1_000_000_000, 1_000_000_000))
+        self.active_sessions.append(ActiveSession(artifact_dir=live))
+        await self.service.startup()
+        await asyncio.wait_for(self.service._startup_task, timeout=5)
+        self.assertTrue(old_file.exists())
+        self.assertEqual(self.service.last_report["roots"][0]["skipped_protected"], 1)
+
+
+@unittest.skipUnless((Path(__file__).resolve().parents[1] / "app" / "main.py").is_file(), "")
+class LifespanWiringTests(unittest.TestCase):
+    def test_the_lifespan_does_not_await_a_sweep(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "app" / "maintenance.py").read_text(encoding="utf-8")
+        begin = source.index("    async def startup(self)")
+        startup = source[begin : source.index("\n    async def ", begin + 1)]
+        self.assertNotIn("await self.run_cleanup()", startup)
+        self.assertIn("asyncio.create_task(self._startup_sweep()", startup)

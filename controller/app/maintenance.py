@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +50,10 @@ class MaintenanceService:
         self.settings = settings
         self.session_provider = session_provider
         self._task: asyncio.Task | None = None
+        # CLEANUP_ON_STARTUP's sweep, run in the background after startup (see startup()).
+        self._startup_task: asyncio.Task | None = None
+        # Set on shutdown: the walk runs in a thread that cancelling its task cannot stop, so it checks this.
+        self._abort = threading.Event()
         self._stop_event = asyncio.Event()
         self._lock = asyncio.Lock()
         self._last_report: CleanupReport | None = None
@@ -58,13 +64,47 @@ class MaintenanceService:
 
     async def startup(self) -> None:
         self._stop_event.clear()
+        self._abort.clear()
         if self.settings.cleanup_on_startup:
-            await self.run_cleanup()
+            # In the background: awaited here, the sweep held the lifespan (and so /readyz and the API) for ~150 s
+            # over 20,000 files on a Docker Desktop bind mount. It cannot race a session that starts meanwhile: it
+            # protects every live session's directories, takes only entries older than the retention cutoff (a new
+            # session's are not), and shares the loop's lock.
+            self._startup_task = asyncio.create_task(self._startup_sweep(), name="maintenance-startup-sweep")
         if self.settings.cleanup_interval_seconds > 0:
             self._task = asyncio.create_task(self._run_loop(), name="maintenance-cleanup-loop")
 
+    async def _startup_sweep(self) -> None:
+        logger.info("startup cleanup sweep started")
+        started = time.monotonic()
+        try:
+            report = await self.run_cleanup()
+        except asyncio.CancelledError:
+            logger.info("startup cleanup sweep cancelled")
+            raise
+        except Exception:
+            logger.exception("startup cleanup sweep failed")
+            return
+        roots = report["roots"]
+        logger.info(
+            "startup cleanup sweep finished in %.1fs: %d files and %d dirs removed, %d recent and %d protected kept",
+            time.monotonic() - started,
+            sum(item["deleted_files"] for item in roots),
+            sum(item["deleted_dirs"] for item in roots),
+            sum(item["skipped_recent"] for item in roots),
+            sum(item["skipped_protected"] for item in roots),
+        )
+
     async def shutdown(self) -> None:
         self._stop_event.set()
+        self._abort.set()
+        if self._startup_task is not None:
+            self._startup_task.cancel()
+            try:
+                await self._startup_task
+            except asyncio.CancelledError:
+                pass
+            self._startup_task = None
         if self._task is not None:
             self._task.cancel()
             try:
@@ -134,7 +174,20 @@ class MaintenanceService:
         # session being created (not yet in session_provider) lost its fresh,
         # still-empty artifact or upload directory, and its later writes failed.
         stale_dirs: set[Path] = set()
-        for path in sorted(root.rglob("*"), key=lambda item: (item.is_file(), len(item.parts))):
+        # Listing the tree is most of the cost on a slow mount (a Docker Desktop bind mount), so shutdown is
+        # checked while listing too: the thread outlives its cancelled task, and the process waits for it at exit.
+        # The sort key stats each entry (is_file), so it is computed here, between abort checks, not inside sorted().
+        entries: list[tuple[tuple[bool, int], Path]] = []
+        for item in root.rglob("*"):
+            if self._abort.is_set():
+                logger.info("cleanup walk of %s stopped for shutdown", root)
+                return stats
+            entries.append(((item.is_file(), len(item.parts)), item))
+        entries.sort(key=lambda pair: pair[0])
+        for _, path in entries:
+            if self._abort.is_set():
+                logger.info("cleanup walk of %s stopped for shutdown", root)
+                return stats
             if path.name == ".gitkeep":
                 continue
             resolved = path.resolve()
@@ -168,6 +221,9 @@ class MaintenanceService:
         for path in sorted(
             (item for item in root.rglob("*") if item.is_dir()), key=lambda item: len(item.parts), reverse=True
         ):
+            if self._abort.is_set():
+                logger.info("cleanup walk of %s stopped for shutdown", root)
+                return stats
             if path not in stale_dirs:
                 continue
             resolved = path.resolve()
