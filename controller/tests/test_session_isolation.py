@@ -156,6 +156,7 @@ class FakeDockerContainers:
         self.events = events if events is not None else []
         # When set, run() writes it as browser-sandbox.json, as browser-node's server.mjs does before its endpoint.
         self.sandbox_state: dict | None = None
+        self.start_fails_after_write = False
         # When set, run() writes no endpoint and the container is already exited (a refused browser).
         self.exit_before_endpoint = False
         # The cleanup helper's runs; cleanup_fails makes it leave the files (a helper that could not run).
@@ -190,6 +191,11 @@ class FakeDockerContainers:
             # As server.mjs writes it: naming this run's endpoint, unless the test says otherwise.
             state = {"endpoint": endpoint, **self.sandbox_state}
             (profile_dir / "browser-sandbox.json").write_text(json.dumps(state), encoding="utf-8")
+        if self.start_fails_after_write:
+            # Started, wrote into its profile, then failed: containers.run raises with the files left behind.
+            (profile_dir / "Default").mkdir(exist_ok=True)
+            (profile_dir / "Default" / "Cookies").write_text("secret", encoding="utf-8")
+            raise RuntimeError("container start failed")
         if not self.exit_before_endpoint:
             (profile_dir / "browser-ws-endpoint.txt").write_text(endpoint, encoding="utf-8")
         container = FakeDockerContainer(
