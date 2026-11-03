@@ -171,6 +171,7 @@ def run_readiness_checks(
     request_gates: dict[str, Any] | None = None,
     window_births: dict[str, Any] | None = None,
     browser_sandbox: dict[str, Any] | None = None,
+    controller_user: Any = None,
 ) -> ReadinessReport:
     checks: list[ReadinessCheck] = []
 
@@ -438,6 +439,12 @@ def run_readiness_checks(
 
     if browser_sandbox is not None:
         checks.append(browser_sandbox_check(browser_sandbox))
+
+    # Who the controller runs as (app/run_as.py); not reported where there are no POSIX user ids.
+    if controller_user is not None and getattr(controller_user, "euid", None) is not None:
+        from .run_as import controller_user_check
+
+        checks.append(controller_user_check(controller_user))
 
     statuses = {check.status for check in checks}
     if "fail" in statuses:

@@ -88,9 +88,9 @@ class ComposeHardeningTests(unittest.TestCase):
         self.assertRegex(block, r"(?m)^    pids_limit: 2048$")
 
     def test_the_controller_sets_only_no_new_privileges(self) -> None:
-        """It keeps its capabilities and root user: a non-root or capability-
-        dropped controller breaks existing /data, docker.sock and CLI-auth
-        setups."""
+        """No compose `user:` or dropped capabilities: its entrypoint needs root
+        (CHOWN, SETUID/SETGID) to hand /data to the user it then runs as
+        (controller/entrypoint.sh, app/run_as.py), and never stays root."""
         block = _service_block(self.compose, "controller")
         self.assertEqual(_flow_list(block, "security_opt"), ["no-new-privileges:true"])
         for key in ("cap_drop", "cap_add", "user", "read_only", "mem_limit"):

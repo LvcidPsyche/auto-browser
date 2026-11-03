@@ -141,6 +141,10 @@ services:
       # Handed to every docker_ephemeral browser container, with the seccomp
       # profile (ISOLATED_BROWSER_SECCOMP_PROFILE) unless it is off.
       BROWSER_SANDBOX: ${BROWSER_SANDBOX:-auto}
+      # The controller runs as the owner of ./data, or as uid 10001 when that
+      # is root (controller/entrypoint.sh). root restores the old root
+      # controller: not recommended, and readiness warns.
+      CONTROLLER_RUN_AS: ${CONTROLLER_RUN_AS:-auto}
       TAKEOVER_URL: ${TAKEOVER_URL:-http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale}
       REMOTE_ACCESS_INFO_PATH: ${REMOTE_ACCESS_INFO_PATH:-/data/tunnels/reverse-ssh.json}
       REMOTE_ACCESS_STALE_AFTER_SECONDS: ${REMOTE_ACCESS_STALE_AFTER_SECONDS:-45}

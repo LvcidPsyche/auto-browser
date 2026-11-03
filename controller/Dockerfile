@@ -45,8 +45,18 @@ COPY app ./app
 COPY tests ./tests
 COPY pyproject.toml ./pyproject.toml
 
-RUN mkdir -p /data/artifacts /data/uploads /data/auth /data/approvals /data/audit /data/db /data/jobs /data/sessions /data/browser-sessions /data/tunnels /data/cli-home
+RUN mkdir -p /data/artifacts /data/uploads /data/auth /data/approvals /data/audit /data/db /data/jobs /data/sessions /data/browser-sessions /data/tunnels /data/cli-home \
+    && chown -R 10001:10001 /data
+
+# uvicorn never runs as root: entrypoint.sh (as root only until setpriv) runs it as the owner of /data, or as this
+# user when /data belongs to root (Docker Desktop bind mounts, named volumes). Its home is sticky and world-writable
+# because a host user's uid may run here too. CONTROLLER_RUN_AS=root keeps the old root controller.
+RUN useradd --uid 10001 --user-group --create-home --home-dir /home/controller --shell /usr/sbin/nologin controller \
+    && chmod 1777 /home/controller
+COPY entrypoint.sh /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 EXPOSE 8000
 
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

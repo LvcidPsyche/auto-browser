@@ -236,6 +236,15 @@ jobs:
             echo "data/api-token is '$token_file', not '600 runner'" >&2
             exit 1
           fi
+          # The controller runs as the owner of ./data (the runner here), never root, so the
+          # runner keeps its files and its token (controller/entrypoint.sh, app/run_as.py).
+          data_owner="$(stat -c '%u' data)"
+          controller_uid="$(docker compose exec -T controller awk '/^Uid:/ {print $2}' /proc/1/status)"
+          echo "controller uid $controller_uid, ./data owner $data_owner"
+          if [ "$controller_uid" != "$data_owner" ] || [ "$controller_uid" = "0" ]; then
+            echo "the controller runs as uid $controller_uid, not as the owner of ./data ($data_owner)" >&2
+            exit 1
+          fi
 
       - name: Check browser-node serves VNC only through noVNC
         # x11vnc listened on TCP 5900, where libvncserver takes a WebSocket from any

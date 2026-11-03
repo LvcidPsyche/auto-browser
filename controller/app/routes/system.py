@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, Response
 from ..audit import get_current_operator
 from ..browser_sandbox import browser_sandbox_status
 from ..readiness import run_readiness_checks
+from ..run_as import controller_user_status
 
 # A readiness probe must answer within a probe interval, not within the
 # session-creation retry budget (CONNECT_RETRIES x CONNECT_RETRY_DELAY_SECONDS,
@@ -177,6 +178,7 @@ def create_system_router(
             request_gates=manager.request_gates.status(),
             window_births=manager.window_births.status(),
             browser_sandbox=browser_sandbox_status(settings, manager.runtime_provisioner),
+            controller_user=controller_user_status(),
         )
         return JSONResponse(
             content=report.to_dict(),
