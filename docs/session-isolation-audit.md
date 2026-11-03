@@ -15,7 +15,7 @@ Two real concerns remain. One is acknowledged in `docs/architecture.md` as a POC
 | Mode | Browser process | Browser context | Takeover surface | Network |
 |------|-----------------|-----------------|-------------------|---------|
 | `shared_browser_node` (default) | Shared (one Chromium) | Isolated per session via `new_context()` | Shared (one X display, one noVNC) | One browser on the compose network |
-| `docker_ephemeral` | Isolated (one container per session) | Isolated per session | Per-session noVNC, optional per-session reverse-SSH | Per session (`ISOLATED_BROWSER_NETWORK_MODE=per_session`, the default): the browser reaches the controller, the internet and other sessions' published noVNC ports (each behind its own random VNC password), not their Playwright servers. `shared` puts all on one network |
+| `docker_ephemeral` | Isolated (one container per session) | Isolated per session | Per-session noVNC, optional per-session reverse-SSH | Per session (`ISOLATED_BROWSER_NETWORK_MODE=per_session`, the default): the browser reaches the internet and other sessions' published noVNC ports; the controller refuses it with 403 (each behind its own random VNC password), not their Playwright servers. `shared` puts all on one network |
 
 ### Per-session networks: what remains reachable
 
@@ -24,9 +24,19 @@ in one session could open another session's Playwright server (`:9223/json`, whi
 browser), its noVNC (`:6080`), and the shared browser-node. Each session's browser now has its own
 bridge network that only it and the controller join. What it still reaches:
 
-- **The controller API**, at the controller's address on the session network (the controller listens
-  on `0.0.0.0:8000`). Without a bearer token that is control of every session. Per-session networks
-  do not change this; refusing requests from session subnets would.
+- **The controller's address on the session network, but not its API.** The controller joins each
+  session network to reach the browser, and refuses every request from one with 403 (by the direct
+  peer address, before the Host check, the rate limiter and the token check; forwarded-for headers
+  are ignored). It tracks each live session network's subnet and forgets it once it has left the
+  network. Browser containers never call the controller, so nothing legitimate is refused. Shared
+  mode tracks nothing: the shared network can hold legitimate callers.
+- **The controller API through the host, on Docker Desktop.** Measured on Docker Desktop 29.9: a
+  session container reaches the API port published on `127.0.0.1` at `host.docker.internal:8000`,
+  and the controller sees that request from the compose network's gateway (`172.18.0.1` here), the
+  same address the host's own requests come from, so the 403 cannot tell it apart. The Host
+  allowlist refuses `Host: host.docker.internal` (400), and with a forged `Host: localhost` the token
+  check answers 401: the API token is the guard on this path. Linux does not give browser containers
+  `host.docker.internal`, and the API is published on loopback only (not measured on Linux).
 - **Every session's published noVNC (6080), whatever `ISOLATED_BROWSER_BIND_HOST` is.** Measured on
   Docker Desktop 29.9: from session A's container, session B's 6080 answers at B's container address
   (Docker accepts traffic to a published port from other bridges) and at `host.docker.internal:<port>`

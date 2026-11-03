@@ -116,8 +116,8 @@ python3 "${ROOT_DIR}/scripts/check_vnc_exposure.py" "${CONTAINER_NAME}" "${NOVNC
 
 # Cross-session probe: a second session, B, on its own network. From A's
 # browser container, B's Playwright server and the shared browser-node must be
-# unreachable, by name and by address. The controller stays reachable from
-# every session (it joins each network), which is expected for now.
+# unreachable, by name and by address. The controller joins each network but
+# refuses every request from one with 403.
 B_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions" -X POST -H 'content-type: application/json' -d '{"name":"isolated-smoke-b","start_url":"https://example.com"}')"
 read -r B_SESSION_ID B_CONTAINER_NAME B_NETWORK <<<"$(python3 - <<'PY' "${B_JSON}"
 import json
@@ -248,12 +248,16 @@ fi
 must_fail_from_a "browser-node by name" getent hosts browser-node
 # No -f: any HTTP answer from the Playwright server would be a reach.
 must_fail_from_a "browser-node:9223 at ${BROWSER_NODE_IP}" curl -sS --max-time 3 -o /dev/null "http://${BROWSER_NODE_IP}:9223/"
-CONTROLLER_STATUS="$(docker exec "${CONTAINER_NAME}" curl -sS --max-time 3 -o /dev/null -w '%{http_code}' "http://${CONTROLLER_IP_ON_A}:8000/readyz" || true)"
-if [[ -z "${CONTROLLER_STATUS}" || "${CONTROLLER_STATUS}" == "000" ]]; then
-  echo >&2 "expected the controller to answer from A at ${CONTROLLER_IP_ON_A}:8000, got '${CONTROLLER_STATUS}'"
-  exit 1
-fi
-echo "probe ok: A reaches the controller at ${CONTROLLER_IP_ON_A}:8000 (HTTP ${CONTROLLER_STATUS}; expected for now)"
+# The controller is on A's network (it joined to reach A's browser), but it refuses
+# every request from a session network with 403, before the Host check and auth.
+for path in /healthz /readyz /sessions /mcp; do
+  CONTROLLER_STATUS="$(docker exec "${CONTAINER_NAME}" curl -sS --max-time 3 -o /dev/null -w '%{http_code}' "http://${CONTROLLER_IP_ON_A}:8000${path}" || true)"
+  if [[ "${CONTROLLER_STATUS}" != "403" ]]; then
+    echo >&2 "expected 403 from the controller at ${CONTROLLER_IP_ON_A}:8000${path} for session A, got '${CONTROLLER_STATUS}'"
+    exit 1
+  fi
+done
+echo "probe ok: the controller refuses session A at ${CONTROLLER_IP_ON_A}:8000 with 403 (/healthz /readyz /sessions /mcp)"
 # The overlay's sysctl is set when the controller starts; it has since joined A's
 # and B's networks. It must still not forward between them.
 CONTROLLER_FORWARD="$(docker exec "${CONTROLLER_ID}" cat /proc/sys/net/ipv4/ip_forward)"

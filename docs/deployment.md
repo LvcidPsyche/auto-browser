@@ -113,8 +113,13 @@ the exception (below).
 
 What per-session networks do not change:
 
-- **The controller API is reachable from every session's browser** at the controller's
-  address on that session's network (it listens on `0.0.0.0:8000`). Set a bearer token.
+- **The controller is on every session's network, but refuses it.** It joins each session
+  network to reach that browser, and answers 403 to any request whose direct peer is on a
+  session network, before the Host check and the token check (forwarded-for headers are
+  ignored). Browser containers never call the controller. On Docker Desktop a session
+  container can still reach the API port published on `127.0.0.1` through
+  `host.docker.internal`, where the controller sees the host's gateway address; there the
+  Host allowlist and the API token are what refuse it, so keep the token (the default).
 - **Each session's published noVNC stays reachable from other sessions,** whatever
   `ISOLATED_BROWSER_BIND_HOST` is. Docker lets a published port be reached at the
   container's address from other bridge networks, and on Docker Desktop
