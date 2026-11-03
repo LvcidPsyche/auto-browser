@@ -50,6 +50,8 @@ installed (no clone needed):
 Replace `<ABSOLUTE_PATH_TO_AUTO_BROWSER>` with the real path to your clone; the bridge reads the
 token file on every request.
 
+A bridge older than the one that added `--token-file` ignores `AUTO_BROWSER_TOKEN_FILE`, so every tool call fails with HTTP 401: use `uvx auto-browser-mcp@latest`, or set `AUTO_BROWSER_BEARER_TOKEN` to the file's contents.
+
 Or from a repo checkout, replace `<ABSOLUTE_PATH_TO_AUTO_BROWSER>` with the real path to your clone.
 This wrapper reads that checkout's `data/api-token` itself:
 

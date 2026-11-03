@@ -56,6 +56,8 @@ auto-browser-mcp --base-url http://127.0.0.1:8000/mcp \
 can start before the controller has written it. `--bearer-token` (or
 `AUTO_BROWSER_BEARER_TOKEN`) wins when it is set.
 
+A bridge older than the one that added `--token-file` ignores `AUTO_BROWSER_TOKEN_FILE`, so every tool call fails with HTTP 401: use `uvx auto-browser-mcp@latest`, or set `AUTO_BROWSER_BEARER_TOKEN` to the file's contents.
+
 Or zero-install via [uv](https://docs.astral.sh/uv/): `uvx auto-browser-mcp`
 (resolved through the [auto-browser-mcp](https://pypi.org/project/auto-browser-mcp/)
 metapackage).

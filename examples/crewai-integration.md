@@ -9,7 +9,7 @@ from crewai import Agent, Crew, Task
 
 from auto_browser_langchain import AutoBrowserTool
 
-browser_tool = AutoBrowserTool(base_url="http://localhost:8000")
+browser_tool = AutoBrowserTool(base_url="http://localhost:8000", token_file="data/api-token")
 
 researcher = Agent(
     role="Web Researcher",

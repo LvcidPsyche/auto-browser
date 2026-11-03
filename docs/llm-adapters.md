@@ -162,6 +162,7 @@ Resume through REST:
 
 ```bash
 curl -X POST http://localhost:8000/agent/jobs/<job_id>/resume \
+  -H "Authorization: Bearer ${API_BEARER_TOKEN:-$(cat data/api-token)}" \
   -H "Content-Type: application/json" \
   -d '{"max_steps": 4}'
 ```

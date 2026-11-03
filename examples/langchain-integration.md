@@ -12,7 +12,7 @@ from langchain_anthropic import ChatAnthropic
 
 from auto_browser_langchain import AutoBrowserTool
 
-tool = AutoBrowserTool(base_url="http://localhost:8000")
+tool = AutoBrowserTool(base_url="http://localhost:8000", token_file="data/api-token")
 llm = ChatAnthropic(model="claude-sonnet-4-6")
 agent = create_react_agent(llm, [tool])
 executor = AgentExecutor(agent=agent, tools=[tool])
@@ -28,7 +28,7 @@ from langgraph.graph import END, StateGraph
 from auto_browser_langchain import AutoBrowserNode
 from auto_browser_langchain.node import BrowserState
 
-node = AutoBrowserNode(base_url="http://localhost:8000")
+node = AutoBrowserNode(base_url="http://localhost:8000", token_file="data/api-token")
 graph = StateGraph(BrowserState)
 graph.add_node("browse", node.run)
 graph.set_entry_point("browse")
