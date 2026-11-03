@@ -17,11 +17,21 @@ CDP (``Target.setDiscoverTargets`` / ``Target.targetCreated``). ``TargetInfo`` c
 * the opener is a page the controller knows (the session's first page, a tab the open-tab tool opened, a
   reported popup: each has its targetId cached): born refused when that page is refused now, or when a page
   that counted for the session closed within the grace (``page_provenance.CLOSED_PAGE_GRACE_SECONDS``);
-* the opener cannot be matched to a page (its targetId is not cached yet, or it is a clean window Playwright
-  has not reported): born refused when the session counts as refused, and that verdict is marked as the
-  session's, so the refusal names another tab as its cause;
+* the opener cannot be matched to a page, though the watcher saw it born clean: it is a popup reported a
+  moment ago whose targetId read is still in flight, or a clean window Playwright has not reported (on the
+  initial blank of its own clean opener). The window is born clean when no open page of the session whose
+  targetId is unknown is refused (whichever of them the opener is, it is clean); otherwise the session
+  decides, as below;
+* the opener cannot be matched at all (no birth for it): born refused when the session counts as refused,
+  and that verdict is marked as the session's, so the refusal names another tab as its cause;
 * no opener (the controller's own ``context.new_page()``: a session's first page, an open-tab tool tab):
   never born refused.
+
+A page target the watcher first sees anywhere but a live ``targetCreated`` (the replay a new watcher gets
+for the targets that already exist, or a ``targetInfoChanged`` for a target it never saw) was born while no
+watcher judged it. A page the controller knows (a cached targetId) counts as reported and clean; one with an
+opener is **unjudged**: refused as born refused is, swept once the session stops counting, and its refusal
+says it was never judged rather than name a host; one with no opener is clean.
 
 Then:
 
@@ -30,21 +40,28 @@ Then:
   nothing it logs or shows reaches the agent meanwhile;
 * a born-refused window Playwright never reports is closed through CDP (``Target.closeTarget``) as soon as
   it is no longer justified: its opener is clean (the agent's navigate, a blocked action's rollback) or gone
-  (past the grace), or, for a window refused by the session fallback, the session no longer counts. The
-  sweep runs at the agent's navigate, at a rollback, after a counting page's close, and on a timer while any
-  such window is live, so whatever ended the refusal the window does not outlive it. It never closes a page
-  Playwright has reported: every reported page's target is marked, and the sweep skips the session's pages.
+  (past the grace), or, for a window refused by the session fallback or unjudged, the session no longer
+  counts. The sweep runs at the agent's navigate, at a rollback, after a counting page's close, and on a
+  timer while any such window is live, so whatever ended the refusal the window does not outlive it. It
+  never closes a page Playwright has reported: a reported page's targetId is cached once read, and the
+  sweep closes only a window whose id is none of the session's pages' (``_reported_target_ids``); while a
+  reported page's id is not known (its read is in flight, or failed and is retried), nothing unmatched in
+  that session is closed, since any of it could be that page; and each window is checked again right
+  before its close, for a report that landed during an earlier close's round trip.
 
 One entry per live page target, dropped on ``Target.targetDestroyed``; nothing per request, so a navigation
-flood cannot grow the state.
+flood cannot grow the state. A reported page's verdict is kept once resolved, not the task that resolved it.
 
 The watcher keeps its own browser-level CDP session rather than sharing the pre-request gate's. It is then
 identical whether the gate is on, off (``PRE_REQUEST_BLOCKING=false``, where the old gap was a full bypass),
 lost, or in an attach mode. While ALLOWED_HOSTS refuses any host it fails closed: a session whose browser
 has no watcher (the attach failed, or the context's id could not be read) is not created
 (``WindowBirthWatcherUnavailable``, as the gate's ``RequestGateUnavailable``); a reported window whose
-targetId cannot be read, or whose birth the watcher never saw, is refused; and when the watcher's session dies
-the popups of every session on that browser are refused until a new watcher attaches, which re-registers them.
+targetId cannot be read (after ``TARGET_ID_READ_ATTEMPTS`` reads), or whose birth the watcher never saw, is
+refused as unjudged; and when the watcher's session dies the popups of every session on that browser are
+refused as unjudged until a new watcher attaches, which registers those sessions before it discovers the
+browser's targets, so the windows that exist by then are its entries too (known pages clean, the rest
+unjudged).
 """
 
 from __future__ import annotations
@@ -74,6 +91,10 @@ CONTEXT_ID_TIMEOUT_SECONDS = 2.0
 RECHECK_INTERVAL_SECONDS = 1.0
 # How long the sweep waits for the targetId reads of the session's reported pages before it closes anything.
 REPORTED_IDS_TIMEOUT_SECONDS = 3.0
+# How many times a reported page's targetId is read before the page is refused as unjudged, and the wait
+# before each read after the first (times the attempt number).
+TARGET_ID_READ_ATTEMPTS = 3
+TARGET_ID_RETRY_SECONDS = 0.5
 # CDP target types that are windows of their own; only these ever become birth entries.
 PAGE_TARGET_TYPE = "page"
 
@@ -100,6 +121,9 @@ class BirthVerdict(Enum):
     REFUSED = "refused"
     # Refused by the session-wide fallback (the opener could not be matched to a page): another tab is the cause.
     REFUSED_BY_SESSION = "refused_by_session"
+    # Never judged: the watcher was lost or not yet attached when the window was born, or the window's
+    # targetId could not be read, so its birth cannot be told. Refused, and the refusal says so.
+    REFUSED_UNJUDGED = "refused_unjudged"
 
 
 @dataclass
@@ -112,6 +136,8 @@ class _Birth:
     born_refused: bool
     # The verdict came from the session-wide fallback, not from the opener itself.
     by_session: bool = False
+    # The watcher did not see the target born (the replay, or an info change for an unknown target).
+    unjudged: bool = False
     # Set once Playwright reported the window (mark_reported): a reported window is never closed from here.
     reported: bool = False
     closed: bool = False
@@ -125,6 +151,10 @@ class _Birth:
             return None
         return page
 
+    def hold_page(self, page: Any) -> None:
+        with contextlib.suppress(TypeError):  # a page that cannot be weakly referenced (a test double)
+            self.page = weakref.ref(page)
+
 
 class WindowBirthWatcher:
     """One browser's window-birth watcher: a browser-level CDP session that judges page targets at birth."""
@@ -136,6 +166,7 @@ class WindowBirthWatcher:
         opener_refused: Callable[[Any, Any], bool],
         session_counts_as_refused: Callable[[Any], bool],
         page_by_target_id: Callable[[Any, str], Any],
+        unmatched_pages: Callable[[Any], list[Any]] | None = None,
         on_lost: Callable[["WindowBirthWatcher"], None] | None = None,
         on_recheck: Callable[[Any], Awaitable[None]] | None = None,
     ) -> None:
@@ -148,6 +179,9 @@ class WindowBirthWatcher:
         self._counts = session_counts_as_refused
         # A page of the session by its cached targetId, with no I/O (the manager's cache).
         self._page_by_target_id = page_by_target_id
+        # The session's open pages whose targetId is not cached (a report's read in flight): an unmatched
+        # opener that was born clean is one of them, or an unreported clean window.
+        self._unmatched_pages = unmatched_pages or (lambda _session: [])
         self._on_lost = on_lost
         self._cdp: Any = None
         self._live = False
@@ -168,10 +202,12 @@ class WindowBirthWatcher:
         return self._live and not self._closed
 
     async def attach(self) -> None:
+        """Attach the browser session and discover its targets. The sessions registered by now get entries
+        for the targets the discovery replays (register them first: a replacement watcher's whole point)."""
         cdp = await asyncio.wait_for(self._browser.new_browser_cdp_session(), timeout=ATTACH_TIMEOUT_SECONDS)
         self._cdp = cdp
-        cdp.on("Target.targetCreated", self._on_target)
-        cdp.on("Target.targetInfoChanged", self._on_target)
+        cdp.on("Target.targetCreated", self._on_target_created)
+        cdp.on("Target.targetInfoChanged", self._on_target_info_changed)
         cdp.on("Target.targetDestroyed", self._on_target_destroyed)
         cdp.on("close", self._on_close)
         try:
@@ -185,6 +221,8 @@ class WindowBirthWatcher:
         if self._closed:
             raise RuntimeError("the window-birth watcher's session closed while it attached")
         self._live = True
+        if self.has_unreported_born_refused():
+            self._start_recheck()  # the replay's unjudged windows: swept once nothing counts
 
     async def detach(self) -> None:
         self._live = False
@@ -232,43 +270,86 @@ class WindowBirthWatcher:
 
     # ── CDP events ──────────────────────────────────────────────────────────────
 
-    def _on_target(self, event: dict[str, Any]) -> None:
+    @staticmethod
+    def _page_info(event: dict[str, Any]) -> dict[str, Any] | None:
         info = event.get("targetInfo") or {}
-        if info.get("type") != PAGE_TARGET_TYPE:
+        if info.get("type") != PAGE_TARGET_TYPE or not info.get("targetId"):
+            return None
+        return info
+
+    def _on_target_created(self, event: dict[str, Any]) -> None:
+        info = self._page_info(event)
+        if info is None or info["targetId"] in self._births:
             return
-        target_id = info.get("targetId")
-        if not target_id:
+        if self.live:
+            self._born(info)
+        else:
+            # Before discovery returned: the replay of the targets that exist already. None of them was
+            # judged at birth by this watcher.
+            self._seen_late(info)
+
+    def _on_target_info_changed(self, event: dict[str, Any]) -> None:
+        info = self._page_info(event)
+        if info is None:
             return
-        context_id = info.get("browserContextId")
-        opener_id = info.get("openerId")
-        existing = self._births.get(target_id)
+        existing = self._births.get(info["targetId"])
         if existing is not None:
             # A target we already judged: keep its birth verdict (a later info change must not downgrade it),
             # only fill in a context id that was not known at creation.
-            if existing.context_id is None and context_id is not None:
-                existing.context_id = context_id
+            if existing.context_id is None and info.get("browserContextId") is not None:
+                existing.context_id = info["browserContextId"]
             return
-        session = self._sessions.get(context_id) if context_id is not None else None
+        self._seen_late(info)
+
+    def _session_of(self, info: dict[str, Any]) -> Any:
         # A page target in a context the controller did not create (an operator's own tab under an attach
         # mode's CDP_CONNECT_URL) is not ours: no entry, so it is never judged or closed.
+        context_id = info.get("browserContextId")
+        return self._sessions.get(context_id) if context_id is not None else None
+
+    def _born(self, info: dict[str, Any]) -> None:
+        session = self._session_of(info)
         if session is None:
             return
-        born_refused, by_session = self._judge(session, opener_id)
+        born_refused, by_session = self._judge(session, info.get("openerId"))
+        self._enter(info, born_refused=born_refused, by_session=by_session)
+
+    def _seen_late(self, info: dict[str, Any]) -> None:
+        """A page target first seen anywhere but a live targetCreated: its birth was not judged. A page the
+        controller knows counts as reported and clean; one with an opener is unjudged (refused, swept once the
+        session stops counting); one with no opener is the controller's own, clean."""
+        session = self._session_of(info)
+        if session is None:
+            return
+        known = self._page_by_target_id(session, info["targetId"])
+        if known is not None:
+            birth = self._enter(info, born_refused=False)
+            birth.reported = True
+            birth.hold_page(known)
+            return
+        if info.get("openerId"):
+            self._enter(info, born_refused=True, unjudged=True)
+            return
+        self._enter(info, born_refused=False)
+
+    def _enter(self, info: dict[str, Any], *, born_refused: bool, by_session: bool = False, unjudged: bool = False):
+        target_id = info["targetId"]
         birth = self._births[target_id] = _Birth(
             target_id=target_id,
-            context_id=context_id,
-            opener_id=opener_id,
+            context_id=info.get("browserContextId"),
+            opener_id=info.get("openerId"),
             born_refused=born_refused,
             by_session=by_session,
+            unjudged=unjudged,
         )
         page = self._reported_before_birth.pop(target_id, None)
         if page is not None:
             # The report raced ahead of the birth: the window was refused at report; it is a reported page.
             birth.reported = True
-            with contextlib.suppress(TypeError):
-                birth.page = weakref.ref(page)
-        if born_refused and not birth.reported:
+            birth.hold_page(page)
+        if born_refused and not birth.reported and self.live:
             self._start_recheck()
+        return birth
 
     def _judge(self, session: Any, opener_id: str | None) -> tuple[bool, bool]:
         """(born refused, by the session fallback) for a window born with ``opener_id``: see the module doc."""
@@ -280,6 +361,12 @@ class WindowBirthWatcher:
         opener = self._opener_page(session, opener_id)
         if opener is not None:
             return self._opener_refused(session, opener), False
+        if opener_birth is not None and not any(
+            self._opener_refused(session, page) for page in self._unmatched_pages(session)
+        ):
+            # The opener was born clean and is a popup whose targetId read is in flight, or a clean unreported
+            # window on its clean opener's blank: whichever it is, nothing it could be is refused.
+            return False, False
         return self._counts(session), True
 
     def _opener_page(self, session: Any, opener_id: str) -> Any:
@@ -302,21 +389,22 @@ class WindowBirthWatcher:
         """Record that Playwright reported the window with ``target_id`` and return its birth verdict.
 
         Fails closed: a window whose targetId could not be read, or whose birth has not arrived yet, is refused
-        (in real Chromium the birth precedes the report; a report with no birth is unexplained). Marking the birth
-        reported is what spares the window from the sweep.
+        as unjudged (in real Chromium the birth precedes the report; a report with no birth is unexplained).
+        Marking the birth reported is what spares the window from the sweep.
         """
         if target_id is None:
-            return BirthVerdict.REFUSED
+            return BirthVerdict.REFUSED_UNJUDGED
         birth = self._births.get(target_id)
         if birth is None:
             with contextlib.suppress(TypeError):
                 self._reported_before_birth[target_id] = page
-            return BirthVerdict.REFUSED
+            return BirthVerdict.REFUSED_UNJUDGED
         birth.reported = True
-        with contextlib.suppress(TypeError):
-            birth.page = weakref.ref(page)
+        birth.hold_page(page)
         if not birth.born_refused:
             return BirthVerdict.CLEAN
+        if birth.unjudged:
+            return BirthVerdict.REFUSED_UNJUDGED
         return BirthVerdict.REFUSED_BY_SESSION if birth.by_session else BirthVerdict.REFUSED
 
     # ── closing unreported born-refused windows ─────────────────────────────────
@@ -337,9 +425,10 @@ class WindowBirthWatcher:
 
     def _justified(self, session: Any, birth: _Birth, depth: int = 0) -> bool:
         """Whether the window is still a refused page's: its opener is refused now, or is itself a live
-        unreported born-refused window that is, or, for a session-fallback verdict, the session still counts.
-        An opener that is gone or cannot be matched justifies nothing past the grace (the session count)."""
-        if birth.by_session:
+        unreported born-refused window that is, or, for a session-fallback or unjudged verdict, the session
+        still counts. An opener that is gone or cannot be matched justifies nothing past the grace (the
+        session count)."""
+        if birth.by_session or birth.unjudged:
             return self._counts(session)
         opener_birth = self._births.get(birth.opener_id) if birth.opener_id else None
         if (
@@ -359,16 +448,25 @@ class WindowBirthWatcher:
         births = self._session_births(session) if session is not None else list(self._births.values())
         return any(birth.born_refused and not birth.reported and not birth.closed for birth in births)
 
-    async def close_unreported(self, session: Any, reported_target_ids: Callable[[Any], Awaitable[set[str]]]) -> None:
+    async def close_unreported(
+        self, session: Any, reported_target_ids: Callable[[Any], Awaitable[tuple[set[str], bool]]]
+    ) -> None:
         """Close every born-refused window of ``session`` that Playwright has not reported and that is no longer
         justified (``_justified``). ``reported_target_ids`` gives the targetIds of the session's reported pages,
-        which are never closed whatever the registry says."""
+        which are never closed whatever the registry says, and whether every reported page's id is among them:
+        while one is not known, nothing unmatched is closed, as any of it could be that page."""
         if not self.live or not self._unjustified(session):
             return
-        protected = await reported_target_ids(session)
+        protected, all_known = await reported_target_ids(session)
         for birth in self._unjustified(session):
             if birth.target_id in protected:
                 birth.reported = True
+                continue
+            if not all_known:
+                continue
+            # Checked again right before the close: a report can land, or the opener be refused again, during
+            # the wait above or an earlier close's round trip.
+            if birth.reported or birth.closed or self._justified(session, birth):
                 continue
             birth.closed = True
             try:
@@ -446,11 +544,14 @@ class WindowBirths:
         self._watchers: dict[int, tuple[Any, WindowBirthWatcher]] = {}
         # Why, and when, the last attach to a browser failed, until one succeeds (readiness, the retry backoff).
         self._attach_failures: dict[int, tuple[Any, str, float]] = {}
-        # Every watched session with its context id, by id(session): re-registered when its browser's watcher
-        # is replaced after a loss, and the sessions whose popups are held refused while it has none.
+        # Every watched session with its context id, by id(session): registered on a replacement watcher
+        # before it discovers the browser's targets, and the sessions whose popups are refused while it has none.
         self._registered: dict[int, tuple[Any, str]] = {}
-        # Each reported page's birth verdict, resolved once (its targetId read) and shared by every caller.
-        self._reports: "weakref.WeakKeyDictionary[Any, asyncio.Task[BirthVerdict]]" = weakref.WeakKeyDictionary()
+        # Each reported page's birth verdict: the task resolving it (its targetId read) while it runs, then the
+        # verdict itself, shared by every caller.
+        self._reports: "weakref.WeakKeyDictionary[Any, asyncio.Task[BirthVerdict] | BirthVerdict]" = (
+            weakref.WeakKeyDictionary()
+        )
         self._lock = asyncio.Lock()
 
     def _get(self, browser: Any) -> WindowBirthWatcher | None:
@@ -480,11 +581,11 @@ class WindowBirths:
             if not context_id or not first_target_id:
                 raise WindowBirthWatcherUnavailable("the window-birth watcher could not read the new context's id")
             self._seed_target_id(page, first_target_id)
-        watcher = await self._ensure(browser)
+        watcher = await self._ensure(browser, (session, context_id))
         self._registered[id(session)] = (session, context_id)
         watcher.register_session(context_id, session)
 
-    async def _ensure(self, browser: Any) -> WindowBirthWatcher:
+    async def _ensure(self, browser: Any, new_session: tuple[Any, str] | None = None) -> WindowBirthWatcher:
         async with self._lock:
             existing = self._watchers.get(id(browser))
             if existing is not None and existing[1].live:
@@ -492,16 +593,26 @@ class WindowBirths:
             failed = self._attach_failures.get(id(browser))
             if failed is not None and time.monotonic() - failed[2] < ATTACH_RETRY_BACKOFF_SECONDS:
                 raise WindowBirthWatcherUnavailable(
-                    f"the window-birth watcher could not attach {ATTACH_RETRY_BACKOFF_SECONDS:g} s ago: {failed[1]}"
+                    "the window-birth watcher could not attach within the last "
+                    f"{ATTACH_RETRY_BACKOFF_SECONDS:g} s: {failed[1]}"
                 )
             watcher = WindowBirthWatcher(
                 browser,
                 opener_refused=self._opener_refused,
                 session_counts_as_refused=self._counts,
                 page_by_target_id=self._page_by_target_id,
+                unmatched_pages=self._unmatched_pages,
                 on_lost=self._lost,
                 on_recheck=self.close_unreported,
             )
+            # Before the attach: discovery replays every target that exists, and only a registered session's
+            # targets get entries (a replacement after a loss: every live session on this browser is this
+            # watcher's; a first watcher: the session being created).
+            sessions = [entry for entry in self._registered.values() if getattr(entry[0], "browser", None) is browser]
+            if new_session is not None:
+                sessions.append(new_session)
+            for session, context_id in sessions:
+                watcher.register_session(context_id, session)
             try:
                 await watcher.attach()
             except Exception as exc:
@@ -510,10 +621,6 @@ class WindowBirths:
                 raise WindowBirthWatcherUnavailable(f"the window-birth watcher could not attach: {message}") from exc
             self._attach_failures.pop(id(browser), None)
             self._watchers[id(browser)] = (browser, watcher)
-            # A replacement after a loss: every live session on this browser is this watcher's again.
-            for session, context_id in list(self._registered.values()):
-                if getattr(session, "browser", None) is browser:
-                    watcher.register_session(context_id, session)
             return watcher
 
     def _lost(self, watcher: WindowBirthWatcher) -> None:
@@ -556,7 +663,8 @@ class WindowBirths:
 
     def holds_refused(self, session: Any) -> bool:
         """Whether every popup of this session is refused because its watcher is lost and not yet replaced: a
-        window born meanwhile was never judged, and a replacement cannot judge it after the fact."""
+        window born meanwhile was never judged. A replacement enters such a window as unjudged (refused,
+        swept once the session stops counting); it cannot tell what the window's opener was at its birth."""
         return self.watching(session) and self._get(getattr(session, "browser", None)) is None
 
     # ── reporting ───────────────────────────────────────────────────────────────
@@ -567,49 +675,87 @@ class WindowBirths:
         self._report(session, page)
 
     async def verdict(self, session: Any, page: Any) -> BirthVerdict:
-        """The reported page's birth verdict, once its targetId is read (one read per page, shared)."""
-        task = self._report(session, page)
-        return await task if task is not None else BirthVerdict.CLEAN
+        """The reported page's birth verdict, once its targetId is read (one read per page, shared).
 
-    def _report(self, session: Any, page: Any) -> "asyncio.Task[BirthVerdict] | None":
+        Never CLEAN for want of a watcher while ALLOWED_HOSTS restricts: a report started under a watcher
+        since lost is awaited all the same, and a page with none is refused as unjudged while its session's
+        watcher is lost. CLEAN with no watcher only where none is wanted (every host allowed, no browser).
+        """
+        report = self._report(session, page)
+        if isinstance(report, BirthVerdict):
+            return report
+        if report is not None:
+            return await report
+        return BirthVerdict.REFUSED_UNJUDGED if self.holds_refused(session) else BirthVerdict.CLEAN
+
+    def _report(self, session: Any, page: Any) -> "asyncio.Task[BirthVerdict] | BirthVerdict | None":
+        try:
+            report = self._reports.get(page)
+        except TypeError:  # a page that cannot be weakly referenced (a test double)
+            watcher = self._get(getattr(session, "browser", None))
+            return spawn_background_task(self._resolve_and_mark(watcher, session, page)) if watcher else None
+        if report is not None and not (isinstance(report, asyncio.Task) and report.cancelled()):
+            return report
         watcher = self._get(getattr(session, "browser", None))
         if watcher is None:
             return None
-        try:
-            task = self._reports.get(page)
-        except TypeError:  # a page that cannot be weakly referenced (a test double)
-            return spawn_background_task(self._resolve_and_mark(watcher, session, page))
-        if task is None or task.done() and task.cancelled():
-            task = spawn_background_task(self._resolve_and_mark(watcher, session, page))
-            self._reports[page] = task
+        task = spawn_background_task(self._resolve_and_mark(watcher, session, page))
+        self._reports[page] = task
+        task.add_done_callback(lambda done: self._keep_verdict(page, done))
         return task
+
+    def _keep_verdict(self, page: Any, task: "asyncio.Task[BirthVerdict]") -> None:
+        """Once resolved, keep the verdict rather than the task (and what it held) for the page's life."""
+        if task.cancelled() or task.exception() is not None:
+            return
+        with contextlib.suppress(TypeError):
+            if self._reports.get(page) is task:
+                self._reports[page] = task.result()
 
     async def _resolve_and_mark(self, watcher: WindowBirthWatcher, session: Any, page: Any) -> BirthVerdict:
         target_id = await self._resolve_target_id(page)
+        for attempt in range(1, TARGET_ID_READ_ATTEMPTS):
+            if target_id is not None or _page_closed(page):
+                break
+            # A read that failed (a bound hit on a busy browser) is tried again before the page is refused as
+            # unjudged; the sweep spares the session's unmatched windows meanwhile (_reported_target_ids).
+            await asyncio.sleep(TARGET_ID_RETRY_SECONDS * attempt)
+            target_id = await self._resolve_target_id(page)
         return watcher.mark_reported(session, target_id, page)
 
-    async def _reported_target_ids(self, session: Any) -> set[str]:
-        """The targetIds of the session's pages whose id the controller already knows, so the sweep never
-        closes one Playwright reported.
+    def _unmatched_pages(self, session: Any) -> list[Any]:
+        """The session's open pages whose targetId is not cached: a reported popup whose read is in flight."""
+        return [page for page in self._session_pages(session) if self._known_target_id(page) is None]
+
+    async def _reported_target_ids(self, session: Any) -> tuple[set[str], bool]:
+        """The targetIds of the session's pages whose id the controller knows, so the sweep never closes one
+        Playwright reported, and whether that is every page of the session.
 
         A page Playwright reported is given a report task (``note_reported`` in ``attach_popup``) that resolves
         and caches its targetId; its first page and open-tab tabs are cached when opened. The reads in flight
         are waited for (bounded), then the cached id of every page is taken. A page whose id is not cached is
-        never read here: it was never reported or opened by the controller (exactly an unreported window the
-        sweep may close), and resolving an arbitrary window's id would open — and, since the session is kept,
+        never read here: resolving an arbitrary window's id would open — and, since the session is kept,
         retain — a CDP session per window, which a refused page flooding windows would turn into resource
-        exhaustion."""
+        exhaustion. Such a page is reported all the same (an unreported window has no Page), so while one is
+        open the sweep closes nothing it cannot match (``close_unreported``)."""
         pages = list(self._session_pages(session))
-        reads = [task for task in (self._reports.get(page) for page in pages) if task is not None and not task.done()]
+        reads = [
+            report
+            for report in (self._reports.get(page) for page in pages)
+            if isinstance(report, asyncio.Task) and not report.done()
+        ]
         if reads:
             with contextlib.suppress(Exception):
                 await asyncio.wait(reads, timeout=REPORTED_IDS_TIMEOUT_SECONDS)
         ids: set[str] = set()
+        all_known = True
         for page in pages:
             target_id = self._known_target_id(page)
-            if target_id is not None:
+            if target_id is None:
+                all_known = _page_closed(page) and all_known
+            else:
                 ids.add(target_id)
-        return ids
+        return ids, all_known
 
     async def close_unreported(self, session: Any) -> None:
         watcher = self._get(getattr(session, "browser", None))
@@ -617,10 +763,11 @@ class WindowBirths:
             await watcher.close_unreported(session, self._reported_target_ids)
 
     def forget_session(self, session: Any) -> None:
+        """The session is gone (closed, or its create failed after ``watch``): no watcher, live or lost, keeps it."""
         self._registered.pop(id(session), None)
-        watcher = self._get(getattr(session, "browser", None))
-        if watcher is not None:
-            watcher.forget_session(session)
+        entry = self._watchers.get(id(getattr(session, "browser", None)))
+        if entry is not None:
+            entry[1].forget_session(session)
 
     async def release(self, browser: Any) -> None:
         async with self._lock:
@@ -648,3 +795,8 @@ class WindowBirths:
         states = {watcher["state"] for watcher in watchers}
         state = next((name for name in ("attach_failed", "lost", "attached") if name in states), "idle")
         return {"state": state, "watchers": watchers}
+
+
+def _page_closed(page: Any) -> bool:
+    is_closed = getattr(page, "is_closed", None)
+    return callable(is_closed) and is_closed() is True
