@@ -90,7 +90,9 @@ class Harness:
         self.counts = False
         self.target_ids: dict[Any, str] = {}
         self.late_refused: list[tuple[Any, Any]] = []
+        self.enabled = True
         self.births = WindowBirths(
+            enabled=lambda: self.enabled,
             session_counts_as_refused=lambda _session: self.counts,
             resolve_target_id=self._resolve,
             on_late_refused=lambda session, page: self.late_refused.append((session, page)),
@@ -281,6 +283,16 @@ async def test_watch_attaches_a_watcher_with_no_gate_and_active_for_reports_it()
 
     assert harness.births.active_for(harness.session) is True
     assert ("Target.setDiscoverTargets", {"discover": True}) in harness.cdp.sent
+
+
+async def test_no_watcher_attaches_when_allowed_hosts_refuses_nothing() -> None:
+    """When every host is allowed, nothing is ever born refused, so the watcher attaches to nothing."""
+    harness = Harness()
+    harness.enabled = False
+    await harness.births.watch(harness.session, context=object(), page=object(), context_id=CTX)
+
+    assert harness.births.active_for(harness.session) is False
+    assert await harness.births.mark_reported(harness.session, FakePage()) is False
 
 
 async def test_a_session_without_a_browser_is_not_watched() -> None:

@@ -231,10 +231,14 @@ class WindowBirths:
     def __init__(
         self,
         *,
+        enabled: Callable[[], bool],
         session_counts_as_refused: Callable[[Any], bool],
         resolve_target_id: Callable[[Any], Awaitable[str | None]],
         on_late_refused: Callable[[Any, Any], None],
     ) -> None:
+        # Whether ALLOWED_HOSTS refuses any host: when every host is allowed nothing is ever born refused, so
+        # the watcher attaches to nothing (unlike the gate, it runs with PRE_REQUEST_BLOCKING off).
+        self._enabled = enabled
         self._counts = session_counts_as_refused
         self._resolve_target_id = resolve_target_id
         self._on_late_refused = on_late_refused
@@ -255,7 +259,7 @@ class WindowBirths:
         refuses a gated session; this watcher runs with the gate off too.)
         """
         browser = getattr(session, "browser", None)
-        if browser is None:
+        if browser is None or not self._enabled():
             return
         try:
             if context_id is None:
