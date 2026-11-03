@@ -493,9 +493,13 @@ refused its windows are born refused by the first rule.
 
 A born-refused window Playwright reports is refused as a popup of a refused opener is. A reported window
 whose opener is clean at report is held refused until its birth verdict is known (one CDP read of its target
-id, read again up to three times when it fails): nothing it logs or shows reaches the agent meanwhile, and
-`activate_tab` waits for the verdict (before it takes the session, so the session's other calls do not wait
-with it; at most 10 seconds) rather than refuse the window. A born-refused window Playwright never reports is
+id, read up to three times in all when it fails): what it logs and throws meanwhile is kept aside and reaches
+the agent once the verdict is clean (dropped on a refusal), and `activate_tab` waits for the verdict (before
+it takes the session, so the session's other calls do not wait with it; at most 10 seconds) rather than
+refuse the window. Two bounds, then: `activate_tab` waits at most 10 seconds for a held popup's verdict, and
+a navigate or a rollback whose sweep (below) has work waits at most 3 seconds, under the session lock, for
+the target id reads in flight of the session's reported pages (not for one that has failed already and is
+being read again). A born-refused window Playwright never reports is
 closed through CDP as soon as nothing justifies it: its opener is clean (the agent's navigate, a blocked
 action's rollback) or gone, past the grace; or, for a window refused by the session fallback or one whose
 birth was not judged (below), the session no longer counts. That sweep runs right after the agent's navigate
@@ -504,9 +508,13 @@ it does not outlive the refusal whatever ended it. It never closes a page Playwr
 page's target id is cached once read, and the sweep closes only a window whose id is none of the session's
 pages'; while a reported page's id is not yet known (its read is in flight, or failed and is being read
 again) it closes nothing it cannot match in that session, since any of it could be that page; and each window
-is checked again right before its close, for a report that landed during the wait. A reported page whose id
-could not be read at all is refused (below) and, while it stays open, keeps that session's unmatched windows
-from being swept: close it. Only page targets are judged this way; iframes and workers are not windows, and a
+is checked again right before its close, for a report that landed during the wait. A page the controller
+opened itself (a session's first page, an open-tab tool tab) has no opener, so no born-refused window can be
+it: its id, read or not, does not hold the sweep. A reported popup whose id could not be read at all is
+refused as unjudged (below) and, while it stays open, spares that session's unmatched windows, which can act
+meanwhile; the sweep reads its id again every 5 seconds while it has work, so a read that failed in passing
+does not spare them for the popup's life, and if the id can never be read, close the popup. Only page
+targets are judged this way; iframes and workers are not windows, and a
 window a cross-site iframe opens has the iframe's page as its opener, so it is judged by that page (an
 iframe from another host on an allowed page can open a window, judged by the allowed page, as the iframe's
 own content is not filtered).
@@ -518,8 +526,9 @@ creating one answers `window_birth_watcher_unavailable` (503, retryable, as the 
 window whose target id cannot be read, or whose birth the watcher never saw, is refused and sent to
 `about:blank` as a refused popup is, but as *unjudged*: nothing is known against its host, and the refusal
 says so and names the way out (activate: "That tab could not be judged when it opened ... Close it and open
-its URL in a new tab, or retry once /readiness reports the window_birth_watcher attached."; reads: "The page
-could not be judged when it opened ..."). It is blanked rather than kept open because, unjudged, it may be a
+its URL in a new tab: a tab opened once /readiness reports the window_birth_watcher attached is judged as it
+opens."; reads: "The page could not be judged when it opened ..."). Activating that tab again never succeeds,
+whatever the cause: its verdict was reached once. It is blanked rather than kept open because, unjudged, it may be a
 refused page's window with a script planted in it. If the watcher's session dies while the browser lives, a
 replacement attaches at once; until it is up, every popup reported in those sessions is refused as unjudged,
 and stays so until the agent navigates it (a replacement cannot judge a window born before it). The
@@ -746,14 +755,19 @@ seconds.
   turn. A reported popup whose opener is clean at report is held refused until its birth verdict is
   known, a CDP round trip (`activate_tab` waits for it, at most 10 seconds, rather than refuse the
   popup, and the session's other calls are not held behind that wait), so it is readable a moment later
-  than before; a window the held popup opens meanwhile is judged by the popup's own birth, not held
-  against it. A popup whose target id the controller could not read, or that was reported while the
-  window-birth watcher was down, is refused as unjudged and sent to `about:blank`: the refusal says the
-  tab could not be judged, and nothing is known against its host; close it and open its URL in a new
-  tab, or navigate it. A born-refused window Playwright
-  never reports is closed once its opener is clean or gone (or, when its opener could not be matched or
-  its birth was not judged, once the session stops counting), so it cannot keep an opener reference
-  across a rollback or send itself to an allowed URL later. The grace cuts the other way too, by design:
+  than before, and what it logged meanwhile is appended once the verdict is clean; a window the held
+  popup opens meanwhile is judged by the popup's own birth, not held against it. A popup whose target id
+  the controller could not read, or that was reported while the window-birth watcher was down, is
+  refused as unjudged and sent to `about:blank`: the refusal says the tab could not be judged, and
+  nothing is known against its host; close it and open its URL in a new tab, or navigate it (activating
+  it again never succeeds). A born-refused window Playwright never reports is closed once its opener is
+  clean or gone (or, when its opener could not be matched or its birth was not judged, once the session
+  stops counting), so it cannot keep an opener reference across a rollback or send itself to an allowed
+  URL later; a navigate or rollback whose sweep has work waits up to 3 seconds for the session's target
+  id reads in flight. The exception is a reported popup whose target id could not be read: while it is
+  open, the sweep closes nothing it cannot match in that session (any of it could be that popup), so a
+  born-refused window is spared, and can act, until the popup's id is read again (every 5 seconds) or
+  the popup is closed. The grace cuts the other way too, by design:
   a legitimate popup (an OAuth window, a `target=_blank` link) that a clean tab opens within 2 seconds of
   the agent closing a refused tab is born refused, and so refused; close it and open it again after the
   grace, or wait 2 seconds after closing a refused tab before starting a popup flow. The 2 seconds after
