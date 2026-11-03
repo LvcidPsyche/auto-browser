@@ -43,7 +43,7 @@ packages change too: they strip the token they send.
 - The 32-character floor for `API_BEARER_TOKEN` (production, or reachable off the box) now measures the token without
   its surrounding whitespace. A token that cleared it only because of padding is refused at startup; replace it with
   a longer one.
-- If your `API_BEARER_TOKEN` has whitespace around it, update the controller before the clients. The new clients
+- If your `API_BEARER_TOKEN` has spaces or tabs around it, update the controller before the clients. The new clients
   send the token stripped, which an older controller compares with the padded value and refuses; the new controller
   accepts both.
 
