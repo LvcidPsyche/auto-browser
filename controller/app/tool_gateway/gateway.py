@@ -35,6 +35,7 @@ from ..models import (
 )
 from ..readiness import run_readiness_checks
 from ..result_shaping import inline_screenshot_path, shape_mcp_result
+from ..run_as import controller_user_status
 from ..tool_inputs import (
     EVAL_JS_DEFAULT_TIMEOUT_MS,
     AgentJobIdInput,
@@ -906,6 +907,7 @@ class McpToolGateway:
             browser_sandbox=browser_sandbox_status(
                 self.manager.settings, getattr(self.manager, "runtime_provisioner", None)
             ),
+            controller_user=controller_user_status(),
         )
         return report.to_dict()
 
