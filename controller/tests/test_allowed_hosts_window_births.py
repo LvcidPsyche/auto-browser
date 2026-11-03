@@ -793,6 +793,16 @@ async def test_the_recheck_starts_for_the_replays_unjudged_windows(h: Harness, m
     assert replacement.closed_targets == ["W"], "the replay's unjudged window was not swept by the recheck"
 
 
+async def test_a_replacement_sweeps_the_replays_unjudged_windows_at_once(h: Harness) -> None:
+    """The orchestrator's O3 probe, released right after the replacement attached: the window had a whole recheck
+    interval to act before the first sweep. A replacement sweeps the replay's windows as soon as it is live."""
+    h.counts = False
+    replacement = await replace_watcher(h, [created("W", CTX, opener_id="GONE")])
+    await asyncio.sleep(0.1)  # well inside RECHECK_INTERVAL_SECONDS (1 s)
+
+    assert replacement.closed_targets == ["W"], "the replacement waited a recheck interval before its first sweep"
+
+
 # ── round 3: the verdict in the loss gap, and no retention ─────────────────────
 
 
@@ -804,7 +814,8 @@ async def test_a_verdict_read_in_the_loss_gap_is_not_clean(h: Harness, monkeypat
     page = FakePage()
     h.target_ids[page] = "T1"
     h.births.note_reported(h.session, page)  # attach_popup: the report task starts while the watcher is live
-    monkeypatch.setattr(h.births, "_lost", lambda watcher: None)  # no replacement: the gap stays open
+    # No replacement, so the gap stays open: the watcher holds the bound on_lost, so it is the one to silence.
+    monkeypatch.setattr(h.watcher, "_on_lost", None)
     h.cdp.fire("close", {})
     assert h.births.holds_refused(h.session)
 
@@ -857,6 +868,30 @@ async def test_a_window_reported_during_the_sweeps_wait_is_not_closed(h: Harness
 
     async def reported_ids(session: Any) -> tuple[set[str], bool]:
         h.watcher.mark_reported(session, "T2", FakePage())  # lands while the sweep waits
+        return set(), True
+
+    await h.watcher.close_unreported(h.session, reported_ids)
+
+    assert h.cdp.closed_targets == ["T1"]
+
+
+async def test_a_window_reported_during_an_earlier_closes_round_trip_is_not_closed(h: Harness) -> None:
+    """The sweep's reads are done and the first close is on the wire when Playwright reports the second window:
+    the close of the second is checked again right before it is sent, and skipped."""
+    opener = h.known("OP", refused=True)
+    h.cdp.fire("Target.targetCreated", created("T1", CTX, opener_id="OP"))
+    h.cdp.fire("Target.targetCreated", created("T2", CTX, opener_id="OP"))
+    h.refused.discard(opener)
+    real_send = h.cdp.send
+
+    async def send(method: str, params: dict | None = None) -> dict:
+        if method == "Target.closeTarget" and params and params["targetId"] == "T1":
+            h.watcher.mark_reported(h.session, "T2", FakePage())  # lands during T1's round trip
+        return await real_send(method, params)
+
+    h.cdp.send = send  # type: ignore[method-assign]
+
+    async def reported_ids(_session: Any) -> tuple[set[str], bool]:
         return set(), True
 
     await h.watcher.close_unreported(h.session, reported_ids)
