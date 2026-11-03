@@ -196,6 +196,31 @@ jobs:
       - name: Run doctor smoke test
         run: DOCTOR_BUILD=1 ./scripts/doctor.sh
 
+      - name: Check the controller demands its generated token
+        # With no API_BEARER_TOKEN, the loopback controller generates a token in
+        # data/api-token and demands it. Before, any container on the compose
+        # network reached it tokenless by sending Host: localhost. The file must
+        # also belong to the runner (0600), or the host user, the scripts and the
+        # stdio bridge could not read it.
+        run: |
+          api_port="$(docker compose port controller 8000 | awk -F: 'NF {print $NF}' | tail -n1)"
+          : "${api_port:?controller publishes no host port for the API (8000)}"
+          from_host="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${api_port}/sessions")"
+          if [ "$from_host" != "401" ]; then
+            echo "A tokenless /sessions from the host answered $from_host, not 401" >&2
+            exit 1
+          fi
+          from_network="$(docker compose exec -T browser-node curl -s -o /dev/null -w '%{http_code}' -H 'Host: localhost' http://controller:8000/sessions)"
+          if [ "$from_network" != "401" ]; then
+            echo "browser-node with a forged Host: localhost answered $from_network, not 401" >&2
+            exit 1
+          fi
+          token_file="$(stat -c '%a %U' data/api-token)"
+          if [ "$token_file" != "600 runner" ]; then
+            echo "data/api-token is '$token_file', not '600 runner'" >&2
+            exit 1
+          fi
+
       - name: Check browser-node serves VNC only through noVNC
         # x11vnc listened on TCP 5900, where libvncserver takes a WebSocket from any
         # Origin, right beside noVNC's Origin guard. Fails on any RFB TCP listener
