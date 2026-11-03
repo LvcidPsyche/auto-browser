@@ -352,6 +352,7 @@ def test_group_or_other_bits_are_removed_with_a_warning(
     chmods: list[tuple[Path, int]] = []
     fake_os = SimpleNamespace(
         name="posix",
+        path=SimpleNamespace(islink=lambda _path: False),
         stat=lambda _path: SimpleNamespace(st_mode=mode),
         chmod=lambda target, bits: chmods.append((target, bits)),
     )
@@ -362,6 +363,26 @@ def test_group_or_other_bits_are_removed_with_a_warning(
 
     assert chmods == ([(path, 0o600)] if tightened else [])
     assert ("0600" in caplog.text) is tightened
+
+
+def test_a_symlinked_token_file_is_left_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    # Kubernetes secret mounts are symlinks, and chmod would change the target (a file we may not own).
+    chmods: list[tuple[Path, int]] = []
+    fake_os = SimpleNamespace(
+        name="posix",
+        path=SimpleNamespace(islink=lambda _path: True),
+        stat=lambda _path: SimpleNamespace(st_mode=0o100644),
+        chmod=lambda target, bits: chmods.append((target, bits)),
+    )
+    monkeypatch.setattr(api_token, "os", fake_os)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        api_token._restrict_mode(tmp_path / "api-token")
+
+    assert chmods == []
+    assert caplog.text == ""
 
 
 @pytest.mark.parametrize(
@@ -375,7 +396,7 @@ def test_a_root_written_token_goes_to_the_owner_of_its_directory(
     chowns: list[tuple[Path, int, int]] = []
     fake_os = SimpleNamespace(
         stat=lambda _path: SimpleNamespace(st_uid=parent_uid, st_gid=parent_uid + 1),
-        chown=lambda target, uid, gid: chowns.append((target, uid, gid)),
+        chown=lambda target, uid, gid, *, follow_symlinks=True: chowns.append((target, uid, gid, follow_symlinks)),
     )
     if euid is not None:  # Windows has no geteuid
         fake_os.geteuid = lambda: euid
@@ -383,13 +404,14 @@ def test_a_root_written_token_goes_to_the_owner_of_its_directory(
 
     api_token._match_parent_owner(path)
 
-    assert chowns == ([(path, parent_uid, parent_uid + 1)] if chowned else [])
+    # Never follow a symlink swapped in for the file between the write and the chown.
+    assert chowns == ([(path, parent_uid, parent_uid + 1, False)] if chowned else [])
 
 
 def test_a_failed_chown_warns_and_startup_continues(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ):
-    def refuse(*_args: object) -> None:
+    def refuse(*_args: object, **_kwargs: object) -> None:
         raise PermissionError("operation not permitted")
 
     fake_os = SimpleNamespace(
