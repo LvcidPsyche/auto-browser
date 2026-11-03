@@ -75,6 +75,28 @@ class RuntimePolicyTests(unittest.TestCase):
 
         self.assertFalse(any("API_BEARER_TOKEN is unset" in w for w in report.warnings))
 
+    def test_loopback_warns_about_a_token_shorter_than_the_production_floor(self) -> None:
+        for fields in ({"API_BEARER_TOKEN": "dev-token"}, {"API_BEARER_TOKENS": "alice:short"}):
+            with self.subTest(fields=fields):
+                settings = Settings(_env_file=None, APP_ENV="development", API_BIND_SCOPE="loopback", **fields)
+
+                report = validate_runtime_policy(settings)
+
+                self.assertEqual(report.errors, [])
+                self.assertTrue(
+                    any("brute-forceable" in w and "compose network" in w for w in report.warnings),
+                    report.warnings,
+                )
+
+    def test_loopback_does_not_warn_about_a_token_at_the_floor(self) -> None:
+        settings = Settings(
+            _env_file=None, APP_ENV="development", API_BIND_SCOPE="loopback", API_BEARER_TOKEN=PRODUCTION_BEARER_TOKEN
+        )
+
+        report = validate_runtime_policy(settings)
+
+        self.assertFalse(any("brute-forceable" in w for w in report.warnings), report.warnings)
+
     def test_production_requires_security_basics(self) -> None:
         settings = Settings(
             _env_file=None,
