@@ -370,8 +370,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _utf8_stdio() -> None:
+    """Speak UTF-8 on stdin and stdout whatever the console's code page.
+
+    MCP's stdio transport is UTF-8. A client that launches the bridge with pipes
+    on Windows hands it the locale's code page (cp1252) for both streams, so
+    tools/list went out as invalid UTF-8 and a page with text outside cp1252
+    crashed the bridge mid-session, leaving its browser session open. Undecodable
+    input becomes U+FFFD instead of a crash, and a lone surrogate from a page is
+    written as its JSON escape, which decodes back to it.
+    """
+    for stream, errors in ((sys.stdin, "replace"), (sys.stdout, "backslashreplace")):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors=errors)
+    reconfigure = getattr(sys.stderr, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(errors="backslashreplace")
+
+
 def main() -> int:
     args = build_arg_parser().parse_args()
+    _utf8_stdio()
     bridge = StdioMcpBridge(
         client=HttpMcpClient(
             base_url=args.base_url,
