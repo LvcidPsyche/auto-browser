@@ -428,11 +428,13 @@ class BrowserSessionService(SessionCreation):
                 args=[STORAGE_PARTITIONING_ON],
             )
         except Exception as exc:
+            # Chromium's text can name host paths, and over MCP this message reaches the agent: it is logged here.
+            logger.warning("shadow browse: the sandboxed headed Chromium did not start: %s", exc)
             raise RuntimeError(
                 "Shadow browsing could not start its sandboxed headed Chromium. On Linux the sandbox needs "
                 "unprivileged user namespaces (sysctl kernel.unprivileged_userns_clone=1, or an AppArmor profile "
-                "that allows them where Ubuntu restricts them), and headed mode needs a display. "
-                f"Chromium said: {exc}"
+                "that allows them where Ubuntu restricts them), and headed mode needs a display. The controller "
+                "log has Chromium's own error."
             ) from exc
         context = None
         try:

@@ -136,10 +136,15 @@ class RestSurfaceTests(unittest.TestCase):
         self.assertEqual((response.status_code, response.json()["detail"]), (403, "Not permitted"))
 
     def test_shadow_browse_still_answers_a_runtime_error_400(self) -> None:
-        with self.client(RuntimeError("shadow browse is disabled")) as client:
+        # The caller gets the generic 400; the operator finds why (root, no sandbox, disabled) in the log.
+        with (
+            self.client(RuntimeError("shadow browse is disabled")) as client,
+            self.assertLogs("app.routes.session_diagnostics", level="WARNING") as logs,
+        ):
             response = client.post("/sessions/s1/shadow-browse")
 
         self.assertEqual((response.status_code, response.json()["detail"]), (400, "Invalid request"))
+        self.assertIn("shadow browse is disabled", "\n".join(logs.output))
 
 
 class McpSurfaceTests(unittest.IsolatedAsyncioTestCase):
