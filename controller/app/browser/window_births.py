@@ -70,10 +70,14 @@ class WindowBirthWatcher:
         self,
         browser: Any,
         *,
+        window_born_refused: Callable[[Any, str | None], bool],
         session_counts_as_refused: Callable[[Any], bool],
         on_late_refused: Callable[[Any, Any], None],
     ) -> None:
         self._browser = browser
+        # Whether a window born with this openerId is born refused: its opener is refused (or the session
+        # counts when the opener cannot be identified), so it is keyed on the opener, not the whole session.
+        self._born_refused = window_born_refused
         self._counts = session_counts_as_refused
         self._on_late_refused = on_late_refused
         self._cdp: Any = None
@@ -158,9 +162,9 @@ class WindowBirthWatcher:
         if session is None:
             return
         # No opener: the controller's own context.new_page() (a session's first page, an open-tab tool tab),
-        # not a window a page opened. Those are never born refused. An opener while the session counts as
-        # refused is: its opener is refused, another tab is, or one that counted closed within the grace.
-        born_refused = bool(opener_id) and self._counts(session)
+        # not a window a page opened. Those are never born refused. A window whose opener is refused (or whose
+        # opener cannot be identified while the session counts, or born within the grace) is born refused.
+        born_refused = self._born_refused(session, opener_id)
         self._births[target_id] = _Birth(
             target_id=target_id, context_id=context_id, opener_id=opener_id, born_refused=born_refused
         )
@@ -232,15 +236,21 @@ class WindowBirths:
         self,
         *,
         enabled: Callable[[], bool],
+        window_born_refused: Callable[[Any, str | None], bool],
         session_counts_as_refused: Callable[[Any], bool],
         resolve_target_id: Callable[[Any], Awaitable[str | None]],
+        seed_target_id: Callable[[Any, str], None],
         on_late_refused: Callable[[Any, Any], None],
     ) -> None:
         # Whether ALLOWED_HOSTS refuses any host: when every host is allowed nothing is ever born refused, so
         # the watcher attaches to nothing (unlike the gate, it runs with PRE_REQUEST_BLOCKING off).
         self._enabled = enabled
+        self._born_refused = window_born_refused
         self._counts = session_counts_as_refused
         self._resolve_target_id = resolve_target_id
+        # Cache a page's targetId so a later window's openerId can be matched to it with no I/O; the gate seeds
+        # the first page when it is on, this seeds it when it is off.
+        self._seed_target_id = seed_target_id
         self._on_late_refused = on_late_refused
         # By id(browser): a browser is held until released, so its id is not reused meanwhile.
         self._watchers: dict[int, tuple[Any, WindowBirthWatcher]] = {}
@@ -263,7 +273,11 @@ class WindowBirths:
             return
         try:
             if context_id is None:
-                context_id = await self._read_context_id(context, page)
+                # The gate did not supply the context id (PRE_REQUEST_BLOCKING off): read it, and seed the
+                # first page's targetId so a window it opens can be matched to its opener with no I/O.
+                context_id, first_target_id = await self._read_context_id(context, page)
+                if first_target_id:
+                    self._seed_target_id(page, first_target_id)
             watcher = await self._ensure(browser)
             if watcher is not None and context_id is not None:
                 watcher.register_session(context_id, session)
@@ -281,6 +295,7 @@ class WindowBirths:
                 return existing[1]
             watcher = WindowBirthWatcher(
                 browser,
+                window_born_refused=self._born_refused,
                 session_counts_as_refused=self._counts,
                 on_late_refused=self._on_late_refused,
             )
@@ -289,7 +304,8 @@ class WindowBirths:
             return watcher
 
     @staticmethod
-    async def _read_context_id(context: Any, page: Any) -> str | None:
+    async def _read_context_id(context: Any, page: Any) -> tuple[str | None, str | None]:
+        """The first page's (browserContextId, targetId), read in one CDP round trip."""
         session = await context.new_cdp_session(page)
         try:
             info = (await asyncio.wait_for(session.send("Target.getTargetInfo"), timeout=CONTEXT_ID_TIMEOUT_SECONDS))[
@@ -298,7 +314,7 @@ class WindowBirths:
         finally:
             with contextlib.suppress(Exception):
                 await session.detach()
-        return info.get("browserContextId")
+        return info.get("browserContextId"), info.get("targetId")
 
     def active_for(self, session: Any) -> bool:
         """Whether a live birth watcher judges this session's windows (false in the unit fakes, where the

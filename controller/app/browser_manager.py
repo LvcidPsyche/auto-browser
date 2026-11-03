@@ -198,8 +198,10 @@ class BrowserManager:
             # Runs whenever ALLOWED_HOSTS refuses a host, even with PRE_REQUEST_BLOCKING off (the no-gate gap);
             # not when every host is allowed, where no window is ever born refused.
             enabled=self._allowed_hosts_restrict,
+            window_born_refused=self._window_born_refused,
             session_counts_as_refused=self._session_has_refused_page,
             resolve_target_id=lambda page: self.request_gates.target_id_of(page),
+            seed_target_id=self.request_gates.seed_target_id,
             on_late_refused=lambda session, page: self.diagnostics.taint_reported_window(session, page),
         )
         self.action_pipeline = BrowserActionPipeline()
@@ -836,6 +838,25 @@ class BrowserManager:
                 details={"url": block.origin, "source": "request", "reason": block.reason},
             )
         )
+
+    def _window_born_refused(self, session: BrowserSession, opener_id: str | None) -> bool:
+        """Whether a window born with ``opener_id`` is born refused: it is a window a page opened (has an
+        opener) whose opener is refused, born within the grace after a counting page cleared or closed, or —
+        when the opener cannot be matched to a known page — opened while the session counts as refused.
+
+        Keyed on the opener, not the whole session, so a window an allowed page opens while an unrelated tab is
+        refused is judged by its allowed opener (it is not born refused), as a reported popup would be. The
+        opener is matched by its cached targetId, with no I/O; an unmatched opener fails closed to the session.
+        """
+        if not opener_id:
+            return False
+        opener = next(
+            (page for page in self.tabs.pages(session) if self.request_gates.known_target_id(page) == opener_id),
+            None,
+        )
+        if opener is not None:
+            return self._page_refused(opener) or self.page_provenance.counting_page_closed_recently(session.id)
+        return self._session_has_refused_page(session)
 
     def _allowed_hosts_restrict(self) -> bool:
         """Whether ALLOWED_HOSTS refuses any host: a non-empty allowlist with no ``*``. When it refuses none,
