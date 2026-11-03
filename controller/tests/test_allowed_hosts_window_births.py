@@ -241,6 +241,23 @@ async def test_an_opener_is_resolved_from_the_watchers_own_registry_before_the_s
     assert await h.report("T1") is BirthVerdict.CLEAN
 
 
+async def test_a_reported_popup_refused_later_refuses_its_windows_through_the_registry(h: Harness) -> None:
+    """The same resolution when it matters: the reported popup is refused by the time it opens a window (a
+    taint, say), its targetId still not in the manager's cache. The watcher's own page reference finds it
+    refused; without that reference the window would be judged by the unmatched-clean-opener rule and let
+    through."""
+    h.known("OP")
+    h.cdp.fire("Target.targetCreated", created("P", CTX, opener_id="OP"))
+    assert await h.report("P") is BirthVerdict.CLEAN
+    popup = h.watcher._births["P"].live_page()
+    assert popup is not None and "P" not in h.pages
+    h.refused.add(popup)
+
+    h.cdp.fire("Target.targetCreated", created("T1", CTX, opener_id="P"))
+
+    assert await h.report("T1") is BirthVerdict.REFUSED
+
+
 # ── propagation: a born-refused window's windows ──────────────────────────────
 
 
