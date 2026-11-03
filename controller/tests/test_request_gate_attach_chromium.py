@@ -50,6 +50,18 @@ pytestmark = [
 DEVTOOLS_PORT_WAIT_SECONDS = 20.0
 
 
+def _read_port_file(port_file: Path) -> str:
+    """The DevToolsActivePort text, or "" while Chrome has not written it.
+
+    On Windows Chrome holds the file open while it writes it, and a read then
+    raises PermissionError; that is "not written yet", not a failure.
+    """
+    try:
+        return port_file.read_text().strip()
+    except (FileNotFoundError, PermissionError):
+        return ""
+
+
 @contextlib.contextmanager
 def operator_chrome(profile: Path, *extra: str):
     """chrome.exe as an operator starts it for CDP_CONNECT_URL: headless, a debugging port, no Playwright flags."""
@@ -73,11 +85,11 @@ def operator_chrome(profile: Path, *extra: str):
     try:
         port_file = profile / "DevToolsActivePort"
         deadline = time.monotonic() + DEVTOOLS_PORT_WAIT_SECONDS
-        while not (port_file.is_file() and port_file.read_text().strip()):
+        while not (written := _read_port_file(port_file)):
             if time.monotonic() > deadline or process.poll() is not None:
                 raise RuntimeError("Chrome did not open its debugging port")
             time.sleep(0.1)
-        yield f"http://127.0.0.1:{port_file.read_text().splitlines()[0]}"
+        yield f"http://127.0.0.1:{written.splitlines()[0]}"
     finally:
         process.kill()
         process.wait(timeout=10)
