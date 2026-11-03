@@ -16,12 +16,12 @@ from __future__ import annotations
 import logging
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.session_isolation import DockerBrowserNodeProvisioner
+from app.session_isolation import DockerBrowserNodeProvisioner, _host_path
 from tests.test_session_isolation import FakeDockerClient, FakeDockerContainer
 
 ENV_EXAMPLE = Path(__file__).resolve().parents[2] / ".env.example"
@@ -356,3 +356,82 @@ class NetworkModeSettingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostDataRootTests(unittest.IsolatedAsyncioTestCase):
+    """Docker Desktop on Windows reports the controller's /data source as
+    C:\...\data. Resolved inside the Linux controller it became
+    /app/C:\...\data and every session create failed ("too many colons")."""
+
+    async def provision_with_data_source(self, source: str, **extra) -> dict:
+        with tempfile.TemporaryDirectory() as tempdir:
+            settings = Settings(
+                _env_file=None,
+                ARTIFACT_ROOT=str(Path(tempdir) / "data" / "artifacts"),
+                ISOLATED_BROWSER_WAIT_TIMEOUT_SECONDS="1",
+                **extra,
+            )
+            controller = FakeDockerContainer(
+                container_id="controller-id",
+                name="controller",
+                attrs={"Mounts": [{"Destination": "/data", "Source": source}]},
+            )
+            client = FakeDockerClient(controller)
+            provisioner = DockerBrowserNodeProvisioner(settings, client=client)
+            provisioner._controller_container_id = controller.id
+            run = client.containers.run
+
+            def run_on_the_local_dirs(image, **kwargs):
+                # The fake writes the endpoint file into the bind source, which
+                # here names a host the test is not on: the daemon would bind
+                # it to the local dir the controller watches. Record the real kwargs.
+                local = provisioner._local_runtime_root("s1")
+                container = run(
+                    image,
+                    **{
+                        **kwargs,
+                        "volumes": {str(local / "profile"): {"bind": "/data/profile", "mode": "rw"}},
+                    },
+                )
+                container.run_kwargs = kwargs
+                return container
+
+            client.containers.run = run_on_the_local_dirs  # type: ignore[method-assign]
+            runtime = await provisioner.provision("s1")
+            self.assertTrue(runtime.ws_endpoint_file.exists())
+            return client.containers.browser_containers[runtime.container_name].run_kwargs["volumes"]
+
+    async def test_a_windows_data_source_is_kept_verbatim(self) -> None:
+        volumes = await self.provision_with_data_source(r"C:\Users\x\auto-browser\data")
+
+        self.assertEqual(
+            volumes,
+            {
+                r"C:\Users\x\auto-browser\data\browser-sessions\s1\profile": {"bind": "/data/profile", "mode": "rw"},
+                r"C:\Users\x\auto-browser\data\browser-sessions\s1\downloads": {
+                    "bind": "/data/downloads",
+                    "mode": "rw",
+                },
+            },
+        )
+
+    async def test_a_unc_data_source_is_kept_verbatim(self) -> None:
+        unc = "\\\\fileserver\\share\\data"  # \\fileserver\share\data
+
+        volumes = await self.provision_with_data_source(unc)
+
+        self.assertIn(unc + "\\browser-sessions\\s1\\profile", volumes)
+
+    async def test_a_windows_isolated_host_data_root_is_kept_verbatim(self) -> None:
+        volumes = await self.provision_with_data_source("/ignored", ISOLATED_HOST_DATA_ROOT="D:/auto-browser/data")
+
+        self.assertIn(r"D:\auto-browser\data\browser-sessions\s1\profile", volumes)
+
+    def test_a_posix_data_source_is_resolved_as_before(self) -> None:
+        # Checked on the helper: provisioning would mkdir the host path, and
+        # on a Windows test host /srv/... resolves to C:\srv\....
+        for source in ("/srv/auto-browser/data", "/home/u/auto-browser/./data"):
+            self.assertEqual(_host_path(source), Path(source).resolve())
+            self.assertIsInstance(_host_path(source), Path)
+        self.assertIsInstance(_host_path(r"C:\data"), PureWindowsPath)
+        self.assertNotIsInstance(_host_path(r"C:\data"), Path)
