@@ -254,6 +254,14 @@ if [[ -z "${CONTROLLER_STATUS}" || "${CONTROLLER_STATUS}" == "000" ]]; then
   exit 1
 fi
 echo "probe ok: A reaches the controller at ${CONTROLLER_IP_ON_A}:8000 (HTTP ${CONTROLLER_STATUS}; expected for now)"
+# The overlay's sysctl is set when the controller starts; it has since joined A's
+# and B's networks. It must still not forward between them.
+CONTROLLER_FORWARD="$(docker exec "${CONTROLLER_ID}" cat /proc/sys/net/ipv4/ip_forward)"
+if [[ "${CONTROLLER_FORWARD}" != "0" ]]; then
+  echo >&2 "expected ip_forward=0 in the controller after joining the session networks, got '${CONTROLLER_FORWARD}'"
+  exit 1
+fi
+echo "probe ok: the controller does not forward between session networks (ip_forward=0)"
 
 bearer_curl -fsS "${API_BASE_URL}/sessions/${B_SESSION_ID}" -X DELETE >/dev/null
 wait_for "session B network removal" "! docker network inspect '${B_NETWORK}'" 30 1
