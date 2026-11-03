@@ -10,6 +10,8 @@ PAGE_NOT_RESPONDING = "page_not_responding"
 BROWSER_ACTION_BLOCKED = "browser_action_blocked"
 # No pre-request gate on the browser (app/browser/request_gate.py): 503, retryable, the next session attaches one.
 PRE_REQUEST_GATE_UNAVAILABLE = "pre_request_gate_unavailable"
+# No window-birth watcher on the browser (app/browser/window_births.py): the same 503, retryable the same way.
+WINDOW_BIRTH_WATCHER_UNAVAILABLE = "window_birth_watcher_unavailable"
 
 
 class RefusedPageError(PermissionError):

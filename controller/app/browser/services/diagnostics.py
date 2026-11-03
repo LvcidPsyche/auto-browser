@@ -20,6 +20,7 @@ from ...network_inspector import scrub_url
 from ...pii_scrub import PiiScrubber
 from ...utils import UTC, spawn_background_task
 from ..page_provenance import is_http, redirect_chain
+from ..window_births import BirthVerdict
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +178,10 @@ class BrowserDiagnosticsService:
         self.manager.page_provenance.opener_lookup_started(page)
         self._claim_unframed_hops(session, page)
         self.attach_page_listeners(page, session)
+        if self.manager.window_births.watching(session):
+            # Its targetId, read in the background: a window it opens is then judged by it, and the sweep of
+            # unreported born-refused windows never closes it (its birth is marked reported).
+            self.manager.window_births.note_reported(session, page)
         if getattr(session, "gate_context_id", None) is not None:
             # From its next navigation on: Playwright reports a popup only once its first has started.
             spawn_background_task(self.manager.request_gates.bypass_service_workers(page))
@@ -248,37 +253,36 @@ class BrowserDiagnosticsService:
 
     def _on_popup(self, session: "BrowserSession", opener: "Page", popup: "Page") -> None:
         # The opener as it is when the popup opens: it can clear its own taint, or close,
-        # before any later look at it, and the popup holds what it wrote either way. Judged synchronously,
-        # as before, so a legitimate popup is readable the moment it is reported.
-        if self.manager.page_provenance.opener_judged(popup, opener_refused=self.manager._page_refused(opener)):
-            spawn_background_task(self._return_to_blank(session, popup))
-        if self.manager.window_births.active_for(session):
-            # And by its CDP target's birth (window_births): a window born while its session counted as
-            # refused is refused even when its opener is clean by the time Playwright reports it, which is how
-            # a window whose first navigation committed nothing leaked. A born-refused window that is never
-            # reported is closed by the sweep before it can commit; this taints the rare one reported anyway.
-            spawn_background_task(self._taint_if_born_refused(session, popup))
-
-    async def _taint_if_born_refused(self, session: "BrowserSession", popup: "Page") -> None:
-        """Taint a reported popup whose CDP target was born refused, when its opener's verdict left it clean.
-
-        Only needed for a window whose opener was clean by the time Playwright reported it (its first
-        navigation committed nothing until after the opener was cleared): the opener-at-report verdict missed
-        it, the birth verdict catches it. A popup the opener-at-report verdict already refused needs nothing
-        here, so its target is not even probed (that probe is a CDP round trip on the window itself); its
-        birth stays unreported and the sweep closes it once the session stops counting, which is right for a
-        window a refused page opened."""
-        if self.manager.page_provenance.refused(popup):
-            return
-        if await self.manager.window_births.mark_reported(session, popup):
+        # before any later look at it, and the popup holds what it wrote either way.
+        births = self.manager.window_births
+        if births.holds_refused(session):
+            # The session's window-birth watcher is lost and not replaced yet: this window's birth was never
+            # judged, and a replacement cannot judge it after the fact, so it is refused (fail closed).
             if self.manager.page_provenance.opener_judged(popup, opener_refused=True):
-                await self._return_to_blank(session, popup)
+                spawn_background_task(self._return_to_blank(session, popup))
+            return
+        opener_refused = self.manager._page_refused(opener)
+        if opener_refused or not births.active_for(session):
+            # Judged synchronously: a refused opener's popup is refused at once, and without a birth watcher
+            # (ALLOWED_HOSTS allows every host, or the fakes) the opener's verdict is the whole verdict.
+            if self.manager.page_provenance.opener_judged(popup, opener_refused=opener_refused):
+                spawn_background_task(self._return_to_blank(session, popup))
+            return
+        # The opener is clean at report, but the window may have been born while it was refused (its first
+        # navigation committed nothing until after the agent's navigate cleared the opener: that is how a
+        # window leaked). It stays refused (opener_pending, set when the context reported it) until its birth
+        # verdict is known: nothing it logs or shows reaches the agent meanwhile.
+        spawn_background_task(self._judge_birth(session, popup))
 
-    def taint_reported_window(self, session: "BrowserSession", page: "Page") -> None:
-        """A window Playwright reported before its CDP birth arrived (the event-order race), now known to be
-        born refused: taint it and send it back to about:blank, as its opener's verdict would have."""
-        if self.manager.page_provenance.opener_judged(page, opener_refused=True):
-            spawn_background_task(self._return_to_blank(session, page))
+    async def _judge_birth(self, session: "BrowserSession", popup: "Page") -> None:
+        """Apply a reported window's birth verdict (window_births) as its opener's verdict would be applied."""
+        verdict = await self.manager.window_births.verdict(session, popup)
+        if self.manager.page_provenance.opener_judged(
+            popup,
+            opener_refused=verdict is not BirthVerdict.CLEAN,
+            by_another_page=verdict is BirthVerdict.REFUSED_BY_SESSION,
+        ):
+            await self._return_to_blank(session, popup)
 
     def attach_page_listeners(self, page: "Page", session: "BrowserSession") -> None:
         if not hasattr(page, "on"):
