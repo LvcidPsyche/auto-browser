@@ -318,3 +318,36 @@ def test_replay_screenshots_load_with_the_token_and_never_send_it_elsewhere() ->
     assert seen_auth[f"{ORIGIN}/artifacts/sess-1/shot.png"] == "Bearer ops-alice"
     assert sources[1] == elsewhere
     assert seen_auth[elsewhere] is None
+
+
+@requires_chromium
+def test_the_session_lists_takeover_link_opens_the_records_url_with_its_password() -> None:
+    """The list's URL is password-free; the link opens the one from GET /sessions/{id}, which carries it."""
+    listed = "http://novnc.test/vnc.html?autoconnect=true"
+    stub = Stub(
+        {
+            ("GET", "/sessions"): (200, [{"id": "sess-abcdef123456", "status": "active", "takeover_url": listed}]),
+            ("GET", "/sessions/sess-abcdef123456"): (
+                200,
+                {"id": "sess-abcdef123456", "takeover_url": listed + "#password=Ab3dEf7h"},
+            ),
+        }
+    )
+
+    async def scenario(page, dialogs) -> list[str]:
+        await page.context.route("http://novnc.test/**", lambda route: route.fulfill(status=200, body="novnc"))
+        opened: list[str] = []
+        for record in (("GET", "/sessions/sess-abcdef123456"), None):
+            if record is None:  # the record cannot be read: the list's URL still opens
+                stub.routes[("GET", "/sessions/sess-abcdef123456")] = (500, {"detail": "boom"})
+            async with page.expect_popup() as popup_info:
+                await page.click("text=Open noVNC")
+            popup = await popup_info.value
+            await popup.wait_for_url("http://novnc.test/**")
+            opened.append(popup.url)
+            await popup.close()
+        return opened
+
+    opened = drive(stub, scenario)
+
+    assert opened == [listed + "#password=Ab3dEf7h", listed]
