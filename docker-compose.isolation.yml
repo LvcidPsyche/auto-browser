@@ -13,6 +13,9 @@ services:
       ISOLATED_TAKEOVER_HOST: ${ISOLATED_TAKEOVER_HOST:-127.0.0.1}
       ISOLATED_TAKEOVER_SCHEME: ${ISOLATED_TAKEOVER_SCHEME:-http}
       ISOLATED_TAKEOVER_PATH: ${ISOLATED_TAKEOVER_PATH:-/vnc.html?autoconnect=true&resize=scale}
+      # per_session: each browser on its own network, joined by the controller.
+      # shared: one network for all; only then is ISOLATED_BROWSER_NETWORK read.
+      ISOLATED_BROWSER_NETWORK_MODE: ${ISOLATED_BROWSER_NETWORK_MODE:-per_session}
       ISOLATED_BROWSER_NETWORK: ${ISOLATED_BROWSER_NETWORK:-}
       ISOLATED_HOST_DATA_ROOT: ${ISOLATED_HOST_DATA_ROOT:-}
       ISOLATED_DOCKER_HOST: ${ISOLATED_DOCKER_HOST:-}

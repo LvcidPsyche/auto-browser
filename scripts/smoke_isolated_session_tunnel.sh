@@ -37,6 +37,9 @@ COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.isolation.yml -f
 cleanup() {
   docker ps -aq --filter label=auto-browser.managed=true | xargs -r docker rm -f >/dev/null 2>&1 || true
   "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
+  # Only after compose down: the controller must be gone, or it still holds
+  # an endpoint on each session network.
+  docker network ls -q --filter label=auto-browser.managed=true | xargs -r docker network rm >/dev/null 2>&1 || true
 }
 
 wait_for() {
