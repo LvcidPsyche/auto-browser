@@ -467,19 +467,42 @@ a tainted one included, is sent back to `about:blank` with a `navigation_blocked
 Shadow-browse sessions attach these listeners to every popup.
 
 A window is also judged when the browser first reports its target to the controller, before any of its
-navigations — through CDP, from the target's opener and context, not from a request. A page target born
-with an opener while its session counts as refused (its opener is refused, another tab is, or a tab that
-counted closed within the grace below) is refused whatever its first navigation then does: a `204` or
-`205`, a failed or hung request, no request at all (`javascript:` or a blocked top-level `data:` URL), or
-a blank the opener writes into. Playwright reports such a window only once it commits, which may be after
-the agent's navigate has cleared the opener, so a window that committed nothing until then would otherwise
-be judged by the clean opener and let through. A window Playwright reports is refused under the rule above.
-One it never reports cannot outlive the refusal that justified it: when its session stops counting as
-refused (the agent's navigate, a blocked action's rollback, or a close) the controller closes it through
-CDP, so a script it planted cannot later commit an allowed URL or navigate the agent's own tab. This holds
-with `PRE_REQUEST_BLOCKING` off and in attach modes; a window whose target cannot be classified is refused,
-not let through. Only page targets are judged this way: a window the open-tab tool opens has no opener and
-is never refused, and iframes and workers are not windows.
+navigations — through CDP (the window-birth watcher, one browser-level session per browser), from the
+target's opener, not from a request. Playwright reports a window only once it commits, which may be after
+the agent's navigate has cleared the opener, so a window that committed nothing until then (a `204` or
+`205`, a failed or hung request, no request at all: `javascript:` or a blocked top-level `data:` URL, or a
+blank the opener writes into) would otherwise be judged by the clean opener and let through. The verdict at
+birth is keyed on the opener, not the session:
+
+- the opener is a window the watcher already judged born refused, reported or not: born refused, whatever
+  the session does meanwhile;
+- the opener is a page the controller knows (the session's first page, a tab the open-tab tool opened, a
+  reported popup; each has its target id cached): born refused when that page is refused at that moment, or
+  when a tab that counted for the session closed within the grace below;
+- the opener cannot be matched to a page (a clean window Playwright has not reported, or a page whose target
+  id is not read yet): born refused when the session counts as refused, and that refusal names another tab
+  as its cause, as a `by another tab` refusal does;
+- no opener (the controller's own new page: a session's first page, an open-tab tool tab): never.
+
+A born-refused window Playwright reports is refused as a popup of a refused opener is. A reported window
+whose opener is clean at report is held refused until its birth verdict is known (one CDP read of its target
+id): nothing it logs or shows reaches the agent meanwhile. A born-refused window Playwright never reports is
+closed through CDP as soon as nothing justifies it: its opener is clean (the agent's navigate, a blocked
+action's rollback) or gone, past the grace; or, for a window refused by the session fallback, the session no
+longer counts. That sweep runs right after the agent's navigate and a rollback's `go_back`, after a counting
+tab's close, and once a second while any such window is live, so it does not outlive the refusal whatever
+ended it. It never closes a page Playwright has reported: every reported page's target is marked, and the
+sweep resolves the session's pages before it closes anything. Only page targets are judged this way; iframes
+and workers are not windows.
+
+The watcher runs whenever `ALLOWED_HOSTS` refuses a host, with `PRE_REQUEST_BLOCKING` off and in attach
+modes, and fails closed. A browser it cannot attach to, or a context whose id it cannot read, gets no session:
+creating one answers `window_birth_watcher_unavailable` (503, retryable, as the gate's
+`pre_request_gate_unavailable`), and the next session tries again after a 2-second backoff. A reported
+window whose target id cannot be read, or whose birth the watcher never saw, is refused. If the watcher's
+session dies while the browser lives, a replacement attaches at once and every live session on that browser
+is registered with it; until it is up, every popup reported in those sessions is refused. `/readiness`
+reports a `window_birth_watcher` check next to the gate's (off, idle, attached, lost or attach failed).
 
 ### Reading a refused page again
 
@@ -686,15 +709,19 @@ seconds.
   other tabs; on a blank, `blob:` or `data:` page, which can hold what that page wrote, it does. An
   iframe from another host on an allowed page can open a popup, which is judged by its opener, the
   allowed page. A popup is judged by its opener as the opener is when Playwright reports the popup, and
-  also at its target's birth (see [When a page is refused](#when-a-page-is-refused)): a window a refused
-  page opened just before the agent's navigate made that page readable again is refused by the birth
-  verdict, whatever its first navigation did, so a window that committed nothing until after the opener
-  was cleared no longer slips through. A window the controller judged born refused that Playwright never
-  reports is closed through CDP once the session stops counting, so it cannot keep an opener reference
-  across a rollback or send itself to an allowed URL later. The 2 seconds after a refused tab closes are
-  measured by the clock: a commit that comes with no request (a `#fragment`, `about:blank`) and that a
-  slow renderer delivers later than that is not refused for that
-  tab.
+  by its opener as it was at the popup's birth (see [When a page is refused](#when-a-page-is-refused)):
+  a window a refused page opened just before the agent's navigate made that page readable again is
+  refused by the birth verdict, whatever its first navigation did, and so is any window it opens in
+  turn. A reported popup whose opener is clean at report is held refused until its birth verdict is
+  known, a CDP round trip, so it is readable a moment later than before. A born-refused window Playwright
+  never reports is closed once its opener is clean or gone (or, when its opener could not be matched,
+  once the session stops counting), so it cannot keep an opener reference across a rollback or send itself
+  to an allowed URL later. The grace cuts the other way too: a legitimate popup (an OAuth window, a
+  `target=_blank` link) that a clean tab opens within 2 seconds of the agent closing a refused tab is born
+  refused, and so refused; close it and open it again after the grace, or wait 2 seconds after closing a
+  refused tab before starting a popup flow. The 2 seconds after a refused tab closes are measured by the
+  clock: a commit that comes with no request (a `#fragment`, `about:blank`) and that a slow renderer
+  delivers later than that is not refused for that tab.
 - **Traces and exports.** Playwright traces (`ENABLE_TRACING`, off by default) record the whole browser
   context, the refused page included, and a storage-state export (`POST /sessions/{id}/storage-state`,
   saving an auth profile) holds every host's cookies.
