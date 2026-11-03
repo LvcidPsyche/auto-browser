@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 # Larger downloads are fetched from their artifact URL, not read into a model's context.
 DOWNLOAD_READ_MAX_BYTES = 10 * 1024 * 1024
+# How long a tab operation waits for a reported popup's birth verdict (its targetId read, retried) before it goes
+# on with the popup still held: longer than the reads it waits for, so only a verdict that never comes hits it.
+BIRTH_VERDICT_WAIT_SECONDS = 10.0
 
 # A fixed type table, not the host's: mimetypes.guess_type reads /etc/mime.types
 # or the Windows registry, and Windows with Office installed maps .csv to
@@ -260,8 +263,9 @@ class BrowserDiagnosticsService:
         births = self.manager.window_births
         if births.holds_refused(session):
             # The session's window-birth watcher is lost and not replaced yet: this window's birth was never
-            # judged, and a replacement cannot judge it after the fact, so it is refused (fail closed).
-            if self.manager.page_provenance.opener_judged(popup, opener_refused=True):
+            # judged, and a replacement cannot judge it after the fact, so it is refused (fail closed), and
+            # its refusal says it was never judged rather than name a host.
+            if self.manager.page_provenance.opener_judged(popup, opener_refused=True, unjudged=True):
                 spawn_background_task(self._return_to_blank(session, popup))
             return
         opener_refused = self.manager._page_refused(opener)
@@ -278,27 +282,36 @@ class BrowserDiagnosticsService:
         self._birth_judgements[popup] = spawn_background_task(self._judge_birth(session, popup))
 
     async def _judge_birth(self, session: "BrowserSession", popup: "Page") -> None:
-        """Apply a reported window's birth verdict (window_births) as its opener's verdict would be applied."""
+        """Apply a reported window's birth verdict (window_births) as its opener's verdict would be applied.
+
+        The blank a refused verdict calls for runs as its own task: it takes the session lock, and whoever
+        waits for the verdict (birth_judged) must not wait for that. A popup that closed meanwhile gets no
+        verdict: its state went with it, and recording one would bring it back for good.
+        """
         verdict = await self.manager.window_births.verdict(session, popup)
+        if popup.is_closed():
+            return
         if self.manager.page_provenance.opener_judged(
             popup,
             opener_refused=verdict is not BirthVerdict.CLEAN,
             by_another_page=verdict is BirthVerdict.REFUSED_BY_SESSION,
+            unjudged=verdict is BirthVerdict.REFUSED_UNJUDGED,
         ):
-            await self._return_to_blank(session, popup)
+            spawn_background_task(self._return_to_blank(session, popup))
 
     async def birth_judged(self, page: "Page") -> None:
         """Wait until a reported window's birth verdict is applied, so the page's refusal is its final one.
 
-        A clean popup is held refused from its report until its birth verdict lands (a CDP round trip), and
-        the agent's next call can come sooner than that: activate_tab and list_tabs wait here rather than
-        refuse it. A verdict that failed leaves the page held (fail closed), and this returns all the same.
+        A clean popup is held refused from its report until its birth verdict lands (a CDP round trip, retried
+        when it fails), and the agent's next call can come sooner than that: activate_tab waits here, before it
+        takes the session lock, rather than refuse it. Bounded: a verdict that does not come leaves the page
+        held (fail closed), and this returns all the same.
         """
         task = self._birth_judgements.get(page)
         if task is None:
             return
         try:
-            await asyncio.shield(task)
+            await asyncio.wait_for(asyncio.shield(task), timeout=BIRTH_VERDICT_WAIT_SECONDS)
         except Exception:
             return
 

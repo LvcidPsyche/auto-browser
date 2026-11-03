@@ -37,8 +37,23 @@ REFUSED_BY_ANOTHER_TAB_MESSAGE = (
 )
 
 
+# A tab refused because its birth could not be judged: the window-birth watcher was lost when it was born, or
+# its target could not be read. Nothing is known against its host; the condition is the controller's, and
+# passing. A tab that is not active cannot be navigated, so the way out is a new tab, which is judged as it opens.
+UNJUDGED_TAB_MESSAGE = (
+    "That tab could not be judged when it opened (the controller's window-birth watcher was unavailable, or the "
+    "tab's target could not be read), so it is refused and cannot be activated: nothing is known against its "
+    "host. Close it and open its URL in a new tab, or retry once /readiness reports the window_birth_watcher "
+    "attached."
+)
+
+
 class TabRefusedByAnotherTabError(PermissionError):
     """Activating a tab refused only because another tab of its session was; the text names no host."""
+
+
+class TabUnjudgedError(PermissionError):
+    """Activating a tab refused only because its birth could not be judged; the text names no host."""
 
 
 class BrowserTabService:
@@ -132,6 +147,12 @@ class BrowserTabService:
 
     async def activate(self, session_id: str, index: int) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
+        pages = self.pages(session)
+        if 0 <= index < len(pages):
+            # A popup reported a moment ago is held until its birth verdict (a CDP round trip): judged first,
+            # not refused for being judged. Before the lock: a refused verdict's blank takes the lock, and the
+            # session's other calls must not wait on this one's wait. The index is read again under the lock.
+            await self.manager.diagnostics.birth_judged(pages[index])
         async with session.lock:
             pages = self.pages(session)
             if index < 0 or index >= len(pages):
@@ -140,13 +161,15 @@ class BrowserTabService:
             # A popup or tab the page opened may sit on a host the allowlist
             # refuses, and every later action and observation reads session.page.
             # Refused before it becomes the active page, so the session stays
-            # where it was. A popup reported a moment ago is judged first, not refused for being judged.
-            await self.manager.diagnostics.birth_judged(target_page)
+            # where it was.
             try:
                 self.manager._assert_page_object_allowed(target_page)
             except PermissionError as exc:
-                if self.manager.page_provenance.refused_by_another_page(target_page):
+                provenance = self.manager.page_provenance
+                if provenance.refused_by_another_page(target_page):
                     raise TabRefusedByAnotherTabError(REFUSED_BY_ANOTHER_TAB_MESSAGE) from exc
+                if provenance.refused_unjudged(target_page):
+                    raise TabUnjudgedError(UNJUDGED_TAB_MESSAGE) from exc
                 raise PermissionError(REFUSED_TAB_MESSAGE) from exc
             self.manager._attach_page_listeners(target_page, session)
             if hasattr(target_page, "bring_to_front"):

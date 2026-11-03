@@ -71,6 +71,9 @@ class _PageState:
     # refusal says so, since closing that page is how the agent stops it happening again. Such a page
     # counts for its session only while it is on another kind of document (counts_for_its_session).
     by_another_page: bool = False
+    # Tainted because its birth could not be judged (the window-birth watcher was lost when it was born, or
+    # its target could not be read), not for any host: its refusal says so, and names the way out.
+    unjudged: bool = False
     # Final URLs of failed top-level navigations whose redirect chain passed a refused URL
     # (refused_navigation_failed): a download from one of them is refused.
     refused_failures: deque[str] = field(default_factory=lambda: deque(maxlen=REFUSED_FAILURES_KEPT))
@@ -129,6 +132,11 @@ class PageProvenance:
             and not state.opener_pending
             and state.refused_hop is None
         )
+
+    def refused_unjudged(self, page: Any) -> bool:
+        """Whether the page is refused only because its birth could not be judged (opener_judged's ``unjudged``)."""
+        state = self._state(page)
+        return state is not None and state.tainted and state.unjudged and state.refused_hop is None
 
     def counts_for_its_session(self, page: Any) -> bool:
         """Whether the page can run a refused host's code, so another page's own commit while it is open is
@@ -198,6 +206,7 @@ class PageProvenance:
         if url_refused or refused_hop is not None:
             state.tainted = True
             state.by_another_page = False
+            state.unjudged = False
         elif by_another_page and not state.tainted:
             state.tainted = True
             state.by_another_page = True
@@ -215,21 +224,29 @@ class PageProvenance:
         if state is not None:
             state.opener_pending = False
 
-    def opener_judged(self, page: Any, *, opener_refused: bool, by_another_page: bool = False) -> bool:
+    def opener_judged(
+        self, page: Any, *, opener_refused: bool, by_another_page: bool = False, unjudged: bool = False
+    ) -> bool:
         """Record the opener's verdict. True when it taints the page, which then goes back to about:blank.
 
         A refused opener taints the popup whatever its URL: on about:, blob: or data: the popup shows
         what the opener wrote, and on an allowed URL the opener chose its path and query, which can
         carry what it read. ``by_another_page``: the verdict is the session's, not the opener's own (the
         window-birth watcher could not match the opener, and another page of the session was refused),
-        so the refusal names another tab as its cause.
+        so the refusal names another tab as its cause. ``unjudged``: no verdict could be reached (the
+        watcher was lost, or the window's target could not be read), so the page is refused and its
+        refusal says that. A page whose state is gone (it closed, and was forgotten, before the verdict
+        came) gets none back: there is nothing left to taint.
         """
-        state = self._ensure(page)
+        state = self._state(page)
+        if state is None:
+            return False
         state.opener_pending = False
         if not opener_refused:
             return False
         state.tainted = True
         state.by_another_page = by_another_page
+        state.unjudged = unjudged
         state.blanked = False
         state.refused_commits += 1
         return True
@@ -459,5 +476,6 @@ def _clear(state: _PageState) -> None:
     record of its failed navigations through a refused host (a download is judged by it) go."""
     state.tainted = False
     state.by_another_page = False
+    state.unjudged = False
     state.opener_pending = False
     state.refused_failures.clear()
