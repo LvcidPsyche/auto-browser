@@ -299,4 +299,15 @@ wait_for \
 wait_for "session network removal" "! docker network inspect '${SESSION_NETWORK}'" 30 1
 echo "session network removed after close"
 
+# Its profile (cookies) and downloads belong to the browser user, which the controller is not: the controller has
+# them emptied as that user before it removes the session dir. Nothing may be left, for A or for B.
+for closed in "${SESSION_ID}" "${B_SESSION_ID}"; do
+  if [[ -e "${ROOT_DIR}/data/browser-sessions/${closed}" ]]; then
+    echo >&2 "data/browser-sessions/${closed} is still on disk after close:"
+    ls -laR "${ROOT_DIR}/data/browser-sessions/${closed}" >&2 || true
+    exit 1
+  fi
+done
+echo "session dirs removed after close (profile and downloads included)"
+
 echo "isolated session smoke test passed"

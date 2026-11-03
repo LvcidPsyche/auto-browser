@@ -158,6 +158,9 @@ class FakeDockerContainers:
         self.sandbox_state: dict | None = None
         # When set, run() writes no endpoint and the container is already exited (a refused browser).
         self.exit_before_endpoint = False
+        # The cleanup helper's runs; cleanup_fails makes it leave the files (a helper that could not run).
+        self.cleanup_runs: list[dict] = []
+        self.cleanup_fails = False
         self.networks = networks
 
     def get(self, identifier: str) -> FakeDockerContainer:
@@ -168,7 +171,15 @@ class FakeDockerContainers:
                 return container
         raise KeyError(identifier)
 
-    def run(self, image: str, **kwargs) -> FakeDockerContainer:
+    def run(self, image: str, *args, **kwargs) -> FakeDockerContainer | bytes:
+        if (kwargs.get("labels") or {}).get("auto-browser.role") == "cleanup":
+            # The browser-user helper that empties a session's profile and downloads (session_isolation.py).
+            self.cleanup_runs.append({"image": image, "command": args[0] if args else kwargs.get("command"), **kwargs})
+            if not self.cleanup_fails:
+                for host_path in kwargs["volumes"]:
+                    for child in sorted(Path(host_path).glob("**/*"), key=lambda path: len(path.parts), reverse=True):
+                        child.rmdir() if child.is_dir() else child.unlink()
+            return b""
         name = kwargs["name"]
         volumes = kwargs["volumes"]
         profile_dir = Path(next(path for path, mount in volumes.items() if mount["bind"] == "/data/profile"))
