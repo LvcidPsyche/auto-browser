@@ -427,6 +427,8 @@ class OnEnforcedForIsolatedTests(_ProvisionMixin, unittest.IsolatedAsyncioTestCa
             None,
             {"sandbox": "unreadable", "detail": "not valid JSON"},
             {"sandbox": "on"},  # no verification evidence
+            # a verified on that names another run's endpoint
+            {"sandbox": "on", "verified": {"renderers": 1}, "endpoint": "ws://another-run:9223/x"},
         ):
             with self.subTest(state=state):
                 with self.assertRaisesRegex(
