@@ -70,16 +70,20 @@ class ShadowBrowseSandboxTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_failed_sandboxed_launch_says_what_the_sandbox_needs(self) -> None:
         # On a Linux host without unprivileged user namespaces the sandboxed launch fails;
         # the operator gets the cause and what to change, with Playwright's own error kept.
-        self.launch.side_effect = RuntimeError("No usable sandbox! (Playwright's text)")
+        # Chromium's own text can carry host paths, and MCP hands a RuntimeError's message to the
+        # calling agent, so that text goes to the server log only.
+        self.launch.side_effect = RuntimeError("No usable sandbox! /home/op/.cache/ms-playwright/chrome")
         with (
             patch.object(sessions_module.os, "geteuid", create=True, return_value=1000),
+            self.assertLogs("app.browser.services.sessions", level="WARNING") as logs,
             self.assertRaises(RuntimeError) as caught,
         ):
             await self.manager.enable_shadow_browse(self.source_id)
 
         message = str(caught.exception)
         self.assertIn("user namespaces", message)
-        self.assertIn("No usable sandbox!", message)
+        self.assertNotIn("ms-playwright", message)
+        self.assertIn("No usable sandbox!", "\n".join(logs.output))
         self.assertIsInstance(caught.exception.__cause__, RuntimeError)
 
     async def test_a_platform_without_geteuid_launches_sandboxed(self) -> None:

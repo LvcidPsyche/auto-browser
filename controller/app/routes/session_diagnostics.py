@@ -202,7 +202,9 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
                 # (a data: or blob: page, a page another tab refused) is typed_route_errors' generic 403: a 500
                 # with a traceback, before.
                 raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
-            except RuntimeError:
+            except RuntimeError as exc:
+                # The caller gets the generic answer; why (disabled, a root controller, no sandbox) is logged.
+                logger.warning("shadow browse refused for session %s: %s", session_id, exc)
                 raise HTTPException(status_code=400, detail="Invalid request") from None
 
     @router.get("/sessions/{session_id}/audit")
