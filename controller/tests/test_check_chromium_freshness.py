@@ -204,7 +204,8 @@ class RobustnessTests(unittest.TestCase):
     def test_npm_metadata_that_is_a_list(self) -> None:
         sources = FakeSources()
         sources.responses["https://registry.npmjs.org/playwright-core/1.64.1"] = b"[1, 2]"
-        self._assert_error(sources)
+        out = self._assert_error(sources)
+        self.assertIn("returned a JSON list, not a dict", out)  # named, not the catch-all's "unexpected"
 
     def test_a_tarball_that_is_not_gzip(self) -> None:
         sources = FakeSources()

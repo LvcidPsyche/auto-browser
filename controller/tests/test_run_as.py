@@ -438,7 +438,10 @@ class ImageWiringTests(unittest.TestCase):
     def test_setpriv_drops_every_capability_and_sets_no_new_privs(self) -> None:
         self.assertRegex(self.entrypoint, r"--inh-caps=-all")
         self.assertRegex(self.entrypoint, r"--ambient-caps=-all")
-        self.assertRegex(self.entrypoint, r"--no-new-privs")
+        # The drop itself, not just the cap_drop ALL branch, carries no_new_privs.
+        self.assertIn("caps=(--inh-caps=-all --ambient-caps=-all --no-new-privs)", self.entrypoint)
+        self.assertIn('--clear-groups "${caps[@]}" "$@"', self.entrypoint)
+        self.assertIn('--groups="$group_list" "${caps[@]}" "$@"', self.entrypoint)
         self.assertRegex(self.entrypoint, r"--bounding-set=-all")
         # Only when CAP_SETPCAP (bit 8) is in the bounding set, so a cap_drop ALL run still starts.
         self.assertIn("1 << 8", self.entrypoint)
