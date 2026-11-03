@@ -4,8 +4,11 @@ FastAPI's built-in pages load Swagger UI and ReDoc from a CDN by floating major
 version (``swagger-ui-dist@5``, ``redoc@2``) with no Subresource Integrity, plus
 Google Fonts and a favicon from fastapi.tiangolo.com. Swagger's Authorize box
 takes the API token, so a changed CDN file could read it. These pages load exact
-versions with SRI hashes, which the browser checks before it runs a byte, and
-nothing else from another origin.
+versions with SRI hashes, which the browser checks before it runs a byte. A
+Content-Security-Policy admits those scripts by exact URL (and Swagger's inline
+init by its hash), and images, fonts and requests from this origin only, so
+nothing else reaches another origin (ReDoc's bundle would fetch its footer logo
+from cdn.redoc.ly).
 
 The hashes were computed from the npm registry tarballs (checked against the
 registry's own integrity) and match jsDelivr's copies byte for byte. To move a
@@ -13,6 +16,10 @@ version: fetch the new files, recompute the sha384, and change both together.
 """
 
 from __future__ import annotations
+
+import base64
+import hashlib
+import re
 
 from fastapi import FastAPI, Request
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
@@ -36,6 +43,23 @@ REDOC_JS = (
 )
 # No favicon request at all, rather than one to a third party.
 _NO_FAVICON = "data:,"
+# Images and fonts from here only (ReDoc's bundle fetches its footer logo from cdn.redoc.ly), requests to
+# here only, and scripts by exact URL. Styles stay inline-capable: both UIs inject their own.
+_POLICY = (
+    "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
+    "connect-src 'self'; img-src 'self' data:; font-src 'self' data:; worker-src blob:; "
+    "style-src {styles} 'unsafe-inline'; script-src {scripts}"
+)
+_INLINE_SCRIPT = re.compile(r"<script>(.*?)</script>", re.S)
+
+
+def _policy(html: str, scripts: list[str], styles: list[str]) -> str:
+    """The page's Content-Security-Policy: its pinned assets, plus the hash of each inline script it holds."""
+    hashes = [
+        "'sha256-" + base64.b64encode(hashlib.sha256(body.encode("utf-8")).digest()).decode() + "'"
+        for body in _INLINE_SCRIPT.findall(html)
+    ]
+    return _POLICY.format(scripts=" ".join(scripts + hashes), styles=" ".join(styles) or "'self'")
 
 
 def _with_integrity(html: str, attribute: str, asset: tuple[str, str]) -> str:
@@ -70,7 +94,8 @@ def install_docs_pages(application: FastAPI) -> None:
         html = page.body.decode("utf-8")
         html = _with_integrity(html, "src", SWAGGER_JS)
         html = _with_integrity(html, "href", SWAGGER_CSS)
-        return HTMLResponse(html)
+        policy = _policy(html, scripts=[SWAGGER_JS[0]], styles=[SWAGGER_CSS[0]])
+        return HTMLResponse(html, headers={"Content-Security-Policy": policy})
 
     async def redoc(request: Request) -> HTMLResponse:
         page = get_redoc_html(
@@ -80,7 +105,8 @@ def install_docs_pages(application: FastAPI) -> None:
             redoc_favicon_url=_NO_FAVICON,
             with_google_fonts=False,
         )
-        return HTMLResponse(_with_integrity(page.body.decode("utf-8"), "src", REDOC_JS))
+        html = _with_integrity(page.body.decode("utf-8"), "src", REDOC_JS)
+        return HTMLResponse(html, headers={"Content-Security-Policy": _policy(html, scripts=[REDOC_JS[0]], styles=[])})
 
     application.add_route("/docs", swagger_ui, include_in_schema=False)
     application.add_route("/redoc", redoc, include_in_schema=False)
