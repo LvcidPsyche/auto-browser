@@ -421,11 +421,19 @@ class BrowserSessionService(SessionCreation):
 
         # A local headed browser process, sandboxed: shadow browse is a host-run feature (the
         # controller image has no Chromium or display), and on a host the sandbox works.
-        headed_browser = await manager.playwright.chromium.launch(
-            headless=False,
-            chromium_sandbox=True,
-            args=[STORAGE_PARTITIONING_ON],
-        )
+        try:
+            headed_browser = await manager.playwright.chromium.launch(
+                headless=False,
+                chromium_sandbox=True,
+                args=[STORAGE_PARTITIONING_ON],
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Shadow browsing could not start its sandboxed headed Chromium. On Linux the sandbox needs "
+                "unprivileged user namespaces (sysctl kernel.unprivileged_userns_clone=1, or an AppArmor profile "
+                "that allows them where Ubuntu restricts them), and headed mode needs a display. "
+                f"Chromium said: {exc}"
+            ) from exc
         context = None
         try:
             # Launched by the controller (not an attach mode), and gated before its first context.

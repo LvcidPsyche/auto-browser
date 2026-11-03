@@ -67,6 +67,21 @@ class ShadowBrowseSandboxTests(unittest.IsolatedAsyncioTestCase):
         self.source.context.storage_state.assert_not_awaited()
         self.launch.assert_not_awaited()
 
+    async def test_a_failed_sandboxed_launch_says_what_the_sandbox_needs(self) -> None:
+        # On a Linux host without unprivileged user namespaces the sandboxed launch fails;
+        # the operator gets the cause and what to change, with Playwright's own error kept.
+        self.launch.side_effect = RuntimeError("No usable sandbox! (Playwright's text)")
+        with (
+            patch.object(sessions_module.os, "geteuid", create=True, return_value=1000),
+            self.assertRaises(RuntimeError) as caught,
+        ):
+            await self.manager.enable_shadow_browse(self.source_id)
+
+        message = str(caught.exception)
+        self.assertIn("user namespaces", message)
+        self.assertIn("No usable sandbox!", message)
+        self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+
     async def test_a_platform_without_geteuid_launches_sandboxed(self) -> None:
         """Windows has no geteuid and no root to refuse: the sandboxed launch goes ahead."""
         saved = getattr(os, "geteuid", None)
