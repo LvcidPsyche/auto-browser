@@ -427,6 +427,7 @@ class WindowBirths:
         page_by_target_id: Callable[[Any, str], Any],
         session_pages: Callable[[Any], list[Any]],
         resolve_target_id: Callable[[Any], Awaitable[str | None]],
+        known_target_id: Callable[[Any], str | None],
         seed_target_id: Callable[[Any, str], None],
     ) -> None:
         # Whether ALLOWED_HOSTS refuses any host: when every host is allowed nothing is ever born refused, so
@@ -437,6 +438,7 @@ class WindowBirths:
         self._page_by_target_id = page_by_target_id
         self._session_pages = session_pages
         self._resolve_target_id = resolve_target_id
+        self._known_target_id = known_target_id
         # Cache a page's targetId so a later window's openerId can be matched to it with no I/O; the gate seeds
         # the first page when it is on, this seeds it when it is off.
         self._seed_target_id = seed_target_id
@@ -587,15 +589,27 @@ class WindowBirths:
         return watcher.mark_reported(session, target_id, page)
 
     async def _reported_target_ids(self, session: Any) -> set[str]:
-        """The targetIds of the session's open pages: the reads in flight are waited for (bounded), and a page
-        whose id is not cached yet is read now, so the sweep never closes a page Playwright reported."""
+        """The targetIds of the session's pages whose id the controller already knows, so the sweep never
+        closes one Playwright reported.
+
+        A page Playwright reported is given a report task (``note_reported`` in ``attach_popup``) that resolves
+        and caches its targetId; its first page and open-tab tabs are cached when opened. The reads in flight
+        are waited for (bounded), then the cached id of every page is taken. A page whose id is not cached is
+        never read here: it was never reported or opened by the controller (exactly an unreported window the
+        sweep may close), and resolving an arbitrary window's id would open — and, since the session is kept,
+        retain — a CDP session per window, which a refused page flooding windows would turn into resource
+        exhaustion."""
         pages = list(self._session_pages(session))
         reads = [task for task in (self._reports.get(page) for page in pages) if task is not None and not task.done()]
         if reads:
             with contextlib.suppress(Exception):
                 await asyncio.wait(reads, timeout=REPORTED_IDS_TIMEOUT_SECONDS)
-        ids = await asyncio.gather(*(self._resolve_target_id(page) for page in pages), return_exceptions=True)
-        return {target_id for target_id in ids if isinstance(target_id, str)}
+        ids: set[str] = set()
+        for page in pages:
+            target_id = self._known_target_id(page)
+            if target_id is not None:
+                ids.add(target_id)
+        return ids
 
     async def close_unreported(self, session: Any) -> None:
         watcher = self._get(getattr(session, "browser", None))

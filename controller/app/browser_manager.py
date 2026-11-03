@@ -203,6 +203,7 @@ class BrowserManager:
             page_by_target_id=self._page_by_target_id,
             session_pages=lambda session: self.tabs.pages(session),
             resolve_target_id=lambda page: self.request_gates.target_id_of(page),
+            known_target_id=self.request_gates.known_target_id,
             seed_target_id=self.request_gates.seed_target_id,
         )
         self.action_pipeline = BrowserActionPipeline()
