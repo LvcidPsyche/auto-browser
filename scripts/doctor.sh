@@ -248,7 +248,10 @@ fi
 API_PORT="$API_PORT" NOVNC_PORT="$NOVNC_PORT" TAKEOVER_URL="$TAKEOVER_URL" \
   docker compose up "${compose_flags[@]}" browser-node controller >/dev/null
 
-if ! wait_for_http "http://127.0.0.1:${API_PORT}/readyz"; then
+# 600 one-second attempts: a controller upgraded from 1.13.0 or earlier first hands its root-owned files to
+# the user it runs as, once (~108s for 20,000 files on a Docker Desktop bind mount), and CLEANUP_ON_STARTUP's
+# sweep walks the same files before the API listens (~152s there): 277s in all on that first start.
+if ! wait_for_http "http://127.0.0.1:${API_PORT}/readyz" 600; then
   echo "Controller never became ready; dumping container logs for diagnosis:" >&2
   docker compose logs --tail=80 controller browser-node >&2 || true
   exit 1

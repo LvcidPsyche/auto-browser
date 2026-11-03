@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -337,3 +338,47 @@ class ImageWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FirstPassNoticeTests(unittest.TestCase):
+    def test_a_scan_is_announced_as_one_time_before_it_starts(self) -> None:
+        # Docker Desktop bind mounts took ~103s for 20102 entries: say so before, not only after.
+        with tempfile.TemporaryDirectory() as tempdir:
+            data = Path(tempdir)
+            owners = {str(data).replace("\\", "/"): 0}
+            fs = FakeFs(owners)
+            with redirect_stdout(io.StringIO()), self.assertLogs("app.run_as", level=logging.INFO) as logs:
+                main(
+                    run_as="auto",
+                    settings=_settings(data),
+                    data_root=data,
+                    owner=fs.owner,
+                    owner_gid=lambda p: 0,
+                    chown=fs.chown,
+                )
+            messages = [record.getMessage() for record in logs.records]
+            notice = next(i for i, m in enumerate(messages) if "one-time" in m)
+            done = next(i for i, m in enumerate(messages) if "handed to it" in m)
+            self.assertLess(notice, done)
+            self.assertIn("a minute or two on Docker Desktop bind mounts", messages[notice])
+
+
+@unittest.skipUnless((REPO / "scripts" / "doctor.sh").is_file(), "scripts/ is not in the controller image")
+class SlowFirstStartTests(unittest.TestCase):
+    def test_doctor_waits_long_enough_for_a_first_hand_over(self) -> None:
+        doctor = (REPO / "scripts" / "doctor.sh").read_text(encoding="utf-8")
+        match = re.search(r'wait_for_http "http://127\.0\.0\.1:\$\{API_PORT\}/readyz" (\d+)', doctor)
+        self.assertIsNotNone(match, "doctor no longer waits on /readyz with an explicit attempt count")
+        self.assertGreaterEqual(int(match.group(1)), 240)
+
+
+class PackageDataTests(unittest.TestCase):
+    def test_the_seccomp_files_ship_in_the_controller_package(self) -> None:
+        import tomllib
+
+        pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+        globs = pyproject["tool"]["setuptools"]["package-data"]["app"]
+        app = Path(__file__).resolve().parents[1] / "app"
+        shipped = {path.relative_to(app).as_posix() for pattern in globs for path in app.glob(pattern)}
+        for name in ("chromium-sandbox.json", "moby-default.json", "README.md"):
+            self.assertIn(f"browser/seccomp/{name}", shipped)

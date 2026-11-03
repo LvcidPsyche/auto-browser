@@ -210,6 +210,12 @@ def main(
 
             settings = Settings()
         paths = controller_owned_paths(settings, data_root)
+        logger.info(
+            "Handing the controller's files under %s to uid %s: a one-time pass (skipped on later starts) that can "
+            "take a minute or two on Docker Desktop bind mounts with many files.",
+            data_root,
+            decision.uid,
+        )
         report = fix_ownership(data_root, paths, decision.uid, decision.gid, owner=owner, chown=chown)
         if not report.errors:
             try:
