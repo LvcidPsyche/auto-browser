@@ -102,6 +102,9 @@ class BrowserDiagnosticsService:
         # Whether each request's page was refused when the request started: a failure is
         # delivered later, when the page may have moved on to an allowed URL.
         self._started_refused: weakref.WeakKeyDictionary[Any, bool] = weakref.WeakKeyDictionary()
+        # A reported window's pending birth verdict (_judge_birth), so a tab operation can wait for it
+        # instead of refusing a clean popup that was reported a moment ago.
+        self._birth_judgements: weakref.WeakKeyDictionary[Any, asyncio.Task[None]] = weakref.WeakKeyDictionary()
 
     async def get_console_messages(self, session_id: str, *, limit: int = 20) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
@@ -272,7 +275,7 @@ class BrowserDiagnosticsService:
         # navigation committed nothing until after the agent's navigate cleared the opener: that is how a
         # window leaked). It stays refused (opener_pending, set when the context reported it) until its birth
         # verdict is known: nothing it logs or shows reaches the agent meanwhile.
-        spawn_background_task(self._judge_birth(session, popup))
+        self._birth_judgements[popup] = spawn_background_task(self._judge_birth(session, popup))
 
     async def _judge_birth(self, session: "BrowserSession", popup: "Page") -> None:
         """Apply a reported window's birth verdict (window_births) as its opener's verdict would be applied."""
@@ -283,6 +286,21 @@ class BrowserDiagnosticsService:
             by_another_page=verdict is BirthVerdict.REFUSED_BY_SESSION,
         ):
             await self._return_to_blank(session, popup)
+
+    async def birth_judged(self, page: "Page") -> None:
+        """Wait until a reported window's birth verdict is applied, so the page's refusal is its final one.
+
+        A clean popup is held refused from its report until its birth verdict lands (a CDP round trip), and
+        the agent's next call can come sooner than that: activate_tab and list_tabs wait here rather than
+        refuse it. A verdict that failed leaves the page held (fail closed), and this returns all the same.
+        """
+        task = self._birth_judgements.get(page)
+        if task is None:
+            return
+        try:
+            await asyncio.shield(task)
+        except Exception:
+            return
 
     def attach_page_listeners(self, page: "Page", session: "BrowserSession") -> None:
         if not hasattr(page, "on"):
