@@ -378,6 +378,16 @@ class DockerBrowserNodeProvisioner:
                     "sessions, remove leftover networks (label auto-browser.managed=true), or widen "
                     '"default-address-pools" in the daemon\'s daemon.json.'
                 ) from exc
+            # The daemon answers 409 Conflict ("network with name ... already exists"). A
+            # leftover of this session id carrying our labels was already removed, so this
+            # one belongs to someone else and is never removed here.
+            if getattr(exc, "status_code", None) == 409 or "already exists" in str(exc).lower():
+                raise RuntimeError(
+                    f"A Docker network named {network_name} already exists and is not a session network of this "
+                    "controller (it lacks the auto-browser.managed and auto-browser.session_id labels), so it is "
+                    f"left alone. If it is a leftover, remove it (docker network rm {network_name}); otherwise "
+                    "set ISOLATED_BROWSER_CONTAINER_PREFIX to a prefix no other network on this daemon uses."
+                ) from exc
             raise
 
     def _remove_stale_session_network(self, client, network_name: str, session_id: str, controller_id: str) -> None:
