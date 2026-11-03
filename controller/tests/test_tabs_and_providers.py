@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from datetime import datetime
@@ -98,6 +99,52 @@ class BrowserTabManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.page.url, "https://example.com/export")
         self.assertEqual(result["tabs"][1]["active"], True)
         self.assertEqual(self.session.page.front_calls, 1)
+
+    # ── round 4: activate_tab binds the tab before it waits for a held popup's verdict ──
+
+    def _wait_then(self, side_effect) -> None:
+        """activate_tab's wait for the tab's birth verdict (diagnostics.birth_judged), during which ``side_effect``
+        happens to the session: a tab closing, the session closing."""
+
+        async def birth_judged(page) -> None:
+            await asyncio.sleep(0)
+            side_effect()
+
+        self.manager.diagnostics.birth_judged = birth_judged  # type: ignore[method-assign]
+
+    async def test_activate_tab_activates_the_tab_it_was_asked_for_when_another_closes_during_the_wait(self) -> None:
+        """Round-4 R4: the tab was read by index again under the lock, so a tab closing during the wait (an OAuth
+        popup closing itself) shifted the indices and another tab, not waited for, was activated."""
+        first, second = self.session.context.pages
+        third = FakeTabPage(self.session.context, "https://example.com/third", "Third")
+        self.session.context.pages.append(third)
+        self._wait_then(lambda: self.session.context.pages.remove(first))
+
+        result = await self.manager.activate_tab(self.session.id, 1)
+
+        self.assertIs(self.session.page, second)
+        self.assertEqual(result["index"], 0)
+        self.assertEqual([tab["active"] for tab in result["tabs"]], [True, False])
+        self.assertEqual(third.front_calls, 0)
+
+    async def test_activate_tab_of_a_tab_that_closes_during_the_wait_is_an_unknown_tab(self) -> None:
+        first, second = self.session.context.pages
+        self._wait_then(lambda: self.session.context.pages.remove(second))
+
+        with self.assertRaises(ValueError):
+            await self.manager.activate_tab(self.session.id, 1)
+
+        self.assertIs(self.session.page, first)
+
+    async def test_activate_tab_of_a_session_that_closes_during_the_wait_is_an_unknown_session(self) -> None:
+        """Round-4 H2: close_session during the wait answered 'Unknown tab index' (400), not the unknown-session
+        error every other call on a closed session gives."""
+        from app.action_errors import SessionNotFoundError
+
+        self._wait_then(lambda: self.manager.sessions.pop(self.session.id))
+
+        with self.assertRaises(SessionNotFoundError):
+            await self.manager.activate_tab(self.session.id, 1)
 
     async def test_close_tab_closes_secondary_page(self) -> None:
         result = await self.manager.close_tab(self.session.id, 1)
