@@ -248,23 +248,22 @@ class BrowserDiagnosticsService:
 
     def _on_popup(self, session: "BrowserSession", opener: "Page", popup: "Page") -> None:
         # The opener as it is when the popup opens: it can clear its own taint, or close,
-        # before any later look at it, and the popup holds what it wrote either way.
-        opener_refused = self.manager._page_refused(opener)
-        if self.manager.window_births.active_for(session):
-            # Judge the window by its CDP target's birth too (window_births): one born while its session
-            # counted as refused is refused even when its opener is clean by the time Playwright reports it,
-            # which is how a window whose first navigation committed nothing leaked. The popup stays refused
-            # (opener_pending, set in attach_popup) until this verdict is in, so nothing reads it meanwhile.
-            spawn_background_task(self._judge_reported_popup(session, popup, opener_refused))
-            return
-        if self.manager.page_provenance.opener_judged(popup, opener_refused=opener_refused):
+        # before any later look at it, and the popup holds what it wrote either way. Judged synchronously,
+        # as before, so a legitimate popup is readable the moment it is reported.
+        if self.manager.page_provenance.opener_judged(popup, opener_refused=self.manager._page_refused(opener)):
             spawn_background_task(self._return_to_blank(session, popup))
+        if self.manager.window_births.active_for(session):
+            # And by its CDP target's birth (window_births): a window born while its session counted as
+            # refused is refused even when its opener is clean by the time Playwright reports it, which is how
+            # a window whose first navigation committed nothing leaked. A born-refused window that is never
+            # reported is closed by the sweep before it can commit; this taints the rare one reported anyway.
+            spawn_background_task(self._taint_if_born_refused(session, popup))
 
-    async def _judge_reported_popup(self, session: "BrowserSession", popup: "Page", opener_refused: bool) -> None:
-        """Record the opener's verdict for a reported popup, combined with its target-birth verdict."""
-        born_refused = await self.manager.window_births.mark_reported(session, popup)
-        if self.manager.page_provenance.opener_judged(popup, opener_refused=opener_refused or born_refused):
-            await self._return_to_blank(session, popup)
+    async def _taint_if_born_refused(self, session: "BrowserSession", popup: "Page") -> None:
+        """Mark a reported popup refused when its CDP target was born refused, on top of its opener's verdict."""
+        if await self.manager.window_births.mark_reported(session, popup):
+            if self.manager.page_provenance.opener_judged(popup, opener_refused=True):
+                await self._return_to_blank(session, popup)
 
     def taint_reported_window(self, session: "BrowserSession", page: "Page") -> None:
         """A window Playwright reported before its CDP birth arrived (the event-order race), now known to be
