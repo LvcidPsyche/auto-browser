@@ -141,6 +141,25 @@ class ShadowBrowseAllowedHostsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.shadow_page.url, url)
         self.assertEqual(self.manager.audit.append.await_args.kwargs["details"]["url"], url)
 
+    async def test_a_start_that_fails_after_the_watcher_registered_the_shadow_session_forgets_it(self) -> None:
+        """The window-birth watcher registers the shadow session before its first navigation; a start that fails
+        after that (here, that navigation) rolls the session back, and its registration goes with it: a dead
+        session left there was held, and re-registered with every replacement watcher."""
+        session_id = await self._source("https://allowed.example/cart")
+        births = self.manager.window_births
+        registered_before = set(births._registered)
+        self.manager.session_lifecycle._goto_or_blocked = AsyncMock(side_effect=RuntimeError("the headed page hung"))
+
+        for _ in range(3):
+            with self.assertRaises(RuntimeError):
+                await self.manager.enable_shadow_browse(session_id)
+
+        self.assertEqual(set(births._registered), registered_before)
+        headed = self.launch.return_value
+        watcher = births._get(headed)
+        self.assertTrue(watcher is None or watcher.session_count == 0)
+        self.assertEqual(list(self.manager.sessions), [session_id])
+
 
 if __name__ == "__main__":
     unittest.main()
