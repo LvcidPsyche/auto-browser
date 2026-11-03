@@ -142,6 +142,10 @@ jobs:
       - name: Audit browser-node production dependencies
         run: npm audit --omit=dev --audit-level=high
         working-directory: browser-node
+      - name: Test browser-node's sandbox policy (BROWSER_SANDBOX)
+        # Node's built-in runner; sandbox.mjs imports only node: modules.
+        run: node --test sandbox.test.mjs
+        working-directory: browser-node
 
   package-build:
     needs: lint
@@ -201,6 +205,12 @@ jobs:
 
       - name: Run doctor smoke test
         run: DOCTOR_BUILD=1 ./scripts/doctor.sh
+
+      - name: Report Chromium's sandbox in browser-node
+        # What this runner's kernel and AppArmor allow: BROWSER_SANDBOX=auto runs Chromium sandboxed where it can and
+        # otherwise falls back with the cause in the state file (Ubuntu 24.04 restricts unprivileged user namespaces
+        # with AppArmor). Printed, not asserted, so a fallback keeps the job green and stays visible.
+        run: docker compose exec -T -u browser browser-node node /opt/browser-node/sandbox-report.mjs browser-node
 
       - name: Check the controller demands its generated token
         # With no API_BEARER_TOKEN, the loopback controller generates a token in

@@ -61,7 +61,10 @@ class IsolatedContainerHardeningTests(unittest.IsolatedAsyncioTestCase):
             kwargs = client.containers.browser_containers[runtime.container_name].run_kwargs
             self.assertEqual(kwargs["cap_drop"], ["ALL"])
             self.assertEqual(kwargs["cap_add"], EXPECTED_CAP_ADD)
-            self.assertEqual(kwargs["security_opt"], ["no-new-privileges:true"])
+            # no-new-privileges first; the second option is the sandbox's seccomp profile (test_browser_sandbox).
+            self.assertEqual(kwargs["security_opt"][0], "no-new-privileges:true")
+            self.assertEqual(len(kwargs["security_opt"]), 2)
+            self.assertTrue(kwargs["security_opt"][1].startswith("seccomp={"))
             # The resource limits stay as they were.
             self.assertEqual(kwargs["pids_limit"], 2048)
             self.assertEqual(kwargs["mem_limit"], "4g")
@@ -80,7 +83,8 @@ class ComposeHardeningTests(unittest.TestCase):
 
     def test_browser_node_sets_no_new_privileges_and_a_pids_limit(self) -> None:
         block = _service_block(self.compose, "browser-node")
-        self.assertEqual(_flow_list(block, "security_opt"), ["no-new-privileges:true"])
+        # The seccomp entry that follows is the sandbox's profile (test_browser_sandbox).
+        self.assertEqual(_flow_list(block, "security_opt")[0], "no-new-privileges:true")
         self.assertRegex(block, r"(?m)^    pids_limit: 2048$")
 
     def test_the_controller_sets_only_no_new_privileges(self) -> None:

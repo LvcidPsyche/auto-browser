@@ -5,6 +5,8 @@ export DISPLAY=:99
 WIDTH="${BROWSER_WIDTH:-1600}"
 HEIGHT="${BROWSER_HEIGHT:-900}"
 WS_ENDPOINT_FILE="${BROWSER_WS_ENDPOINT_FILE:-/data/profile/browser-ws-endpoint.txt}"
+# How Chromium runs (sandbox on or off, and why), written by server.mjs before the endpoint file.
+SANDBOX_STATE_FILE="${BROWSER_SANDBOX_STATE_FILE:-$(dirname "$WS_ENDPOINT_FILE")/browser-sandbox.json}"
 PLAYWRIGHT_SERVER_PORT="${PLAYWRIGHT_SERVER_PORT:-9223}"
 PLAYWRIGHT_SERVER_HOST="${PLAYWRIGHT_SERVER_HOST:-0.0.0.0}"
 PLAYWRIGHT_SERVER_ADVERTISED_HOST="${PLAYWRIGHT_SERVER_ADVERTISED_HOST:-browser-node}"
@@ -18,7 +20,8 @@ export BROWSER_WIDTH="$WIDTH" \
 BROWSER_USER="${BROWSER_USER:-browser}"
 
 mkdir -p /data/profile /data/downloads /tmp/runtime
-rm -f "$WS_ENDPOINT_FILE"
+# A state file left by the last run would describe a Chromium that is gone.
+rm -f "$WS_ENDPOINT_FILE" "$SANDBOX_STATE_FILE"
 DISPLAY_NUM="${DISPLAY#:}"
 rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
 
