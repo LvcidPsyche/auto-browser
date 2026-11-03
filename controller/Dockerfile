@@ -46,13 +46,18 @@ COPY tests ./tests
 COPY pyproject.toml ./pyproject.toml
 
 RUN mkdir -p /data/artifacts /data/uploads /data/auth /data/approvals /data/audit /data/db /data/jobs /data/sessions /data/browser-sessions /data/tunnels /data/cli-home \
-    && chown -R 10001:10001 /data
+    && chown -R 10002:10002 /data
 
 # uvicorn never runs as root: entrypoint.sh (as root only until setpriv) runs it as the owner of /data, or as this
-# user when /data belongs to root (Docker Desktop bind mounts, named volumes). Its home is sticky and world-writable
+# user (uid 10002, never browser-node's 10001) when /data belongs to root or to 10001 (Docker Desktop bind mounts,
+# named volumes, a 1.14 pre-release's data). Its home is sticky and world-writable
 # because a host user's uid may run here too. CONTROLLER_RUN_AS=root keeps the old root controller.
-RUN useradd --uid 10001 --user-group --create-home --home-dir /home/controller --shell /usr/sbin/nologin controller \
+RUN useradd --uid 10002 --user-group --create-home --home-dir /home/controller --shell /usr/sbin/nologin controller \
     && chmod 1777 /home/controller
+# With the isolation overlay on Docker Desktop the controller joins group 0 (the Docker socket's group there). Nothing
+# in the image is writable through group 0 alone: apt leaves the man dirs and debconf's tmp.ci g+w, so the group
+# write bit comes off everything but the sticky, world-writable dirs (/tmp, /var/tmp, /run/lock).
+RUN find / -xdev -group 0 -perm -g+w ! -type l ! -perm -1000 -exec chmod g-w {} +
 COPY entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 

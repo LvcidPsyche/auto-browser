@@ -1,9 +1,13 @@
 """The controller never runs as root by default (CONTROLLER_RUN_AS=auto|root).
 
 controller/entrypoint.sh starts as root only to call app.run_as, which picks the user (the owner of /data when that
-is not root, so the host user keeps its files and its 0600 api-token; otherwise the image's controller user, uid
-10001), hands that user the root-owned entries of the controller's own /data subtrees (never a blanket chown, never
-the browser's dirs, never outside /data), and then the entrypoint execs uvicorn through setpriv.
+is neither root nor the browser's uid 10001, so the host user keeps its files and its 0600 api-token; otherwise the
+image's controller user, uid 10002), hands that user what earlier releases left in the controller's own /data
+subtrees through directory fds, and then the entrypoint execs uvicorn through setpriv.
+
+The ownership walk and the marker use dir fds (os.fwalk, dir_fd=), which exist on Linux only: those tests run on
+CI's Linux hosts and inside the controller image (as root and as a user), and skip on Windows. Run as a non-root user,
+they hand entries from the current uid to itself, which shows exactly what the walk touches without needing root.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import io
 import logging
 import os
 import re
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -21,28 +26,68 @@ from types import SimpleNamespace
 from app.config import Settings
 from app.readiness import run_readiness_checks
 from app.run_as import (
+    BROWSER_UID,
     CONTROLLER_UID,
+    MARKER_NAME,
     controller_owned_paths,
     controller_user_check,
     decide_user,
     fix_ownership,
     main,
+    marker_bytes,
+    read_marker,
+    write_marker,
 )
 
 REPO = Path(__file__).resolve().parents[2]
+LINUX = sys.platform.startswith("linux")
+ME = os.getuid() if hasattr(os, "getuid") else -1
+MY_GID = os.getgid() if hasattr(os, "getgid") else -1
 
 
 class DecideUserTests(unittest.TestCase):
     def test_a_host_user_owned_data_dir_runs_as_that_user(self) -> None:
-        decision = decide_user("auto", data_root=Path("/data"), owner_uid=1001, owner_gid=121)
-        self.assertEqual((decision.uid, decision.gid), (1001, 121))
+        decision = decide_user(
+            "auto", data_root=Path("/data"), owner_uid=1001, owner_gid=1001, is_system_group=lambda g: False
+        )
+        self.assertEqual((decision.uid, decision.gid), (1001, 1001))
         self.assertIn("the owner of /data (uid 1001)", decision.reason)
 
-    def test_a_root_owned_data_dir_runs_as_10001(self) -> None:
+    def test_a_root_owned_data_dir_runs_as_10002(self) -> None:
         decision = decide_user("auto", data_root=Path("/data"), owner_uid=0, owner_gid=0)
         self.assertEqual((decision.uid, decision.gid), (CONTROLLER_UID, CONTROLLER_UID))
-        self.assertEqual(CONTROLLER_UID, 10001)
+        self.assertEqual(CONTROLLER_UID, 10002)
         self.assertIn("belongs to root", decision.reason)
+
+    def test_never_the_browsers_uid(self) -> None:
+        # A data dir a 1.14 pre-release handed to 10001: the controller must not share browser-node's uid.
+        decision = decide_user("auto", data_root=Path("/data"), owner_uid=BROWSER_UID, owner_gid=BROWSER_UID)
+        self.assertEqual((decision.uid, decision.gid), (10002, 10002))
+        self.assertIn("browser's uid 10001", decision.reason)
+
+    def test_the_primary_gid_is_never_0_or_a_system_group(self) -> None:
+        zero = decide_user(
+            "auto", data_root=Path("/data"), owner_uid=1001, owner_gid=0, is_system_group=lambda g: False
+        )
+        self.assertEqual((zero.uid, zero.gid), (1001, 1001))
+        self.assertIn("its group 0 is root", zero.reason)
+        shadow = decide_user(
+            "auto", data_root=Path("/data"), owner_uid=1001, owner_gid=42, is_system_group=lambda g: g == 42
+        )
+        self.assertEqual((shadow.uid, shadow.gid), (1001, 1001))
+        self.assertIn("its group 42 is a system group", shadow.reason)
+        user_group = decide_user(
+            "auto", data_root=Path("/data"), owner_uid=1001, owner_gid=121, is_system_group=lambda g: False
+        )
+        self.assertEqual(user_group.gid, 121)
+
+    @unittest.skipUnless(LINUX, "grp is POSIX")
+    def test_the_default_system_group_check_reads_the_images_groups(self) -> None:
+        # gid 0 exists everywhere; on Debian (the image) gid 42 is shadow.
+        from app.run_as import _is_image_system_group
+
+        self.assertTrue(_is_image_system_group(0))
+        self.assertFalse(_is_image_system_group(60000))
 
     def test_root_is_an_explicit_choice(self) -> None:
         decision = decide_user("root", data_root=Path("/data"), owner_uid=1001, owner_gid=121)
@@ -121,178 +166,210 @@ class OwnedPathsTests(unittest.TestCase):
         self.assertNotIn(Path("/srv/artifacts"), paths)
 
 
-class FakeFs:
-    """lstat/chown over a dict of path -> uid, for root-owned bookkeeping without root."""
-
-    def __init__(self, owners: dict[str, int], fail: set[str] = frozenset()) -> None:
-        self.owners = owners
-        self.fail = fail
-        self.chowned: list[str] = []
-
-    def owner(self, path: Path) -> int:
-        return self.owners[str(path).replace("\\", "/")]
-
-    def chown(self, path: Path, uid: int, gid: int) -> None:
-        key = str(path).replace("\\", "/")
-        if key in self.fail:
-            raise PermissionError(1, "Operation not permitted", key)
-        self.chowned.append(key)
-        self.owners[key] = uid
+def _tree(root: Path, *relatives: str) -> None:
+    for relative in relatives:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
 
 
-class FixOwnershipTests(unittest.TestCase):
-    def _tree(self, root: Path) -> None:
-        for relative in ("artifacts/a/1.png", "artifacts/a/2.png", "auth/profile.json", "browser-profile/x"):
-            path = root / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("x", encoding="utf-8")
-        (root / "api-token").write_text("t", encoding="utf-8")
+@unittest.skipUnless(LINUX, "dir-fd walk: Linux only")
+class FixOwnershipLinuxTests(unittest.TestCase):
+    """Real files and real chown, handing entries from the current uid to itself."""
 
-    def test_only_root_owned_entries_are_handed_over(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            self._tree(root)
-            every = [p for p in [root, *root.rglob("*")]]
-            owners = {str(p).replace("\\", "/"): 0 for p in every}
-            owners[str(root / "artifacts" / "a" / "2.png").replace("\\", "/")] = 1001
-            fs = FakeFs(owners)
-            report = fix_ownership(
-                root,
-                [root / "artifacts", root / "auth", root / "api-token"],
-                1001,
-                1001,
-                owner=fs.owner,
-                chown=fs.chown,
-            )
-            rel = sorted(str(Path(p).relative_to(root)).replace("\\", "/") for p in fs.chowned)
-            self.assertEqual(
-                rel, [".", "api-token", "artifacts", "artifacts/a", "artifacts/a/1.png", "auth", "auth/profile.json"]
-            )
-            self.assertEqual(report.changed, 7)
-            self.assertEqual(report.errors, [])
-            # The browser's dir and the file already owned by the user were not touched.
-            self.assertNotIn(str(root / "browser-profile").replace("\\", "/"), fs.chowned)
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data = Path(self.tmp.name) / "data"
+        self.outside = Path(self.tmp.name) / "outside"
+        self.data.mkdir()
+        self.outside.mkdir()
+        _tree(self.outside, "secret", "deep/secret2")
 
-    def test_a_failed_chown_is_reported_with_its_path(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            root = Path(tempdir)
-            self._tree(root)
-            owners = {str(p).replace("\\", "/"): 0 for p in [root, *root.rglob("*")]}
-            fs = FakeFs(owners, fail={str(root / "auth").replace("\\", "/")})
-            report = fix_ownership(root, [root / "auth"], 10001, 10001, owner=fs.owner, chown=fs.chown)
-            self.assertEqual(len(report.errors), 1)
-            self.assertIn("auth", report.errors[0])
+    def _fix(self, paths, **kwargs):
+        return fix_ownership(self.data, [self.data / p for p in paths], ME, MY_GID, from_uids=frozenset({ME}), **kwargs)
 
-    def test_symlinks_are_not_followed_out_of_the_tree(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir, tempfile.TemporaryDirectory() as outside:
-            root = Path(tempdir)
-            (root / "artifacts").mkdir()
-            (Path(outside) / "secret").write_text("x", encoding="utf-8")
-            try:
-                os.symlink(outside, root / "artifacts" / "link", target_is_directory=True)
-            except (OSError, NotImplementedError):
-                self.skipTest("no symlinks here")
-            owners = {str(p).replace("\\", "/"): 0 for p in [root, root / "artifacts", root / "artifacts" / "link"]}
-            fs = FakeFs(owners)
-            fix_ownership(root, [root / "artifacts"], 10001, 10001, owner=fs.owner, chown=fs.chown)
-            self.assertFalse(any("secret" in path for path in fs.chowned))
+    def test_hands_over_the_tree_and_nothing_owned_by_others(self) -> None:
+        _tree(self.data, "artifacts/a/1.png", "auth/p.json", "api-token")
+        report = self._fix(["artifacts", "auth", "api-token"])
+        self.assertEqual(
+            sorted(report.changed_paths),
+            [".", "api-token", "artifacts", "artifacts/a", "artifacts/a/1.png", "auth", "auth/p.json"],
+        )
+        none = fix_ownership(self.data, [self.data / "artifacts"], ME, MY_GID, from_uids=frozenset({ME + 12345}))
+        self.assertEqual(none.changed_paths, [])
+
+    def test_a_planted_symlink_is_changed_itself_and_never_followed(self) -> None:
+        _tree(self.data, "artifacts/a.png")
+        os.symlink(self.outside, self.data / "artifacts" / "link", target_is_directory=True)
+        os.symlink(self.outside / "secret", self.data / "artifacts" / "filelink")
+        report = self._fix(["artifacts"])
+        self.assertIn("artifacts/link", report.changed_paths)
+        self.assertFalse(any("secret" in p or p.startswith("artifacts/link/") for p in report.changed_paths), report)
+
+    def test_a_top_that_is_a_symlink_is_not_walked(self) -> None:
+        os.symlink(self.outside, self.data / "artifacts", target_is_directory=True)
+        report = self._fix(["artifacts"])
+        self.assertEqual(sorted(report.changed_paths), [".", "artifacts"])
+
+    def test_a_directory_swapped_for_a_symlink_mid_walk_is_not_entered(self) -> None:
+        _tree(self.data, "artifacts/a/1.png", "artifacts/b/2.png")
+
+        def swap(base: str) -> None:
+            # After artifacts/ was read and b handled, before fwalk descends into b.
+            if base == "artifacts":
+                (self.data / "artifacts" / "b").rename(self.data / "artifacts" / "b.real")
+                os.symlink(self.outside, self.data / "artifacts" / "b", target_is_directory=True)
+
+        report = self._fix(["artifacts"], after_dir=swap)
+        self.assertFalse(any(p.startswith("artifacts/b/") for p in report.changed_paths), report.changed_paths)
+        self.assertFalse(any("secret" in p for p in report.changed_paths))
+
+    def test_hard_linked_files_are_skipped_and_reported(self) -> None:
+        _tree(self.data, "artifacts/one")
+        os.link(self.data / "artifacts" / "one", self.data / "artifacts" / "two")
+        report = self._fix(["artifacts"])
+        self.assertNotIn("artifacts/one", report.changed_paths)
+        self.assertNotIn("artifacts/two", report.changed_paths)
+        self.assertIn("artifacts/one: 2 hard links", report.skipped)
+
+    def test_a_sub_mount_is_skipped_and_not_entered(self) -> None:
+        _tree(self.data, "auth/mounted/inner.json", "auth/own.json")
+
+        def fake_lstat(name, *, dir_fd, follow_symlinks):
+            st = os.stat(name, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+            if name == "mounted":
+                fields = list(st)
+                fields[2] = st.st_dev + 1  # st_dev
+                return os.stat_result(fields)
+            return st
+
+        report = self._fix(["auth"], lstat=fake_lstat)
+        self.assertIn("auth/own.json", report.changed_paths)
+        self.assertFalse(any(p.startswith("auth/mounted") for p in report.changed_paths), report.changed_paths)
+        self.assertTrue(any(s.startswith("auth/mounted: another filesystem") for s in report.skipped))
+
+    def test_the_browsers_directories_are_never_entered(self) -> None:
+        _tree(
+            self.data,
+            "browser-sessions/s1/profile/Cookies",
+            "browser-sessions/s1/downloads/f.pdf",
+            "browser-sessions/s1/notes.json",
+        )
+        report = self._fix(["browser-sessions"])
+        self.assertIn("browser-sessions/s1/notes.json", report.changed_paths)
+        self.assertFalse(any("/profile" in p or "/downloads" in p for p in report.changed_paths), report.changed_paths)
+
+    def test_a_deeper_configured_path_needs_root_owned_parents(self) -> None:
+        if ME == 0:
+            self.skipTest("as root the parent is root-owned")
+        _tree(self.data, "x/artifacts/a.png")
+        report = self._fix(["x/artifacts"])
+        self.assertEqual(sorted(report.changed_paths), ["."])
+        self.assertTrue(any("not a root-owned directory" in e for e in report.errors), report.errors)
 
 
-class MainTests(unittest.TestCase):
-    def test_prints_the_users_for_the_entrypoint_and_logs_an_error_naming_the_way_out(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            data = Path(tempdir)
-            (data / "auth").mkdir()
-            owners = {str(data).replace("\\", "/"): 0, str(data / "auth").replace("\\", "/"): 0}
-            fs = FakeFs(owners, fail={str(data / "auth").replace("\\", "/")})
-            out = io.StringIO()
-            with redirect_stdout(out), self.assertLogs("app.run_as", level=logging.ERROR) as logs:
-                code = main(
-                    run_as="auto",
-                    settings=_settings(data),
-                    data_root=data,
-                    owner=fs.owner,
-                    owner_gid=lambda path: 0,
-                    chown=fs.chown,
-                )
-            self.assertEqual(code, 0)
-            self.assertIn("RUN_UID=10001\n", out.getvalue())
-            self.assertIn("RUN_GID=10001\n", out.getvalue())
-            self.assertIn("RUN_REASON=", out.getvalue())
-            message = "\n".join(logs.output)
-            self.assertIn(str(data / "auth"), message)
-            self.assertIn("CONTROLLER_RUN_AS=root", message)
+@unittest.skipUnless(LINUX, "dir-fd marker: Linux only")
+class MarkerLinuxTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data = Path(self.tmp.name) / "data"
+        self.data.mkdir()
+        self.target = Path(self.tmp.name) / "target"
+        self.target.write_bytes(b"precious\n")
 
-    def test_a_clean_pass_leaves_a_marker_and_the_next_start_skips_the_scan(self) -> None:
-        # A Docker Desktop bind mount took 71.66s just to scan 20102 entries on every start: one pass is enough.
-        with tempfile.TemporaryDirectory() as tempdir:
-            data = Path(tempdir)
-            (data / "auth").mkdir()
-            owners = {str(data).replace("\\", "/"): 0, str(data / "auth").replace("\\", "/"): 0}
-            fs = FakeFs(owners)
-            seen: list[Path] = []
+    def test_round_trip(self) -> None:
+        write_marker(self.data, ME, MY_GID)
+        self.assertEqual(read_marker(self.data, ME), marker_bytes(ME, MY_GID))
 
-            def owner(path: Path) -> int:
-                seen.append(path)
-                return fs.owner(path)
+    def test_a_symlink_is_no_marker_and_writing_replaces_it_without_touching_its_target(self) -> None:
+        self.target.write_bytes(marker_bytes(ME, MY_GID))
+        os.symlink(self.target, self.data / MARKER_NAME)
+        self.assertIsNone(read_marker(self.data, ME))
+        write_marker(self.data, ME, MY_GID)
+        self.assertFalse((self.data / MARKER_NAME).is_symlink())
+        self.assertEqual(self.target.read_bytes(), marker_bytes(ME, MY_GID))  # unchanged, not truncated
 
-            with redirect_stdout(io.StringIO()), self.assertLogs("app.run_as", level=logging.INFO):
-                main(
-                    run_as="auto",
-                    settings=_settings(data),
-                    data_root=data,
-                    owner=owner,
-                    owner_gid=lambda p: 0,
-                    chown=fs.chown,
-                )
-            self.assertEqual((data / ".auto-browser-owner").read_text(encoding="utf-8"), "10001:10001\n")
-            scanned = len(seen)
-            out = io.StringIO()
-            with redirect_stdout(out), self.assertLogs("app.run_as", level=logging.INFO) as logs:
-                main(
-                    run_as="auto",
-                    settings=_settings(data),
-                    data_root=data,
-                    owner=owner,
-                    owner_gid=lambda p: 10001,
-                    chown=fs.chown,
-                )
-            self.assertEqual(len(seen) - scanned, 1, "only /data itself is looked at")
-            self.assertIn("RUN_UID=10001\n", out.getvalue())
-            self.assertIn(".auto-browser-owner", "\n".join(logs.output))
+    def test_a_hard_link_is_replaced_not_truncated(self) -> None:
+        os.link(self.target, self.data / MARKER_NAME)
+        write_marker(self.data, ME, MY_GID)
+        self.assertEqual(self.target.read_bytes(), b"precious\n")
 
-    def test_a_pass_with_errors_leaves_no_marker(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            data = Path(tempdir)
-            (data / "auth").mkdir()
-            owners = {str(data).replace("\\", "/"): 0, str(data / "auth").replace("\\", "/"): 0}
-            fs = FakeFs(owners, fail={str(data / "auth").replace("\\", "/")})
-            with redirect_stdout(io.StringIO()), self.assertLogs("app.run_as", level=logging.ERROR):
-                main(
-                    run_as="auto",
-                    settings=_settings(data),
-                    data_root=data,
-                    owner=fs.owner,
-                    owner_gid=lambda p: 0,
-                    chown=fs.chown,
-                )
-            self.assertFalse((data / ".auto-browser-owner").exists())
+    def test_a_fifo_is_no_marker_and_does_not_hang(self) -> None:
+        os.mkfifo(self.data / MARKER_NAME)
+        self.assertIsNone(read_marker(self.data, ME))
 
-    def test_a_root_run_removes_the_marker(self) -> None:
-        # Root may write root-owned files, so the next non-root start must look again.
-        with tempfile.TemporaryDirectory() as tempdir:
-            data = Path(tempdir)
-            (data / ".auto-browser-owner").write_text("10001:10001\n", encoding="utf-8")
-            with redirect_stdout(io.StringIO()), self.assertLogs("app.run_as", level=logging.WARNING):
-                main(run_as="root", settings=_settings(data), data_root=data)
-            self.assertFalse((data / ".auto-browser-owner").exists())
+    def test_non_utf8_content_is_just_a_mismatch(self) -> None:
+        (self.data / MARKER_NAME).write_bytes(b"\xff\xfe\x00")
+        self.assertEqual(read_marker(self.data, ME), b"\xff\xfe\x00")
+        self.assertNotEqual(read_marker(self.data, ME), marker_bytes(ME, MY_GID))
 
-    def test_root_prints_no_user(self) -> None:
+    def test_another_owner_or_a_big_file_is_no_marker(self) -> None:
+        write_marker(self.data, ME, MY_GID)
+        self.assertIsNone(read_marker(self.data, ME + 1))
+        (self.data / MARKER_NAME).unlink()
+        (self.data / MARKER_NAME).write_bytes(b"1" * 4096)
+        self.assertIsNone(read_marker(self.data, ME))
+
+
+def _lines(text: str) -> list[str]:
+    return text.splitlines()
+
+
+@unittest.skipUnless(LINUX, "the root step is Linux only")
+class MainLinuxTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data = Path(self.tmp.name) / "data"
+        self.data.mkdir()
+
+    def _main(self, **kwargs):
+        out = io.StringIO()
+        with redirect_stdout(out), self.assertLogs("app.run_as", level=logging.INFO) as logs:
+            code = main(settings=_settings(self.data), data_root=self.data, **kwargs)
+        return code, _lines(out.getvalue()), [r.getMessage() for r in logs.records]
+
+    def test_three_strict_lines_then_a_marker_and_a_skipped_second_start(self) -> None:
+        if ME in (0, BROWSER_UID):
+            self.skipTest("needs a data dir owned by an ordinary uid")
+        code, lines, messages = self._main(run_as="auto")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(lines), 3)
+        self.assertRegex(lines[0], r"^RUN_UID=[0-9]+$")
+        self.assertRegex(lines[1], r"^RUN_GID=[0-9]+$")
+        self.assertRegex(lines[2], r"^RUN_REASON=[^\n]+$")
+        self.assertEqual(lines[0], f"RUN_UID={ME}")
+        notice = next(i for i, m in enumerate(messages) if "one-time" in m)
+        done = next(i for i, m in enumerate(messages) if "handed to it" in m)
+        self.assertLess(notice, done)
+        self.assertIn("a minute or two on Docker Desktop bind mounts", messages[notice])
+        self.assertTrue((self.data / MARKER_NAME).is_file())
+        _, _, messages = self._main(run_as="auto")
+        self.assertTrue(any("handed over already" in m for m in messages))
+
+    def test_a_non_utf8_marker_rescans_instead_of_crashing(self) -> None:
+        if ME in (0, BROWSER_UID):
+            self.skipTest("needs a data dir owned by an ordinary uid")
+        (self.data / MARKER_NAME).write_bytes(b"\xff\xfe\x00")
+        code, lines, messages = self._main(run_as="auto")
+        self.assertEqual(code, 0)
+        self.assertTrue(any("one-time" in m for m in messages))
+
+    def test_a_root_run_removes_the_marker_and_prints_no_user(self) -> None:
+        (self.data / MARKER_NAME).write_bytes(b"1:1\n")
         out = io.StringIO()
         with redirect_stdout(out), self.assertLogs("app.run_as", level=logging.WARNING):
-            code = main(run_as="root", settings=_settings(Path("/data")), data_root=Path("/data"), owner=lambda p: 0)
-        self.assertEqual(code, 0)
-        self.assertIn("RUN_UID=\n", out.getvalue())
+            main(run_as="root", settings=_settings(self.data), data_root=self.data)
+        self.assertEqual(
+            _lines(out.getvalue()), ["RUN_UID=", "RUN_GID=", "RUN_REASON=CONTROLLER_RUN_AS=root (not recommended)"]
+        )
+        self.assertFalse((self.data / MARKER_NAME).exists())
+
+    def test_a_bad_value_exits_64(self) -> None:
+        with redirect_stdout(io.StringIO()), self.assertLogs("app.run_as", level=logging.ERROR):
+            self.assertEqual(main(run_as="yes", settings=_settings(self.data), data_root=self.data), 64)
 
 
 class ReadinessTests(unittest.TestCase):
@@ -316,51 +393,48 @@ class ReadinessTests(unittest.TestCase):
         self.assertIn("controller_user", [check.name for check in report.checks])
 
 
-@unittest.skipUnless((REPO / "controller" / "entrypoint.sh").is_file() or (REPO / "docker-compose.yml").is_file(), "")
+@unittest.skipUnless((REPO / "controller" / "entrypoint.sh").is_file(), "the entrypoint is not in the controller image")
 class ImageWiringTests(unittest.TestCase):
-    def test_the_image_has_the_user_the_entrypoint_and_setpriv(self) -> None:
-        dockerfile = (REPO / "controller" / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("useradd --uid 10001", dockerfile)
-        self.assertRegex(dockerfile, r'(?m)^ENTRYPOINT \["/entrypoint\.sh"\]$')
-        entrypoint = (REPO / "controller" / "entrypoint.sh").read_text(encoding="utf-8")
-        self.assertIn("python -m app.run_as", entrypoint)
-        self.assertIn("exec setpriv --reuid=", entrypoint)
-        self.assertIn("docker.sock", entrypoint)
-        self.assertNotRegex(entrypoint, r"chown -R")
+    def setUp(self) -> None:
+        self.dockerfile = (REPO / "controller" / "Dockerfile").read_text(encoding="utf-8")
+        self.entrypoint = (REPO / "controller" / "entrypoint.sh").read_text(encoding="utf-8")
 
-    def test_ci_checks_the_controller_runs_as_the_data_owner_and_keeps_the_runners_token(self) -> None:
+    def test_the_image_has_the_users_and_the_entrypoint(self) -> None:
+        self.assertIn("useradd --uid 10002", self.dockerfile)
+        self.assertRegex(self.dockerfile, r'(?m)^ENTRYPOINT \["/entrypoint\.sh"\]$')
+        self.assertIn("python -m app.run_as", self.entrypoint)
+        self.assertIn("docker.sock", self.entrypoint)
+        self.assertNotRegex(self.entrypoint, r"chown -R")
+
+    def test_nothing_in_the_image_is_writable_through_group_0_alone(self) -> None:
+        # The controller joins group 0 for Docker Desktop's root:root socket.
+        self.assertIn(
+            "RUN find / -xdev -group 0 -perm -g+w ! -type l ! -perm -1000 -exec chmod g-w {} +", self.dockerfile
+        )
+
+    def test_no_eval_and_a_strict_parse(self) -> None:
+        self.assertNotRegex(self.entrypoint, r"(?m)^\s*eval\b")
+        self.assertIn("^RUN_UID=([0-9]*)$", self.entrypoint)
+        self.assertIn("^RUN_GID=([0-9]*)$", self.entrypoint)
+        self.assertIn("RUN_REASON=", self.entrypoint)
+
+    def test_setpriv_drops_every_capability_and_sets_no_new_privs(self) -> None:
+        self.assertRegex(self.entrypoint, r"--inh-caps=-all")
+        self.assertRegex(self.entrypoint, r"--ambient-caps=-all")
+        self.assertRegex(self.entrypoint, r"--no-new-privs")
+        self.assertRegex(self.entrypoint, r"--bounding-set=-all")
+        # Only when CAP_SETPCAP (bit 8) is in the bounding set, so a cap_drop ALL run still starts.
+        self.assertIn("1 << 8", self.entrypoint)
+
+    def test_ci_checks_the_data_owner_the_token_and_the_dropped_capabilities(self) -> None:
         ci = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         job = ci[ci.index("  compose-smoke:") :]
         self.assertIn('if [ "$token_file" != "600 runner" ]; then', job)
         self.assertIn("docker compose exec -T controller awk '/^Uid:/ {print $2}' /proc/1/status", job)
         self.assertIn('if [ "$controller_uid" != "$data_owner" ] || [ "$controller_uid" = "0" ]; then', job)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-class FirstPassNoticeTests(unittest.TestCase):
-    def test_a_scan_is_announced_as_one_time_before_it_starts(self) -> None:
-        # Docker Desktop bind mounts took ~103s for 20102 entries: say so before, not only after.
-        with tempfile.TemporaryDirectory() as tempdir:
-            data = Path(tempdir)
-            owners = {str(data).replace("\\", "/"): 0}
-            fs = FakeFs(owners)
-            with redirect_stdout(io.StringIO()), self.assertLogs("app.run_as", level=logging.INFO) as logs:
-                main(
-                    run_as="auto",
-                    settings=_settings(data),
-                    data_root=data,
-                    owner=fs.owner,
-                    owner_gid=lambda p: 0,
-                    chown=fs.chown,
-                )
-            messages = [record.getMessage() for record in logs.records]
-            notice = next(i for i, m in enumerate(messages) if "one-time" in m)
-            done = next(i for i, m in enumerate(messages) if "handed to it" in m)
-            self.assertLess(notice, done)
-            self.assertIn("a minute or two on Docker Desktop bind mounts", messages[notice])
+        for field in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
+            self.assertIn(field, job)
+        self.assertIn("NoNewPrivs", job)
 
 
 @unittest.skipUnless((REPO / "scripts" / "doctor.sh").is_file(), "scripts/ is not in the controller image")
@@ -382,3 +456,7 @@ class PackageDataTests(unittest.TestCase):
         shipped = {path.relative_to(app).as_posix() for pattern in globs for path in app.glob(pattern)}
         for name in ("chromium-sandbox.json", "moby-default.json", "README.md"):
             self.assertIn(f"browser/seccomp/{name}", shipped)
+
+
+if __name__ == "__main__":
+    unittest.main()
