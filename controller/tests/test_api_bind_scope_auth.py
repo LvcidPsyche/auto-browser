@@ -311,5 +311,36 @@ class ShippedComposeDeclarationTests(unittest.TestCase):
         self.assertIn("API_BIND_SCOPE: exposed", text)
 
 
+class ApiDocsScopeTests(unittest.TestCase):
+    """/docs, /redoc and /openapi.json need no token on loopback, where the browser is the operator's own."""
+
+    DOCS = ("/openapi.json", "/docs", "/redoc")
+
+    def client(self, scope: str, **fields) -> TestClient:
+        application = FastAPI()
+        install_controller_http_middleware(
+            application,
+            settings=settings(API_BIND_SCOPE=scope, API_BEARER_TOKEN=STRONG_TOKEN, **fields),
+            rate_limiter=None,
+            metrics=SimpleNamespace(enabled=False),
+        )
+        return TestClient(application)
+
+    def test_an_exposed_deployment_answers_401_on_the_docs(self) -> None:
+        for fields in ({}, {"APP_ENV": "production"}):
+            client = self.client(BIND_SCOPE_EXPOSED, **fields)
+            for path in self.DOCS:
+                with self.subTest(path=path, fields=fields):
+                    self.assertEqual(client.get(path).status_code, 401)
+                    authed = client.get(path, headers={"Authorization": f"Bearer {STRONG_TOKEN}"})
+                    self.assertEqual(authed.status_code, 200)
+
+    def test_a_loopback_deployment_serves_the_docs_without_a_token(self) -> None:
+        client = self.client(BIND_SCOPE_LOOPBACK)
+        for path in self.DOCS:
+            with self.subTest(path=path):
+                self.assertEqual(client.get(path).status_code, 200)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -85,7 +85,7 @@ Run `make doctor` from a normal terminal with local Docker access and permission
 
 Open:
 
-- API docs: `http://127.0.0.1:8000/docs` (Authorize with the token to try requests)
+- API docs: `http://127.0.0.1:8000/docs` (Authorize with the token to try requests). The docs need no token on a loopback deployment (an exposed one answers 401), and Swagger UI loads its assets from cdn.jsdelivr.net.
 - Operator dashboard: `http://127.0.0.1:8000/dashboard`, which includes the queue of actions waiting on your approval;
   paste the token when it asks, or open `http://127.0.0.1:8000/dashboard#token=<token>`
 - Visual takeover: `http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale`
