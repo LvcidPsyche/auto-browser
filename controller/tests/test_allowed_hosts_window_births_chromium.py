@@ -701,10 +701,15 @@ async def test_a_reported_refused_popup_made_active_and_navigated_survives(tmp_p
 
 
 async def test_a_popup_from_an_open_tab_tab_is_judged_by_that_tab_while_another_tab_is_refused(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch
 ) -> None:
     """Reviewer's P2: a tab the open-tab tool opened (its targetId cached at open) opens a clean popup while
-    the first tab is refused. The popup is judged by its own opener, not the session: readable, activatable."""
+    the first tab is refused. The popup is judged by its own opener, not the session: readable, activatable.
+
+    note_reported is a no-op here, so the tab's targetId is cached only by the open-tab read under the lock,
+    not by the slower report path: that is the read this exercises, and the window is judged by the tab even
+    when nothing else cached its id."""
+    monkeypatch.setattr(WindowBirths, "note_reported", lambda self, session, page: None)
     pages = {"/start": "<p>start</p>", "/ok": "<title>ok</title>", "/second": "<title>second</title><p>two</p>"}
     async with browser_env(tmp_path, pages) as env:
         session_id = await env.create("/start")
@@ -803,22 +808,45 @@ async def test_a_lost_watcher_refuses_popups_until_a_replacement_re_registers_th
 # ── the hold until the birth verdict is not a refusal ───────────────────────────
 
 
-async def test_a_clean_popup_is_activatable_the_moment_it_is_reported(tmp_path: Path) -> None:
-    """A reported popup is held refused until its birth verdict lands, a CDP round trip after the report; the
-    agent's next call can come sooner. activate_tab and list_tabs wait for the verdict rather than refuse the
-    popup (three tests of test_allowed_hosts_navigation.py activate a popup right after its report)."""
+async def test_a_clean_popup_is_activatable_the_moment_it_is_reported(tmp_path: Path, monkeypatch) -> None:
+    """A reported popup is held refused (opener_pending) until its birth verdict lands, a CDP round trip after
+    the report; the agent's next call can come sooner. activate_tab and list_tabs wait for the verdict rather
+    than refuse the popup (three tests of test_allowed_hosts_navigation.py activate a popup right after its
+    report). The verdict is delayed here so the hold is in force when the tab operations run, and they must
+    still end on the popup, not refuse it."""
     pages = {"/start": "<p>start</p>", "/second": "<title>second</title><p>two</p>"}
     async with browser_env(tmp_path, pages) as env:
         session_id = await env.create("/start")
         session = env.manager.sessions[session_id]
+        births = env.manager.window_births
+        release = asyncio.Event()
+        original_verdict = births.verdict
+
+        async def slow_verdict(session, page):
+            await release.wait()
+            return await original_verdict(session, page)
+
+        monkeypatch.setattr(births, "verdict", slow_verdict)
+
         async with session.context.expect_page() as opened:
             await session.page.evaluate("(u) => { window.open(u) }", f"{env.allowed}/second")
         popup = await opened.value
+        index = session.context.pages.index(popup)
+        await asyncio.sleep(0.1)
+        assert env.manager._page_refused(popup), "the reported popup is not held until its verdict"
 
-        await env.manager.list_tabs(session_id)
-        await env.manager.activate_tab(session_id, session.context.pages.index(popup))
+        activate = asyncio.ensure_future(env.manager.activate_tab(session_id, index))
+        await asyncio.sleep(0.2)
+        assert not activate.done(), "activate_tab did not wait for the held popup's verdict"
+        tabs_task = asyncio.ensure_future(env.manager.list_tabs(session_id))
+        await asyncio.sleep(0.1)
+        assert not tabs_task.done(), "list_tabs did not wait for the held popup's verdict"
+
+        release.set()
+        await activate
+        tabs = await tabs_task
 
         assert session.page is popup
         assert not env.manager._page_refused(popup)
-        await popup.wait_for_load_state()
+        assert any("second" in (tab.get("title") or "") for tab in tabs), tabs
         assert "two" in json.dumps(await env.manager.observe(session_id, preset="text"))
