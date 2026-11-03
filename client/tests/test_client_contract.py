@@ -115,6 +115,15 @@ class ClientConstructionTests(unittest.TestCase):
                 AutoBrowserClient("http://auto-browser.test", token_file=path)
         self.assertIn(str(path), str(caught.exception))
 
+    def test_an_unreadable_token_file_says_how_to_read_it(self) -> None:
+        # The controller's root-written file can be unreadable to the host user (Docker Desktop, rootless).
+        denied = PermissionError(13, "Permission denied")
+        with mock.patch.object(Path, "read_text", side_effect=denied):
+            with self.assertRaises(PermissionError) as caught:
+                AutoBrowserClient("http://auto-browser.test", token_file="data/api-token")
+        self.assertIn("data/api-token", str(caught.exception))
+        self.assertIn("docker compose exec -T controller cat /data/api-token", str(caught.exception))
+
     def test_error_class_is_exported_from_the_package(self) -> None:
         import auto_browser_client
 
