@@ -19,6 +19,15 @@ _MANAGED_LABEL = "auto-browser.managed"
 _SESSION_ID_LABEL = "auto-browser.session_id"
 _MODE_LABEL = "auto-browser.mode"
 
+# The capabilities browser-node's entrypoint needs as root before setpriv
+# drops to the browser user (whose processes then hold none): CHOWN for the
+# profile and runtime dirs, DAC_OVERRIDE to remove the endpoint file and write
+# the VNC password in browser-owned dirs, KILL to stop node gracefully,
+# SETGID/SETUID for setpriv. Everything else is dropped. docker-compose.yml's
+# browser-node service lists the same set (test_container_hardening checks).
+_BROWSER_NODE_CAP_ADD = ("CHOWN", "DAC_OVERRIDE", "KILL", "SETGID", "SETUID")
+_NO_NEW_PRIVILEGES = "no-new-privileges:true"
+
 # The daemon's error when its default address pools are used up. Docker's
 # defaults give about 31 bridge networks, two of them already taken by the
 # default bridge and the compose network.
@@ -390,6 +399,11 @@ class DockerBrowserNodeProvisioner:
             detach=True,
             network=network_name,
             shm_size="2g",
+            cap_drop=["ALL"],
+            cap_add=list(_BROWSER_NODE_CAP_ADD),
+            # setpriv drops privileges by syscall, so no-new-privileges (which
+            # only blocks gains across execve) leaves it working.
+            security_opt=[_NO_NEW_PRIVILEGES],
             environment=environment,
             volumes={
                 str(host_profile_dir): {"bind": "/data/profile", "mode": "rw"},
