@@ -466,6 +466,21 @@ checks the URL the page is already on, as it does after a later navigation. A re
 a tainted one included, is sent back to `about:blank` with a `navigation_blocked` audit event.
 Shadow-browse sessions attach these listeners to every popup.
 
+A window is also judged when the browser first reports its target to the controller, before any of its
+navigations — through CDP, from the target's opener and context, not from a request. A page target born
+with an opener while its session counts as refused (its opener is refused, another tab is, or a tab that
+counted closed within the grace below) is refused whatever its first navigation then does: a `204` or
+`205`, a failed or hung request, no request at all (`javascript:` or a blocked top-level `data:` URL), or
+a blank the opener writes into. Playwright reports such a window only once it commits, which may be after
+the agent's navigate has cleared the opener, so a window that committed nothing until then would otherwise
+be judged by the clean opener and let through. A window Playwright reports is refused under the rule above.
+One it never reports cannot outlive the refusal that justified it: when its session stops counting as
+refused (the agent's navigate, a blocked action's rollback, or a close) the controller closes it through
+CDP, so a script it planted cannot later commit an allowed URL or navigate the agent's own tab. This holds
+with `PRE_REQUEST_BLOCKING` off and in attach modes; a window whose target cannot be classified is refused,
+not let through. Only page targets are judged this way: a window the open-tab tool opens has no opener and
+is never refused, and iframes and workers are not windows.
+
 ### Reading a refused page again
 
 Observe, screenshots, the page-reading MCP tools and actions other than navigation answer that a
@@ -670,14 +685,15 @@ seconds.
   refused until the agent navigates it or it is closed. On an allowed http(s) URL it does not refuse the
   other tabs; on a blank, `blob:` or `data:` page, which can hold what that page wrote, it does. An
   iframe from another host on an allowed page can open a popup, which is judged by its opener, the
-  allowed page. A popup is judged by its opener as the opener is when Playwright reports the popup,
-  after its first commit, so one a refused page opened just before the agent's navigate made that page
-  readable again is readable too. A popup the context has not reported yet does not count for the
-  session, though a refused host's document may already run in it, so a tab it navigates in that moment
-  is not refused for it; and the refused first navigation of a popup that closes before it is reported
-  stays on the session's record (a download from its URL is refused) until the session ends. The 2
-  seconds after a refused tab closes are measured by the clock: a commit that comes with no request (a
-  `#fragment`, `about:blank`) and that a slow renderer delivers later than that is not refused for that
+  allowed page. A popup is judged by its opener as the opener is when Playwright reports the popup, and
+  also at its target's birth (see [When a page is refused](#when-a-page-is-refused)): a window a refused
+  page opened just before the agent's navigate made that page readable again is refused by the birth
+  verdict, whatever its first navigation did, so a window that committed nothing until after the opener
+  was cleared no longer slips through. A window the controller judged born refused that Playwright never
+  reports is closed through CDP once the session stops counting, so it cannot keep an opener reference
+  across a rollback or send itself to an allowed URL later. The 2 seconds after a refused tab closes are
+  measured by the clock: a commit that comes with no request (a `#fragment`, `about:blank`) and that a
+  slow renderer delivers later than that is not refused for that
   tab.
 - **Traces and exports.** Playwright traces (`ENABLE_TRACING`, off by default) record the whole browser
   context, the refused page included, and a storage-state export (`POST /sessions/{id}/storage-state`,
