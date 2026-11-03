@@ -66,7 +66,13 @@ cd auto-browser
 docker compose up --build
 ```
 
-That is enough for local development with the default settings.
+That is enough for local development with the default settings. On first start the controller
+generates an API token and saves it to `data/api-token` in this folder (git ignores it), and
+every API and MCP request must send it as `Authorization: Bearer <token>`. The dashboard asks
+for it once, the examples below read it with `$(cat data/api-token)`, and the MCP clients take
+it as shown under [MCP Clients](#mcp-clients). `API_ALLOW_TOKENLESS_LOOPBACK=true` runs the
+controller without a token, as it ran before, but then any container on the compose network
+can drive the browser.
 
 Optional:
 
@@ -79,8 +85,9 @@ Run `make doctor` from a normal terminal with local Docker access and permission
 
 Open:
 
-- API docs: `http://127.0.0.1:8000/docs`
-- Operator dashboard: `http://127.0.0.1:8000/dashboard`, which includes the queue of actions waiting on your approval
+- API docs: `http://127.0.0.1:8000/docs` (Authorize with the token to try requests)
+- Operator dashboard: `http://127.0.0.1:8000/dashboard`, which includes the queue of actions waiting on your approval;
+  paste the token when it asks, or open `http://127.0.0.1:8000/dashboard#token=<token>`
 - Visual takeover: `http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale`
 
 All published ports bind to `127.0.0.1` by default.
@@ -120,10 +127,12 @@ Start here:
 - [`examples/login-and-save-profile.md`](./examples/login-and-save-profile.md)
 - [`examples/README.md`](./examples/README.md)
 
-Minimal session creation:
+Minimal session creation, from the auto-browser folder (`AUTH` carries the token; if you
+set `API_BEARER_TOKEN`, use `$API_BEARER_TOKEN` in place of `$(cat data/api-token)`):
 
 ```bash
-curl -s http://127.0.0.1:8000/sessions \
+AUTH=(-H "Authorization: Bearer $(cat data/api-token)")
+curl -s "${AUTH[@]}" http://127.0.0.1:8000/sessions \
   -X POST \
   -H 'content-type: application/json' \
   -d '{"name":"demo","start_url":"https://example.com"}' | jq
@@ -132,7 +141,7 @@ curl -s http://127.0.0.1:8000/sessions \
 Minimal observation:
 
 ```bash
-curl -s http://127.0.0.1:8000/sessions/<session-id>/observe | jq
+curl -s "${AUTH[@]}" http://127.0.0.1:8000/sessions/<session-id>/observe | jq
 ```
 
 ## Recent Changes
@@ -177,27 +186,36 @@ Auto Browser exposes:
 - convenience endpoints at `http://127.0.0.1:8000/mcp/tools` and `http://127.0.0.1:8000/mcp/tools/call`
 - a stdio bridge: `uvx auto-browser-mcp` from PyPI, or [`scripts/mcp_stdio_bridge.py`](./scripts/mcp_stdio_bridge.py) in a repo checkout
 
-Clients that speak MCP over HTTP connect directly. With Claude Code or Codex:
+Clients that speak MCP over HTTP connect directly, sending the controller's token. With Claude
+Code or Codex, from the auto-browser folder:
 
 ```bash
-claude mcp add --transport http auto-browser http://127.0.0.1:8000/mcp
-codex mcp add auto-browser --url http://127.0.0.1:8000/mcp
+claude mcp add --transport http auto-browser http://127.0.0.1:8000/mcp \
+  --header "Authorization: Bearer $(cat data/api-token)"
+
+# Codex reads the token from the variable you name: export it wherever Codex runs.
+export AUTO_BROWSER_TOKEN="$(cat data/api-token)"
+codex mcp add auto-browser --url http://127.0.0.1:8000/mcp --bearer-token-env-var AUTO_BROWSER_TOKEN
 ```
 
 Google Antigravity takes the server in its raw MCP config (MCP Servers, then Manage MCP
 Servers, then View raw config), or in `~/.gemini/config/mcp_config.json`. It reads
-`serverUrl`, not `url`:
+`serverUrl`, not `url`, and the token goes in `headers`:
 
 ```json
 {
   "mcpServers": {
-    "auto-browser": { "serverUrl": "http://127.0.0.1:8000/mcp" }
+    "auto-browser": {
+      "serverUrl": "http://127.0.0.1:8000/mcp",
+      "headers": { "Authorization": "Bearer <contents of data/api-token>" }
+    }
   }
 }
 ```
 
-Cursor, VS Code, bearer tokens, and pairing Auto Browser with a web-search MCP
-server are covered in [`docs/mcp-clients.md`](./docs/mcp-clients.md).
+Cursor, VS Code, Claude Desktop through the stdio bridge (which reads `data/api-token`
+itself), and pairing Auto Browser with a web-search MCP server are covered in
+[`docs/mcp-clients.md`](./docs/mcp-clients.md).
 
 The default MCP tool profile is `curated`: the 20 tools a browsing agent needs (sessions, observe and screenshot, `execute_action`, page and download reading, tabs, auth profiles, human takeover). Every listed tool costs the model context on every request, so the diagnostics, audit, harness, and admin tools are in the full profile. To expose everything, set:
 
@@ -210,7 +228,7 @@ MCP_TOOL_PROFILE=full
 Raw tool-call example:
 
 ```bash
-curl -s http://127.0.0.1:8000/mcp/tools/call \
+curl -s "${AUTH[@]}" http://127.0.0.1:8000/mcp/tools/call \
   -X POST \
   -H 'content-type: application/json' \
   -d '{

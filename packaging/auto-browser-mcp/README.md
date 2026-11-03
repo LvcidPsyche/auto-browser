@@ -13,12 +13,15 @@ With a local Auto Browser stack running (`docker compose up` in the repo):
   "mcpServers": {
     "auto-browser": {
       "command": "uvx",
-      "args": ["auto-browser-mcp"]
+      "args": ["auto-browser-mcp"],
+      "env": {
+        "AUTO_BROWSER_TOKEN_FILE": "/ABSOLUTE/PATH/TO/auto-browser/data/api-token"
+      }
     }
   }
 }
 ```
 
-Pass `--base-url` / `--bearer-token` / `--operator-id` (or set `AUTO_BROWSER_BASE_URL` / `AUTO_BROWSER_BEARER_TOKEN` / `AUTO_BROWSER_OPERATOR_ID`) for non-default deployments.
+On first start the controller saves its API token to `data/api-token` in the auto-browser folder, and the bridge reads it from `--token-file` / `AUTO_BROWSER_TOKEN_FILE` on every request, so it can start before the controller. Pass `--base-url` / `--bearer-token` / `--operator-id` (or set `AUTO_BROWSER_BASE_URL` / `AUTO_BROWSER_BEARER_TOKEN` / `AUTO_BROWSER_OPERATOR_ID`) for non-default deployments; a bearer token wins over the file.
 
 See the [Auto Browser repository](https://github.com/LvcidPsyche/auto-browser) for the full server, docs, and examples.

@@ -14,9 +14,15 @@ arguments, so the model can use every tool the controller serves:
 ```python
 from auto_browser_langchain import AutoBrowserTool
 
-tool = AutoBrowserTool(base_url="http://localhost:8000", bearer_token=None)
+tool = AutoBrowserTool(base_url="http://localhost:8000", token_file="data/api-token")
 print(tool.invoke({"action": "browser.observe", "arguments": {"preset": "text"}}))
 ```
+
+A local controller with no `API_BEARER_TOKEN` saves its generated token to
+`data/api-token` in the auto-browser folder. `token_file` (on the tool, on
+`AutoBrowserTool.list_tools` and on `AutoBrowserNode`) reads it on every call, so a
+regenerated token needs no restart; `bearer_token` wins when it is set. A missing or
+empty file raises before any request is sent.
 
 `AutoBrowserNode` is a LangGraph node that opens a session and records the
 current URL and screenshot in the graph state.

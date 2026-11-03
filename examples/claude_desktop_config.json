@@ -5,6 +5,7 @@
       "args": ["auto-browser-mcp"],
       "env": {
         "AUTO_BROWSER_BASE_URL": "http://127.0.0.1:8000/mcp",
+        "AUTO_BROWSER_TOKEN_FILE": "<ABSOLUTE_PATH_TO_AUTO_BROWSER>/data/api-token",
         "AUTO_BROWSER_BEARER_TOKEN": ""
       }
     }
