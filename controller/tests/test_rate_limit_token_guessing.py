@@ -24,10 +24,11 @@ WRONG = {"Authorization": "Bearer " + "x" * 40}
 RIGHT = {"Authorization": f"Bearer {TOKEN}"}
 
 
-def make_client(scope: str = BIND_SCOPE_LOOPBACK) -> TestClient:
+def make_client(scope: str = BIND_SCOPE_LOOPBACK, *, tokenless: bool = False) -> TestClient:
     app = FastAPI()
     settings = SimpleNamespace(
-        api_bearer_token=TOKEN,
+        api_bearer_token=None if tokenless else TOKEN,
+        api_allow_tokenless_loopback=tokenless,
         api_bind_scope=scope,
         model_fields_set=frozenset({"api_bind_scope"}),
         request_rate_limit_exempt_path_list=EXEMPT,
@@ -48,7 +49,8 @@ def make_client(scope: str = BIND_SCOPE_LOOPBACK) -> TestClient:
         async def ok(a: str = "", b: str = "") -> dict[str, bool]:
             return {"ok": True}
 
-    return TestClient(app)
+    # A tokenless controller answers loopback host names only (the Host guard), not "testserver".
+    return TestClient(app, base_url="http://127.0.0.1") if tokenless else TestClient(app)
 
 
 class ExemptPathTokenGuessingTests(unittest.TestCase):
@@ -79,6 +81,14 @@ class ExemptPathTokenGuessingTests(unittest.TestCase):
         self.assertEqual(set(self.statuses(make_client(), "/docs", {}, 30)), {200})
         codes = self.statuses(make_client(BIND_SCOPE_EXPOSED), "/docs", {})
         self.assertEqual(codes[LIMIT:], [429] * (12 - LIMIT))
+
+    def test_a_controller_that_needs_no_token_keeps_exempt_paths_unthrottled(self) -> None:
+        # With API_ALLOW_TOKENLESS_LOOPBACK no request carries a token, so a request to an
+        # exempt path is not a guess: a replay loading dozens of screenshots must not hit 429.
+        client = make_client(tokenless=True)
+        for path in ("/metrics", "/artifacts/x/y.png"):
+            with self.subTest(path=path):
+                self.assertEqual(set(self.statuses(client, path, {}, 30)), {200})
 
 
 if __name__ == "__main__":
