@@ -32,8 +32,10 @@ resolve_repo_host_path() {
 }
 
 # The controller's bearer token: API_BEARER_TOKEN when set, else the token the
-# controller saved in API_TOKEN_FILE (/data/api-token, which is
-# <repo>/data/api-token on the host). Prints nothing when there is none, as for a
+# compose controller saved in /data/api-token (<repo>/data/api-token on the host).
+# Not API_TOKEN_FILE: these scripts drive the compose stack, which pins that path,
+# so a different API_TOKEN_FILE in .env or the shell names some other controller's file.
+# Prints nothing when there is none, as for a
 # controller run with API_ALLOW_TOKENLESS_LOOPBACK=true. Callers read it on every
 # call: a controller the script itself starts writes the file only once it is up.
 api_token() {
@@ -42,7 +44,7 @@ api_token() {
     return 0
   fi
   local token_file
-  token_file="$(resolve_repo_host_path "${ROOT_DIR}" "${API_TOKEN_FILE:-/data/api-token}")"
+  token_file="$(resolve_repo_host_path "${ROOT_DIR}" /data/api-token)"
   if [[ -r "$token_file" ]]; then
     tr -d '[:space:]' < "$token_file"
   elif [[ -e "$token_file" ]]; then
