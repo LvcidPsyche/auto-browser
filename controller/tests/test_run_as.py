@@ -367,6 +367,23 @@ class MainLinuxTests(unittest.TestCase):
         )
         self.assertFalse((self.data / MARKER_NAME).exists())
 
+    def test_as_root_a_pre_release_data_dir_owned_by_10001_goes_to_10002(self) -> None:
+        # 1.14 pre-releases ran as 10001, browser-node's uid; 1.14.0 runs as 10002 and takes those files over, but
+        # never the browser's own directories.
+        if ME != 0:
+            self.skipTest("needs root (runs inside the controller image)")
+        _tree(self.data, "auth/p.json", "artifacts/a.png", "browser-sessions/s1/profile/Cookies", "api-token")
+        for path in [self.data, *self.data.rglob("*")]:
+            os.chown(path, BROWSER_UID, BROWSER_UID)
+        out = io.StringIO()
+        with redirect_stdout(out), self.assertLogs("app.run_as", level=logging.INFO):
+            main(run_as="auto", settings=_settings(self.data), data_root=self.data)
+        self.assertIn(f"RUN_UID={CONTROLLER_UID}", out.getvalue())
+        for relative in (".", "auth", "auth/p.json", "artifacts/a.png", "api-token", "browser-sessions/s1"):
+            self.assertEqual(os.lstat(self.data / relative).st_uid, CONTROLLER_UID, relative)
+        self.assertEqual(os.lstat(self.data / "browser-sessions/s1/profile/Cookies").st_uid, BROWSER_UID)
+        self.assertEqual(os.lstat(self.data / MARKER_NAME).st_uid, CONTROLLER_UID)
+
     def test_a_bad_value_exits_64(self) -> None:
         with redirect_stdout(io.StringIO()), self.assertLogs("app.run_as", level=logging.ERROR):
             self.assertEqual(main(run_as="yes", settings=_settings(self.data), data_root=self.data), 64)
