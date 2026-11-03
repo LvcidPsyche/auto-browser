@@ -83,13 +83,23 @@ def ensure_api_credential(settings: Any) -> None:
     settings.api_bearer_token = token
     logger.warning(
         "No API credential was configured, so the controller generated a bearer token and saved it to %s "
-        "(mode 0600; with the shipped compose it is ./data/api-token on the host; sha256 fingerprint %s). "
+        "(%s; with the shipped compose it is ./data/api-token on the host; sha256 fingerprint %s). "
         "Every API and MCP request must now send 'Authorization: Bearer <token>'. Point clients at the file "
         "(auto-browser-mcp --token-file / AUTO_BROWSER_TOKEN_FILE), set API_BEARER_TOKEN, or set "
         "API_ALLOW_TOKENLESS_LOOPBACK=true to serve loopback without one.",
         path,
+        _permissions_note(),
         _fingerprint(token),
     )
+
+
+def _permissions_note() -> str:
+    if os.name == "nt":
+        return (
+            "the file inherits the permissions of its folder, which may let other local users read it: "
+            "set API_TOKEN_FILE under your user profile"
+        )
+    return "mode 0600"
 
 
 def _read_token_file(path: Path) -> str | None:
