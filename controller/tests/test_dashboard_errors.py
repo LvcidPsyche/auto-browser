@@ -262,3 +262,59 @@ def test_every_action_shows_why_it_failed() -> None:
     assert "no such job" in seen["replay"]
     assert "cannot start a browser" in seen["start"]
     assert "cannot start a browser" in seen["reopen"]
+
+
+# A 1x1 PNG, so a loaded screenshot has a natural width.
+PIXEL_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+    "1f15c4890000000d49444154789c6360000002000100e221bc330000000049454e44ae426082"
+)
+
+
+@requires_chromium
+def test_replay_screenshots_load_with_the_token_and_never_send_it_elsewhere() -> None:
+    # /artifacts sits behind the bearer token, which an <img src> cannot send; with
+    # a token by default every replay screenshot was a 401.
+    seen_auth: dict[str, str | None] = {}
+
+    class ImageStub(Stub):
+        async def handle(self, route) -> None:
+            request = route.request
+            if "/shot.png" in request.url:
+                seen_auth[request.url] = request.headers.get("authorization")
+                await route.fulfill(status=200, content_type="image/png", body=PIXEL_PNG)
+                return
+            await super().handle(route)
+
+    elsewhere = "http://elsewhere.test/shot.png"
+    stub = ImageStub(
+        {
+            ("GET", "/agent/jobs/job-1"): (
+                200,
+                {
+                    "status": "completed",
+                    "steps": [
+                        {"status": "ok", "observation": {"screenshot_url": "/artifacts/sess-1/shot.png"}},
+                        {"status": "ok", "observation": {"screenshot_url": elsewhere}},
+                    ],
+                },
+            ),
+        }
+    )
+
+    async def scenario(page, dialogs) -> list[str]:
+        await page.route("http://elsewhere.test/**", stub.handle)
+        await page.fill("#replay-job-id", "job-1")
+        await page.click("#load-replay")
+        await page.wait_for_function(
+            "(() => { const imgs = [...document.querySelectorAll('#replay-output img')];"
+            " return imgs.length === 2 && imgs.every((img) => img.complete && img.naturalWidth > 0); })()"
+        )
+        return await page.eval_on_selector_all("#replay-output img", "(imgs) => imgs.map((img) => img.src)")
+
+    sources = drive(stub, scenario)
+
+    assert sources[0].startswith("blob:"), sources
+    assert seen_auth[f"{ORIGIN}/artifacts/sess-1/shot.png"] == "Bearer ops-alice"
+    assert sources[1] == elsewhere
+    assert seen_auth[elsewhere] is None
