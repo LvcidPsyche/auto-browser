@@ -64,7 +64,8 @@ targetId cannot be read (after ``TARGET_ID_READ_ATTEMPTS`` reads), or whose birt
 refused as unjudged; and when the watcher's session dies the popups of every session on that browser are
 refused as unjudged until a new watcher attaches, which registers those sessions before it discovers the
 browser's targets, so the windows that exist by then are its entries too (known pages clean, the rest
-unjudged).
+unjudged), and sweeps the unjudged ones at once. Nothing closes such a window while no watcher is attached:
+what it sends to an allowed origin in that gap reaches the origin's server, though not the agent.
 """
 
 from __future__ import annotations
@@ -225,7 +226,9 @@ class WindowBirthWatcher:
             raise RuntimeError("the window-birth watcher's session closed while it attached")
         self._live = True
         if self.has_unreported_born_refused():
-            self._start_recheck()  # the replay's unjudged windows: swept once nothing counts
+            # The replay's unjudged windows: swept now, not a recheck interval later. A window born while no
+            # watcher was attached has had that long to act already; a replacement's first duty is that sweep.
+            self._start_recheck(now=True)
 
     async def detach(self) -> None:
         self._live = False
@@ -481,23 +484,26 @@ class WindowBirthWatcher:
                     f"{type(exc).__name__}: {exc}"[:200],
                 )
 
-    def _start_recheck(self) -> None:
+    def _start_recheck(self, *, now: bool = False) -> None:
         if self._recheck is not None and not self._recheck.done():
             return
         with contextlib.suppress(RuntimeError):  # no running loop (never in the controller; the fakes' setup)
-            self._recheck = asyncio.get_running_loop().create_task(self._recheck_loop())
+            self._recheck = asyncio.get_running_loop().create_task(self._recheck_loop(now))
 
     def _stop_recheck(self) -> None:
         if self._recheck is not None and not self._recheck.done():
             self._recheck.cancel()
         self._recheck = None
 
-    async def _recheck_loop(self) -> None:
-        """While any born-refused unreported window is live: re-check every RECHECK_INTERVAL_SECONDS and close
-        those nothing justifies any more, whatever ended the refusal (a page leaving its blank, a failed refused
-        hop) and whether or not an agent action followed it."""
+    async def _recheck_loop(self, now: bool = False) -> None:
+        """While any born-refused unreported window is live: re-check every RECHECK_INTERVAL_SECONDS (at once
+        first, with ``now``) and close those nothing justifies any more, whatever ended the refusal (a page leaving
+        its blank, a failed refused hop) and whether or not an agent action followed it."""
         while self.live and self.has_unreported_born_refused():
-            await asyncio.sleep(RECHECK_INTERVAL_SECONDS)
+            if now:
+                now = False
+            else:
+                await asyncio.sleep(RECHECK_INTERVAL_SECONDS)
             if not self.live:
                 return
             for session in list(self._sessions.values()):

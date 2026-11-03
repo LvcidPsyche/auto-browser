@@ -525,8 +525,12 @@ replacement attaches at once; until it is up, every popup reported in those sess
 and stays so until the agent navigates it (a replacement cannot judge a window born before it). The
 replacement registers every live session on that browser before it discovers the browser's targets, so the
 windows that exist by then are its entries too: a page the controller knows (its target id cached) counts as
-reported and clean; a window with an opener is unjudged, refused if it is reported and swept once the session
-stops counting; a window with no opener is clean. With `ALLOWED_HOSTS` empty or `*` nothing attaches, no
+reported and clean; a window with an opener is unjudged, refused if it is reported and swept as soon as the
+replacement is up and the session does not count; a window with no opener is clean. While no watcher is
+attached nothing closes such a window, so a window a refused page opened during the loss can act until the
+replacement sweeps it: a navigation it makes to an allowed URL then is reported, refused as unjudged and
+blanked, and reaches neither the agent nor the console, but that URL, with whatever the refused page put in
+it, has reached the allowed origin's server (the same class as a refused page's own request, above). With `ALLOWED_HOSTS` empty or `*` nothing attaches, no
 browser-level CDP session is opened, and a popup is judged at report by its opener alone, as before the
 watcher. `/readiness` reports a `window_birth_watcher` check next to the gate's (off, idle, attached, lost
 or attach failed).
