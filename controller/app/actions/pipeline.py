@@ -18,7 +18,7 @@ from ..action_errors import (
 )
 from ..approvals import ApprovalRefusal, effect_started, held_status, refused_before_effect
 from ..browser.request_gate import UNATTRIBUTED_STOP, block_summary, stopped_by_gate
-from ..utils import utc_now
+from ..utils import spawn_background_task, utc_now
 from ..witness import WitnessApproval
 
 logger = logging.getLogger(__name__)
@@ -314,6 +314,10 @@ class BrowserActionPipeline:
                 with context.manager.page_provenance.escape(session.page, witness_state.escape_url):
                     await session.page.go_back(wait_until="domcontentloaded")
                 await context.manager._settle(session.page)
+                # The rollback may have cleared the last refused page. A window that refused page opened but
+                # Playwright never reported keeps a live opener reference across go_back (the BrowsingInstance
+                # survives), so close it before a script it planted can navigate this tab to an allowed URL.
+                spawn_background_task(context.manager.window_births.close_unreported(session))
         except Exception as exc:
             logger.debug("failed to roll back blocked action navigation for session %s: %s", session.id, exc)
         await self._leave_disallowed_page(context)

@@ -283,6 +283,9 @@ class BrowserSessionService(SessionCreation):
         if session.network_inspector is not None:
             session.network_inspector.detach()
             session.network_inspector = None
+        # The window-birth watcher is per-browser and shared with other sessions on it; drop only this
+        # session's context mapping (the watcher itself is released with its browser).
+        self.manager.window_births.forget_session(session)
         await self._teardown_step(session, "close browser context", session.context.close)
         if session.browser is not None and session.owns_browser:
             await self._close_owned_browser(session.browser, session.id)
@@ -307,6 +310,7 @@ class BrowserSessionService(SessionCreation):
             )
             return
         await gates.release(browser)
+        await self.manager.window_births.release(browser)
 
     @staticmethod
     async def _teardown_step(session: "BrowserSession", label: str, step: Any) -> bool:
@@ -472,6 +476,7 @@ class BrowserSessionService(SessionCreation):
             manager._attach_page_listeners(page, shadow_session)
             # As in create_session: popups need the listeners too, the page guard among them.
             manager.diagnostics.watch_context(context, shadow_session)
+            await manager.window_births.watch(shadow_session, context, page, context_id=gate_context_id)
             manager.sessions[shadow_session_id] = shadow_session
 
             if current_url != "about:blank":

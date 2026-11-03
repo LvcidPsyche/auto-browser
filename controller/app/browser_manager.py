@@ -40,6 +40,7 @@ from .browser.services import (
     BrowserUploadService,
     BrowserWitnessService,
 )
+from .browser.window_births import WindowBirths
 from .config import Settings
 from .downloads import DownloadCaptureService
 from .memory_manager import MemoryManager
@@ -193,6 +194,11 @@ class BrowserManager:
             on_block=self._on_navigation_stopped,
             off_reason=self._pre_request_blocking_off_reason,
         )
+        self.window_births = WindowBirths(
+            session_counts_as_refused=self._session_has_refused_page,
+            resolve_target_id=lambda page: self.request_gates.target_id_of(page),
+            on_late_refused=lambda session, page: self.diagnostics.taint_reported_window(session, page),
+        )
         self.action_pipeline = BrowserActionPipeline()
         self.element_ids = ElementIds(settings)
         self.actions = BrowserActionService(self)
@@ -317,6 +323,7 @@ class BrowserManager:
                     logger.warning("failed to close session %s during shutdown: %s", session_id, exc)
 
         await self.request_gates.release_all()
+        await self.window_births.release_all()
         self.browser = None
         if self.playwright is not None:
             await self.playwright.stop()
