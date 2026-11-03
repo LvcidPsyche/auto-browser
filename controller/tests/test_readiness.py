@@ -197,3 +197,40 @@ def test_docker_ephemeral_with_vnc_password_passes() -> None:
 
     assert check.status == "pass"
     assert "s3cret" not in repr(check)
+
+
+# ── the window-birth watcher, next to the gate ─────────────────────────────────
+
+
+def _watcher_check(status: dict):
+    report = run_readiness_checks(_settings(allowed_hosts="example.com"), window_births=status)
+    return next(check for check in report.checks if check.name == "window_birth_watcher")
+
+
+def test_window_birth_watcher_off_when_every_host_is_allowed_passes() -> None:
+    check = _watcher_check({"state": "off", "off_reason": "allows_every_host", "watchers": []})
+    assert check.status == "pass"
+    assert "every host" in check.message
+
+
+@pytest.mark.parametrize("state", ["idle", "attached"])
+def test_window_birth_watcher_attached_or_idle_passes(state: str) -> None:
+    watchers = [{"state": "attached", "sessions": 1, "born_refused_unreported": 0}] if state == "attached" else []
+    check = _watcher_check({"state": state, "watchers": watchers})
+    assert check.status == "pass"
+    assert check.details == {"state": state, "watchers": watchers}
+
+
+@pytest.mark.parametrize("state", ["lost", "attach_failed"])
+def test_window_birth_watcher_lost_or_attach_failed_warns(state: str) -> None:
+    status = {"state": state, "watchers": [{"state": state, "error": "boom"}]}
+    check = _watcher_check(status)
+    assert check.status == "warn"
+    assert "refused" in check.message
+    assert check.fix is not None
+    assert check.details == status
+
+
+def test_the_report_has_no_watcher_check_unless_its_state_is_given() -> None:
+    report = run_readiness_checks(_settings(allowed_hosts="example.com"))
+    assert all(check.name != "window_birth_watcher" for check in report.checks)

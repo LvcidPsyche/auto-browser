@@ -895,9 +895,12 @@ class McpToolGateway:
         )
 
     async def _readiness_check(self, payload: ReadinessCheckInput) -> dict[str, Any]:
-        # The same report as GET /readiness, the pre-request gate's state included.
+        # The same report as GET /readiness, the pre-request gate's and the window-birth watcher's states included.
         report = run_readiness_checks(
-            self.manager.settings, mode=payload.mode, request_gates=self.manager.request_gates.status()
+            self.manager.settings,
+            mode=payload.mode,
+            request_gates=self.manager.request_gates.status(),
+            window_births=self.manager.window_births.status(),
         )
         return report.to_dict()
 
