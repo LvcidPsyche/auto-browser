@@ -91,7 +91,7 @@ can. In exchange every renderer runs sandboxed, which is the better trade for a 
 | `BROWSER_SANDBOX` | What happens |
 |---|---|
 | `auto` (default) | Chromium starts sandboxed, and browser-node checks in `/proc` that each renderer is in its own user namespace under one more seccomp filter. A failure is retried once; then Chromium runs unsandboxed and a WARNING names the cause. |
-| `on` | A browser that cannot run sandboxed does not start: browser-node exits, and an isolated session fails. The controller enforces it too: an isolated container whose state is not a verified `on` (an image older than 1.14.0, which ignores the setting, included) is refused and removed, and a shared browser-node that is not `on` fails readiness. With `docker_ephemeral`, an unreadable profile file, or a daemon without seccomp, refuses every session. |
+| `on` | Nothing runs unsandboxed. A browser that cannot run sandboxed does not start (a sandboxed launch that fails is retried once first): browser-node exits, and an isolated session fails. The controller enforces it too: an isolated container whose state is not a verified `on` (an image older than 1.14.0, which ignores the setting, included) is refused and removed, and in shared mode every session is refused, and readiness fails, while the shared browser-node's state is not a verified `on` (`/readyz` is unchanged). With `docker_ephemeral`, an unreadable profile file, or a daemon without seccomp, refuses every session. A Chrome attached over CDP (`CDP_CONNECT_URL`) is the operator's own and is not checked. |
 | `off` | Chromium runs unsandboxed (the behaviour before 1.14.0). `docker_ephemeral` containers get no custom profile, only Docker's default. |
 
 The causes a fallback names are distinct, so a setup problem never reads like a host restriction:
@@ -112,10 +112,15 @@ browser-node prints the outcome (`chromium sandbox: on (verified)`, or the WARNI
 `browser-sandbox.json` beside its endpoint file. `GET /readiness` reports them in the `browser_sandbox` check, one
 line per browser (the shared browser-node and every live isolated container): it passes when every browser is
 sandboxed, warns when one fell back (naming the browser, the cause and the detail), and fails when one refused to
-start or when `BROWSER_SANDBOX=on` and one is not verified `on`. The state is self-attested by the container it
-describes: the controller reads it without following links, from a regular file of at most 16 KiB, keeps only known
-keys, and reads it once per browser run (an isolated container's when it is provisioned, the shared node's when its
-endpoint changes), so a browser compromised later cannot rewrite what readiness reports for that run. To see the
+start or when `BROWSER_SANDBOX=on` and one is not verified `on` (at least one renderer verified). The state is
+self-attested by the container it describes, so it is worth what that container was worth when it wrote it: it is
+written before the browser loads any page, and is trustworthy only until the browser runs untrusted content. The
+controller reads it without following links, from a regular file of at most 16 KiB, keeps only known keys, and reads
+it once per browser run, never again for that run: an isolated container's when it is provisioned, the shared
+node's when the controller connects (or reconnects) to it. The state names the endpoint of the run it describes,
+and the controller takes it only when that is the endpoint it just connected to; otherwise the shared node is
+`unknown` (a browser-node rolled back to an image that writes no state leaves the previous run's `on` beside its new
+endpoint). A browser compromised later can rewrite both files, but not what the controller already holds. To see the
 live evidence in a container, run
 `docker compose exec -u browser browser-node node /opt/browser-node/sandbox-report.mjs` (the state, a `/proc` check
 and `chrome://sandbox`).
@@ -152,12 +157,17 @@ without compose's `no-new-privileges`):
 At start, what earlier releases left in the controller's own `/data` subtrees (entries owned by root, or by 10001
 from a pre-release) is given to that user. The walk holds directory file descriptors and changes each entry relative
 to its directory without following links, so swapping a directory for a symlink mid-walk cannot lead it out of the
-tree. It stays on `/data`'s own filesystem (a mount inside a subtree is skipped and logged), skips files with more
-than one hard link, never enters the browser containers' directories (`browser-profile`, `downloads`,
-`browser-sessions/*/profile` and `browser-sessions/*/downloads`), and refuses a configured path deeper than one level
-whose parents are not root-owned directories. A pass that hands everything over leaves `data/.auto-browser-owner`,
+tree; each directory is handed over after its contents, through the descriptor already open, so root never locks
+itself out of a 0700 directory mid-walk. It skips every mount point under `/data` (read from `/proc/self/mountinfo`,
+so a bind of the same filesystem, or Docker Desktop's single share, is skipped too, not only another device), skips
+files with more than one hard link, never enters the browser containers' directories (`browser-profile`,
+`downloads`, `browser-sessions/*/profile` and `browser-sessions/*/downloads`), refuses a configured path with `.` or
+`..` in it (`ARTIFACT_ROOT=/data/../etc` is not handed over), and refuses one deeper than one level whose parents are
+not root-owned directories. An error on one path is logged and the others are still handed over. A pass that hands everything over leaves `data/.auto-browser-owner`,
 and later starts as the same user skip the scan; a root run (`CONTROLLER_RUN_AS=root`) removes it, deleting it forces
-a new pass, and anything unexpected there (a symlink, a FIFO, another owner, other content) just means a new pass. The marker belongs to the controller's user, who owns `/data` anyway: that user could forge it, but that only skips the hand-over of its own files.
+a new pass, and anything unexpected there (a symlink, a FIFO, another owner, other content) just means a new pass.
+The marker belongs to the controller's user, who owns `/data` anyway, and root writes it as that user: that user
+could forge it, but that only skips the hand-over of its own files.
 Measured on Docker Desktop for 20,000 files: 0.37 s in a named volume, but 103 s once on a Windows bind mount
 (`./data`), whose file operations are slow; with the marker, later starts take under a second. The controller logs
 that it is starting the one-time pass, and `scripts/doctor.sh` waits up to ten minutes for the API. The startup
@@ -173,7 +183,9 @@ read fails with its own message.
 Downloads: the controller never reads Chromium's own download files. Playwright's `save_as` streams each download
 from the browser into the controller's artifacts, which the controller owns, so it works whatever uid either side
 runs as (measured: shared and `docker_ephemeral`, the controller as 10002 and as a host-user uid; Chromium's own
-files are 0644 in every case). CI's compose-smoke downloads a file and reads it back as the runner's uid.
+files are 0644 in every case). CI's compose-smoke downloads a file and reads it back through the API; the check
+itself reads the artifact as root, so it is the ownership check before it that proves the controller runs as the
+runner's uid.
 
 With the isolation overlay, the controller joins the group of the mounted Docker socket. On a Linux host that is the
 `docker` group; **on Docker Desktop the socket is `root:root`, so the controller joins group 0**. It is still not uid 0
@@ -182,9 +194,19 @@ off everything but the sticky, world-writable `/tmp`, `/var/tmp` and `/run/lock`
 itself equivalent to root on the Docker host, whatever user holds it.
 
 A container started with `cap_drop: [ALL]` cannot switch users (no CAP_SETUID or CAP_SETGID): it still starts, as a
-uid 0 with no capabilities and no_new_privs, and the log and readiness warn. To run such a container as the
-controller user, start it as that user (`user: "10002:10002"` in compose, or `docker run --user 10002:10002`, with
-`./data` owned by 10002): the entrypoint then runs the controller directly. Or add `cap_add: [CHOWN, SETUID, SETGID]`.
+uid 0 with no capabilities and no_new_privs, and the log and readiness warn. That works only on data root can read
+without CAP_DAC_OVERRIDE: on a `/data` another uid owns (one an earlier start handed to 10002, say) it cannot read the
+0600 API token and the controller exits at startup, which the entrypoint warns about before it starts (measured on
+Docker Desktop: a restart loop on `PermissionError: '/data/api-token'`). To run such a container as the controller
+user, start it as that user (`user: "10002:10002"` in compose, or `docker run --user 10002:10002`, with `./data` owned
+by 10002): the entrypoint then runs the controller directly (measured: readyz, a session and the token all work with
+no capability). Or add `cap_add: [CHOWN, DAC_READ_SEARCH, SETUID, SETGID]`, measured as the smallest set that hands
+both a 1.13.0 data dir and a pre-release's 10001-owned 0700 directories over (CHOWN, SETUID and SETGID alone cover the
+1.13.0 case; root needs DAC_READ_SEARCH to enter another uid's 0700 directories).
+
+**A host user with uid 10001** (browser-node's): the controller never runs as 10001, so a `./data` owned by such a
+user is treated like a root-owned one and handed to uid 10002. To keep the files yours, chown `./data` to another uid,
+or start the controller as `user: "10002:10002"` and give yourself access through a group.
 
 `CONTROLLER_RUN_AS=root` restores the root controller of earlier releases. It is not recommended, and the
 `controller_user` readiness check warns while it is set; that check also reports the uid in use and why.
