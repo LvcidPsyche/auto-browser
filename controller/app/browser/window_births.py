@@ -15,8 +15,11 @@ CDP (``Target.setDiscoverTargets`` / ``Target.targetCreated``). ``TargetInfo`` c
 * the opener is a born-refused window itself (reported or not): born refused, whatever the session does
   meanwhile (a window a refused page's window opens after the agent's navigate is still that page's);
 * the opener is a page the controller knows (the session's first page, a tab the open-tab tool opened, a
-  reported popup: each has its targetId cached): born refused when that page is refused now, or when a page
-  that counted for the session closed within the grace (``page_provenance.CLOSED_PAGE_GRACE_SECONDS``);
+  reported popup: each has its targetId cached): born refused when that page is refused for what happened
+  to it (its URL, a taint, a refused hop; not for its own birth verdict still pending, which the first rule
+  carries), or when a page that counted for the session closed within the grace
+  (``page_provenance.CLOSED_PAGE_GRACE_SECONDS``; kept by design: a popup a clean tab opens within 2 s of
+  closing a refused tab is refused);
 * the opener cannot be matched to a page, though the watcher saw it born clean: it is a popup reported a
   moment ago whose targetId read is still in flight, or a clean window Playwright has not reported (on the
   initial blank of its own clean opener). The window is born clean when no open page of the session whose
