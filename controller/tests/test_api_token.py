@@ -313,6 +313,17 @@ def test_the_escape_hatch_does_not_apply_in_production(tmp_path: Path):
     assert settings.api_bearer_token == STRONG_TOKEN
 
 
+def test_the_escape_hatch_does_not_apply_in_production_at_the_gate_either(tmp_path: Path):
+    # Without the lifespan: the policy and the served gate must refuse on their own.
+    settings = make_settings(tmp_path / "api-token", hatch=True, APP_ENV="production")
+
+    assert resolve_auth_policy(settings).required is True
+    client = served_client(settings)
+    assert client.get("/sessions").status_code == 401
+    assert client.get("/sessions", headers={"Host": "localhost"}).status_code == 401
+    assert client.get("/healthz").status_code == 200
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows has no POSIX permission bits")
 def test_a_token_file_others_can_read_is_made_private(tmp_path: Path, caplog: pytest.LogCaptureFixture):
     path = tmp_path / "api-token"

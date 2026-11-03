@@ -168,7 +168,11 @@ def tokenless_loopback_allowed(settings: Any) -> bool:
 
     `is True`, not truthiness: tests pass MagicMock settings, whose every attribute
     is truthy, and a stand-in without the attribute must fall to "required".
+    Never in production, whatever the setting: the gate must not depend on the
+    lifespan having refused it first.
     """
+    if getattr(settings, "is_production", False) is True:
+        return False
     return getattr(settings, "api_allow_tokenless_loopback", False) is True
 
 
