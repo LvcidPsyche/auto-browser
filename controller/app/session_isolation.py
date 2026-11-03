@@ -44,6 +44,8 @@ _BROWSER_USER = "10001:10001"
 # browser-node service lists the same set (test_container_hardening checks).
 _BROWSER_NODE_CAP_ADD = ("CHOWN", "DAC_OVERRIDE", "KILL", "SETGID", "SETUID")
 _NO_NEW_PRIVILEGES = "no-new-privileges:true"
+# A session's runtime dir name: one plain path component (session ids are uuid4 hex; orphans come from iterdir).
+_SESSION_DIR_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
 # Each isolated session's noVNC gets its own random VNC password. Its 6080 is
 # reachable from other sessions' containers (Docker routes to published ports
@@ -775,19 +777,24 @@ class DockerBrowserNodeProvisioner:
         container, and anything that still remains is a WARNING with its path,
         never silently ignored.
         """
+        if not _SESSION_DIR_NAME.fullmatch(session_id or "") or session_id in {".", ".."}:
+            # One plain path component only: an id like 'a/../b' resolves inside the runtime root, but names b.
+            logger.warning("Refusing to remove the runtime dir of session %r: not a plain directory name", session_id)
+            return
         runtime_root = self._local_runtime_root(session_id)
         try:
             resolved = runtime_root.resolve()
             base = self._local_runtime_root("").resolve()
             # Never delete outside the managed runtime root, whatever a
             # malformed session id might resolve to.
-            if base not in resolved.parents:
-                logger.warning("Refusing to remove %s: outside the session runtime root", resolved)
+            if resolved.parent != base:
+                logger.warning("Refusing to remove %s: not directly in the session runtime root", resolved)
                 return
             if not resolved.exists():
                 return
             if client is not None and self._has_browser_files(resolved):
-                self._empty_as_browser_user(client, session_id)
+                # The helper's host path comes from the checked relative path, never from the raw id.
+                self._empty_as_browser_user(client, session_id, resolved.relative_to(base))
             failures: list[str] = []
             shutil.rmtree(resolved, onerror=lambda _func, path, exc: failures.append(f"{path}: {exc[1]}"))
             if resolved.exists():
@@ -815,7 +822,7 @@ class DockerBrowserNodeProvisioner:
                 return True  # unreadable to the controller: exactly the case the helper is for
         return False
 
-    def _empty_as_browser_user(self, client, session_id: str) -> None:
+    def _empty_as_browser_user(self, client, session_id: str, relative: Path) -> None:
         """Empty profile/ and downloads/ as the browser user, after its container has stopped.
 
         A short --rm container from the browser image, with only those two dirs mounted, no network and no
@@ -824,7 +831,7 @@ class DockerBrowserNodeProvisioner:
         try:
             host_data_root = self._host_data_root or self._discover_host_data_root(client)
             self._host_data_root = host_data_root
-            host_root = host_data_root / "browser-sessions" / session_id
+            host_root = host_data_root / "browser-sessions" / relative
             client.containers.run(
                 self.settings.isolated_browser_image,
                 ["sh", "-c", "find /data/profile /data/downloads -mindepth 1 -delete"],

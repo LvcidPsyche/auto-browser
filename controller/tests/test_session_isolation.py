@@ -175,6 +175,7 @@ class FakeDockerContainers:
         if (kwargs.get("labels") or {}).get("auto-browser.role") == "cleanup":
             # The browser-user helper that empties a session's profile and downloads (session_isolation.py).
             self.cleanup_runs.append({"image": image, "command": args[0] if args else kwargs.get("command"), **kwargs})
+            self.events.append(("cleanup.run", (kwargs.get("labels") or {}).get("auto-browser.session_id")))
             if not self.cleanup_fails:
                 for host_path in kwargs["volumes"]:
                     for child in sorted(Path(host_path).glob("**/*"), key=lambda path: len(path.parts), reverse=True):
@@ -380,6 +381,8 @@ class DockerBrowserNodeProvisionerTests(unittest.IsolatedAsyncioTestCase):
                     ("container.remove", "browser-session-session-1"),
                     ("network.disconnect", net, "controller-id", True),
                     ("network.remove", net),
+                    # The browser user's dirs are emptied last, once the container is gone.
+                    ("cleanup.run", "session-1"),
                 ],
             )
             self.assertNotIn(net, client.networks.by_name)

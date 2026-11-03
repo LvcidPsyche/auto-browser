@@ -60,9 +60,16 @@ class SessionDirCleanupTests(unittest.IsolatedAsyncioTestCase):
             sorted(mount["bind"] for mount in run["volumes"].values()), ["/data/downloads", "/data/profile"]
         )
         self.assertIn("find /data/profile /data/downloads -mindepth 1 -delete", " ".join(run["command"]))
-        # After the browser container stopped: Chromium writes to its profile as it exits.
-        stop_index = next(i for i, event in enumerate(self.client.events) if event[0] == "container.stop")
-        self.assertGreater(len(self.client.events), stop_index)
+        # After the browser container stopped and was removed: Chromium writes to its profile as it exits (M1b).
+        events = self.client.events
+        name = runtime.container_name
+        helper = events.index(("cleanup.run", "s1"))
+        self.assertGreater(helper, events.index(("container.stop", name)))
+        self.assertGreater(helper, events.index(("container.remove", name)))
+        # Hardened (M3), and only the session's two dirs mounted (M4).
+        self.assertIn("no-new-privileges:true", run["security_opt"])
+        for source in run["volumes"]:
+            self.assertRegex(Path(source).as_posix(), r"/browser-sessions/s1/(profile|downloads)$")
 
     async def test_anything_left_is_a_warning_with_the_path(self) -> None:
         runtime = await self.provisioner.provision("s2")
@@ -98,6 +105,26 @@ class SessionDirCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self._session_dir("orphan").exists())
         self.assertEqual(len(self.client.containers.cleanup_runs), 1)
         self.assertEqual(self.client.containers.cleanup_runs[0]["user"], "10001:10001")
+
+    async def test_a_failed_provision_empties_the_dirs_too(self) -> None:
+        # M5: the failed-provision cleanup passes the client, so the helper runs.
+        self.client.containers.exit_before_endpoint = True
+        self.settings.isolated_browser_wait_timeout_seconds = 1
+        with self.assertRaises(RuntimeError):
+            await self.provisioner.provision("s4")
+        self.assertEqual(
+            [run["labels"]["auto-browser.session_id"] for run in self.client.containers.cleanup_runs], ["s4"]
+        )
+        self.assertFalse(self._session_dir("s4").exists())
+
+    async def test_a_session_id_must_be_one_plain_component(self) -> None:
+        # P3#11: 'a/../b' resolves inside browser-sessions, but must never empty or remove session b.
+        self._fill("b")
+        for bad in ("a/../b", "../b", "a\..\b", ".", ".."):
+            with self.subTest(session_id=bad), self.assertLogs("app.session_isolation", level=logging.WARNING):
+                self.provisioner._remove_runtime_dirs(bad, client=self.client)
+        self.assertEqual(self.client.containers.cleanup_runs, [])
+        self.assertTrue((self._session_dir("b") / "profile" / "Default" / "Cookies").exists())
 
     async def test_a_dir_already_gone_runs_no_helper(self) -> None:
         import shutil
