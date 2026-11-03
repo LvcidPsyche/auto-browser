@@ -107,9 +107,13 @@ class FakeDockerNetworks:
         self.events = events
         self.by_name: dict[str, FakeDockerNetwork] = {}
         self.create_kwargs: dict[str, dict] = {}
+        self.next_subnet = 1
 
-    def add(self, name: str, labels: dict | None = None) -> FakeDockerNetwork:
+    def add(self, name: str, labels: dict | None = None, subnet: str | None = None) -> FakeDockerNetwork:
         network = FakeDockerNetwork(name=name, labels=labels, events=self.events, owner=self)
+        if subnet:
+            # As the daemon reports it: IPAM.Config[0].Subnet.
+            network.attrs["IPAM"] = {"Driver": "default", "Config": [{"Subnet": subnet, "Gateway": subnet[:-4] + "1"}]}
         self.by_name[name] = network
         return network
 
@@ -118,7 +122,10 @@ class FakeDockerNetworks:
             raise RuntimeError(f"network with name {name} already exists")
         self.events.append(("network.create", name))
         self.create_kwargs[name] = kwargs
-        return self.add(name, kwargs.get("labels"))
+        # Each created network gets the next free /24, as the daemon allots from its pools.
+        subnet = f"172.30.{self.next_subnet}.0/24"
+        self.next_subnet += 1
+        return self.add(name, kwargs.get("labels"), subnet=subnet)
 
     def get(self, identifier: str) -> FakeDockerNetwork:
         for network in self.by_name.values():

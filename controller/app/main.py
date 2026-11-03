@@ -114,7 +114,14 @@ app.include_router(
     ),
     tags=["operations"],
 )
-install_controller_http_middleware(app, settings=settings, rate_limiter=rate_limiter, metrics=metrics)
+install_controller_http_middleware(
+    app,
+    settings=settings,
+    rate_limiter=rate_limiter,
+    metrics=metrics,
+    # A request from a docker_ephemeral session network is refused (403) before auth.
+    refuses_peer=manager.runtime_provisioner.peer_is_in_session_network,
+)
 
 
 # Legacy operator dashboard aliases now redirect to the auth-bootstrap-aware dashboard.

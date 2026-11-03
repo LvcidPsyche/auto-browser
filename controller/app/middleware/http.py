@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.websockets import WebSocketClose
 
 from ..audit import reset_current_operator, set_current_operator
 from ..auth_policy import (
@@ -25,12 +27,53 @@ from .hosts import install_controller_host_middleware
 logger = logging.getLogger(__name__)
 
 
+class SessionNetworkPeerMiddleware:
+    """Refuse (403) any request whose direct peer is on a docker_ephemeral session network.
+
+    The controller joins every session's network, so each session's browser could
+    reach this API at the controller's address there. Browser containers never call
+    the controller, so such a request is a page, or code, in a session: it is
+    refused before the Host check, the rate limiter, the token check and every
+    route. Only the ASGI client address counts, never a forwarded-for header. A
+    WebSocket is closed before it is accepted, which the server answers with 403.
+    """
+
+    def __init__(self, app: ASGIApp, refuses_peer: Callable[[str], bool]) -> None:
+        self.app = app
+        self.refuses_peer = refuses_peer
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        client = scope.get("client")
+        host = client[0] if client else ""
+        if not host or not self.refuses_peer(host):
+            await self.app(scope, receive, send)
+            return
+        logger.warning("refused a request from session network peer %s to %s", host, scope.get("path", ""))
+        if scope["type"] == "websocket":
+            await WebSocketClose(code=1008, reason="session network peer")(scope, receive, send)
+            return
+        response = JSONResponse(
+            status_code=403,
+            content={
+                "detail": (
+                    "Forbidden: this request comes from an isolated browser's session network, and session "
+                    "browsers may not call the controller API."
+                )
+            },
+        )
+        await response(scope, receive, send)
+
+
 def install_controller_http_middleware(
     application: FastAPI,
     *,
     settings: Any,
     rate_limiter: Any,
     metrics: Any,
+    refuses_peer: Callable[[str], bool] | None = None,
 ) -> None:
     # Where this API is reachable from is fixed by the deployment, so it is
     # resolved once. Whether a request is authenticated is then one function of
@@ -243,6 +286,11 @@ def install_controller_http_middleware(
     # a missing operator id, and never spends rate-limit budget. Metrics stay
     # outside it so the refusal is still counted.
     install_controller_host_middleware(application, configured_hosts)
+
+    # Outside the Host check and the auth gate: a peer on a docker_ephemeral session
+    # network is refused before anything else answers it (see SessionNetworkPeerMiddleware).
+    if refuses_peer is not None:
+        application.add_middleware(SessionNetworkPeerMiddleware, refuses_peer=refuses_peer)
 
     @application.middleware("http")
     async def record_http_metrics(request: Request, call_next):
