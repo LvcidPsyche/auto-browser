@@ -4,23 +4,30 @@
 1. The Chromium that the pinned playwright-core bundles (its browsers.json, read from the exact npm tarball of the
    version browser-node/package-lock.json pins) against Chrome stable for Linux (Google's versionhistory API).
    Fails, naming both versions, when stable's major is ahead, or when a newer playwright-core release bundles a newer
-   Chromium (then a Playwright bump would bring security fixes). Otherwise passes and prints the patch gap.
+   Chromium (then a Playwright bump would bring security fixes). Otherwise passes and prints the patch gap; a
+   same-build gap above PATCH_GAP_WARNING is a GitHub warning annotation and a job-summary line (stable patch
+   releases carry Chrome's security fixes), still exit 0 since no Playwright release fixes it.
 2. controller/app/browser/seccomp/chromium-sandbox.json, minus its auto-browser entry, against moby's default
    profile as the latest Docker Engine release vendors it. The profile replaces the engine's own default, so a stale
    copy could deny a syscall a newer runtime needs: a drift fails, and the fix is refreshing the profile (README.md
    beside it).
 
-Exit 0 when everything is current, 1 on staleness or drift, 2 when a source could not be read.
+Exit 0 when everything is current, 1 on staleness or drift, 2 (with an ERROR line, never a traceback) when a source
+could not be read or held something unexpected. GITHUB_TOKEN, when set, is sent to api.github.com only.
 Standard library only; every fetch is injectable for the offline tests (controller/tests/test_check_chromium_freshness.py).
 """
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
+import os
 import sys
 import tarfile
+import urllib.parse
 import urllib.request
+from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -36,6 +43,8 @@ MOBY_DEFAULT_PROFILE = (
     "https://raw.githubusercontent.com/moby/moby/{tag}/vendor/github.com/moby/profiles/seccomp/default.json"
 )
 AUTO_BROWSER_COMMENT_PREFIX = "auto-browser:"
+PATCH_GAP_WARNING = 20
+_GITHUB_API_HOST = "api.github.com"
 
 Fetch = Callable[[str], bytes]
 
@@ -47,64 +56,85 @@ class SourceError(RuntimeError):
 def fetch(url: str) -> bytes:
     if not url.startswith("https://"):
         raise SourceError(f"refusing a non-https URL: {url}")
-    request = urllib.request.Request(url, headers={"User-Agent": "auto-browser-chromium-freshness"})  # noqa: S310
+    headers = {"User-Agent": "auto-browser-chromium-freshness"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token and urllib.parse.urlsplit(url).hostname == _GITHUB_API_HOST:
+        # Unauthenticated, api.github.com allows 60 requests an hour per IP, shared across a hosted runner pool.
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)  # noqa: S310
     try:
         with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310 - fixed https URLs above
             return response.read()
-    except OSError as exc:
-        raise SourceError(f"could not fetch {url}: {exc}") from exc
+    except (OSError, http.client.HTTPException) as exc:
+        raise SourceError(f"could not fetch {url}: {exc!r}") from exc
 
 
-def _json(fetcher: Fetch, url: str) -> Any:
+def _json(fetcher: Fetch, url: str, kind: type = dict) -> Any:
     try:
-        return json.loads(fetcher(url))
+        value = json.loads(fetcher(url))
     except ValueError as exc:
         raise SourceError(f"{url} did not return JSON: {exc}") from exc
+    if not isinstance(value, kind):
+        raise SourceError(f"{url} returned a JSON {type(value).__name__}, not a {kind.__name__}")
+    return value
 
 
-def version_tuple(version: str) -> tuple[int, ...]:
+def version_tuple(version: Any) -> tuple[int, ...]:
     try:
-        return tuple(int(part) for part in version.split("."))
+        return tuple(int(part) for part in str(version).split("."))
     except ValueError as exc:
         raise SourceError(f"not a dotted version: {version!r}") from exc
 
 
 def pinned_playwright_core(lock_path: Path = PACKAGE_LOCK) -> str:
-    lock = json.loads(lock_path.read_text(encoding="utf-8"))
     try:
-        return lock["packages"]["node_modules/playwright-core"]["version"]
-    except KeyError as exc:
-        raise SourceError(f"{lock_path} pins no playwright-core") from exc
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        version = lock["packages"]["node_modules/playwright-core"]["version"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SourceError(f"{lock_path} pins no playwright-core ({exc!r})") from exc
+    version_tuple(version)  # a prerelease or odd pin is an error here, not a traceback later
+    return str(version)
 
 
 def bundled_chromium(version: str, fetcher: Fetch) -> str:
     """browserVersion of chromium in the browsers.json of playwright-core <version>, from its npm tarball."""
     meta = _json(fetcher, f"{NPM_REGISTRY}/playwright-core/{version}")
-    tarball = meta.get("dist", {}).get("tarball")
-    if not tarball:
+    dist = meta.get("dist")
+    tarball = dist.get("tarball") if isinstance(dist, dict) else None
+    if not isinstance(tarball, str) or not tarball:
         raise SourceError(f"npm has no tarball for playwright-core {version}")
-    with tarfile.open(fileobj=io.BytesIO(fetcher(tarball)), mode="r:gz") as archive:
-        try:
+    try:
+        with tarfile.open(fileobj=io.BytesIO(fetcher(tarball)), mode="r:gz") as archive:
             member = archive.extractfile("package/browsers.json")
-        except KeyError as exc:
-            raise SourceError(f"playwright-core {version} ships no browsers.json") from exc
-        browsers = json.load(member)
-    for browser in browsers.get("browsers", []):
-        if browser.get("name") == "chromium" and browser.get("browserVersion"):
-            return browser["browserVersion"]
+            if member is None:
+                raise SourceError(f"playwright-core {version}'s browsers.json is not a file")
+            browsers = json.load(member)
+    except KeyError as exc:
+        raise SourceError(f"playwright-core {version} ships no browsers.json") from exc
+    except (tarfile.TarError, OSError, EOFError, ValueError) as exc:
+        raise SourceError(f"playwright-core {version}'s tarball could not be read: {exc!r}") from exc
+    entries = browsers.get("browsers") if isinstance(browsers, dict) else None
+    for browser in entries if isinstance(entries, list) else []:
+        if isinstance(browser, dict) and browser.get("name") == "chromium" and browser.get("browserVersion"):
+            version_tuple(browser["browserVersion"])
+            return str(browser["browserVersion"])
     raise SourceError(f"playwright-core {version}'s browsers.json names no chromium browserVersion")
 
 
 def latest_playwright_core(fetcher: Fetch) -> str:
     version = _json(fetcher, f"{NPM_REGISTRY}/playwright-core/latest").get("version")
-    if not version:
+    if not isinstance(version, str) or not version:
         raise SourceError("npm reports no latest playwright-core")
+    version_tuple(version)
     return version
 
 
 def chrome_stable(fetcher: Fetch) -> str:
-    versions = [entry.get("version", "") for entry in _json(fetcher, CHROME_STABLE_LINUX).get("versions", [])]
-    versions = [version for version in versions if version]
+    entries = _json(fetcher, CHROME_STABLE_LINUX).get("versions")
+    if not isinstance(entries, list):
+        raise SourceError("versionhistory returned no list of Chrome stable versions for Linux")
+    versions = [entry.get("version") for entry in entries if isinstance(entry, dict)]
+    versions = [version for version in versions if isinstance(version, str) and version]
     if not versions:
         raise SourceError("versionhistory returned no Chrome stable versions for Linux")
     return max(versions, key=version_tuple)
@@ -112,8 +142,9 @@ def chrome_stable(fetcher: Fetch) -> str:
 
 def evaluate_chromium(
     pinned: str, bundled: str, latest: str, latest_bundled: str, stable: str
-) -> tuple[bool, list[str]]:
-    """(ok, lines). Stale when stable's major is ahead, or a newer playwright-core bundles a newer Chromium."""
+) -> tuple[bool, list[str], str | None]:
+    """(ok, lines, warning). Stale when stable's major is ahead, or a newer playwright-core bundles a newer
+    Chromium. warning: a same-build patch gap above PATCH_GAP_WARNING, which no Playwright release fixes yet."""
     lines = [
         f"pinned playwright-core {pinned} bundles Chromium {bundled}",
         f"latest playwright-core {latest} bundles Chromium {latest_bundled}",
@@ -132,20 +163,31 @@ def evaluate_chromium(
             f"STALE: playwright-core {latest} bundles Chromium {latest_bundled}, newer than the Chromium {bundled} "
             f"of the pinned {pinned}; bump Playwright on both sides (scripts/check_playwright_pins.py)."
         )
+    warning = None
     if ok:
-        lines.append(f"OK: {_patch_gap(bundled, stable)}")
-    return ok, lines
+        gap_text, gap = _patch_gap(bundled, stable)
+        lines.append(f"OK: {gap_text}")
+        if gap is not None and gap > PATCH_GAP_WARNING:
+            warning = (
+                f"The bundled Chromium {bundled} is {gap} patch releases behind Chrome stable {stable} on the same "
+                f"build; no Playwright release bundles a newer one yet."
+            )
+    return ok, lines, warning
 
 
-def _patch_gap(bundled: str, stable: str) -> str:
+def _patch_gap(bundled: str, stable: str) -> tuple[str, int | None]:
     b, s = version_tuple(bundled), version_tuple(stable)
     if b == s:
-        return f"the bundled Chromium {bundled} is Chrome stable."
+        return f"the bundled Chromium {bundled} is Chrome stable.", 0
     if b > s:
-        return f"the bundled Chromium {bundled} is newer than Chrome stable {stable}."
-    if b[:3] == s[:3]:
-        return f"same build {'.'.join(map(str, b[:3]))}; stable is {s[3] - b[3]} patch number(s) ahead ({stable} vs {bundled})."
-    return f"same major {b[0]}; stable {stable} is a later build than the bundled {bundled}."
+        return f"the bundled Chromium {bundled} is newer than Chrome stable {stable}.", None
+    if len(b) == len(s) == 4 and b[:3] == s[:3]:
+        gap = s[3] - b[3]
+        return (
+            f"same build {'.'.join(map(str, b[:3]))}; stable is {gap} patch number(s) ahead ({stable} vs {bundled}).",
+            gap,
+        )
+    return f"same major {b[0]}; stable {stable} is a later build than the bundled {bundled}.", None
 
 
 def strip_auto_browser(profile: dict[str, Any]) -> dict[str, Any]:
@@ -158,52 +200,74 @@ def strip_auto_browser(profile: dict[str, Any]) -> dict[str, Any]:
     return stripped
 
 
+def _condition(entry: dict[str, Any]) -> str:
+    """What distinguishes one entry for a syscall from another: its action, arg filters and cap/arch conditions."""
+    parts = [str(entry.get("action", "?"))]
+    ops = {
+        "SCMP_CMP_EQ": "==",
+        "SCMP_CMP_NE": "!=",
+        "SCMP_CMP_MASKED_EQ": "&=",
+        "SCMP_CMP_GE": ">=",
+        "SCMP_CMP_GT": ">",
+        "SCMP_CMP_LE": "<=",
+        "SCMP_CMP_LT": "<",
+    }
+    for arg in entry.get("args") or []:
+        if isinstance(arg, dict):
+            parts.append(f"arg{arg.get('index')} {ops.get(arg.get('op'), arg.get('op'))} {arg.get('value')}")
+    for key in ("includes", "excludes"):
+        if entry.get(key):
+            parts.append(f"{key} {json.dumps(entry[key], sort_keys=True)}")
+    return ", ".join(parts)
+
+
 def profile_drift(shipped: dict[str, Any], upstream: dict[str, Any]) -> list[str]:
-    """How the shipped profile, minus the auto-browser entry, differs from upstream (empty when it does not)."""
+    """How the shipped profile, minus the auto-browser entry, differs from upstream (empty when it does not).
+
+    Grouped by syscall: one line per syscall whose rules differ, with the distinguishing conditions on each side."""
     ours = strip_auto_browser(shipped)
-    differences = []
-    for key in sorted(set(ours) | set(upstream)):
-        if key != "syscalls" and ours.get(key) != upstream.get(key):
-            differences.append(f"top-level {key!r} differs")
-    mine, theirs = ours.get("syscalls", []), upstream.get("syscalls", [])
-    if len(mine) == len(theirs):
-        # Upstream usually edits entries in place: name what changed in each, syscall by syscall.
-        for index, (old, new) in enumerate(zip(mine, theirs)):
-            if old == new:
-                continue
-            added = sorted(set(new.get("names", [])) - set(old.get("names", [])))
-            removed = sorted(set(old.get("names", [])) - set(new.get("names", [])))
-            fields = sorted(key for key in set(old) | set(new) if key != "names" and old.get(key) != new.get(key))
-            parts = [f"syscalls[{index}] ({_entry_label(new)})"]
-            if added:
-                parts.append(f"upstream adds {', '.join(added)}")
-            if removed:
-                parts.append(f"upstream removes {', '.join(removed)}")
-            if fields:
-                parts.append(f"changes {', '.join(fields)}")
-            differences.append(": ".join(parts[:1]) + ": " + "; ".join(parts[1:] or ["reordered names"]))
-        return differences
-    as_text = lambda entries: [json.dumps(entry, sort_keys=True) for entry in entries]  # noqa: E731
-    for entry, text in zip(theirs, as_text(theirs)):
-        if text not in as_text(mine):
-            differences.append(f"upstream has an entry the profile lacks ({_entry_label(entry)})")
-    for entry, text in zip(mine, as_text(mine)):
-        if text not in as_text(theirs):
-            differences.append(f"the profile has an entry upstream dropped or changed ({_entry_label(entry)})")
+    differences = [
+        f"top-level {key!r} differs"
+        for key in sorted(set(ours) | set(upstream))
+        if key != "syscalls" and ours.get(key) != upstream.get(key)
+    ]
+
+    def by_name(profile: dict[str, Any]) -> dict[str, list[str]]:
+        rules: dict[str, list[str]] = defaultdict(list)
+        for entry in profile.get("syscalls", []):
+            for name in entry.get("names", []):
+                rules[name].append(_condition(entry))
+        return rules
+
+    mine, theirs = by_name(ours), by_name(upstream)
+    for name in sorted(set(mine) | set(theirs)):
+        if sorted(mine.get(name, [])) == sorted(theirs.get(name, [])):
+            continue
+        ours_text = "; ".join(sorted(mine.get(name, []))) or "none"
+        theirs_rules = sorted(theirs.get(name, []))
+        differences.append(
+            f"{name}: profile has [{ours_text}]; {len(theirs_rules)} upstream entries [{'; '.join(theirs_rules) or 'none'}]"
+        )
+    if not differences and ours.get("syscalls") != upstream.get("syscalls"):
+        differences.append("syscalls entries are the same but in a different order")
     return differences
-
-
-def _entry_label(entry: dict[str, Any]) -> str:
-    names = entry.get("names", [])
-    shown = ", ".join(names[:6]) + (f" and {len(names) - 6} more" if len(names) > 6 else "")
-    return f"{entry.get('action', '?')} {shown}"
 
 
 def latest_moby_default(fetcher: Fetch) -> tuple[str, dict[str, Any]]:
     tag = _json(fetcher, MOBY_LATEST_RELEASE).get("tag_name")
-    if not tag:
+    if not isinstance(tag, str) or not tag:
         raise SourceError("GitHub reports no latest moby release")
-    return tag, _json(fetcher, MOBY_DEFAULT_PROFILE.format(tag=tag))
+    profile = _json(fetcher, MOBY_DEFAULT_PROFILE.format(tag=tag))
+    if not isinstance(profile.get("syscalls"), list) or not isinstance(profile.get("defaultAction"), str):
+        raise SourceError(f"moby {tag}'s default.json is not a seccomp profile (no syscalls list or defaultAction)")
+    return tag, profile
+
+
+def _summary(line: str) -> None:
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if path:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
 
 
 def run(fetcher: Fetch = fetch, lock_path: Path = PACKAGE_LOCK, profile_path: Path = SECCOMP_PROFILE) -> int:
@@ -214,17 +278,23 @@ def run(fetcher: Fetch = fetch, lock_path: Path = PACKAGE_LOCK, profile_path: Pa
         latest_bundled = bundled if latest == pinned else bundled_chromium(latest, fetcher)
         stable = chrome_stable(fetcher)
         tag, upstream = latest_moby_default(fetcher)
+        chromium_ok, lines, warning = evaluate_chromium(pinned, bundled, latest, latest_bundled, stable)
+        shipped = json.loads(profile_path.read_text(encoding="utf-8"))
+        drift = profile_drift(shipped, upstream)
     except SourceError as exc:
         print(f"ERROR: {exc}")
         return 2
-    chromium_ok, lines = evaluate_chromium(pinned, bundled, latest, latest_bundled, stable)
+    except Exception as exc:  # noqa: BLE001 - every anomaly is exit 2 with a line, never a traceback
+        print(f"ERROR: unexpected {type(exc).__name__}: {exc}")
+        return 2
     print("\n".join(lines))
+    if warning:
+        print(f"::warning::{warning}")
+        _summary(f"- {warning}")
 
-    drift = profile_drift(json.loads(profile_path.read_text(encoding="utf-8")), upstream)
     if drift:
-        print(
-            f"DRIFT: {profile_path.relative_to(REPO_ROOT) if profile_path.is_relative_to(REPO_ROOT) else profile_path}"
-        )
+        shown = profile_path.relative_to(REPO_ROOT) if profile_path.is_relative_to(REPO_ROOT) else profile_path
+        print(f"DRIFT: {shown}")
         print(f"  minus its auto-browser entry, it no longer matches moby's default profile as {tag} vendors it:")
         for line in drift:
             print(f"  - {line}")
