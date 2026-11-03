@@ -12,7 +12,7 @@
 fastapi>=0.162.0,<0.163
 starlette==1.10.0
 uvicorn[standard]==0.54.0
-playwright==1.62.0
+playwright==1.64.1
 pydantic-settings==2.16.1
 httpx==0.28.1
 # Imported directly (url_safety maps a host through its UTS 46 table, as a browser does);

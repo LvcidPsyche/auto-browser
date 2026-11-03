@@ -16,7 +16,6 @@ const advertisedHost = process.env.PLAYWRIGHT_SERVER_ADVERTISED_HOST || "browser
 // The controller's copy is app/browser/launch_flags.py; tests/test_playwright_disabled_features.py checks both.
 const PLAYWRIGHT_DISABLED_FEATURES_BUT_PARTITIONING = [
   "AvoidUnnecessaryBeforeUnloadCheckSync",
-  "BoundaryEventDispatchTracksNodeRemoval",
   "DestroyProfileOnBrowserClose",
   "DialMediaRouteProvider",
   "GlobalMediaControls",
@@ -25,9 +24,12 @@ const PLAYWRIGHT_DISABLED_FEATURES_BUT_PARTITIONING = [
   "MediaRouter",
   "PaintHolding",
   "BlockOriginHeaderModificationOnRedirect",
+  "AvoidCorsURLLoaderRestartOnRedirect",
   "Translate",
   "AutoDeElevate",
   "OptimizationHints",
+  "NetworkTimeServiceQuerying",
+  "AimEnabled",
   "msForceBrowserSignIn",
   "msEdgeUpdateLaunchServicesPreferredVersion",
 ];
