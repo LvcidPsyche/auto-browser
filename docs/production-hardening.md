@@ -22,9 +22,10 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   - request rate limiting enabled
 - Keep `PRE_REQUEST_BLOCKING=true` (the default), so a navigation to a host off `ALLOWED_HOSTS` is stopped before
   it is sent rather than refused after it loads. With `CDP_CONNECT_URL` or `browser.cdp_attach`, start that Chrome
-  with `--disable-features=BlockOriginHeaderModificationOnRedirect` and set
-  `CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true`; without it, cross-origin 307/308 POST redirects fail in the
-  operator's own tabs while the gate is attached. What is stopped and what is not:
+  with `--disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect` and set
+  `CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true`; without it, cross-origin 307/308 POST redirects can fail, and on
+  Chrome 155 and later credentialed, preflighted cross-origin requests fail after a redirect, in the operator's
+  own tabs too, while the gate is attached. What is stopped and what is not:
   [`docs/deployment.md`](./deployment.md#stopped-before-the-request-is-sent).
 - Operator identity is only authentication when it comes from a named
   credential (`API_BEARER_TOKENS=alice:token-a,bob:token-b`), which records
