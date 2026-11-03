@@ -351,6 +351,10 @@ class SessionCreation:
         created_hook_started: bool = False,
     ) -> None:
         self.manager.sessions.pop(session_id, None)
+        if session is not None:
+            # Registered with the window-birth watcher before the failure (watch runs early): a dead session
+            # left there was held, and re-registered with every replacement watcher.
+            self.manager.window_births.forget_session(session)
         if created_hook_started and self.manager._session_create_failed_hook is not None:
             # The created hook registered per-session state (network inspector,
             # CDP session) that only the closed path removed; a failed create
