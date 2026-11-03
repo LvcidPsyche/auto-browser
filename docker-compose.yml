@@ -18,7 +18,13 @@ services:
     # controller/app/session_isolation.py; a test keeps the two in step.
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, KILL, SETGID, SETUID]
-    security_opt: ["no-new-privileges:true"]
+    # The seccomp profile Chromium's own sandbox needs: moby's default plus
+    # chroot, clone and unshare (controller/app/browser/seccomp/README.md).
+    # Compose resolves the path against this file's directory. With
+    # BROWSER_SANDBOX=off, set BROWSER_SECCOMP_PROFILE=builtin as well for
+    # Docker's own default profile (compose cannot make one depend on the other;
+    # browser-node warns when it runs unsandboxed with namespaces still allowed).
+    security_opt: ["no-new-privileges:true", "seccomp=${BROWSER_SECCOMP_PROFILE:-./controller/app/browser/seccomp/chromium-sandbox.json}"]
     # The same cap as isolated session containers (ISOLATED_BROWSER_PIDS_LIMIT).
     # It counts threads.
     pids_limit: 2048
@@ -55,6 +61,12 @@ services:
       PLAYWRIGHT_SERVER_HOST: 0.0.0.0
       PLAYWRIGHT_SERVER_PORT: 9223
       PLAYWRIGHT_SERVER_ADVERTISED_HOST: browser-node
+      # Chromium's own sandbox: auto (sandboxed, else unsandboxed with a
+      # WARNING naming why), on (refuse to run unsandboxed) or off. The state
+      # goes to browser-sandbox.json beside the endpoint file; readiness shows it.
+      BROWSER_SANDBOX: ${BROWSER_SANDBOX:-auto}
+      # Which seccomp profile security_opt applied, so a fallback names its cause.
+      BROWSER_SECCOMP_PROFILE: ${BROWSER_SECCOMP_PROFILE:-auto-browser}
       # Optional VNC authentication for noVNC (6080); only the first 8 characters
       # count. 6080 is loopback-only here — set this when you publish it anywhere
       # else. x11vnc itself listens on no TCP port, only on a unix socket inside
@@ -126,6 +138,9 @@ services:
       CONTROLLER_ALLOWED_HOSTS: ${CONTROLLER_ALLOWED_HOSTS:-localhost,127.0.0.1,::1,testserver}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       BROWSER_WS_ENDPOINT_FILE: /data/browser-profile/browser-ws-endpoint.txt
+      # Handed to every docker_ephemeral browser container, with the seccomp
+      # profile (ISOLATED_BROWSER_SECCOMP_PROFILE) unless it is off.
+      BROWSER_SANDBOX: ${BROWSER_SANDBOX:-auto}
       TAKEOVER_URL: ${TAKEOVER_URL:-http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale}
       REMOTE_ACCESS_INFO_PATH: ${REMOTE_ACCESS_INFO_PATH:-/data/tunnels/reverse-ssh.json}
       REMOTE_ACCESS_STALE_AFTER_SECONDS: ${REMOTE_ACCESS_STALE_AFTER_SECONDS:-45}

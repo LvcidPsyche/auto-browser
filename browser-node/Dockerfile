@@ -50,7 +50,7 @@ RUN npm ci --omit=dev --no-audit --no-fund \
 COPY policies/auto-browser.json /etc/chromium/policies/managed/auto-browser.json
 COPY policies/auto-browser.json /etc/opt/chrome_for_testing/policies/managed/auto-browser.json
 COPY entrypoint.sh /entrypoint.sh
-COPY server.mjs /opt/browser-node/server.mjs
+COPY server.mjs sandbox.mjs sandbox-report.mjs /opt/browser-node/
 COPY novnc_origin.py /opt/browser-node/novnc_origin.py
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 

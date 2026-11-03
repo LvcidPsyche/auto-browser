@@ -1,6 +1,16 @@
 import { mkdir, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { chromium } from "playwright";
+
+import {
+  declaredProfile,
+  diagnose,
+  launchWithSandboxPolicy,
+  parseSetting,
+  SandboxRefusedError,
+  verifySandbox,
+  writeState,
+} from "./sandbox.mjs";
 
 const width = Number.parseInt(process.env.BROWSER_WIDTH || "1280", 10);
 const height = Number.parseInt(process.env.BROWSER_HEIGHT || "800", 10);
@@ -8,6 +18,10 @@ const endpointFile = process.env.BROWSER_WS_ENDPOINT_FILE || "/data/profile/brow
 const host = process.env.PLAYWRIGHT_SERVER_HOST || "0.0.0.0";
 const port = Number.parseInt(process.env.PLAYWRIGHT_SERVER_PORT || "9223", 10);
 const advertisedHost = process.env.PLAYWRIGHT_SERVER_ADVERTISED_HOST || "browser-node";
+// Written before the endpoint file, so a reader that sees the endpoint also sees how Chromium runs.
+const sandboxStateFile = process.env.BROWSER_SANDBOX_STATE_FILE || join(dirname(endpointFile), "browser-sandbox.json");
+const sandboxSetting = parseSetting(process.env.BROWSER_SANDBOX);
+const seccompProfile = declaredProfile(process.env.BROWSER_SECCOMP_PROFILE);
 
 // Playwright's own --disable-features list (driver coreBundle.js `disabledFeatures`) without
 // ThirdPartyStoragePartitioning. Chromium keeps the last --disable-features switch, so this turns storage
@@ -34,26 +48,66 @@ const PLAYWRIGHT_DISABLED_FEATURES_BUT_PARTITIONING = [
   "msEdgeUpdateLaunchServicesPreferredVersion",
 ];
 
-const browserServer = await chromium.launchServer({
-  headless: false,
-  chromiumSandbox: false,
-  host,
-  port,
-  downloadsPath: "/data/downloads",
-  args: [
-    `--window-size=${width},${height}`,
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--disable-software-rasterizer",
-    "--disable-background-networking",
-    "--disable-blink-features=AutomationControlled",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--lang=en-US,en",
-    "--disable-notifications",
-    `--disable-features=${PLAYWRIGHT_DISABLED_FEATURES_BUT_PARTITIONING.join(",")}`,
-  ],
-});
+const chromiumArgs = [
+  `--window-size=${width},${height}`,
+  "--disable-dev-shm-usage",
+  "--disable-gpu",
+  "--disable-software-rasterizer",
+  "--disable-background-networking",
+  "--disable-blink-features=AutomationControlled",
+  "--no-first-run",
+  "--no-default-browser-check",
+  "--lang=en-US,en",
+  "--disable-notifications",
+  `--disable-features=${PLAYWRIGHT_DISABLED_FEATURES_BUT_PARTITIONING.join(",")}`,
+];
+
+// BROWSER_SANDBOX (sandbox.mjs): auto tries Chromium's sandbox and falls back with a WARNING, on refuses to run
+// without it, off is the old unsandboxed launch.
+const launch = (sandboxed) =>
+  chromium.launchServer({
+    headless: false,
+    chromiumSandbox: sandboxed,
+    host,
+    port,
+    downloadsPath: "/data/downloads",
+    args: chromiumArgs,
+  });
+
+// Opens one page through the server so a renderer exists, then checks it in /proc (sandbox.mjs verifySandbox).
+async function verify(server) {
+  const client = await chromium.connect(server.wsEndpoint(), { timeout: 30000 });
+  try {
+    const page = await client.newPage();
+    await page.setContent("<p>sandbox check</p>");
+    return verifySandbox({ browserPid: server.process().pid });
+  } finally {
+    await client.close();
+  }
+}
+
+await mkdir(dirname(sandboxStateFile), { recursive: true });
+let browserServer;
+try {
+  const result = await launchWithSandboxPolicy({
+    setting: sandboxSetting,
+    profile: seccompProfile,
+    launch,
+    verify,
+    diagnose,
+    log: console,
+  });
+  browserServer = result.server;
+  await writeState(sandboxStateFile, result.state);
+  console.log(`chromium sandbox: ${result.state.sandbox} (${result.state.cause ?? "verified"}); state in ${sandboxStateFile}`);
+} catch (error) {
+  if (error instanceof SandboxRefusedError) {
+    await writeState(sandboxStateFile, error.state);
+    console.error(error.message);
+    process.exit(1);
+  }
+  throw error;
+}
 
 const rawEndpoint = new URL(browserServer.wsEndpoint());
 rawEndpoint.hostname = advertisedHost;

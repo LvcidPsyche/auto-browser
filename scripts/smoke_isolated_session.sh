@@ -79,6 +79,14 @@ if [[ "${NETWORK_MEMBERS}" != "2" ]]; then
 fi
 echo "session network ok: ${SESSION_NETWORK} holds 2 containers"
 
+# Chromium's own sandbox, measured inside a browser container: the state its server.mjs wrote, a live /proc check
+# (renderers in their own user namespace under one more seccomp filter) and chrome://sandbox. Printed, not asserted:
+# BROWSER_SANDBOX=auto falls back where the host refuses unprivileged user namespaces, and says why.
+sandbox_report() {
+  docker exec -u browser "$1" node /opt/browser-node/sandbox-report.mjs "$2"
+}
+sandbox_report "${CONTAINER_NAME}" "session A"
+
 OBSERVE_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}/observe")"
 python3 - <<'PY' "${OBSERVE_JSON}" "${CONTAINER_NAME}" "${NOVNC_PORT}"
 import json
@@ -142,6 +150,8 @@ CONTROLLER_ID="$("${COMPOSE[@]}" ps -q controller)"
 CONTROLLER_IP_ON_A="$(container_ip "${CONTROLLER_ID}" "${SESSION_NETWORK}")"
 : "${B_IP:?no address for session B}" "${BROWSER_NODE_IP:?no address for browser-node}"
 : "${CONTROLLER_IP_ON_A:?the controller is not on the network of session A}"
+sandbox_report "${B_CONTAINER_NAME}" "session B"
+sandbox_report "${BROWSER_NODE_ID}" "browser-node"
 
 must_fail_from_a() {
   local description="$1"
