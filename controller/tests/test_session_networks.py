@@ -249,6 +249,63 @@ class SessionNetworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(runtime.network_name, client.networks.by_name)
         self.assertNotIn("controller-id", client.networks.by_name[runtime.network_name].attrs["Containers"])
 
+    async def test_a_browser_container_that_cannot_be_removed_does_not_leak_its_network(self) -> None:
+        """A failed container.remove left the container's endpoint on the network,
+        so the network removal failed too and the network (and its address-pool
+        slot, about 30 per daemon) leaked until the next controller start."""
+        provisioner, client = self.provisioner()
+        runtime = await provisioner.provision("s1")
+        container = client.containers.browser_containers[runtime.container_name]
+
+        def refuse(force: bool = False) -> None:
+            client.events.append(("container.remove refused", container.name))
+            raise RuntimeError("removal of container browser-session-s1 is already in progress")
+
+        container.remove = refuse  # type: ignore[method-assign]
+        client.events.clear()
+
+        with self.assertLogs("app.session_isolation", level=logging.WARNING):
+            await provisioner.release(runtime)
+
+        self.assertNotIn(runtime.network_name, client.networks.by_name)
+        self.assertEqual(
+            client.events,
+            [
+                ("container.stop", "browser-session-s1"),
+                ("container.remove refused", "browser-session-s1"),
+                ("network.disconnect", runtime.network_name, "browser-session-s1-id", True),
+                ("network.disconnect", runtime.network_name, "controller-id", True),
+                ("network.remove", runtime.network_name),
+            ],
+        )
+
+    async def test_a_removed_container_is_not_disconnected_again(self) -> None:
+        provisioner, client = self.provisioner()
+        runtime = await provisioner.provision("s1")
+        client.events.clear()
+
+        await provisioner.release(runtime)
+
+        disconnected = [event[2] for event in client.events if event[0] == "network.disconnect"]
+        self.assertEqual(disconnected, ["controller-id"])
+
+    async def test_a_stranded_container_is_never_pulled_off_a_network_without_this_sessions_labels(self) -> None:
+        provisioner, client = self.provisioner()
+        runtime = await provisioner.provision("s1")
+        container = client.containers.browser_containers[runtime.container_name]
+
+        def refuse(force: bool = False) -> None:
+            raise RuntimeError("container is busy")
+
+        container.remove = refuse  # type: ignore[method-assign]
+        client.networks.by_name[runtime.network_name].attrs["Labels"]["auto-browser.session_id"] = "someone-else"
+
+        with self.assertLogs("app.session_isolation", level=logging.WARNING):
+            await provisioner.release(runtime)
+
+        network = client.networks.by_name[runtime.network_name]
+        self.assertIn(container.id, network.attrs["Containers"])
+
     async def test_release_carries_on_when_the_network_is_already_gone(self) -> None:
         provisioner, client = self.provisioner()
         runtime = await provisioner.provision("s1")
