@@ -2,6 +2,19 @@
 
 All notable changes to auto-browser are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- **Stealth sessions sent half a user agent.** The `USER_AGENT_POOL` default was joined and split on commas, and every
+  Chrome UA contains `(KHTML, like Gecko)`. So each context with `STEALTH_ENABLED=true` got a fragment such as
+  `like Gecko) Chrome/149.0.0.0 Safari/537.36` as its user agent, which is a stronger bot signal than the default.
+  Entries are now separated by `|` or newlines. A value with neither is one user agent, commas included, so a
+  `USER_AGENT_POOL` naming a single UA now works too.
+- **The stealth UA pool claims Chrome 156 and 155, and Edge 156,** to match the Chromium 156 that 1.12.4's
+  browser-node ships. It claimed Chrome 148 and 149, while the browser's Client Hints (`Sec-CH-UA`,
+  `navigator.userAgentData`) report Chromium 156.
+
 ## [1.12.4] — 2026-11-03
 
 A browser update over 1.12.3. The browser-node image moves from Chromium 151 to Chromium 156, which has the fixes
