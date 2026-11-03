@@ -675,8 +675,10 @@ class ImageWiringTests(unittest.TestCase):
 
     def test_the_entrypoint_is_0755_whatever_the_build_context(self) -> None:
         # The group-0 sweep runs before it is copied, so its mode must not come from the clone's umask.
-        self.assertIn("COPY --chmod=0755 entrypoint.sh /entrypoint.sh", self.dockerfile)
-        self.assertIn("chmod 0755 /entrypoint.sh", self.dockerfile)
+        self.assertIn("RUN sed -i 's/\\r$//' /entrypoint.sh && chmod 0755 /entrypoint.sh", self.dockerfile)
+        # No BuildKit-only syntax: the classic builder must still build the image (P3#10).
+        for buildkit_only in ("--chmod", "--mount=", "# syntax"):
+            self.assertNotIn(buildkit_only, self.dockerfile)
 
     def test_nothing_in_the_image_is_writable_through_group_0_alone(self) -> None:
         # The controller joins group 0 for Docker Desktop's root:root socket.
