@@ -133,6 +133,7 @@ class Harness:
             page_by_target_id=lambda _session, tid: self._open(self.pages.get(tid)),
             session_pages=lambda _session: [page for page in self.pages.values() if not page.closed],
             resolve_target_id=self._resolve,
+            known_target_id=lambda page: self.target_ids.get(page),
             seed_target_id=lambda page, tid: self.seeded.__setitem__(page, tid),
         )
 
@@ -388,6 +389,31 @@ async def test_a_window_with_no_opener_is_not_closed(h: Harness) -> None:
 
     h.counts = False
     assert await h.sweep() == []
+
+
+async def test_the_sweep_never_reads_an_uncached_pages_target_id(h: Harness, monkeypatch) -> None:
+    """A refused page can flood the session with windows: they sit in the session's pages with no cached id.
+    The sweep protects only pages whose id it already knows (reported pages, the first page, open-tab tabs);
+    it must not open a CDP session to identify each flood window, which — kept for the page's life — a refused
+    page could turn into resource exhaustion (it hung the controller before this)."""
+    opener = h.known("OP", refused=True)
+    h.cdp.fire("Target.targetCreated", created("T1", CTX, opener_id="OP"))  # born refused, unreported
+    flood = [FakePage() for _ in range(5)]
+    for i, page in enumerate(flood):
+        h.pages[f"FLOOD{i}"] = page  # in the session's pages, but its targetId was never read
+
+    resolved: list[Any] = []
+    original = h.births._resolve_target_id
+
+    async def spy(page: Any) -> str | None:
+        resolved.append(page)
+        return await original(page)
+
+    monkeypatch.setattr(h.births, "_resolve_target_id", spy)
+    h.refused.discard(opener)
+
+    assert await h.sweep() == ["T1"]
+    assert resolved == [], "the sweep read a page's targetId instead of using only cached ids"
 
 
 async def test_close_target_failure_leaves_the_window_claimable_again(h: Harness) -> None:
