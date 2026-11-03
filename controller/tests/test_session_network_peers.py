@@ -183,22 +183,52 @@ class SessionSubnetTrackingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(provisioner.peer_is_in_session_network("172.18.0.5"))
 
-    async def test_a_network_without_an_ipam_subnet_is_not_fatal(self) -> None:
+    async def test_a_network_without_an_ipam_subnet_refuses_the_session(self) -> None:
+        # Fail closed: without its subnet the controller could not refuse that network's peers,
+        # so the session is not started, and nothing is left on the daemon.
         provisioner, client = self.provisioner()
         create = client.networks.create
+        created = []
 
         def without_ipam(name, **kwargs):
             network = create(name, **kwargs)
             network.attrs.pop("IPAM", None)
+            created.append(network)
             return network
 
         client.networks.create = without_ipam  # type: ignore[method-assign]
 
-        with self.assertLogs("app.session_isolation", level=logging.WARNING) as logs:
-            runtime = await provisioner.provision("s1")
+        with self.assertRaisesRegex(RuntimeError, "no subnet"):
+            await provisioner.provision("s1")
 
-        self.assertTrue(runtime.network_owned)
-        self.assertIn("subnet", "\n".join(logs.output))
+        self.assertEqual(len(created), 1)
+        self.assertTrue(created[0].removed)
+        self.assertNotIn("container.run", [event[0] for event in client.events])
+
+    async def test_an_ipv6_session_network_is_refused_by_address(self) -> None:
+        provisioner, client = self.provisioner()
+        network = client.networks.add("ipv6-net", SESSION_LABELS)
+        network.attrs["IPAM"] = {"Driver": "default", "Config": [{"Subnet": "fd00:ab:cd::/64"}]}
+
+        self.assertTrue(provisioner._track_session_subnets(network))
+
+        self.assertTrue(provisioner.peer_is_in_session_network("fd00:ab:cd::5"))
+        self.assertFalse(provisioner.peer_is_in_session_network("fd00:ab:ce::5"))
+        self.assertFalse(provisioner.peer_is_in_session_network("10.0.0.5"))
+
+    async def test_a_reused_subnet_replaces_a_stale_entry(self) -> None:
+        # Docker reuses a subnet only once its old network is gone, so an entry left by a release
+        # that could neither leave nor remove its network is stale once the range is handed out again.
+        provisioner, client = self.provisioner()
+        stale = client.networks.add("stale-net", SESSION_LABELS, subnet="10.0.0.0/24")
+        provisioner._track_session_subnets(stale)
+        fresh = client.networks.add("fresh-net", SESSION_LABELS, subnet="10.0.0.0/24")
+
+        provisioner._track_session_subnets(fresh)
+
+        self.assertNotIn("stale-net", provisioner._session_subnets)
+        self.assertIn("fresh-net", provisioner._session_subnets)
+        self.assertTrue(provisioner.peer_is_in_session_network("10.0.0.5"))
 
 
 def _app(refuses_peer, **overrides) -> FastAPI:
