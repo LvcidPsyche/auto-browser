@@ -2,7 +2,7 @@
 
 All notable changes to auto-browser are documented here.
 
-## [Unreleased]
+## [1.13.0] — 2026-11-03
 
 A security release over 1.12.4 (GHSA-4c52-f6vr-xrrf). A browser container that a page compromised could take over
 other sessions' browsers and desktops and, on a controller without a token, the controller's API. 1.13.0 isolates each
