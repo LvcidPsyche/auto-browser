@@ -12,3 +12,7 @@ Dockerfile* text eol=lf
 *.png binary
 *.gif binary
 *.ico binary
+
+# The seccomp profiles are checked byte for byte (moby-default.json against its upstream sha256), so no
+# end-of-line conversion on checkout.
+controller/app/browser/seccomp/*.json -text
