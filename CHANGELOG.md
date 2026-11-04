@@ -2,7 +2,27 @@
 
 All notable changes to auto-browser are documented here.
 
-## [Unreleased]
+## [1.13.1] — 2026-11-04
+
+A security release over 1.13.0 (GHSA-q9w4-3w52-f9f2). A page on a host `ALLOWED_HOSTS` refuses could open a window that
+reached the agent anyway, and with `docker_ephemeral` isolation the controller answered API requests from a session's
+own Docker network. 1.13.1 judges every window when it is created, refuses requests from session networks, and runs
+shadow browsing's Chromium with its sandbox on. Only the controller image changes: the browser-node image and the
+client, LangChain and MCP bridge packages change only in version.
+
+### Upgrade notes
+
+- **With `ALLOWED_HOSTS` refusing any host, each browser gets a window-birth watcher** (one browser-level CDP
+  session). A browser it cannot attach to gets no session: creating one answers `window_birth_watcher_unavailable`
+  (503, retryable), as the pre-request gate's own failure does, and `/readiness` reports the watcher. With
+  `ALLOWED_HOSTS` empty or `*` nothing changes.
+- **A popup becomes readable one CDP round trip after it is reported.** `activate_tab` waits for its verdict, at most
+  10 seconds, rather than refuse it. A popup a clean tab opens within 2 seconds of a refused tab closing is refused:
+  open it again after those 2 seconds.
+- **Requests from a `docker_ephemeral` session network are refused (403).** Nothing in the shipped setup calls the
+  controller from a session's browser container.
+- **Shadow browsing launches its headed Chromium sandboxed,** and a controller running as root refuses it. On Linux
+  the sandbox needs unprivileged user namespaces.
 
 ### Security
 
