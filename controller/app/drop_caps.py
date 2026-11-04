@@ -54,7 +54,7 @@ def main(argv: list[str]) -> int:
     except OSError as exc:
         print(f"entrypoint: ERROR: could not drop the remaining capabilities: {exc}", file=sys.stderr)
         return 70
-    os.execvp(argv[2], argv[2:])
+    os.execvp(argv[2], argv[2:])  # noqa: S606 - the entrypoint's own command line, exec'd as it was given
     return 0  # not reached
 
 
