@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, Mock
 from urllib.parse import urlsplit
 
 import pytest
+from playwright.async_api import Error as PlaywrightError
 
 from app.browser import request_gate, request_gates
 from app.browser.request_gate import (
@@ -1203,6 +1204,38 @@ async def test_f8c_a_detach_that_never_answers_is_bounded(monkeypatch) -> None:
     await asyncio.wait_for(gate.detach(), timeout=2.0)
 
     assert not gate.live
+
+
+class _ClosedOnDetachCDP(FakeCDPSession):
+    """A session whose browser is already going: detach raises what Playwright raises for a closed target."""
+
+    async def detach(self) -> None:
+        raise PlaywrightError("Target page, context or browser has been closed")
+
+
+async def test_a_detach_from_a_target_already_closed_is_not_a_warning(caplog) -> None:
+    # Closing shadow browse's browser takes the gate's session down first: expected, so DEBUG, as the window-birth
+    # watcher logs the same case. A detach that times out on a live browser may leave its session: still a WARNING.
+    gate = _bare_gate(_ClosedOnDetachCDP())
+    await gate.attach()
+
+    with caplog.at_level("DEBUG", logger=request_gate.logger.name):
+        await gate.detach()
+
+    [record] = [r for r in caplog.records if "could not detach its session" in r.getMessage()]
+    assert record.levelname == "DEBUG"
+
+
+async def test_a_detach_that_times_out_is_still_a_warning(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(request_gate, "DETACH_TIMEOUT_SECONDS", 0.05)
+    gate = _bare_gate(_HangingCDP(detach_hangs=True))
+    await gate.attach()
+
+    with caplog.at_level("DEBUG", logger=request_gate.logger.name):
+        await asyncio.wait_for(gate.detach(), timeout=2.0)
+
+    [record] = [r for r in caplog.records if "could not detach its session" in r.getMessage()]
+    assert record.levelname == "WARNING"
 
 
 async def test_f8b_release_waits_for_an_attach_in_flight() -> None:

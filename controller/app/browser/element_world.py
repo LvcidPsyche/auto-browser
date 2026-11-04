@@ -229,7 +229,7 @@ class PageWorld:
             logger.debug("element ids: calling the world again after: %s", exc.message)
             return await self._call(page, declaration, args, timeout_ms)
         except PlaywrightError as exc:
-            if effect not in _SENT_AGAIN or not (_NO_FRAME in exc.message or _session_gone(exc)):
+            if effect not in _SENT_AGAIN or not (_NO_FRAME in exc.message or session_gone(exc)):
                 raise
             logger.debug("element ids: calling the world again after: %s", exc.message)
             return await self._call(page, declaration, args, timeout_ms)
@@ -255,7 +255,7 @@ class PageWorld:
                 timeout_ms,
             )
         except PlaywrightError as exc:
-            if _NO_FRAME in exc.message or _session_gone(exc):
+            if _NO_FRAME in exc.message or session_gone(exc):
                 # The function was sent: it may have run before its answer was lost.
                 raise _AnswerLost(exc.message) from exc
             raise
@@ -295,7 +295,7 @@ class PageWorld:
             # leaves the session that replaced it alone.
             if self._cdp is cdp and _NO_FRAME in exc.message:
                 self._frame_id = None
-            elif self._cdp is cdp and _session_gone(exc):
+            elif self._cdp is cdp and session_gone(exc):
                 self._reset()
             raise
 
@@ -346,8 +346,10 @@ class _AnswerLost(PlaywrightError):
     """The session or frame went away after the function was sent to the world."""
 
 
-def _session_gone(exc: PlaywrightError) -> bool:
-    return any(fragment in exc.message for fragment in _SESSION_GONE)
+def session_gone(exc: BaseException) -> bool:
+    """Whether a CDP failure says its session or target is gone (closed, disposed of), by its text."""
+    text = getattr(exc, "message", None) or str(exc)
+    return any(fragment in text for fragment in _SESSION_GONE)
 
 
 def _detach_when_attached(attaching: "asyncio.Future[CDPSession]") -> None:
