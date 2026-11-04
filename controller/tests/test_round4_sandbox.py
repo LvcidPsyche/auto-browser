@@ -102,6 +102,11 @@ class EphemeralReadinessTests(_Files, unittest.TestCase):
         check = browser_sandbox_check(browser_sandbox_status(self.settings("on", "docker_ephemeral"), unknown))
         self.assertEqual(check.status, "warn")
         self.assertIn("docker info failed", check.message)
+        # And with a verified session running: still not a pass.
+        session = {"sandbox": "on", "verified": _on(RUN_1)["verified"]}
+        running = SimpleNamespace(seccomp_support_known=lambda: None, sandbox_states=lambda: {"s1": session})
+        check = browser_sandbox_check(browser_sandbox_status(self.settings("on", "docker_ephemeral"), running))
+        self.assertEqual(check.status, "warn", check.message)
         known_false = SimpleNamespace(seccomp_support_known=lambda: False, sandbox_states=lambda: {})
         # N8: what the provisioner learnt reaches readiness through browser_sandbox_status.
         check = browser_sandbox_check(browser_sandbox_status(self.settings("on", "docker_ephemeral"), known_false))
