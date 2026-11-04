@@ -83,6 +83,10 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 # browser.get_html says what was stopped on Chrome's error page; none here.
                 error_page_block=AsyncMock(return_value=None),
             ),
+            # ... and the window-birth watcher next to it (off: ALLOWED_HOSTS is "*" below).
+            window_births=SimpleNamespace(
+                status=lambda: {"state": "off", "off_reason": "allows_every_host", "watchers": []},
+            ),
             settings=SimpleNamespace(
                 auth_state_encryption_key=None,
                 require_auth_state_encryption=False,
@@ -662,6 +666,9 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(response.isError)
         self.assertEqual(response.structuredContent["mode"], "confidential")
         self.assertIn(response.structuredContent["overall"], {"warn", "fail"})
+        # The window-birth watcher's check is in the tool's report, as it is in GET /readiness.
+        checks = {check["name"]: check for check in response.structuredContent["checks"]}
+        self.assertEqual(checks["window_birth_watcher"]["status"], "pass")
 
     async def test_memory_profile_tools_forward_arguments(self) -> None:
         save_response = await self.full_gateway.call_tool(
