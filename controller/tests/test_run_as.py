@@ -961,7 +961,13 @@ class ImageWiringTests(unittest.TestCase):
         # Item 9: the real fork child, as root without DAC capabilities, guarded on uid 0 and CapEff bits 1 and 2.
         self.assertIn("--inh-caps=-all --bounding-set=-dac_override,-dac_read_search sh -c", ci)
         self.assertIn("[ $(( (0x$eff >> 1) & 3 )) -eq 0 ]", ci)
-        self.assertIn("python -m pytest tests/test_run_as.py -k as_root -q -rs'", ci)
+        # P6#7, S6#6: that test by its node id, so a rename fails the step (pytest exits 4) instead of leaving only a
+        # test that skips in the image, and the guard's CapEff in CI's log.
+        node = "tests/test_run_as.py::MainLinuxTests::test_as_root_a_pre_release_data_dir_owned_by_10001_goes_to_10002"
+        self.assertIn(f"python -m pytest {node} -q -rs'", ci)
+        self.assertIn('echo "uid 0, CapEff $eff";', ci)
+        self.assertNotIn("-k as_root", ci)
+        self.assertTrue(callable(getattr(MainLinuxTests, node.rsplit("::", 1)[1], None)), node)
         self.assertIn('grep -q "app/browser/seccomp/$name" /tmp/controller-wheel.txt', ci)
         # All six capability lines must be there, not just no bad one.
         self.assertIn('if [ "$(echo "$status" | grep -c .)" != 6 ]; then', ci)
