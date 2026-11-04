@@ -152,6 +152,59 @@ async def test_the_warning_is_logged_once_not_per_screenshot(
     assert "unscrubbed" in warnings[0]
 
 
+# Round 7, item 18: the WARNING's hint fits its reason.
+_HINTS = {
+    "image": "Run the controller from the Docker image, which ships tesseract.",
+    "temp dir": "a writable temporary directory",
+    "setting": "OCR_ENABLED=false",
+}
+
+
+@pytest.mark.parametrize(
+    ("ocr", "reason", "hint"),
+    [
+        ({"available": False, "enabled": True, "error": "tesseract_not_found"}, "tesseract_not_found", "image"),
+        ({"available": False, "enabled": True}, "ocr_unavailable", "image"),
+        ({"available": False, "enabled": True, "error": "ocr_extraction_failed"}, "ocr_extraction_failed", "temp dir"),
+        ({"available": False, "enabled": False}, "ocr_disabled", "setting"),
+    ],
+)
+async def test_the_warning_gives_the_hint_its_reason_needs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, ocr: dict, reason: str, hint: str
+) -> None:
+    service = _service(tmp_path)
+    screenshot = {"path": str(tmp_path / "shot.png"), "url": "/artifacts/shot.png"}
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        await service._scrub_screenshot_if_needed(service.manager.session, screenshot, ocr)
+
+    (warning,) = _warnings(caplog)
+    assert f"OCR is unavailable ({reason}): screenshots are returned unscrubbed." in warning
+    assert _HINTS[hint] in warning
+    for other, text in _HINTS.items():
+        if other != hint:
+            assert text not in warning
+    assert screenshot["pii_scrub_skipped"] == reason
+
+
+async def test_an_ocr_run_without_a_temp_dir_says_what_it_needs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Round 6's item 1 measurement (v2): under read_only with no tmpfs, pytesseract finds no temporary directory, the
+    # OCR run fails, and the screenshot goes out unscrubbed; the hint says what the OCR run needs.
+    service = _service(tmp_path)
+    missing = FileNotFoundError("No usable temporary directory found in ['/tmp', '/var/tmp', '/usr/tmp', '/app']")
+
+    with patch("app.ocr.pytesseract.image_to_data", side_effect=missing):
+        with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+            result = await service.capture_screenshot("session-1")
+
+    assert result["screenshot_pii_scrub"] == {"applied": False, "reason": "ocr_extraction_failed"}
+    (warning,) = _warnings(caplog)
+    assert "a writable temporary directory" in warning
+    assert "which ships tesseract" not in warning
+
+
 async def test_with_tesseract_present_nothing_is_reported(
     tmp_path: Path, tesseract_present: None, caplog: pytest.LogCaptureFixture
 ) -> None:

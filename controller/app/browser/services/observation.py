@@ -47,6 +47,19 @@ def _scrub_disclosure(screenshot: dict[str, Any]) -> dict[str, Any]:
     return {"screenshot_pii_scrub": {"applied": False, "reason": reason}} if reason else {}
 
 
+# The unscrubbed-screenshot WARNING's hint, by reason (round 7, item 18). The others (tesseract_not_found, and the
+# ocr_unavailable fallback) mean no tesseract binary.
+_UNSCRUBBED_HINTS = {
+    "ocr_extraction_failed": (
+        "The OCR run failed; it needs a writable temporary directory (under read_only: true, a tmpfs for /tmp; see "
+        "docs/deployment.md)."
+    ),
+    "ocr_disabled": (
+        "OCR_ENABLED=false turned OCR off: set OCR_ENABLED=true, or PII_SCRUB_SCREENSHOT=false to make the gap explicit."
+    ),
+}
+_TESSERACT_HINT = "Run the controller from the Docker image, which ships tesseract."
+
 # An outline is a nicety; an observation must not wait long on one.
 ARIA_SNAPSHOT_TIMEOUT_MS = 5000
 
@@ -455,8 +468,9 @@ class BrowserObservationService:
                 self._warned_unscrubbed.add(reason)
                 logger.warning(
                     "screenshot PII scrubbing is on but OCR is unavailable (%s): screenshots are returned "
-                    "unscrubbed. Run the controller from the Docker image, which ships tesseract.",
+                    "unscrubbed. %s",
                     reason,
+                    _UNSCRUBBED_HINTS.get(reason, _TESSERACT_HINT),
                 )
             return
         # Prefer the uncapped redaction list. `blocks` is truncated to
