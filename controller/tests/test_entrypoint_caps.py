@@ -179,7 +179,9 @@ class EntrypointCapabilityTests(unittest.TestCase):
             env={"FAKE_DATA_OWNER": "10002", "FAKE_SEARCHABLE": "0"},
         )
         self.assertEqual(code, 70, out)
-        self.assertIn("cannot reach, or there is no, the API token's directory", out)
+        # Item 4: the brief's wording, "cannot reach, or does not exist".
+        self.assertIn("cannot reach the API token's directory", out)
+        self.assertIn(", or it does not exist, so the controller cannot start", out)
 
     def test_the_file_the_controller_names_is_the_one_checked(self) -> None:
         elsewhere = self._data(False) / "secrets"

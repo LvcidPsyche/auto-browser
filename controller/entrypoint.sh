@@ -110,7 +110,7 @@ if (( ((16#$cap_eff >> 7) & 1) == 0 || ((16#$cap_eff >> 6) & 1) == 0 )); then
     echo "entrypoint: WARNING: could not ask the controller which token file it reads; not checking it here." >&2
   elif [[ -n "$token_file" ]]; then
     if ! "${dropped[@]}" test -x "$(dirname "$token_file")"; then
-      fail "uid 0 with $kept cannot reach, or there is no, the API token's directory $(dirname "$token_file"), so" \
+      fail "uid 0 with $kept cannot reach the API token's directory $(dirname "$token_file"), or it does not exist, so" \
         "the controller cannot start: $way_out."
     elif "${dropped[@]}" test -e "$token_file" && ! "${dropped[@]}" test -r "$token_file"; then
       fail "uid 0 with $kept cannot read the API token $token_file, so the controller cannot start: $way_out."
