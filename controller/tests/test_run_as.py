@@ -820,6 +820,40 @@ class MainLinuxTests(unittest.TestCase):
         ]
         self.assertTrue(any("artifacts/new\\nline: " in m for m in could_not), could_not)
 
+    def test_the_skipped_withheld_and_unchecked_warnings_escape_their_names(self) -> None:
+        # closure7 #3: the log test's newline name reaches only the ERROR lines. One newline-named entry for each of
+        # the other three WARNINGs, few enough to stay under their caps (20, 20 and 5).
+        if ME in (0, BROWSER_UID):
+            self.skipTest("needs a data dir owned by an ordinary uid, which a 0000 dir refuses")
+        _tree(self.data, "artifacts/hard\nlink", "auth/with\nheld/sub/f", "artifacts/un\nchecked/f")
+        os.link(self.data / "artifacts" / "hard\nlink", self.data / "artifacts" / "hard\nlink2")  # skipped
+        withheld = self.data / "auth" / "with\nheld"
+        withheld.chmod(0o700)  # its stuck child fails, and without o+rx it is kept as its owner's
+        unchecked = self.data / "artifacts" / "un\nchecked"
+        unchecked.chmod(0o000)  # the controller's own, unopenable: taken as handed over unlooked-at
+        real = run_as._open_dir_nofollow
+
+        def stuck(entry, dir_fd):
+            if entry == "sub":
+                raise OSError(errno.EIO, os.strerror(errno.EIO))
+            return real(entry, dir_fd)
+
+        try:
+            with patch.object(run_as, "_open_dir_nofollow", stuck):
+                _, _, messages = self._main(run_as="auto")
+        finally:
+            unchecked.chmod(0o755)
+        warnings = [r.getMessage() for r in self.last_records if r.levelno == logging.WARNING]
+        joined = "\n".join(warnings)
+        self.assertIn("Not handed over: artifacts/hard\\nlink: 2 hard links", warnings, joined)
+        self.assertIn(
+            "Not handed over: auth/with\\nheld: kept as its owner's until its contents can be handed over",
+            warnings,
+            joined,
+        )
+        self.assertTrue(any("could not be opened" in m and "artifacts/un\\nchecked" in m for m in warnings), joined)
+        self.assertFalse(any(raw in m for m in messages for raw in ("hard\nlink", "with\nheld", "un\nchecked")))
+
     def test_a_backslash_in_a_name_is_escaped_too(self) -> None:
         # P5#8: always escaped, so a name spelled like an escape cannot pass for one.
         self.assertEqual(run_as._escaped("a\\nb"), "a\\\\nb")
