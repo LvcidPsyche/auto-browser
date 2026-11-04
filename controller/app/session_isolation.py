@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import string
 import threading
 from dataclasses import dataclass, field
@@ -788,18 +789,20 @@ class DockerBrowserNodeProvisioner:
             return
         runtime_root = self._local_runtime_root(session_id)
         try:
-            resolved = runtime_root.resolve()
-            base = self._local_runtime_root("").resolve()
-            # Never delete outside the managed runtime root, whatever a
-            # malformed session id might resolve to.
-            if resolved.parent != base:
-                logger.warning("Refusing to remove %s: not directly in the session runtime root", resolved)
+            # Checked with lstat, never resolve(): browser-sessions/<id> must be a real directory directly in the
+            # runtime root, not a symlink the browser user (who owns its contents) or anyone else planted (D5).
+            try:
+                root_st = os.lstat(runtime_root)
+            except FileNotFoundError:
                 return
-            if not resolved.exists():
+            if not stat.S_ISDIR(root_st.st_mode):
+                logger.warning("Refusing to remove %s: not a real directory (a symlink or a file)", runtime_root)
                 return
+            resolved = runtime_root
             if client is not None and self._has_browser_files(resolved):
-                # The helper's host path comes from the checked relative path, never from the raw id.
-                self._empty_as_browser_user(client, session_id, resolved.relative_to(base))
+                if self._real_browser_dirs(resolved):
+                    # The helper's host path is built from the validated id, never from a resolved path.
+                    self._empty_as_browser_user(client, session_id, Path(session_id))
             failures: list[str] = []
             shutil.rmtree(resolved, onerror=lambda _func, path, exc: failures.append(f"{path}: {exc[1]}"))
             if resolved.exists():
@@ -815,6 +818,24 @@ class DockerBrowserNodeProvisioner:
                 logger.debug("Removed isolated session runtime dir %s", resolved)
         except Exception as exc:
             logger.warning("Could not remove runtime dir for session %s: %s", session_id, exc)
+
+    @staticmethod
+    def _real_browser_dirs(runtime_root: Path) -> bool:
+        """profile/ and downloads/ are real directories or absent: a symlink there would point the helper (which mounts
+        them) at whatever it names."""
+        for name in ("profile", "downloads"):
+            try:
+                st = os.lstat(runtime_root / name)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISDIR(st.st_mode):
+                logger.warning(
+                    "Not emptying %s as the browser user: %s is not a real directory (a symlink or a file)",
+                    runtime_root,
+                    name,
+                )
+                return False
+        return True
 
     @staticmethod
     def _has_browser_files(runtime_root: Path) -> bool:

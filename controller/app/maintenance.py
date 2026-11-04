@@ -200,9 +200,13 @@ class MaintenanceService:
             stats.bytes_reclaimed += size
 
     @staticmethod
-    def _entry_error(stats: CleanupStats, path: Path, exc: OSError) -> None:
+    def _entry_error(stats: CleanupStats, path: Path, exc: Exception, seen: set[Path]) -> None:
+        # Counted once per entry, whichever pass met it (P4#7).
+        if path in seen:
+            return
+        seen.add(path)
         stats.errors += 1
-        logger.warning("cleanup sweep could not handle %s: %s", path, exc.strerror or exc)
+        logger.warning("cleanup sweep could not handle %s: %s", path, getattr(exc, "strerror", None) or exc)
 
     def _cleanup_root(self, root: Path, retention_hours: float, protected_roots: list[Path]) -> CleanupStats:
         stats = CleanupStats(root=str(root), retention_hours=retention_hours)
@@ -218,6 +222,8 @@ class MaintenanceService:
         # Listing the tree is most of the cost on a slow mount (a Docker Desktop bind mount), so shutdown is
         # checked while listing too: the thread outlives its cancelled task, and the process waits for it at exit.
         # The sort key stats each entry (is_file), so it is computed here, between abort checks, not inside sorted().
+        # resolve() raises RuntimeError on a symlink loop (Python 3.11), so entries catch that as well as OSError.
+        failed: set[Path] = set()
         entries: list[tuple[tuple[bool, int], Path]] = []
         for item in root.rglob("*"):
             if self._abort.is_set():
@@ -226,7 +232,7 @@ class MaintenanceService:
             try:
                 is_file = item.is_file()
             except OSError as exc:
-                self._entry_error(stats, item, exc)
+                self._entry_error(stats, item, exc, failed)
                 continue
             entries.append(((is_file, len(item.parts)), item))
         entries.sort(key=lambda pair: pair[0])
@@ -238,8 +244,8 @@ class MaintenanceService:
                 continue
             try:
                 self._sweep_entry(path, cutoff, protected_roots, stale_dirs, stats)
-            except OSError as exc:
-                self._entry_error(stats, path, exc)
+            except (OSError, RuntimeError) as exc:
+                self._entry_error(stats, path, exc, failed)
 
         directories: list[Path] = []
         for item in root.rglob("*"):
@@ -250,14 +256,18 @@ class MaintenanceService:
                 if item.is_dir():
                     directories.append(item)
             except OSError as exc:
-                self._entry_error(stats, item, exc)
+                self._entry_error(stats, item, exc, failed)
         for path in sorted(directories, key=lambda item: len(item.parts), reverse=True):
             if self._abort.is_set():
                 logger.info("cleanup walk of %s stopped for shutdown", root)
                 return stats
             if path not in stale_dirs:
                 continue
-            resolved = path.resolve()
+            try:
+                resolved = path.resolve()
+            except (OSError, RuntimeError) as exc:
+                self._entry_error(stats, path, exc, failed)
+                continue
             if self._protected_match(resolved, protected_roots) is not None:
                 continue
             try:

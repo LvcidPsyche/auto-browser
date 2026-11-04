@@ -81,6 +81,47 @@ class MaintenanceServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(upload.exists(), "and the next root too")
         self.assertEqual(uploads["errors"], 0)
 
+    async def test_a_symlink_loop_and_unreadable_entries_are_counted_once_each(self) -> None:
+        # P4#7: resolve() raises RuntimeError on a loop (Python 3.11); is_file/is_dir EACCES in the listing and the
+        # dir pass; each entry counted once, and the next root still swept.
+        from unittest.mock import patch
+
+        ancient = 1_000_000_000
+        artifacts = Path(self.settings.artifact_root)
+        looped = artifacts / "looped.bin"
+        hidden = artifacts / "hidden"
+        hidden.mkdir()
+        upload = Path(self.settings.upload_root) / "old-upload.bin"
+        for path in (looped, upload):
+            path.write_text("x", encoding="utf-8")
+            utime(path, (ancient, ancient))
+        utime(hidden, (ancient, ancient))
+        real_resolve, real_is_file, real_is_dir = Path.resolve, Path.is_file, Path.is_dir
+
+        def resolve(path, *args, **kwargs):
+            if path.name == "looped.bin":
+                raise RuntimeError(f"Symlink loop from {str(path)!r}")
+            return real_resolve(path, *args, **kwargs)
+
+        def is_file(path):
+            if path.name == "hidden":
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_is_file(path)
+
+        def is_dir(path):
+            if path.name == "hidden":
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_is_dir(path)
+
+        with (
+            patch.object(Path, "resolve", resolve),
+            patch.object(Path, "is_file", is_file),
+            patch.object(Path, "is_dir", is_dir),
+        ):
+            report = await self.service.run_cleanup()
+        self.assertEqual(report["roots"][0]["errors"], 2, report["roots"][0])
+        self.assertFalse(upload.exists(), "the next root was swept")
+
     async def test_the_startup_summary_reports_errors(self) -> None:
         from unittest.mock import patch
 
