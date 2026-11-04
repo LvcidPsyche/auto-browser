@@ -32,7 +32,9 @@ class BrowserRuntimeService:
         # connection lasts; {"sandbox": "attached"} for a Chrome reached over CDP; None while not connected.
         self.shared_sandbox: dict[str, Any] | None = None
         # (endpoint, state) of the last snapshot. A reconnect to the same endpoint reuses it and never re-reads the
-        # file, which the browser user can rewrite; a new endpoint (a new run) is read afresh.
+        # file, which the browser user can rewrite; a new endpoint (a new run) is read afresh, and that file is the
+        # browser user's to write too. The reuse is per run only because Playwright's launchServer mints a random
+        # wsPath on every launch (browser-node passes none), so a new run never repeats an old endpoint.
         self._snapshot: tuple[str, dict[str, Any]] | None = None
 
     async def ensure_browser(self) -> Browser:
@@ -213,7 +215,6 @@ class BrowserRuntimeService:
             if (
                 manager.settings.browser_sandbox == "on"
                 and not manager.settings.cdp_connect_url
-                and self.shared_sandbox != ATTACHED
                 and not verified_on(self.shared_sandbox)
             ):
                 reason = refusal("the shared browser-node", self.shared_sandbox)

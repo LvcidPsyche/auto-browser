@@ -235,6 +235,11 @@ class DockerBrowserNodeProvisioner:
         await asyncio.to_thread(self._ensure_context)
         # Ask docker info now, so readiness knows whether the daemon applies seccomp before the first session.
         await asyncio.to_thread(self._daemon_supports_seccomp)
+        if self._seccomp_supported is None:
+            logger.warning(
+                "docker info failed at startup, so whether the daemon applies seccomp is unknown until a session asks "
+                "again; under BROWSER_SANDBOX=on readiness warns meanwhile."
+            )
         await asyncio.to_thread(self._reap_orphaned_containers)
         # After the container reap, so the orphans' endpoints are already gone.
         await asyncio.to_thread(self._reap_orphaned_networks)

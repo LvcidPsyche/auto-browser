@@ -30,7 +30,7 @@ class SessionDirCleanupTests(unittest.IsolatedAsyncioTestCase):
         )
         self.controller = FakeDockerContainer(container_id="controller-id", name="controller", attrs={})
         self.client = FakeDockerClient(self.controller)
-        self.client.containers.sandbox_state = {"sandbox": "on", "verified": {"renderers": 1}}
+        self.client.containers.sandbox_state = {"sandbox": "on", "verified": {"renderers": 1, "renderer_userns_differs": True, "browser_seccomp_filters": 2, "renderer_seccomp_filters": [3]}}
         self.provisioner = DockerBrowserNodeProvisioner(self.settings, client=self.client)
         self.provisioner._controller_container_id = self.controller.id
 

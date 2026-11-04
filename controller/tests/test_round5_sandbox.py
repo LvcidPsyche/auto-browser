@@ -1,0 +1,229 @@
+"""1.14.0 round 5: the state's trust edges, the seccomp profile read, and CI's gate-check script.
+
+- D3: in shared mode with no endpoint file, only a "refused" state is taken from the state file; anything else (a
+  stale or forged "on") is "has not reported its sandbox yet".
+- D6: the seccomp profile is read like the state files: no links, no FIFO, a regular file under a size cap.
+- S4#6, D13: format characters (bidi, zero-width, line and paragraph separators) and C1 are stripped, method too.
+- S4#7: no "(None)" in readiness lines, and a detail keeps its own trailing colon.
+- S4#10: scripts/check_sandbox_gate.py exits 1 on a wrong status and on a state naming another endpoint.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import io
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import unittest
+from contextlib import redirect_stdout
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from types import SimpleNamespace
+
+from app.browser_sandbox import (
+    BROWSER_SANDBOX_STATE_FILENAME,
+    SECCOMP_PROFILE_PATH,
+    _Line,
+    browser_sandbox_status,
+    load_seccomp_profile,
+    read_sandbox_state,
+)
+
+REPO = Path(__file__).resolve().parents[2]
+EVIDENCE = {
+    "renderers": 1,
+    "renderer_userns_differs": True,
+    "browser_seccomp_filters": 2,
+    "renderer_seccomp_filters": [3],
+}
+
+
+class NoEndpointTests(unittest.TestCase):
+    def test_only_a_refusal_is_taken_without_an_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            state_file = Path(tempdir) / BROWSER_SANDBOX_STATE_FILENAME
+            settings = SimpleNamespace(
+                browser_sandbox="on",
+                session_isolation_mode="shared_browser_node",
+                browser_ws_endpoint_file=str(Path(tempdir) / "browser-ws-endpoint.txt"),
+                isolated_browser_seccomp_profile=str(SECCOMP_PROFILE_PATH),
+            )
+            state_file.write_text(json.dumps({"sandbox": "on", "verified": EVIDENCE}), encoding="utf-8")
+            self.assertEqual(browser_sandbox_status(settings)["browser_node"]["sandbox"], "unknown")
+            state_file.write_text(json.dumps({"sandbox": "refused", "cause": "userns_refused"}), encoding="utf-8")
+            self.assertEqual(browser_sandbox_status(settings)["browser_node"]["sandbox"], "refused")
+
+
+class ProfileReadTests(unittest.TestCase):
+    def test_the_shipped_profile_loads(self) -> None:
+        self.assertIn('"syscalls"', load_seccomp_profile(SECCOMP_PROFILE_PATH))
+
+    def test_a_directory_or_an_oversized_file_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            with self.assertRaises((OSError, ValueError)):
+                load_seccomp_profile(tempdir)
+            big = Path(tempdir) / "big.json"
+            big.write_bytes(b" " * ((1 << 20) + 1))
+            with self.assertRaisesRegex(ValueError, "larger than"):
+                load_seccomp_profile(big)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo") and sys.platform == "linux", "Linux")
+    def test_a_fifo_does_not_block_and_a_symlink_is_not_followed(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            fifo = Path(tempdir) / "profile.json"
+            os.mkfifo(fifo)
+            with self.assertRaisesRegex(ValueError, "not a regular file"):
+                load_seccomp_profile(fifo)
+            link = Path(tempdir) / "link.json"
+            link.symlink_to(SECCOMP_PROFILE_PATH)
+            with self.assertRaises(OSError):
+                load_seccomp_profile(link)
+
+
+class PrintableTests(unittest.TestCase):
+    def test_c1_and_format_characters_are_stripped_method_too(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / BROWSER_SANDBOX_STATE_FILENAME
+            raw = {
+                "sandbox": "off",
+                "detail": "a\x7fb\x85c‮d​e f g",
+                "verified": {"method": "proc\nFORGED\x1b[31m‮"},
+            }
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            state = read_sandbox_state(path)
+        self.assertEqual(state["detail"], "a b c d e f g")
+        self.assertEqual(state["verified"]["method"], "proc FORGED [31m ")
+
+
+class DescribeTests(unittest.TestCase):
+    def test_no_none_and_a_trailing_colon_kept(self) -> None:
+        self.assertEqual(_Line("browser-node", {"sandbox": "off"}).describe(), "browser-node: sandbox off")
+        self.assertEqual(
+            _Line("browser-node", {"sandbox": "refused", "detail": "x"}).describe(), "browser-node: sandbox refused: x"
+        )
+        self.assertEqual(
+            _Line("browser-node", {"sandbox": "off", "cause": "c", "detail": "ends with colon:"}).describe(),
+            "browser-node: sandbox off (c): ends with colon:",
+        )
+
+
+def _load_gate_script():
+    spec = importlib.util.spec_from_file_location(
+        "check_sandbox_gate_under_test", REPO / "scripts" / "check_sandbox_gate.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _Api(BaseHTTPRequestHandler):
+    status = 200
+
+    def log_message(self, *args) -> None:
+        return None
+
+    def _send(self, status: int, body: dict) -> None:
+        data = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self) -> None:  # /healthz
+        self._send(200, {"ok": True})
+
+    def do_POST(self) -> None:  # /sessions
+        self._send(type(self).status, {"id": "s1"} if type(self).status == 200 else {"detail": "x"})
+
+    def do_DELETE(self) -> None:
+        self._send(200, {})
+
+
+class GateScriptTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.module = _load_gate_script()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data = Path(self.tmp.name)
+        (self.data / "api-token").write_text("t", encoding="utf-8")
+        (self.data / "browser-profile").mkdir()
+
+    def _run(self, status: int, *args: str) -> int:
+        handler = type("Api", (_Api,), {"status": status})
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        argv = ["x", "--api-port", str(server.server_address[1]), "--data", str(self.data), *args]
+        with redirect_stdout(io.StringIO()):
+            return self.module.main(argv)
+
+    def _files(self, state_endpoint: str, file_endpoint: str) -> None:
+        profile = self.data / "browser-profile"
+        (profile / "browser-sandbox.json").write_text(json.dumps({"endpoint": state_endpoint}), encoding="utf-8")
+        (profile / "browser-ws-endpoint.txt").write_text(file_endpoint, encoding="utf-8")
+
+    def test_200_with_matching_endpoints_passes_and_mismatched_fails(self) -> None:
+        self._files("ws://a/1", "ws://a/1")
+        self.assertEqual(self._run(200, "--expect", "200"), 0)
+        self._files("ws://a/1", "ws://a/2")
+        self.assertEqual(self._run(200, "--expect", "200"), 1)
+
+    def test_a_wrong_status_fails(self) -> None:
+        self.assertEqual(self._run(500, "--expect", "409"), 1)
+        self.assertEqual(self._run(409, "--expect", "409"), 0)
+        self.assertEqual(self._run(409, "--expect", "200"), 1)
+
+
+class BrowserNodeWiringTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.server = (REPO / "browser-node" / "server.mjs").read_text(encoding="utf-8")
+        self.entrypoint = (REPO / "browser-node" / "entrypoint.sh").read_text(encoding="utf-8")
+
+    def test_the_endpoint_file_holds_the_advertised_string(self) -> None:
+        # N9: the endpoint file and the state's endpoint are the same string, advertised(browserServer).
+        self.assertRegex(self.server, r"(?m)^const advertisedEndpoint = advertised\(browserServer\);$")
+        self.assertIn("await writeFile(tmpFile, advertisedEndpoint, ", self.server)
+        self.assertIn("endpoint: advertised(browserServer) }", self.server)
+
+    def test_make_verify_is_sandbox_mjs_own(self) -> None:
+        # R2d: an import alias or a local makeVerify could wrap the verdict; server.mjs imports it plainly.
+        start = self.server.index("import {\n  declaredProfile,")
+        imports = self.server[start : self.server.index('} from "./sandbox.mjs";')]
+        self.assertRegex(imports, r"(?m)^  makeVerify,$")
+        self.assertNotIn(" as ", imports)
+        self.assertNotRegex(self.server, r"(const|let|var|function)\s+makeVerify\b")
+
+    def test_a_directory_named_like_the_endpoint_or_state_file_is_removed(self) -> None:
+        # D11: rm -f fails on a directory of that name, and browser-node could then never start again. The
+        # entrypoint's own line, run under bash against planted directories.
+        from tests.test_scripts_token_argv import BASH, _bash_path
+
+        line = next(
+            line for line in self.entrypoint.splitlines() if '"$WS_ENDPOINT_FILE" "$SANDBOX_STATE_FILE"' in line
+        )
+        self.assertTrue(line.startswith("rm -rf -- "), line)
+        if not BASH:
+            self.skipTest("no bash")
+        with tempfile.TemporaryDirectory() as tempdir:
+            endpoint = Path(tempdir) / "browser-ws-endpoint.txt"
+            state = Path(tempdir) / "browser-sandbox.json"
+            (endpoint / "inner").mkdir(parents=True)
+            state.mkdir()
+            script = (
+                f'set -euo pipefail; WS_ENDPOINT_FILE="{_bash_path(endpoint)}"; '
+                f'SANDBOX_STATE_FILE="{_bash_path(state)}"; {line}'
+            )
+            result = subprocess.run([BASH, "-c", script], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(endpoint.exists() or state.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

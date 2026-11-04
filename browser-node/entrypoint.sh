@@ -21,7 +21,7 @@ BROWSER_USER="${BROWSER_USER:-browser}"
 
 mkdir -p /data/profile /data/downloads /tmp/runtime
 # A state file left by the last run would describe a Chromium that is gone.
-rm -f "$WS_ENDPOINT_FILE" "$SANDBOX_STATE_FILE"
+rm -rf -- "$WS_ENDPOINT_FILE" "$SANDBOX_STATE_FILE"
 DISPLAY_NUM="${DISPLAY#:}"
 rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
 

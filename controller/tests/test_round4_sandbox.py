@@ -37,8 +37,21 @@ RUN_1 = "ws://browser-node:9223/run-1"
 RUN_2 = "ws://browser-node:9223/run-2"
 
 
+SECCOMP_KNOWN = SimpleNamespace(seccomp_support_known=lambda: True, sandbox_states=lambda: {})
+
+
 def _on(endpoint: str) -> dict:
-    return {"setting": "on", "sandbox": "on", "endpoint": endpoint, "verified": {"renderers": 2}}
+    return {
+        "setting": "on",
+        "sandbox": "on",
+        "endpoint": endpoint,
+        "verified": {
+            "renderers": 2,
+            "renderer_userns_differs": True,
+            "browser_seccomp_filters": 2,
+            "renderer_seccomp_filters": [3, 3],
+        },
+    }
 
 
 class _Files:
@@ -75,13 +88,25 @@ class EphemeralReadinessTests(_Files, unittest.TestCase):
             self.write(RUN_1, state)
             for setting in ("on", "auto"):
                 with self.subTest(setting=setting, state=state):
-                    status = browser_sandbox_status(self.settings(setting, "docker_ephemeral"))
+                    status = browser_sandbox_status(self.settings(setting, "docker_ephemeral"), SECCOMP_KNOWN)
                     check = browser_sandbox_check(status)
                     self.assertEqual(check.status, "pass", check.message)
                     self.assertTrue(status["browser_node_informational"])
                     if state is not None:
                         # Reported from its state file, as in round 2.
                         self.assertEqual(status["browser_node"]["sandbox"], state["sandbox"])
+
+    def test_an_unknown_seccomp_answer_warns_under_on(self) -> None:
+        # S4#11: docker info failed at startup; under on that is not a pass.
+        unknown = SimpleNamespace(seccomp_support_known=lambda: None, sandbox_states=lambda: {})
+        check = browser_sandbox_check(browser_sandbox_status(self.settings("on", "docker_ephemeral"), unknown))
+        self.assertEqual(check.status, "warn")
+        self.assertIn("docker info failed", check.message)
+        known_false = SimpleNamespace(seccomp_support_known=lambda: False, sandbox_states=lambda: {})
+        # N8: what the provisioner learnt reaches readiness through browser_sandbox_status.
+        check = browser_sandbox_check(browser_sandbox_status(self.settings("on", "docker_ephemeral"), known_false))
+        self.assertEqual(check.status, "fail")
+        self.assertIn("reports no seccomp support", check.message)
 
     def test_an_isolated_session_still_counts(self) -> None:
         self.write(RUN_1, _on(RUN_1))
@@ -109,7 +134,11 @@ class SharedNothingReportedTests(_Files, unittest.TestCase):
                 )
                 check = browser_sandbox_check(status)
                 self.assertEqual(check.status, "warn")
-                self.assertIn("a Chrome attached over CDP, not checked", check.message)
+                self.assertIn(
+                    "browser-node is not in use: the controller is attached to a Chrome over CDP", check.message
+                )
+                self.assertNotIn("without its sandbox", check.message)
+                self.assertNotIn("container", check.message.split(".")[0])
 
 
 class _FakeBrowser:
@@ -131,7 +160,7 @@ class _FakeBrowser:
             handler(self)
 
     async def close(self) -> None:
-        self.connected = False
+        self.drop()  # as Playwright does: closing fires "disconnected"
 
 
 class SnapshotLifetimeTests(_Files, unittest.IsolatedAsyncioTestCase):
@@ -218,6 +247,25 @@ class SnapshotLifetimeTests(_Files, unittest.IsolatedAsyncioTestCase):
         status = browser_sandbox_status(runtime.manager.settings, shared=runtime.shared_sandbox)
         self.assertEqual(browser_sandbox_check(status).status, "warn")
 
+    async def test_the_replaced_browsers_late_disconnect_clears_nothing(self) -> None:
+        # S4#9: cdp_attach closes the browser-node connection it replaces; that browser's "disconnected" must not
+        # clear the attached Chrome's state (the handler checks which browser is current).
+        self.write(RUN_1, _on(RUN_1))
+        runtime = self._runtime("auto")
+        await runtime.ensure_browser()
+        await runtime.cdp_attach("http://operator-chrome:9222")
+        self.assertEqual(runtime.shared_sandbox, {"sandbox": "attached"})
+
+    async def test_the_gate_refuses_an_attached_chrome_under_on_too(self) -> None:
+        # S4#3: a second layer behind the cdp_attach refusal: attached under auto, then the setting is on.
+        self.write(RUN_1, _on(RUN_1))
+        runtime = self._runtime("auto")
+        await runtime.ensure_browser()
+        await runtime.cdp_attach("http://operator-chrome:9222")
+        runtime.manager.settings.browser_sandbox = "on"
+        with self.assertRaisesRegex(RuntimeError, "a Chrome attached over CDP, which it cannot verify"):
+            await runtime.acquire_session_browser("s1")
+
     async def test_cdp_connect_url_reads_as_attached_and_stays_exempt_under_on(self) -> None:
         runtime = self._runtime("on", CDP_CONNECT_URL="http://operator-chrome:9222")
         browser, isolated = await runtime.acquire_session_browser("s1")
@@ -243,6 +291,28 @@ class ProvisionerStartupTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(provisioner.seccomp_support_known())
             await provisioner.startup()
             self.assertIs(provisioner.seccomp_support_known(), False)
+
+    async def test_a_docker_info_failure_at_startup_is_a_warning(self) -> None:
+        from app.session_isolation import DockerBrowserNodeProvisioner
+        from tests.test_browser_sandbox import _settings
+        from tests.test_session_isolation import FakeDockerClient, FakeDockerContainer
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            data_root = Path(tempdir) / "data"
+            data_root.mkdir()
+            client = FakeDockerClient(FakeDockerContainer(container_id="controller-id", name="controller", attrs={}))
+
+            def broken_info():
+                raise ConnectionError("daemon unreachable")
+
+            client.info = broken_info
+            provisioner = DockerBrowserNodeProvisioner(
+                _settings(data_root, SESSION_ISOLATION_MODE="docker_ephemeral"), client=client
+            )
+            provisioner._controller_container_id = "controller-id"
+            with self.assertLogs("app.session_isolation", "WARNING") as logs:
+                await provisioner.startup()
+            self.assertTrue(any("docker info failed at startup" in line for line in logs.output), logs.output)
 
 
 class RouteReadinessTests(unittest.IsolatedAsyncioTestCase):

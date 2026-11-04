@@ -198,7 +198,7 @@ def _status(browser_node=None, isolated=None, *, setting="auto", mode="shared_br
     }
 
 
-ON = {"setting": "auto", "sandbox": "on", "cause": None, "verified": {"renderers": 1}}
+ON = {"setting": "auto", "sandbox": "on", "cause": None, "verified": {"renderers": 1, "renderer_userns_differs": True, "browser_seccomp_filters": 2, "renderer_seccomp_filters": [3]}}
 
 
 class ReadinessSandboxTests(unittest.TestCase):
@@ -305,7 +305,7 @@ class ComposeAndImageWiringTests(unittest.TestCase):
         dockerfile = (BROWSER_NODE / "Dockerfile").read_text(encoding="utf-8")
         self.assertRegex(dockerfile, r"(?m)^COPY server\.mjs sandbox\.mjs sandbox-report\.mjs /opt/browser-node/$")
         entrypoint = (BROWSER_NODE / "entrypoint.sh").read_text(encoding="utf-8")
-        self.assertIn('rm -f "$WS_ENDPOINT_FILE" "$SANDBOX_STATE_FILE"', entrypoint)
+        self.assertIn('rm -rf -- "$WS_ENDPOINT_FILE" "$SANDBOX_STATE_FILE"', entrypoint)
         self.assertIn("browser-sandbox.json", entrypoint)
 
     def test_the_smokes_print_each_containers_measured_state(self) -> None:
@@ -431,9 +431,9 @@ class OnEnforcedForIsolatedTests(_ProvisionMixin, unittest.IsolatedAsyncioTestCa
             {"sandbox": "unreadable", "detail": "not valid JSON"},
             {"sandbox": "on"},  # no verification evidence
             # a verified on that names another run's endpoint
-            {"sandbox": "on", "verified": {"renderers": 1}, "endpoint": "ws://another-run:9223/x"},
+            {"sandbox": "on", "verified": {"renderers": 1, "renderer_userns_differs": True, "browser_seccomp_filters": 2, "renderer_seccomp_filters": [3]}, "endpoint": "ws://another-run:9223/x"},
             # a verified on that names no endpoint (S3#15: required for isolated states too)
-            {"sandbox": "on", "verified": {"renderers": 1}, "endpoint": None},
+            {"sandbox": "on", "verified": {"renderers": 1, "renderer_userns_differs": True, "browser_seccomp_filters": 2, "renderer_seccomp_filters": [3]}, "endpoint": None},
         ):
             with self.subTest(state=state):
                 with self.assertRaisesRegex(

@@ -24,7 +24,7 @@ RUN_2 = "ws://browser-node:9223/run-2"
 
 
 def _on(endpoint: str) -> dict:
-    return {"setting": "on", "sandbox": "on", "endpoint": endpoint, "verified": {"renderers": 2}}
+    return {"setting": "on", "sandbox": "on", "endpoint": endpoint, "verified": {"renderers": 2, "renderer_userns_differs": True, "browser_seccomp_filters": 2, "renderer_seccomp_filters": [3, 3]}}
 
 
 class FakeBrowser:
@@ -144,14 +144,25 @@ class IsolatedRefusalLogTests(unittest.IsolatedAsyncioTestCase):
 
 class VerifiedOnTests(unittest.TestCase):
     def test_on_needs_at_least_one_verified_renderer(self) -> None:
-        self.assertTrue(verified_on({"sandbox": "on", "verified": {"renderers": 1}}))
+        self.assertTrue(verified_on({"sandbox": "on", "verified": {"renderers": 1, "renderer_userns_differs": True, "browser_seccomp_filters": 2, "renderer_seccomp_filters": [3]}}))
+        # D4: renderers alone, or without their own namespace, or filters not above the browser's, are not enough.
+        self.assertFalse(verified_on({"sandbox": "on", "verified": {"renderers": 1}}))
+        self.assertFalse(verified_on({"sandbox": "on", "verified": {**{"renderers": 1, "renderer_userns_differs": True, "browser_seccomp_filters": 2, "renderer_seccomp_filters": [3]}, "renderer_userns_differs": False}}))
+        self.assertFalse(verified_on({"sandbox": "on", "verified": {**{"renderers": 1, "renderer_userns_differs": True, "browser_seccomp_filters": 2, "renderer_seccomp_filters": [3]}, "renderer_seccomp_filters": [2]}}))
+        self.assertFalse(verified_on({"sandbox": "on", "verified": {**{"renderers": 1, "renderer_userns_differs": True, "browser_seccomp_filters": 2, "renderer_seccomp_filters": [3]}, "renderer_seccomp_filters": []}}))
+        # The old-kernel evidence (chrome://sandbox) needs no filter counts.
+        self.assertTrue(
+            verified_on(
+                {"sandbox": "on", "verified": {"renderers": 1, "renderer_userns_differs": True, "method": "chrome://sandbox"}}
+            )
+        )
         self.assertFalse(verified_on({"sandbox": "on"}))
         self.assertFalse(verified_on({"sandbox": "on", "verified": {"renderers": 0}}))
         self.assertFalse(verified_on({"sandbox": "unreadable"}))
         self.assertFalse(verified_on(None))
         # Renderers do not make a state that is not 'on' count (R11).
         for name in ("unreadable", "off", "refused", "unknown"):
-            self.assertFalse(verified_on({"sandbox": name, "verified": {"renderers": 2}}), name)
+            self.assertFalse(verified_on({"sandbox": name, "verified": {"renderers": 2, "renderer_userns_differs": True, "browser_seccomp_filters": 2, "renderer_seccomp_filters": [3, 3]}}), name)
 
     def test_snapshot_binds_to_the_endpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
