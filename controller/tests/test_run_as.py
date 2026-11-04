@@ -441,8 +441,9 @@ class FixOwnershipLinuxTests(unittest.TestCase):
         with patch.object(run_as.os, "scandir", CountingScandir):
             report = self._fix(["artifacts"], max_entries=10, lstat=counting_lstat)
         self.assertTrue(report.truncated)
-        self.assertLessEqual(len(lstats), 10)
-        self.assertLessEqual(len(listed), 11)
+        # P6#5: exact, so a cap checked after the lstat (round 5's place) fails here: 9 lstats, 10 entries pulled.
+        self.assertEqual(len(lstats), 9)
+        self.assertEqual(len(listed), 10)
 
     def test_a_stuck_entry_under_a_0755_parent_does_not_keep_it(self) -> None:
         _tree(self.data, "auth/sub/f", "auth/top.json")
@@ -714,7 +715,8 @@ class MainLinuxTests(unittest.TestCase):
         self.assertTrue((self.data / MARKER_NAME).is_file())
 
     def test_two_starts_under_a_0711_or_0751_parent_keep_the_marker_withheld(self) -> None:
-        # Item 2: no marker on either start, and the ERROR summary on both, under a 0711 and a 0751 parent.
+        # Item 2: no marker on either start, and the ERROR summary on both, under a 0711 and a 0751 parent. P6#2: and
+        # the parent itself kept as its owner's on both starts, which is what fails when o+x alone counts as reopenable.
         if ME in (0, BROWSER_UID):
             self.skipTest("needs a data dir owned by an ordinary uid")
         real = run_as._open_dir_nofollow
@@ -730,6 +732,7 @@ class MainLinuxTests(unittest.TestCase):
                 (self.data / MARKER_NAME).unlink(missing_ok=True)
                 _tree(self.data, "artifacts/run/sub/f")
                 (self.data / "artifacts" / "run").chmod(mode)
+                owner = (self.data / "artifacts" / "run").stat().st_uid
                 try:
                     for start in (1, 2):
                         with patch.object(run_as, "_open_dir_nofollow", stuck):
@@ -738,6 +741,12 @@ class MainLinuxTests(unittest.TestCase):
                         self.assertEqual(
                             sum(m.startswith("No marker written") for m in messages), 1, (oct(mode), start, messages)
                         )
+                        self.assertIn(
+                            "Not handed over: artifacts/run: kept as its owner's until its contents can be handed over",
+                            messages,
+                            (oct(mode), start),
+                        )
+                        self.assertEqual((self.data / "artifacts" / "run").stat().st_uid, owner, (oct(mode), start))
                 finally:
                     (self.data / "artifacts" / "run").chmod(0o755)
 
@@ -747,14 +756,15 @@ class MainLinuxTests(unittest.TestCase):
         if ME in (0, BROWSER_UID):
             self.skipTest("needs a data dir owned by an ordinary uid")
         names = [f"artifacts/h{i:02d}" for i in range(25)]
-        _tree(self.data, *names, "artifacts/new\nline", "auth/sub/f")
+        # P6#4: the newline-named entry is a directory the stuck opener fails on, so it reaches an ERROR line.
+        _tree(self.data, *names, "artifacts/new\nline/f", "auth/sub/f")
         for name in names:
             os.link(self.data / name, self.data / (name + ".link"))
         (self.data / "auth").chmod(0o700)
         real = run_as._open_dir_nofollow
 
         def stuck(entry, dir_fd):
-            if entry == "sub":
+            if entry in ("sub", "new\nline"):
                 raise OSError(errno.EIO, os.strerror(errno.EIO))
             return real(entry, dir_fd)
 
@@ -768,6 +778,12 @@ class MainLinuxTests(unittest.TestCase):
         self.assertTrue(any("kept as its owner's until its contents" in m for m in messages), joined)
         self.assertTrue(any("entries examined so far" in m for m in messages), joined)
         self.assertFalse(any("new\nline" in m for m in messages))
+        could_not = [
+            r.getMessage()
+            for r in self.last_records
+            if r.levelno == logging.ERROR and "Could not give" in r.getMessage()
+        ]
+        self.assertTrue(any("artifacts/new\\nline: " in m for m in could_not), could_not)
 
     def test_a_backslash_in_a_name_is_escaped_too(self) -> None:
         # P5#8: always escaped, so a name spelled like an escape cannot pass for one.
