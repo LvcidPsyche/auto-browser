@@ -30,7 +30,9 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   `CDP_BLOCK_ORIGIN_ON_REDIRECT_DISABLED=true`; without it, cross-origin 307/308 POST redirects can fail, and on
   Chrome 155 and later credentialed, preflighted cross-origin requests fail after a redirect, in the operator's
   own tabs too, while the gate is attached. What is stopped and what is not:
-  [`docs/deployment.md`](./deployment.md#stopped-before-the-request-is-sent).
+  [`docs/deployment.md`](./deployment.md#stopped-before-the-request-is-sent). On Docker Desktop, browser
+  containers can reach that Chrome's remote-debugging port: keep it off a host whose browser containers load
+  pages you don't trust ([`docs/deployment.md`](./deployment.md#per-session-networks-docker_ephemeral)).
 - Operator identity is only authentication when it comes from a named
   credential (`API_BEARER_TOKENS=alice:token-a,bob:token-b`), which records
   `source: "token"` on the audit event. With the shared `API_BEARER_TOKEN`,
