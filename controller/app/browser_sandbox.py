@@ -164,7 +164,8 @@ def _profile_readable(path: str | Path) -> bool:
 
 
 def verified_on(state: dict[str, Any] | None) -> bool:
-    """'on' with the evidence sandbox.mjs writes, as scripts/assert_browser_sandbox.py checks it: at least one renderer,
+    """'on' with the evidence sandbox.mjs writes, as scripts/assert_browser_sandbox.py checks the evidence (not the
+    setting): at least one renderer,
     each in its own user namespace, and either /proc's seccomp filter counts (every renderer above the browser) or
     chrome://sandbox's own report (old kernels). A bare 'on', or renderers alone, is not enough."""
     if not state or state.get("sandbox") != "on":

@@ -1,9 +1,10 @@
 """controller/entrypoint.sh's capability handling, run for real under bash with a fake /proc/self/status.
 
 A copy of the entrypoint reads a fake status file, and stub id/python/setpriv/getent on PATH record what it would
-exec. Covers the branch for a container that cannot switch users (no CAP_SETUID/CAP_SETGID): it clears the bounding set
-when CAP_SETPCAP allows, and otherwise names the capabilities that remain instead of claiming none; and the strict
-parse of CapEff/CapBnd (exit 70 on anything but 16 hex digits).
+exec. Covers the branch for a container that cannot switch users (no CAP_SETUID/CAP_SETGID): it execs through
+app.drop_caps with no capability, clears the bounding set when CAP_SETPCAP allows, names what the container still grants
+at every start, and asks the controller which token file to check; the other exec paths (non-root, CONTROLLER_RUN_AS=
+root); and the strict parse of CapEff/CapBnd (exit 70 on anything but 16 hex digits).
 """
 
 from __future__ import annotations
