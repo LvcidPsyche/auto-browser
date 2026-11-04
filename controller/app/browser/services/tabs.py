@@ -40,12 +40,13 @@ REFUSED_BY_ANOTHER_TAB_MESSAGE = (
 # A tab refused because its birth could not be judged: the window-birth watcher was lost when it was born, its
 # target could not be read, or its verdict never came (activate_tab waited its bound). Nothing is known against its
 # host; the condition is the controller's, and passing. A tab that is not active cannot be navigated, and activating
-# it again never succeeds (a verdict is reached once), so the way out is a new tab, which is judged as it opens.
+# it again does not succeed (a verdict, once reached, is final; only a judgement still running past activate_tab's
+# bound, which nothing known causes, could land clean later), so the way out is a new tab, judged as it opens.
 UNJUDGED_TAB_MESSAGE = (
-    "That tab could not be judged when it opened (the controller's window-birth watcher was unavailable, or the "
-    "tab's target could not be read), so it is refused and cannot be activated: nothing is known against its "
-    "host. Close it and open its URL in a new tab: a tab opened once /readiness reports the window_birth_watcher "
-    "attached is judged as it opens."
+    "That tab could not be judged when it opened (the controller's window-birth watcher was unavailable, the "
+    "tab's target could not be read, or its verdict did not come in time), so it is refused and cannot be "
+    "activated: nothing is known against its host. Close it and open its URL in a new tab: a tab opened once "
+    "/readiness reports the window_birth_watcher attached is judged as it opens."
 )
 
 
