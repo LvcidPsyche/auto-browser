@@ -46,6 +46,7 @@ from typing import Any, Callable
 from ..action_errors import BROWSER_ACTION_BLOCKED, PRE_REQUEST_GATE_UNAVAILABLE, BrowserActionError
 from ..network_inspector import url_origin
 from ..utils import spawn_background_task
+from .element_world import session_gone
 
 logger = logging.getLogger(__name__)
 
@@ -310,7 +311,12 @@ class RequestGate:
         try:
             await asyncio.wait_for(self._cdp.detach(), timeout=DETACH_TIMEOUT_SECONDS)
         except Exception as exc:
-            logger.warning("pre-request gate: could not detach its session: %s", f"{type(exc).__name__}: {exc}"[:200])
+            # A target already closed (its browser is going, as at shadow browse's close) took the session with it,
+            # as the window-birth watcher expects too. Anything else (a timeout on a live browser) may leave it.
+            level = logging.DEBUG if session_gone(exc) else logging.WARNING
+            logger.log(
+                level, "pre-request gate: could not detach its session: %s", f"{type(exc).__name__}: {exc}"[:200]
+            )
 
     def ending(self, ending: bool = True) -> None:
         """The controller is closing this gate's browser: the close takes the gate's session down with it, which is
