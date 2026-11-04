@@ -144,6 +144,7 @@ class _Api(BaseHTTPRequestHandler):
         self._send(200, {})
 
 
+@unittest.skipUnless((REPO / "scripts").is_dir(), "scripts/ is not in the controller image")
 class GateScriptTests(unittest.TestCase):
     def setUp(self) -> None:
         self.module = _load_gate_script()
@@ -190,6 +191,7 @@ class GateScriptTests(unittest.TestCase):
         self.assertEqual(self._run(409, "--expect", "200"), 1)
 
 
+@unittest.skipUnless((REPO / "browser-node").is_dir(), "browser-node/ is not in the controller image")
 class BrowserNodeWiringTests(unittest.TestCase):
     def setUp(self) -> None:
         self.server = (REPO / "browser-node" / "server.mjs").read_text(encoding="utf-8")
