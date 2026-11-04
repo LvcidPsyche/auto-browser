@@ -19,6 +19,15 @@ from app.session_isolation import DockerBrowserNodeProvisioner
 from tests.test_session_isolation import FakeDockerClient, FakeDockerContainer
 
 
+def _can_symlink() -> bool:
+    with tempfile.TemporaryDirectory() as tempdir:
+        try:
+            (Path(tempdir) / "link").symlink_to(tempdir, target_is_directory=True)
+        except OSError:
+            return False
+    return True
+
+
 class SessionDirCleanupTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -30,7 +39,15 @@ class SessionDirCleanupTests(unittest.IsolatedAsyncioTestCase):
         )
         self.controller = FakeDockerContainer(container_id="controller-id", name="controller", attrs={})
         self.client = FakeDockerClient(self.controller)
-        self.client.containers.sandbox_state = {"sandbox": "on", "verified": {"renderers": 1, "renderer_userns_differs": True, "browser_seccomp_filters": 2, "renderer_seccomp_filters": [3]}}
+        self.client.containers.sandbox_state = {
+            "sandbox": "on",
+            "verified": {
+                "renderers": 1,
+                "renderer_userns_differs": True,
+                "browser_seccomp_filters": 2,
+                "renderer_seccomp_filters": [3],
+            },
+        }
         self.provisioner = DockerBrowserNodeProvisioner(self.settings, client=self.client)
         self.provisioner._controller_container_id = self.controller.id
 
@@ -84,7 +101,8 @@ class SessionDirCleanupTests(unittest.IsolatedAsyncioTestCase):
             real_os_unlink = os.unlink
 
             def os_unlink(path, *args, **kwargs):
-                if Path(path).is_relative_to(browser_owned):
+                # By name too: on Linux rmtree unlinks names relative to a directory fd, not full paths.
+                if Path(path).name == "Cookies" or Path(path).is_relative_to(browser_owned):
                     raise PermissionError(13, "Permission denied", str(path))
                 return real_os_unlink(path, *args, **kwargs)
 
@@ -125,10 +143,38 @@ class SessionDirCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("s5", [run["labels"]["auto-browser.session_id"] for run in self.client.containers.cleanup_runs])
         self.assertFalse(self._session_dir("s5").exists())
 
+    @unittest.skipUnless(_can_symlink(), "symlinks need privileges on this host")
+    async def test_a_symlinked_session_dir_is_never_followed(self) -> None:
+        # D5: browser-sessions/<id> planted as a symlink to another directory: neither removed through nor emptied.
+        target = self.data / "elsewhere"
+        (target / "profile").mkdir(parents=True)
+        (target / "profile" / "keep.txt").write_text("keep", encoding="utf-8")
+        (self.data / "browser-sessions").mkdir(exist_ok=True)
+        self._session_dir("s6").symlink_to(target, target_is_directory=True)
+        with self.assertLogs("app.session_isolation", level=logging.WARNING) as logs:
+            self.provisioner._remove_runtime_dirs("s6", client=self.client)
+        self.assertTrue((target / "profile" / "keep.txt").exists())
+        self.assertEqual(self.client.containers.cleanup_runs, [])
+        self.assertIn("not a real directory", "\n".join(logs.output))
+
+    @unittest.skipUnless(_can_symlink(), "symlinks need privileges on this host")
+    async def test_a_symlinked_profile_is_not_handed_to_the_helper(self) -> None:
+        target = self.data / "elsewhere"
+        target.mkdir()
+        (target / "keep.txt").write_text("keep", encoding="utf-8")
+        root = self._session_dir("s7")
+        (root / "downloads").mkdir(parents=True)
+        (root / "downloads" / "f.pdf").write_text("pdf", encoding="utf-8")
+        (root / "profile").symlink_to(target, target_is_directory=True)
+        with self.assertLogs("app.session_isolation", level=logging.WARNING):
+            self.provisioner._remove_runtime_dirs("s7", client=self.client)
+        self.assertEqual(self.client.containers.cleanup_runs, [])
+        self.assertTrue((target / "keep.txt").exists(), "rmtree unlinks the symlink, never what it names")
+
     async def test_a_session_id_must_be_one_plain_component(self) -> None:
         # P3#11: 'a/../b' resolves inside browser-sessions, but must never empty or remove session b.
         self._fill("b")
-        for bad in ("a/../b", "../b", "a\..\b", ".", ".."):
+        for bad in ("a/../b", "../b", r"a\..\b", ".", ".."):
             with self.subTest(session_id=bad), self.assertLogs("app.session_isolation", level=logging.WARNING):
                 self.provisioner._remove_runtime_dirs(bad, client=self.client)
         self.assertEqual(self.client.containers.cleanup_runs, [])
