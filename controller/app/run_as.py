@@ -14,10 +14,11 @@ uid's own (the entrypoint creates it).
 
 Before that, entries of the controller's own /data subtrees left by earlier releases (owned by root, or by 10001 from
 a pre-release) are handed to that user. The walk holds directory fds and stats and chowns relative to them without
-following links (os.fwalk), so swapping a directory for a symlink mid-walk cannot steer it out of the tree; it stays
-on /data's filesystem (sub-mounts are skipped), skips hard-linked files, and never enters the browser's directories
-(browser-profile, downloads, browser-sessions/*/profile and */downloads). A chown that fails is an ERROR naming the
-path and the way out; the controller still starts. A marker file records a clean pass so later starts skip the scan.
+following links (its own dir-fd walk), so swapping a directory for a symlink mid-walk cannot steer it out of the
+tree; it stays on /data's filesystem (sub-mounts are skipped), skips hard-linked files, and never enters the browser's
+directories (browser-profile, downloads, browser-sessions/*/profile and */downloads). A chown that fails is an ERROR
+naming the path; the controller still starts, and a summary says the pass repeats on every start until it is fixed.
+A marker file records a clean pass so later starts skip the scan.
 root keeps the old behaviour and readiness warns about it.
 
 The root step is Linux-only (dir fds); the entrypoint is the only caller.
@@ -78,6 +79,10 @@ def _is_image_system_group(gid: int) -> bool:
 NOBODY_UID = 65534
 # The walk is depth-bounded, never recursing into a RecursionError: deeper entries are errors (and no marker).
 MAX_WALK_DEPTH = 200
+# And bounded in breadth: progress is logged every WALK_PROGRESS_EVERY entries, and a pass stops after
+# MAX_WALK_ENTRIES (an error: no marker, the next start goes on).
+WALK_PROGRESS_EVERY = 10_000
+MAX_WALK_ENTRIES = 2_000_000
 _REFUSED_GIDS = frozenset({0, BROWSER_UID, NOBODY_UID})
 
 
@@ -103,14 +108,6 @@ def decide_user(
             CONTROLLER_UID,
             CONTROLLER_UID,
             f"{root} belongs to root, so the image's controller user (uid {CONTROLLER_UID})",
-        )
-    if owner_uid == NOBODY_UID:
-        # How root-squashed or NFS data looks (or a host's nobody): not a user to become.
-        return UserDecision(
-            CONTROLLER_UID,
-            CONTROLLER_UID,
-            f"{root} is owned by uid {NOBODY_UID} (nobody: root-squashed or NFS data, as it looks), so the image's "
-            f"controller user (uid {CONTROLLER_UID})",
         )
     if owner_uid == BROWSER_UID:
         # A 1.14 pre-release left it so, or a host user happens to have uid 10001 (docs: chown ./data to another uid).
@@ -188,10 +185,21 @@ class OwnershipReport:
     examined: int = 0
     errors: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
-    # "Already the user's, not readable" skips: their contents were not checked, so no marker is written.
+    # Directories already the user's that root could not open: taken as handed over (contents not looked at).
     unchecked: list[str] = field(default_factory=list)
+    # Directories kept as their owner's because something under them failed and handing them over would lock root
+    # out (no o+x): the next start can still reach and retry their contents.
+    withheld: list[str] = field(default_factory=list)
+    truncated: bool = False
     changed_paths: list[str] = field(default_factory=list)
     seconds: float = 0.0
+
+
+def _escaped(text: str) -> str:
+    """A path or message as one printable log line: anything else (newlines, ANSI escapes) shown escaped (D14)."""
+    if text.isprintable():
+        return text
+    return text.encode("unicode_escape", "backslashreplace").decode("ascii")
 
 
 def _browser_owned(relative: str) -> bool:
@@ -240,6 +248,7 @@ def fix_ownership(
     lstat: Callable[..., os.stat_result] = os.stat,
     before_open: Callable[[str], None] | None = None,
     mountinfo: str | None = None,
+    max_entries: int | None = None,
 ) -> OwnershipReport:
     """Give entries owned by one of from_uids to uid:gid: data_root itself (not recursively) and each path's tree.
 
@@ -252,6 +261,7 @@ def fix_ownership(
     any path with "..". Every OSError is an error in the report, never an exception (no marker is then written).
     `lstat`, `before_open` and `mountinfo` are test hooks."""
     report = OwnershipReport()
+    max_entries = MAX_WALK_ENTRIES if max_entries is None else max_entries
     started = time.monotonic()
     mounts = mount_points_under(data_root, mountinfo)
 
@@ -291,6 +301,13 @@ def fix_ownership(
             report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
             return
         report.examined += 1
+        if report.examined > max_entries:
+            if not report.truncated:
+                report.truncated = True
+                report.errors.append(f"{data_root}: more than {max_entries} entries, the pass stopped there")
+            return
+        if report.examined % WALK_PROGRESS_EVERY == 0:
+            logger.info("hand-over pass: %d entries examined so far", report.examined)
         if skip(relative, st, root_dev):
             return
         if not stat.S_ISDIR(st.st_mode):
@@ -310,14 +327,11 @@ def fix_ownership(
             if exc.errno in (errno.ELOOP, errno.ENOTDIR):  # swapped for a symlink or a file since the lstat
                 report.skipped.append(f"{relative}: no longer a directory")
             elif exc.errno == errno.EACCES and st.st_uid == uid:
-                # Root without CAP_DAC_READ_SEARCH cannot open a 0700 directory an earlier start handed over. It is
-                # the user's, but what is inside was not looked at: reported, and no marker (a later start checks).
-                note = (
-                    f"{relative}: already uid {uid}'s, and not readable without CAP_DAC_READ_SEARCH: its contents "
-                    "were not checked"
-                )
-                report.skipped.append(note)
-                report.unchecked.append(note)
+                # Root without CAP_DAC_READ_SEARCH cannot open a 0700 directory that is the user's already: one an
+                # earlier start handed over (never one whose subtree failed and that root would lose access to, see
+                # below) or one the user made (a mkdtemp staging dir). Taken as handed over; its contents were not
+                # looked at, which main() logs once at INFO.
+                report.unchecked.append(relative)
             else:
                 report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
             return
@@ -334,10 +348,13 @@ def fix_ownership(
             errors_before = len(report.errors)
             for child in children:
                 visit(fd, child, f"{relative}/{child}", root_dev, depth + 1)
-            # Bottom-up: after its contents, and only when they all went over. A directory whose subtree failed stays
-            # its old owner's, so root (as that owner) can still reach the subtree and the next start retries it.
-            if len(report.errors) == errors_before:
+            # Bottom-up, after its contents. When some of them failed, a directory root could not enter as another
+            # owner's (no o+x: root without DAC capabilities) keeps its owner, so the next start can still reach and
+            # retry the failed entries; one with o+x is handed over all the same.
+            if len(report.errors) == errors_before or opened.st_mode & stat.S_IXOTH:
                 chown_fd(fd, relative, opened)
+            else:
+                report.withheld.append(relative)
         finally:
             os.close(fd)
 
@@ -368,9 +385,9 @@ def fix_ownership(
                             break
                         parent_relative = "/".join(parts[: index + 1])
                         if st.st_dev != root_st.st_dev or parent_relative in mounts:
-                            report.errors.append(
-                                f"{data_root / parent_relative}: a parent of {top} that is a mount point under "
-                                f"{data_root}, so its tree was not handed over"
+                            # Like a top that is itself a mount point: skipped, not an error.
+                            report.skipped.append(
+                                f"{parent_relative}: a mount point under {data_root} among the parents of {top}"
                             )
                             break
                         if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0:
@@ -396,9 +413,12 @@ def fix_ownership(
                     os.close(parent_fd)
             except OSError as exc:
                 report.errors.append(f"{top}: {exc.strerror or exc}")
-        # /data itself last, after everything under it, and only when all of it went over.
-        if not report.errors:
+        # /data itself last, after everything under it, on the same rule: a stuck entry must not keep the controller
+        # from writing into /data unless handing /data over would lock root out of it.
+        if not report.errors or root_st.st_mode & stat.S_IXOTH:
             chown_fd(root_fd, ".", root_st)
+        else:
+            report.withheld.append(".")
     finally:
         os.close(root_fd)
     report.seconds = time.monotonic() - started
@@ -462,6 +482,8 @@ def write_marker(data_root: Path, uid: int, gid: int) -> None:
             os._exit(code)
         _, status = os.waitpid(pid, 0)
         code = os.waitstatus_to_exitcode(status)
+        if code < 0:
+            raise OSError(errno.EIO, f"writing the marker as uid {uid} failed: the child was killed by signal {-code}")
         if code == _CHILD_UNEXPECTED:
             raise OSError(errno.EIO, f"writing the marker as uid {uid} failed: an unexpected error in the child")
         if code != 0:
@@ -524,12 +546,14 @@ def main(*, run_as: str | None = None, settings: Any = None, data_root: Path | N
         logger.error("%s", exc)
         return 64
     if run_as != "root" and st.st_uid == NOBODY_UID:
+        # Root-squashed NFS shows root's files as nobody's, and root's chown cannot work there: running as 65534 is
+        # the uid that can still read them (its own 0600 token included).
         logger.warning(
-            "%s is owned by uid %s (nobody): data on a root-squashed or NFS mount looks like this, and the controller "
-            "runs as uid %s instead. Give ./data to a real uid, or 10002.",
+            "%s is owned by uid %s (nobody): data on a root-squashed or NFS mount looks like this. The controller runs "
+            "as uid %s, the owner, which can read those files; give ./data to a real uid where you can.",
             data_root,
             NOBODY_UID,
-            CONTROLLER_UID,
+            NOBODY_UID,
         )
     if decision.uid is None:
         remove_marker(data_root)
@@ -560,7 +584,7 @@ def main(*, run_as: str | None = None, settings: Any = None, data_root: Path | N
             decision.uid,
         )
         report = fix_ownership(data_root, paths, decision.uid, decision.gid, from_uids=from_uids)
-        if not report.errors and not report.unchecked:
+        if not report.errors:
             try:
                 write_marker(data_root, decision.uid, decision.gid)
             except OSError as exc:
@@ -577,17 +601,40 @@ def main(*, run_as: str | None = None, settings: Any = None, data_root: Path | N
             ",".join(map(str, sorted(from_uids))),
             report.seconds,
         )
+        if report.unchecked:
+            logger.info(
+                "%d directories already uid %s's could not be opened without CAP_DAC_READ_SEARCH and were taken as "
+                "handed over (their contents were not looked at), e.g. %s",
+                len(report.unchecked),
+                decision.uid,
+                ", ".join(_escaped(entry) for entry in report.unchecked[:5]),
+            )
         for skipped in report.skipped[:20]:
-            logger.warning("Not handed over: %s", skipped)
+            logger.warning("Not handed over: %s", _escaped(skipped))
+        if len(report.skipped) > 20:
+            logger.warning("... and %d more entries not handed over", len(report.skipped) - 20)
+        for withheld in report.withheld[:20]:
+            logger.warning(
+                "Not handed over: %s: kept as its owner's until its contents can be handed over", _escaped(withheld)
+            )
+        if len(report.withheld) > 20:
+            logger.warning("... and %d more directories kept as their owner's", len(report.withheld) - 20)
         for error in report.errors[:20]:
             logger.error(
                 "Could not give %s to uid %s, so the controller may not be able to use it. Fix its ownership, or "
                 "set CONTROLLER_RUN_AS=root to run as root as before 1.14.0 (not recommended).",
-                error,
+                _escaped(error),
                 decision.uid,
             )
         if len(report.errors) > 20:
             logger.error("... and %d more entries that could not be handed over", len(report.errors) - 20)
+        if report.errors:
+            logger.error(
+                "No marker written: %d entries could not be handed over (first: %s), so this pass is retried on every "
+                "start until they are fixed. See docs/deployment.md, 'Who the controller runs as'.",
+                len(report.errors),
+                "; ".join(_escaped(error) for error in report.errors[:3]),
+            )
     print(f"RUN_UID={'' if decision.uid is None else decision.uid}")
     print(f"RUN_GID={'' if decision.gid is None else decision.gid}")
     print(f"RUN_REASON={_one_line(decision.reason)}")
