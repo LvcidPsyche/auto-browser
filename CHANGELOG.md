@@ -6,6 +6,26 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- **A window that a refused page opened could reach the agent.** The controller judged a popup by its opener
+  when Playwright reported it, and Playwright reports a window only once its first navigation commits. A window
+  whose first navigation committed nothing was reported after the agent's next navigate had cleared the opener,
+  so it was judged clean and read. The controller now judges every window when its CDP target is created, by its
+  opener, and closes a refused page's window that Playwright never reports once nothing justifies it. It fails
+  closed: a browser it cannot watch gets no session (`window_birth_watcher_unavailable`, 503, retryable), and
+  `/readiness` reports the watcher. With `ALLOWED_HOSTS` empty or `*` nothing changes and nothing attaches.
+  What changes for legitimate popups:
+  - a reported popup becomes readable one CDP round trip later than before (`activate_tab` waits for it, at most
+    10 seconds), and what it logged meanwhile reaches the agent once it is judged clean, except for a popup that
+    closes before its target id is read (within milliseconds of loading, longer on a busy browser), which is
+    left unjudged and loses what it logged;
+  - with the watcher attached and its reads succeeding, the one new refusal is a popup opened within 2 seconds of
+    a refused tab closing;
+  - a window the controller cannot judge (its target id cannot be read, or it opened while the watcher was down)
+    is refused as unjudged, and the refusal says so and how to open it again;
+  - each reported popup and open-tab tab keeps one page-level CDP session for its life: reading its target id
+    opens it, and detaching it lost the failed-request and download events of the windows that page opens.
+
+  The rarer fail-closed cases are listed in [`docs/deployment.md`](./docs/deployment.md#when-a-page-is-refused).
 - **The controller refuses requests from `docker_ephemeral` session networks.** It joins each session's network to
   reach that browser, so in 1.13.0 code that broke out of a session's browser could still reach the API at the
   controller's address there, with only the token in its way. Browser containers never call the
