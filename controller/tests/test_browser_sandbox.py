@@ -590,6 +590,9 @@ class Round2WiringTests(unittest.TestCase):
             job,
         )
         self.assertIn('--log-must-say "BROWSER_SANDBOX=on, but the shared browser-node reports off"', job)
+        # CI2 and S5#12: the leg fails without an endpoint, and checks the state is off before the gate.
+        self.assertIn('|| { echo "browser-node published no endpoint under auto" >&2; exit 1; }', job)
+        self.assertIn('sys.exit(s.get("sandbox") != "off")', job)
         # D10: an isolated session under on, its container's state verified.
         self.assertIn("check_sandbox_gate.py --expect 200 --isolated", job)
         self.assertLess(

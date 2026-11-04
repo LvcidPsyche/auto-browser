@@ -200,6 +200,13 @@ class OwnedPathsTests(unittest.TestCase):
         self.assertNotIn(Path("/srv/artifacts"), paths)
 
 
+def _give_back_to_root(top: Path) -> None:
+    for directory, dirnames, filenames in os.walk(top):
+        for name in dirnames + filenames:
+            os.chown(os.path.join(directory, name), 0, 0, follow_symlinks=False)
+    os.chown(top, 0, 0, follow_symlinks=False)
+
+
 def _remove_deep(top: Path) -> None:
     """Remove a chain of nested "d" directories without recursion (shutil.rmtree recurses past ~1000 levels)."""
     fds = [os.open(str(top), os.O_RDONLY | os.O_DIRECTORY)]
@@ -802,6 +809,9 @@ class MainLinuxTests(unittest.TestCase):
         # never the browser's own directories.
         if ME != 0:
             self.skipTest("needs root (runs inside the controller image)")
+        # Handed to 10002, the tree is not root's to delete without CAP_DAC_OVERRIDE (CI's second root step):
+        # give it back first, with the CAP_CHOWN root still holds.
+        self.addCleanup(_give_back_to_root, self.data)
         _tree(self.data, "auth/p.json", "artifacts/a.png", "browser-sessions/s1/profile/Cookies", "api-token")
         for path in [self.data, *self.data.rglob("*")]:
             os.chown(path, BROWSER_UID, BROWSER_UID)
@@ -913,7 +923,11 @@ class ImageWiringTests(unittest.TestCase):
         self.assertIn("docker compose run --no-deps --rm --entrypoint sh controller -c", ci)
         # Really root: otherwise the root-only tests skip and the step stays green (S3#14).
         self.assertIn("""'test "$(id -u)" = 0 || { echo "not root: uid $(id -u)" >&2; exit 1; };""", ci)
-        self.assertIn("python -m pytest tests/test_run_as.py -q -rs'", ci)
+        self.assertIn("python -m pytest tests/test_run_as.py tests/test_drop_caps.py -q -rs'", ci)
+        # Item 9: the real fork child, as root without DAC capabilities, guarded on uid 0 and CapEff bits 1 and 2.
+        self.assertIn("--inh-caps=-all --bounding-set=-dac_override,-dac_read_search sh -c", ci)
+        self.assertIn("[ $(( (0x$eff >> 1) & 3 )) -eq 0 ]", ci)
+        self.assertIn("python -m pytest tests/test_run_as.py -k as_root -q -rs'", ci)
         self.assertIn('grep -q "app/browser/seccomp/$name" /tmp/controller-wheel.txt', ci)
         # All six capability lines must be there, not just no bad one.
         self.assertIn('if [ "$(echo "$status" | grep -c .)" != 6 ]; then', ci)
