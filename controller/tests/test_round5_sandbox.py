@@ -23,6 +23,7 @@ from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.browser_sandbox import (
     BROWSER_SANDBOX_STATE_FILENAME,
@@ -72,16 +73,29 @@ class ProfileReadTests(unittest.TestCase):
                 load_seccomp_profile(big)
 
     @unittest.skipUnless(hasattr(os, "mkfifo") and sys.platform == "linux", "Linux")
-    def test_a_fifo_does_not_block_and_a_symlink_is_not_followed(self) -> None:
+    def test_a_fifo_does_not_block_and_a_symlink_to_a_file_loads(self) -> None:
+        # Item 5: the operator's path follows links (a ConfigMap mount); a FIFO is still refused, and never blocks.
         with tempfile.TemporaryDirectory() as tempdir:
             fifo = Path(tempdir) / "profile.json"
             os.mkfifo(fifo)
-            with self.assertRaisesRegex(ValueError, "not a regular file"):
-                load_seccomp_profile(fifo)
+            outcome: list = []
+
+            def load_fifo() -> None:
+                try:
+                    load_seccomp_profile(fifo)
+                    outcome.append("loaded")
+                except (OSError, ValueError) as exc:
+                    outcome.append(exc)
+
+            worker = threading.Thread(target=load_fifo, daemon=True)
+            worker.start()
+            worker.join(5)
+            self.assertFalse(worker.is_alive(), "load_seccomp_profile blocked on a FIFO")
+            self.assertIsInstance(outcome[0], ValueError)
+            self.assertIn("not a regular file", str(outcome[0]))
             link = Path(tempdir) / "link.json"
             link.symlink_to(SECCOMP_PROFILE_PATH)
-            with self.assertRaises(OSError):
-                load_seccomp_profile(link)
+            self.assertIn('"syscalls"', load_seccomp_profile(link))
 
 
 class PrintableTests(unittest.TestCase):
@@ -122,6 +136,7 @@ def _load_gate_script():
 
 class _Api(BaseHTTPRequestHandler):
     status = 200
+    delete_status = 200
 
     def log_message(self, *args) -> None:
         return None
@@ -137,11 +152,19 @@ class _Api(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # /healthz
         self._send(200, {"ok": True})
 
+    def _drain(self) -> None:
+        # Read the request body before answering: an unread body can reset the connection under the client (S5#2).
+        length = int(self.headers.get("content-length") or 0)
+        if length:
+            self.rfile.read(length)
+
     def do_POST(self) -> None:  # /sessions
+        self._drain()
         self._send(type(self).status, {"id": "s1"} if type(self).status == 200 else {"detail": "x"})
 
     def do_DELETE(self) -> None:
-        self._send(200, {})
+        self._drain()
+        self._send(type(self).delete_status, {})
 
 
 @unittest.skipUnless((REPO / "scripts").is_dir(), "scripts/ is not in the controller image")
@@ -154,15 +177,15 @@ class GateScriptTests(unittest.TestCase):
         (self.data / "api-token").write_text("t", encoding="utf-8")
         (self.data / "browser-profile").mkdir()
 
-    def _run(self, status: int, *args: str) -> int:
-        handler = type("Api", (_Api,), {"status": status})
+    def _run(self, status: int, *args: str, delete_status: int = 200, env: dict | None = None) -> int:
+        handler = type("Api", (_Api,), {"status": status, "delete_status": delete_status})
         server = HTTPServer(("127.0.0.1", 0), handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         argv = ["x", "--api-port", str(server.server_address[1]), "--data", str(self.data), *args]
-        with redirect_stdout(io.StringIO()):
+        with redirect_stdout(io.StringIO()), patch.dict(os.environ, env or {}):
             return self.module.main(argv)
 
     def _files(self, state_endpoint: str, file_endpoint: str) -> None:
@@ -184,6 +207,39 @@ class GateScriptTests(unittest.TestCase):
         self.assertEqual(self._run(200, "--expect", "200", "--isolated"), 0)
         state.write_text(json.dumps({**verified, "verified": {"renderers": 1}}), encoding="utf-8")
         self.assertEqual(self._run(200, "--expect", "200", "--isolated"), 1)
+
+    def test_isolated_refuses_chrome_sandbox_evidence(self) -> None:
+        # GS4: --isolated applies --require-proc: the old-kernel evidence is not enough on CI's runners.
+        state = self.data / "browser-sessions" / "s1" / "profile" / "browser-sandbox.json"
+        state.parent.mkdir(parents=True)
+        page = {"renderers": 1, "renderer_userns_differs": True, "method": "chrome://sandbox"}
+        state.write_text(json.dumps({"setting": "on", "sandbox": "on", "verified": page}), encoding="utf-8")
+        self.assertEqual(self._run(200, "--expect", "200", "--isolated"), 1)
+
+    def test_a_close_that_fails_fails(self) -> None:
+        # GS5: the DELETE's status counts.
+        self._files("ws://a/1", "ws://a/1")
+        self.assertEqual(self._run(200, "--expect", "200", delete_status=500), 1)
+
+    def test_log_must_say_reads_the_controller_log(self) -> None:
+        # GS3/GS6: a stub `docker` on PATH stands in for `docker compose logs controller`.
+        bin_dir = self.data / "bin"
+        bin_dir.mkdir()
+        if os.name == "nt":
+            (bin_dir / "docker.cmd").write_text("@echo off\r\necho WARNING the gate said no\r\n", encoding="utf-8")
+        else:
+            stub = bin_dir / "docker"
+            stub.write_text("#!/bin/sh\necho 'WARNING the gate said no'\n", encoding="utf-8")
+            stub.chmod(0o755)
+        path = {"PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", "")}
+        self.assertEqual(self._run(409, "--expect", "409", "--log-must-say", "the gate said no", env=path), 0)
+        self.assertEqual(self._run(409, "--expect", "409", "--log-must-say", "something else", env=path), 1)
+
+    def test_forty_runs_in_a_row(self) -> None:
+        # Item 18: the race the reviewer saw (an unread body) is gone.
+        self._files("ws://a/1", "ws://a/1")
+        failures = sum(self._run(200, "--expect", "200") != 0 for _ in range(40))
+        self.assertEqual(failures, 0)
 
     def test_a_wrong_status_fails(self) -> None:
         self.assertEqual(self._run(500, "--expect", "409"), 1)

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -89,7 +90,10 @@ def main(argv: list[str]) -> int:
     else:
         if args.log_must_say is not None:
             logs = subprocess.run(
-                ["docker", "compose", "logs", "controller"], capture_output=True, text=True, check=False
+                [shutil.which("docker") or "docker", "compose", "logs", "controller"],
+                capture_output=True,
+                text=True,
+                check=False,
             ).stdout
             if args.log_must_say not in logs:
                 print(f"FAIL: the controller's log does not say {args.log_must_say!r}")
