@@ -191,7 +191,7 @@ class OwnershipReport:
     # Directories already the user's that root could not open: taken as handed over (contents not looked at).
     unchecked: list[str] = field(default_factory=list)
     # Directories kept as their owner's because something under them failed and handing them over would lock root
-    # out (no o+x): the next start can still reach and retry their contents.
+    # out (not o+rx): the next start can still reach and retry their contents.
     withheld: list[str] = field(default_factory=list)
     truncated: bool = False
     changed_paths: list[str] = field(default_factory=list)
@@ -361,9 +361,9 @@ def fix_ownership(
                 if report.truncated:
                     break
                 visit(fd, child, f"{relative}/{child}", root_dev, depth + 1)
-            # Bottom-up, after its contents. When some of them failed, a directory root could not enter as another
-            # owner's (no o+x: root without DAC capabilities) keeps its owner, so the next start can still reach and
-            # retry the failed entries; one with o+x is handed over all the same.
+            # Bottom-up, after its contents. When some of them failed, a directory root could not open and list again
+            # as another owner's (not o+rx: root without DAC capabilities) keeps its owner, so the next start can
+            # still reach and retry the failed entries; one with o+rx is handed over all the same.
             if len(report.errors) == errors_before or opened.st_mode & ROOT_REOPENS == ROOT_REOPENS:
                 chown_fd(fd, relative, opened)
             else:
