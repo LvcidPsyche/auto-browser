@@ -143,6 +143,16 @@ class FakeDockerNetworks:
         return [n for n in networks if n.attrs["Labels"].get(key) == value]
 
 
+class _UnsearchablePath(type(Path())):
+    """A path under a directory this process cannot search: root's 0700 /root, for a controller that is not root."""
+
+    def stat(self, *, follow_symlinks: bool = True):
+        raise PermissionError(13, "Permission denied", str(self))
+
+    def mkdir(self, *args, **kwargs) -> None:
+        raise PermissionError(13, "Permission denied", str(self))
+
+
 class FakeDockerContainers:
     def __init__(
         self,
@@ -404,16 +414,25 @@ class DockerBrowserNodeProvisionerTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertNotIn(net, client.networks.by_name)
 
-    async def test_a_host_data_path_the_controller_cannot_see_is_only_handed_to_docker(self) -> None:
+    async def test_the_host_data_path_is_only_handed_to_docker(self) -> None:
         # The controller in its container sees /data, not the host path behind it (on Linux CI,
         # /home/runner/work/.../data). The session's dirs are made through /data; the host path only goes to the
-        # daemon as the browser's bind source. Making it here built directories in the controller's own filesystem,
-        # which a controller that is not root cannot (PermissionError, answered 403).
+        # daemon as the browser's bind source. Touching it here built directories in the controller's own
+        # filesystem, which a controller that is not root cannot (PermissionError, answered 403), even to stat one
+        # under /root, root's 0700 home, where a compose run from /root/auto-browser puts it. Where the path does
+        # exist in the container it is another directory, and nothing may be written there either.
+        for case in ("absent", "visible", "unsearchable"):
+            with self.subTest(host_path=case):
+                await self._provision_with_a_host_only_data_path(case)
+
+    async def _provision_with_a_host_only_data_path(self, case: str) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             data_root = root / "data"
             data_root.mkdir(parents=True, exist_ok=True)
             host_only = root / "host-only" / "data"
+            if case == "visible":
+                host_only.mkdir(parents=True)
             settings = Settings(
                 _env_file=None,
                 ARTIFACT_ROOT=str(data_root / "artifacts"),
@@ -437,14 +456,16 @@ class DockerBrowserNodeProvisionerTests(unittest.IsolatedAsyncioTestCase):
             provisioner = DockerBrowserNodeProvisioner(settings, client=client)
             provisioner._controller_container_id = controller_container.id
 
-            # A POSIX host path, as on Linux: _host_path keeps a Windows one as a PureWindowsPath, which this test
-            # host's temp dir would be.
-            with patch("app.session_isolation._host_path", lambda value: Path(value).resolve()):
+            # A concrete host path, as on Linux: _host_path keeps a Windows one as a PureWindowsPath, which this
+            # test host's temp dir would be. "unsearchable" stands for /root/auto-browser/data seen by uid 10002:
+            # every stat and mkdir raises PermissionError, as Python 3.11's is_dir() does in the image.
+            host_path_type = _UnsearchablePath if case == "unsearchable" else Path
+            with patch("app.session_isolation._host_path", lambda value: host_path_type(Path(value).resolve())):
                 runtime = await provisioner.provision("session-1")
 
             self.assertTrue((data_root / "browser-sessions" / "session-1" / "profile").is_dir())
             self.assertTrue((data_root / "browser-sessions" / "session-1" / "downloads").is_dir())
-            self.assertFalse((root / "host-only").exists())
+            self.assertEqual(list((root / "host-only").glob("**/*")), [host_only] if case == "visible" else [])
             volumes = client.containers.browser_containers[runtime.container_name].run_kwargs["volumes"]
             host_session = Path(host_only.resolve()) / "browser-sessions" / "session-1"
             self.assertEqual(
