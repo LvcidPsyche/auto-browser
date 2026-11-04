@@ -22,6 +22,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -58,6 +59,7 @@ def main(argv: list[str]) -> int:
                 break
         except OSError:
             time.sleep(2)
+    started = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     status, body = call("POST", f"{base}/sessions", token, {"name": "sandbox-gate", "start_url": "https://example.com"})
     print(f"create session: HTTP {status}")
     if status != args.expect:
@@ -90,7 +92,8 @@ def main(argv: list[str]) -> int:
     else:
         if args.log_must_say is not None:
             logs = subprocess.run(
-                [shutil.which("docker") or "docker", "compose", "logs", "controller"],
+                # Only what was logged since this check began: an older run's WARNING must not satisfy it.
+                [shutil.which("docker") or "docker", "compose", "logs", "--since", started, "controller"],
                 capture_output=True,
                 text=True,
                 check=False,

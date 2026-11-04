@@ -387,6 +387,14 @@ class Round3FreshnessTests(unittest.TestCase):
         self.assertIn("WARNING: could not write the job summary", out.getvalue())
         self.assertNotIn("Traceback", out.getvalue())
 
+    def test_bundled_ahead_of_stable_gives_no_warning(self) -> None:
+        # F2: a later bundled build than stable is not stale.
+        ok, _lines, warning = self.check.evaluate_chromium(
+            "1.62.0", "156.0.8101.2", "1.62.0", "156.0.8101.2", "156.0.8078.4"
+        )
+        self.assertTrue(ok)
+        self.assertIsNone(warning)
+
     def test_a_later_build_in_the_same_major_warns(self) -> None:
         ok, _lines, warning = self.check.evaluate_chromium(
             "1.62.0", "156.0.8078.4", "1.62.0", "156.0.8078.4", "156.0.8101.2"

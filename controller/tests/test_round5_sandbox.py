@@ -234,6 +234,8 @@ class GateScriptTests(unittest.TestCase):
         path = {"PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", "")}
         self.assertEqual(self._run(409, "--expect", "409", "--log-must-say", "the gate said no", env=path), 0)
         self.assertEqual(self._run(409, "--expect", "409", "--log-must-say", "something else", env=path), 1)
+        # S5#12: only the lines logged since the check began.
+        self.assertIn('"--since", started', (REPO / "scripts" / "check_sandbox_gate.py").read_text(encoding="utf-8"))
 
     def test_forty_runs_in_a_row(self) -> None:
         # Item 18: the race the reviewer saw (an unread body) is gone.

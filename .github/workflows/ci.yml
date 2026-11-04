@@ -45,6 +45,7 @@ jobs:
         run: python scripts/fixture_eval.py
 
   host-tests:
+    timeout-minutes: 45
     needs: lint
     runs-on: ubuntu-latest
     strategy:
@@ -172,6 +173,7 @@ jobs:
           done
 
   controller-tests:
+    timeout-minutes: 20
     needs: lint
     runs-on: ubuntu-latest
     steps:
@@ -204,7 +206,19 @@ jobs:
         run: >-
           docker compose run --no-deps --rm --entrypoint sh controller -c
           'test "$(id -u)" = 0 || { echo "not root: uid $(id -u)" >&2; exit 1; };
-          python -m pytest tests/test_run_as.py -q -rs'
+          python -m pytest tests/test_run_as.py tests/test_drop_caps.py -q -rs'
+
+      - name: The marker child writes as the user when root holds no DAC capability
+        # The real fork child, as root with CAP_DAC_OVERRIDE and CAP_DAC_READ_SEARCH out of the bounding set: the exec'd
+        # root process takes the bounding set, so its effective set lacks both (setpriv cannot lower the current
+        # process's effective set, but the next one's is bounded). The guard proves it before the tests run.
+        run: >-
+          docker compose run --no-deps --rm --entrypoint setpriv controller
+          --inh-caps=-all --bounding-set=-dac_override,-dac_read_search sh -c
+          'test "$(id -u)" = 0 || { echo "not root" >&2; exit 1; };
+          eff=$(awk "/^CapEff:/ {print \$2}" /proc/self/status);
+          [ $(( (0x$eff >> 1) & 3 )) -eq 0 ] || { echo "CapEff $eff still has DAC_OVERRIDE or DAC_READ_SEARCH" >&2; exit 1; };
+          python -m pytest tests/test_run_as.py -k as_root -q -rs'
 
   compose-smoke:
     runs-on: ubuntu-latest
@@ -373,6 +387,7 @@ jobs:
             [ -s data/browser-profile/browser-ws-endpoint.txt ] && break
             sleep 2
           done
+          [ -s data/browser-profile/browser-ws-endpoint.txt ] || { echo "browser-node published no endpoint under auto" >&2; exit 1; }
           python3 -c 'import json,sys; s=json.load(open("data/browser-profile/browser-sandbox.json")); print(s); sys.exit(s.get("sandbox") != "off")'
           api_port="$(docker compose port controller 8000 | awk -F: 'NF {print $NF}' | tail -n1)"
           python3 scripts/check_sandbox_gate.py --expect 409 --api-port "$api_port" \
