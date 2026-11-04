@@ -2,6 +2,100 @@
 
 All notable changes to auto-browser are documented here.
 
+## [Unreleased]
+
+### Upgrade notes
+
+- **A default compose install now runs browser-node under a custom seccomp profile that lets the container create
+  user namespaces.** Chromium's own sandbox needs them, and Docker's default profile refuses them to a container
+  without CAP_SYS_ADMIN. The profile is moby's default plus `chroot`, `clone` and `unshare`
+  (`controller/app/browser/seccomp/`); `docker_ephemeral` containers get it too. It exposes the kernel's
+  user-namespace code to code in the container, and in exchange every renderer runs sandboxed. That is the better
+  trade for a browser that renders arbitrary pages: a renderer exploit no longer starts with every syscall the
+  container allows. To keep the old setup under compose, set both `BROWSER_SANDBOX=off` and
+  `BROWSER_SECCOMP_PROFILE=builtin` (docs/deployment.md, "Chromium's sandbox"). On a host whose Docker daemon sets
+  its own `seccomp-profile`, 1.14.0's profile replaces that one, and `builtin` means moby's built-in profile, not the
+  daemon's: point `BROWSER_SECCOMP_PROFILE` and `ISOLATED_BROWSER_SECCOMP_PROFILE` at your profile plus the
+  auto-browser entry to keep it.
+- **The controller now runs as the owner of your data directory, or as uid 10002, not as root.** A Linux checkout
+  whose `./data` belongs to you runs it as you; Docker Desktop and named volumes run it as uid 10002 (never
+  browser-node's 10001). It holds no capabilities and runs with no_new_privs. At start, the
+  root-owned files earlier releases left in the controller's own `/data` subtrees are handed to that user, and
+  `data/api-token` stays readable by its owner. `CONTROLLER_RUN_AS=root` restores the root controller; it is not
+  recommended, and readiness warns while it is set. With the isolation overlay on Docker Desktop, the controller
+  joins group 0 to use the Docker socket.
+- **`BROWSER_SANDBOX=on` now also gates shared mode**: every session is refused, and readiness fails, while the
+  shared browser-node's connect-time state is not a verified `on`, including a browser-node image older than 1.14.0.
+  Under `on`, `browser.cdp_attach` is refused; a `CDP_CONNECT_URL` Chrome is the operator's own and is reported as
+  attached, not checked.
+- **Rolling back**: after running an older release on the same data, delete `data/.auto-browser-owner` before
+  starting 1.14 again, so the files the older release created as root are handed over. A container without
+  DAC_OVERRIDE or DAC_READ_SEARCH cannot look inside its own unreadable directories: chown `./data` by hand then.
+- **A capability-less uid 0 still owns the image**: under `cap_drop: [SETUID]` or a `cap_add` set without SETUID or
+  SETGID, a compromised controller could rewrite the image and regain the container's capabilities on a restart.
+  The entrypoint names them; prefer `cap_drop: [ALL]`, `user: "10002:10002"`, or `read_only: true` with a tmpfs for
+  `/tmp`, which screenshot OCR needs (docs/deployment.md).
+- **A controller that cannot switch users** (`cap_drop: [ALL]`, `cap_drop: [SETUID]`, or `cap_add` without SETUID
+  or SETGID) starts as a uid 0 with no capabilities at all, and refuses to start, in one line, when it cannot enter
+  the API token's directory or read the token the controller would read (a directory not there yet is the
+  controller's to create); run it as `user: "10002:10002"`, or add `cap_add: [CHOWN, DAC_READ_SEARCH, SETUID,
+  SETGID]` (docs/deployment.md). Data owned by 65534 (root-squashed NFS) runs as 65534.
+
+### Security
+
+- **Chromium runs with its own sandbox in browser-node and every isolated container** (`BROWSER_SANDBOX=auto`, the
+  default). It launched with the sandbox off, so a renderer exploit ran with every syscall the container allowed.
+  browser-node now checks in `/proc` that renderers really are sandboxed; where a host refuses the user namespace
+  (Ubuntu 23.10 and later restrict it with AppArmor), `auto` runs Chromium unsandboxed with a WARNING that names the
+  cause, `on` refuses to start, and `off` keeps the old behaviour. Readiness reports every browser's state.
+- **The controller no longer runs as root** (see the upgrade notes).
+- **A closed isolated session's profile and downloads are removed.** A controller that is not root could not delete
+  the browser user's files, and the error was ignored, so the session's cookies stayed on disk; they are now emptied
+  as the browser user, and anything left is a WARNING with its path.
+- **The controller refuses requests from `docker_ephemeral` session networks.** It joins each session's network to
+  reach that browser, so in 1.13.0 code that broke out of a session's browser could still reach the API at the
+  controller's address there, with only the token in its way. Browser containers never call the
+  controller, so it now answers 403 to any request whose direct peer is on a live session network, before the Host
+  check, the rate limiter and the token check. Forwarded-for headers are ignored. A session network that reports no
+  subnet is not used: the session fails to start rather than run unfenced. On Docker Desktop a session container can
+  still reach the API port published on `127.0.0.1` through `host.docker.internal`, where the controller sees the
+  host's own address; the Host allowlist and the token refuse it there.
+- **Shadow browsing runs its headed Chromium with Chromium's sandbox on.** It launched with `--no-sandbox`, and since
+  the shipped controller image has no browser for it, that meant host runs, where the sandbox works. A controller
+  running as root, where Chromium cannot start sandboxed, now refuses shadow browsing. When the sandboxed launch
+  fails (on Linux it needs unprivileged user namespaces), the error says so, and the controller log has Chromium's
+  own message.
+- **`/docs` and `/redoc` load pinned Swagger UI (5.34.0) and ReDoc (2.5.4) with Subresource Integrity hashes,** and
+  a Content-Security-Policy that admits nothing else from another origin (no Google Fonts, no third-party favicon,
+  no ReDoc logo from cdn.redoc.ly). Swagger's Authorize box takes the API token, and the pages loaded a floating
+  major version from a CDN with no integrity check.
+- **The smoke and doctor scripts no longer put the API token on curl's command line,** where every local user could
+  read it in the process list. It reaches curl as a config on stdin, and stays out of `bash -x` traces.
+- **The controller reads the browsers' endpoint files without following links,** and no error quotes their
+  content: a link planted at a Playwright endpoint file could have put a file the controller can read, its API token
+  included, into its log. An endpoint is a short ws:// or wss:// URL in printable ASCII, or it is refused.
+
+### Fixed
+
+- **A browser container that could not be removed no longer keeps its session network** (and its address-pool slot)
+  until the next start: it is disconnected first.
+- **A foreign Docker network holding a session network's name** gives an error naming it and what to do, instead of
+  Docker's bare conflict.
+- **The shadow-browse route logs why it refused** (disabled, a root controller, no sandbox); callers still get a
+  generic 400.
+
+### Added
+
+- A weekly CI check (`scripts/check_chromium_freshness.py`) fails when Chrome stable for Linux is a major ahead of the
+  Chromium the pinned Playwright bundles, when a newer Playwright bundles a newer Chromium, or when moby's default
+  seccomp profile has moved away from the one the sandbox profile is built from.
+
+### Changed
+
+- CI's compose-smoke runs with a `VNC_PASSWORD` on the shared browser-node, so its VNC-authentication checks run.
+- CI's compose-smoke prints each browser's measured sandbox state, and checks that the controller runs as the owner
+  of `./data`.
+
 ## [1.13.1] — 2026-11-04
 
 A security release over 1.13.0 (GHSA-q9w4-3w52-f9f2). A page on a host `ALLOWED_HOSTS` refuses could open a window that
