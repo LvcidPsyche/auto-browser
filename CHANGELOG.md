@@ -53,37 +53,17 @@ All notable changes to auto-browser are documented here.
 - **A closed isolated session's profile and downloads are removed.** A controller that is not root could not delete
   the browser user's files, and the error was ignored, so the session's cookies stayed on disk; they are now emptied
   as the browser user, and anything left is a WARNING with its path.
-- **The controller refuses requests from `docker_ephemeral` session networks.** It joins each session's network to
-  reach that browser, so in 1.13.0 code that broke out of a session's browser could still reach the API at the
-  controller's address there, with only the token in its way. Browser containers never call the
-  controller, so it now answers 403 to any request whose direct peer is on a live session network, before the Host
-  check, the rate limiter and the token check. Forwarded-for headers are ignored. A session network that reports no
-  subnet is not used: the session fails to start rather than run unfenced. On Docker Desktop a session container can
-  still reach the API port published on `127.0.0.1` through `host.docker.internal`, where the controller sees the
-  host's own address; the Host allowlist and the token refuse it there.
-- **Shadow browsing runs its headed Chromium with Chromium's sandbox on.** It launched with `--no-sandbox`, and since
-  the shipped controller image has no browser for it, that meant host runs, where the sandbox works. A controller
-  running as root, where Chromium cannot start sandboxed, now refuses shadow browsing. When the sandboxed launch
-  fails (on Linux it needs unprivileged user namespaces), the error says so, and the controller log has Chromium's
-  own message.
-- **`/docs` and `/redoc` load pinned Swagger UI (5.34.0) and ReDoc (2.5.4) with Subresource Integrity hashes,** and
-  a Content-Security-Policy that admits nothing else from another origin (no Google Fonts, no third-party favicon,
-  no ReDoc logo from cdn.redoc.ly). Swagger's Authorize box takes the API token, and the pages loaded a floating
-  major version from a CDN with no integrity check.
-- **The smoke and doctor scripts no longer put the API token on curl's command line,** where every local user could
-  read it in the process list. It reaches curl as a config on stdin, and stays out of `bash -x` traces.
 - **The controller reads the browsers' endpoint files without following links,** and no error quotes their
   content: a link planted at a Playwright endpoint file could have put a file the controller can read, its API token
   included, into its log. An endpoint is a short ws:// or wss:// URL in printable ASCII, or it is refused.
 
 ### Fixed
 
-- **A browser container that could not be removed no longer keeps its session network** (and its address-pool slot)
-  until the next start: it is disconnected first.
-- **A foreign Docker network holding a session network's name** gives an error naming it and what to do, instead of
-  Docker's bare conflict.
-- **The shadow-browse route logs why it refused** (disabled, a root controller, no sandbox); callers still get a
-  generic 400.
+- **When screenshot PII scrubbing cannot run, the WARNING (and the error, under `PII_SCRUB_SCREENSHOT_STRICT=true`)
+  says what its reason needs.** Both said to run the Docker image, which ships tesseract, even when the controller
+  already ran it and its OCR run failed, for example for want of a writable temporary directory under
+  `read_only: true`. A failed OCR run now names that check, `OCR_ENABLED=false` names the setting, and the cause of
+  the failure is logged at DEBUG.
 
 ### Added
 
@@ -93,7 +73,6 @@ All notable changes to auto-browser are documented here.
 
 ### Changed
 
-- CI's compose-smoke runs with a `VNC_PASSWORD` on the shared browser-node, so its VNC-authentication checks run.
 - CI's compose-smoke prints each browser's measured sandbox state, and checks that the controller runs as the owner
   of `./data`.
 
