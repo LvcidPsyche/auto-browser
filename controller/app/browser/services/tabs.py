@@ -37,16 +37,21 @@ REFUSED_BY_ANOTHER_TAB_MESSAGE = (
 )
 
 
-# A tab refused because its birth could not be judged: the window-birth watcher was lost when it was born, or
-# its target could not be read. Nothing is known against its host; the condition is the controller's, and
-# passing. A tab that is not active cannot be navigated, and activating it again never succeeds (a verdict is
-# reached once), so the way out is a new tab, which is judged as it opens.
+# A tab refused because its birth could not be judged: the window-birth watcher was lost when it was born, its
+# target could not be read, or its verdict never came (activate_tab waited its bound). Nothing is known against its
+# host; the condition is the controller's, and passing. A tab that is not active cannot be navigated, and activating
+# it again never succeeds (a verdict is reached once), so the way out is a new tab, which is judged as it opens.
 UNJUDGED_TAB_MESSAGE = (
     "That tab could not be judged when it opened (the controller's window-birth watcher was unavailable, or the "
     "tab's target could not be read), so it is refused and cannot be activated: nothing is known against its "
     "host. Close it and open its URL in a new tab: a tab opened once /readiness reports the window_birth_watcher "
     "attached is judged as it opens."
 )
+
+
+# The tab asked for closed while activate_tab waited for its birth verdict: its index was valid when it was asked
+# (a ValueError all the same, as an unknown index is; REST answers 400).
+TAB_CLOSED_DURING_WAIT_MESSAGE = "That tab closed while it was being judged; list the tabs again"
 
 
 class TabRefusedByAnotherTabError(PermissionError):
@@ -164,7 +169,7 @@ class BrowserTabService:
                 raise SessionNotFoundError(session_id)
             pages = self.pages(session)
             if not any(page is target_page for page in pages):
-                raise ValueError(f"Unknown tab index: {index}")  # the tab closed during the wait
+                raise ValueError(TAB_CLOSED_DURING_WAIT_MESSAGE)
             index = next(position for position, page in enumerate(pages) if page is target_page)
             # A popup or tab the page opened may sit on a host the allowlist
             # refuses, and every later action and observation reads session.page.
@@ -176,7 +181,7 @@ class BrowserTabService:
                 provenance = self.manager.page_provenance
                 if provenance.refused_by_another_page(target_page):
                     raise TabRefusedByAnotherTabError(REFUSED_BY_ANOTHER_TAB_MESSAGE) from exc
-                if provenance.refused_unjudged(target_page):
+                if provenance.refused_unjudged(target_page) or self.manager.diagnostics.verdict_never_came(target_page):
                     raise TabUnjudgedError(UNJUDGED_TAB_MESSAGE) from exc
                 raise PermissionError(REFUSED_TAB_MESSAGE) from exc
             self.manager._attach_page_listeners(target_page, session)
