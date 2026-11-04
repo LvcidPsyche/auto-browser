@@ -570,10 +570,11 @@ class BrowserDiagnosticsService:
         failed and the session read as interrupted while its other tabs were fine.
         """
         provenance = self.manager.page_provenance
-        if self.birth_pending(page) and provenance.held_for_verdict(page) and not self.manager._url_off_list(page.url):
+        if self.birth_pending(page) and provenance.held_for_verdict(page):
             # Held only for its birth verdict, still being judged: what it logged meanwhile is that verdict's to
             # decide (_judge_birth), as if it were still open. Recorded now, as its state is forgotten below; one
-            # refused for anything else meanwhile is not, and its output is dropped with it.
+            # refused for anything else meanwhile (an off-list commit or hop taints it) is not, and its output is
+            # dropped with it.
             with contextlib.suppress(TypeError):
                 self._closed_while_held.add(page)
         if self.manager._url_off_list(page.url) or provenance.counts_for_its_session(page):
