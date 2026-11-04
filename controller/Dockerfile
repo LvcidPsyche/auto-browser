@@ -58,6 +58,10 @@ RUN useradd --uid 10002 --user-group --create-home --home-dir /home/controller -
 # in the image is writable through group 0 alone: apt leaves the man dirs and debconf's tmp.ci g+w, so the group
 # write bit comes off everything but the sticky, world-writable dirs (/tmp, /var/tmp, /run/lock).
 RUN find / -xdev -group 0 -perm -g+w ! -type l ! -perm -1000 -exec chmod g-w {} +
+# No setuid or setgid binaries: the controller runs no login, mount or ssh-keysign, and a process of its uid must
+# have no way back up (measured before: su, passwd, mount, umount, chfn, chsh, gpasswd, newgrp, ssh-keysign setuid
+# root; unix_chkpwd, chage, expiry, ssh-agent setgid).
+RUN find / -xdev -perm /6000 -type f -exec chmod ug-s {} +
 # 0755 whatever mode the build context gives it (a clone under umask 002 makes it group-writable): it runs as root on
 # every start. Set by RUN chmod rather than a COPY flag, which only BuildKit understands.
 COPY entrypoint.sh /entrypoint.sh

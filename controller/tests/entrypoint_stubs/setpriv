@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Every call is recorded in FAKE_SETPRIV_LOG. `setpriv ... test <op> <path>` is one of the entrypoint's checks
+# under the drop: -x answers FAKE_SEARCHABLE, -e the real existence, -r FAKE_READABLE (1 by default each). Any
+# other call is the final exec, echoed.
+echo "$*" >> "${FAKE_SETPRIV_LOG:-/dev/null}"
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  if [ "${args[i]}" = test ]; then
+    op="${args[i+1]}"
+    path="${args[i+2]}"
+    case "$op" in
+      -x) [ "${FAKE_SEARCHABLE:-1}" = 1 ] ;;
+      -e) [ -e "$path" ] ;;
+      -r) [ "${FAKE_READABLE:-1}" = 1 ] ;;
+    esac
+    exit $?
+  fi
+done
+echo "EXEC setpriv $*"

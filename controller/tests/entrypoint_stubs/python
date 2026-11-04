@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# app.run_as's three lines; anything else (app.drop_caps) is not reached here: setpriv's stub stops first.
+printf 'RUN_UID=10002\nRUN_GID=10002\nRUN_REASON=test reason\n'

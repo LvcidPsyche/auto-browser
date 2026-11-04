@@ -22,22 +22,11 @@ ALL_DROPPED = "0000000000000000"  # cap_drop: [ALL]
 CHOWN_DAC_FOWNER = "000000000000000b"  # cap_drop ALL + cap_add CHOWN, DAC_OVERRIDE, FOWNER (no SETUID, no SETPCAP)
 SETUID_NO_SETPCAP = "00000000000000c1"  # cap_drop ALL + cap_add CHOWN, SETUID, SETGID
 
-STUBS = {
-    "id": '#!/usr/bin/env bash\n[ "$1" = "-u" ] && echo 0 && exit 0\necho "uid=0(root)"\n',
-    "python": '#!/usr/bin/env bash\nprintf "RUN_UID=10002\\nRUN_GID=10002\\nRUN_REASON=test reason\\n"\n',
-    # `setpriv <drop> test -r <file>` is the entrypoint's read check under the dropped capabilities: its answer is
-    # FAKE_READABLE (1 by default); any other setpriv call is the final exec, echoed.
-    "setpriv": (
-        '#!/usr/bin/env bash\nfor arg in "$@"; do if [ "$arg" = test ]; then [ "${FAKE_READABLE:-1}" = 1 ]; exit $?; '
-        'fi; done\necho "EXEC setpriv $*"\n'
-    ),
-    # The owner of /data as the entrypoint reads it: FAKE_DATA_OWNER, else the real stat.
-    "stat": '#!/usr/bin/env bash\nif [ -n "${FAKE_DATA_OWNER:-}" ]; then echo "$FAKE_DATA_OWNER"; exit 0; fi\n'
-    'exec /usr/bin/stat "$@"\n',
-    "getent": "#!/usr/bin/env bash\nexit 0\n",
-    "groupadd": "#!/usr/bin/env bash\nexit 0\n",
-    "useradd": "#!/usr/bin/env bash\nexit 0\n",
-}
+# Stub commands on PATH (tests/entrypoint_stubs/): id (FAKE_UID), python (app.run_as's lines), setpriv (records each
+# call in FAKE_SETPRIV_LOG; answers the checks it runs: FAKE_SEARCHABLE, FAKE_READABLE), stat (FAKE_DATA_OWNER).
+STUB_DIR = Path(__file__).resolve().parent / "entrypoint_stubs"
+# What the cannot-switch branch execs through: setpriv's drop, then app.drop_caps for permitted and effective.
+DROP_CHAIN = "python -m app.drop_caps --"
 
 
 def run_entrypoint(
@@ -59,9 +48,9 @@ def run_entrypoint(
         status.write_text("\n".join(lines) + "\n", encoding="utf-8")
         stubs = root / "stubs"
         stubs.mkdir()
-        for name, body in STUBS.items():
-            (stubs / name).write_text(body, encoding="utf-8", newline="\n")
-            (stubs / name).chmod(0o755)
+        for stub in STUB_DIR.iterdir():
+            (stubs / stub.name).write_text(stub.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+            (stubs / stub.name).chmod(0o755)
         copy = root / "entrypoint.sh"
         copy.write_text(
             script.read_text(encoding="utf-8").replace("/proc/self/status", _bash_path(status)),
@@ -72,8 +61,8 @@ def run_entrypoint(
             [
                 BASH,
                 "-c",
-                # tests/__init__.py points API_TOKEN_FILE at a temp file: the entrypoint must look in data_root.
-                "unset API_TOKEN_FILE; "
+                # tests/__init__.py sets API_TOKEN_FILE and tokenless loopback: each test sets only what it means.
+                "unset API_TOKEN_FILE API_BEARER_TOKEN API_BEARER_TOKENS API_ALLOW_TOKENLESS_LOOPBACK; "
                 f'export PATH="{_bash_path(stubs)}:$PATH"; '
                 f'export CONTROLLER_DATA_ROOT="{_bash_path(data_root) if data_root else "/nonexistent-data"}"; '
                 + "".join(f"export {key}='{value}'; " for key, value in (env or {}).items())
@@ -101,7 +90,7 @@ class EntrypointCapabilityTests(unittest.TestCase):
         self.assertIn('user: "10002:10002"', out)
         # The set measured to work for 1.13.0 data and a pre-release's 10001-owned 0700 directories.
         self.assertIn("or add cap_add CHOWN, DAC_READ_SEARCH, SETUID and SETGID.", out)
-        self.assertIn("EXEC setpriv --inh-caps=-all --ambient-caps=-all --no-new-privs uvicorn", out)
+        self.assertIn(f"EXEC setpriv --inh-caps=-all --ambient-caps=-all --no-new-privs {DROP_CHAIN} uvicorn", out)
 
     def _data(self, token: bool) -> Path:
         tempdir = tempfile.TemporaryDirectory()
@@ -150,20 +139,87 @@ class EntrypointCapabilityTests(unittest.TestCase):
         self.assertNotIn("--user 10001", out)
         self.assertIn("chown ./data to 10002", out)
 
-    def test_dac_read_search_alone_can_read_but_not_write(self) -> None:
-        # P3#4: the read claim follows bits 1 (DAC_OVERRIDE) and 2 (DAC_READ_SEARCH); the write side is separate.
-        read_only = "0000000000000004"  # cap_drop ALL + cap_add DAC_READ_SEARCH: no SETPCAP, so it remains
-        code, out = run_entrypoint(read_only, read_only, data_root=self._data(False), env={"FAKE_DATA_OWNER": "10002"})
+    def test_the_checks_run_through_the_same_drop_as_the_exec(self) -> None:
+        # P4#8: with SETPCAP the drop clears the bounding set; the read check must carry it too, and app.drop_caps.
+        log = self._data(False) / "setpriv.log"
+        with_setpcap = NO_SETUID  # cap_drop [SETUID]: SETPCAP stays
+        code, out = run_entrypoint(
+            with_setpcap,
+            with_setpcap,
+            data_root=self._data(True),
+            env={"FAKE_DATA_OWNER": "10002", "FAKE_SETPRIV_LOG": _bash_path(log)},
+        )
         self.assertEqual(code, 0, out)
-        self.assertNotIn("cannot read its private files", out)
-        self.assertIn("cannot write into it", out)
+        checks = [line for line in log.read_text(encoding="utf-8").splitlines() if " test " in line]
+        self.assertEqual(len(checks), 3, checks)  # -x the directory, -e and -r the token
+        for line in checks:
+            self.assertTrue(line.startswith("--inh-caps=-all --ambient-caps=-all --no-new-privs --bounding-set=-all"))
+            self.assertIn(f"{DROP_CHAIN} test ", line)
+
+    def test_no_refusal_when_the_controller_never_reads_the_file(self) -> None:
+        # P4#4: an environment token, or tokenless loopback: the file is not read, so an unreadable one is no reason.
+        data = self._data(True)
+        base = {"FAKE_DATA_OWNER": "10002", "FAKE_READABLE": "0"}
+        for extra in (
+            {"API_BEARER_TOKEN": "t"},
+            {"API_BEARER_TOKENS": "a,b"},
+            {"API_ALLOW_TOKENLESS_LOOPBACK": "true"},
+            {"API_ALLOW_TOKENLESS_LOOPBACK": "1"},
+        ):
+            with self.subTest(**extra):
+                code, out = run_entrypoint(ALL_DROPPED, ALL_DROPPED, data_root=data, env={**base, **extra})
+                self.assertEqual(code, 0, out)
+                self.assertIn("will likely fail", out)
+
+    def test_an_unsearchable_token_directory_is_refused_too(self) -> None:
+        # P4#4: the existence check runs through the drop: an EACCES on the directory is not "no file".
+        code, out = run_entrypoint(
+            ALL_DROPPED,
+            ALL_DROPPED,
+            data_root=self._data(True),
+            env={"FAKE_DATA_OWNER": "10002", "FAKE_SEARCHABLE": "0"},
+        )
+        self.assertEqual(code, 70, out)
+        self.assertIn("cannot reach the API token's directory", out)
+
+    def test_api_token_file_from_the_environment_is_the_one_checked(self) -> None:
+        elsewhere = self._data(False) / "secrets"
+        elsewhere.mkdir()
+        (elsewhere / "token").write_text("t", encoding="utf-8")
+        code, out = run_entrypoint(
+            ALL_DROPPED,
+            ALL_DROPPED,
+            data_root=self._data(False),  # no token in data_root itself
+            env={"FAKE_DATA_OWNER": "10002", "FAKE_READABLE": "0", "API_TOKEN_FILE": _bash_path(elsewhere / "token")},
+        )
+        self.assertEqual(code, 70, out)
+        self.assertIn("secrets/token", out)
+
+    def test_a_nobody_owned_data_dir_points_to_10002(self) -> None:
+        code, out = run_entrypoint(
+            ALL_DROPPED, ALL_DROPPED, data_root=self._data(False), env={"FAKE_DATA_OWNER": "65534"}
+        )
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('"65534:65534"', out)
+        self.assertIn("chown ./data to 10002", out)
+
+    def test_a_non_root_start_still_gets_no_new_privs(self) -> None:
+        # D1: started as a user (compose user:, docker run --user), the entrypoint still execs through setpriv.
+        code, out = run_entrypoint(DOCKER_DEFAULT, DOCKER_DEFAULT, env={"FAKE_UID": "10002"})
+        self.assertEqual(code, 0, out)
+        self.assertIn("EXEC setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all uvicorn", out)
 
     def test_a_bad_controller_run_as_is_refused_on_this_branch_too(self) -> None:
         # P3#13: the cannot-switch branch never runs app.run_as, so bash checks the value itself.
         code, out = run_entrypoint(ALL_DROPPED, ALL_DROPPED, env={"CONTROLLER_RUN_AS": "yes"})
         self.assertEqual(code, 70, out)
         self.assertIn("CONTROLLER_RUN_AS must be auto or root", out)
-        for good in ("auto", "root", " Root ", ""):
+        # P4#10: exactly what app.run_as accepts (strip().lower()): echo's flags and inner spaces are not.
+        for bad in ("-n", "-e", "ro ot"):
+            with self.subTest(value=bad):
+                code, out = run_entrypoint(ALL_DROPPED, ALL_DROPPED, env={"CONTROLLER_RUN_AS": bad})
+                self.assertEqual(code, 70, out)
+        for good in ("auto", "root", " Root ", "", "AUTO"):
             with self.subTest(value=good):
                 code, out = run_entrypoint(ALL_DROPPED, ALL_DROPPED, env={"CONTROLLER_RUN_AS": good})
                 self.assertEqual(code, 0, out)
@@ -176,11 +232,13 @@ class EntrypointCapabilityTests(unittest.TestCase):
         self.assertIn("running as uid 0 with no capabilities", out)
         self.assertNotIn("--reuid", out)
 
-    def test_cap_add_without_setuid_names_what_remains(self) -> None:
+    def test_cap_add_without_setuid_still_drops_everything(self) -> None:
+        # D2: no SETPCAP, so setpriv cannot clear the bounding set; app.drop_caps empties permitted and effective
+        # under no_new_privs before the exec, so "no capabilities" is true here too.
         code, out = run_entrypoint(CHOWN_DAC_FOWNER, CHOWN_DAC_FOWNER)
         self.assertEqual(code, 0, out)
-        self.assertNotIn("no capabilities", out)
-        self.assertIn("capabilities 000000000000000b (chown dac_override fowner)", out)
+        self.assertIn("running as uid 0 with no capabilities", out)
+        self.assertIn(f"--no-new-privs {DROP_CHAIN} uvicorn", out)
         self.assertNotIn("--bounding-set", out)
 
     def test_setpcap_is_probed_in_the_effective_set(self) -> None:

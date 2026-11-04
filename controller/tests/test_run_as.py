@@ -688,6 +688,10 @@ class ImageWiringTests(unittest.TestCase):
         self.assertIn("docker.sock", self.entrypoint)
         self.assertNotRegex(self.entrypoint, r"chown -R")
 
+    def test_the_image_strips_setuid_and_setgid_bits(self) -> None:
+        # D1: nothing a controller uid can run elevates it.
+        self.assertIn("RUN find / -xdev -perm /6000 -type f -exec chmod ug-s {} +", self.dockerfile)
+
     def test_the_entrypoint_is_0755_whatever_the_build_context(self) -> None:
         # The group-0 sweep runs before it is copied, so its mode must not come from the clone's umask.
         self.assertIn("RUN sed -i 's/\\r$//' /entrypoint.sh && chmod 0755 /entrypoint.sh", self.dockerfile)

@@ -10,9 +10,10 @@
 set -euo pipefail
 
 if [[ "$(id -u)" -ne 0 ]]; then
-  # Started as a non-root user already (docker run --user, a Kubernetes runAsUser): nothing to drop.
+  # Started as a non-root user already (docker run --user, a Kubernetes runAsUser): no capabilities to drop, but
+  # no_new_privs and empty inheritable and ambient sets all the same (a plain docker run sets no no-new-privileges).
   export CONTROLLER_RUN_AS_REASON="${CONTROLLER_RUN_AS_REASON:-started as uid $(id -u) by the container runtime}"
-  exec "$@"
+  exec setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all "$@"
 fi
 
 fail() {
@@ -30,23 +31,16 @@ read_caps() {
 }
 cap_eff="$(read_caps CapEff)"
 cap_bnd="$(read_caps CapBnd)"
-CAP_NAMES=(chown dac_override dac_read_search fowner fsetid kill setgid setuid setpcap linux_immutable
-  net_bind_service net_broadcast net_admin net_raw ipc_lock ipc_owner sys_module sys_rawio sys_chroot sys_ptrace
-  sys_pacct sys_admin sys_boot sys_nice sys_resource sys_time sys_tty_config mknod lease audit_write audit_control
-  setfcap mac_override mac_admin syslog wake_alarm block_suspend audit_read perfmon bpf checkpoint_restore)
-cap_names() {
-  local mask=$((16#$1)) bit names=()
-  for ((bit = 0; bit < ${#CAP_NAMES[@]}; bit++)); do
-    if (( (mask >> bit) & 1 )); then names+=("${CAP_NAMES[bit]}"); fi
-  done
-  echo "${names[*]:-none}"
-}
 # The bounding set can only be cleared while CAP_SETPCAP (bit 8) is in the effective set.
 has_setpcap=0
 if (( (16#$cap_eff >> 8) & 1 )); then has_setpcap=1; fi
 
 # CONTROLLER_RUN_AS is checked here too: the branch below never runs app.run_as, which checks it on the main path.
-run_as_setting="$(echo "${CONTROLLER_RUN_AS:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+# As app.run_as reads it: leading and trailing whitespace trimmed, lowercased (Python's .strip().lower()).
+run_as_setting="${CONTROLLER_RUN_AS:-}"
+run_as_setting="${run_as_setting#"${run_as_setting%%[![:space:]]*}"}"
+run_as_setting="${run_as_setting%"${run_as_setting##*[![:space:]]}"}"
+run_as_setting="${run_as_setting,,}"
 case "$run_as_setting" in
   "" | auto | root) ;;
   *) fail "CONTROLLER_RUN_AS must be auto or root, got '${CONTROLLER_RUN_AS}'" ;;
@@ -57,16 +51,14 @@ esac
 # WARNING and the readiness reason name whatever remains.
 if (( ((16#$cap_eff >> 7) & 1) == 0 || ((16#$cap_eff >> 6) & 1) == 0 )); then
   drop=(--inh-caps=-all --ambient-caps=-all --no-new-privs)
-  remaining="$cap_bnd"
   if (( has_setpcap )); then
     drop+=(--bounding-set=-all)
-    remaining=0000000000000000
   fi
-  if (( 16#$remaining == 0 )); then
+  # setpriv leaves uid 0 its permitted and effective sets: app.drop_caps capsets them (and inheritable) to 0 under
+  # no_new_privs before the exec, so the command starts with no capability whatever the container was given. The
+  # token check below runs through the same chain, so it sees exactly what the controller will.
+  dropped=(setpriv "${drop[@]}" python -m app.drop_caps --)
     kept="no capabilities"
-  else
-    kept="capabilities $remaining ($(cap_names "$remaining"))"
-  fi
   export CONTROLLER_RUN_AS_REASON="no CAP_SETUID/CAP_SETGID, so uid 0 with $kept"
   echo "entrypoint: WARNING: this container cannot switch users (no CAP_SETUID/CAP_SETGID): running as uid 0 with" \
     "$kept and no_new_privs. To run as the controller user instead, start it as that user: compose" \
@@ -85,24 +77,23 @@ if (( ((16#$cap_eff >> 7) & 1) == 0 || ((16#$cap_eff >> 6) & 1) == 0 )); then
       chown_hint=" (chown ./data to 10002 first)"
     fi
     way_out="start it as uid $as_uid$chown_hint (compose user: \"$as_uid:$as_uid\", or docker run --user $as_uid:$as_uid), or add the capabilities above"
+    # The path is API_TOKEN_FILE from the environment (a .env file is the controller's, not this script's).
     token_file="${API_TOKEN_FILE:-$data_root/api-token}"
-    # The read check runs through the same drop as the exec, so it sees the capabilities that will remain.
-    if [[ -e "$token_file" ]] && ! setpriv "${drop[@]}" test -r "$token_file"; then
+    tokenless="$(printf '%s' "${API_ALLOW_TOKENLESS_LOOPBACK:-}" | tr '[:upper:]' '[:lower:]')"
+    if [[ -n "${API_BEARER_TOKEN:-}" || -n "${API_BEARER_TOKENS:-}" || "$tokenless" =~ ^(1|true|yes|on)$ ]]; then
+      : # the controller never reads the file then
+    elif ! "${dropped[@]}" test -x "$(dirname "$token_file")"; then
+      fail "$data_root belongs to uid $data_owner, and uid 0 with $kept cannot reach the API token's directory" \
+        "$(dirname "$token_file"), so the controller cannot start: $way_out."
+    elif "${dropped[@]}" test -e "$token_file" && ! "${dropped[@]}" test -r "$token_file"; then
       fail "$data_root belongs to uid $data_owner, and uid 0 with $kept cannot read the API token" \
         "$token_file, so the controller cannot start: $way_out."
     fi
-    can_read=$(( ((16#$remaining >> 1) & 1) || ((16#$remaining >> 2) & 1) ))
-    can_write=$(( (16#$remaining >> 1) & 1 ))
-    if (( ! can_read )); then
-      echo "entrypoint: WARNING: $data_root belongs to uid $data_owner, and uid 0 without CAP_DAC_OVERRIDE or" \
-        "CAP_DAC_READ_SEARCH cannot read its private files: the controller will likely fail to start. To fix it," \
-        "$way_out." >&2
-    elif (( ! can_write )); then
-      echo "entrypoint: WARNING: $data_root belongs to uid $data_owner, and uid 0 without CAP_DAC_OVERRIDE" \
-        "cannot write into it: the controller will likely fail to start. To fix it, $way_out." >&2
-    fi
+    # With no capability at all, uid 0 can neither read the owner's 0600 files nor write into a 0755 /data.
+    echo "entrypoint: WARNING: $data_root belongs to uid $data_owner, and uid 0 with no capabilities cannot read" \
+      "its private files or write into it: the controller will likely fail to start. To fix it, $way_out." >&2
   fi
-  exec setpriv "${drop[@]}" "$@"
+  exec "${dropped[@]}" "$@"
 fi
 
 # run_as prints exactly three lines; logs, and any ERROR, go to stderr. A bad CONTROLLER_RUN_AS exits non-zero
