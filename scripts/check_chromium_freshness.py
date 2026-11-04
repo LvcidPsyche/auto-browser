@@ -184,6 +184,13 @@ def evaluate_chromium(
                 f"The bundled Chromium {bundled} is {gap} patch numbers behind Chrome stable {stable} on the same "
                 f"build; no Playwright release bundles a newer one yet."
             )
+        b, st = version_tuple(bundled), version_tuple(stable)
+        if warning is None and b[:1] == st[:1] and len(b) == len(st) == 4 and st[:3] > b[:3]:
+            # D17: the same major, a later build: its fixes are not in the browser we ship either.
+            warning = (
+                f"Chrome stable {stable} is a later build than the bundled Chromium {bundled} on the same major; no "
+                "Playwright release bundles it yet."
+            )
     return ok, lines, warning
 
 
