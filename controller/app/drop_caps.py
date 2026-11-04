@@ -13,7 +13,6 @@ cap_bprm_creds_from_file), so the command starts with nothing. Linux only.
 from __future__ import annotations
 
 import ctypes
-import ctypes.util
 import os
 import sys
 
@@ -33,7 +32,8 @@ class _CapData(ctypes.Structure):
 
 def drop_all() -> None:
     """no_new_privs, an empty ambient set, and empty permitted, effective and inheritable sets, or OSError."""
-    libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+    # The libc already loaded in this process: find_library would run a subprocess (ldconfig) as root first.
+    libc = ctypes.CDLL(None, use_errno=True)
     for args in ((PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), (PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0)):
         if libc.prctl(*[ctypes.c_ulong(value) for value in args]) != 0:
             code = ctypes.get_errno()
@@ -51,7 +51,7 @@ def main(argv: list[str]) -> int:
         return 64
     try:
         drop_all()
-    except OSError as exc:
+    except (OSError, AttributeError) as exc:  # AttributeError: no prctl or capset in this libc
         print(f"entrypoint: ERROR: could not drop the remaining capabilities: {exc}", file=sys.stderr)
         return 70
     os.execvp(argv[2], argv[2:])  # noqa: S606 - the entrypoint's own command line, exec'd as it was given

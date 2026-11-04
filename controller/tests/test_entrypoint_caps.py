@@ -36,6 +36,7 @@ def run_entrypoint(
     *,
     data_root: Path | None = None,
     env: dict[str, str] | None = None,
+    python_stub: str | None = None,
 ) -> tuple[int, str]:
     with tempfile.TemporaryDirectory() as tempdir:
         root = Path(tempdir)
@@ -51,6 +52,8 @@ def run_entrypoint(
         for stub in STUB_DIR.iterdir():
             (stubs / stub.name).write_text(stub.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
             (stubs / stub.name).chmod(0o755)
+        if python_stub is not None:
+            (stubs / "python").write_text(python_stub, encoding="utf-8", newline="\n")
         copy = root / "entrypoint.sh"
         copy.write_text(
             script.read_text(encoding="utf-8").replace("/proc/self/status", _bash_path(status)),
@@ -156,23 +159,18 @@ class EntrypointCapabilityTests(unittest.TestCase):
             self.assertTrue(line.startswith("--inh-caps=-all --ambient-caps=-all --no-new-privs --bounding-set=-all"))
             self.assertIn(f"{DROP_CHAIN} test ", line)
 
-    def test_no_refusal_when_the_controller_never_reads_the_file(self) -> None:
-        # P4#4: an environment token, or tokenless loopback: the file is not read, so an unreadable one is no reason.
-        data = self._data(True)
-        base = {"FAKE_DATA_OWNER": "10002", "FAKE_READABLE": "0"}
-        for extra in (
-            {"API_BEARER_TOKEN": "t"},
-            {"API_BEARER_TOKENS": "a,b"},
-            {"API_ALLOW_TOKENLESS_LOOPBACK": "true"},
-            {"API_ALLOW_TOKENLESS_LOOPBACK": "1"},
-        ):
-            with self.subTest(**extra):
-                code, out = run_entrypoint(ALL_DROPPED, ALL_DROPPED, data_root=data, env={**base, **extra})
-                self.assertEqual(code, 0, out)
-                self.assertIn("will likely fail", out)
+    def test_no_refusal_when_the_controller_reads_no_file(self) -> None:
+        # Item 4: the controller says which file it reads (app.api_token --file-to-read); nothing, nothing checked.
+        code, out = run_entrypoint(
+            ALL_DROPPED,
+            ALL_DROPPED,
+            data_root=self._data(True),
+            env={"FAKE_DATA_OWNER": "10002", "FAKE_READABLE": "0", "FAKE_FILE_TO_READ": ""},
+        )
+        self.assertEqual(code, 0, out)
+        self.assertIn("will likely fail", out)
 
-    def test_an_unsearchable_token_directory_is_refused_too(self) -> None:
-        # P4#4: the existence check runs through the drop: an EACCES on the directory is not "no file".
+    def test_an_unreachable_token_directory_is_refused_too(self) -> None:
         code, out = run_entrypoint(
             ALL_DROPPED,
             ALL_DROPPED,
@@ -180,9 +178,9 @@ class EntrypointCapabilityTests(unittest.TestCase):
             env={"FAKE_DATA_OWNER": "10002", "FAKE_SEARCHABLE": "0"},
         )
         self.assertEqual(code, 70, out)
-        self.assertIn("cannot reach the API token's directory", out)
+        self.assertIn("cannot reach, or there is no, the API token's directory", out)
 
-    def test_api_token_file_from_the_environment_is_the_one_checked(self) -> None:
+    def test_the_file_the_controller_names_is_the_one_checked(self) -> None:
         elsewhere = self._data(False) / "secrets"
         elsewhere.mkdir()
         (elsewhere / "token").write_text("t", encoding="utf-8")
@@ -190,10 +188,67 @@ class EntrypointCapabilityTests(unittest.TestCase):
             ALL_DROPPED,
             ALL_DROPPED,
             data_root=self._data(False),  # no token in data_root itself
-            env={"FAKE_DATA_OWNER": "10002", "FAKE_READABLE": "0", "API_TOKEN_FILE": _bash_path(elsewhere / "token")},
+            env={
+                "FAKE_DATA_OWNER": "10002",
+                "FAKE_READABLE": "0",
+                "FAKE_FILE_TO_READ": _bash_path(elsewhere / "token"),
+            },
         )
         self.assertEqual(code, 70, out)
         self.assertIn("secrets/token", out)
+
+    def test_a_root_owned_data_dir_with_an_unreadable_token_is_refused(self) -> None:
+        # Item 4: the check runs whatever /data's owner (a root /data holding a 10002-owned 0600 token).
+        code, out = run_entrypoint(
+            ALL_DROPPED, ALL_DROPPED, data_root=self._data(True), env={"FAKE_DATA_OWNER": "0", "FAKE_READABLE": "0"}
+        )
+        self.assertEqual(code, 70, out)
+        self.assertIn("cannot read the API token", out)
+
+    def test_a_failed_drop_says_so_first(self) -> None:
+        code, out = run_entrypoint(ALL_DROPPED, ALL_DROPPED, data_root=self._data(True), env={"FAKE_DROP_RC": "1"})
+        self.assertEqual(code, 70, out)
+        self.assertIn("could not drop this container's capabilities", out)
+        self.assertNotIn("API token", out)
+
+    def test_a_failed_helper_is_a_warning_not_a_refusal(self) -> None:
+        code, out = run_entrypoint(
+            ALL_DROPPED,
+            ALL_DROPPED,
+            data_root=self._data(True),
+            env={"FAKE_DATA_OWNER": "10002", "FAKE_READABLE": "0", "FAKE_HELPER_RC": "1"},
+        )
+        self.assertEqual(code, 0, out)
+        self.assertIn("could not ask the controller which token file it reads", out)
+
+    def test_the_bounding_set_it_still_grants_is_named(self) -> None:
+        # Item 1: uid 0 can rewrite the image and regain these after a restart; cap_drop ALL grants none.
+        code, out = run_entrypoint(CHOWN_DAC_FOWNER, CHOWN_DAC_FOWNER)
+        self.assertEqual(code, 0, out)
+        self.assertIn("this container still grants chown dac_override fowner at every start", out)
+        self.assertIn("read_only: true with tmpfs mounts for /tmp, /var/tmp and /home/controller", out)
+        code, out = run_entrypoint(NO_SETUID, NO_SETUID)  # SETPCAP clears it here, but a restart grants it again
+        self.assertIn("this container still grants", out)
+        code, out = run_entrypoint(ALL_DROPPED, ALL_DROPPED)
+        self.assertNotIn("still grants", out)
+
+    def test_a_non_root_start_checks_controller_run_as_too(self) -> None:
+        # Item 11: a bad value exits 70 there as well, and root is said to be ignored.
+        code, out = run_entrypoint(
+            DOCKER_DEFAULT, DOCKER_DEFAULT, env={"FAKE_UID": "10002", "CONTROLLER_RUN_AS": "yes"}
+        )
+        self.assertEqual(code, 70, out)
+        code, out = run_entrypoint(
+            DOCKER_DEFAULT, DOCKER_DEFAULT, env={"FAKE_UID": "10002", "CONTROLLER_RUN_AS": "root"}
+        )
+        self.assertEqual(code, 0, out)
+        self.assertIn("CONTROLLER_RUN_AS=root is ignored: this container was started as uid 10002", out)
+
+    def test_the_root_path_execs_with_no_new_privs(self) -> None:
+        stub_python = '#!/usr/bin/env bash\nprintf "RUN_UID=\\nRUN_GID=\\nRUN_REASON=CONTROLLER_RUN_AS=root (not recommended)\\n"\n'
+        code, out = run_entrypoint(DOCKER_DEFAULT, DOCKER_DEFAULT, python_stub=stub_python)
+        self.assertEqual(code, 0, out)
+        self.assertIn("EXEC setpriv --no-new-privs uvicorn", out)
 
     def test_a_nobody_owned_data_dir_points_to_65534(self) -> None:
         # P4#5: on root-squashed NFS only 65534 can read the data; root's chown cannot work there.
