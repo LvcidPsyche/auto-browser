@@ -16,10 +16,12 @@ CDP (``Target.setDiscoverTargets`` / ``Target.targetCreated``). ``TargetInfo`` c
   meanwhile (a window a refused page's window opens after the agent's navigate is still that page's);
 * the opener is a page the controller knows (the session's first page, a tab the open-tab tool opened, a
   reported popup: each has its targetId cached): born refused when that page is refused for what happened
-  to it (its URL, a taint, a refused hop; not for its own birth verdict still pending, which the first rule
-  carries), or when a page that counted for the session closed within the grace
+  to it (its URL, a taint, a refused hop) or is held for a verdict no judgement is reaching; not for its own
+  birth verdict while that verdict is being judged, which the first rule carries, unless the watcher saw no
+  birth of it (that verdict then comes out unjudged, and its windows are born refused); or when a page that
+  counted for the session closed within the grace
   (``page_provenance.CLOSED_PAGE_GRACE_SECONDS``; kept by design: a popup a clean tab opens within 2 s of
-  closing a refused tab is refused);
+  a refused tab closing, whoever closed it, is refused);
 * the opener cannot be matched to a page, though the watcher saw it born clean: it is a popup reported a
   moment ago whose targetId read is still in flight, or a clean window Playwright has not reported (on the
   initial blank of its own clean opener). The window is born clean when no open page of the session whose
@@ -177,6 +179,7 @@ class WindowBirthWatcher:
         unmatched_pages: Callable[[Any], list[Any]] | None = None,
         on_lost: Callable[["WindowBirthWatcher"], None] | None = None,
         on_recheck: Callable[[Any], Awaitable[None]] | None = None,
+        opener_held: Callable[[Any], bool] | None = None,
     ) -> None:
         self._browser = browser
         # The sweep for one session (WindowBirths.close_unreported, which adds the reported-page protection).
@@ -190,6 +193,9 @@ class WindowBirthWatcher:
         # The session's open pages whose targetId is not cached (a report's read in flight): an unmatched
         # opener that was born clean is one of them, or an unreported clean window.
         self._unmatched_pages = unmatched_pages or (lambda _session: [])
+        # Whether a page is held for its own birth verdict (page_provenance.held_for_verdict): the opener rule's
+        # exemption for such a page rests on its birth, which must be known (_judge).
+        self._opener_held = opener_held or (lambda _page: False)
         self._on_lost = on_lost
         self._cdp: Any = None
         self._live = False
@@ -370,6 +376,11 @@ class WindowBirthWatcher:
             return True, False
         opener = self._opener_page(session, opener_id)
         if opener is not None:
+            if opener_birth is None and self._opener_held(opener):
+                # Held for its own birth verdict, which the exemption below defers to; but no birth of it was seen,
+                # so that verdict comes out unjudged (mark_reported) and carries nothing here: refused, as before
+                # the watcher.
+                return True, False
             return self._opener_refused(session, opener), False
         if opener_birth is not None and not any(
             self._opener_refused(session, page) for page in self._unmatched_pages(session)
@@ -555,6 +566,7 @@ class WindowBirths:
         known_target_id: Callable[[Any], str | None],
         seed_target_id: Callable[[Any, str], None],
         opened_by_controller: Callable[[Any], bool] | None = None,
+        opener_held: Callable[[Any], bool] | None = None,
     ) -> None:
         # Whether ALLOWED_HOSTS refuses any host: when every host is allowed nothing is ever born refused, so
         # the watcher attaches to nothing (unlike the gate, it runs with PRE_REQUEST_BLOCKING off).
@@ -571,6 +583,7 @@ class WindowBirths:
         # Whether the controller opened a page itself (an open-tab tool tab): such a page has no opener, so no
         # born-refused window can be it, and the sweep need not know its targetId (page_provenance).
         self._controller_opened = opened_by_controller or (lambda _page: False)
+        self._opener_held = opener_held
         # Pages whose targetId read failed at least once (_resolve_and_mark): the sweep does not wait for their
         # reads, and reads one again (rate-bounded) when it needs the id and no read is in flight.
         self._read_failed: "weakref.WeakSet[Any]" = weakref.WeakSet()
@@ -639,6 +652,7 @@ class WindowBirths:
                 unmatched_pages=self._unmatched_pages,
                 on_lost=self._lost,
                 on_recheck=self.close_unreported,
+                opener_held=self._opener_held,
             )
             # Before the attach: discovery replays every target that exists, and only a registered session's
             # targets get entries (a replacement after a loss: every live session on this browser is this
