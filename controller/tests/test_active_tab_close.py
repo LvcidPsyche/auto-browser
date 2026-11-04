@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 import weakref
 from types import SimpleNamespace
@@ -32,7 +33,8 @@ def fake_manager() -> SimpleNamespace:
 
 
 class ActiveTabCloseTests(unittest.TestCase):
-    def _session(self, *pages: FakePage) -> SimpleNamespace:
+    @staticmethod
+    def _session(*pages: FakePage) -> SimpleNamespace:
         return SimpleNamespace(
             id="s1",
             page=pages[0],
@@ -67,6 +69,44 @@ class ActiveTabCloseTests(unittest.TestCase):
         background.close_itself()
 
         self.assertIs(session.page, active)
+
+
+class ClosedWhileHeldTests(unittest.TestCase):
+    """The close record of a held popup (_closed_while_held) keeps what it logged for a clean verdict. It holds
+    only a popup held for nothing but its pending birth verdict: an off-list commit taints the popup, so its
+    output is never kept for a later clean verdict. That is why the record needs no URL check of its own."""
+
+    def setUp(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        self.addCleanup(self.loop.close)
+        manager = fake_manager()
+        # A tainted page counts for its session, so its close also asks whether the session is watched.
+        manager.window_births = SimpleNamespace(active_for=lambda _session: False)
+        self.service = BrowserDiagnosticsService(manager, None, None)  # type: ignore[arg-type]
+        self.provenance = manager.page_provenance
+        self.opener, self.popup = FakePage(), FakePage()
+        self.session = ActiveTabCloseTests._session(self.opener, self.popup)
+        for page in (self.opener, self.popup):
+            self.service.attach_page_listeners(page, self.session)
+        # Reported and held for its birth verdict, which is still being judged.
+        self.provenance.opener_lookup_started(self.popup)
+        self.service._birth_judgements[self.popup] = self.loop.create_future()
+
+    def test_a_popup_held_only_for_its_verdict_is_recorded_when_it_closes(self) -> None:
+        self.assertTrue(self.provenance.held_for_verdict(self.popup))
+
+        self.popup.close_itself()
+
+        self.assertIn(self.popup, self.service._closed_while_held)
+
+    def test_a_held_popup_that_commits_an_off_list_url_is_never_recorded(self) -> None:
+        self.popup.url = "https://refused.example/"
+        self.provenance.committed(self.popup, self.popup.url, url_refused=True)
+        self.assertFalse(self.provenance.held_for_verdict(self.popup), "an off-list commit taints the popup")
+
+        self.popup.close_itself()
+
+        self.assertNotIn(self.popup, self.service._closed_while_held)
 
 
 if __name__ == "__main__":
