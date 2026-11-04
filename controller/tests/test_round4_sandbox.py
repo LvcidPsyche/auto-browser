@@ -139,8 +139,9 @@ class SharedNothingReportedTests(_Files, unittest.TestCase):
                 )
                 check = browser_sandbox_check(status)
                 self.assertEqual(check.status, "warn")
+                # S6#3: the message is built from the attached line itself.
                 self.assertIn(
-                    "browser-node is not in use: the controller is attached to a Chrome over CDP", check.message
+                    "browser-node is not in use: attached Chrome: attached over CDP, not checked", check.message
                 )
                 self.assertNotIn("without its sandbox", check.message)
                 self.assertNotIn("container", check.message.split(".")[0])

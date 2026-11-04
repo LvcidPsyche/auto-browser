@@ -20,6 +20,7 @@ import tempfile
 import threading
 import unittest
 from contextlib import redirect_stdout
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -230,20 +231,31 @@ class GateScriptTests(unittest.TestCase):
         self.assertEqual(self._run(200, "--expect", "200", "--isolated", delete_status=500), 1)
 
     def test_log_must_say_reads_the_controller_log(self) -> None:
-        # GS3/GS6: a stub `docker` on PATH stands in for `docker compose logs controller`.
+        # GS3/GS6: a stub `docker` on PATH stands in for `docker compose logs controller`; S6#5: it writes the
+        # arguments it was given to a file.
         bin_dir = self.data / "bin"
         bin_dir.mkdir()
+        argv_file = self.data / "docker-argv.txt"
         if os.name == "nt":
-            (bin_dir / "docker.cmd").write_text("@echo off\r\necho WARNING the gate said no\r\n", encoding="utf-8")
+            (bin_dir / "docker.cmd").write_text(
+                f'@echo off\r\necho %*> "{argv_file}"\r\necho WARNING the gate said no\r\n', encoding="utf-8"
+            )
         else:
             stub = bin_dir / "docker"
-            stub.write_text("#!/bin/sh\necho 'WARNING the gate said no'\n", encoding="utf-8")
+            stub.write_text(
+                f"#!/bin/sh\nprintf '%s\\n' \"$@\" > '{argv_file}'\necho 'WARNING the gate said no'\n", encoding="utf-8"
+            )
             stub.chmod(0o755)
         path = {"PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", "")}
+        began = datetime.now(UTC).replace(microsecond=0)
         self.assertEqual(self._run(409, "--expect", "409", "--log-must-say", "the gate said no", env=path), 0)
+        # S5#12, S6#5: only the lines logged since the check began, by an RFC3339 UTC time no earlier than its start.
+        words = argv_file.read_text(encoding="utf-8").split()
+        self.assertEqual(words[:3], ["compose", "logs", "--since"], words)
+        self.assertRegex(words[3], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertGreaterEqual(datetime.strptime(words[3], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC), began)
+        self.assertEqual(words[4:], ["controller"], words)
         self.assertEqual(self._run(409, "--expect", "409", "--log-must-say", "something else", env=path), 1)
-        # S5#12: only the lines logged since the check began.
-        self.assertIn('"--since", started', (REPO / "scripts" / "check_sandbox_gate.py").read_text(encoding="utf-8"))
 
     def test_forty_runs_in_a_row(self) -> None:
         # Item 18: the race the reviewer saw (an unread body) is gone.

@@ -53,11 +53,15 @@ def _printable(text: str) -> str:
 
     C0, DEL and C1; Unicode format (Cf: bidi overrides, zero-width), line (Zl) and paragraph (Zp) separators,
     surrogates (Cs: a lone one makes the JSON response fail to encode), private-use (Co) and unassigned (Cn) code
-    points; and the variation selectors (U+FE00-FE0F, U+E0100-E01EF)."""
+    points; the variation selectors (U+FE00-FE0F, U+E0100-E01EF); and the invisible marks and letters U+034F,
+    U+115F, U+1160, U+180B-180D, U+180F, U+3164 and U+FFA0."""
     return "".join(" " if _unprintable(ch) else ch for ch in text)
 
 
 _HIDDEN_CATEGORIES = frozenset({"Cf", "Zl", "Zp", "Cs", "Co", "Cn"})
+# Invisible although their category is a mark or a letter (S6#14): the combining grapheme joiner, the Hangul fillers
+# and the Mongolian free variation selectors.
+_HIDDEN_CODE_POINTS = frozenset({0x034F, 0x115F, 0x1160, 0x180B, 0x180C, 0x180D, 0x180F, 0x3164, 0xFFA0})
 
 
 def _unprintable(ch: str) -> bool:
@@ -67,6 +71,7 @@ def _unprintable(ch: str) -> bool:
         or 127 <= code < 160
         or 0xFE00 <= code <= 0xFE0F
         or 0xE0100 <= code <= 0xE01EF
+        or code in _HIDDEN_CODE_POINTS
         or unicodedata.category(ch) in _HIDDEN_CATEGORIES
     )
 
@@ -229,9 +234,10 @@ class EndpointFileError(OSError):
 
 def read_endpoint_file(path: Path) -> str | None:
     """A browser container's ws endpoint, read like its state file: O_NOFOLLOW|O_NONBLOCK, a regular file of at most
-    ENDPOINT_MAX_BYTES, a ws:// or wss:// URL. None while it is absent or empty. Anything else is EndpointFileError,
-    whose message names the path and never the content: Playwright echoes its connect target into errors, and a link
-    planted here could otherwise put any file the controller can read (its API token) into the log."""
+    ENDPOINT_MAX_BYTES, a ws:// or wss:// URL in printable ASCII. None while it is absent or empty. Anything else is
+    EndpointFileError, whose message names the path and never the content: Playwright echoes its connect target into
+    errors, and a link planted here could otherwise put any file the controller can read (its API token) into the
+    log."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(path, flags)
@@ -259,7 +265,14 @@ def read_endpoint_file(path: Path) -> str | None:
         raise EndpointFileError(f"the endpoint file {path} is not UTF-8 text") from None
     if not endpoint:
         return None
-    if not endpoint.startswith(("ws://", "wss://")) or any(ch.isspace() for ch in endpoint):
+    # A real endpoint is ws://host:port/<hex>: printable ASCII without whitespace, so no control or format character
+    # reaches a log line or an error (S6#2, F6).
+    if (
+        not endpoint.startswith(("ws://", "wss://"))
+        or not endpoint.isascii()
+        or not endpoint.isprintable()
+        or any(ch.isspace() for ch in endpoint)
+    ):
         raise EndpointFileError(f"the endpoint file {path} does not hold a ws:// or wss:// URL")
     return endpoint
 
@@ -472,9 +485,12 @@ def browser_sandbox_check(status: dict[str, Any]):
         return ReadinessCheck(
             name=name,
             status="warn",
+            # From the attached lines, label and detail (S6#3): an unconnected CDP_CONNECT_URL Chrome reads "not
+            # connected", never as if the controller were attached to it.
             message=(
-                "browser-node is not in use: the controller is attached to a Chrome over CDP, whose sandbox is not "
-                "checked."
+                "browser-node is not in use: "
+                + "; ".join(line.describe() for line in attached)
+                + "."
                 + (
                     f" Chromium's sandbox is on and verified in {len(containers)} browser container(s)."
                     if containers
