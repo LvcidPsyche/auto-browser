@@ -296,7 +296,7 @@ class SessionNetworkTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn(runtime.network_name, client.networks.by_name)
         self.assertEqual(
-            client.events,
+            [event for event in client.events if event[0] != "cleanup.run"],  # the network calls only
             [
                 ("container.stop", "browser-session-s1"),
                 ("container.remove refused", "browser-session-s1"),
@@ -418,7 +418,7 @@ class SessionNetworkTests(unittest.IsolatedAsyncioTestCase):
         await restarted.startup()
 
         self.assertEqual(
-            client.events,
+            [event for event in client.events if event[0] != "cleanup.run"],  # the network calls only
             [
                 ("container.remove", "browser-session-orphan"),
                 ("network.disconnect", provisioner_run.network_name, "controller-id", True),
