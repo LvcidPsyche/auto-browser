@@ -239,7 +239,8 @@ which fails the call instead. The capability-less start works only on data root 
 entrypoint then refuses to start with one clear line (exit 70) rather than let the controller fail on it. It asks the
 controller which file it would read (`python -m app.api_token --file-to-read`: an environment token or tokenless
 loopback reads none; `API_TOKEN_FILE` from the environment or `.env` otherwise), whatever `/data`'s owner, and checks
-that one; a token directory that is not there yet is the controller's to create. A container started as a non-root
+that one. A token directory it cannot see, not there yet or under one it cannot search, is left to the controller,
+which creates it or says why it cannot. A container started as a non-root
 user runs the controller with no_new_privs too. To run such a container as the controller
 user, start it as that user (`user: "10002:10002"` in compose, or `docker run --user 10002:10002`, with `./data` owned
 by 10002): the entrypoint then runs the controller directly (measured: readyz, a session and the token all work with

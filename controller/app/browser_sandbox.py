@@ -173,9 +173,10 @@ def _profile_readable(path: str | Path) -> bool:
 def verified_on(state: dict[str, Any] | None) -> bool:
     """'on' with the evidence sandbox.mjs writes: at least one renderer, each in its own user namespace, and either
     /proc's seccomp filter counts (one per renderer, each above the browser's) or chrome://sandbox's own report (old
-    kernels). A bare 'on', or renderers alone, is not enough. Stricter than scripts/assert_browser_sandbox.py, which
-    checks the same evidence (not the setting) but not its shape: here the filter counts must be plain non-negative
-    ints, one per renderer, and at most 64 of them."""
+    kernels). A bare 'on', or renderers alone, is not enough. With read_sandbox_state, which every caller reads the
+    state through, stricter than scripts/assert_browser_sandbox.py, which checks the same evidence (not the setting)
+    but not its shape: here non-negative counts, one per renderer, and _sanitize keeps a filter list only if it holds
+    at most 64 plain ints."""
     if not state or state.get("sandbox") != "on":
         return False
     verified = state.get("verified") or {}
