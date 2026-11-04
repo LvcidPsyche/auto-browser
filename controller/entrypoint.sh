@@ -15,9 +15,9 @@ fail() {
 }
 
 # CONTROLLER_RUN_AS, checked first on every path (the non-root and cannot-switch branches never run app.run_as).
-# As app.run_as reads it: trimmed and lowercased. bash's [[:space:]] (in the image's C.UTF-8 locale) leaves the
-# no-break spaces U+00A0 and U+202F that Python's .strip() removes, so a value padded with those fails closed here
-# (exit 70) rather than reading as auto or root.
+# As app.run_as reads it: trimmed and lowercased. bash's [[:space:]] (in the image's C.UTF-8 locale) leaves some
+# characters Python's .strip() removes (the no-break spaces U+00A0, U+2007 and U+202F, U+001C-U+001F, U+0085), so a
+# value padded with those fails closed here (exit 70) rather than reading as auto or root.
 run_as_setting="${CONTROLLER_RUN_AS:-}"
 run_as_setting="${run_as_setting#"${run_as_setting%%[![:space:]]*}"}"
 run_as_setting="${run_as_setting%"${run_as_setting##*[![:space:]]}"}"

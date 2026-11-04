@@ -31,15 +31,16 @@ All notable changes to auto-browser are documented here.
 - **Rolling back**: after running an older release on the same data, delete `data/.auto-browser-owner` before
   starting 1.14 again, so the files the older release created as root are handed over. A container without
   DAC_OVERRIDE or DAC_READ_SEARCH cannot look inside its own unreadable directories: chown `./data` by hand then.
-- **A capability-less uid 0 still owns the image**: under `cap_drop: [SETUID]` or a `cap_add` set without SETUID or
-  SETGID, a compromised controller could rewrite the image and regain the container's capabilities on a restart.
-  The entrypoint names them; prefer `cap_drop: [ALL]`, `user: "10002:10002"`, or `read_only: true` with a tmpfs for
-  `/tmp`, which screenshot OCR needs (docs/deployment.md).
-- **A controller that cannot switch users** (`cap_drop: [ALL]`, `cap_drop: [SETUID]`, or `cap_add` without SETUID
-  or SETGID) starts as a uid 0 with no capabilities at all, and refuses to start, in one line, when it cannot enter
-  the API token's directory or read the token the controller would read (a directory not there yet is the
-  controller's to create); run it as `user: "10002:10002"`, or add `cap_add: [CHOWN, DAC_READ_SEARCH, SETUID,
-  SETGID]` (docs/deployment.md). Data owned by 65534 (root-squashed NFS) runs as 65534.
+- **A capability-less uid 0 still owns the image**: under `cap_drop: [SETUID]` or `[SETGID]`, or a `cap_add` set
+  without SETUID or SETGID, a compromised controller could rewrite the image and regain the container's capabilities
+  on a restart. The entrypoint names them; prefer `cap_drop: [ALL]`, `user: "10002:10002"`, or `read_only: true`
+  with a tmpfs for `/tmp`, which screenshot OCR needs (docs/deployment.md).
+- **A controller that cannot switch users** (`cap_drop: [ALL]`, `cap_drop: [SETUID]` or `[SETGID]`, or `cap_add`
+  without SETUID or SETGID) starts as a uid 0 with no capabilities at all, and refuses to start, in one line, when
+  it cannot enter the API token's directory or read the token the controller would read. A directory it cannot see,
+  not there yet or under one it cannot search, is left to the controller, which creates it or says why it cannot.
+  Run it as `user: "10002:10002"`, or add `cap_add: [CHOWN, DAC_READ_SEARCH, SETUID, SETGID]` (docs/deployment.md).
+  Data owned by 65534 (root-squashed NFS) runs as 65534.
 
 ### Security
 
