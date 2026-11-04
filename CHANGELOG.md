@@ -4,6 +4,13 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- A session whose `start_url` fails to load (a refused connection, an unresolved name, a timeout) is answered with
+  400 `browser_action_failed`, retryable, as `navigate` answers the same failure. It used to be a 500 "Internal
+  error". The message names Chrome's net error (`net::ERR_CONNECTION_REFUSED`) or the timeout, never the URL, and
+  the session is closed as before. Shadow browse's page gets the same answer.
+
 ## [1.14.0] — 2026-11-04
 
 A hardening release over 1.13.1. The controller no longer runs as root, and Chromium runs with its own sandbox in

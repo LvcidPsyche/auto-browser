@@ -3,17 +3,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from ... import events as _events
 from ...action_errors import (
     ERROR_PAGE_SOURCE_FORK,
     ERROR_PAGE_SOURCE_SHADOW,
+    BrowserActionError,
     ErrorPageSourceError,
     SessionNotFoundError,
 )
@@ -42,6 +45,33 @@ PAGE_TITLE_TIMEOUT_SECONDS = 2.0
 CLOSE_LOCK_WAIT_SECONDS = 10.0
 # Each teardown step (trace, context, isolated runtime) gets at most this long.
 TEARDOWN_STEP_TIMEOUT_SECONDS = 30.0
+# Chrome's name for why a load failed (net::ERR_CONNECTION_REFUSED), the only part of Playwright's text an
+# unloaded page's error repeats: the rest names the URL, a redirect's too, and carries a call log.
+_NET_ERROR = re.compile(r"net::ERR_[A-Z0-9_]+")
+# What failed to load, and what became of it, by the action that loaded it (_goto_or_blocked's callers).
+_LOAD_FAILED = {
+    "create_session": "The session's start_url did not load ({reason}), so the session was closed. Check that it "
+    "answers, or create the session without one and navigate it.",
+    "enable_shadow_browse": "The page did not load in the shadow browser ({reason}), so the shadow browser was "
+    "closed. Try again, or navigate the session first.",
+}
+_TIMED_OUT = re.compile(r"Timeout \d+ms exceeded")
+
+
+def _load_failed(exc: PlaywrightError, *, action: str) -> BrowserActionError:
+    """A page the controller itself loaded (a start_url, shadow browse's page) that failed for a reason of its own."""
+    text = getattr(exc, "message", None) or str(exc)
+    first_line = text.splitlines()[0] if text else ""
+    net_error = _NET_ERROR.search(first_line)
+    if net_error:
+        reason = net_error.group(0)
+    elif isinstance(exc, PlaywrightTimeoutError) or _TIMED_OUT.search(first_line):
+        reason = "it timed out"
+    else:
+        reason = "the browser could not open it"
+    return BrowserActionError(
+        _LOAD_FAILED[action].format(reason=reason), action=action, status_code=400, retryable=True
+    )
 
 
 def _on_error_page(page: Any) -> bool:
@@ -540,7 +570,9 @@ class BrowserSessionService(SessionCreation):
                 navigation.response = await page.goto(url, wait_until="domcontentloaded")
         except PlaywrightError as exc:
             if not stopped_by_gate(exc):
-                raise
+                # A load that failed (refused, unresolved, timed out): retryable, as navigate's own failure, and
+                # typed, so the route answers it rather than with a 500. Never a block (R6's rule).
+                raise _load_failed(exc, action=action) from exc
             stopped = await gates.blocks_on_page(browser, page, since=since)
             raise navigation_blocked_error(stopped[-1] if stopped else None, action=action) from exc
         await self.manager._settle(page)
