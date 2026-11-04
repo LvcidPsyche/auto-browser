@@ -127,13 +127,16 @@ class BrowserTabManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([tab["active"] for tab in result["tabs"]], [True, False])
         self.assertEqual(third.front_calls, 0)
 
-    async def test_activate_tab_of_a_tab_that_closes_during_the_wait_is_an_unknown_tab(self) -> None:
+    async def test_activate_tab_of_a_tab_that_closes_during_the_wait_says_it_closed(self) -> None:
+        """Round-4 RB9: the agent got 'Unknown tab index: N' for an index that was valid when it asked, which it
+        cannot tell from a mistyped one. Still a ValueError (REST: 400), with a text that says what happened."""
         first, second = self.session.context.pages
         self._wait_then(lambda: self.session.context.pages.remove(second))
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as raised:
             await self.manager.activate_tab(self.session.id, 1)
 
+        self.assertEqual(str(raised.exception), "That tab closed while it was being judged; list the tabs again")
         self.assertIs(self.session.page, first)
 
     async def test_activate_tab_of_a_session_that_closes_during_the_wait_is_an_unknown_session(self) -> None:
@@ -148,8 +151,11 @@ class BrowserTabManagementTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_activate_tab_returns_within_the_bound_when_the_verdict_never_comes(self) -> None:
         """The orchestrator's open item: a held popup whose verdict never comes. activate_tab returns within
-        BIRTH_VERDICT_WAIT_SECONDS, with the popup still held and refused (fail closed), not hung."""
+        BIRTH_VERDICT_WAIT_SECONDS, with the popup still held and refused (fail closed), not hung. Round-4 RB3: its
+        refusal is the unjudged one, not the host refusal ('on a host ALLOWED_HOSTS does not allow, or came from
+        one'): the popup is on an allowed host, and nothing is known against it."""
         from app.browser.services import diagnostics as diagnostics_module
+        from app.browser.services.tabs import UNJUDGED_TAB_MESSAGE, TabUnjudgedError
 
         popup = self.session.context.pages[1]
         self.manager.page_provenance.opener_lookup_started(popup)
@@ -157,10 +163,11 @@ class BrowserTabManagementTests(unittest.IsolatedAsyncioTestCase):
         self.manager.diagnostics._birth_judgements[popup] = never
         with patch.object(diagnostics_module, "BIRTH_VERDICT_WAIT_SECONDS", 0.2):
             started = asyncio.get_running_loop().time()
-            with self.assertRaises(PermissionError):
+            with self.assertRaises(TabUnjudgedError) as raised:
                 await asyncio.wait_for(self.manager.activate_tab(self.session.id, 1), timeout=5.0)
             elapsed = asyncio.get_running_loop().time() - started
 
+        self.assertEqual(str(raised.exception), UNJUDGED_TAB_MESSAGE)
         self.assertLess(elapsed, 2.0, "activate_tab did not return at the bound")
         self.assertGreaterEqual(elapsed, 0.2)
         self.assertTrue(self.manager.page_provenance.refused(popup), "the popup was no longer held")

@@ -332,6 +332,12 @@ class BrowserDiagnosticsService:
             for items, value in held:
                 self._bounded_append(items, value)
 
+    def verdict_never_came(self, page: Any) -> bool:
+        """Whether the page is still held for a birth verdict that was being judged: birth_judged returned at its
+        bound, or the judgement ended without applying one (cancelled from outside). Refused as not judged, not
+        for a host: it is on an allowed host and came from an allowed page, as far as anything is known."""
+        return page in self._birth_judgements and self.manager.page_provenance.held_for_verdict(page)
+
     def birth_pending(self, page: Any) -> bool:
         """Whether the page's birth verdict is still being judged (_judge_birth runs): the hold on it is passing."""
         try:

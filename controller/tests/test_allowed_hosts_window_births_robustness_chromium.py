@@ -1046,3 +1046,53 @@ async def test_an_oauth_callback_that_closes_at_once_keeps_its_line_exactly_when
         assert kept is (verdicts[0] is BirthVerdict.CLEAN)
         assert not session.lock.locked()
 
+
+# ── round 5: activate_tab's refusals after the wait ────────────────────────────
+
+
+async def test_activate_tab_of_a_popup_whose_verdict_never_comes_returns_the_unjudged_refusal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round-4 robustness RB3 (B6): a held popup whose judgement ended without a verdict (cancelled from outside)
+    was refused with the host message ('on a host ALLOWED_HOSTS does not allow, or came from one'), though it is
+    on an allowed host and came from an allowed page. Its refusal is the unjudged one."""
+    async with browser_env(tmp_path, {**PAGES, "/noisy": NOISY}) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        popup, release = await held_noisy_popup(env, session, monkeypatch)
+        env.manager.diagnostics._birth_judgements[popup].cancel()
+        await nav.wait_for(lambda: not env.manager.diagnostics.birth_pending(popup), timeout=TIMEOUT)
+
+        with pytest.raises(TabUnjudgedError, match="could not be judged"):
+            await asyncio.wait_for(env.manager.activate_tab(session_id, session.context.pages.index(popup)), TIMEOUT)
+        assert session.page is not popup and not session.lock.locked()
+        assert env.manager._page_refused(popup)
+        release.set()
+        await settle(lambda: not pending(), timeout=TIMEOUT)
+
+
+async def test_activate_tab_of_a_tab_that_closes_during_the_wait_says_it_closed(tmp_path: Path, monkeypatch) -> None:
+    """Round-4 robustness RB9 (B2): the tab asked for closed during activate_tab's wait for its verdict, and the
+    agent got 'Unknown tab index: N' for an index that was valid when it asked."""
+    async with browser_env(tmp_path, PAGES) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        first = session.page
+        real = rg._read_target_id
+
+        async def slow(page):
+            if page is not first:
+                await asyncio.sleep(1.0)
+            return await real(page)
+
+        monkeypatch.setattr(rg, "_read_target_id", slow)
+        popup = await open_popup(session, f"{env.allowed}/second")
+        activate = asyncio.ensure_future(env.manager.activate_tab(session_id, session.context.pages.index(popup)))
+        await asyncio.sleep(0.2)
+        assert not activate.done(), "activate_tab did not wait for the tab's verdict"
+        await popup.close()
+
+        with pytest.raises(ValueError, match="That tab closed while it was being judged; list the tabs again"):
+            await asyncio.wait_for(activate, timeout=TIMEOUT)
+        assert session.page is first and not session.lock.locked()
+        await settle(lambda: not pending(), timeout=TIMEOUT)
