@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
@@ -163,6 +163,15 @@ class FakeDockerContainers:
         self.cleanup_runs: list[dict] = []
         self.cleanup_fails = False
         self.networks = networks
+        # (host data root, the controller's /data): the daemon binds a host path, which the controller sees as the
+        # same directory under /data. None: the two are the same path (a controller run on the host).
+        self.host_to_local: tuple[Path, Path] | None = None
+
+    def _local(self, host_path: str) -> Path:
+        if self.host_to_local is None:
+            return Path(host_path)
+        host_root, local_root = self.host_to_local
+        return local_root / Path(host_path).relative_to(host_root)
 
     def get(self, identifier: str) -> FakeDockerContainer:
         if identifier in {self.controller_container.id, self.controller_container.name}:
@@ -179,12 +188,14 @@ class FakeDockerContainers:
             self.events.append(("cleanup.run", (kwargs.get("labels") or {}).get("auto-browser.session_id")))
             if not self.cleanup_fails:
                 for host_path in kwargs["volumes"]:
-                    for child in sorted(Path(host_path).glob("**/*"), key=lambda path: len(path.parts), reverse=True):
+                    for child in sorted(
+                        self._local(host_path).glob("**/*"), key=lambda path: len(path.parts), reverse=True
+                    ):
                         child.rmdir() if child.is_dir() else child.unlink()
             return b""
         name = kwargs["name"]
         volumes = kwargs["volumes"]
-        profile_dir = Path(next(path for path, mount in volumes.items() if mount["bind"] == "/data/profile"))
+        profile_dir = self._local(next(path for path, mount in volumes.items() if mount["bind"] == "/data/profile"))
         profile_dir.mkdir(parents=True, exist_ok=True)
         endpoint = f"ws://{name}:9223/playwright"
         if self.sandbox_state is not None:
@@ -392,6 +403,55 @@ class DockerBrowserNodeProvisionerTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
             self.assertNotIn(net, client.networks.by_name)
+
+    async def test_a_host_data_path_the_controller_cannot_see_is_only_handed_to_docker(self) -> None:
+        # The controller in its container sees /data, not the host path behind it (on Linux CI,
+        # /home/runner/work/.../data). The session's dirs are made through /data; the host path only goes to the
+        # daemon as the browser's bind source. Making it here built directories in the controller's own filesystem,
+        # which a controller that is not root cannot (PermissionError, answered 403).
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            data_root = root / "data"
+            data_root.mkdir(parents=True, exist_ok=True)
+            host_only = root / "host-only" / "data"
+            settings = Settings(
+                _env_file=None,
+                ARTIFACT_ROOT=str(data_root / "artifacts"),
+                UPLOAD_ROOT=str(data_root / "uploads"),
+                AUTH_ROOT=str(data_root / "auth"),
+                APPROVAL_ROOT=str(data_root / "approvals"),
+                SESSION_STORE_ROOT=str(data_root / "sessions"),
+                AUDIT_ROOT=str(data_root / "audit"),
+                ISOLATED_TAKEOVER_HOST="127.0.0.1",
+            )
+            controller_container = FakeDockerContainer(
+                container_id="controller-id",
+                name="controller",
+                attrs={
+                    "Mounts": [{"Destination": "/data", "Source": str(host_only)}],
+                    "NetworkSettings": {"Networks": {"auto-browser_default": {}}},
+                },
+            )
+            client = FakeDockerClient(controller_container)
+            client.containers.host_to_local = (host_only.resolve(), data_root)
+            provisioner = DockerBrowserNodeProvisioner(settings, client=client)
+            provisioner._controller_container_id = controller_container.id
+
+            # A POSIX host path, as on Linux: _host_path keeps a Windows one as a PureWindowsPath, which this test
+            # host's temp dir would be.
+            with patch("app.session_isolation._host_path", lambda value: Path(value).resolve()):
+                runtime = await provisioner.provision("session-1")
+
+            self.assertTrue((data_root / "browser-sessions" / "session-1" / "profile").is_dir())
+            self.assertTrue((data_root / "browser-sessions" / "session-1" / "downloads").is_dir())
+            self.assertFalse((root / "host-only").exists())
+            volumes = client.containers.browser_containers[runtime.container_name].run_kwargs["volumes"]
+            host_session = Path(host_only.resolve()) / "browser-sessions" / "session-1"
+            self.assertEqual(
+                {volumes[str(host_session / "profile")]["bind"], volumes[str(host_session / "downloads")]["bind"]},
+                {"/data/profile", "/data/downloads"},
+            )
+            await provisioner.release(runtime)
 
     async def test_provision_applies_default_resource_limits(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
