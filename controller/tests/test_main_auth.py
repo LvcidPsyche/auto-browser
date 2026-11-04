@@ -85,7 +85,7 @@ class MainAuthTests(unittest.TestCase):
         for path in ("/docs", "/redoc"):
             with self.subTest(path=path):
                 html = self.client.get(path).text
-                tags = re.findall(r"<(?:script|link)\b[^>]*>", html)
+                tags = re.findall(r"<(?:script|link)\b[^>]*>", html, re.I)
                 external = [tag for tag in tags if re.search(r'(?:src|href)="https?://', tag)]
                 self.assertTrue(external, "the page loads its UI from a CDN")
                 for tag in external:
@@ -113,10 +113,20 @@ class MainAuthTests(unittest.TestCase):
                 external = re.findall(r'<script src="([^"]+)"', response.text)
                 self.assertEqual(sorted(s for s in scripts if s.startswith("https://")), sorted(external))
                 self.assertNotIn("'unsafe-inline'", scripts)
-                inline = re.findall(r"<script>(.*?)</script>", response.text, re.S)
+                inline = re.findall(r"<script>(.*?)</script\b[^>]*>", response.text, re.S | re.I)
                 for body in inline:
                     digest = base64.b64encode(hashlib.sha256(body.encode("utf-8")).digest()).decode()
                     self.assertIn(f"'sha256-{digest}'", scripts)
+
+    def test_the_docs_pages_policy_hashes_an_inline_script_however_its_tags_are_spelled(self) -> None:
+        # The hashes come from FastAPI's page template. One that spelled its tags in upper case, or closed a script
+        # with "</script >", would otherwise leave Swagger's inline init unhashed, and the browser would refuse it.
+        from app.docs_pages import _policy
+
+        digest = base64.b64encode(hashlib.sha256(b"init()").digest()).decode()
+        for page in ("<SCRIPT>init()</SCRIPT>", "<script>init()</script >", "<Script>init()</sCrIpT\n>"):
+            with self.subTest(page=page):
+                self.assertIn(f"'sha256-{digest}'", _policy(page, [], []))
 
     def test_a_changed_page_template_fails_loudly_rather_than_dropping_the_hash(self) -> None:
         from app.docs_pages import SWAGGER_JS, _with_integrity
