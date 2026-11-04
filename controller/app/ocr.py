@@ -69,7 +69,7 @@ class OCRExtractor:
                 )
         except TesseractNotFoundError:
             return self._error_payload(image_path, "tesseract_not_found")
-        except Exception:  # pragma: no cover - defensive
+        except Exception:
             # The catch-all behind ocr_extraction_failed: its hint says what to check, and this says which applies
             # (a missing temporary directory, a tesseract error, an unreadable image).
             logger.debug("OCR extraction failed for %s", image_path, exc_info=True)
