@@ -1096,3 +1096,69 @@ async def test_activate_tab_of_a_tab_that_closes_during_the_wait_says_it_closed(
             await asyncio.wait_for(activate, timeout=TIMEOUT)
         assert session.page is first and not session.lock.locked()
         await settle(lambda: not pending(), timeout=TIMEOUT)
+
+
+# ── round 5: two guards no test noticed broken (rounds 3 and 4's mutants survived) ──
+
+
+async def test_a_window_a_held_popup_opens_is_judged_by_its_birth_not_refused_at_report(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round 3's rule at report (diagnostics._on_popup asks _opener_refused, not _page_refused): a popup held while
+    its own birth verdict is judged opens a window, reported before that verdict lands, while another tab is
+    refused. The window is not refused at report for its opener's hold; its own birth decides (born clean, as its
+    opener was), and it is activated. No test noticed the rule broken: the opener's read had always landed first."""
+    pages = {**PAGES, "/opens": "<title>opens</title><script>window.open('/second')</script>"}
+    async with browser_env(tmp_path, pages) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        refused = await open_popup(session, f"{env.evil}/")
+        await settle(lambda: env.manager._page_refused(refused), timeout=TIMEOUT)
+        births = env.manager.window_births
+        release = asyncio.Event()
+        original = births._resolve_target_id
+
+        async def held_for_the_opener(page):
+            if "/opens" in page.url:
+                await release.wait()
+            return await original(page)
+
+        monkeypatch.setattr(births, "_resolve_target_id", held_for_the_opener)
+        reported: list = []
+        handler = lambda page: reported.append(page)  # noqa: E731 - Playwright wraps a plain function, not a builtin
+        session.context.on("page", handler)
+        await session.page.evaluate("(u) => { window.open(u) }", f"{env.allowed}/opens")
+        await nav.wait_for(lambda: len(reported) == 2, timeout=TIMEOUT)
+        session.context.remove_listener("page", handler)
+        opener, child = reported
+        assert env.manager.diagnostics.birth_pending(opener) and env.manager.page_provenance.held_for_verdict(opener)
+
+        await asyncio.wait_for(env.manager.activate_tab(session_id, session.context.pages.index(child)), 8.0)
+        assert session.page is child and not env.manager._page_refused(child)
+        assert "two" in json.dumps(await env.manager.observe(session_id, preset="text"))
+        release.set()
+        await settle(lambda: not pending(), timeout=TIMEOUT)
+
+
+async def test_what_a_held_popup_emits_while_refused_for_something_else_stays_out_after_the_agent_clears_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The buffer's own guard (diagnostics._keep_output keeps output aside only while the popup is held only for its
+    verdict; round 4's mutant survived): a held popup refused for something else meanwhile (a commit another tab
+    chose) keeps nothing it emits then, even when the agent's navigate clears it before the clean verdict lands."""
+    async with browser_env(tmp_path, {**PAGES, "/noisy": NOISY}) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        popup, release = await held_noisy_popup(env, session, monkeypatch)
+        env.manager.page_provenance.committed(popup, popup.url, url_refused=False, by_another_page=True)
+        await popup.evaluate("() => console.log('emitted-while-refused')")
+        await asyncio.sleep(0.3)
+        session.page = popup
+        await env.manager.navigate(session_id, f"{env.allowed}/ok")  # the agent's navigate clears it
+        assert not env.manager.page_provenance.refused(popup)
+
+        release.set()
+        await nav.wait_for(lambda: not env.manager.diagnostics.birth_pending(popup), timeout=TIMEOUT)
+        await settle(lambda: not pending(), timeout=TIMEOUT)
+
+        assert not any("emitted-while-refused" in json.dumps(message) for message in session.console_messages)
