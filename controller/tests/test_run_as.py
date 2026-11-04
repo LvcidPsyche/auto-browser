@@ -397,16 +397,19 @@ class FixOwnershipLinuxTests(unittest.TestCase):
                 (self.data / "auth").chmod(0o755)
 
     def test_data_without_o_rx_is_withheld_on_an_error(self) -> None:
-        # R-e: /data itself on the same rule.
-        _tree(self.data, "auth/sub/f")
-        self.data.chmod(0o700)
-        try:
-            with self._failing("sub", errno.EIO):
-                report = self._fix(["auth"])
-        finally:
-            self.data.chmod(0o755)
-        self.assertIn(".", report.withheld)
-        self.assertNotIn(".", report.changed_paths)
+        # R-e and item 2: /data itself on the same rule, 0711 (o+x, no o+r) included.
+        for mode in (0o700, 0o711):
+            with self.subTest(mode=oct(mode)):
+                shutil.rmtree(self.data / "auth", ignore_errors=True)
+                _tree(self.data, "auth/sub/f")
+                self.data.chmod(mode)
+                try:
+                    with self._failing("sub", errno.EIO):
+                        report = self._fix(["auth"])
+                finally:
+                    self.data.chmod(0o755)
+                self.assertIn(".", report.withheld)
+                self.assertNotIn(".", report.changed_paths)
 
     def test_the_cap_stops_lstat_and_listing(self) -> None:
         # Item 8 (P5#3): checked before the lstat; a directory is listed no further than the cap allows.
@@ -667,6 +670,7 @@ class MainLinuxTests(unittest.TestCase):
         out = io.StringIO()
         with redirect_stdout(out), self.assertLogs("app.run_as", level=logging.INFO) as logs:
             code = main(settings=_settings(self.data), data_root=self.data, **kwargs)
+        self.last_records = logs.records
         return code, _lines(out.getvalue()), [r.getMessage() for r in logs.records]
 
     def test_three_strict_lines_then_a_marker_and_a_skipped_second_start(self) -> None:
@@ -759,6 +763,11 @@ class MainLinuxTests(unittest.TestCase):
         self.assertTrue(any("entries examined so far" in m for m in messages), joined)
         self.assertFalse(any("new\nline" in m for m in messages))
 
+    def test_a_backslash_in_a_name_is_escaped_too(self) -> None:
+        # P5#8: always escaped, so a name spelled like an escape cannot pass for one.
+        self.assertEqual(run_as._escaped("a\\nb"), "a\\\\nb")
+        self.assertEqual(run_as._escaped("plain"), "plain")
+
     def test_two_starts_an_unreadable_own_dir_writes_the_marker(self) -> None:
         if ME in (0, BROWSER_UID):
             self.skipTest("needs a data dir owned by an ordinary uid")
@@ -773,7 +782,10 @@ class MainLinuxTests(unittest.TestCase):
         with patch.object(run_as, "_open_dir_nofollow", unreadable):
             _, _, messages = self._main(run_as="auto")
         self.assertTrue((self.data / MARKER_NAME).is_file())
-        self.assertTrue(any("taken as handed over" in m for m in messages), messages)
+        # Item 3: one WARNING per pass, saying nothing inside was looked at.
+        unchecked = [r for r in self.last_records if "taken as handed over without looking inside" in r.getMessage()]
+        self.assertEqual(len(unchecked), 1, messages)
+        self.assertEqual(unchecked[0].levelno, logging.WARNING)
         _, _, messages = self._main(run_as="auto")
         self.assertTrue(any("handed over already" in m for m in messages))
 
