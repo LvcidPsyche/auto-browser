@@ -50,7 +50,8 @@ _POLICY = (
     "connect-src 'self'; img-src 'self' data:; font-src 'self' data:; worker-src blob:; "
     "style-src {styles} 'unsafe-inline'; script-src {scripts}"
 )
-_INLINE_SCRIPT = re.compile(r"<script>(.*?)</script>", re.S)
+# Tags in any case, and any end tag the browser accepts ("</script >"), so no inline init goes unhashed.
+_INLINE_SCRIPT = re.compile(r"<script>(.*?)</script\b[^>]*>", re.S | re.I)
 
 
 def _policy(html: str, scripts: list[str], styles: list[str]) -> str:
