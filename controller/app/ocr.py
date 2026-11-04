@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,8 @@ from typing import Any
 import pytesseract
 from PIL import Image
 from pytesseract import Output, TesseractNotFoundError
+
+logger = logging.getLogger(__name__)
 
 # Tesseract confidence below this is treated as unreliable for the model-facing
 # excerpt. It deliberately does NOT gate `redaction_blocks` — see _extract_sync.
@@ -67,6 +70,9 @@ class OCRExtractor:
         except TesseractNotFoundError:
             return self._error_payload(image_path, "tesseract_not_found")
         except Exception:  # pragma: no cover - defensive
+            # The catch-all behind ocr_extraction_failed: its hint says what to check, and this says which applies
+            # (a missing temporary directory, a tesseract error, an unreadable image).
+            logger.debug("OCR extraction failed for %s", image_path, exc_info=True)
             return self._error_payload(image_path, "ocr_extraction_failed")
 
         blocks: list[dict[str, Any]] = []
