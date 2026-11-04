@@ -1,19 +1,35 @@
 #!/usr/bin/env bash
-# Every call is recorded in FAKE_SETPRIV_LOG. `setpriv ... test <op> <path>` is one of the entrypoint's checks
-# under the drop: -x answers FAKE_SEARCHABLE, -e the real existence, -r FAKE_READABLE (1 by default each). Any
-# other call is the final exec, echoed.
+# Every call is recorded in FAKE_SETPRIV_LOG. A call through the drop chain (`setpriv <drop> python -m app.drop_caps
+# -- <command>`) runs one of the entrypoint's own commands, answered here:
+#   true                                    the drop check: FAKE_DROP_RC (0 by default)
+#   test -x|-e|-r <path>                     FAKE_SEARCHABLE, the real existence, FAKE_READABLE (1 by default each)
+#   python -m app.api_token --file-to-read   FAKE_FILE_TO_READ (default <CONTROLLER_DATA_ROOT>/api-token; set it
+#                                            empty for "reads none"), or exit FAKE_HELPER_RC when set
+# Any other call is the final exec, echoed.
 echo "$*" >> "${FAKE_SETPRIV_LOG:-/dev/null}"
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
-  if [ "${args[i]}" = test ]; then
-    op="${args[i+1]}"
-    path="${args[i+2]}"
-    case "$op" in
-      -x) [ "${FAKE_SEARCHABLE:-1}" = 1 ] ;;
-      -e) [ -e "$path" ] ;;
-      -r) [ "${FAKE_READABLE:-1}" = 1 ] ;;
+  if [ "${args[i]}" = "--" ]; then
+    cmd=("${args[@]:i+1}")
+    case "${cmd[0]}" in
+      true) exit "${FAKE_DROP_RC:-0}" ;;
+      test)
+        case "${cmd[1]}" in
+          -x) [ "${FAKE_SEARCHABLE:-1}" = 1 ] ;;
+          -e) [ -e "${cmd[2]}" ] ;;
+          -r) [ "${FAKE_READABLE:-1}" = 1 ] ;;
+        esac
+        exit $?
+        ;;
+      python)
+        if [ "${cmd[2]}" = app.api_token ]; then
+          if [ -n "${FAKE_HELPER_RC:-}" ]; then exit "$FAKE_HELPER_RC"; fi
+          printf '%s\n' "${FAKE_FILE_TO_READ-${CONTROLLER_DATA_ROOT:-/data}/api-token}"
+          exit 0
+        fi
+        ;;
     esac
-    exit $?
+    break
   fi
 done
 echo "EXEC setpriv $*"

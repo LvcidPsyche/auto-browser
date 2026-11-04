@@ -26,6 +26,7 @@ import logging
 import os
 import secrets
 import stat
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +63,7 @@ def ensure_api_credential(settings: Any) -> None:
 
     loopback = resolve_bind_scope(settings) == BIND_SCOPE_LOOPBACK
     may_generate = loopback and not settings.is_production
-    if may_generate and tokenless_loopback_allowed(settings):
+    if file_to_read(settings) is None:
         logger.warning(
             "API_ALLOW_TOKENLESS_LOOPBACK=true: serving loopback without a token; %s is neither read nor written",
             path,
@@ -92,6 +93,30 @@ def ensure_api_credential(settings: Any) -> None:
         _permissions_note(),
         _fingerprint(token),
     )
+
+
+def file_to_read(settings: Any) -> Path | None:
+    """The token file ensure_api_credential reads (or generates), or None when it reads none: an environment token
+    (API_BEARER_TOKEN, API_BEARER_TOKENS), or tokenless loopback (loopback bind, not production, the setting on).
+    entrypoint.sh asks this through `python -m app.api_token --file-to-read`, so its pre-check follows the controller."""
+    if credentials_for(settings):
+        return None
+    loopback = resolve_bind_scope(settings) == BIND_SCOPE_LOOPBACK
+    if loopback and not settings.is_production and tokenless_loopback_allowed(settings):
+        return None
+    return Path(settings.api_token_file)
+
+
+def main(argv: list[str]) -> int:
+    """`python -m app.api_token --file-to-read`: print the path the controller would read, or nothing."""
+    if argv[1:] != ["--file-to-read"]:
+        print("usage: python -m app.api_token --file-to-read", file=sys.stderr)
+        return 64
+    from .config import Settings
+
+    path = file_to_read(Settings())
+    print("" if path is None else str(path))
+    return 0
 
 
 def _permissions_note() -> str:
@@ -195,3 +220,7 @@ def _match_parent_owner(path: Path) -> None:
 
 def _fingerprint(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
