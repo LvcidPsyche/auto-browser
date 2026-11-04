@@ -155,7 +155,7 @@ class EntrypointCapabilityTests(unittest.TestCase):
         )
         self.assertEqual(code, 0, out)
         checks = [line for line in log.read_text(encoding="utf-8").splitlines() if " test " in line]
-        self.assertEqual(len(checks), 4, checks)  # -e and -x the directory, -e and -r the token
+        self.assertEqual(len(checks), 4, checks)  # -e and -x the directory (it exists here), -e and -r the token
         for line in checks:
             self.assertTrue(line.startswith("--inh-caps=-all --ambient-caps=-all --no-new-privs --bounding-set=-all"))
             self.assertIn(f"{DROP_CHAIN} test ", line)
@@ -321,7 +321,8 @@ class EntrypointCapabilityTests(unittest.TestCase):
         self.assertEqual(code, 70, out)
         self.assertIn("CONTROLLER_RUN_AS must be auto or root", out)
         # P4#10: exactly what app.run_as accepts (strip().lower()): echo's flags and inner spaces are not.
-        for bad in ("-n", "-e", "ro ot"):
+        # F8: the no-break spaces that Python's .strip() removes and bash's [[:space:]] keeps fail closed here.
+        for bad in ("-n", "-e", "ro ot", "\u00a0root", "root\u202f"):
             with self.subTest(value=bad):
                 code, out = run_entrypoint(ALL_DROPPED, ALL_DROPPED, env={"CONTROLLER_RUN_AS": bad})
                 self.assertEqual(code, 70, out)

@@ -999,8 +999,8 @@ class DockerBrowserNodeProvisioner:
 
     @staticmethod
     def _container_logs(container) -> str:
-        """The container's last 20 log lines for an error: its own output, never raw (S5#5), whichever error carries
-        it, the exit's or the timeout's (O6-1)."""
+        """The container's last 20 log lines for an error, on one line: its own output, never raw (S5#5), whichever
+        error carries it, the exit's or the timeout's (O6-1)."""
         try:
             output = container.logs(tail=20)
         except Exception:

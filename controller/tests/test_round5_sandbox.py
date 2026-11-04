@@ -249,11 +249,13 @@ class GateScriptTests(unittest.TestCase):
         path = {"PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", "")}
         began = datetime.now(UTC).replace(microsecond=0)
         self.assertEqual(self._run(409, "--expect", "409", "--log-must-say", "the gate said no", env=path), 0)
-        # S5#12, S6#5: only the lines logged since the check began, by an RFC3339 UTC time no earlier than its start.
+        ended = datetime.now(UTC)
+        # S5#12, S6#5: only the lines logged since the check began, by an RFC3339 UTC time taken during the check.
         words = argv_file.read_text(encoding="utf-8").split()
         self.assertEqual(words[:3], ["compose", "logs", "--since"], words)
         self.assertRegex(words[3], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
-        self.assertGreaterEqual(datetime.strptime(words[3], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC), began)
+        since = datetime.strptime(words[3], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        self.assertTrue(began <= since <= ended, (began, since, ended))
         self.assertEqual(words[4:], ["controller"], words)
         self.assertEqual(self._run(409, "--expect", "409", "--log-must-say", "something else", env=path), 1)
 

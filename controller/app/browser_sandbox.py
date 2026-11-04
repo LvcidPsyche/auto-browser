@@ -172,8 +172,8 @@ def verified_on(state: dict[str, Any] | None) -> bool:
     """'on' with the evidence sandbox.mjs writes: at least one renderer, each in its own user namespace, and either
     /proc's seccomp filter counts (one per renderer, each above the browser's) or chrome://sandbox's own report (old
     kernels). A bare 'on', or renderers alone, is not enough. Stricter than scripts/assert_browser_sandbox.py, which
-    checks the same evidence (not the setting) but not its shape: here the counts must be plain non-negative ints,
-    one per renderer, at most 64."""
+    checks the same evidence (not the setting) but not its shape: here the filter counts must be plain non-negative
+    ints, one per renderer, and at most 64 of them."""
     if not state or state.get("sandbox") != "on":
         return False
     verified = state.get("verified") or {}
