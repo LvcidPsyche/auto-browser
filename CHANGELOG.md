@@ -4,6 +4,15 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-11-04
+
+A hardening release over 1.13.1. The controller no longer runs as root, and Chromium runs with its own sandbox in
+browser-node and in every isolated container, so a renderer exploit no longer starts with every syscall the
+container allows. `BROWSER_SANDBOX=on` refuses any session whose browser is not verifiably sandboxed. Read the
+upgrade notes first: the controller changes user and hands its data over at the first start, and browser-node runs
+under a custom seccomp profile. The controller and browser-node images change; the client, LangChain and MCP bridge
+packages change only in version.
+
 ### Upgrade notes
 
 - **A default compose install now runs browser-node under a custom seccomp profile that lets the container create
