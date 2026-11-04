@@ -154,7 +154,7 @@ async def test_activate_tab_of_a_popup_whose_read_fails_returns_the_unjudged_ref
 async def test_a_window_born_while_the_watcher_was_lost_is_closed_by_the_replacement(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The orchestrator's O3 leak: a refused page's window (javascript:void(0), never reported) born during the
+    """Review finding O3: a refused page's window (javascript:void(0), never reported) born during the
     loss; the agent's navigate clears the opener while no watcher sweeps; the replacement then judged the window
     by its clean opener and it leaked. Now the replacement enters it from the discovery replay as unjudged and
     closes it once nothing counts: nothing it held reaches list_tabs, observe or the console."""
@@ -240,7 +240,7 @@ async def test_a_reported_clean_popups_window_after_a_replacement_is_not_refused
 
 
 async def test_creates_that_fail_after_the_watcher_registered_them_are_forgotten(tmp_path: Path) -> None:
-    """The orchestrator's O1b and the reviewers' R1: a start URL that redirects off the list, and a tunnel that
+    """Review findings O1b and R1: a start URL that redirects off the list, and a tunnel that
     fails, both after watch(). The registry and the watcher's sessions stay at their baseline."""
     pages = {**PAGES, "/redir": nav.redirect("{EVIL}/")}
     async with browser_env(tmp_path, pages) as env:
@@ -452,7 +452,7 @@ async def test_an_open_tab_tab_costs_one_cdp_session(tmp_path: Path) -> None:
 async def test_nothing_a_held_popup_emits_is_kept_until_its_verdict_which_decides_it(
     tmp_path: Path, monkeypatch, outcome: str
 ) -> None:
-    """The orchestrator's O2: the hold from a popup's report to its birth verdict, made observable by holding
+    """Review finding O2: the hold from a popup's report to its birth verdict, made observable by holding
     the targetId read on an event. While held, what the popup logs and throws is not in the session's output,
     it is not read, and its title is not listed. A clean verdict frees the page and appends what it emitted
     meanwhile (round-4 R5: a legitimate popup's load-time output reached the agent before the hold existed);

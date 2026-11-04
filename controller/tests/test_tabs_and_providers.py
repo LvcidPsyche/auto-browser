@@ -150,7 +150,7 @@ class BrowserTabManagementTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.activate_tab(self.session.id, 1)
 
     async def test_activate_tab_returns_within_the_bound_when_the_verdict_never_comes(self) -> None:
-        """The orchestrator's open item: a held popup whose verdict never comes. activate_tab returns within
+        """A review's open item: a held popup whose verdict never comes. activate_tab returns within
         BIRTH_VERDICT_WAIT_SECONDS, with the popup still held and refused (fail closed), not hung. Round-4 RB3: its
         refusal is the unjudged one, not the host refusal ('on a host ALLOWED_HOSTS does not allow, or came from
         one'): the popup is on an allowed host, and nothing is known against it."""
