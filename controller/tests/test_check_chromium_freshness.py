@@ -387,6 +387,14 @@ class Round3FreshnessTests(unittest.TestCase):
         self.assertIn("WARNING: could not write the job summary", out.getvalue())
         self.assertNotIn("Traceback", out.getvalue())
 
+    def test_a_later_build_in_the_same_major_warns(self) -> None:
+        ok, _lines, warning = self.check.evaluate_chromium(
+            "1.62.0", "156.0.8078.4", "1.62.0", "156.0.8078.4", "156.0.8101.2"
+        )
+        self.assertTrue(ok)
+        self.assertIsNotNone(warning)
+        self.assertIn("a later build than the bundled Chromium 156.0.8078.4", warning)
+
     def test_the_warning_says_patch_numbers(self) -> None:
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
