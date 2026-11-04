@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# The owner of /data as the entrypoint reads it: FAKE_DATA_OWNER, else the real stat.
+if [ -n "${FAKE_DATA_OWNER:-}" ]; then echo "$FAKE_DATA_OWNER"; exit 0; fi
+exec /usr/bin/stat "$@"
