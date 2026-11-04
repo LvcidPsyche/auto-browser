@@ -958,7 +958,8 @@ class DockerBrowserNodeProvisioner:
             await asyncio.to_thread(container.reload)
             status = str(getattr(container, "status", "") or container.attrs.get("State", {}).get("Status", ""))
             if status in {"exited", "dead"}:
-                logs = self._container_logs(container)
+                # A call to the daemon, like the reload: off the event loop.
+                logs = await asyncio.to_thread(self._container_logs, container)
                 # A browser that refused to run unsandboxed (BROWSER_SANDBOX=on) says why in its state file, which
                 # the cleanup below deletes with the profile dir: read it first.
                 state = read_sandbox_state(endpoint_file.with_name(BROWSER_SANDBOX_STATE_FILENAME))
@@ -975,7 +976,7 @@ class DockerBrowserNodeProvisioner:
             if endpoint:
                 return endpoint
             await asyncio.sleep(0.25)
-        logs = self._container_logs(container)
+        logs = await asyncio.to_thread(self._container_logs, container)
         raise RuntimeError(f"Timed out waiting for isolated browser endpoint file {endpoint_file}. {logs}")
 
     def _cleanup_pending_container(self, pending: PendingBrowserProvision) -> None:

@@ -195,8 +195,22 @@ class PrintableTests(unittest.TestCase):
         self.assertEqual(_printable("a\ud800bc\U000e0100d️e\U0010ffffz"), "a b c d e z")
 
     def test_invisible_fillers_and_selectors_are_spaces_too(self) -> None:
-        # S6#14: combining marks and letters by category, but invisible.
-        for ch in ("\u180b", "\u180c", "\u180d", "\u180f", "\u034f", "\u115f", "\u1160", "\u3164", "\uffa0"):
+        # S6#14: combining marks and letters by category, but invisible. Closure 7 #4: the Khmer inherent vowels and
+        # the Braille blank too.
+        for ch in (
+            "\u180b",
+            "\u180c",
+            "\u180d",
+            "\u180f",
+            "\u034f",
+            "\u115f",
+            "\u1160",
+            "\u3164",
+            "\uffa0",
+            "\u17b4",
+            "\u17b5",
+            "\u2800",
+        ):
             with self.subTest(code=f"U+{ord(ch):04X}"):
                 self.assertEqual(_printable(f"a{ch}b"), "a b")
 
@@ -328,8 +342,17 @@ class WordingTests(unittest.TestCase):
                 reload=lambda: None,
                 logs=lambda tail=20: "start\n\x1b[31mFORGED\x07 \u202edrow\n".encode(),
             )
-            with self.assertRaises(RuntimeError) as raised:
+            # Closure 7 #8: the log tail is a call to the daemon, so it is fetched off the event loop.
+            import app.session_isolation as isolation
+
+            with (
+                patch.object(isolation.asyncio, "to_thread", wraps=isolation.asyncio.to_thread) as to_thread,
+                self.assertRaises(RuntimeError) as raised,
+            ):
                 asyncio.run(provisioner._wait_for_ws_endpoint(container, directory / "browser-ws-endpoint.txt"))
+            self.assertIn(
+                DockerBrowserNodeProvisioner._container_logs, [call.args[0] for call in to_thread.call_args_list]
+            )
         text = str(raised.exception)
         self.assertIn("Timed out waiting for isolated browser endpoint file", text)
         self.assertIn("FORGED", text)

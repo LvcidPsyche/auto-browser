@@ -205,6 +205,23 @@ async def test_an_ocr_run_without_a_temp_dir_says_what_it_needs(
     assert "which ships tesseract" not in warning
 
 
+def test_a_failed_ocr_run_logs_its_cause(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    # ocr_extraction_failed is the OCR call's catch-all, and its hint says what to check: the exception itself is
+    # logged (DEBUG, with its traceback), so an operator can see which check applies.
+    image = tmp_path / "shot.png"
+    Image.new("RGB", (40, 20), "white").save(image)
+    extractor = OCRExtractor(enabled=True, language="eng", max_blocks=20, text_limit=2000)
+
+    with patch("app.ocr.pytesseract.image_to_data", side_effect=RuntimeError("tesseract exited 1: boom")):
+        with caplog.at_level(logging.DEBUG, logger="app.ocr"):
+            payload = extractor._extract_sync(image)
+
+    assert payload["error"] == "ocr_extraction_failed"
+    (record,) = [r for r in caplog.records if r.name == "app.ocr"]
+    assert record.levelno == logging.DEBUG
+    assert record.exc_info is not None and "boom" in str(record.exc_info[1])
+
+
 async def test_the_warning_is_logged_once_per_reason(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     # Item 18 keeps once per reason: two reasons give two WARNINGs, each with its own hint; repeats give none.
     service = _service(tmp_path)

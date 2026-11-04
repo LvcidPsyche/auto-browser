@@ -53,15 +53,17 @@ def _printable(text: str) -> str:
 
     C0, DEL and C1; Unicode format (Cf: bidi overrides, zero-width), line (Zl) and paragraph (Zp) separators,
     surrogates (Cs: a lone one makes the JSON response fail to encode), private-use (Co) and unassigned (Cn) code
-    points; the variation selectors (U+FE00-FE0F, U+E0100-E01EF); and the invisible marks and letters U+034F,
-    U+115F, U+1160, U+180B-180D, U+180F, U+3164 and U+FFA0."""
+    points; the variation selectors (U+FE00-FE0F, U+E0100-E01EF); and the invisible marks, letters and symbols
+    U+034F, U+115F, U+1160, U+17B4, U+17B5, U+180B-180D, U+180F, U+2800, U+3164 and U+FFA0."""
     return "".join(" " if _unprintable(ch) else ch for ch in text)
 
 
 _HIDDEN_CATEGORIES = frozenset({"Cf", "Zl", "Zp", "Cs", "Co", "Cn"})
-# Invisible although their category is a mark or a letter (S6#14): the combining grapheme joiner, the Hangul fillers
-# and the Mongolian free variation selectors.
-_HIDDEN_CODE_POINTS = frozenset({0x034F, 0x115F, 0x1160, 0x180B, 0x180C, 0x180D, 0x180F, 0x3164, 0xFFA0})
+# Invisible although their category is a mark, a letter or a symbol (S6#14): the combining grapheme joiner, the Hangul
+# fillers, the Khmer inherent vowels, the Mongolian free variation selectors and the Braille blank.
+_HIDDEN_CODE_POINTS = frozenset(
+    {0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180B, 0x180C, 0x180D, 0x180F, 0x2800, 0x3164, 0xFFA0}
+)
 
 
 def _unprintable(ch: str) -> bool:
