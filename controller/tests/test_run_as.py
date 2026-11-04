@@ -49,11 +49,12 @@ MY_GID = os.getgid() if hasattr(os, "getgid") else -1
 
 
 class DecideUserTests(unittest.TestCase):
-    def test_nobody_owned_data_runs_as_the_controller_user(self) -> None:
-        # P3#12: 65534 is how root-squashed or NFS data looks, not a user to become.
+    def test_nobody_owned_data_runs_as_its_owner(self) -> None:
+        # P4#5: root-squashed NFS shows root's files as 65534's, and root's chown cannot work there: 65534 can read
+        # them, 10002 cannot. Its group (nogroup) falls back to 10002's.
         decision = decide_user("auto", data_root=Path("/data"), owner_uid=65534, owner_gid=65534)
-        self.assertEqual((decision.uid, decision.gid), (CONTROLLER_UID, CONTROLLER_UID))
-        self.assertIn("root-squash", decision.reason)
+        self.assertEqual((decision.uid, decision.gid), (65534, CONTROLLER_UID))
+        self.assertIn("nogroup", decision.reason)
 
     def test_a_host_user_owned_data_dir_runs_as_that_user(self) -> None:
         decision = decide_user(
@@ -359,26 +360,47 @@ class FixOwnershipLinuxTests(unittest.TestCase):
 
         return patch.object(run_as, "_open_dir_nofollow", opener)
 
-    def test_a_directory_whose_subtree_errored_is_not_handed_over(self) -> None:
-        # P3#1: it stays root's (reachable for root as its owner), so the next start retries the subtree.
+    def test_a_stuck_entry_under_a_0700_parent_keeps_the_parent(self) -> None:
+        # P4#1: handing a 0700 directory over would lock root (without DAC capabilities) out of its stuck entry.
         _tree(self.data, "auth/sub/f", "auth/top.json")
+        (self.data / "auth").chmod(0o700)
         with self._failing("sub", errno.EIO):
             report = self._fix(["auth"])
         self.assertTrue(any("auth/sub" in e for e in report.errors), report.errors)
         self.assertIn("auth/top.json", report.changed_paths)
         self.assertNotIn("auth", report.changed_paths)
-        self.assertNotIn(".", report.changed_paths, "nor /data itself")
+        self.assertIn("auth", report.withheld)
+        self.assertIn(".", report.changed_paths, "/data itself is handed over: it keeps o+x")
         again = self._fix(["auth"])
         self.assertEqual(again.errors, [])
         self.assertIn("auth", again.changed_paths)
 
-    def test_an_unchecked_skip_is_recorded(self) -> None:
+    def test_a_stuck_entry_under_a_0755_parent_does_not_keep_it(self) -> None:
+        _tree(self.data, "auth/sub/f", "auth/top.json")
+        (self.data / "auth").chmod(0o755)
+        with self._failing("sub", errno.EIO):
+            report = self._fix(["auth"])
+        self.assertTrue(report.errors)
+        self.assertIn("auth", report.changed_paths)
+        self.assertIn(".", report.changed_paths)
+        self.assertEqual(report.withheld, [])
+
+    def test_an_unreadable_own_dir_counts_as_handed_over(self) -> None:
+        # P4#3: already the user's (a mkdtemp-style 0700 dir): taken as done, recorded, not a skip or an error.
         _tree(self.data, "auth/p.json")
         with self._failing("auth", errno.EACCES):
             report = self._fix(["auth"])
         self.assertEqual(report.errors, [])
-        self.assertEqual(len(report.unchecked), 1)
-        self.assertIn("its contents were not checked", report.unchecked[0])
+        self.assertEqual(report.unchecked, ["auth"])
+        self.assertNotIn("auth", " ".join(report.skipped))
+
+    def test_a_pass_stops_at_its_entry_cap(self) -> None:
+        # D15: an overflow is an error (no marker), the walk does not go on.
+        _tree(self.data, *(f"artifacts/f{i}" for i in range(30)))
+        report = self._fix(["artifacts"], max_entries=10)
+        self.assertTrue(report.truncated)
+        self.assertTrue(any("more than 10 entries" in e for e in report.errors), report.errors)
+        self.assertLessEqual(len(report.changed_paths), 10)
 
     def test_a_tree_deeper_than_the_bound_is_an_error_not_a_crash(self) -> None:
         # P3#5: 1200 levels is past Python's recursion limit; the walk stops at its bound and reports it.
@@ -421,7 +443,9 @@ class FixOwnershipLinuxTests(unittest.TestCase):
         mountinfo = f"36 35 0:1 / {self.data.as_posix()}/a rw - tmpfs tmpfs rw\n"
         report = self._fix(["a/b"], mountinfo=mountinfo)
         self.assertNotIn("a/b/host-file", report.changed_paths)
-        self.assertTrue(any("a mount point" in e for e in report.errors), report.errors)
+        # P4#9: a skip, like a top that is itself a mount point, not an error.
+        self.assertEqual(report.errors, [])
+        self.assertTrue(any("a mount point" in entry for entry in report.skipped), report.skipped)
 
     def test_an_unreadable_directory_already_the_users_is_skipped_not_an_error(self) -> None:
         # Root with only CHOWN/SETUID/SETGID cannot open a 0700 directory it handed over on an earlier start.
@@ -436,7 +460,8 @@ class FixOwnershipLinuxTests(unittest.TestCase):
         with patch.object(run_as, "_open_dir_nofollow", denied):
             report = self._fix(["auth"])
         self.assertEqual(report.errors, [])
-        self.assertTrue(any(s.startswith("auth: already uid") for s in report.skipped), report.skipped)
+        # Taken as handed over since round 5 (P4#3): recorded, not a skip.
+        self.assertEqual(report.unchecked, ["auth"])
         with patch.object(run_as, "_open_dir_nofollow", denied):
             other = fix_ownership(self.data, [self.data / "auth"], ME + 1, MY_GID, from_uids=frozenset({ME}))
         self.assertTrue(other.errors, "a directory of another uid that cannot be opened stays an error")
@@ -452,6 +477,17 @@ class FixOwnershipLinuxTests(unittest.TestCase):
             write_marker(self.data, 10002, 10002)
         fork.assert_called_once()
         self.assertFalse((self.data / MARKER_NAME).exists(), "the parent (root) wrote it itself")
+
+    @unittest.skipUnless(hasattr(os, "fork"), "no fork")
+    def test_a_child_killed_by_a_signal_says_so(self) -> None:
+        # P4#14: waitstatus_to_exitcode gives -signum; not an errno.
+        with (
+            patch.object(run_as.os, "geteuid", return_value=0),
+            patch.object(run_as.os, "fork", return_value=4242),
+            patch.object(run_as.os, "waitpid", return_value=(4242, 9)),
+            self.assertRaisesRegex(OSError, "killed by signal 9"),
+        ):
+            write_marker(self.data, 10002, 10002)
 
     @unittest.skipUnless(hasattr(os, "fork"), "no fork")
     def test_an_unexpected_child_failure_is_not_reported_as_eperm(self) -> None:
@@ -474,7 +510,7 @@ class FixOwnershipLinuxTests(unittest.TestCase):
             report = self._fix(["auth", "jobs"])
         finally:
             (self.data / "auth").chmod(0o755)
-        # Already this uid's and unreadable: an unchecked skip (no marker), not a crash.
+        # Already this uid's and unreadable: taken as handed over (round 5), not a crash.
         self.assertTrue(any("auth" in entry for entry in report.errors + report.unchecked), report)
         self.assertIn("jobs/j.json", report.changed_paths)  # the next top still ran
 
@@ -492,8 +528,8 @@ class FixOwnershipLinuxTests(unittest.TestCase):
 
     def test_a_top_with_dot_dot_is_refused(self) -> None:
         report = fix_ownership(self.data, [self.data / ".." / "outside"], ME, MY_GID, from_uids=frozenset({ME}))
-        # An error: /data itself is not handed over either (round 4, P3#1), so the next start retries.
-        self.assertEqual(report.changed_paths, [])
+        # An error, but /data keeps o+x: it is handed over (round 5, P4#1).
+        self.assertEqual(report.changed_paths, ["."])
         self.assertTrue(any("not a plain path" in error for error in report.errors), report.errors)
 
     def test_a_deeper_configured_path_needs_root_owned_parents(self) -> None:
@@ -501,7 +537,7 @@ class FixOwnershipLinuxTests(unittest.TestCase):
             self.skipTest("as root the parent is root-owned")
         _tree(self.data, "x/artifacts/a.png")
         report = self._fix(["x/artifacts"])
-        self.assertEqual(sorted(report.changed_paths), [])  # an error: /data is not handed over either
+        self.assertEqual(sorted(report.changed_paths), ["."])  # an error, but /data keeps o+x (round 5)
         self.assertTrue(any("not a root-owned directory" in e for e in report.errors), report.errors)
 
 
@@ -585,25 +621,54 @@ class MainLinuxTests(unittest.TestCase):
         _, _, messages = self._main(run_as="auto")
         self.assertTrue(any("handed over already" in m for m in messages))
 
-    def test_no_marker_until_a_start_without_errors_or_unchecked_skips(self) -> None:
-        # P3#1, two starts: an error, then an unchecked skip, write no marker; a clean start does.
+    def test_two_starts_a_stuck_entry_then_a_clean_pass(self) -> None:
+        # P4#1/P4#3, two starts each: an error withholds the marker (one ERROR summary says it repeats); an unreadable
+        # own dir does not.
         if ME in (0, BROWSER_UID):
             self.skipTest("needs a data dir owned by an ordinary uid")
         _tree(self.data, "artifacts/run/sub/f")
         real = run_as._open_dir_nofollow
-        for name, code in (("sub", errno.EIO), ("artifacts", errno.EACCES)):
 
-            def opener(entry, dir_fd, name=name, code=code):
-                if entry == name:
-                    raise OSError(code, os.strerror(code))
-                return real(entry, dir_fd)
+        def stuck(entry, dir_fd):
+            if entry == "sub":
+                raise OSError(errno.EIO, os.strerror(errno.EIO))
+            return real(entry, dir_fd)
 
-            with patch.object(run_as, "_open_dir_nofollow", opener):
-                _, _, messages = self._main(run_as="auto")
-            self.assertFalse((self.data / MARKER_NAME).exists(), (name, messages))
-        self.assertTrue(any("its contents were not checked" in m for m in messages), messages)
+        with patch.object(run_as, "_open_dir_nofollow", stuck):
+            _, _, messages = self._main(run_as="auto")
+        self.assertFalse((self.data / MARKER_NAME).exists())
+        summary = [m for m in messages if m.startswith("No marker written")]
+        self.assertEqual(len(summary), 1, messages)
+        self.assertIn("retried on every start until they are fixed", summary[0])
         self._main(run_as="auto")
         self.assertTrue((self.data / MARKER_NAME).is_file())
+
+    def test_two_starts_an_unreadable_own_dir_writes_the_marker(self) -> None:
+        if ME in (0, BROWSER_UID):
+            self.skipTest("needs a data dir owned by an ordinary uid")
+        _tree(self.data, "auth/.import-x1/p.json")
+        real = run_as._open_dir_nofollow
+
+        def unreadable(entry, dir_fd):
+            if entry == ".import-x1":
+                raise OSError(errno.EACCES, os.strerror(errno.EACCES))
+            return real(entry, dir_fd)
+
+        with patch.object(run_as, "_open_dir_nofollow", unreadable):
+            _, _, messages = self._main(run_as="auto")
+        self.assertTrue((self.data / MARKER_NAME).is_file())
+        self.assertTrue(any("taken as handed over" in m for m in messages), messages)
+        _, _, messages = self._main(run_as="auto")
+        self.assertTrue(any("handed over already" in m for m in messages))
+
+    def test_main_warns_about_nobody_owned_data(self) -> None:
+        with (
+            patch.object(run_as.os, "stat", return_value=os.stat_result((0o40755, 0, 0, 2, 65534, 65534, 0, 0, 0, 0))),
+            patch.object(run_as, "read_marker", return_value=marker_bytes(65534, CONTROLLER_UID)),
+        ):
+            _, lines, messages = self._main(run_as="auto")
+        self.assertIn("RUN_UID=65534", lines)
+        self.assertTrue(any("root-squashed" in m for m in messages), messages)
 
     def test_a_non_utf8_marker_rescans_instead_of_crashing(self) -> None:
         if ME in (0, BROWSER_UID):

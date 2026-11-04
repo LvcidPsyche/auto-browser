@@ -69,10 +69,11 @@ if (( ((16#$cap_eff >> 7) & 1) == 0 || ((16#$cap_eff >> 6) & 1) == 0 )); then
   data_root="${CONTROLLER_DATA_ROOT:-/data}"
   data_owner="$(stat -c %u "$data_root" 2>/dev/null || true)"
   if [[ "$data_owner" =~ ^[0-9]+$ ]] && (( data_owner != 0 )); then
-    # Never browser-node's uid (10001), nor nobody (65534, root-squash): the controller's own user then.
+    # Never browser-node's uid (10001): the controller's own user then. Nobody (65534, root-squashed NFS) is the uid
+    # that can read such data, as app.run_as decides too.
     as_uid="$data_owner"
     chown_hint=""
-    if (( data_owner == 10001 || data_owner == 65534 )); then
+    if (( data_owner == 10001 )); then
       as_uid=10002
       chown_hint=" (chown ./data to 10002 first)"
     fi

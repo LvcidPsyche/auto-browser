@@ -195,13 +195,14 @@ class EntrypointCapabilityTests(unittest.TestCase):
         self.assertEqual(code, 70, out)
         self.assertIn("secrets/token", out)
 
-    def test_a_nobody_owned_data_dir_points_to_10002(self) -> None:
+    def test_a_nobody_owned_data_dir_points_to_65534(self) -> None:
+        # P4#5: on root-squashed NFS only 65534 can read the data; root's chown cannot work there.
         code, out = run_entrypoint(
             ALL_DROPPED, ALL_DROPPED, data_root=self._data(False), env={"FAKE_DATA_OWNER": "65534"}
         )
         self.assertEqual(code, 0, out)
-        self.assertNotIn('"65534:65534"', out)
-        self.assertIn("chown ./data to 10002", out)
+        self.assertIn('user: "65534:65534"', out)
+        self.assertNotIn("chown ./data to 10002", out)
 
     def test_a_non_root_start_still_gets_no_new_privs(self) -> None:
         # D1: started as a user (compose user:, docker run --user), the entrypoint still execs through setpriv.
