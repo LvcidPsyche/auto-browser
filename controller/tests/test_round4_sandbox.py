@@ -201,6 +201,8 @@ class SnapshotLifetimeTests(_Files, unittest.IsolatedAsyncioTestCase):
             browser=None,
             playwright=SimpleNamespace(chromium=SimpleNamespace(connect=connect, connect_over_cdp=connect_over_cdp)),
             request_gates=SimpleNamespace(attach=attach, release=release),
+            # A reconnect releases the old browser's window-birth watcher with its gate (1.13.1).
+            window_births=SimpleNamespace(release=release),
             sessions={},
             session_lifecycle=SimpleNamespace(_creating=0),
             audit=SimpleNamespace(append=AsyncMock()),
