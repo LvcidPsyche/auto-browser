@@ -35,7 +35,6 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exec setpriv --no-new-privs --inh-caps=-all --ambient-caps=-all "$@"
 fi
 
-
 # The capability sets, read once and strictly: anything but 16 hex digits stops the container (exit 70) rather than
 # letting a failed arithmetic test fall through to a drop that may not happen.
 read_caps() {
@@ -46,7 +45,7 @@ read_caps() {
 }
 cap_eff="$(read_caps CapEff)"
 cap_bnd="$(read_caps CapBnd)"
-# For the WARNING about what the bounding set still holds.
+# For the WARNING about what the container grants at every start (its bounding set at start).
 CAP_NAMES=(chown dac_override dac_read_search fowner fsetid kill setgid setuid setpcap linux_immutable
   net_bind_service net_broadcast net_admin net_raw ipc_lock ipc_owner sys_module sys_rawio sys_chroot sys_ptrace
   sys_pacct sys_admin sys_boot sys_nice sys_resource sys_time sys_tty_config mknod lease audit_write audit_control
@@ -62,10 +61,10 @@ cap_names() {
 has_setpcap=0
 if (( (16#$cap_eff >> 8) & 1 )); then has_setpcap=1; fi
 
-
 # Switching users needs CAP_SETUID (bit 7) and CAP_SETGID (bit 6). Without them (cap_drop ALL, cap_drop [SETUID], a
 # cap_add set without them) the container still starts as uid 0, with no_new_privs and every set but the bounding
-# set emptied (only CAP_SETPCAP can clear that one): the WARNING names what the bounding set still holds.
+# set emptied (only CAP_SETPCAP can clear that one): the WARNING names what the container grants at every start
+# (its bounding set at start).
 if (( ((16#$cap_eff >> 7) & 1) == 0 || ((16#$cap_eff >> 6) & 1) == 0 )); then
   drop=(--inh-caps=-all --ambient-caps=-all --no-new-privs)
   if (( has_setpcap )); then

@@ -6,8 +6,9 @@ usage: check_sandbox_gate.py --expect 200|409 [--isolated] [--log-must-say TEXT]
 --expect 200: a session is created, then closed. Shared mode: the shared browser-node's state names exactly the
               endpoint file's content (the run the controller connected to). --isolated (docker_ephemeral): the
               session container's own state is a verified on with /proc evidence (assert_browser_sandbox.py's rules).
---expect 409: session creation is refused (by the gate: a browser-node that is not a verified "on", or one that
-              refused to start). --log-must-say: and the controller's log (docker compose logs controller) says so.
+--expect 409: session creation is refused by the gate (a browser-node that is not a verified "on"), or by a failed
+              connect to a browser-node that refused to start. --log-must-say: and the controller's log (docker
+              compose logs controller) says so.
 
 The token is read from DIR/api-token and never printed.
 """

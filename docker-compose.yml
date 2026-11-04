@@ -143,8 +143,9 @@ services:
       BROWSER_SANDBOX: ${BROWSER_SANDBOX:-auto}
       # The controller runs as the owner of ./data, or as uid 10002 (the image's
       # controller user) when ./data belongs to root or to browser-node's uid
-      # 10001, and as 65534 for root-squashed data (controller/entrypoint.sh). root restores the old root
-      # controller: not recommended, and readiness warns.
+      # 10001, and as 65534 for root-squashed data (controller/entrypoint.sh).
+      # root restores the old root controller: not recommended, and readiness
+      # warns.
       CONTROLLER_RUN_AS: ${CONTROLLER_RUN_AS:-auto}
       TAKEOVER_URL: ${TAKEOVER_URL:-http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale}
       REMOTE_ACCESS_INFO_PATH: ${REMOTE_ACCESS_INFO_PATH:-/data/tunnels/reverse-ssh.json}

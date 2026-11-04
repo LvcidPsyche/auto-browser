@@ -283,9 +283,9 @@ def browser_sandbox_status(
     """What readiness reports: the shared browser-node's state and each live isolated container's.
 
     `shared` is the connect-time snapshot (BrowserRuntimeService.shared_sandbox, None while not connected), or
-    {"sandbox": "attached"} for a Chrome attached over CDP. In shared mode, without one: a state file beside a missing
-    endpoint file is reported (a browser that refused to start sandboxed writes one and no endpoint), an endpoint file
-    is 'unknown' until the controller connects, and neither is 'unknown' too (nothing has reported yet).
+    {"sandbox": "attached"} for a Chrome attached over CDP. In shared mode, without one: only a refused state file is
+    reported (a browser that refused to start sandboxed writes one and no endpoint), an endpoint file is 'unknown'
+    until the controller connects, and neither is 'unknown' too (nothing has reported yet).
 
     In docker_ephemeral mode no session runs on the shared node: its line is read from its state file, as before the
     snapshot, and is informational (browser_sandbox_check never counts it)."""

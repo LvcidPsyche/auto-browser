@@ -178,7 +178,7 @@ from a pre-release) is given to that user. The walk holds directory file descrip
 to its directory without following links, so swapping a directory for a symlink mid-walk cannot lead it out of the
 tree; each directory is handed over after its contents, through the descriptor already open, so root never locks
 itself out of a 0700 directory mid-walk. When something under a directory fails, the directory keeps its owner only
-if handing it over would lock root out of it (no o+x): the next start can then still reach and retry what failed.
+if handing it over would lock root out of it (not o+rx): the next start can then still reach and retry what failed.
 `/data` itself is otherwise handed over, so one stuck entry never keeps the controller from writing into it. The walk
 goes at most 200 levels below each configured path, and 2,000,000 entries in a pass (beyond either is an error), and
 logs its progress every 10,000 entries. It skips every mount point under `/data`, and a configured path whose
