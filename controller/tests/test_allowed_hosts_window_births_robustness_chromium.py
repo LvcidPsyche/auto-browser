@@ -884,3 +884,165 @@ async def test_a_clean_popups_console_output_from_its_hold_reaches_the_agent_onc
             "the callback's console line did not reach the agent"
         )
         assert SECRET not in json.dumps(session.console_messages)
+
+
+# ── round 5: held output when the popup closes first, or is refused meanwhile ──
+
+NOISY = (
+    f"<title>noisy</title><p>noisy</p><script>console.log('{SECRET}');"
+    f"setTimeout(() => {{ throw new Error('{SECRET}') }}, 0)</script>"
+)
+
+
+async def held_noisy_popup(env: nav.Env, session, monkeypatch):
+    """A popup that logs and throws while held for its verdict, its targetId read held on the returned event."""
+    births = env.manager.window_births
+    release = asyncio.Event()
+    original = births._resolve_target_id
+
+    async def held(page):
+        if page is not session.page:
+            await release.wait()
+        return await original(page)
+
+    monkeypatch.setattr(births, "_resolve_target_id", held)
+    emitted: list = []
+    session.context.on("console", lambda message: emitted.append(message.text))
+    popup = await open_popup(session, f"{env.allowed}/noisy")
+    await nav.wait_for(lambda: SECRET in emitted, timeout=TIMEOUT)
+    await asyncio.sleep(0.3)  # its page error too
+    assert env.manager.diagnostics.birth_pending(popup) and env.manager.page_provenance.held_for_verdict(popup)
+    return popup, release
+
+
+async def test_a_clean_verdict_after_something_else_refused_a_held_popup_drops_what_it_emitted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round-4 bypass BY1: the recheck before the held output is appended (the page refused meanwhile, by a commit
+    another tab chose) had no test. The popup's own birth verdict comes out clean; what it emitted while held does
+    not reach the agent, as it was refused for something else before the verdict landed."""
+    async with browser_env(tmp_path, {**PAGES, "/noisy": NOISY}) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        popup, release = await held_noisy_popup(env, session, monkeypatch)
+        # Stand-in for a commit another tab chose during the hold (PageProvenance.committed's by_another_page).
+        env.manager.page_provenance.committed(popup, popup.url, url_refused=False, by_another_page=True)
+
+        release.set()
+        await nav.wait_for(lambda: not env.manager.diagnostics.birth_pending(popup), timeout=TIMEOUT)
+        await settle(lambda: not pending(), timeout=TIMEOUT)
+
+        assert env.manager._page_refused(popup)
+        assert SECRET not in json.dumps(session.console_messages)
+        assert SECRET not in json.dumps(session.page_errors)
+        assert env.manager.diagnostics._held_output.get(popup) is None
+
+
+async def test_a_popup_closed_mid_hold_before_its_id_was_read_shows_nothing_it_emitted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round-4 bypass BY1 (closed mid-hold): the popup closes while its targetId read is held, so the read finds a
+    closed page and the verdict is unjudged. What it emitted while held reaches neither the logs nor the tabs."""
+    async with browser_env(tmp_path, {**PAGES, "/noisy": NOISY}) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        popup, release = await held_noisy_popup(env, session, monkeypatch)
+        await popup.close()
+
+        release.set()
+        await nav.wait_for(lambda: not env.manager.diagnostics.birth_pending(popup), timeout=TIMEOUT)
+        await settle(lambda: not pending(), timeout=TIMEOUT)
+
+        assert SECRET not in json.dumps(session.console_messages)
+        assert SECRET not in json.dumps(session.page_errors)
+        assert SECRET not in json.dumps(await env.manager.list_tabs(session_id))
+        assert SECRET not in json.dumps(await env.manager.observe(session_id, preset="text"), default=str)
+
+
+CLOSE_ON_CUE = {
+    "/start": "<title>start</title><p>start</p>"
+    "<script>window.addEventListener('message', (e) => { window.__code = e.data })</script>",
+    "/authorize": nav.redirect("{ALLOWED}/callback"),
+    "/callback": "<title>cb</title><p>cb</p><script>console.log('callback-loaded');"
+    "window.opener && window.opener.postMessage('code-123', '*')</script>",
+}
+
+
+@pytest.mark.parametrize("outcome", ["clean", "refused", "refused-meanwhile"])
+async def test_a_held_popup_that_closes_before_its_verdict_keeps_its_output_only_on_a_clean_verdict(
+    tmp_path: Path, monkeypatch, outcome: str
+) -> None:
+    """Round-4 robustness RB1: a popup held for its birth verdict that closed before the verdict landed lost what
+    it logged meanwhile, though the verdict was clean (_judge_birth returned at is_closed before it took the held
+    list). The OAuth callback's read lands while it is open; it closes itself; then the verdict lands. Clean: its
+    console line reaches the agent, as on base. A refused verdict, or a page refused for something else before it
+    closed, drops it."""
+    async with browser_env(tmp_path, {**PAGES, **CLOSE_ON_CUE}) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        births = env.manager.window_births
+        real_verdict = births.verdict
+        read_landed = asyncio.Event()
+        verdicts: list = []
+
+        async def verdict_after_close(session_, page):
+            result = await real_verdict(session_, page)
+            if page is session.page:
+                return result
+            verdicts.append(result)
+            read_landed.set()
+            await nav.wait_for(lambda: page.is_closed(), timeout=TIMEOUT)
+            return BirthVerdict.REFUSED if outcome == "refused" else result
+
+        monkeypatch.setattr(births, "verdict", verdict_after_close)
+        popup = await open_popup(session, f"{env.allowed}/authorize")
+        await asyncio.wait_for(read_landed.wait(), timeout=TIMEOUT)
+        await nav.wait_for(lambda: session.page.evaluate("() => window.__code === 'code-123'"), timeout=TIMEOUT)
+        assert verdicts == [BirthVerdict.CLEAN], verdicts
+        assert not any("callback-loaded" in json.dumps(message) for message in session.console_messages)
+        if outcome == "refused-meanwhile":
+            env.manager.page_provenance.committed(popup, popup.url, url_refused=False, by_another_page=True)
+
+        await popup.evaluate("() => { setTimeout(() => window.close(), 0) }")  # it closes itself
+        await settle(lambda: popup.is_closed(), timeout=TIMEOUT)
+        await settle(lambda: not pending(), timeout=TIMEOUT)
+
+        kept = any("callback-loaded" in json.dumps(message) for message in session.console_messages)
+        assert kept is (outcome == "clean"), f"{outcome}: callback line kept={kept}"
+        assert env.manager.diagnostics._held_output.get(popup) is None
+
+
+async def test_an_oauth_callback_that_closes_at_once_keeps_its_line_exactly_when_its_verdict_is_clean(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round-4 robustness RB1, the reviewer's A1 close@0 flow: the callback logs, posts its code and calls
+    window.close() at once. The flow works. Its line reaches the agent exactly when its birth verdict is clean:
+    a read that finds the page closed already cannot match it to its birth, and an unjudged popup's output is
+    dropped (fail closed)."""
+    pages = {**PAGES, **CLOSE_ON_CUE}
+    pages["/callback"] = pages["/callback"].replace("</script>", "; window.close()</script>")
+    async with browser_env(tmp_path, pages) as env:
+        session_id = await env.create("/start")
+        session = env.manager.sessions[session_id]
+        births = env.manager.window_births
+        real_verdict = births.verdict
+        verdicts: list = []
+
+        async def recorded(session_, page):
+            result = await real_verdict(session_, page)
+            if page is not session.page:
+                verdicts.append(result)
+            return result
+
+        monkeypatch.setattr(births, "verdict", recorded)
+        popup = await open_popup(session, f"{env.allowed}/authorize")
+        await nav.wait_for(lambda: session.page.evaluate("() => window.__code === 'code-123'"), timeout=TIMEOUT)
+        await settle(lambda: popup.is_closed(), timeout=TIMEOUT)
+        await settle(lambda: not pending(), timeout=TIMEOUT)
+
+        assert len(verdicts) == 1, verdicts
+        kept = any("callback-loaded" in json.dumps(message) for message in session.console_messages)
+        print(f"\n[A1 close@0] verdict {verdicts[0].value}; callback line kept: {kept}")
+        assert kept is (verdicts[0] is BirthVerdict.CLEAN)
+        assert not session.lock.locked()
+

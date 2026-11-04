@@ -32,7 +32,7 @@ DOWNLOAD_READ_MAX_BYTES = 10 * 1024 * 1024
 BIRTH_VERDICT_WAIT_SECONDS = 10.0
 # Console messages and page errors a reported popup emits while it is held for its birth verdict are kept aside,
 # at most this many per popup, and appended once the verdict is clean (a legitimate popup's load-time output
-# reaches the agent as it did before the hold); a refusal drops them.
+# reaches the agent as it did before the hold), also when the popup closed first; a refusal drops them.
 HELD_OUTPUT_MAX = 50
 
 # A fixed type table, not the host's: mimetypes.guess_type reads /etc/mime.types
@@ -115,6 +115,9 @@ class BrowserDiagnosticsService:
         self._birth_judgements: weakref.WeakKeyDictionary[Any, asyncio.Task[None]] = weakref.WeakKeyDictionary()
         # What a held popup logged and threw meanwhile, as (the session's list, the entry), per popup (_keep_output).
         self._held_output: weakref.WeakKeyDictionary[Any, list[tuple[list[Any], Any]]] = weakref.WeakKeyDictionary()
+        # Held popups that closed while held only for a birth verdict still being judged (_on_page_closed): their
+        # state goes with the close, and this is what _judge_birth needs of it.
+        self._closed_while_held: weakref.WeakSet[Any] = weakref.WeakSet()
 
     async def get_console_messages(self, session_id: str, *, limit: int = 20) -> dict[str, Any]:
         session = await self.manager.get_session(session_id)
@@ -300,10 +303,19 @@ class BrowserDiagnosticsService:
 
         The blank a refused verdict calls for runs as its own task: it takes the session lock, and whoever
         waits for the verdict (birth_judged) must not wait for that. A popup that closed meanwhile gets no
-        verdict: its state went with it, and recording one would bring it back for good.
+        verdict: its state went with it, and recording one would bring it back for good. What it logged while
+        held is appended all the same when the verdict is clean and it closed held only for that verdict
+        (_on_page_closed): nothing else had refused it.
         """
-        verdict = await self.manager.window_births.verdict(session, popup)
+        try:
+            verdict = await self.manager.window_births.verdict(session, popup)
+        finally:
+            # On every path: a judgement cancelled from outside leaves nothing kept aside either.
+            held = self._held_output.pop(popup, [])
         if popup.is_closed():
+            if verdict is BirthVerdict.CLEAN and popup in self._closed_while_held:
+                for items, value in held:
+                    self._bounded_append(items, value)
             return
         refused = self.manager.page_provenance.opener_judged(
             popup,
@@ -311,7 +323,6 @@ class BrowserDiagnosticsService:
             by_another_page=verdict is BirthVerdict.REFUSED_BY_SESSION,
             unjudged=verdict is BirthVerdict.REFUSED_UNJUDGED,
         )
-        held = self._held_output.pop(popup, [])
         if refused:
             spawn_background_task(self._return_to_blank(session, popup))
             return
@@ -379,7 +390,8 @@ class BrowserDiagnosticsService:
         page that moved itself there, reached the agent through its console and its errors
         until the page guard had sent it back to about:blank. A reported popup refused only
         because its birth verdict is still being judged has its output kept aside instead
-        (bounded): a clean verdict appends it (_judge_birth), a refusal drops it.
+        (bounded): a clean verdict appends it (_judge_birth), also once the popup has closed,
+        and a refusal drops it.
         """
         if not self.manager._page_refused(page):
             self._bounded_append(items, value)
@@ -552,6 +564,12 @@ class BrowserDiagnosticsService:
         failed and the session read as interrupted while its other tabs were fine.
         """
         provenance = self.manager.page_provenance
+        if self.birth_pending(page) and provenance.held_for_verdict(page) and not self.manager._url_off_list(page.url):
+            # Held only for its birth verdict, still being judged: what it logged meanwhile is that verdict's to
+            # decide (_judge_birth), as if it were still open. Recorded now, as its state is forgotten below; one
+            # refused for anything else meanwhile is not, and its output is dropped with it.
+            with contextlib.suppress(TypeError):
+                self._closed_while_held.add(page)
         if self.manager._url_off_list(page.url) or provenance.counts_for_its_session(page):
             # What it did just before closing (an opener it navigated, a blank it wrote) is delivered after this.
             provenance.closed_while_counting(session.id)
