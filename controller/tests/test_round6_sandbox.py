@@ -231,6 +231,18 @@ class WordingTests(unittest.TestCase):
             "attached Chrome: attached over CDP, not checked (not connected)", check.message + _describe(status)
         )
 
+    def test_the_attached_chrome_line_keeps_its_label_in_the_readiness_message(self) -> None:
+        # S5b: the attached line's own label, read where a readiness message carries it (the warning that lists an
+        # unsandboxed container and the attached Chrome), not rebuilt by the test.
+        status = {
+            "setting": "auto",
+            "browser_node": {"sandbox": "attached", "detail": "not connected"},
+            "isolated": {"s1": {"sandbox": "off", "cause": "seccomp_profile_not_applied"}},
+        }
+        check = browser_sandbox_check(status)
+        self.assertEqual(check.status, "warn")
+        self.assertIn("; attached Chrome: attached over CDP, not checked (not connected)", check.message)
+
     def test_the_isolated_exit_error_joins_its_parts_and_cleans_the_log(self) -> None:
         # Item 14 (S5#5): no "(None)", and the container's own output never raw.
         from app.session_isolation import DockerBrowserNodeProvisioner

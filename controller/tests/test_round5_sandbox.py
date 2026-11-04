@@ -221,6 +221,14 @@ class GateScriptTests(unittest.TestCase):
         self._files("ws://a/1", "ws://a/1")
         self.assertEqual(self._run(200, "--expect", "200", delete_status=500), 1)
 
+    def test_an_isolated_close_that_fails_fails(self) -> None:
+        # GS6: under --isolated the DELETE's status counts too, next to a verified state.
+        state = self.data / "browser-sessions" / "s1" / "profile" / "browser-sandbox.json"
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({"setting": "on", "sandbox": "on", "verified": EVIDENCE}), encoding="utf-8")
+        self.assertEqual(self._run(200, "--expect", "200", "--isolated"), 0)
+        self.assertEqual(self._run(200, "--expect", "200", "--isolated", delete_status=500), 1)
+
     def test_log_must_say_reads_the_controller_log(self) -> None:
         # GS3/GS6: a stub `docker` on PATH stands in for `docker compose logs controller`.
         bin_dir = self.data / "bin"
