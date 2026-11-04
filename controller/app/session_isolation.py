@@ -487,10 +487,15 @@ class DockerBrowserNodeProvisioner:
 
         local_profile_dir.mkdir(parents=True, exist_ok=True)
         local_downloads_dir.mkdir(parents=True, exist_ok=True)
-        # The host path is usually the same directory as the local one (through
-        # the /data mount). A Windows host path cannot be made from in here; the
-        # local dirs above already are it.
-        if isinstance(host_data_root, Path):
+        # The host path is the same directory as the local one, seen through the
+        # /data mount: the local dirs above already are it, and the daemon needs
+        # the host path only as the bind source. It is made here only where this
+        # process sees it too (a controller run on the host). In a container the
+        # host path (Linux CI's /home/runner/work/.../data) is not there: making
+        # it built directories in the container's own filesystem, which a
+        # controller that is not root cannot (PermissionError). A Windows host
+        # path is never made from in here.
+        if isinstance(host_data_root, Path) and host_data_root.is_dir():
             host_profile_dir.mkdir(parents=True, exist_ok=True)
             host_downloads_dir.mkdir(parents=True, exist_ok=True)
 
