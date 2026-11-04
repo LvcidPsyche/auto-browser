@@ -127,6 +127,8 @@ class Harness:
         self.refused: set[Any] = set()
         # Pages the controller opened itself (an open-tab tab): page_provenance.controller_opened.
         self.controller_opened: set[Any] = set()
+        # Pages held for their own birth verdict (page_provenance.held_for_verdict).
+        self.held: set[Any] = set()
         self.enabled = True
         self.seeded: dict[Any, str] = {}
         self.births = WindowBirths(
@@ -139,6 +141,7 @@ class Harness:
             known_target_id=lambda page: self.target_ids.get(page),
             seed_target_id=lambda page, tid: self.seeded.__setitem__(page, tid),
             opened_by_controller=lambda page: page in self.controller_opened,
+            opener_held=lambda page: page in self.held,
         )
 
     @staticmethod
@@ -1151,3 +1154,26 @@ async def test_an_unjudged_verdict_from_a_lost_watcher_leaves_the_replays_entry_
     assert await report is BirthVerdict.REFUSED_UNJUDGED
     birth = second._births["P"]
     assert (birth.born_refused, birth.by_session, birth.unjudged, birth.reported) == (True, False, True, False)
+
+
+# ── round 5: a held opener the watcher has no birth for; the sweep once a retried read lands ──
+
+
+async def test_a_held_opener_with_no_birth_refuses_the_windows_it_opens(h: Harness) -> None:
+    """Round-4 bypass BY4: the exemption for an opener held while its own birth verdict is judged rests on that
+    birth, whose verdict the watcher propagates to the opener's windows. An opener matched by its cached id with
+    no birth entry gets an unjudged verdict (mark_reported finds no birth), so the exemption must not let its
+    window be born clean: it is born refused, as before the watcher. With the birth known, the exemption holds."""
+    opener = h.known("OP")  # its id cached, its targetCreated never seen
+    h.held.add(opener)  # held for its verdict; opener_refused is False for it (the exemption)
+    h.cdp.fire("Target.targetCreated", created("T1", CTX, opener_id="OP"))
+
+    assert h.watcher._births["T1"].born_refused, "a held opener with no birth exempted its window"
+    assert await h.report("T1") is BirthVerdict.REFUSED
+
+    h.known("FIRST")
+    h.cdp.fire("Target.targetCreated", created("P", CTX, opener_id="FIRST"))  # a known, clean birth
+    popup = h.known("P")
+    h.held.add(popup)
+    h.cdp.fire("Target.targetCreated", created("T2", CTX, opener_id="P"))
+    assert await h.report("T2") is BirthVerdict.CLEAN
