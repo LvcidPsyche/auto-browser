@@ -298,6 +298,18 @@ async def test_an_opener_held_only_while_its_own_verdict_is_judged_does_not_refu
     assert manager._opener_refuses_its_windows(tab_session(off_list), off_list)
 
 
+def test_the_window_birth_watcher_asks_the_page_provenance_whether_an_opener_is_held(tmp_path: Path) -> None:
+    """Round-4 BY4: the watcher refuses the windows of a held opener it saw no birth of, which needs the manager
+    to tell it which pages are held for their verdict (page_provenance.held_for_verdict); unwired, the default
+    holds no page and the exemption applies to every held opener again."""
+    manager = manager_for(tmp_path)
+    held, clean = MovingPage(ALLOWED, ALLOWED), MovingPage(ALLOWED, ALLOWED)
+    manager.page_provenance.opener_lookup_started(held)
+
+    assert manager.window_births._opener_held(held)
+    assert not manager.window_births._opener_held(clean)
+
+
 def test_the_unjudged_tab_message_says_a_new_tab_is_judged_as_it_opens_and_does_not_advise_a_retry(
     tmp_path: Path,
 ) -> None:
