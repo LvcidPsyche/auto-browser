@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.action_errors import BrowserActionError, SessionNotFoundError
 from app.browser.launch_flags import STORAGE_PARTITIONING_ON
@@ -945,20 +946,47 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         self._isolated()
         self.browser.context.page.goto = AsyncMock(side_effect=PlaywrightError("Page.goto: Timeout 30000ms exceeded."))
 
-        with self.assertRaises(PlaywrightError):
+        with self.assertRaises(BrowserActionError):
             await self.manager.create_session(name="s", start_url=START_URL)
 
         self.assertIsNone(self.manager.request_gates.get(self.browser))
         self.assertEqual(self.manager.request_gates.status()["gates"], [])
 
     async def test_f12e_a_start_url_that_fails_for_another_reason_keeps_its_own_error(self) -> None:
+        # Its own error: a failed load the agent may retry, never a block. Typed, so the route answers 400 with a
+        # code rather than 500 "Internal error". It names Chrome's net error only: Playwright's text carries the
+        # URL (a redirect's too) and a call log.
         self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
         self.browser.context.page.goto = AsyncMock(
-            side_effect=PlaywrightError("Page.goto: net::ERR_NAME_NOT_RESOLVED at https://example.com/")
+            side_effect=PlaywrightError(
+                "Page.goto: net::ERR_CONNECTION_REFUSED at http://10.9.8.7:8080/secret-path\nCall log:\n"
+                '  - navigating to "http://10.9.8.7:8080/secret-path", waiting until "domcontentloaded"'
+            )
         )
 
-        with self.assertRaises(PlaywrightError):
+        with self.assertRaises(BrowserActionError) as raised:
             await self.manager.create_session(name="s", start_url=START_URL)
+
+        error = raised.exception
+        self.assertEqual((error.code, error.status_code, error.retryable), ("browser_action_failed", 400, True))
+        self.assertEqual(error.action, "create_session")
+        self.assertIn("net::ERR_CONNECTION_REFUSED", error.message)
+        self.assertIn("session was closed", error.message)
+        self.assertNotIn("10.9.8.7", error.message)
+        self.assertNotIn("secret-path", error.message)
+        self.assertNotIn("Call log", error.message)
+        self.assertEqual(self.manager.sessions, {})
+
+    async def test_f12e_a_start_url_that_times_out_says_so(self) -> None:
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        self.browser.context.page.goto = AsyncMock(side_effect=PlaywrightTimeoutError("Timeout 30000ms exceeded."))
+
+        with self.assertRaises(BrowserActionError) as raised:
+            await self.manager.create_session(name="s", start_url=START_URL)
+
+        self.assertEqual(raised.exception.code, "browser_action_failed")
+        self.assertIn("timed out", raised.exception.message)
+        self.assertEqual(self.manager.sessions, {})
 
     async def test_f12e_a_shadow_page_that_fails_for_another_reason_keeps_its_own_error(self) -> None:
         self.manager.settings.shadow_browse_enabled = True
@@ -967,11 +995,21 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
         self.manager.sessions[source_id].context.storage_state = AsyncMock(return_value={})
         headed = _browser()
-        headed.context.page.goto = AsyncMock(side_effect=PlaywrightError("Page.goto: Timeout 30000ms exceeded."))
+        headed.context.page.goto = AsyncMock(
+            side_effect=PlaywrightError("Page.goto: net::ERR_TIMED_OUT at " + START_URL)
+        )
         self._playwright(launch=AsyncMock(return_value=headed))
 
-        with self.assertRaises(PlaywrightError):
+        with self.assertRaises(BrowserActionError) as raised:
             await self.manager.enable_shadow_browse(source_id)
+
+        error = raised.exception
+        self.assertEqual(
+            (error.code, error.status_code, error.action), ("browser_action_failed", 400, "enable_shadow_browse")
+        )
+        self.assertIn("net::ERR_TIMED_OUT", error.message)
+        self.assertNotIn(START_URL, error.message)
+        self.assertEqual(list(self.manager.sessions), [source_id])
 
     async def _run(self, session, operation, *, target_id: str | None = "the-page", on_snapshot=None) -> dict:
         """The action pipeline over the fake browser, its observations stubbed (``on_snapshot`` runs in the
