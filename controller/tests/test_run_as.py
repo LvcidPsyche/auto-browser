@@ -713,12 +713,10 @@ class MainLinuxTests(unittest.TestCase):
         self._main(run_as="auto")
         self.assertTrue((self.data / MARKER_NAME).is_file())
 
-    def test_two_starts_under_a_0711_parent_keep_the_marker_withheld(self) -> None:
-        # Item 2: no marker on either start, and the ERROR summary on both.
+    def test_two_starts_under_a_0711_or_0751_parent_keep_the_marker_withheld(self) -> None:
+        # Item 2: no marker on either start, and the ERROR summary on both, under a 0711 and a 0751 parent.
         if ME in (0, BROWSER_UID):
             self.skipTest("needs a data dir owned by an ordinary uid")
-        _tree(self.data, "artifacts/run/sub/f")
-        (self.data / "artifacts" / "run").chmod(0o711)
         real = run_as._open_dir_nofollow
 
         def stuck(entry, dir_fd):
@@ -726,14 +724,22 @@ class MainLinuxTests(unittest.TestCase):
                 raise OSError(errno.EIO, os.strerror(errno.EIO))
             return real(entry, dir_fd)
 
-        try:
-            for start in (1, 2):
-                with patch.object(run_as, "_open_dir_nofollow", stuck):
-                    _, _, messages = self._main(run_as="auto")
-                self.assertFalse((self.data / MARKER_NAME).exists(), start)
-                self.assertEqual(sum(m.startswith("No marker written") for m in messages), 1, (start, messages))
-        finally:
-            (self.data / "artifacts" / "run").chmod(0o755)
+        for mode in (0o711, 0o751):
+            with self.subTest(mode=oct(mode)):
+                shutil.rmtree(self.data / "artifacts", ignore_errors=True)
+                (self.data / MARKER_NAME).unlink(missing_ok=True)
+                _tree(self.data, "artifacts/run/sub/f")
+                (self.data / "artifacts" / "run").chmod(mode)
+                try:
+                    for start in (1, 2):
+                        with patch.object(run_as, "_open_dir_nofollow", stuck):
+                            _, _, messages = self._main(run_as="auto")
+                        self.assertFalse((self.data / MARKER_NAME).exists(), (oct(mode), start))
+                        self.assertEqual(
+                            sum(m.startswith("No marker written") for m in messages), 1, (oct(mode), start, messages)
+                        )
+                finally:
+                    (self.data / "artifacts" / "run").chmod(0o755)
 
     def test_the_log_escapes_lists_caps_and_reports_progress(self) -> None:
         # R-a, R-b, R-c, R-d: an escaped newline name, "... and N more" past 20 skips, the withheld WARNING, and the
