@@ -106,6 +106,15 @@ provenance attestation (`gh attestation verify oci://ghcr.io/lvcidpsyche/auto-br
 The controller image leaves out the agent CLIs; for `*_AUTH_MODE=cli`, build from source with
 `INSTALL_AGENT_CLIS=true`.
 
+With isolated sessions, name `docker-compose.images.yml` last, so they start from the published browser image too:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.isolation.yml -f docker-compose.images.yml up -d
+```
+
+In the other order, the isolation overlay's default wins, and isolated sessions run a local
+`auto-browser-browser-node:latest`: a stale build, or no image at all.
+
 ## Try It in Codespaces
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/LvcidPsyche/auto-browser?quickstart=1)

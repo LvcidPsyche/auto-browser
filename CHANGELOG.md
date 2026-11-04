@@ -10,6 +10,17 @@ All notable changes to auto-browser are documented here.
   400 `browser_action_failed`, retryable, as `navigate` answers the same failure. It used to be a 500 "Internal
   error". The message names Chrome's net error (`net::ERR_CONNECTION_REFUSED`) or the timeout, never the URL, and
   the session is closed as before. Shadow browse's page gets the same answer.
+- Closing shadow browse no longer logs a WARNING that the pre-request gate could not detach from a target that was
+  already closed. That case is logged at DEBUG; a detach that fails otherwise is still a WARNING.
+
+### Changed
+
+- The README and `docker-compose.images.yml` say to name the images overlay last when isolated sessions are on.
+  Named before `docker-compose.isolation.yml`, it lost `ISOLATED_BROWSER_IMAGE` to that overlay's default, so
+  isolated sessions ran a local `auto-browser-browser-node:latest` (a stale build, or none) instead of the
+  published image.
+- `docs/deployment.md` states that under `PII_SCRUB_SCREENSHOT_STRICT=true` an action whose before-screenshot
+  cannot be scrubbed is refused before it runs (503). With OCR unavailable, that means every action.
 
 ## [1.14.0] — 2026-11-04
 

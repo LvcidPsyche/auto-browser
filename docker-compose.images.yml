@@ -2,6 +2,9 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose.images.yml up -d
 #
+# With isolated sessions, name this file last, after docker-compose.isolation.yml: otherwise that overlay's
+# ISOLATED_BROWSER_IMAGE default (a local auto-browser-browser-node:latest) wins over the published image below.
+#
 # AUTO_BROWSER_IMAGE_TAG picks the version: `latest` (default, the newest release), a release
 # such as `1.10.1`, or `edge` (the current main branch). The controller image is built without
 # the agent CLIs; `*_AUTH_MODE=cli` needs a local build with INSTALL_AGENT_CLIS=true.
