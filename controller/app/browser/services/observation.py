@@ -438,10 +438,12 @@ class BrowserObservationService:
     def _withhold_screenshot(screenshot: dict[str, str], reason: str) -> NoReturn:
         """PII_SCRUB_SCREENSHOT_STRICT: delete the unscrubbed image and fail the call."""
         Path(screenshot["path"]).unlink(missing_ok=True)
+        # The same hint as the unscrubbed WARNING's: deployment.md sends a read_only deployment without a writable
+        # /tmp here, and that one already runs the image.
         raise BrowserActionError(
             f"Screenshot withheld: PII_SCRUB_SCREENSHOT_STRICT is on and the screenshot could not be "
-            f"PII-scrubbed ({reason}). Run the controller from the Docker image, which ships tesseract, "
-            "or set PII_SCRUB_SCREENSHOT_STRICT=false.",
+            f"PII-scrubbed ({reason}). {_UNSCRUBBED_HINTS.get(reason, _TESSERACT_HINT)} To return it unscrubbed "
+            "instead, set PII_SCRUB_SCREENSHOT_STRICT=false.",
             code=SCREENSHOT_WITHHELD,
             status_code=503,
             retryable=False,

@@ -250,6 +250,34 @@ async def test_strict_mode_withholds_a_screenshot_it_cannot_scrub(tmp_path: Path
     assert not (tmp_path / "shot.png").exists()
 
 
+@pytest.mark.parametrize(
+    ("ocr", "reason", "hint"),
+    [
+        ({"available": False, "enabled": True, "error": "tesseract_not_found"}, "tesseract_not_found", "image"),
+        ({"available": False, "enabled": True}, "ocr_unavailable", "image"),
+        ({"available": False, "enabled": True, "error": "ocr_extraction_failed"}, "ocr_extraction_failed", "temp dir"),
+        ({"available": False, "enabled": False}, "ocr_disabled", "setting"),
+    ],
+)
+async def test_strict_mode_gives_the_hint_its_reason_needs(tmp_path: Path, ocr: dict, reason: str, hint: str) -> None:
+    # deployment.md sends a read_only deployment without a writable /tmp to STRICT: its error must not then say to
+    # run the image it already runs.
+    service = _service(tmp_path, strict=True)
+    screenshot = {"path": str(tmp_path / "shot.png"), "url": "/artifacts/shot.png"}
+
+    with pytest.raises(BrowserActionError) as raised:
+        await service._scrub_screenshot_if_needed(service.manager.session, screenshot, ocr)
+
+    message = raised.value.message
+    assert f"could not be PII-scrubbed ({reason})." in message
+    assert _HINTS[hint] in message
+    for other, text in _HINTS.items():
+        if other != hint:
+            assert text not in message
+    assert message.endswith("To return it unscrubbed instead, set PII_SCRUB_SCREENSHOT_STRICT=false.")
+    assert not (tmp_path / "shot.png").exists()
+
+
 async def test_strict_mode_withholds_when_ocr_is_disabled(tmp_path: Path) -> None:
     service = _service(tmp_path, ocr_enabled=False, strict=True)
 
