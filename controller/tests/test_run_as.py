@@ -17,6 +17,7 @@ import io
 import logging
 import os
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -375,6 +376,64 @@ class FixOwnershipLinuxTests(unittest.TestCase):
         self.assertEqual(again.errors, [])
         self.assertIn("auth", again.changed_paths)
 
+    def test_a_stuck_entry_under_a_0711_or_0751_parent_keeps_the_parent(self) -> None:
+        # Item 2 (P5#5, O5-1): o+x alone is not enough; root without DAC capabilities must open and list it again.
+        for mode in (0o711, 0o751):
+            with self.subTest(mode=oct(mode)):
+                shutil.rmtree(self.data / "auth", ignore_errors=True)
+                _tree(self.data, "auth/sub/f", "auth/top.json")
+                (self.data / "auth").chmod(mode)
+                with self._failing("sub", errno.EIO):
+                    report = self._fix(["auth"])
+                self.assertIn("auth", report.withheld)
+                self.assertNotIn("auth", report.changed_paths)
+                (self.data / "auth").chmod(0o755)
+
+    def test_data_without_o_rx_is_withheld_on_an_error(self) -> None:
+        # R-e: /data itself on the same rule.
+        _tree(self.data, "auth/sub/f")
+        self.data.chmod(0o700)
+        try:
+            with self._failing("sub", errno.EIO):
+                report = self._fix(["auth"])
+        finally:
+            self.data.chmod(0o755)
+        self.assertIn(".", report.withheld)
+        self.assertNotIn(".", report.changed_paths)
+
+    def test_the_cap_stops_lstat_and_listing(self) -> None:
+        # Item 8 (P5#3): checked before the lstat; a directory is listed no further than the cap allows.
+        _tree(self.data, *(f"artifacts/f{i:02d}" for i in range(40)))
+        lstats = []
+
+        def counting_lstat(*args, **kwargs):
+            lstats.append(args[0])
+            return os.stat(*args, **kwargs)
+
+        listed = []
+        real_scandir = os.scandir
+
+        class CountingScandir:
+            def __init__(self, fd):
+                self.inner = real_scandir(fd)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.inner.close()
+
+            def __iter__(self):
+                for entry in self.inner:
+                    listed.append(entry.name)
+                    yield entry
+
+        with patch.object(run_as.os, "scandir", CountingScandir):
+            report = self._fix(["artifacts"], max_entries=10, lstat=counting_lstat)
+        self.assertTrue(report.truncated)
+        self.assertLessEqual(len(lstats), 10)
+        self.assertLessEqual(len(listed), 11)
+
     def test_a_stuck_entry_under_a_0755_parent_does_not_keep_it(self) -> None:
         _tree(self.data, "auth/sub/f", "auth/top.json")
         (self.data / "auth").chmod(0o755)
@@ -643,6 +702,56 @@ class MainLinuxTests(unittest.TestCase):
         self._main(run_as="auto")
         self.assertTrue((self.data / MARKER_NAME).is_file())
 
+    def test_two_starts_under_a_0711_parent_keep_the_marker_withheld(self) -> None:
+        # Item 2: no marker on either start, and the ERROR summary on both.
+        if ME in (0, BROWSER_UID):
+            self.skipTest("needs a data dir owned by an ordinary uid")
+        _tree(self.data, "artifacts/run/sub/f")
+        (self.data / "artifacts" / "run").chmod(0o711)
+        real = run_as._open_dir_nofollow
+
+        def stuck(entry, dir_fd):
+            if entry == "sub":
+                raise OSError(errno.EIO, os.strerror(errno.EIO))
+            return real(entry, dir_fd)
+
+        try:
+            for start in (1, 2):
+                with patch.object(run_as, "_open_dir_nofollow", stuck):
+                    _, _, messages = self._main(run_as="auto")
+                self.assertFalse((self.data / MARKER_NAME).exists(), start)
+                self.assertEqual(sum(m.startswith("No marker written") for m in messages), 1, (start, messages))
+        finally:
+            (self.data / "artifacts" / "run").chmod(0o755)
+
+    def test_the_log_escapes_lists_caps_and_reports_progress(self) -> None:
+        # R-a, R-b, R-c, R-d: an escaped newline name, "... and N more" past 20 skips, the withheld WARNING, and the
+        # progress line.
+        if ME in (0, BROWSER_UID):
+            self.skipTest("needs a data dir owned by an ordinary uid")
+        names = [f"artifacts/h{i:02d}" for i in range(25)]
+        _tree(self.data, *names, "artifacts/new\nline", "auth/sub/f")
+        for name in names:
+            os.link(self.data / name, self.data / (name + ".link"))
+        (self.data / "auth").chmod(0o700)
+        real = run_as._open_dir_nofollow
+
+        def stuck(entry, dir_fd):
+            if entry == "sub":
+                raise OSError(errno.EIO, os.strerror(errno.EIO))
+            return real(entry, dir_fd)
+
+        try:
+            with patch.object(run_as, "_open_dir_nofollow", stuck), patch.object(run_as, "WALK_PROGRESS_EVERY", 5):
+                _, _, messages = self._main(run_as="auto")
+        finally:
+            (self.data / "auth").chmod(0o755)
+        joined = "\n".join(messages)
+        self.assertTrue(any("... and" in m and "more entries not handed over" in m for m in messages), joined)
+        self.assertTrue(any("kept as its owner's until its contents" in m for m in messages), joined)
+        self.assertTrue(any("entries examined so far" in m for m in messages), joined)
+        self.assertFalse(any("new\nline" in m for m in messages))
+
     def test_two_starts_an_unreadable_own_dir_writes_the_marker(self) -> None:
         if ME in (0, BROWSER_UID):
             self.skipTest("needs a data dir owned by an ordinary uid")
@@ -752,6 +861,12 @@ class ImageWiringTests(unittest.TestCase):
         self.assertIn("python -m app.run_as", self.entrypoint)
         self.assertIn("docker.sock", self.entrypoint)
         self.assertNotRegex(self.entrypoint, r"chown -R")
+
+    def test_the_setuid_strip_comes_after_every_install_step(self) -> None:
+        # F-a: an apt-get, pip or npm RUN after it could bring a setuid binary back.
+        strip = self.dockerfile.index("RUN find / -xdev -perm /6000 -type f -exec chmod ug-s {} +")
+        for marker in ("apt-get install", "pip install", "npm install"):
+            self.assertLess(self.dockerfile.rfind(marker), strip, marker)
 
     def test_the_image_strips_setuid_and_setgid_bits(self) -> None:
         # D1: nothing a controller uid can run elevates it.
