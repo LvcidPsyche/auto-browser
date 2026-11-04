@@ -742,7 +742,7 @@ async def replace_watcher(h: Harness, replay: list[dict] | None = None) -> Repla
 async def test_a_replacement_registers_the_sessions_before_it_discovers_the_targets(h: Harness) -> None:
     """Chromium replays targetCreated for every existing target before setDiscoverTargets returns; a watcher
     that registered its sessions only after that dropped the replay and knew nothing of the windows born under
-    the lost watcher (the orchestrator's O3 leak)."""
+    the lost watcher (review finding O3)."""
     other = FakeSession(h.browser, "s2")
     await h.births.watch(other, context=object(), page=object(), context_id=OTHER_CTX)
     replacement = await replace_watcher(h)
@@ -818,7 +818,7 @@ async def test_the_recheck_starts_for_the_replays_unjudged_windows(h: Harness, m
 
 
 async def test_a_replacement_sweeps_the_replays_unjudged_windows_at_once(h: Harness) -> None:
-    """The orchestrator's O3 probe, released right after the replacement attached: the window had a whole recheck
+    """Review finding O3's probe, released right after the replacement attached: the window had a whole recheck
     interval to act before the first sweep. A replacement sweeps the replay's windows as soon as it is live."""
     h.counts = False
     replacement = await replace_watcher(h, [created("W", CTX, opener_id="GONE")])
