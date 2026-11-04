@@ -8,6 +8,8 @@
 - Items 14 to 16 (S5#5, S5#6, S5#13): the isolated exit error's wording and log tail, the docker info error in the
   startup WARNING, and an unconnected CDP_CONNECT_URL Chrome.
 - S5#7 and E4: verified_on's exact method and a missing browser count; a sandbox.mjs-shaped file round trip.
+- Round 7: the timeout error's log tail (O6-1), an endpoint's characters (S6#2), the attached-only readiness message
+  (S6#3), the isolated endpoint read off the loop (S6#4), and more invisible characters (S6#14).
 """
 
 from __future__ import annotations
@@ -98,10 +100,25 @@ class EndpointFileTests(unittest.TestCase):
         self.path.write_text(SECRET, encoding="utf-8")
         provisioner = DockerBrowserNodeProvisioner(_settings(self.dir), client=MagicMock())
         container = SimpleNamespace(name="browser-session-x", status="running", attrs={}, reload=lambda: None)
-        with self.assertRaises(RuntimeError) as raised:
-            asyncio.run(provisioner._wait_for_ws_endpoint(container, self.path))
+        # S6#4: the read goes through asyncio.to_thread, off the event loop.
+        with patch("app.session_isolation.asyncio.to_thread", wraps=asyncio.to_thread) as to_thread:
+            with self.assertRaises(RuntimeError) as raised:
+                asyncio.run(provisioner._wait_for_ws_endpoint(container, self.path))
         self.assertNotIn(SECRET, str(raised.exception))
         self.assertIn("does not hold a ws:// or wss:// URL", str(raised.exception))
+        self.assertIn(read_endpoint_file, [call.args[0] for call in to_thread.call_args_list if call.args])
+
+    def test_control_and_format_characters_in_an_endpoint_are_refused(self) -> None:
+        # S6#2, F6: a real endpoint is ws://host:port/<hex>, ASCII and printable.
+        for bad in ("\x1b[31m", "\x07", "\x00", "\u202e"):
+            with self.subTest(char=repr(bad)):
+                self.path.write_text(f"ws://127.0.0.1:9222/ab{bad}cd", encoding="utf-8")
+                with self.assertRaises(EndpointFileError) as raised:
+                    read_endpoint_file(self.path)
+                self.assertNotIn(bad, str(raised.exception))
+                self.assertIn("does not hold a ws:// or wss:// URL", str(raised.exception))
+        self.path.write_text("ws://127.0.0.1:9222/0123abcd", encoding="utf-8")
+        self.assertEqual(read_endpoint_file(self.path), "ws://127.0.0.1:9222/0123abcd")
 
 
 def _try(function, *args):
@@ -176,6 +193,12 @@ class PrintableTests(unittest.TestCase):
     def test_surrogates_private_use_unassigned_and_variation_selectors(self) -> None:
         self.assertEqual(_printable("a\ud800bc\U000e0100d️e\U0010ffffz"), "a b c d e z")
 
+    def test_invisible_fillers_and_selectors_are_spaces_too(self) -> None:
+        # S6#14: combining marks and letters by category, but invisible.
+        for ch in ("\u180b", "\u180c", "\u180d", "\u180f", "\u034f", "\u115f", "\u1160", "\u3164", "\uffa0"):
+            with self.subTest(code=f"U+{ord(ch):04X}"):
+                self.assertEqual(_printable(f"a{ch}b"), "a b")
+
     def test_a_lone_surrogate_never_makes_readiness_a_500(self) -> None:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
@@ -227,9 +250,28 @@ class WordingTests(unittest.TestCase):
         self.assertEqual(status["browser_node"], {"sandbox": "attached", "detail": "not connected"})
         check = browser_sandbox_check(status)
         self.assertEqual(check.status, "warn")
-        self.assertIn(
-            "attached Chrome: attached over CDP, not checked (not connected)", check.message + _describe(status)
-        )
+        # S6#3: in the message itself, not rebuilt by the test.
+        self.assertIn("attached Chrome: attached over CDP, not checked (not connected)", check.message)
+
+    def test_the_attached_only_message_is_built_from_the_attached_line(self) -> None:
+        # S6#3: shared mode with CDP_CONNECT_URL, not connected and connected, read on check.message alone.
+        with tempfile.TemporaryDirectory() as tempdir:
+            settings = SimpleNamespace(
+                browser_sandbox="on",
+                session_isolation_mode="shared_browser_node",
+                browser_ws_endpoint_file=str(Path(tempdir) / "browser-ws-endpoint.txt"),
+                cdp_connect_url="http://operator-chrome:9222",
+                isolated_browser_seccomp_profile="/x",
+            )
+            unconnected = browser_sandbox_check(browser_sandbox_status(settings))
+            connected = browser_sandbox_check(browser_sandbox_status(settings, shared={"sandbox": "attached"}))
+        self.assertEqual(unconnected.status, "warn")
+        self.assertIn("attached Chrome: attached over CDP, not checked (not connected)", unconnected.message)
+        self.assertEqual(connected.status, "warn")
+        self.assertIn("attached Chrome: attached over CDP, not checked", connected.message)
+        self.assertNotIn("not connected", connected.message)
+        for check in (unconnected, connected):
+            self.assertNotIn("the controller is attached", check.message)
 
     def test_the_attached_chrome_line_keeps_its_label_in_the_readiness_message(self) -> None:
         # S5b: the attached line's own label, read where a readiness message carries it (the warning that lists an
@@ -252,8 +294,14 @@ class WordingTests(unittest.TestCase):
             directory = Path(tempdir)
             (directory / "browser-sandbox.json").write_text('{"sandbox": "refused", "detail": "no namespace"}', "utf-8")
             provisioner = DockerBrowserNodeProvisioner(_settings(directory), client=MagicMock())
-            provisioner._container_logs = lambda container: "line one\n\x1b[31mFORGED\x1b[0m\x07"
-            container = SimpleNamespace(name="browser-session-x", status="exited", attrs={}, reload=lambda: None)
+            # The container's own log, through the real _container_logs (O6-1: it cleans the tail for every caller).
+            container = SimpleNamespace(
+                name="browser-session-x",
+                status="exited",
+                attrs={},
+                reload=lambda: None,
+                logs=lambda tail=20: b"line one\n\x1b[31mFORGED\x1b[0m\x07",
+            )
             with self.assertRaises(RuntimeError) as raised:
                 asyncio.run(provisioner._wait_for_ws_endpoint(container, directory / "browser-ws-endpoint.txt"))
         text = str(raised.exception)
@@ -261,6 +309,31 @@ class WordingTests(unittest.TestCase):
         self.assertNotIn("(None)", text)
         self.assertNotIn("\x1b", text)
         self.assertNotIn("\x07", text)
+
+    def test_the_isolated_timeout_error_cleans_the_log_too(self) -> None:
+        # O6-1, S6#1, F1: a container still running when the wait times out; its log tail never raw either.
+        from app.session_isolation import DockerBrowserNodeProvisioner
+        from tests.test_browser_sandbox import _settings
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            directory = Path(tempdir)
+            provisioner = DockerBrowserNodeProvisioner(
+                _settings(directory, ISOLATED_BROWSER_WAIT_TIMEOUT_SECONDS=1), client=MagicMock()
+            )
+            container = SimpleNamespace(
+                name="browser-session-x",
+                status="running",
+                attrs={},
+                reload=lambda: None,
+                logs=lambda tail=20: "start\n\x1b[31mFORGED\x07 \u202edrow\n".encode(),
+            )
+            with self.assertRaises(RuntimeError) as raised:
+                asyncio.run(provisioner._wait_for_ws_endpoint(container, directory / "browser-ws-endpoint.txt"))
+        text = str(raised.exception)
+        self.assertIn("Timed out waiting for isolated browser endpoint file", text)
+        self.assertIn("FORGED", text)
+        for raw in ("\x1b", "\x07", "\u202e", "\n"):
+            self.assertNotIn(raw, text)
 
     def test_the_startup_warning_carries_the_docker_info_error(self) -> None:
         # Item 15 (S5#6)
@@ -284,13 +357,6 @@ class WordingTests(unittest.TestCase):
             with self.assertLogs("app.session_isolation", "WARNING") as logs:
                 asyncio.run(provisioner.startup())
         self.assertTrue(any("daemon unreachable at /var/run/docker.sock" in line for line in logs.output), logs.output)
-
-
-def _describe(status: dict) -> str:
-    from app.browser_sandbox import _Line
-
-    node = status["browser_node"]
-    return _Line("attached Chrome", node).describe()
 
 
 if __name__ == "__main__":

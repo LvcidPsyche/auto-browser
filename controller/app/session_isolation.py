@@ -963,10 +963,10 @@ class DockerBrowserNodeProvisioner:
                 # the cleanup below deletes with the profile dir: read it first.
                 state = read_sandbox_state(endpoint_file.with_name(BROWSER_SANDBOX_STATE_FILENAME))
                 why = f" Its sandbox state: {describe_state(state)}." if state is not None else ""
-                # The log tail is the container's own output: shown, but never raw (S5#5).
+                # The log tail is the container's own output: shown, but never raw (S5#5; _container_logs cleans it).
                 raise RuntimeError(
                     f"Isolated browser container {container.name} exited before Playwright endpoint was ready.{why}\n"
-                    f"{_printable(logs)}"
+                    f"{logs}"
                 )
             try:
                 endpoint = await asyncio.to_thread(read_endpoint_file, endpoint_file)
@@ -999,13 +999,15 @@ class DockerBrowserNodeProvisioner:
 
     @staticmethod
     def _container_logs(container) -> str:
+        """The container's last 20 log lines for an error: its own output, never raw (S5#5), whichever error carries
+        it, the exit's or the timeout's (O6-1)."""
         try:
             output = container.logs(tail=20)
         except Exception:
             return "No container logs available."
         if isinstance(output, bytes):
-            return output.decode("utf-8", errors="replace").strip() or "No container logs available."
-        return str(output).strip() or "No container logs available."
+            output = output.decode("utf-8", errors="replace")
+        return _printable(str(output)).strip() or "No container logs available."
 
     @staticmethod
     def _extract_host_port(ports: dict[str, Any], key: str) -> int | None:
