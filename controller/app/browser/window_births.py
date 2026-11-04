@@ -588,6 +588,8 @@ class WindowBirths:
         # reads, and reads one again (rate-bounded) when it needs the id and no read is in flight.
         self._read_failed: "weakref.WeakSet[Any]" = weakref.WeakSet()
         self._rereads: "weakref.WeakKeyDictionary[Any, float]" = weakref.WeakKeyDictionary()
+        # Report tasks a sweep skipped that have a sweep of their session scheduled for when they end.
+        self._sweeps_after_read: "weakref.WeakSet[asyncio.Task[BirthVerdict]]" = weakref.WeakSet()
         # By id(browser): a browser is held until released, so its id is not reused meanwhile.
         self._watchers: dict[int, tuple[Any, WindowBirthWatcher]] = {}
         # Why, and when, the last attach to a browser failed, until one succeeds (readiness, the retry backoff).
@@ -792,7 +794,7 @@ class WindowBirths:
         A page Playwright reported is given a report task (``note_reported`` in ``attach_popup``) that resolves
         and caches its targetId; its first page and open-tab tabs are cached when opened. The reads in flight
         are waited for (bounded; not one that has failed already and is being retried, whose id is not expected
-        within the wait), then the cached id of every page is taken. A page whose id is not cached is not read
+        within the wait: the session is swept again once it ends), then the cached id of every page is taken. A page whose id is not cached is not read
         here as part of the sweep: resolving an arbitrary window's id would open — and, since the session is
         kept, retain — a CDP session per window, which a refused page flooding windows would turn into resource
         exhaustion. Such a page is reported all the same (an unreported window has no Page), so while one is
@@ -801,11 +803,17 @@ class WindowBirths:
         once per TARGET_ID_REREAD_SECONDS, so a read that failed in passing does not spare the session's
         unmatched windows for the page's life; the next sweep uses the id."""
         pages = list(self._session_pages(session))
-        reads = [
-            report
-            for page, report in ((page, self._reports.get(page)) for page in pages)
-            if isinstance(report, asyncio.Task) and not report.done() and not self._failed_once(page)
-        ]
+        reads = []
+        for page in pages:
+            report = self._reports.get(page)
+            if not isinstance(report, asyncio.Task) or report.done():
+                continue
+            if self._failed_once(page):
+                # Not waited for: once it lands the session is swept again, so the windows this sweep spares for
+                # want of its id are closed then, not a recheck interval later.
+                self._sweep_when_read(session, report)
+            else:
+                reads.append(report)
         if reads:
             with contextlib.suppress(Exception):
                 await asyncio.wait(reads, timeout=REPORTED_IDS_TIMEOUT_SECONDS)
@@ -820,6 +828,13 @@ class WindowBirths:
                 if not self._controller_opened(page):
                     all_known = False
         return ids, all_known
+
+    def _sweep_when_read(self, session: Any, report: "asyncio.Task[BirthVerdict]") -> None:
+        """Sweep the session once when a report's retried read ends: one sweep per read, however many skip it."""
+        if report in self._sweeps_after_read:
+            return
+        self._sweeps_after_read.add(report)
+        report.add_done_callback(lambda _done: spawn_background_task(self.close_unreported(session)))
 
     def _failed_once(self, page: Any) -> bool:
         try:
