@@ -141,7 +141,7 @@ def load_seccomp_profile(path: str | Path) -> str:
     Raises OSError or ValueError when the file is missing or not a JSON object. Read without blocking (a FIFO), a
     regular file only, under a size cap. Links are followed: the path is the operator's (a Kubernetes ConfigMap mount
     is a symlink), and whoever could plant a link there could write the file anyway; it must not sit in a directory a
-    browser container can write (data/browser-profile, data/browser-sessions)."""
+    browser container can write (data/browser-profile, data/downloads, data/browser-sessions)."""
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
     fd = os.open(str(path), flags)
     try:
@@ -169,10 +169,11 @@ def _profile_readable(path: str | Path) -> bool:
 
 
 def verified_on(state: dict[str, Any] | None) -> bool:
-    """'on' with the evidence sandbox.mjs writes, as scripts/assert_browser_sandbox.py checks the evidence (not the
-    setting): at least one renderer,
-    each in its own user namespace, and either /proc's seccomp filter counts (every renderer above the browser) or
-    chrome://sandbox's own report (old kernels). A bare 'on', or renderers alone, is not enough."""
+    """'on' with the evidence sandbox.mjs writes: at least one renderer, each in its own user namespace, and either
+    /proc's seccomp filter counts (one per renderer, each above the browser's) or chrome://sandbox's own report (old
+    kernels). A bare 'on', or renderers alone, is not enough. Stricter than scripts/assert_browser_sandbox.py, which
+    checks the same evidence (not the setting) but not its shape: here the counts must be plain non-negative ints,
+    one per renderer, at most 64."""
     if not state or state.get("sandbox") != "on":
         return False
     verified = state.get("verified") or {}
