@@ -330,10 +330,10 @@ def fix_ownership(
             if exc.errno in (errno.ELOOP, errno.ENOTDIR):  # swapped for a symlink or a file since the lstat
                 report.skipped.append(f"{relative}: no longer a directory")
             elif exc.errno == errno.EACCES and st.st_uid == uid:
-                # Root without CAP_DAC_READ_SEARCH cannot open a 0700 directory that is the user's already: one an
-                # earlier start handed over (never one whose subtree failed and that root would lose access to, see
-                # below) or one the user made (a mkdtemp staging dir). Taken as handed over; its contents were not
-                # looked at, which main() logs once at INFO.
+                # Root without CAP_DAC_OVERRIDE or CAP_DAC_READ_SEARCH cannot open a 0700 directory that is the user's
+                # already: one an earlier start handed over (never one whose subtree failed and that root would lose
+                # access to, see below) or one the user made (a mkdtemp staging dir). Taken as handed over; its
+                # contents were not looked at, which main() logs once per pass as a WARNING.
                 report.unchecked.append(relative)
             else:
                 report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
@@ -616,10 +616,10 @@ def main(*, run_as: str | None = None, settings: Any = None, data_root: Path | N
         )
         if report.unchecked:
             logger.warning(
-                "%d directories already uid %s's could not be opened without CAP_DAC_READ_SEARCH and were taken as "
-                "handed over without looking inside, e.g. %s. After running an older release, or CONTROLLER_RUN_AS=root, "
-                "on this data, a container without DAC_READ_SEARCH cannot hand over what those wrote in them: chown "
-                "./data by hand then.",
+                "%d directories already uid %s's could not be opened without CAP_DAC_OVERRIDE or CAP_DAC_READ_SEARCH "
+                "and were taken as handed over without looking inside, e.g. %s. After running an older release, or "
+                "CONTROLLER_RUN_AS=root, on this data, a container without DAC_OVERRIDE or DAC_READ_SEARCH cannot hand "
+                "over what those wrote in them: chown ./data by hand then.",
                 len(report.unchecked),
                 decision.uid,
                 ", ".join(_escaped(entry) for entry in report.unchecked[:5]),

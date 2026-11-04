@@ -117,8 +117,8 @@ browser-node prints the outcome (`chromium sandbox: on (verified)`, or the WARNI
 `browser-sandbox.json` beside its endpoint file. `GET /readiness` reports them in the `browser_sandbox` check, one
 line per browser (the shared browser-node and every live isolated container): it passes when every browser is
 sandboxed, warns when one fell back (naming the browser, the cause and the detail), and fails when one refused to
-start or when `BROWSER_SANDBOX=on` and one is not verified `on` (renderers in their own user namespace, with
-/proc filter counts above the browser's or chrome://sandbox's report). The state is
+start or when `BROWSER_SANDBOX=on` and one is not verified `on` (renderers in their own user namespace, with one
+/proc filter count per renderer, each above the browser's, or chrome://sandbox's report). The state is
 self-attested by the container it describes, so it is worth what that container was worth when it wrote it: it is
 written before the browser loads any page but its own check, and is trustworthy only until the browser runs
 untrusted content. The controller reads it without following links, from a regular file of at most 16 KiB, keeps
@@ -151,15 +151,15 @@ daemon's configured profile. 1.14.0's profile replaces it, and `builtin` means m
 daemon's. To keep a hardened daemon profile, set `BROWSER_SECCOMP_PROFILE` (compose) and
 `ISOLATED_BROWSER_SECCOMP_PROFILE` (the controller) to that profile plus the auto-browser entry. That path may be a
 link (a Kubernetes ConfigMap mount works), but it must not sit in a directory a browser container can write
-(`data/browser-profile`, `data/browser-sessions`). **A kernel without
-seccomp**: a custom profile makes Docker refuse to create the container, where its default only warned. For
+(`data/browser-profile`, `data/downloads`, `data/browser-sessions`). **A kernel without seccomp**: a custom profile
+makes Docker refuse to create the container, where its default only warned. For
 `docker_ephemeral` the controller checks `docker info` and sends no profile there (auto falls back, on refuses); under
 compose, set `BROWSER_SECCOMP_PROFILE=builtin` on such a host.
 
 ## Who the controller runs as (CONTROLLER_RUN_AS)
 
-The controller image needs Linux 4.3 or later: setpriv clears the ambient capability set on every start
-path, and older kernels have none.
+The controller image needs Linux 4.3 or later: setpriv clears the ambient capability set on every start path but
+`CONTROLLER_RUN_AS=root`, and older kernels have none.
 
 The controller image's entrypoint runs as root only long enough to choose a user and hand it its files, then runs
 uvicorn as that user through `setpriv`, with no capability in any set and no_new_privs (even under a plain `docker run`
@@ -189,10 +189,10 @@ files with more than one hard link, never enters the browser containers' directo
 `..` in it (`ARTIFACT_ROOT=/data/../etc` is not handed over), and refuses one deeper than one level whose parents are
 not root-owned directories. An error on one path is logged and the others are still handed over; while any error
 remains, no marker is written and one ERROR line says the pass is retried on every start until it is fixed. A
-directory that is the controller user's already and that root cannot open (a 0700 one, without CAP_DAC_READ_SEARCH)
-is taken as handed over without looking inside, with one WARNING per pass: after running an older release, or
-`CONTROLLER_RUN_AS=root`, on this data, such a container cannot hand over what those wrote in there, and `./data`
-must be chowned by hand. A pass without errors leaves `data/.auto-browser-owner`,
+directory that is the controller user's already and that root cannot open (a 0700 one, without CAP_DAC_OVERRIDE or
+CAP_DAC_READ_SEARCH) is taken as handed over without looking inside, with one WARNING per pass: after running an
+older release, or `CONTROLLER_RUN_AS=root`, on this data, such a container cannot hand over what those wrote in
+there, and `./data` must be chowned by hand. A pass without errors leaves `data/.auto-browser-owner`,
 and later starts as the same user skip the scan; a root run (`CONTROLLER_RUN_AS=root`) removes it, deleting it forces
 a new pass, and anything unexpected there (a symlink, a FIFO, another owner, other content) just means a new pass.
 The marker belongs to the controller's user, who owns `/data` anyway, and root writes it as that user: that user
@@ -232,13 +232,15 @@ given: the entrypoint empties every set but the bounding set, which only CAP_SET
 The log and readiness warn. That uid 0 still owns the image's files, though: a compromised controller could rewrite
 `/entrypoint.sh` or `app/`, and a restart (`restart: unless-stopped`) runs that as root with the container's
 capabilities again, which the WARNING names. The stronger forms are `cap_drop: [ALL]`, `user: "10002:10002"`, or
-`read_only: true` with tmpfs mounts for `/tmp`, `/var/tmp` and `/home/controller`. That works only on
-data root can read with no capability: on a `/data` another uid owns (one an earlier start handed to 10002, say) it
-cannot read the 0600 API token, and the entrypoint then refuses to start with one clear line (exit 70) rather than
-let the controller fail on it. It asks the controller which file it would read (`python -m app.api_token
---file-to-read`: an environment token or tokenless loopback reads none; `API_TOKEN_FILE` from the environment or
-`.env` otherwise), whatever `/data`'s owner, and checks that one. A container started as a non-root user runs the
-controller with no_new_privs too. To run such a container as the controller
+`read_only: true` with a tmpfs for `/tmp`. Under `read_only`, the tmpfs for `/tmp` is what OCR needs: without it,
+screenshots are returned unscrubbed (flagged in the result, with a WARNING) unless `PII_SCRUB_SCREENSHOT_STRICT=true`,
+which fails the call instead. The capability-less start works only on data root can read with no capability: on a
+`/data` another uid owns (one an earlier start handed to 10002, say) it cannot read the 0600 API token, and the
+entrypoint then refuses to start with one clear line (exit 70) rather than let the controller fail on it. It asks the
+controller which file it would read (`python -m app.api_token --file-to-read`: an environment token or tokenless
+loopback reads none; `API_TOKEN_FILE` from the environment or `.env` otherwise), whatever `/data`'s owner, and checks
+that one; a token directory that is not there yet is the controller's to create. A container started as a non-root
+user runs the controller with no_new_privs too. To run such a container as the controller
 user, start it as that user (`user: "10002:10002"` in compose, or `docker run --user 10002:10002`, with `./data` owned
 by 10002): the entrypoint then runs the controller directly (measured: readyz, a session and the token all work with
 no capability). Or add `cap_add: [CHOWN, DAC_READ_SEARCH, SETUID, SETGID]`, measured as the smallest set that hands
