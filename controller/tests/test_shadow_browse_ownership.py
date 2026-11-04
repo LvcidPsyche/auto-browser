@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock
 from app.action_errors import SessionNotFoundError
 from app.models import OperatorIdentity
 from app.session_ownership import acting_as
+from tests._regular_user import regular_user
 from tests.test_auth_state_ownership import StateContext, build_manager
 from tests.test_browser_manager_create_session import FakeBrowser, FakePage
 
@@ -29,6 +30,7 @@ class ShadowBrowseOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.manager, _ = build_manager(Path(self.tmp.name))
         self.manager.settings.shadow_browse_enabled = True
+        self.enterContext(regular_user())
         self.manager.settings.max_sessions = 5
         headed = FakeBrowser(StateContext(FakePage(), "shadow"))
         headed.close = AsyncMock()
@@ -91,6 +93,7 @@ class ShadowBrowseAllowedHostsTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.manager, _ = build_manager(Path(self.tmp.name))
         self.manager.settings.shadow_browse_enabled = True
+        self.enterContext(regular_user())
         self.manager.settings.max_sessions = 5
         self.manager.settings.allowed_hosts = "allowed.example"
         self.manager.audit.append = AsyncMock()

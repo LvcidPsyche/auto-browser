@@ -24,6 +24,7 @@ from app.browser.launch_flags import STORAGE_PARTITIONING_ON
 from app.browser.request_gate import RequestGateUnavailable
 from app.browser_manager import BrowserManager
 from tests._fake_cdp import FakeCDPSession, settle_background
+from tests._regular_user import regular_user
 from tests.test_browser_manager_create_session import FakeBrowser, FakeContext, FakePage, _settings
 
 START_URL = "https://example.com/start"
@@ -175,6 +176,7 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_shadow_launch_gates_its_headed_browser(self) -> None:
         self.manager.settings.shadow_browse_enabled = True
+        self.enterContext(regular_user())
         self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
         source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
         self.manager.sessions[source_id].context.storage_state = AsyncMock(return_value={})
@@ -395,6 +397,7 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_failed_shadow_launch_releases_its_browsers_gate(self) -> None:
         self.manager.settings.shadow_browse_enabled = True
+        self.enterContext(regular_user())
         self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
         source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
         self.manager.sessions[source_id].context.storage_state = AsyncMock(return_value={})
@@ -526,6 +529,7 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
     async def test_r1_a_shadow_launch_whose_gate_is_lost_while_it_starts_is_refused(self) -> None:
         """The loss lands before the shadow session is in manager.sessions, so containment cannot see it."""
         self.manager.settings.shadow_browse_enabled = True
+        self.enterContext(regular_user())
         self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
         source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
         self.manager.sessions[source_id].context.storage_state = AsyncMock(return_value={})
@@ -594,6 +598,7 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_r14_a_shadow_launch_whose_page_the_gate_stops_is_the_same_block(self) -> None:
         self.manager.settings.shadow_browse_enabled = True
+        self.enterContext(regular_user())
         self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
         source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
         self.manager.sessions[source_id].context.storage_state = AsyncMock(return_value={})
@@ -748,6 +753,7 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_f1_a_failed_shadow_launch_closes_its_context_before_releasing_its_gate(self) -> None:
         self.manager.settings.shadow_browse_enabled = True
+        self.enterContext(regular_user())
         self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
         source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
         self.manager.sessions[source_id].context.storage_state = AsyncMock(return_value={})
@@ -882,6 +888,7 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_f9c_a_shadow_page_that_leaves_for_a_refused_host_while_it_settles_is_a_block(self) -> None:
         self.manager.settings.shadow_browse_enabled = True
+        self.enterContext(regular_user())
         self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
         source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
         self.manager.sessions[source_id].context.storage_state = AsyncMock(return_value={})
@@ -955,6 +962,7 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_f12e_a_shadow_page_that_fails_for_another_reason_keeps_its_own_error(self) -> None:
         self.manager.settings.shadow_browse_enabled = True
+        self.enterContext(regular_user())
         self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
         source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
         self.manager.sessions[source_id].context.storage_state = AsyncMock(return_value={})
@@ -1149,6 +1157,7 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         from app.browser.services import sessions as sessions_module
 
         self.manager.settings.shadow_browse_enabled = True
+        self.enterContext(regular_user())
         self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
         source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
         self.manager.sessions[source_id].context.storage_state = AsyncMock(return_value={})

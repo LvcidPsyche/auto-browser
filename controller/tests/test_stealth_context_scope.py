@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, Mock
 
 from app.browser_manager import BrowserManager
 from app.browser_scripts import STEALTH_INIT_SCRIPT
+from tests._regular_user import regular_user
 from tests.test_browser_manager_create_session import FakeBrowser, FakeContext, FakePage, _settings
 
 TIMEOUT_MS = 4321
@@ -39,6 +40,7 @@ class StealthContextScopeTests(unittest.IsolatedAsyncioTestCase):
         settings = _settings(Path(self.tmp.name))
         settings.stealth_enabled = True
         settings.shadow_browse_enabled = True
+        self.enterContext(regular_user())
         settings.action_timeout_ms = TIMEOUT_MS
         self.manager = BrowserManager(settings)
         self.manager.audit.append = AsyncMock()

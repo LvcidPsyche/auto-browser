@@ -25,6 +25,7 @@ import pytest
 from tests import test_allowed_hosts_navigation as nav
 from tests._background import pending
 from tests._chromium import requires_chromium
+from tests._regular_user import regular_user
 from tests.test_allowed_hosts_navigation import (  # noqa: F401 - _shared_chromium is the module's Chromium fixture
     SECRET,
     _shared_chromium,
@@ -178,7 +179,8 @@ async def test_a_popup_in_a_shadow_browse_session_is_returned_to_blank(tmp_path:
         env.manager.settings.shadow_browse_enabled = True
         launch = AsyncMock(return_value=_TrackedBrowser(nav._SHARED["browser"], env))
         env.manager.playwright = SimpleNamespace(chromium=SimpleNamespace(launch=launch))
-        shadow_id = (await env.manager.enable_shadow_browse(source_id))["shadow_session_id"]
+        with regular_user():
+            shadow_id = (await env.manager.enable_shadow_browse(source_id))["shadow_session_id"]
         assert launch.await_args.kwargs["headless"] is False
         spy = audit_spy(env)
 

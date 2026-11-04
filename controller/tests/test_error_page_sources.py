@@ -23,6 +23,7 @@ from app.routes.session_diagnostics import create_session_diagnostics_router
 from app.routes.sessions import create_sessions_router
 from app.session_ownership import acting_as
 from app.tool_gateway import McpToolGateway
+from tests._regular_user import regular_user
 from tests.test_auth_state_ownership import ALICE, StateContext, build_manager
 from tests.test_request_gate_wiring import START_URL, _browser
 
@@ -70,6 +71,8 @@ class ShadowFromAnErrorPageTests(unittest.IsolatedAsyncioTestCase):
         await GateWiringTests.asyncSetUp(self.harness)
         self.manager = self.harness.manager
         self.manager.settings.shadow_browse_enabled = True
+        # On self, not the harness: the harness's cleanups never run, so a patch entered there would outlive the test.
+        self.enterContext(regular_user())
         self.browser = self.harness.browser
         self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
         self.source_id = (await self.manager.create_session(name="source", start_url=START_URL))["id"]
