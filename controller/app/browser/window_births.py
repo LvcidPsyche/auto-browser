@@ -794,8 +794,9 @@ class WindowBirths:
         A page Playwright reported is given a report task (``note_reported`` in ``attach_popup``) that resolves
         and caches its targetId; its first page and open-tab tabs are cached when opened. The reads in flight
         are waited for (bounded; not one that has failed already and is being retried, whose id is not expected
-        within the wait: the session is swept again once it ends), then the cached id of every page is taken. A page whose id is not cached is not read
-        here as part of the sweep: resolving an arbitrary window's id would open — and, since the session is
+        within the wait: the session is swept again once that retry ends), then the cached id of every page is
+        taken. A page whose id is not cached is not read here as part of the sweep: resolving an arbitrary
+        window's id would open — and, since the session is
         kept, retain — a CDP session per window, which a refused page flooding windows would turn into resource
         exhaustion. Such a page is reported all the same (an unreported window has no Page), so while one is
         open the sweep closes nothing it cannot match (``close_unreported``), unless the controller opened the
