@@ -141,8 +141,9 @@ services:
       # Handed to every docker_ephemeral browser container, with the seccomp
       # profile (ISOLATED_BROWSER_SECCOMP_PROFILE) unless it is off.
       BROWSER_SANDBOX: ${BROWSER_SANDBOX:-auto}
-      # The controller runs as the owner of ./data, or as uid 10001 when that
-      # is root (controller/entrypoint.sh). root restores the old root
+      # The controller runs as the owner of ./data, or as uid 10002 (the image's
+      # controller user) when ./data belongs to root or to browser-node's uid
+      # 10001 (controller/entrypoint.sh). root restores the old root
       # controller: not recommended, and readiness warns.
       CONTROLLER_RUN_AS: ${CONTROLLER_RUN_AS:-auto}
       TAKEOVER_URL: ${TAKEOVER_URL:-http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale}
