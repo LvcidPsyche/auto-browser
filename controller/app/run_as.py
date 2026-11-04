@@ -82,6 +82,9 @@ MAX_WALK_DEPTH = 200
 # And bounded in breadth: progress is logged every WALK_PROGRESS_EVERY entries, and a pass stops after
 # MAX_WALK_ENTRIES (an error: no marker, the next start goes on).
 WALK_PROGRESS_EVERY = 10_000
+# What root without DAC capabilities needs, as "others", to open and list a directory it handed over (o+r and o+x):
+# an errored subtree's ancestor, or /data, is handed over only with both, so the next start can retry it.
+ROOT_REOPENS = stat.S_IROTH | stat.S_IXOTH
 MAX_WALK_ENTRIES = 2_000_000
 _REFUSED_GIDS = frozenset({0, BROWSER_UID, NOBODY_UID})
 
@@ -196,9 +199,8 @@ class OwnershipReport:
 
 
 def _escaped(text: str) -> str:
-    """A path or message as one printable log line: anything else (newlines, ANSI escapes) shown escaped (D14)."""
-    if text.isprintable():
-        return text
+    """A path or message as one printable log line, always escaped (D14, P5#8): backslashes too, so an escaped
+    sequence in a name cannot pass for a real one, and newlines and ANSI escapes never reach the log raw."""
     return text.encode("unicode_escape", "backslashreplace").decode("ascii")
 
 
@@ -290,6 +292,12 @@ def fix_ownership(
         return False
 
     def visit(parent_fd: int, name: str, relative: str, root_dev: int, depth: int = 0) -> None:
+        if report.truncated:
+            return
+        if report.examined >= max_entries:
+            report.truncated = True
+            report.errors.append(f"{data_root}: more than {max_entries} entries, the pass stopped there")
+            return
         if depth > MAX_WALK_DEPTH:
             report.errors.append(f"{data_root / relative}: deeper than {MAX_WALK_DEPTH} levels, not handed over")
             return
@@ -301,11 +309,6 @@ def fix_ownership(
             report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
             return
         report.examined += 1
-        if report.examined > max_entries:
-            if not report.truncated:
-                report.truncated = True
-                report.errors.append(f"{data_root}: more than {max_entries} entries, the pass stopped there")
-            return
         if report.examined % WALK_PROGRESS_EVERY == 0:
             logger.info("hand-over pass: %d entries examined so far", report.examined)
         if skip(relative, st, root_dev):
@@ -341,17 +344,27 @@ def fix_ownership(
                 report.skipped.append(f"{relative}: replaced since it was examined")
                 return
             try:
-                children = sorted(entry.name for entry in os.scandir(fd))
+                # Listed lazily and no further than the cap allows; only what was taken is sorted.
+                room = max_entries - report.examined + 1
+                children = []
+                with os.scandir(fd) as entries:
+                    for entry in entries:
+                        if len(children) >= room:
+                            break
+                        children.append(entry.name)
+                children.sort()
             except OSError as exc:
                 report.errors.append(f"{data_root / relative}: {exc.strerror or exc}")
                 return
             errors_before = len(report.errors)
             for child in children:
+                if report.truncated:
+                    break
                 visit(fd, child, f"{relative}/{child}", root_dev, depth + 1)
             # Bottom-up, after its contents. When some of them failed, a directory root could not enter as another
             # owner's (no o+x: root without DAC capabilities) keeps its owner, so the next start can still reach and
             # retry the failed entries; one with o+x is handed over all the same.
-            if len(report.errors) == errors_before or opened.st_mode & stat.S_IXOTH:
+            if len(report.errors) == errors_before or opened.st_mode & ROOT_REOPENS == ROOT_REOPENS:
                 chown_fd(fd, relative, opened)
             else:
                 report.withheld.append(relative)
@@ -415,7 +428,7 @@ def fix_ownership(
                 report.errors.append(f"{top}: {exc.strerror or exc}")
         # /data itself last, after everything under it, on the same rule: a stuck entry must not keep the controller
         # from writing into /data unless handing /data over would lock root out of it.
-        if not report.errors or root_st.st_mode & stat.S_IXOTH:
+        if not report.errors or root_st.st_mode & ROOT_REOPENS == ROOT_REOPENS:
             chown_fd(root_fd, ".", root_st)
         else:
             report.withheld.append(".")
@@ -602,9 +615,11 @@ def main(*, run_as: str | None = None, settings: Any = None, data_root: Path | N
             report.seconds,
         )
         if report.unchecked:
-            logger.info(
+            logger.warning(
                 "%d directories already uid %s's could not be opened without CAP_DAC_READ_SEARCH and were taken as "
-                "handed over (their contents were not looked at), e.g. %s",
+                "handed over without looking inside, e.g. %s. After running an older release, or CONTROLLER_RUN_AS=root, "
+                "on this data, a container without DAC_READ_SEARCH cannot hand over what those wrote in them: chown "
+                "./data by hand then.",
                 len(report.unchecked),
                 decision.uid,
                 ", ".join(_escaped(entry) for entry in report.unchecked[:5]),

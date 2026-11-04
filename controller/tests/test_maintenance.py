@@ -122,6 +122,31 @@ class MaintenanceServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["roots"][0]["errors"], 2, report["roots"][0])
         self.assertFalse(upload.exists(), "the next root was swept")
 
+    async def test_a_stale_directory_whose_resolve_loops_in_the_second_pass_is_counted(self) -> None:
+        # M-b: the second pass's resolve() sits inside the per-entry handler too.
+        from unittest.mock import patch
+
+        stale = Path(self.settings.artifact_root) / "stale-dir"
+        stale.mkdir()
+        utime(stale, (1_000_000_000, 1_000_000_000))
+        upload = Path(self.settings.upload_root) / "old.bin"
+        upload.write_text("x", encoding="utf-8")
+        utime(upload, (1_000_000_000, 1_000_000_000))
+        real_resolve = Path.resolve
+        calls = {"stale-dir": 0}
+
+        def resolve(path, *args, **kwargs):
+            if path.name == "stale-dir":
+                calls["stale-dir"] += 1
+                if calls["stale-dir"] > 1:  # the first pass's resolve works; the second pass's loops
+                    raise RuntimeError(f"Symlink loop from {str(path)!r}")
+            return real_resolve(path, *args, **kwargs)
+
+        with patch.object(Path, "resolve", resolve):
+            report = await self.service.run_cleanup()
+        self.assertEqual(report["roots"][0]["errors"], 1, report["roots"][0])
+        self.assertFalse(upload.exists(), "the next root was swept")
+
     async def test_the_startup_summary_reports_errors(self) -> None:
         from unittest.mock import patch
 
