@@ -350,7 +350,8 @@ jobs:
 
       - name: Without the profile, BROWSER_SANDBOX=on refuses to start
         # The negative leg: under Docker's own profile a sandboxed launch cannot start, so on must leave browser-node
-        # refused, with its state saying so and no endpoint, and the controller (still under on) refuse the session.
+        # refused, with its state saying so and no endpoint: the session is refused by the gate, or by a failed
+        # connect to a browser-node that refused to start (the next step is the one only the gate can refuse).
         run: |
           BROWSER_SANDBOX=on BROWSER_SECCOMP_PROFILE=builtin docker compose up -d --force-recreate --no-deps browser-node || true
           python3 - <<'PY'
