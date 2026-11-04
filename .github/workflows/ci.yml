@@ -362,3 +362,26 @@ jobs:
           docker compose logs --tail 20 browser-node
           api_port="$(docker compose port controller 8000 | awk -F: 'NF {print $NF}' | tail -n1)"
           python3 scripts/check_sandbox_gate.py --expect 409 --api-port "$api_port"
+
+      - name: The controller's gate refuses an unverified browser-node (BROWSER_SANDBOX=on)
+        # The leg above's 409 comes from a browser-node with no endpoint at all. Here browser-node runs under auto with
+        # Docker's own profile: it starts unsandboxed (state off) and publishes an endpoint, so the controller (still
+        # under on) connects, and only its gate can refuse the session; its WARNING must say why.
+        run: |
+          BROWSER_SANDBOX=auto BROWSER_SECCOMP_PROFILE=builtin docker compose up -d --force-recreate --no-deps browser-node
+          for _ in $(seq 1 60); do
+            [ -s data/browser-profile/browser-ws-endpoint.txt ] && break
+            sleep 2
+          done
+          python3 -c 'import json,sys; s=json.load(open("data/browser-profile/browser-sandbox.json")); print(s); sys.exit(s.get("sandbox") != "off")'
+          api_port="$(docker compose port controller 8000 | awk -F: 'NF {print $NF}' | tail -n1)"
+          python3 scripts/check_sandbox_gate.py --expect 409 --api-port "$api_port" \
+            --log-must-say "BROWSER_SANDBOX=on, but the shared browser-node reports off"
+
+      - name: An isolated session under BROWSER_SANDBOX=on runs sandboxed
+        # docker_ephemeral with the restriction lifted (the on-leg above): the session's own container must start
+        # with a verified sandbox, /proc evidence included.
+        run: |
+          BROWSER_SANDBOX=on docker compose -f docker-compose.yml -f docker-compose.isolation.yml up -d --build --force-recreate browser-node controller
+          api_port="$(docker compose -f docker-compose.yml -f docker-compose.isolation.yml port controller 8000 | awk -F: 'NF {print $NF}' | tail -n1)"
+          python3 scripts/check_sandbox_gate.py --expect 200 --isolated --api-port "$api_port"

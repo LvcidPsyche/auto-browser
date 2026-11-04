@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Check the controller's BROWSER_SANDBOX=on gate against a real browser-node (CI's compose-smoke).
 
-usage: check_sandbox_gate.py --expect 200|409 [--api-port N] [--data DIR]
+usage: check_sandbox_gate.py --expect 200|409 [--isolated] [--log-must-say TEXT] [--api-port N] [--data DIR]
 
---expect 200: a session is created (the shared browser-node's snapshot is a verified "on"), then closed, and the
-              state's endpoint is exactly the endpoint file's content (the run the controller connected to).
---expect 409: session creation is refused (a browser-node that refused to start sandboxed).
+--expect 200: a session is created, then closed. Shared mode: the shared browser-node's state names exactly the
+              endpoint file's content (the run the controller connected to). --isolated (docker_ephemeral): the
+              session container's own state is a verified on with /proc evidence (assert_browser_sandbox.py's rules).
+--expect 409: session creation is refused (by the gate: a browser-node that is not a verified "on", or one that
+              refused to start). --log-must-say: and the controller's log (docker compose logs controller) says so.
 
 The token is read from DIR/api-token and never printed.
 """
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 import urllib.error
@@ -42,6 +45,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--expect", type=int, choices=(200, 409), required=True)
     parser.add_argument("--api-port", type=int, default=8000)
     parser.add_argument("--data", default="data")
+    parser.add_argument("--isolated", action="store_true")
+    parser.add_argument("--log-must-say", default=None)
     args = parser.parse_args(argv[1:])
     data = Path(args.data)
     token = (data / "api-token").read_text(encoding="utf-8").strip()
@@ -57,8 +62,24 @@ def main(argv: list[str]) -> int:
     if status != args.expect:
         print(f"FAIL: expected HTTP {args.expect}, got {status}: {json.dumps(body)[:300]}")
         return 1
+    if args.expect == 200 and args.isolated:
+        state_file = data / "browser-sessions" / body["id"] / "profile" / "browser-sandbox.json"
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        close_status, _ = call("DELETE", f"{base}/sessions/{body['id']}", token)
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from assert_browser_sandbox import problems
+
+        found = problems(state, require_proc=True)
+        if found or close_status != 200:
+            print(f"FAIL: the isolated container's state: {found or 'fine'}; close: HTTP {close_status}")
+            return 1
+        print("OK: the isolated session's container ran with a verified sandbox (/proc evidence)")
+        return 0
     if args.expect == 200:
-        call("DELETE", f"{base}/sessions/{body['id']}", token)
+        close_status, _ = call("DELETE", f"{base}/sessions/{body['id']}", token)
+        if close_status != 200:
+            print(f"FAIL: closing the session answered HTTP {close_status}")
+            return 1
         state = json.loads((data / "browser-profile" / "browser-sandbox.json").read_text(encoding="utf-8"))
         endpoint = (data / "browser-profile" / "browser-ws-endpoint.txt").read_text(encoding="utf-8").strip()
         if state.get("endpoint") != endpoint:
@@ -66,6 +87,13 @@ def main(argv: list[str]) -> int:
             return 1
         print("OK: the session ran on a verified browser-node, and the state names the endpoint the controller used")
     else:
+        if args.log_must_say is not None:
+            logs = subprocess.run(
+                ["docker", "compose", "logs", "controller"], capture_output=True, text=True, check=False
+            ).stdout
+            if args.log_must_say not in logs:
+                print(f"FAIL: the controller's log does not say {args.log_must_say!r}")
+                return 1
         print("OK: the controller refused the session")
     return 0
 

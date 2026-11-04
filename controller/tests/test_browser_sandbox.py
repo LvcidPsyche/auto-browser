@@ -198,7 +198,17 @@ def _status(browser_node=None, isolated=None, *, setting="auto", mode="shared_br
     }
 
 
-ON = {"setting": "auto", "sandbox": "on", "cause": None, "verified": {"renderers": 1, "renderer_userns_differs": True, "browser_seccomp_filters": 2, "renderer_seccomp_filters": [3]}}
+ON = {
+    "setting": "auto",
+    "sandbox": "on",
+    "cause": None,
+    "verified": {
+        "renderers": 1,
+        "renderer_userns_differs": True,
+        "browser_seccomp_filters": 2,
+        "renderer_seccomp_filters": [3],
+    },
+}
 
 
 class ReadinessSandboxTests(unittest.TestCase):
@@ -431,9 +441,27 @@ class OnEnforcedForIsolatedTests(_ProvisionMixin, unittest.IsolatedAsyncioTestCa
             {"sandbox": "unreadable", "detail": "not valid JSON"},
             {"sandbox": "on"},  # no verification evidence
             # a verified on that names another run's endpoint
-            {"sandbox": "on", "verified": {"renderers": 1, "renderer_userns_differs": True, "browser_seccomp_filters": 2, "renderer_seccomp_filters": [3]}, "endpoint": "ws://another-run:9223/x"},
+            {
+                "sandbox": "on",
+                "verified": {
+                    "renderers": 1,
+                    "renderer_userns_differs": True,
+                    "browser_seccomp_filters": 2,
+                    "renderer_seccomp_filters": [3],
+                },
+                "endpoint": "ws://another-run:9223/x",
+            },
             # a verified on that names no endpoint (S3#15: required for isolated states too)
-            {"sandbox": "on", "verified": {"renderers": 1, "renderer_userns_differs": True, "browser_seccomp_filters": 2, "renderer_seccomp_filters": [3]}, "endpoint": None},
+            {
+                "sandbox": "on",
+                "verified": {
+                    "renderers": 1,
+                    "renderer_userns_differs": True,
+                    "browser_seccomp_filters": 2,
+                    "renderer_seccomp_filters": [3],
+                },
+                "endpoint": None,
+            },
         ):
             with self.subTest(state=state):
                 with self.assertRaisesRegex(
@@ -555,6 +583,15 @@ class Round2WiringTests(unittest.TestCase):
         self.assertIn('sys.exit("a refused browser-node left an endpoint file")', job)
         # The controller under on in both legs: a session on the verified node, a 409 on the refused one (S3#5).
         self.assertIn("BROWSER_SANDBOX=on docker compose up -d --force-recreate browser-node controller", job)
+        # S4#1/D9: a leg only the gate can refuse (an unverified browser-node with an endpoint), and its WARNING.
+        self.assertIn(
+            "BROWSER_SANDBOX=auto BROWSER_SECCOMP_PROFILE=builtin docker compose up -d --force-recreate --no-deps "
+            "browser-node",
+            job,
+        )
+        self.assertIn('--log-must-say "BROWSER_SANDBOX=on, but the shared browser-node reports off"', job)
+        # D10: an isolated session under on, its container's state verified.
+        self.assertIn("check_sandbox_gate.py --expect 200 --isolated", job)
         self.assertLess(
             job.index('check_sandbox_gate.py --expect 200 --api-port "$api_port"'),
             job.index('check_sandbox_gate.py --expect 409 --api-port "$api_port"'),

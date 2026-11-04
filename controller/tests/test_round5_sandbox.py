@@ -175,6 +175,15 @@ class GateScriptTests(unittest.TestCase):
         self._files("ws://a/1", "ws://a/2")
         self.assertEqual(self._run(200, "--expect", "200"), 1)
 
+    def test_isolated_needs_the_containers_own_verified_state(self) -> None:
+        state = self.data / "browser-sessions" / "s1" / "profile" / "browser-sandbox.json"
+        state.parent.mkdir(parents=True)
+        verified = {"setting": "on", "sandbox": "on", "verified": EVIDENCE}
+        state.write_text(json.dumps(verified), encoding="utf-8")
+        self.assertEqual(self._run(200, "--expect", "200", "--isolated"), 0)
+        state.write_text(json.dumps({**verified, "verified": {"renderers": 1}}), encoding="utf-8")
+        self.assertEqual(self._run(200, "--expect", "200", "--isolated"), 1)
+
     def test_a_wrong_status_fails(self) -> None:
         self.assertEqual(self._run(500, "--expect", "409"), 1)
         self.assertEqual(self._run(409, "--expect", "409"), 0)
