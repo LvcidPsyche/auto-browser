@@ -155,7 +155,7 @@ class EntrypointCapabilityTests(unittest.TestCase):
         )
         self.assertEqual(code, 0, out)
         checks = [line for line in log.read_text(encoding="utf-8").splitlines() if " test " in line]
-        self.assertEqual(len(checks), 3, checks)  # -x the directory, -e and -r the token
+        self.assertEqual(len(checks), 4, checks)  # -e and -x the directory, -e and -r the token
         for line in checks:
             self.assertTrue(line.startswith("--inh-caps=-all --ambient-caps=-all --no-new-privs --bounding-set=-all"))
             self.assertIn(f"{DROP_CHAIN} test ", line)
@@ -179,9 +179,27 @@ class EntrypointCapabilityTests(unittest.TestCase):
             env={"FAKE_DATA_OWNER": "10002", "FAKE_SEARCHABLE": "0"},
         )
         self.assertEqual(code, 70, out)
-        # Item 4: the brief's wording, "cannot reach, or does not exist".
+        # Round 7 (P6#1): only a directory that exists is refused, so the ERROR no longer says it may not exist.
         self.assertIn("cannot reach the API token's directory", out)
-        self.assertIn(", or it does not exist, so the controller cannot start", out)
+        self.assertIn(", so the controller cannot start", out)
+        self.assertNotIn("does not exist", out)
+
+    def test_a_missing_token_directory_is_left_to_the_controller(self) -> None:
+        # P6#1: on a root-owned /data that uid 0 can write, the controller creates secrets/ and the token in it.
+        data = self._data(False)
+        code, out = run_entrypoint(
+            ALL_DROPPED,
+            ALL_DROPPED,
+            data_root=data,
+            env={
+                "FAKE_DATA_OWNER": "0",
+                "FAKE_SEARCHABLE": "0",  # what -x says of a directory that is not there
+                "FAKE_FILE_TO_READ": _bash_path(data / "secrets" / "api-token"),
+            },
+        )
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("ERROR", out)
+        self.assertIn("EXEC setpriv", out)
 
     def test_the_file_the_controller_names_is_the_one_checked(self) -> None:
         elsewhere = self._data(False) / "secrets"
@@ -229,11 +247,31 @@ class EntrypointCapabilityTests(unittest.TestCase):
         code, out = run_entrypoint(CHOWN_DAC_FOWNER, CHOWN_DAC_FOWNER)
         self.assertEqual(code, 0, out)
         self.assertIn("this container still grants chown dac_override fowner at every start", out)
-        self.assertIn("read_only: true with tmpfs mounts for /tmp, /var/tmp and /home/controller", out)
+        # Round 7 (P6#3): under read_only the controller needs one writable temp dir, /tmp; HOME needs nothing.
+        self.assertIn("read_only: true with a tmpfs for /tmp; see docs/deployment.md", out)
+        self.assertNotIn("/var/tmp", out)
+        self.assertNotIn("/home/controller", out)
         code, out = run_entrypoint(NO_SETUID, NO_SETUID)  # SETPCAP clears it here, but a restart grants it again
         self.assertIn("this container still grants", out)
         code, out = run_entrypoint(ALL_DROPPED, ALL_DROPPED)
         self.assertNotIn("still grants", out)
+
+    def test_the_warning_names_the_bounding_set_not_the_effective_set(self) -> None:
+        # P6#6: a runtime may start root with an effective set narrower than its bounding set. A restart after the
+        # image is rewritten regains the bounding set, so that is the set the WARNING names.
+        code, out = run_entrypoint(ALL_DROPPED, CHOWN_DAC_FOWNER)
+        self.assertEqual(code, 0, out)
+        self.assertIn("this container still grants chown dac_override fowner at every start", out)
+
+    def test_a_capability_without_a_name_is_named_by_its_bit(self) -> None:
+        # P6#12, F7: cap_names covers bits 0-63, so a bounding set that is not empty never reads "none".
+        code, out = run_entrypoint(ALL_DROPPED, "0000020000000001")  # CAP_CHOWN and bit 41
+        self.assertEqual(code, 0, out)
+        self.assertIn("this container still grants chown cap_41 at every start", out)
+        code, out = run_entrypoint(ALL_DROPPED, "8000000000000000")  # bit 63 alone
+        self.assertEqual(code, 0, out)
+        self.assertIn("this container still grants cap_63 at every start", out)
+        self.assertNotIn("grants none", out)
 
     def test_a_non_root_start_checks_controller_run_as_too(self) -> None:
         # Item 11: a bad value exits 70 there as well, and root is said to be ignored.
@@ -246,6 +284,15 @@ class EntrypointCapabilityTests(unittest.TestCase):
         )
         self.assertEqual(code, 0, out)
         self.assertIn("CONTROLLER_RUN_AS=root is ignored: this container was started as uid 10002", out)
+
+    def test_controller_run_as_root_is_ignored_with_a_warning_when_it_cannot_switch(self) -> None:
+        # P6#11: the cannot-switch branch drops every capability, so CONTROLLER_RUN_AS=root is ignored there too.
+        code, out = run_entrypoint(ALL_DROPPED, ALL_DROPPED, env={"CONTROLLER_RUN_AS": "root"})
+        self.assertEqual(code, 0, out)
+        self.assertIn("CONTROLLER_RUN_AS=root is ignored: this container cannot switch users", out)
+        code, out = run_entrypoint(ALL_DROPPED, ALL_DROPPED, env={"CONTROLLER_RUN_AS": "auto"})
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("is ignored", out)
 
     def test_the_root_path_execs_with_no_new_privs(self) -> None:
         stub_python = '#!/usr/bin/env bash\nprintf "RUN_UID=\\nRUN_GID=\\nRUN_REASON=CONTROLLER_RUN_AS=root (not recommended)\\n"\n'

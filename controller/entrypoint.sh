@@ -15,7 +15,9 @@ fail() {
 }
 
 # CONTROLLER_RUN_AS, checked first on every path (the non-root and cannot-switch branches never run app.run_as).
-# As app.run_as reads it: leading and trailing whitespace trimmed, lowercased (Python's .strip().lower()).
+# As app.run_as reads it: trimmed and lowercased. bash's [[:space:]] (in the image's C.UTF-8 locale) leaves the
+# no-break spaces U+00A0 and U+202F that Python's .strip() removes, so a value padded with those fails closed here
+# (exit 70) rather than reading as auto or root.
 run_as_setting="${CONTROLLER_RUN_AS:-}"
 run_as_setting="${run_as_setting#"${run_as_setting%%[![:space:]]*}"}"
 run_as_setting="${run_as_setting%"${run_as_setting##*[![:space:]]}"}"
@@ -51,9 +53,10 @@ CAP_NAMES=(chown dac_override dac_read_search fowner fsetid kill setgid setuid s
   sys_pacct sys_admin sys_boot sys_nice sys_resource sys_time sys_tty_config mknod lease audit_write audit_control
   setfcap mac_override mac_admin syslog wake_alarm block_suspend audit_read perfmon bpf checkpoint_restore)
 cap_names() {
+  # All 64 bits: one the list does not name yet reads cap_<bit>, so a mask that is not 0 never reads "none".
   local mask=$((16#$1)) bit names=()
-  for ((bit = 0; bit < ${#CAP_NAMES[@]}; bit++)); do
-    if (( (mask >> bit) & 1 )); then names+=("${CAP_NAMES[bit]}"); fi
+  for ((bit = 0; bit < 64; bit++)); do
+    if (( (mask >> bit) & 1 )); then names+=("${CAP_NAMES[bit]:-cap_$bit}"); fi
   done
   echo "${names[*]:-none}"
 }
@@ -82,12 +85,16 @@ if (( ((16#$cap_eff >> 7) & 1) == 0 || ((16#$cap_eff >> 6) & 1) == 0 )); then
     "$kept and no_new_privs. To run as the controller user instead, start it as that user: compose" \
     "user: \"10002:10002\" (or docker run --user 10002:10002), with ./data owned by 10002; or add cap_add CHOWN," \
     "DAC_READ_SEARCH, SETUID and SETGID." >&2
+  if [[ "$run_as_setting" == root ]]; then
+    echo "entrypoint: WARNING: CONTROLLER_RUN_AS=root is ignored: this container cannot switch users, so it runs as" \
+      "uid 0 with $kept." >&2
+  fi
   if (( 16#$cap_bnd != 0 )); then
     # uid 0 still owns the image's files: a compromised controller can rewrite /entrypoint.sh or app/, and the next
     # restart runs that as root with these capabilities again (restart: unless-stopped).
     echo "entrypoint: WARNING: this container still grants $(cap_names "$cap_bnd") at every start (its bounding set)," \
       "and uid 0 can rewrite the image (/entrypoint.sh, app/) to regain them after a restart. Use cap_drop: [ALL]," \
-      "user: \"10002:10002\", or read_only: true with tmpfs mounts for /tmp, /var/tmp and /home/controller." >&2
+      "user: \"10002:10002\", or read_only: true with a tmpfs for /tmp; see docs/deployment.md." >&2
   fi
   data_root="${CONTROLLER_DATA_ROOT:-/data}"
   data_owner="$(stat -c %u "$data_root" 2>/dev/null || true)"
@@ -108,9 +115,12 @@ if (( ((16#$cap_eff >> 7) & 1) == 0 || ((16#$cap_eff >> 6) & 1) == 0 )); then
   if ! token_file="$("${dropped[@]}" python -m app.api_token --file-to-read)"; then
     echo "entrypoint: WARNING: could not ask the controller which token file it reads; not checking it here." >&2
   elif [[ -n "$token_file" ]]; then
-    if ! "${dropped[@]}" test -x "$(dirname "$token_file")"; then
-      fail "uid 0 with $kept cannot reach the API token's directory $(dirname "$token_file"), or it does not exist, so" \
-        "the controller cannot start: $way_out."
+    token_dir="$(dirname "$token_file")"
+    # A directory that is not there yet is the controller's to create, with the token in it (or to fail on with its
+    # own message), so only one that exists is refused here.
+    if "${dropped[@]}" test -e "$token_dir" && ! "${dropped[@]}" test -x "$token_dir"; then
+      fail "uid 0 with $kept cannot reach the API token's directory $token_dir, so the controller cannot start:" \
+        "$way_out."
     elif "${dropped[@]}" test -e "$token_file" && ! "${dropped[@]}" test -r "$token_file"; then
       fail "uid 0 with $kept cannot read the API token $token_file, so the controller cannot start: $way_out."
     fi
