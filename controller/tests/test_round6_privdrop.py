@@ -27,8 +27,12 @@ def _settings(**env) -> Settings:
 
 class FileToReadTests(unittest.TestCase):
     def test_an_environment_token_reads_no_file(self) -> None:
-        self.assertIsNone(api_token.file_to_read(_settings(API_BEARER_TOKEN="x" * 40)))
-        self.assertIsNone(api_token.file_to_read(_settings(API_BEARER_TOKENS="ops:" + "y" * 40)))
+        # Tokenless off (tests/__init__.py turns it on), so only the environment token can say "none".
+        for env in ({"API_BEARER_TOKEN": "x" * 40}, {"API_BEARER_TOKENS": "ops:" + "y" * 40}):
+            with self.subTest(**env):
+                settings = _settings(**env, API_ALLOW_TOKENLESS_LOOPBACK="false", API_BIND_SCOPE="loopback")
+                self.assertIsNone(api_token.file_to_read(settings))
+        self.assertIsNotNone(api_token.file_to_read(_settings(API_ALLOW_TOKENLESS_LOOPBACK="false")))
 
     def test_tokenless_spellings_on_loopback_read_no_file(self) -> None:
         for value in ("true", "t", "y", "yes", "on", "1"):
