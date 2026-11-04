@@ -175,6 +175,29 @@ class BrowserTabManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(self.session.page, popup)
         never.cancel()
 
+    async def test_activate_tab_keeps_the_host_refusal_for_a_hold_never_judged_and_for_a_refused_verdict(self) -> None:
+        """Round-4 RB3's unjudged refusal is for a verdict that was being judged and never came. A popup held with
+        no judgement started (its opener closed before Playwright reported it), and one whose verdict came out
+        refused, keep the host refusal, as before."""
+        from app.browser.services.tabs import REFUSED_TAB_MESSAGE, TabUnjudgedError
+
+        popup = self.session.context.pages[1]
+        self.manager.page_provenance.opener_lookup_started(popup)
+        with self.assertRaises(PermissionError) as raised:
+            await self.manager.activate_tab(self.session.id, 1)
+        self.assertNotIsInstance(raised.exception, TabUnjudgedError)
+        self.assertEqual(str(raised.exception), REFUSED_TAB_MESSAGE)
+
+        judged = asyncio.get_running_loop().create_future()
+        judged.set_result(None)
+        self.manager.diagnostics._birth_judgements[popup] = judged
+        self.manager.page_provenance.opener_judged(popup, opener_refused=True)
+        with self.assertRaises(PermissionError) as raised:
+            await self.manager.activate_tab(self.session.id, 1)
+        self.assertNotIsInstance(raised.exception, TabUnjudgedError)
+        self.assertEqual(str(raised.exception), REFUSED_TAB_MESSAGE)
+        self.assertIsNot(self.session.page, popup)
+
     async def test_close_tab_closes_secondary_page(self) -> None:
         result = await self.manager.close_tab(self.session.id, 1)
 
