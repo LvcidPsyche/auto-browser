@@ -28,7 +28,9 @@ def register(registry, gateway):
                 "Refused when more than one operator credential is configured (the attached browser "
                 "would be shared by every operator): run a separate controller per operator, or set "
                 "CDP_CONNECT_URL at startup. Also refused while live sessions still use the current "
-                "browser: close them first. The previous browser is disconnected on success."
+                "browser: close them first. Refused under BROWSER_SANDBOX=on (the controller cannot verify a "
+                "Chrome reached over CDP; CDP_CONNECT_URL is the operator's way). The previous browser is "
+                "disconnected on success."
             ),
             input_model=CdpAttachInput,
             handler=gateway._cdp_attach,

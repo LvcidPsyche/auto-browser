@@ -127,7 +127,10 @@ and reused, never re-read, when the controller reconnects to the same endpoint; 
 afresh. The state names the endpoint of the run it describes, and the controller takes it only when that is the
 endpoint it connected to; otherwise it is `unknown` (a browser-node rolled back to an image that writes no state
 leaves the previous run's `on` beside its new endpoint). A browser compromised later can rewrite both files, but not
-what the controller already holds; a controller restart reads them again. In `docker_ephemeral` mode no session
+what the controller already holds; a controller restart reads them again, and so does a reconnect to a new endpoint
+(that file too is the browser user's to write). While disconnected, readiness reports the files as they are: unknown
+with an endpoint file, and without one only a refusal. Reusing a snapshot per endpoint is sound because Playwright's
+launchServer mints a random path for every run, so a new run never repeats an old endpoint. In `docker_ephemeral` mode no session
 runs on the shared browser-node, so readiness shows its line for information and never warns or fails on it. To see the
 live evidence in a container, run
 `docker compose exec -u browser browser-node node /opt/browser-node/sandbox-report.mjs` (the state, a `/proc` check
@@ -166,16 +169,20 @@ At start, what earlier releases left in the controller's own `/data` subtrees (e
 from a pre-release) is given to that user. The walk holds directory file descriptors and changes each entry relative
 to its directory without following links, so swapping a directory for a symlink mid-walk cannot lead it out of the
 tree; each directory is handed over after its contents, through the descriptor already open, so root never locks
-itself out of a 0700 directory mid-walk, and only when all of its contents went over, so a failed subtree is retried
-on the next start. The walk goes at most 200 levels deep (deeper entries are errors). It skips every mount point
-under `/data`, and a configured path whose parents include one, (read from `/proc/self/mountinfo`,
+itself out of a 0700 directory mid-walk. When something under a directory fails, the directory keeps its owner only
+if handing it over would lock root out of it (no o+x): the next start can then still reach and retry what failed.
+`/data` itself is otherwise handed over, so one stuck entry never keeps the controller from writing into it. The walk
+goes at most 200 levels below each configured path, and 2,000,000 entries in a pass (beyond either is an error), and
+logs its progress every 10,000 entries. It skips every mount point under `/data`, and a configured path whose
+parents include one (read from `/proc/self/mountinfo`,
 so a bind of the same filesystem, or Docker Desktop's single share, is skipped too, not only another device), skips
 files with more than one hard link, never enters the browser containers' directories (`browser-profile`,
 `downloads`, `browser-sessions/*/profile` and `browser-sessions/*/downloads`), refuses a configured path with `.` or
 `..` in it (`ARTIFACT_ROOT=/data/../etc` is not handed over), and refuses one deeper than one level whose parents are
-not root-owned directories. An error on one path is logged and the others are still handed over. A pass that
-hands everything over, without errors and without a directory it could not look into, leaves
-`data/.auto-browser-owner`,
+not root-owned directories. An error on one path is logged and the others are still handed over; while any error
+remains, no marker is written and one ERROR line says the pass is retried on every start until it is fixed. A
+directory that is the controller user's already and that root cannot open (a 0700 one, without CAP_DAC_READ_SEARCH)
+counts as handed over: what is inside is that user's. A pass without errors leaves `data/.auto-browser-owner`,
 and later starts as the same user skip the scan; a root run (`CONTROLLER_RUN_AS=root`) removes it, deleting it forces
 a new pass, and anything unexpected there (a symlink, a FIFO, another owner, other content) just means a new pass.
 The marker belongs to the controller's user, who owns `/data` anyway, and root writes it as that user: that user
@@ -204,19 +211,29 @@ runner's uid.
 With the isolation overlay, the controller joins the group of the mounted Docker socket. On a Linux host that is the
 `docker` group; **on Docker Desktop the socket is `root:root`, so the controller joins group 0**. It is still not uid 0
 and holds no capabilities. Nothing in the image is writable through group 0 alone: the image takes the group write bit
-off everything but the sticky, world-writable `/tmp`, `/var/tmp` and `/run/lock`. Access to the Docker socket is
-itself equivalent to root on the Docker host, whatever user holds it.
+off everything but the sticky, world-writable `/tmp`, `/var/tmp` and `/run/lock`, and `/home/controller` (sticky and
+world-writable too, since any run-as uid needs a HOME). It also strips every setuid and setgid bit (su, passwd,
+mount and the rest), so nothing a controller uid can run raises it. Access to the Docker socket is itself equivalent
+to root on the Docker host, whatever user holds it.
 
-A container started with `cap_drop: [ALL]` cannot switch users (no CAP_SETUID or CAP_SETGID): it still starts, as a
-uid 0 with no capabilities and no_new_privs, and the log and readiness warn. That works only on data root can read
-without CAP_DAC_OVERRIDE: on a `/data` another uid owns (one an earlier start handed to 10002, say) it cannot read the
-0600 API token and the controller exits at startup, which the entrypoint warns about before it starts (measured on
-Docker Desktop: a restart loop on `PermissionError: '/data/api-token'`). To run such a container as the controller
+A container that cannot switch users (no CAP_SETUID or CAP_SETGID: `cap_drop: [ALL]`, `cap_drop: [SETUID]`, or a
+`cap_add` set without them) still starts, as a uid 0 with no capabilities at all and no_new_privs, whatever it was
+given: the entrypoint empties every capability set before the exec. The log and readiness warn. That works only on
+data root can read with no capability: on a `/data` another uid owns (one an earlier start handed to 10002, say) it
+cannot read the 0600 API token, and the entrypoint then refuses to start with one clear line (exit 70) rather than
+let the controller fail on it. It checks the file named by `API_TOKEN_FILE` in the container's environment (a `.env`
+file is the controller's, not the entrypoint's), and only when the controller would read it: not with
+`API_BEARER_TOKEN`, `API_BEARER_TOKENS` or tokenless loopback. A container started as a non-root user runs the
+controller with no_new_privs too. To run such a container as the controller
 user, start it as that user (`user: "10002:10002"` in compose, or `docker run --user 10002:10002`, with `./data` owned
 by 10002): the entrypoint then runs the controller directly (measured: readyz, a session and the token all work with
 no capability). Or add `cap_add: [CHOWN, DAC_READ_SEARCH, SETUID, SETGID]`, measured as the smallest set that hands
-both a 1.13.0 data dir and a pre-release's 10001-owned 0700 directories over (CHOWN, SETUID and SETGID alone cover the
-1.13.0 case; root needs DAC_READ_SEARCH to enter another uid's 0700 directories).
+both a 1.13.0 data dir and a pre-release's 10001-owned 0700 directories over. Without DAC_READ_SEARCH, root cannot
+enter another uid's 0700 directories: their entries are errors, and the pass (with no marker) repeats on every start
+until they are handed over by hand.
+
+**Data owned by 65534** (nobody: root-squashed NFS shows root's files that way): the controller runs as 65534, the
+only uid that can read them there (root's chown cannot work on such a mount), and the log warns.
 
 **A host user with uid 10001** (browser-node's): the controller never runs as 10001, so a `./data` owned by such a
 user is treated like a root-owned one and handed to uid 10002. To keep the files yours, chown `./data` to another uid,

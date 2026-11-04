@@ -50,6 +50,9 @@ Ship Auto Browser as a safe **single-tenant private beta** first, then harden to
   approval's id, kind, origin and tool, and its decision's comment, included), and
   the takeover desktop is shared by every session on a browser node; use
   `docker_ephemeral` isolation to give each session its own.
+- `browser.cdp_attach` is refused under `BROWSER_SANDBOX=on`: the controller cannot verify the sandbox
+  of a Chrome reached over CDP (over `POST /mcp/tools/call`, as every tool refusal, that is HTTP 200 with
+  `isError`). `CDP_CONNECT_URL` is the operator's own way to use such a Chrome.
 - `browser.cdp_attach` swaps the one browser every session runs on, so it is refused
   whenever more than one credential is configured (named credentials, or a named one
   next to the shared token): the attached browser would be shared by every operator.
