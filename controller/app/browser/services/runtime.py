@@ -9,7 +9,7 @@ from playwright.async_api import Browser
 
 from ...action_errors import SESSION_CLOSED_GATE_LOST, SessionNotFoundError
 from ...auth_policy import credentials_for
-from ...browser_sandbox import refusal, snapshot_shared_state, verified_on
+from ...browser_sandbox import read_endpoint_file, refusal, snapshot_shared_state, verified_on
 from ...session_isolation import IsolatedBrowserRuntime
 from ...session_ownership import as_system
 from ...utils import spawn_background_task
@@ -198,10 +198,11 @@ class BrowserRuntimeService:
     async def resolve_browser_ws_endpoint(self) -> str:
         manager = self.manager
         ws_endpoint_file = Path(manager.settings.browser_ws_endpoint_file)
-        if ws_endpoint_file.exists():
-            ws_endpoint = ws_endpoint_file.read_text(encoding="utf-8").strip()
-            if ws_endpoint:
-                return ws_endpoint
+        # The state reader's rules, off the event loop: no link, no FIFO, a short ws:// URL, and an error that
+        # never carries the file's content (Playwright would echo a planted one into the log).
+        ws_endpoint = await asyncio.to_thread(read_endpoint_file, ws_endpoint_file)
+        if ws_endpoint:
+            return ws_endpoint
         if manager.settings.browser_ws_endpoint:
             return manager.settings.browser_ws_endpoint
         raise FileNotFoundError(f"missing playwright ws endpoint file: {ws_endpoint_file}")

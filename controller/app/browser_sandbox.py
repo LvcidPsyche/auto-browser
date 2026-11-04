@@ -51,10 +51,23 @@ def _unreadable(detail: str) -> dict[str, Any]:
 def _printable(text: str) -> str:
     """The text with control and format characters as spaces: it reaches logs, readiness and an agent's context.
 
-    C0, DEL and C1, and Unicode format (Cf: bidi overrides, zero-width), line (Zl) and paragraph (Zp) separators."""
-    return "".join(
-        " " if ord(ch) < 32 or 127 <= ord(ch) < 160 or unicodedata.category(ch) in {"Cf", "Zl", "Zp"} else ch
-        for ch in text
+    C0, DEL and C1; Unicode format (Cf: bidi overrides, zero-width), line (Zl) and paragraph (Zp) separators,
+    surrogates (Cs: a lone one makes the JSON response fail to encode), private-use (Co) and unassigned (Cn) code
+    points; and the variation selectors (U+FE00-FE0F, U+E0100-E01EF)."""
+    return "".join(" " if _unprintable(ch) else ch for ch in text)
+
+
+_HIDDEN_CATEGORIES = frozenset({"Cf", "Zl", "Zp", "Cs", "Co", "Cn"})
+
+
+def _unprintable(ch: str) -> bool:
+    code = ord(ch)
+    return (
+        code < 32
+        or 127 <= code < 160
+        or 0xFE00 <= code <= 0xFE0F
+        or 0xE0100 <= code <= 0xE01EF
+        or unicodedata.category(ch) in _HIDDEN_CATEGORIES
     )
 
 
@@ -79,7 +92,9 @@ def _sanitize(raw: Any) -> dict[str, Any]:
             elif kind is str and isinstance(value, str):
                 kept[key] = _printable(value[:64])
             elif kind is list and isinstance(value, list):
-                kept[key] = [item for item in value[:64] if isinstance(item, int) and not isinstance(item, bool)]
+                # Whole or not at all: a list with anything but plain ints, or more than 64 entries, is dropped.
+                if len(value) <= 64 and all(isinstance(item, int) and not isinstance(item, bool) for item in value):
+                    kept[key] = list(value)
         state["verified"] = kept
     if state.get("sandbox") not in _STATES:
         return _unreadable(f"browser-sandbox.json names no known sandbox state ({str(raw.get('sandbox'))[:32]!r})")
@@ -118,9 +133,11 @@ def read_sandbox_state(path: Path) -> dict[str, Any] | None:
 def load_seccomp_profile(path: str | Path) -> str:
     """The profile as compact JSON, for a container's SecurityOpt (the daemon takes the JSON, not a path).
 
-    Raises OSError or ValueError when the file is missing or not a JSON object. Read like the state files: without
-    following links, without blocking (a FIFO), a regular file only, under a size cap."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    Raises OSError or ValueError when the file is missing or not a JSON object. Read without blocking (a FIFO), a
+    regular file only, under a size cap. Links are followed: the path is the operator's (a Kubernetes ConfigMap mount
+    is a symlink), and whoever could plant a link there could write the file anyway; it must not sit in a directory a
+    browser container can write (data/browser-profile, data/browser-sessions)."""
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
     fd = os.open(str(path), flags)
     try:
         info = os.fstat(fd)
@@ -164,10 +181,11 @@ def verified_on(state: dict[str, Any] | None) -> bool:
     browser_filters = verified.get("browser_seccomp_filters")
     return (
         isinstance(filters, list)
-        and bool(filters)
+        and len(filters) == renderers
         and isinstance(browser_filters, int)
         and not isinstance(browser_filters, bool)
-        and all(isinstance(count, int) and count > browser_filters for count in filters)
+        and browser_filters >= 0
+        and all(isinstance(count, int) and count >= 0 and count > browser_filters for count in filters)
     )
 
 
@@ -191,6 +209,60 @@ def snapshot_shared_state(settings: Any, endpoint: str) -> dict[str, Any]:
     return state
 
 
+def describe_state(state: dict[str, Any]) -> str:
+    """ "<sandbox> (<cause>): <detail>", without the parts a state does not have."""
+    described = str(state.get("sandbox"))
+    if state.get("cause"):
+        described += f" ({state['cause']})"
+    if state.get("detail"):
+        described += f": {state['detail']}"
+    return described
+
+
+ENDPOINT_MAX_BYTES = 512
+
+
+class EndpointFileError(OSError):
+    """A Playwright endpoint file that is not one: never carries the file's content (it may not be an endpoint)."""
+
+
+def read_endpoint_file(path: Path) -> str | None:
+    """A browser container's ws endpoint, read like its state file: O_NOFOLLOW|O_NONBLOCK, a regular file of at most
+    ENDPOINT_MAX_BYTES, a ws:// or wss:// URL. None while it is absent or empty. Anything else is EndpointFileError,
+    whose message names the path and never the content: Playwright echoes its connect target into errors, and a link
+    planted here could otherwise put any file the controller can read (its API token) into the log."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        reason = "a symlink, which is refused" if exc.errno == errno.ELOOP else (exc.strerror or "unreadable")
+        raise EndpointFileError(f"the endpoint file {path} could not be opened ({reason})") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise EndpointFileError(f"the endpoint file {path} is not a regular file")
+        if st.st_size > ENDPOINT_MAX_BYTES:
+            raise EndpointFileError(f"the endpoint file {path} is larger than {ENDPOINT_MAX_BYTES} bytes")
+        data = os.read(fd, ENDPOINT_MAX_BYTES + 1)
+    except EndpointFileError:
+        raise
+    except OSError as exc:
+        raise EndpointFileError(f"the endpoint file {path} could not be read ({exc.strerror or 'error'})") from None
+    finally:
+        os.close(fd)
+    try:
+        endpoint = data.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        raise EndpointFileError(f"the endpoint file {path} is not UTF-8 text") from None
+    if not endpoint:
+        return None
+    if not endpoint.startswith(("ws://", "wss://")) or any(ch.isspace() for ch in endpoint):
+        raise EndpointFileError(f"the endpoint file {path} does not hold a ws:// or wss:// URL")
+    return endpoint
+
+
 def refusal(who: str, state: dict[str, Any] | None) -> str:
     """The error for a session refused under BROWSER_SANDBOX=on (isolated and shared use the same wording)."""
     if state is None:
@@ -200,11 +272,7 @@ def refusal(who: str, state: dict[str, Any] | None) -> str:
     elif state.get("sandbox") == "attached":
         described = "a Chrome attached over CDP, which it cannot verify"
     else:
-        described = str(state.get("sandbox"))
-        if state.get("cause"):
-            described += f" ({state['cause']})"
-        if state.get("detail"):
-            described += f": {state['detail']}"
+        described = describe_state(state)
     return f"BROWSER_SANDBOX=on, but {who} reports {described}; the session was refused."
 
 
@@ -224,6 +292,9 @@ def browser_sandbox_status(
     isolation_mode = getattr(settings, "session_isolation_mode", "shared_browser_node")
     informational = isolation_mode == "docker_ephemeral"
     browser_node: dict[str, Any] | None = shared
+    if browser_node is None and getattr(settings, "cdp_connect_url", None) and not informational:
+        # The operator's Chrome over CDP, not connected now: still that Chrome, not a browser-node.
+        browser_node = {"sandbox": "attached", "detail": "not connected"}
     if browser_node is None and endpoint_file.name:
         state = read_sandbox_state(endpoint_file.with_name(BROWSER_SANDBOX_STATE_FILENAME))
         if informational:
@@ -270,6 +341,8 @@ class _Line:
 
     def describe(self) -> str:
         if self.sandbox == "attached":
+            if (self.state or {}).get("detail"):
+                return f"{self.label}: attached over CDP, not checked ({self.state['detail']})"
             return f"{self.label}: attached over CDP, not checked"
         if self.sandbox in {"unknown", "unreadable"}:
             detail = (self.state or {}).get("detail") or (

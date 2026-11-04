@@ -370,8 +370,8 @@ class HardenedStateFileTests(unittest.TestCase):
         state = read_sandbox_state(self.path)
         self.assertEqual(set(state), {"sandbox", "cause", "detail", "verified"})
         self.assertLessEqual(len(state["detail"]), 1000)
-        self.assertEqual(set(state["verified"]), {"renderers", "renderer_seccomp_filters"})
-        self.assertLessEqual(len(state["verified"]["renderer_seccomp_filters"]), 64)
+        # A 500-entry filter list is dropped whole (S5#8), not cut to 64.
+        self.assertEqual(set(state["verified"]), {"renderers"})
 
     def test_wrong_types_and_unknown_states_are_unreadable(self) -> None:
         self.path.write_text('{"sandbox": 5}', encoding="utf-8")

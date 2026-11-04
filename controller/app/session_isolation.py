@@ -22,7 +22,11 @@ except Exception:  # pragma: no cover - optional dependency for local host-only 
 from .browser_sandbox import (
     BROWSER_SANDBOX_STATE_FILENAME,
     SECCOMP_PROFILE_PATH,
+    EndpointFileError,
+    _printable,
+    describe_state,
     load_seccomp_profile,
+    read_endpoint_file,
     read_sandbox_state,
     refusal,
     verified_on,
@@ -238,8 +242,9 @@ class DockerBrowserNodeProvisioner:
         await asyncio.to_thread(self._daemon_supports_seccomp)
         if self._seccomp_supported is None:
             logger.warning(
-                "docker info failed at startup, so whether the daemon applies seccomp is unknown until a session asks "
-                "again; under BROWSER_SANDBOX=on readiness warns meanwhile."
+                "docker info failed at startup (%s), so whether the daemon applies seccomp is unknown until a session "
+                "asks again; under BROWSER_SANDBOX=on readiness warns meanwhile.",
+                getattr(self, "_seccomp_error", "unknown error"),
             )
         await asyncio.to_thread(self._reap_orphaned_containers)
         # After the container reap, so the orphans' endpoints are already gone.
@@ -454,6 +459,7 @@ class DockerBrowserNodeProvisioner:
             try:
                 options = (self._ensure_context().info() or {}).get("SecurityOptions") or []
             except Exception as exc:  # the API is unreachable here; container creation will say so itself
+                self._seccomp_error = str(exc)[:300]
                 logger.debug("docker info failed (%s); assuming seccomp support", exc)
                 return True
             self._seccomp_supported = any(str(option).startswith("name=seccomp") for option in options)
@@ -956,19 +962,18 @@ class DockerBrowserNodeProvisioner:
                 # A browser that refused to run unsandboxed (BROWSER_SANDBOX=on) says why in its state file, which
                 # the cleanup below deletes with the profile dir: read it first.
                 state = read_sandbox_state(endpoint_file.with_name(BROWSER_SANDBOX_STATE_FILENAME))
-                why = ""
-                if state is not None:
-                    why = (
-                        f" Its sandbox state: {state.get('sandbox')} ({state.get('cause')}): {state.get('detail', '')}."
-                    )
+                why = f" Its sandbox state: {describe_state(state)}." if state is not None else ""
+                # The log tail is the container's own output: shown, but never raw (S5#5).
                 raise RuntimeError(
                     f"Isolated browser container {container.name} exited before Playwright endpoint was ready.{why}\n"
-                    f"{logs}"
+                    f"{_printable(logs)}"
                 )
-            if endpoint_file.exists():
-                endpoint = endpoint_file.read_text(encoding="utf-8").strip()
-                if endpoint:
-                    return endpoint
+            try:
+                endpoint = await asyncio.to_thread(read_endpoint_file, endpoint_file)
+            except EndpointFileError as exc:
+                raise RuntimeError(f"Isolated browser container {container.name}: {exc}") from None
+            if endpoint:
+                return endpoint
             await asyncio.sleep(0.25)
         logs = self._container_logs(container)
         raise RuntimeError(f"Timed out waiting for isolated browser endpoint file {endpoint_file}. {logs}")
