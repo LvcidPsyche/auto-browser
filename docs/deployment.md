@@ -143,6 +143,20 @@ What per-session networks do not change:
 - **The shared browser-node's noVNC is reachable from session containers too,** the same
   way. Only the operator's `VNC_PASSWORD` guards it, so set it with `docker_ephemeral`;
   the readiness check warns while it is unset.
+- **On Docker Desktop, browser containers reach the host's loopback.** `host.docker.internal`
+  reaches listeners bound to the host's `127.0.0.1`, not only the ports Docker publishes
+  there. Measured on Docker Desktop 29.9 from the shared browser-node and from a
+  `docker_ephemeral` session container on its own network: a page server on `127.0.0.1`
+  answered, and so did a host Chromium's remote-debugging port once the request said
+  `Host: localhost`. Its answer names the browser's DevTools WebSocket, through which CDP
+  drives the whole browser and whatever it is signed in to (the WebSocket was not opened).
+  The port refused the `Host: host.docker.internal` such a request normally carries, but
+  native code in a browser container that a page compromised can send any header. So on
+  Docker Desktop, don't leave a Chrome with `--remote-debugging-port` (what `CDP_CONNECT_URL`
+  and `browser.cdp_attach` attach to), or any service that trusts loopback callers,
+  listening on the host's loopback while browser containers load pages you don't trust. On
+  Linux neither the compose files nor the controller give browser containers
+  `host.docker.internal` (not measured on Linux).
 - **Separation relies on Docker's firewall rules** between bridges. A daemon run with
   `"iptables": false` routes between them, and the networks isolate nothing.
 - **One controller per daemon.** The startup sweep removes every labelled session network
