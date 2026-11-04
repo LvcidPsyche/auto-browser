@@ -19,6 +19,7 @@ from app.browser_manager import BrowserManager
 from app.models import McpToolCallRequest, OperatorIdentity
 from app.session_ownership import acting_as
 from app.tool_gateway.gateway import McpToolGateway
+from tests._regular_user import regular_user
 from tests.test_browser_manager_create_session import FakeBrowser, FakeContext, FakePage, _settings
 
 BOB = OperatorIdentity(id="bob", source="token")
@@ -187,6 +188,7 @@ class SessionCloseAfterSwapTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_closing_a_shadow_session_closes_its_headed_browser(self) -> None:
         self.manager.settings.shadow_browse_enabled = True
+        self.enterContext(regular_user())
         headed = _browser("headed")
         self.manager.playwright = SimpleNamespace(  # type: ignore[assignment]
             chromium=SimpleNamespace(launch=AsyncMock(return_value=headed))
