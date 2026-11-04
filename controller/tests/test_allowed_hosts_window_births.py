@@ -1177,3 +1177,51 @@ async def test_a_held_opener_with_no_birth_refuses_the_windows_it_opens(h: Harne
     h.held.add(popup)
     h.cdp.fire("Target.targetCreated", created("T2", CTX, opener_id="P"))
     assert await h.report("T2") is BirthVerdict.CLEAN
+
+
+async def test_a_sweep_that_skipped_a_failed_once_read_sweeps_again_when_it_lands(h: Harness, monkeypatch) -> None:
+    """Round-4 bypass BY3: the sweep does not wait for a read whose first attempt failed (R7), so it spares the
+    session's unmatched windows, which were closed only at the next recheck tick. One sweep of the session is
+    scheduled for when that read ends, however many sweeps skipped it: the window is closed right after the
+    retried read resolves."""
+    monkeypatch.setattr(wb, "TARGET_ID_RETRY_SECONDS", 0.2)
+    monkeypatch.setattr(wb, "RECHECK_INTERVAL_SECONDS", 60.0)  # no recheck tick within the test
+    opener = h.known("OP", refused=True)
+    h.known("FIRST")
+    h.cdp.fire("Target.targetCreated", created("T1", CTX, opener_id="OP"))  # born refused, never reported
+    h.cdp.fire("Target.targetCreated", created("P", CTX, opener_id="FIRST"))
+    popup = FakePage()
+    h.pages["P?"] = popup  # reported, its id not cached yet
+    reads: list[Any] = []
+
+    async def resolve(page: Any) -> str | None:
+        reads.append(page)
+        if page is popup and reads.count(popup) > 1:
+            h.target_ids[popup] = "P"  # the retry reads it, and caches it as request_gates does
+        return h.target_ids.get(page)
+
+    monkeypatch.setattr(h.births, "_resolve_target_id", resolve)
+    report = asyncio.ensure_future(h.births.verdict(h.session, popup))
+    await asyncio.sleep(0.05)  # the first read failed; the retry is sleeping
+    assert not report.done()
+    h.refused.discard(opener)  # nothing justifies T1 any more
+
+    assert await h.sweep() == [], "the sweep closed an unmatched window while a reported page's id was unknown"
+    assert await h.sweep() == []
+    sweeps: list[Any] = []
+    real_close_unreported = h.births.close_unreported
+
+    async def counted(session: Any) -> None:
+        sweeps.append(session)
+        await real_close_unreported(session)
+
+    monkeypatch.setattr(h.births, "close_unreported", counted)
+    assert await report is BirthVerdict.CLEAN
+    for _ in range(20):
+        if h.cdp.closed_targets:
+            break
+        await asyncio.sleep(0.01)
+
+    assert h.cdp.closed_targets == ["T1"], "the window outlived the read that let the sweep match it"
+    await asyncio.sleep(0.05)
+    assert len(sweeps) == 1, f"{len(sweeps)} sweeps scheduled for one read"
