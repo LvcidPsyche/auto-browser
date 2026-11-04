@@ -43,7 +43,7 @@ def test_a_redirect_is_reported_and_never_followed(status: int) -> None:
     class _Redirecting(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802 - http.server's naming
             # Read the body first: on Windows a socket closed with unread data resets, and the client's read of
-            # this response then fails with WSAECONNABORTED (1 run in about 50 before).
+            # this response then fails with WSAECONNABORTED (1 call in 200 before).
             self.rfile.read(int(self.headers.get("Content-Length") or 0))
             self.send_response(status)
             self.send_header("Location", f"http://127.0.0.1:{elsewhere.server_port}/collect")

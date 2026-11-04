@@ -485,19 +485,15 @@ class DockerBrowserNodeProvisioner:
         host_profile_dir = host_runtime_root / "profile"
         host_downloads_dir = host_runtime_root / "downloads"
 
+        # The host paths name these same directories as the daemon sees them (the
+        # browser writes its endpoint file into the bind, and the controller reads
+        # it here), so the dirs are made here only, and the host paths go to the
+        # daemon only. In a container the host path is not the controller's to
+        # touch: Linux CI's /home/runner/work/.../data is absent, and one under
+        # /root (a compose run from /root/auto-browser) cannot even be stat'ed by
+        # a controller that is not root.
         local_profile_dir.mkdir(parents=True, exist_ok=True)
         local_downloads_dir.mkdir(parents=True, exist_ok=True)
-        # The host path is the same directory as the local one, seen through the
-        # /data mount: the local dirs above already are it, and the daemon needs
-        # the host path only as the bind source. It is made here only where this
-        # process sees it too (a controller run on the host). In a container the
-        # host path (Linux CI's /home/runner/work/.../data) is not there: making
-        # it built directories in the container's own filesystem, which a
-        # controller that is not root cannot (PermissionError). A Windows host
-        # path is never made from in here.
-        if isinstance(host_data_root, Path) and host_data_root.is_dir():
-            host_profile_dir.mkdir(parents=True, exist_ok=True)
-            host_downloads_dir.mkdir(parents=True, exist_ok=True)
 
         network = None
         controller_id: str | None = None
