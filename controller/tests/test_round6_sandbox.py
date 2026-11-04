@@ -36,7 +36,8 @@ from app.browser_sandbox import (
 )
 
 LINUX = sys.platform == "linux"
-SECRET = "SECRET-tok3n-value-0123456789"
+# A canary planted where a link could lead (the API token, say): it must never come back in an error.
+CANARY = "canary-value-0123456789"
 
 
 class EndpointFileTests(unittest.TestCase):
@@ -54,22 +55,22 @@ class EndpointFileTests(unittest.TestCase):
         self.assertEqual(read_endpoint_file(self.path), "ws://browser-node:9223/abc")
 
     def test_an_oversized_or_non_url_file_is_refused_without_its_content(self) -> None:
-        for content in ("ws://x/" + "a" * 600, SECRET, f"ws://x/{SECRET} more"):
+        for content in ("ws://x/" + "a" * 600, CANARY, f"ws://x/{CANARY} more"):
             with self.subTest(content=content[:20]):
                 self.path.write_text(content, encoding="utf-8")
                 with self.assertRaises(EndpointFileError) as raised:
                     read_endpoint_file(self.path)
-                self.assertNotIn(SECRET, str(raised.exception))
+                self.assertNotIn(CANARY, str(raised.exception))
                 self.assertNotIn("aaaa", str(raised.exception))
 
     @unittest.skipUnless(LINUX, "symlinks and FIFOs: Linux")
     def test_a_symlink_or_a_fifo_is_refused_and_never_blocks(self) -> None:
-        secret = self.dir / "api-token"
-        secret.write_text(SECRET, encoding="utf-8")
-        self.path.symlink_to(secret)
+        planted = self.dir / "api-token"
+        planted.write_text(CANARY, encoding="utf-8")
+        self.path.symlink_to(planted)
         with self.assertRaisesRegex(EndpointFileError, "a symlink, which is refused") as raised:
             read_endpoint_file(self.path)
-        self.assertNotIn(SECRET, str(raised.exception))
+        self.assertNotIn(CANARY, str(raised.exception))
         self.path.unlink()
         os.mkfifo(self.path)
         outcome: list = []
@@ -82,7 +83,7 @@ class EndpointFileTests(unittest.TestCase):
     def test_the_shared_read_runs_off_the_loop_and_hides_the_content(self) -> None:
         from app.browser.services.runtime import BrowserRuntimeService
 
-        self.path.write_text(SECRET, encoding="utf-8")
+        self.path.write_text(CANARY, encoding="utf-8")
         manager = SimpleNamespace(
             settings=SimpleNamespace(browser_ws_endpoint_file=str(self.path), browser_ws_endpoint="")
         )
@@ -91,20 +92,20 @@ class EndpointFileTests(unittest.TestCase):
             with self.assertRaises(EndpointFileError) as raised:
                 asyncio.run(runtime.resolve_browser_ws_endpoint())
         self.assertTrue(to_thread.called)
-        self.assertNotIn(SECRET, str(raised.exception))
+        self.assertNotIn(CANARY, str(raised.exception))
 
     def test_the_isolated_wait_refuses_a_bad_endpoint_file(self) -> None:
         from app.session_isolation import DockerBrowserNodeProvisioner
         from tests.test_browser_sandbox import _settings
 
-        self.path.write_text(SECRET, encoding="utf-8")
+        self.path.write_text(CANARY, encoding="utf-8")
         provisioner = DockerBrowserNodeProvisioner(_settings(self.dir), client=MagicMock())
         container = SimpleNamespace(name="browser-session-x", status="running", attrs={}, reload=lambda: None)
         # S6#4: the read goes through asyncio.to_thread, off the event loop.
         with patch("app.session_isolation.asyncio.to_thread", wraps=asyncio.to_thread) as to_thread:
             with self.assertRaises(RuntimeError) as raised:
                 asyncio.run(provisioner._wait_for_ws_endpoint(container, self.path))
-        self.assertNotIn(SECRET, str(raised.exception))
+        self.assertNotIn(CANARY, str(raised.exception))
         self.assertIn("does not hold a ws:// or wss:// URL", str(raised.exception))
         self.assertIn(read_endpoint_file, [call.args[0] for call in to_thread.call_args_list if call.args])
 
