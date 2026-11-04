@@ -165,23 +165,27 @@ async def test_a_start_url_that_is_stopped_is_the_same_block(tmp_path: Path) -> 
 
 
 async def test_a_start_url_that_refuses_the_connection_is_a_failed_load_not_a_500(tmp_path: Path) -> None:
+    # An allowed host on a port bound but never listened on, held for the whole test so nothing else can take it:
+    # Chromium's own ERR_CONNECTION_REFUSED. The path stands for what the error must not repeat.
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         closed_port = probe.getsockname()[1]
-    # An allowed host on a port nothing listens on: Chromium's own ERR_CONNECTION_REFUSED. The path stands for what
-    # the error must not repeat.
-    start_url = f"http://{ALLOWED}:{closed_port}{SECRET_PATH}"
-    async with gated(tmp_path) as env:
-        async with _rest(env) as client:
-            response = await client.post("/sessions", json={"name": "s", "start_url": start_url})
+        start_url = f"http://{ALLOWED}:{closed_port}{SECRET_PATH}"
+        async with gated(tmp_path) as env:
+            async with _rest(env) as client:
+                response = await client.post("/sessions", json={"name": "s", "start_url": start_url})
 
-        assert response.status_code == 400, response.text
-        body = response.json()
-        assert (body["code"], body["retryable"], body["action"]) == ("browser_action_failed", True, "create_session")
-        assert "net::ERR_CONNECTION_REFUSED" in body["error"]
-        assert "secret" not in body["error"] and "token" not in body["error"]
-        assert str(closed_port) not in body["error"]
-        assert env.manager.sessions == {}
+            assert response.status_code == 400, response.text
+            body = response.json()
+            assert (body["code"], body["retryable"], body["action"]) == (
+                "browser_action_failed",
+                True,
+                "create_session",
+            )
+            assert "net::ERR_CONNECTION_REFUSED" in body["error"]
+            assert "secret" not in body["error"] and "token" not in body["error"]
+            assert str(closed_port) not in body["error"]
+            assert env.manager.sessions == {}
 
 
 async def test_a_new_tab_whose_url_is_stopped_is_the_same_block(tmp_path: Path) -> None:

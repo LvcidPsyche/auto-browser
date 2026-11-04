@@ -8,8 +8,9 @@ All notable changes to auto-browser are documented here.
 
 - A session whose `start_url` fails to load (a refused connection, an unresolved name, a timeout) is answered with
   400 `browser_action_failed`, retryable, as `navigate` answers the same failure. It used to be a 500 "Internal
-  error". The message names Chrome's net error (`net::ERR_CONNECTION_REFUSED`) or the timeout, never the URL, and
-  the session is closed as before. Shadow browse's page gets the same answer.
+  error". The message names Chrome's net error (`net::ERR_CONNECTION_REFUSED`) or the timeout, or else says the
+  browser could not open the page. It never repeats Playwright's text, which carries the URL, and the controller's
+  log keeps that text's first line. The session is closed as before. Shadow browse's page gets the same answer.
 - Closing shadow browse no longer logs a WARNING that the pre-request gate could not detach from a target that was
   already closed. That case is logged at DEBUG; a detach that fails otherwise is still a WARNING.
 
