@@ -977,6 +977,28 @@ class GateWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Call log", error.message)
         self.assertEqual(self.manager.sessions, {})
 
+    async def test_f12e_only_chromes_own_net_error_is_named_never_one_in_a_url(self) -> None:
+        # A first line can quote a URL (an interrupted navigation's): a net::ERR_ token there is the page's, and
+        # repeating it would hand back part of a path.
+        self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
+        self.browser.context.page.goto = AsyncMock(
+            side_effect=PlaywrightError(
+                'Page.goto: Navigation to "https://example.com/r/net::ERR_SECRET_TOKEN" is interrupted by another '
+                "navigation"
+            )
+        )
+
+        with (
+            self.assertLogs("app.browser.services.sessions", level="WARNING") as logs,
+            self.assertRaises(BrowserActionError) as raised,
+        ):
+            await self.manager.create_session(name="s", start_url=START_URL)
+
+        self.assertNotIn("SECRET", raised.exception.message)
+        self.assertIn("the browser could not open it", raised.exception.message)
+        # The operator's log keeps it: no load failure, so the one to look at (the 500 path used to log it).
+        self.assertTrue(any("is interrupted by another navigation" in line for line in logs.output), logs.output)
+
     async def test_f12e_a_start_url_that_times_out_says_so(self) -> None:
         self.manager._acquire_session_browser = AsyncMock(return_value=(self.browser, None))  # type: ignore[method-assign]
         self.browser.context.page.goto = AsyncMock(side_effect=PlaywrightTimeoutError("Timeout 30000ms exceeded."))
