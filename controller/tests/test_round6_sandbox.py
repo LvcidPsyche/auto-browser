@@ -109,8 +109,9 @@ class EndpointFileTests(unittest.TestCase):
         self.assertIn(read_endpoint_file, [call.args[0] for call in to_thread.call_args_list if call.args])
 
     def test_control_and_format_characters_in_an_endpoint_are_refused(self) -> None:
-        # S6#2, F6: a real endpoint is ws://host:port/<hex>, ASCII and printable.
-        for bad in ("\x1b[31m", "\x07", "\x00", "\u202e"):
+        # S6#2, F6: a real endpoint is ws://host:port/<hex>, ASCII and printable. A Cyrillic a is printable, so only
+        # the ASCII check refuses it.
+        for bad in ("\x1b[31m", "\x07", "\x00", "\u202e", "\u0430"):
             with self.subTest(char=repr(bad)):
                 self.path.write_text(f"ws://127.0.0.1:9222/ab{bad}cd", encoding="utf-8")
                 with self.assertRaises(EndpointFileError) as raised:
@@ -334,6 +335,9 @@ class WordingTests(unittest.TestCase):
         self.assertIn("FORGED", text)
         for raw in ("\x1b", "\x07", "\u202e", "\n"):
             self.assertNotIn(raw, text)
+        # Decoded, not the bytes' repr.
+        self.assertNotIn("b'", text)
+        self.assertNotIn("\\x1b", text)
 
     def test_the_startup_warning_carries_the_docker_info_error(self) -> None:
         # Item 15 (S5#6)

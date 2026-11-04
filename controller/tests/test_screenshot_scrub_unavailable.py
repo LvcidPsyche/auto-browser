@@ -205,6 +205,23 @@ async def test_an_ocr_run_without_a_temp_dir_says_what_it_needs(
     assert "which ships tesseract" not in warning
 
 
+async def test_the_warning_is_logged_once_per_reason(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    # Item 18 keeps once per reason: two reasons give two WARNINGs, each with its own hint; repeats give none.
+    service = _service(tmp_path)
+    disabled = {"available": False, "enabled": False}
+    failed = {"available": False, "enabled": True, "error": "ocr_extraction_failed"}
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        for ocr in (disabled, failed, disabled, failed):
+            screenshot = {"path": str(tmp_path / "shot.png"), "url": "/artifacts/shot.png"}
+            await service._scrub_screenshot_if_needed(service.manager.session, screenshot, ocr)
+
+    warnings = _warnings(caplog)
+    assert len(warnings) == 2
+    assert "(ocr_disabled)" in warnings[0] and _HINTS["setting"] in warnings[0]
+    assert "(ocr_extraction_failed)" in warnings[1] and _HINTS["temp dir"] in warnings[1]
+
+
 async def test_with_tesseract_present_nothing_is_reported(
     tmp_path: Path, tesseract_present: None, caplog: pytest.LogCaptureFixture
 ) -> None:

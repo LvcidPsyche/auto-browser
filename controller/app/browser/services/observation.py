@@ -51,8 +51,8 @@ def _scrub_disclosure(screenshot: dict[str, Any]) -> dict[str, Any]:
 # ocr_unavailable fallback) mean no tesseract binary.
 _UNSCRUBBED_HINTS = {
     "ocr_extraction_failed": (
-        "The OCR run failed; it needs a writable temporary directory (under read_only: true, a tmpfs for /tmp; see "
-        "docs/deployment.md)."
+        "The OCR run failed: check that it has a writable temporary directory (under read_only: true, a tmpfs for "
+        "/tmp; see docs/deployment.md)."
     ),
     "ocr_disabled": (
         "OCR_ENABLED=false turned OCR off: set OCR_ENABLED=true, or PII_SCRUB_SCREENSHOT=false to make the gap explicit."

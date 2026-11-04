@@ -117,7 +117,8 @@ if (( ((16#$cap_eff >> 7) & 1) == 0 || ((16#$cap_eff >> 6) & 1) == 0 )); then
   elif [[ -n "$token_file" ]]; then
     token_dir="$(dirname "$token_file")"
     # A directory that is not there yet is the controller's to create, with the token in it (or to fail on with its
-    # own message), so only one that exists is refused here.
+    # own message), so only one that exists is refused here. Through the drop, one under a parent uid 0 cannot search
+    # looks missing too, and is left to the controller the same way.
     if "${dropped[@]}" test -e "$token_dir" && ! "${dropped[@]}" test -x "$token_dir"; then
       fail "uid 0 with $kept cannot reach the API token's directory $token_dir, so the controller cannot start:" \
         "$way_out."

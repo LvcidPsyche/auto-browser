@@ -750,6 +750,41 @@ class MainLinuxTests(unittest.TestCase):
                 finally:
                     (self.data / "artifacts" / "run").chmod(0o755)
 
+    def test_as_root_two_starts_keep_a_10001_parent_under_0711_or_0751_its_owners(self) -> None:
+        # P6#2, where the owner check bites: as root on a root-owned /data the controller is 10002, so a 10001-owned
+        # 0711 or 0751 parent over a stuck entry would change hands if o+x alone counted as reopenable (mutant RA-1).
+        if ME != 0:
+            self.skipTest("needs root (runs inside the controller image)")
+        self.addCleanup(_give_back_to_root, self.data)
+        real = run_as._open_dir_nofollow
+
+        def stuck(entry, dir_fd):
+            if entry == "sub":
+                raise OSError(errno.EIO, os.strerror(errno.EIO))
+            return real(entry, dir_fd)
+
+        for mode in (0o711, 0o751):
+            with self.subTest(mode=oct(mode)):
+                _give_back_to_root(self.data)
+                shutil.rmtree(self.data / "artifacts", ignore_errors=True)
+                (self.data / MARKER_NAME).unlink(missing_ok=True)
+                _tree(self.data, "artifacts/run/sub/f")
+                parent = self.data / "artifacts" / "run"
+                for path in (parent, parent / "sub", parent / "sub" / "f"):
+                    os.chown(path, BROWSER_UID, BROWSER_UID)
+                parent.chmod(mode)
+                for start in (1, 2):
+                    with patch.object(run_as, "_open_dir_nofollow", stuck):
+                        _, lines, messages = self._main(run_as="auto")
+                    self.assertIn(f"RUN_UID={CONTROLLER_UID}", lines, (oct(mode), start))
+                    self.assertFalse((self.data / MARKER_NAME).exists(), (oct(mode), start))
+                    self.assertIn(
+                        "Not handed over: artifacts/run: kept as its owner's until its contents can be handed over",
+                        messages,
+                        (oct(mode), start),
+                    )
+                    self.assertEqual(parent.stat().st_uid, BROWSER_UID, (oct(mode), start))
+
     def test_the_log_escapes_lists_caps_and_reports_progress(self) -> None:
         # R-a, R-b, R-c, R-d: an escaped newline name, "... and N more" past 20 skips, the withheld WARNING, and the
         # progress line.

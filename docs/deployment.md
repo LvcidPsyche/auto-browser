@@ -244,9 +244,9 @@ user runs the controller with no_new_privs too. To run such a container as the c
 user, start it as that user (`user: "10002:10002"` in compose, or `docker run --user 10002:10002`, with `./data` owned
 by 10002): the entrypoint then runs the controller directly (measured: readyz, a session and the token all work with
 no capability). Or add `cap_add: [CHOWN, DAC_READ_SEARCH, SETUID, SETGID]`, measured as the smallest set that hands
-both a 1.13.0 data dir and a pre-release's 10001-owned 0700 directories over. Without DAC_READ_SEARCH, root cannot
-enter another uid's 0700 directories: their entries are errors, and the pass (with no marker) repeats on every start
-until they are handed over by hand.
+both a 1.13.0 data dir and a pre-release's 10001-owned 0700 directories over. Without DAC_READ_SEARCH (the set has
+no DAC_OVERRIDE), root cannot enter another uid's 0700 directories: their entries are errors, and the pass (with no
+marker) repeats on every start until they are handed over by hand.
 
 **Data owned by 65534** (nobody: root-squashed NFS shows root's files that way): the controller runs as 65534, the
 only uid that can read them there (root's chown cannot work on such a mount), and the log warns.
