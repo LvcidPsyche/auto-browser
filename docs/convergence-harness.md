@@ -105,6 +105,8 @@ Review staged candidates through MCP before shelling into the harness root:
 
 Stage 0 ships with a deterministic `ProgrammaticVerifier` and a dependency-gated `UniversalVerifierAdapter`. The UV adapter returns `unverified` until a pinned Stagehand/Universal Verifier command is configured through `HARNESS_UV_COMMAND`.
 
+`HARNESS_UV_COMMAND` receives the full task contract and the attempt's trace on stdin, including the final observation as the page gave it (only secret-named keys are removed; the PII and URL-token scrubbing applied to what is stored is not), so configure only a command you trust with that page content. Its stdout is read up to 1 MiB; a command that writes more is killed and the verification is `unverified`.
+
 Stage 1 is expected to add the CUAVerifierBench regression suite and verifier ensemble voting on top of this adapter boundary.
 
 ## Mesh Boundary

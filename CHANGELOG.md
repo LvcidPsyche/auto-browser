@@ -117,6 +117,9 @@ All notable changes to auto-browser are documented here.
   marketing page that offers "sign in" or mentions "authenticate" no longer fails a run. `payment_screen` and
   `captcha_screen` match whole words and phrases (`credit card`, `card number`, `payment method`, ...; the bare word
   `payment` no longer counts, a `/payment` path does), so "accredit cards" or "captchaless" are not hits.
+- The harness's `HARNESS_UV_COMMAND` verifier reads its stdout with a 1 MiB cap (it used to buffer all of it): a
+  command that writes more is killed and the verification is `unverified`. The docs now say the command receives the
+  full contract and the unscrubbed trace on stdin.
 
 ### Security
 
