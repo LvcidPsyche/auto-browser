@@ -6,6 +6,8 @@ The file's path and the OS error text belong in the server log only: over HTTP t
 
 from __future__ import annotations
 
+import copy
+import pickle
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -15,7 +17,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.models import McpToolCallRequest
-from app.proxy_personas import PROXY_PERSONA_FILE_UNREADABLE, ProxyPersonaFileError, ProxyPersonaStore
+from app.proxy_personas import (
+    PROXY_PERSONA_FILE_UNREADABLE,
+    ProxyPersonaDuplicateError,
+    ProxyPersonaFileError,
+    ProxyPersonaStore,
+)
 from app.routes.operations import create_operations_router
 from app.routes.sessions import create_sessions_router
 from app.tool_gateway import McpToolGateway
@@ -50,6 +57,15 @@ def _assert_fixed(response, corrupt_path: Path) -> None:
     assert response.json() == {"detail": PROXY_PERSONA_FILE_UNREADABLE}
     assert str(corrupt_path.parent) not in response.text
     assert "personas.json" not in response.text
+
+
+@pytest.mark.parametrize("error_type", [ProxyPersonaFileError, ProxyPersonaDuplicateError])
+def test_the_fixed_errors_survive_copy_and_pickle(error_type: type[Exception]):
+    original = error_type()
+    pickled = pickle.loads(pickle.dumps(original))  # noqa: S301 - bytes this test just made
+    for clone in (copy.copy(original), copy.deepcopy(original), pickled):
+        assert type(clone) is error_type
+        assert str(clone) == str(original)
 
 
 def test_the_message_names_the_setting_not_the_path(corrupt_path: Path):

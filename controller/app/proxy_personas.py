@@ -65,10 +65,11 @@ class ProxyPersonaFileError(RuntimeError):
     transient read error (a sharing violation, a brief permission fault) must never displace a good, hand-edited file.
 
     The message is fixed and path-free, because callers (REST and MCP) show it as it is. The path and the
-    cause are logged at ERROR where the file is read.
+    cause are logged at ERROR where the file is read. Copy and pickle rebuild an exception from its args (the
+    message), so the constructor takes and ignores them.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *_args: object) -> None:
         super().__init__(PROXY_PERSONA_FILE_UNREADABLE)
 
 
