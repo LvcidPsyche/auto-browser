@@ -32,6 +32,9 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- The Codex path-compatibility shim (which links a `.codex` home named in the CLI home's `config.toml` to the real one)
+  now creates a link only under the CLI home or at `/home/<user>/.codex`, never makes parent directories anywhere else,
+  logs each path it skips, and runs once per adapter instead of on every CLI call.
 - `browser.cdp_attach` now logs, audits and returns the Chrome it attached to as `scheme://host:port` only. A CDP URL's
   userinfo, query and `/devtools/browser/<id>` path can be the credential for that Chrome; the attach itself still
   uses the full URL.

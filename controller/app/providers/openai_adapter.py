@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import httpx
@@ -11,6 +12,21 @@ import httpx
 from ..codex_sandbox import codex_sandbox_flags
 from ..models import BrowserActionDecision
 from .base import BaseProviderAdapter, ProviderAPIError, ProviderDecision
+
+logger = logging.getLogger(__name__)
+
+# A codex config can name a /home/<user>/.codex home from another machine or container; that one place outside the CLI
+# home is worth linking to the real one. Anything else is skipped.
+_HOME_ROOT_PARTS = 4  # ("/", "home", "<user>", ".codex")
+
+
+def _codex_root_allowed(expected: PurePosixPath, cli_home: PurePosixPath) -> bool:
+    if ".." in expected.parts:
+        return False
+    if cli_home in expected.parents:
+        return True
+    return len(expected.parts) == _HOME_ROOT_PARTS and expected.parts[:2] == ("/", "home")
+
 
 try:
     import tomllib
@@ -333,6 +349,8 @@ class OpenAIAdapter(BaseProviderAdapter):
         )
 
     def _ensure_codex_config_path_compatibility(self) -> None:
+        if getattr(self, "_codex_config_checked", False):
+            return
         cli_home = (self.settings.cli_home or "").strip()
         if not cli_home:
             return
@@ -347,8 +365,18 @@ class OpenAIAdapter(BaseProviderAdapter):
         except Exception:
             return
 
-        for expected_codex_home in self._extract_codex_roots(config):
+        # Once per adapter: the config is read and the links made on the first call that finds it.
+        self._codex_config_checked = True
+        cli_home_posix = PurePosixPath(Path(cli_home).as_posix())
+        for expected_codex_home in sorted(self._extract_codex_roots(config)):
             if expected_codex_home == actual_codex_home or expected_codex_home.exists():
+                continue
+            if not _codex_root_allowed(PurePosixPath(expected_codex_home.as_posix()), cli_home_posix):
+                logger.warning(
+                    "codex config names %s; not linking it to the CLI home (only the CLI home and /home/<user>/.codex "
+                    "are linked)",
+                    expected_codex_home.as_posix(),
+                )
                 continue
             try:
                 expected_codex_home.parent.mkdir(parents=True, exist_ok=True)
