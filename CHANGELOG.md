@@ -124,6 +124,9 @@ All notable changes to auto-browser are documented here.
   `ssh_port`, `ssh_user`, `info_path` or `log_path`, and its `error` is a short code (`autossh_exited`,
   `autossh_start_failed`, `provision_cancelled`, `provision_failed`) instead of autossh's stderr, which is logged by
   the controller.
+- `browser.request_human_takeover` no longer writes the takeover URL and the remote-access block to the session's
+  `actions.jsonl` (served under `/artifacts` to the session's users): the line keeps the reason and the session, without `takeover_url` or
+  `remote_access`. The tool's own result still carries them, as before.
 
 ## [1.15.0] — 2026-11-05
 
