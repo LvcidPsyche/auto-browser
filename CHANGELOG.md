@@ -48,6 +48,9 @@ All notable changes to auto-browser are documented here.
   that did not (trace stop, tunnel release, browser context, isolated browser, isolated runtime), and the
   `session_closed` audit event and witness receipt carry status `partial` and those names instead of `ok`. The session
   is unregistered either way, so its `MAX_SESSIONS` slot is free.
+- A late background write of a session's record can no longer put a closed session back to active: the active write is
+  skipped when the session is no longer registered (checked before and after the summary is built), and the session
+  store refuses to overwrite a stored `closed` record with an `active` one.
 
 ### Security
 

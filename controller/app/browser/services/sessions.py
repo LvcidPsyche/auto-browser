@@ -724,11 +724,17 @@ class BrowserSessionService(SessionCreation):
         return await self.manager._session_summary(session)
 
     async def persist(self, session: "BrowserSession", *, status: SessionStatus) -> None:
+        # A persist that lands after close() has stored "closed" would put the session back to active: an
+        # active record of a session that is gone. Checked before the summary and again after it, which awaits.
+        if status == "active" and self.manager.sessions.get(session.id) is not session:
+            return
         summary = await self.manager._session_summary(
             session,
             status=status,
             live=status == "active",
         )
+        if status == "active" and self.manager.sessions.get(session.id) is not session:
+            return
         await self.manager.session_store.upsert(SessionRecord.model_validate(summary))
 
     def isolation_payload(self, session: "BrowserSession") -> dict[str, Any]:

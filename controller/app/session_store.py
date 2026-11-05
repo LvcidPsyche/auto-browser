@@ -210,9 +210,23 @@ class DurableSessionStore:
         return await self.file_store.get(session_id)
 
     async def upsert(self, record: SessionRecord) -> None:
+        if record.status == "active" and await self._is_closed(record.id):
+            # A late write of a session that has been closed: a session never reopens.
+            logger.info("not writing an active record over the closed session %s", record.id)
+            return
         await self.file_store.upsert(record)
         if self.redis_store is not None and self._primary is self.redis_store:
             await self.redis_store.upsert(record)
+
+    async def _is_closed(self, session_id: str) -> bool:
+        """Whether the durable (file) record says the session is closed; no record is not closed."""
+        try:
+            return (await self.file_store.get(session_id)).status == "closed"
+        except KeyError:
+            return False
+        except Exception as exc:  # an unreadable record is not evidence of a close; the write may replace it
+            logger.warning("could not read the record of session %s before writing it: %s", session_id, exc)
+            return False
 
     async def mark_all_active_interrupted(self) -> None:
         await self.file_store.mark_all_active_interrupted()
