@@ -6,6 +6,9 @@ All notable changes to auto-browser are documented here.
 
 ### Changed
 
+- **Upgrade note:** an approval webhook whose host is a private name (a service on the compose network, a LAN
+  address) was reachable by name before and is now refused. Set the new `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS=true` to
+  allow it.
 - `MESH_ENABLED`, `MESH_IDENTITY_DIR`, `MESH_PEERS_PATH`, `MESH_TIMESTAMP_WINDOW`, `CURATOR_PROVIDER` and `CURATOR_MODEL`
   are now `Settings` fields, read from the controller's settings rather than from `os.environ` at startup. The names
   and defaults are unchanged; `MESH_ENABLED` now takes any boolean spelling pydantic accepts (not only `true`), and an
@@ -21,6 +24,11 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- The approval webhook target is now checked after DNS: the host is read as a browser reads it (`2130706433`, `0x7f.1`
+  and `127.1` are refused), resolved, and refused when any answer is a loopback, private, link-local, unspecified,
+  multicast or reserved address; the request is then sent to the address that was checked, with the original name kept
+  as the `Host` header and the TLS server name, so a second lookup cannot return a different one. Logs carry only
+  `scheme://host`, never the path, query or credentials. A name that does not resolve is not posted to.
 - A harness `run_id` must now look like the ids the harness generates (letters, digits, `.`, `_`, `-`; no leading dot), at
   the tool boundary and again in the run store, so an id cannot name a directory outside the harness runs root.
 - `provider_model` on the agent step and run requests, and the model the Codex host bridge passes to `codex --model`,

@@ -69,6 +69,12 @@ class EventsTests(unittest.TestCase):
 
 
 class WebhookTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        # The webhook target is resolved before it is posted to: hooks.example.com stands for a public address.
+        resolver = patch.object(webhooks, "_resolve_host", AsyncMock(return_value=["93.184.216.34"]))
+        resolver.start()
+        self.addCleanup(resolver.stop)
+
     async def test_dispatch_posts_signed_approval_event_and_ignores_failures(self) -> None:
         approval = ApprovalRecord(
             id="approval-1",
@@ -94,7 +100,9 @@ class WebhookTests(unittest.IsolatedAsyncioTestCase):
             await webhooks.dispatch_approval_event(approval, webhook_url="https://hooks.example.com/approval")
 
         first_call = client.post.await_args_list[0]
-        self.assertEqual(first_call.args[0], "https://hooks.example.com/approval")
+        # Pinned to the address that was checked, with the name kept for the Host header and TLS.
+        self.assertEqual(first_call.args[0], "https://93.184.216.34/approval")
+        self.assertEqual(first_call.kwargs["headers"]["Host"], "hooks.example.com")
         self.assertIn("X-Webhook-Signature", first_call.kwargs["headers"])
         self.assertEqual(first_call.kwargs["headers"]["User-Agent"], f"auto-browser/{__version__}")
         self.assertIn(b'"source":"test"', first_call.kwargs["content"])

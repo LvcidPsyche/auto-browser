@@ -49,6 +49,10 @@ BOB = OperatorIdentity(id="bob", source="token")
 class ApprovalArgumentsTests(SpendBase):
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
+        # The webhook target is resolved before it is posted to: hooks.example.com stands for a public address.
+        resolver = patch.object(webhooks, "_resolve_host", AsyncMock(return_value=["93.184.216.34"]))
+        resolver.start()
+        self.addCleanup(resolver.stop)
         self.app = FastAPI()
         self.app.include_router(create_operations_router(manager=self.manager, proxy_store=None, cron_service=None))
 

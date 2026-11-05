@@ -365,6 +365,9 @@ class Settings(BaseSettings):
     # Approval webhooks — notified when approvals are created or decided
     approval_webhook_url: str | None = Field(None, alias="APPROVAL_WEBHOOK_URL")
     approval_webhook_secret: str | None = Field(None, alias="APPROVAL_WEBHOOK_SECRET", repr=False)
+    # Off: a webhook host that is, or resolves to, a loopback, private, link-local or unspecified address is
+    # refused (app/webhooks.py). On, for a receiver on the compose network or the LAN.
+    approval_webhook_allow_private_targets: bool = Field(False, alias="APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS")
 
     # Perception presets — default mode for /observe
     # text: no screenshot, no OCR — accessibility tree + text extraction only
