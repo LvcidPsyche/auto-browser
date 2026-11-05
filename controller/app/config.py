@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     takeover_url: str = Field(
         "http://localhost:6080/vnc.html?autoconnect=true&resize=scale",
         alias="TAKEOVER_URL",
+        repr=False,
     )
     remote_access_info_path: str = Field(
         "/data/tunnels/reverse-ssh.json",
@@ -261,7 +262,7 @@ class Settings(BaseSettings):
         "normal",
         alias="WITNESS_PROTECTION_MODE_DEFAULT",
     )
-    witness_remote_url: str | None = Field(None, alias="WITNESS_REMOTE_URL")
+    witness_remote_url: str | None = Field(None, alias="WITNESS_REMOTE_URL", repr=False)
     witness_remote_api_key: str | None = Field(None, alias="WITNESS_REMOTE_API_KEY", repr=False)
     witness_remote_tenant_id: str | None = Field(None, alias="WITNESS_REMOTE_TENANT_ID")
     witness_remote_timeout_seconds: float = Field(0.75, alias="WITNESS_REMOTE_TIMEOUT_SECONDS")
@@ -291,7 +292,7 @@ class Settings(BaseSettings):
     auth_retention_hours: float = Field(168.0, alias="AUTH_RETENTION_HOURS")
 
     openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY", repr=False)
-    openai_base_url: str = Field("https://api.openai.com/v1", alias="OPENAI_BASE_URL")
+    openai_base_url: str = Field("https://api.openai.com/v1", alias="OPENAI_BASE_URL", repr=False)
     openai_model: str = Field("gpt-6.1-sol", alias="OPENAI_MODEL")
     openai_auth_mode: str = Field("api", alias="OPENAI_AUTH_MODE")
     openai_cli_path: str = Field("codex", alias="OPENAI_CLI_PATH")
@@ -307,7 +308,7 @@ class Settings(BaseSettings):
     codex_allow_host_exec: bool = Field(False, alias="CODEX_BRIDGE_ALLOW_HOST_EXEC")
 
     anthropic_api_key: str | None = Field(None, alias="ANTHROPIC_API_KEY", repr=False)
-    anthropic_base_url: str = Field(ANTHROPIC_DEFAULT_BASE_URL, alias="ANTHROPIC_BASE_URL")
+    anthropic_base_url: str = Field(ANTHROPIC_DEFAULT_BASE_URL, alias="ANTHROPIC_BASE_URL", repr=False)
     anthropic_version: str = Field("2023-06-01", alias="ANTHROPIC_VERSION")
     claude_model: str = Field("claude-sonnet-4-6", alias="CLAUDE_MODEL")
     vision_model: str = Field("claude-haiku-4-5-20251001", alias="VISION_MODEL")
@@ -319,6 +320,7 @@ class Settings(BaseSettings):
     gemini_base_url: str = Field(
         "https://generativelanguage.googleapis.com/v1beta",
         alias="GEMINI_BASE_URL",
+        repr=False,
     )
     gemini_model: str = Field("gemini-3.5-flash", alias="GEMINI_MODEL")
     gemini_auth_mode: str = Field("api", alias="GEMINI_AUTH_MODE")
@@ -332,23 +334,23 @@ class Settings(BaseSettings):
     # (and, for openrouter/openai_compatible, a model) to enable each. base_url defaults
     # are stable; model defaults are current-but-overridable.
     openrouter_api_key: str | None = Field(None, alias="OPENROUTER_API_KEY", repr=False)
-    openrouter_base_url: str = Field("https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL")
+    openrouter_base_url: str = Field("https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL", repr=False)
     openrouter_model: str = Field("", alias="OPENROUTER_MODEL")
 
     xai_api_key: str | None = Field(None, alias="XAI_API_KEY", repr=False)
-    xai_base_url: str = Field("https://api.x.ai/v1", alias="XAI_BASE_URL")
+    xai_base_url: str = Field("https://api.x.ai/v1", alias="XAI_BASE_URL", repr=False)
     xai_model: str = Field("grok-4", alias="XAI_MODEL")
 
     deepseek_api_key: str | None = Field(None, alias="DEEPSEEK_API_KEY", repr=False)
-    deepseek_base_url: str = Field("https://api.deepseek.com/v1", alias="DEEPSEEK_BASE_URL")
+    deepseek_base_url: str = Field("https://api.deepseek.com/v1", alias="DEEPSEEK_BASE_URL", repr=False)
     deepseek_model: str = Field("deepseek-chat", alias="DEEPSEEK_MODEL")
 
     minimax_api_key: str | None = Field(None, alias="MINIMAX_API_KEY", repr=False)
-    minimax_base_url: str = Field("https://api.minimax.io/v1", alias="MINIMAX_BASE_URL")
+    minimax_base_url: str = Field("https://api.minimax.io/v1", alias="MINIMAX_BASE_URL", repr=False)
     minimax_model: str = Field("MiniMax-M3", alias="MINIMAX_MODEL")
 
     openai_compatible_api_key: str | None = Field(None, alias="OPENAI_COMPATIBLE_API_KEY", repr=False)
-    openai_compatible_base_url: str = Field("", alias="OPENAI_COMPATIBLE_BASE_URL")
+    openai_compatible_base_url: str = Field("", alias="OPENAI_COMPATIBLE_BASE_URL", repr=False)
     openai_compatible_model: str = Field("", alias="OPENAI_COMPATIBLE_MODEL")
 
     model_request_timeout_seconds: float = Field(60.0, alias="MODEL_REQUEST_TIMEOUT_SECONDS")

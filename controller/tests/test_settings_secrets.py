@@ -55,6 +55,22 @@ class SecretsStayOutOfReprTests(unittest.TestCase):
             ("CDP_CONNECT_URL", f"ws://127.0.0.1:9222/devtools/browser/{_SENTINEL}"),
             ("BROWSER_WS_ENDPOINT", f"ws://browser-node:9223/{_SENTINEL}"),
             ("DEFAULT_PROXY_SERVER", f"http://user:{_SENTINEL}@proxy.example:3128"),
+            # A provider endpoint, the takeover link and the witness remote can carry userinfo the same way.
+            *(
+                (alias, f"https://user:{_SENTINEL}@host.example/v1")
+                for alias in (
+                    "ANTHROPIC_BASE_URL",
+                    "DEEPSEEK_BASE_URL",
+                    "GEMINI_BASE_URL",
+                    "MINIMAX_BASE_URL",
+                    "OPENAI_BASE_URL",
+                    "OPENAI_COMPATIBLE_BASE_URL",
+                    "OPENROUTER_BASE_URL",
+                    "XAI_BASE_URL",
+                    "TAKEOVER_URL",
+                    "WITNESS_REMOTE_URL",
+                )
+            ),
         ):
             with self.subTest(alias=alias):
                 settings = Settings(_env_file=None, **{alias: value})
