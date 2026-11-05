@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from ..action_errors import ErrorPageSourceError, RefusedPageError
+from ..auth_state import AuthStateDecryptError
 from ..browser.services.session_creation import SessionLimitError
 from ..browser.services.tabs import TabRefusedByAnotherTabError, TabUnjudgedError
 from ..models import (
@@ -71,6 +72,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                     )
             except SessionLimitError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from None
+            except AuthStateDecryptError as exc:
+                # A fixed text that says what to check; it names no path.
+                raise HTTPException(status_code=422, detail=str(exc)) from None
             except RuntimeError:
                 raise HTTPException(status_code=409, detail="Conflict") from None
             return manager.remote_access.with_takeover_password(created)

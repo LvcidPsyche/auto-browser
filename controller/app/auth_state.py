@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from dataclasses import dataclass
@@ -8,9 +9,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 
 from .utils import PRIVATE_FILE_MODE, UTC, atomic_write_text
+
+logger = logging.getLogger(__name__)
+
+AUTH_STATE_UNREADABLE = "wrong or missing AUTH_STATE_ENCRYPTION_KEY, or the file is corrupt"
+
+
+class AuthStateDecryptError(RuntimeError):
+    """An encrypted auth state could not be read. A RuntimeError so callers that already map those still do."""
+
 
 # Auth state is cookies plus storage state — kilobytes. Anything larger is not
 # a state file, and content-sniffing it is not worth the read.
@@ -70,6 +80,10 @@ class AuthStateManager:
                 "ciphertext": ciphertext,
             }
             atomic_write_text(final_path, json.dumps(payload), mode=PRIVATE_FILE_MODE)
+            # A plaintext state saved before encryption was on would otherwise stay beside the encrypted one, and
+            # still load.
+            if final_path.name.endswith(".enc"):
+                final_path.with_name(final_path.name.removesuffix(".enc")).unlink(missing_ok=True)
             return self.inspect(final_path)
 
         # A fresh temp file per save, removed whatever happens. The fixed
@@ -106,13 +120,24 @@ class AuthStateManager:
                     "REQUIRE_AUTH_STATE_ENCRYPTION=true but this auth state is not encrypted: "
                     f"{source_path}. Re-save it with an encryption key configured."
                 )
+            if self._fernet is not None:
+                logger.warning(
+                    "auth state %s is not encrypted although AUTH_STATE_ENCRYPTION_KEY is set; re-save the profile "
+                    "to encrypt it",
+                    source_path.name,
+                )
             return PreparedAuthState(path=source_path, source_info=info, storage_state=str(source_path))
         if self._fernet is None:
-            raise RuntimeError("Encrypted auth state provided but AUTH_STATE_ENCRYPTION_KEY is not configured")
+            raise AuthStateDecryptError(AUTH_STATE_UNREADABLE)
 
-        payload = json.loads(source_path.read_text(encoding="utf-8"))
-        plaintext = self._fernet.decrypt(payload["ciphertext"].encode("utf-8"))
-        return PreparedAuthState(path=source_path, source_info=info, storage_state=json.loads(plaintext))
+        try:
+            payload = json.loads(source_path.read_text(encoding="utf-8"))
+            plaintext = self._fernet.decrypt(payload["ciphertext"].encode("utf-8"))
+            state = json.loads(plaintext)
+        except (InvalidToken, KeyError, TypeError, AttributeError, ValueError) as exc:
+            logger.warning("auth state %s could not be decrypted: %s", source_path.name, type(exc).__name__)
+            raise AuthStateDecryptError(AUTH_STATE_UNREADABLE) from None
+        return PreparedAuthState(path=source_path, source_info=info, storage_state=state)
 
     def inspect(self, path: Path | None) -> dict[str, Any]:
         payload: dict[str, Any] = {

@@ -19,6 +19,11 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- An encrypted auth-state save now removes the plaintext state file it replaces, and loading a plaintext state while
+  `AUTH_STATE_ENCRYPTION_KEY` is set logs a warning.
+- `POST /sessions` with an auth profile or `storage_state_path` that cannot be decrypted (wrong or missing
+  `AUTH_STATE_ENCRYPTION_KEY`, or a corrupt file) now answers 422 "wrong or missing AUTH_STATE_ENCRYPTION_KEY, or the
+  file is corrupt" instead of an unhandled error.
 - A `nan` or infinite value in any float setting (`ARTIFACT_RETENTION_HOURS=nan` swept every artifact on the next
   cleanup) now stops startup with an error naming the setting. Zero and negative retention still mean "keep forever".
 
