@@ -11,10 +11,10 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+
 from app.browser_manager import BrowserManager
 from app.witness import WitnessRecorder
 from app.witness_signing import WitnessSigner
-
 from tests.test_witness_signing import VERIFIER, _receipt_kwargs, requires_verifier
 
 SCOPE = "sess-1"
