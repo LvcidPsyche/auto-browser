@@ -86,6 +86,9 @@ _ONE_TIME_CODE_FIELD_SELECTORS = (
     'input[placeholder*="code" i]',
 )
 _MAX_CODE_FIELD_CANDIDATES = 5
+# Total time type_text_human_like may spend in per-character delays. Longer text is typed faster, not longer:
+# 5000 characters at the default delays would hold the session lock for about 11 minutes.
+HUMAN_TYPING_BUDGET_SECONDS = 20.0
 _ONE_TIME_CODE_INPUT_TYPES = frozenset({"", "text", "tel", "number", "password"})
 # Words that say a field holds some other kind of code. The autofill typed live
 # one-time codes into promo, ZIP and card-security fields because their names
@@ -929,15 +932,20 @@ class BrowserActionService:
             return False
 
     async def type_text_human_like(self, page: "Page", text: str) -> None:
-        for index, char in enumerate(text):
-            await page.keyboard.type(char)
+        delays_ms: list[int] = []
+        for index in range(len(text)):
             delay_ms = random.randint(
                 self.manager.settings.human_typing_min_delay_ms,
                 self.manager.settings.human_typing_max_delay_ms,
             )
             if index > 0 and index % random.randint(6, 12) == 0:
                 delay_ms += random.randint(180, 600)
-            await asyncio.sleep(delay_ms / 1000)
+            delays_ms.append(delay_ms)
+        # Scale every delay down together when the whole text would overrun the budget.
+        scale = min(1.0, HUMAN_TYPING_BUDGET_SECONDS * 1000 / max(sum(delays_ms), 1))
+        for char, delay_ms in zip(text, delays_ms):
+            await page.keyboard.type(char)
+            await asyncio.sleep(delay_ms * scale / 1000)
 
     async def _find_one_time_code_field(self, page: "Page") -> tuple[Any, str] | None:
         for selector in _ONE_TIME_CODE_FIELD_SELECTORS:

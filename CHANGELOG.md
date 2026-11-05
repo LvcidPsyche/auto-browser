@@ -84,6 +84,8 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **Human-like typing now has a time limit.** It paused 40-130 ms after every character with no overall cap, so a 5000-character text held the session for about 11 minutes. The pauses now add up to at most 20 seconds: a long text is typed faster, and a short one keeps its usual pace.
+
 - **Ordinary pages are no longer mistaken for bot challenges.** After each action the controller looked for words such as "captcha", "security check" and "access denied" anywhere in the URL, the title and the first 500 characters of the page, so a blog post about CAPTCHAs, a `?q=captcha` search or a docs paragraph about HTTP 403 failed an action that had already run with `captcha_detected` and asked for a human takeover. A challenge is now recognised by a frame from a challenge provider (Google reCAPTCHA, hCaptcha, Cloudflare, Arkose Labs, GeeTest), by a known interstitial title ("Just a moment...", "Attention Required! | Cloudflare"), or by the "verify you are human" prompt in the page text.
 
 - **Element intelligence now works on a real browser.** `get_element_intelligence` asked Chromium for computed styles without first enabling the DOM and CSS agents, so the style lookup failed there. It now enables both before it reads.
