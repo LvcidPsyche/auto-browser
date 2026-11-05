@@ -97,21 +97,21 @@ class CliProviderEnvironmentTests(unittest.TestCase):
                 raise PermissionError("read-only")
             return real_mkdir(path, *args, **kwargs)
 
-        with patch.dict(os.environ, {"CLI_HOME": configured}, clear=True):
-            adapter = ClaudeAdapter(Settings(_env_file=None))
-            with patch.object(Path, "mkdir", mkdir), self.assertLogs("app.providers.base", "WARNING") as logs:
-                folder = adapter.effective_cli_home()
-                env = adapter.cli_environment()
-                again = adapter.effective_cli_home()
+        with tempfile.TemporaryDirectory() as tmp:
+            environ = {"CLI_HOME": configured, "HOME": tmp, "USERPROFILE": tmp, "LOCALAPPDATA": tmp}
+            with patch.dict(os.environ, environ, clear=True):
+                adapter = ClaudeAdapter(Settings(_env_file=None))
+                with patch.object(Path, "mkdir", mkdir), self.assertLogs("app.providers.base", "WARNING") as logs:
+                    folder = adapter.effective_cli_home()
+                    env = adapter.cli_environment()
+                    again = adapter.effective_cli_home()
 
-        fallback = Path(folder)
-        self.assertEqual((env["HOME"], again), (folder, folder))
-        self.assertEqual(fallback.parent, Path(tempfile.gettempdir()))
-        self.assertTrue(fallback.name.startswith("auto-browser-cli-"))
-        self.assertNotEqual(fallback.name, "auto-browser-cli-cwd")  # the shared, predictable folder
-        self.assertTrue(fallback.is_dir())
-        if os.name == "posix":
-            self.assertEqual(stat.S_IMODE(fallback.stat().st_mode), 0o700)
+            fallback = Path(folder)
+            self.assertEqual((env["HOME"], again), (folder, folder))
+            self.assertIn(Path(tmp), fallback.parents)  # the user's own directory, never the shared temp dir
+            self.assertTrue(fallback.is_dir())
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(fallback.stat().st_mode), 0o700)
         self.assertEqual(len(logs.records), 1)
         message = logs.records[0].getMessage()
         self.assertIn(configured, message)

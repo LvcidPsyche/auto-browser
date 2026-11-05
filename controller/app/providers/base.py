@@ -3,14 +3,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import email.utils
-import functools
 import json
 import logging
 import mimetypes
 import os
 import socket
 import stat
-import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -55,12 +53,51 @@ CLI_BASE_ENV_PREFIXES = ("LC_",)
 _UNUSABLE_CLI_HOMES: set[str] = set()
 
 
-@functools.cache
+def _private_cli_home_path() -> Path:
+    """Where this user's private CLI home lives: a place whose whole ancestor chain only this user can write.
+
+    $XDG_RUNTIME_DIR (0700, per user) when it is a directory this user owns; otherwise a per-user cache
+    directory (under %LOCALAPPDATA% on Windows). Never the shared system temp dir: the CLIs read config from the
+    parents of their working directory too, and anyone can create a file in /tmp.
+    """
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(base) / "auto-browser" / "cli-home"
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        try:
+            info = os.lstat(runtime)
+        except OSError:
+            info = None
+        if info is not None and stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o022:
+            return Path(runtime) / "auto-browser-cli"
+    return Path.home() / ".cache" / "auto-browser" / "cli-home"
+
+
 def _private_cli_home() -> str:
-    """The CLI home when CLI_HOME is unset or cannot be created: made once per process, by mkdtemp, so only this
-    user can enter it (0o700). A shared, predictable temp path could be made first by another local user, with a
-    .env or CLI settings in it for the child to load."""
-    return tempfile.mkdtemp(prefix="auto-browser-cli-")
+    """The CLI home when CLI_HOME is unset or cannot be created. Created 0o700 when missing, and on POSIX checked
+    on every call (a temp or cache cleaner may remove it, and another user may put something in its place): it
+    must be a real directory, not a symlink, owned by this user, mode 0o700. Anything else is refused."""
+    path = _private_cli_home_path()
+    if os.name == "nt":
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.mkdir(path, 0o700)
+            os.chmod(path, 0o700)  # the umask may have removed bits from the mkdir mode
+        except FileExistsError:
+            pass
+        info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise RuntimeError(
+            f"the private CLI home {path} must be a real directory (not a symlink) owned by this user with mode "
+            f"0700; found mode {stat.S_IMODE(info.st_mode):04o}, owner {info.st_uid}. Remove it or fix it and retry."
+        )
+    return str(path)
 
 
 @dataclass
@@ -400,7 +437,7 @@ class BaseProviderAdapter(ABC):
         A directory with no .env and no checkout among its parents: the Gemini CLI loads a .env from its working
         directory and parents into its environment, so a child started in the controller's checkout re-reads the
         secrets `cli_environment` withheld. CLI_HOME when it exists or can be created; otherwise (unset, or a host
-        run with no writable /data) a private directory of this process's (_private_cli_home).
+        run with no writable /data) this user's private directory (_private_cli_home).
         """
         cli_home = (self.settings.cli_home or "").strip()
         if not cli_home:
