@@ -66,6 +66,10 @@ jobs:
         if: matrix.python-version == '3.11'
         run: python -m playwright install --with-deps chromium
       - name: Run controller tests on host Python
+        # The leg that installed Chromium must run its tests: with this set, a missing
+        # browser fails the run instead of skipping the real-browser tests.
+        env:
+          AUTO_BROWSER_REQUIRE_CHROMIUM: ${{ matrix.python-version == '3.11' && '1' || '' }}
         run: |
           cd controller
           python -m pytest tests/ \
