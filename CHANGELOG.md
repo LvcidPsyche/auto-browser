@@ -19,6 +19,9 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- The Codex host bridge now removes only a stale socket at `--socket-path`: a regular file, directory or symlink there
+  stops it with a message instead of being deleted, a path too long for a unix socket is refused with its length, and
+  the socket is set to 0600 explicitly after binding.
 - An encrypted auth-state save now removes the plaintext state file it replaces, and loading a plaintext state while
   `AUTH_STATE_ENCRYPTION_KEY` is set logs a warning.
 - `POST /sessions` with an auth profile or `storage_state_path` that cannot be decrypted (wrong or missing

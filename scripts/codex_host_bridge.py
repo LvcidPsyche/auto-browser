@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -50,6 +51,39 @@ def build_sandbox_flags(*, allow_host_exec: bool, sandbox_mode: str) -> list[str
 # keeps the two equal). The leading alphanumeric keeps a model from being read as a codex flag.
 MODEL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
 _MODEL_NAME_RE = re.compile(MODEL_NAME_PATTERN)
+
+
+# sockaddr_un.sun_path, terminator included: 104 on macOS and the BSDs, 108 on Linux.
+AF_UNIX_PATH_MAX = 104 if sys.platform == "darwin" else 108
+
+
+class SocketPathError(RuntimeError):
+    pass
+
+
+def prepare_socket_path(raw: str) -> Path:
+    """The resolved path to bind, with a stale socket there removed; SocketPathError when it cannot be used.
+
+    Only a socket is ever unlinked: the path used to be resolved and whatever file it named was deleted, so a
+    --socket-path that pointed at a regular file or a symlink removed it (or the symlink's target).
+    """
+    socket_path = Path(raw).resolve()
+    if len(os.fsencode(str(socket_path))) >= AF_UNIX_PATH_MAX:
+        raise SocketPathError(
+            f"socket path is too long for a unix socket ({len(os.fsencode(str(socket_path)))} bytes, "
+            f"limit {AF_UNIX_PATH_MAX - 1}): {socket_path}; pass a shorter --socket-path"
+        )
+    socket_path.parent.mkdir(parents=True, exist_ok=True)
+    for candidate in (Path(raw), socket_path):
+        try:
+            mode = os.lstat(candidate).st_mode
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISSOCK(mode):
+            raise SocketPathError(f"{candidate} exists and is not a socket; refusing to remove it")
+    if socket_path.exists():
+        socket_path.unlink()
+    return socket_path
 
 
 def model_name_is_valid(model: str) -> bool:
@@ -293,10 +327,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    socket_path = Path(args.socket_path).resolve()
-    socket_path.parent.mkdir(parents=True, exist_ok=True)
-    if socket_path.exists():
-        socket_path.unlink()
+    try:
+        socket_path = prepare_socket_path(args.socket_path)
+    except SocketPathError as exc:
+        print(f"[codex-bridge] {exc}", file=sys.stderr)
+        return 2
 
     os.umask(0o077)
     service = CodexBridgeService(
@@ -308,6 +343,8 @@ def main() -> int:
         in {"1", "true", "yes", "on"},
     )
     server = UnixHTTPServer(str(socket_path), service)
+    # The umask above already makes it 0600; say so explicitly rather than rely on it.
+    os.chmod(socket_path, 0o600)
 
     def shutdown(_: int, __: Any) -> None:
         threading.Thread(target=server.shutdown, daemon=True).start()
