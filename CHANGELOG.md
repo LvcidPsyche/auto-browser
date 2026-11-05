@@ -4,6 +4,24 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.14.1] — 2026-11-04
+
+A patch release over 1.14.0. A session whose start page fails to load now gets a 400 the agent can act on instead
+of a 500. Closing shadow browse no longer logs a false warning. The docs fix a compose ordering that ran isolated
+sessions on a stale local browser image. The controller image changes; browser-node and the client, LangChain and
+MCP bridge packages change only in version.
+
+### Upgrade notes
+
+- **If you run the published images with isolated sessions, check the order of your compose files.**
+  `docker-compose.images.yml` must come after `docker-compose.isolation.yml`. Named before it, it lost
+  `ISOLATED_BROWSER_IMAGE` to the isolation overlay's default, so `docker_ephemeral` sessions ran a local
+  `auto-browser-browser-node:latest` (a stale build, or none) instead of the published browser-node. To check,
+  run `docker compose ... config` and confirm `ISOLATED_BROWSER_IMAGE` names the `ghcr.io` image. Then close any
+  isolated sessions started before you fixed the order.
+- Creating a session whose `start_url` fails to load now returns 400 `browser_action_failed` (retryable), not 500.
+  A client that handled the 500 should handle the 400 the way it handles a failed `navigate`.
+
 ### Fixed
 
 - A session whose `start_url` fails to load (a refused connection, an unresolved name, a timeout) is answered with
