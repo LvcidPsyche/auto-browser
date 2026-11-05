@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from shutil import which
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 from pydantic import ValidationError
@@ -54,51 +54,102 @@ CLI_BASE_ENV_PREFIXES = ("LC_",)
 _UNUSABLE_CLI_HOMES: set[str] = set()
 
 
-def _private_cli_home_path() -> Path:
-    """Where this user's private CLI home lives: a place whose whole ancestor chain only this user can write.
+# The one error a caller gets when no private CLI home can be used. It names no server path (it can reach agent
+# step results and MCP answers); the paths, owners and modes refused are in the log.
+PRIVATE_CLI_HOME_ERROR = (
+    "provider CLIs have no usable private working directory (see the controller log for why); "
+    "set CLI_HOME to a writable directory"
+)
+# Empty files in the private CLI home. The Gemini CLI loads the first .env it finds in its working directory, then
+# its parents, then the user's home: these hold nothing and stop that search before a parent's (the user's home
+# is now an ancestor).
+_ENV_SENTINELS = (".env", ".gemini/.env")
 
-    $XDG_RUNTIME_DIR (0700, per user) when it is a directory this user owns; otherwise a per-user cache
-    directory (under %LOCALAPPDATA% on Windows). Never the shared system temp dir: the CLIs read config from the
-    parents of their working directory too, and anyone can create a file in /tmp.
+
+class _Refused(Exception):
+    """A private CLI home candidate that cannot be used, and why (with its path, owner and mode, for the log)."""
+
+
+def _private_cli_home_candidates() -> Iterator[Path]:
+    """Where this user's private CLI home may live, best first. Never the shared system temp dir: the CLIs read
+    config from the parents of their working directory too, and anyone can create a file in /tmp.
+
+    On Windows a per-user directory under %LOCALAPPDATA%. On POSIX $XDG_RUNTIME_DIR/auto-browser-cli when that is
+    an absolute path to a directory this user owns that no one else can write, then ~/.cache/auto-browser/cli-home.
     """
     if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-        return Path(base) / "auto-browser" / "cli-home"
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime:
+        yield Path(base) / "auto-browser" / "cli-home"
+        return
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or ""
+    if os.path.isabs(runtime):  # a relative value would resolve against the controller's working directory
         try:
             info = os.lstat(runtime)
         except OSError:
             info = None
         if info is not None and stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o022:
-            return Path(runtime) / "auto-browser-cli"
-    return Path.home() / ".cache" / "auto-browser" / "cli-home"
+            yield Path(runtime) / "auto-browser-cli"
+    yield Path.home() / ".cache" / "auto-browser" / "cli-home"
+
+
+def _make_private_dir(path: Path) -> None:
+    """Make ``path`` and any missing parent 0o700, then check it on POSIX: the directory must be real (not a
+    symlink), this user's and 0o700, and no ancestor up to the first root-owned one may be writable by group or
+    others without the sticky bit (whoever can write one could put their own directory in this one's place)."""
+    if os.name == "nt":
+        path.mkdir(parents=True, exist_ok=True)
+        return
+    for directory in [*reversed(path.parents), path]:
+        if not os.path.lexists(directory):
+            try:
+                os.mkdir(directory, 0o700)
+            except FileExistsError:
+                pass
+            else:
+                os.chmod(directory, 0o700)  # the umask may have removed bits from the mkdir mode
+    uid = os.getuid()
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o700:
+        kind = "a symlink" if stat.S_ISLNK(info.st_mode) else "a directory" if stat.S_ISDIR(info.st_mode) else "a file"
+        raise _Refused(
+            f"it must be a real directory owned by uid {uid} with mode 0700; found {kind}, mode "
+            f"{stat.S_IMODE(info.st_mode):04o}, owner {info.st_uid}"
+        )
+    for ancestor in Path(os.path.realpath(path)).parents:
+        info = os.stat(ancestor)
+        if info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
+            raise _Refused(
+                f"its ancestor {ancestor} is writable by group or others without the sticky bit "
+                f"(mode {stat.S_IMODE(info.st_mode):04o}, owner {info.st_uid})"
+            )
+        if info.st_uid == 0:
+            break
 
 
 def _private_cli_home() -> str:
-    """The CLI home when CLI_HOME is unset or cannot be created. Created 0o700 when missing, and on POSIX checked
-    on every call (a temp or cache cleaner may remove it, and another user may put something in its place): it
-    must be a real directory, not a symlink, owned by this user, mode 0o700. Anything else is refused."""
-    path = _private_cli_home_path()
-    if os.name == "nt":
-        path.mkdir(parents=True, exist_ok=True)
-        return str(path)
+    """The CLI home when CLI_HOME is unset or cannot be created: the first candidate that can be made and passes
+    its checks, made and checked on every call (a temp or cache cleaner may remove it, and another user may put
+    something in its place), with its empty .env sentinels. When none can be used (no home, a home that cannot
+    hold it, every candidate refused), one RuntimeError that says to set CLI_HOME, with the reasons in the log."""
+    reasons: list[str] = []
     try:
-        info = os.lstat(path)
-    except FileNotFoundError:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.mkdir(path, 0o700)
-            os.chmod(path, 0o700)  # the umask may have removed bits from the mkdir mode
-        except FileExistsError:
-            pass
-        info = os.lstat(path)
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
-        raise RuntimeError(
-            f"the private CLI home {path} must be a real directory (not a symlink) owned by this user with mode "
-            f"0700; found mode {stat.S_IMODE(info.st_mode):04o}, owner {info.st_uid}. Remove it or fix it and retry."
-        )
-    return str(path)
+        for path in _private_cli_home_candidates():
+            try:
+                _make_private_dir(path)
+                for name in _ENV_SENTINELS:
+                    sentinel = path / name
+                    sentinel.parent.mkdir(mode=0o700, exist_ok=True)
+                    sentinel.touch(mode=0o600, exist_ok=True)
+            except (_Refused, OSError) as exc:
+                why = str(exc) if isinstance(exc, _Refused) else f"{type(exc).__name__}: {exc}"
+                logger.warning("the private CLI home %s cannot be used: %s", path, why)
+                reasons.append(f"{path}: {why}")
+                continue
+            return str(path)
+    except (OSError, RuntimeError) as exc:  # Path.home() with no HOME and no passwd entry, for one
+        reasons.append(f"{type(exc).__name__}: {exc}")
+    logger.error("no private CLI home can be used: %s", "; ".join(reasons) or "no candidate")
+    raise RuntimeError(PRIVATE_CLI_HOME_ERROR)
 
 
 @dataclass
@@ -435,10 +486,12 @@ class BaseProviderAdapter(ABC):
     def effective_cli_home(self) -> str:
         """The one CLI home a provider CLI child gets: its working directory, and its HOME when CLI_HOME is set.
 
-        A directory with no .env and no checkout among its parents: the Gemini CLI loads a .env from its working
-        directory and parents into its environment, so a child started in the controller's checkout re-reads the
-        secrets `cli_environment` withheld. CLI_HOME when it exists or can be created; otherwise (unset, or a host
-        run with no writable /data) this user's private directory (_private_cli_home).
+        Never the controller's checkout: the Gemini CLI loads a .env from its working directory and parents into its
+        environment, so a child started there re-reads the secrets `cli_environment` withheld. CLI_HOME when it
+        exists or can be created; otherwise (unset, or a host run with no writable /data) this user's private
+        directory (_private_cli_home). That one lies under the user's home, so the home is among its parents, but
+        empty .env sentinels in it stop the Gemini CLI's search before a parent's .env. When neither can be used, a
+        RuntimeError (PRIVATE_CLI_HOME_ERROR) that says to set CLI_HOME.
         """
         cli_home = (self.settings.cli_home or "").strip()
         if not cli_home:
@@ -446,9 +499,15 @@ class BaseProviderAdapter(ABC):
         try:
             Path(cli_home).mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            fallback = _private_cli_home()
-            if cli_home not in _UNUSABLE_CLI_HOMES:
-                _UNUSABLE_CLI_HOMES.add(cli_home)
+            first = cli_home not in _UNUSABLE_CLI_HOMES
+            _UNUSABLE_CLI_HOMES.add(cli_home)
+            try:
+                fallback = _private_cli_home()
+            except RuntimeError:
+                if first:
+                    logger.warning("CLI_HOME %s cannot be created (%s), and no private CLI home either", cli_home, exc)
+                raise
+            if first:
                 logger.warning(
                     "CLI_HOME %s cannot be created (%s); provider CLI children start in, and get as HOME, %s, which "
                     "holds no CLI sign-in. CLI mode needs CLI_HOME set to a writable directory on host runs.",

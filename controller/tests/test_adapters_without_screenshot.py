@@ -124,7 +124,9 @@ class AdaptersWithoutScreenshotTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn(_PNG_B64, body)
 
     async def test_the_openai_codex_cli_omits_image_without_a_screenshot(self) -> None:
-        adapter = OpenAIAdapter(_settings(OPENAI_AUTH_MODE="cli", OPENAI_CLI_PATH="codex"))
+        # A CLI_HOME of its own: the per-call directory is made under it, not under the real home.
+        cli_home = str(Path(self.tempdir.name) / "cli-home")
+        adapter = OpenAIAdapter(_settings(OPENAI_AUTH_MODE="cli", OPENAI_CLI_PATH="codex", CLI_HOME=cli_home))
         commands: list[list[str]] = []
 
         async def fake_run_cli(*, command, input_text=None, env=None, cwd=None):

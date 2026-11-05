@@ -13,6 +13,10 @@ All notable changes to auto-browser are documented here.
   needs one that is not in the set, name it in the new `CLI_PROVIDER_ENV_PASSTHROUGH` setting (comma-separated
   variable names, empty by default). The set is the operating-system basics (`PATH`, `HOME`, `TEMP`, `LANG`, `LC_*`,
   proxy and certificate variables) plus that provider's own key, endpoint and config-directory variables (for `codex`, that includes `CODEX_API_KEY`).
+  With `CLI_HOME` unset, or set to a directory that cannot be created, a CLI call now fails (with an error that says to
+  set `CLI_HOME`) where the controller's user has no home directory it can write, or where its private directory is
+  refused (see Security); before this release the CLI started in the controller's working directory instead. Set
+  `CLI_HOME` to a writable directory there; the image's default, `/data/cli-home`, is one.
 - **A Witness bundle whose chain failed the exporter's own check now fails the offline verifier.** That covers, for
   example, a chain whose anchor reads `anchor_missing`, `anchor_unreadable`, `truncated` or `diverged`, or whose hash
   walk fails, with or without `--allow-unsigned`; a `chain_valid_at_export` that is present and not exactly `true`
@@ -116,10 +120,15 @@ All notable changes to auto-browser are documented here.
   allowlist (see the upgrade note). They also start in `CLI_HOME` instead of the controller's working directory,
   because the Gemini CLI loads a `.env` from its working directory and its parents, which on a host checkout would
   hand the withheld secrets back. With `CLI_HOME` unset they start in a private directory the controller makes
-  for this user: `$XDG_RUNTIME_DIR/auto-browser-cli` when that is a directory the user owns, otherwise
-  `~/.cache/auto-browser/cli-home` (under `%LOCALAPPDATA%` on Windows), never the shared system temp dir. On Linux and
-  macOS it is created 0700 and checked on every use: a symlink, another owner or another mode is refused with an error
-  naming the path, and a directory a cleaner removed is made again. With `CLI_HOME` set to a directory that
+  for this user: `$XDG_RUNTIME_DIR/auto-browser-cli` when that is an absolute path to a directory the user owns that
+  no one else can write, otherwise `~/.cache/auto-browser/cli-home` (under `%LOCALAPPDATA%` on Windows), never the
+  shared system temp dir. On Linux and macOS it, and any parent it needs, is created 0700 and checked on every use: a
+  symlink, another owner or another mode, or a parent (up to the first root-owned one) that group or others can write
+  without the sticky bit, refuses that place and the next one is tried; a directory a cleaner removed is made again. It
+  holds empty `.env` and `.gemini/.env` files, which stop the Gemini CLI looking for a `.env` in its parents (the
+  user's home is one). When no place can be used, the CLI call fails with an error that says to set `CLI_HOME` to a
+  writable directory; the paths, owners and modes refused are in the server log only. The Codex CLI's per-call
+  directory is now made under the CLI home too, not in the system temp dir. With `CLI_HOME` set to a directory that
   cannot be created (a host run with no writable `/data`), that private directory is their working directory and their
   `HOME`, and a warning says CLI mode needs `CLI_HOME` set to a writable directory.
 - **Harness traces no longer keep typed secrets or URL tokens, and induced skills no longer claim to be

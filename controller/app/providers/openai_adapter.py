@@ -186,7 +186,8 @@ class OpenAIAdapter(BaseProviderAdapter):
             previous_steps=previous_steps,
             include_schema=False,
         )
-        with tempfile.TemporaryDirectory() as tempdir:
+        # Under the CLI home, not the shared system temp dir, whose other users could plant config in a parent.
+        with tempfile.TemporaryDirectory(dir=self.effective_cli_home()) as tempdir:
             temp_root = Path(tempdir)
             schema_path = temp_root / "browser_action_schema.json"
             output_path = temp_root / "decision.json"
