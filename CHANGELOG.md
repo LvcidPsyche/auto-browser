@@ -24,6 +24,9 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- `.gitignore` now ignores everything under `data/` except each directory's `.gitkeep` (it listed directories one by one
+  and missed `data/memory`, `data/mesh` with the node identity key, `data/harness`, the proxy and cron stores), and
+  ignores `.env.*` except `.env.example`.
 - The approval webhook target is now checked after DNS: the host is read as a browser reads it (`2130706433`, `0x7f.1`
   and `127.1` are refused), resolved, and refused when any answer is a loopback, private, link-local, unspecified,
   multicast or reserved address; the request is then sent to the address that was checked, with the original name kept
