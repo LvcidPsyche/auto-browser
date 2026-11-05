@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from app.config import Settings
 from app.vision_target import VisionTargeter
 
 
@@ -101,6 +102,20 @@ class VisionTargeterAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["found"])
         self.assertIn("parse error", result["description"])
 
+    async def test_default_settings_post_to_the_messages_url(self) -> None:
+        # The default ANTHROPIC_BASE_URL already ends in /v1, as claude_adapter assumes.
+        targeter = VisionTargeter.from_settings(Settings(_env_file=None, ANTHROPIC_API_KEY="k"))
+        assert targeter is not None
+        shot = self._screenshot_path()
+        payload = {"content": [{"type": "text", "text": json.dumps({"x": 1, "y": 2, "found": True})}]}
+        context = _mock_async_client(payload)
+
+        with patch("app.vision_target.httpx.AsyncClient", return_value=context):
+            await targeter.find_element(str(shot), "a button")
+
+        client = context.__aenter__.return_value
+        self.assertEqual(client.post.call_args.args[0], "https://api.anthropic.com/v1/messages")
+
     async def test_find_element_missing_screenshot(self) -> None:
         targeter = _make_targeter()
 
@@ -119,7 +134,7 @@ class VisionTargeterSettingsTests(unittest.TestCase):
     def test_from_settings_defaults_to_vision_model(self) -> None:
         settings = SimpleNamespace(
             anthropic_api_key="sk-test",
-            anthropic_base_url="https://api.anthropic.com",
+            anthropic_base_url="https://api.anthropic.com/v1",
             vision_model="claude-haiku-4-5-20251001",
         )
 
@@ -132,7 +147,7 @@ class VisionTargeterSettingsTests(unittest.TestCase):
     def test_from_settings_uses_default_model_when_vision_model_missing(self) -> None:
         settings = SimpleNamespace(
             anthropic_api_key="sk-test",
-            anthropic_base_url="https://api.anthropic.com",
+            anthropic_base_url="https://api.anthropic.com/v1",
         )
 
         result = VisionTargeter.from_settings(settings)

@@ -84,6 +84,8 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **Vision targeting now posts to the right Anthropic URL.** With the default `ANTHROPIC_BASE_URL` (which already ends in `/v1`) it called `/v1/v1/messages` and every vision lookup failed. It now uses the same `<base>/messages` form as the Claude adapter.
+
 - **Provider CLI mode no longer fails on a host without a writable `/data`.** The working directory for a provider CLI child is created under `CLI_HOME` (default `/data/cli-home`), and the failed `mkdir` stopped CLI mode. It now falls back to a folder under the system temp directory.
 
 - **A proxy persona file that cannot be read is no longer overwritten.** An unreadable or corrupt file read as an empty set, so the next save or delete rewrote it and erased every other persona. Reads and saves now fail with an error that names the file and says to fix or move it, and the file is left as it was; a missing file still reads as empty. At startup the ownerless-persona warning logs the error and carries on.

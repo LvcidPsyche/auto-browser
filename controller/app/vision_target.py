@@ -53,7 +53,7 @@ class VisionTargeter:
         self,
         *,
         api_key: str | None = None,
-        base_url: str = "https://api.anthropic.com",
+        base_url: str = "https://api.anthropic.com/v1",
         model: str = _DEFAULT_MODEL,
         timeout_seconds: float = 30.0,
     ):
@@ -126,7 +126,7 @@ class VisionTargeter:
 
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             response = await client.post(
-                f"{self.base_url}/v1/messages",
+                f"{self.base_url}/messages",
                 headers=headers,
                 json=payload,
             )
@@ -177,6 +177,6 @@ class VisionTargeter:
             return None
         return cls(
             api_key=api_key,
-            base_url=getattr(settings, "anthropic_base_url", "https://api.anthropic.com"),
+            base_url=getattr(settings, "anthropic_base_url", "https://api.anthropic.com/v1"),
             model=getattr(settings, "vision_model", None) or _DEFAULT_MODEL,
         )
