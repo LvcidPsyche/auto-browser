@@ -81,6 +81,8 @@ All notable changes to auto-browser are documented here.
 - When the active tab closes (`browser.close_tab`, or the page closing itself), the session no longer moves to a tab that
   `ALLOWED_HOSTS` refuses while an allowed one is left: it takes the nearest allowed tab, and only when every remaining
   tab is refused does the old choice stand.
+- A convergence run started with `max_attempts` below the contract's budget now needs that many consecutive passes at
+  most: the threshold followed the contract's budget, so `max_attempts=1` on a budget of 5 could never converge.
 
 ### Security
 

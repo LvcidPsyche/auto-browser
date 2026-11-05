@@ -187,7 +187,7 @@ class HarnessService:
         self.store.save(record)
         attempt_budget = min(max_attempts or contract.budget.max_attempts, contract.budget.max_attempts)
         detector = ConvergenceDetector(
-            required_successes=min(3, max(1, contract.budget.max_attempts)),
+            required_successes=min(3, attempt_budget),
             max_attempts=attempt_budget,
         )
         results: list[VerificationResult] = []
