@@ -96,6 +96,13 @@ class DriftOnUrlContainsTests(unittest.IsolatedAsyncioTestCase):
     async def test_an_email_in_the_url_query_stays_healthy(self) -> None:
         self.assertEqual(await self._drift(f"?email={EMAIL}", f"https://app.test/done?email={EMAIL}"), "healthy")
 
+    async def test_a_query_piece_without_its_question_mark_stays_healthy(self) -> None:
+        # `email=...` has no `?`, but it is a piece of the query, and the stored query was scrubbed.
+        for expected in (f"email={EMAIL}", f"&email={EMAIL}"):
+            with self.subTest(expected=expected):
+                final_url = f"https://app.test/done?next=1&email={EMAIL}"
+                self.assertEqual(await self._drift(expected, final_url), "healthy")
+
 
 if __name__ == "__main__":
     unittest.main()

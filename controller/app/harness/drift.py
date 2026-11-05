@@ -97,11 +97,23 @@ class SkillDriftMonitor:
         return results
 
 
+def _scrub_url_contains(value: str) -> str:
+    """A `url_contains` value scrubbed the way the part of the stored URL it should match was.
+
+    The stored URL has only its query and fragment rewritten. A value with a `?` or `#` is a URL or its tail, and
+    goes through the URL scrubber; one with neither but an `=` (`email=...`, `&email=...`) is a piece of a query,
+    and is scrubbed as one; anything else (a path, bare text) stays as it is, as the stored path did.
+    """
+    if "?" in value or "#" in value:
+        return _scrub_url(value)
+    if "=" in value:
+        return _scrub_url("?" + value)[1:]
+    return value
+
+
 # How the stored trace scrubs the field each kind of postcondition reads. `url_matches` is a regex, left alone.
-# `url_contains` is read against the stored URL, which only has its query and fragment rewritten, so a scheme-less
-# fragment of a URL goes through the URL scrubber and not the text one (which would also rewrite its path).
 _STORED_TEXT_SCRUBBERS = {
-    "url_contains": _scrub_url,
+    "url_contains": _scrub_url_contains,
     "text_contains": _scrub_string,
     "dom_contains": _scrub_string,
     "network_response_shape": _scrub_string,

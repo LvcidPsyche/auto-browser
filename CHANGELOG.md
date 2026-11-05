@@ -263,10 +263,14 @@ All notable changes to auto-browser are documented here.
 - **A newly staged harness skill is no longer reported degraded at once.** A staged skill keeps a scrubbed trace, so a
   required `dom_contains` or `text_contains` on an email that passed in the live run no longer matched when the drift
   monitor checked the stored copy. The monitor now scrubs the expected strings the way the stored trace was scrubbed
-  before it verifies (a `url_contains` value goes through the URL scrubber, which rewrites only the query and fragment,
-  as the stored URL was). A skill whose recorded page no longer holds the expected text still reports degraded.
-  Limits: an expectation that is wholly PII is scrubbed to the bare replacement, so it is checked as "some redaction is
-  present" in the stored text; and the stored copy is compared under the scrub settings in force now, so changing
+  before it verifies. A `url_contains` value with a `?` or `#` goes through the URL scrubber, which rewrites only the
+  query and fragment, as the stored URL was; one with neither but an `=` (`email=...`, `&email=...`) is scrubbed as a
+  piece of a query; a path or bare text is compared as it is, as the stored path was kept. A skill whose recorded page
+  no longer holds the expected text still reports degraded. Limits: a text expectation (`text_contains`,
+  `dom_contains`) that is wholly PII is scrubbed to the bare replacement, so it is checked as "some redaction is
+  present" in the stored text; a `url_contains` that is a bare email (no `=`) which stood in the final URL's query
+  cannot be matched, because the stored query was scrubbed and the bare value is not, so that skill reports degraded
+  (write it as `email=...`); and the stored copy is compared under the scrub settings in force now, so changing
   `PII_SCRUB_*` after staging can still report a fresh skill degraded.
 
 - **A live harness run now records its model decisions, and a mock run no longer counts as having screenshots.** The
