@@ -42,9 +42,10 @@ All notable changes to auto-browser are documented here.
   other provider's API key were visible to them, and to anything a prompt-injected CLI could run. They now get an
   allowlist (see the upgrade note). They also start in `CLI_HOME` instead of the controller's working directory,
   because the Gemini CLI loads a `.env` from its working directory and its parents, which on a host checkout would
-  hand the withheld secrets back. With `CLI_HOME` unset, or set to a directory that cannot be created (a host run
-  with no writable `/data`), they start in a private directory the controller makes under the system temp dir, which
-  is also their `HOME` in the second case, and a warning says CLI mode needs `CLI_HOME` set to a writable directory.
+  hand the withheld secrets back. With `CLI_HOME` unset they start in a private directory the controller makes under
+  the system temp dir. With `CLI_HOME` set to a directory that cannot be created (a host run with no writable
+  `/data`), that private directory is their working directory and their `HOME`, and a warning says CLI mode needs
+  `CLI_HOME` set to a writable directory.
 - **Harness traces no longer keep typed secrets or URL tokens, and induced skills no longer claim to be
   credential free.** A trace redacted only keys with secret-sounding names, so the text typed into a field marked
   sensitive (or found sensitive when the step ran), tokens in a URL query or fragment, and PII in free text all
