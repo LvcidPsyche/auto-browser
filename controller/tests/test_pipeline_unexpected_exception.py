@@ -200,6 +200,87 @@ class PipelineUnexpectedExceptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audited, ["ok"])
         self.assertEqual(self.manager._append_jsonl.await_count, 1)
 
+    async def test_a_failure_after_the_page_was_read_says_recording_it_ended(self) -> None:
+        self.manager._action_verification = lambda *_: (_ for _ in ()).throw(RuntimeError("verification bug"))
+
+        async def operation():
+            return None
+
+        with self.assertRaises(RuntimeError):
+            await self.manager._run_action(self.session, "click", {"selector": "#b"}, operation)
+
+        receipts, _ = await self._receipts_and_audit_statuses()
+        self.assertEqual(
+            receipts[0].metadata["error"],
+            "the action ran; recording it ended in RuntimeError. Observe the page before acting again.",
+        )
+        self.assertNotIn("verification bug", str(receipts[0].model_dump()))
+
+    async def test_a_failure_that_is_neither_the_page_read_nor_the_record_says_what_came_after(self) -> None:
+        self.manager.action_pipeline._record_success = AsyncMock(side_effect=RuntimeError("bug"))  # type: ignore[method-assign]
+
+        async def operation():
+            return None
+
+        with self.assertRaises(RuntimeError):
+            await self.manager._run_action(self.session, "click", {"selector": "#b"}, operation)
+
+        receipts, _ = await self._receipts_and_audit_statuses()
+        self.assertEqual(
+            receipts[0].metadata["error"],
+            "the action ran; what came after it ended in RuntimeError. Observe the page before acting again.",
+        )
+
+    async def test_the_next_action_records_after_a_cancelled_actions_slow_writes(self) -> None:
+        writing, finish = asyncio.Event(), asyncio.Event()
+        order: list[str] = []
+
+        async def audit(**event: Any) -> None:
+            if event["action"] == "click":
+                writing.set()
+                await finish.wait()  # the cancelled action's audit write, still going
+            order.append(event["action"])
+
+        self.manager.audit.append = AsyncMock(side_effect=audit)
+
+        async def operation():
+            return None
+
+        first = asyncio.create_task(self.manager._run_action(self.session, "click", {"selector": "#a"}, operation))
+        await asyncio.wait_for(writing.wait(), WAIT_SECONDS)
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(first, WAIT_SECONDS)  # the lock is free; its writes are not done
+
+        second = asyncio.create_task(self.manager._run_action(self.session, "hover", {"selector": "#b"}, operation))
+        await asyncio.sleep(0.2)
+        self.assertEqual(order, [], "the next action recorded before the cancelled one's writes finished")
+        finish.set()
+        await asyncio.wait_for(second, WAIT_SECONDS)
+
+        self.assertEqual(order, ["click", "hover"])
+
+    async def test_a_second_cancellation_while_the_error_is_recorded_does_not_replace_the_error(self) -> None:
+        writing, finish, audited = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def audit(**event: Any) -> None:
+            writing.set()
+            await finish.wait()
+            audited.set()
+
+        self.manager.audit.append = AsyncMock(side_effect=audit)
+
+        async def operation():
+            raise RuntimeError("unexpected bug")
+
+        task = asyncio.create_task(self.manager._run_action(self.session, "click", {"selector": "#b"}, operation))
+        await asyncio.wait_for(writing.wait(), WAIT_SECONDS)
+        task.cancel()  # while the interrupted action's record is being written
+        with self.assertRaises(RuntimeError):
+            await asyncio.wait_for(task, WAIT_SECONDS)
+        finish.set()
+        await asyncio.wait_for(audited.wait(), WAIT_SECONDS)  # the record finishes behind it
+
     async def test_an_unexpected_error_before_the_action_began_records_nothing_and_gives_its_approval_back(
         self,
     ) -> None:

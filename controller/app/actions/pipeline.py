@@ -106,6 +106,9 @@ class ActionWitnessState:
     ran: bool = False
     # Whether the action's terminal record has begun to be written: nothing records the action again.
     recorded: bool = False
+    # How far the success path got after the change: "reading" while the page is read, "observed" once that has
+    # returned (what is left is recording it). Words what an interruption after the change was interrupting.
+    after_phase: str = ""
 
 
 def _log_unfinished_record(task: asyncio.Task[None]) -> None:
@@ -116,6 +119,16 @@ def _log_unfinished_record(task: asyncio.Task[None]) -> None:
 
 # Records still being written behind a cancelled action: held, as the event loop holds a task only weakly.
 _UNFINISHED_RECORDS: set[asyncio.Task[None]] = set()
+# The record being written for each session, so the session's next action can wait for it (it is still running
+# only when a cancellation cut the action short: otherwise the action waited for its writes).
+_RECORD_IN_FLIGHT: dict[str, asyncio.Task[None]] = {}
+# Longest the next action waits for a cancelled action's record before it goes on without it.
+RECORD_WAIT_SECONDS = 5.0
+
+
+def _forget_record(session_id: str, task: asyncio.Task[None]) -> None:
+    if _RECORD_IN_FLIGHT.get(session_id) is task:
+        del _RECORD_IN_FLIGHT[session_id]
 
 
 class BrowserActionPipeline:
@@ -145,6 +158,7 @@ class BrowserActionPipeline:
             # action would count as that tab's choice: the action waits out the grace (bounded), before its
             # snapshot and before its effect is marked, so a cancellation meanwhile gives an approval back.
             await context.manager._wait_out_closed_page_grace(context.session)
+            await self._wait_for_unfinished_record(context.session.id)
             witness_state = await self._prepare(context)
             try:
                 return await self._execute_and_record(context, witness_state)
@@ -155,6 +169,25 @@ class BrowserActionPipeline:
                 if not witness_state.recorded:
                     await self._record_interrupted(context, witness_state, exc)
                 raise
+
+    @staticmethod
+    async def _wait_for_unfinished_record(session_id: str) -> None:
+        """Let a cancelled action's record finish before this action's own: its writes outlive the session lock,
+        so otherwise the two actions' lines, audit entries and receipts could land in the wrong order."""
+        pending = _RECORD_IN_FLIGHT.get(session_id)
+        if pending is None or pending.done():
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(pending), RECORD_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "session %s: the previous action's record was still being written after %.0f s; going on",
+                session_id,
+                RECORD_WAIT_SECONDS,
+            )
+        except Exception:
+            # Its failure reached its own caller; this action goes on.
+            logger.debug("session %s: the previous action's record failed", session_id, exc_info=True)
 
     async def _execute_and_record(self, context: ActionRunContext, witness_state: ActionWitnessState) -> dict[str, Any]:
         try:
@@ -219,7 +252,10 @@ class BrowserActionPipeline:
             return  # Nothing of the action ran; the approval holder gives its approval back.
         how = "was cancelled" if isinstance(exc, asyncio.CancelledError) else f"ended in {type(exc).__name__}"
         if witness_state.ran:
-            error = f"the action ran; reading the page after it {how}. Observe the page before acting again."
+            interrupted = {"reading": "reading the page after it", "observed": "recording it"}.get(
+                witness_state.after_phase, "what came after it"
+            )
+            error = f"the action ran; {interrupted} {how}. Observe the page before acting again."
         else:
             error = f"outcome unknown: the action began and {how}. Observe the page before acting again."
         try:
@@ -229,6 +265,14 @@ class BrowserActionPipeline:
                 status="error",
                 after={"url": context.manager._shown_url(context.session.page)},
                 error=error,
+            )
+        except asyncio.CancelledError:
+            # Cancelled again while the record is written: the writes finish in the background (_write_record
+            # shields them), and the caller goes on to re-raise the error that brought us here, not this one.
+            logger.warning(
+                "cancelled again while recording the interrupted %s in session %s; the record finishes behind it",
+                context.action_name,
+                context.session.id,
             )
         except Exception:
             logger.warning(
@@ -503,23 +547,28 @@ class BrowserActionPipeline:
                 metadata={"error": error},
             )
 
-        await self._write_record(witness_state, writes())
+        await self._write_record(session.id, witness_state, writes())
 
     @staticmethod
-    async def _write_record(witness_state: ActionWitnessState, writes: Coroutine[Any, Any, None]) -> None:
+    async def _write_record(
+        session_id: str, witness_state: ActionWitnessState, writes: Coroutine[Any, Any, None]
+    ) -> None:
         """Run a record's writes (actions.jsonl, the audit entry, the receipt) as one unit a cancellation does not
         cut short, so a cancelled action never leaves one or two of them.
 
         A cancellation that lands while they run goes on at once, and the writes finish behind it: each store
         orders its own writes (the audit's and the witness chain's locks; actions.jsonl takes one appended line,
         as a takeover's record, written without the session lock, already does), so writes that land after the
-        session lock is released are still whole. The callers read the approval's status first, while the
-        execution still holds the approval.
+        session lock is released are still whole, and the session's next action waits for them before its own
+        (_wait_for_unfinished_record). The callers read the approval's status first, while the execution still
+        holds the approval.
         """
         witness_state.recorded = True
         task = asyncio.ensure_future(writes)
         _UNFINISHED_RECORDS.add(task)
         task.add_done_callback(_UNFINISHED_RECORDS.discard)
+        _RECORD_IN_FLIGHT[session_id] = task
+        task.add_done_callback(lambda done: _forget_record(session_id, done))
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
@@ -555,7 +604,9 @@ class BrowserActionPipeline:
     ) -> dict[str, Any]:
         manager = context.manager
         session = context.session
+        witness_state.after_phase = "reading"
         after = await self._after_observation(context)
+        witness_state.after_phase = "observed"
         session.last_action = context.action_name
         verification = manager._action_verification(context.action_name, context.target, witness_state.before, after)
         action_class = manager._action_class(context.action_name)
@@ -594,7 +645,7 @@ class BrowserActionPipeline:
                 approval=approval,
             )
 
-        await self._write_record(witness_state, writes())
+        await self._write_record(session.id, witness_state, writes())
         await manager._persist_session(session, status="active")
         _events.emit_action(session.id, context.action_name, "ok", {"url": manager._shown_url(session.page)})
         return {
