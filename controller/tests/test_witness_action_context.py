@@ -17,6 +17,23 @@ from app.models import BrowserActionDecision
 from app.utils import UTC
 from tests.test_browser_manager_actions import FakeContext, FakePage, _settings
 
+# Long enough for a loaded machine; what the test waits on is an event, not a duration.
+WAIT_SECONDS = 30
+
+
+class SignallingLock(asyncio.Lock):
+    """A session lock that says when a second action has come to wait for it: by then that action has done all it
+    does before the lock (the old code had set its context on the session)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waited_on = asyncio.Event()
+
+    async def acquire(self) -> bool:
+        if self.locked():
+            self.waited_on.set()
+        return await super().acquire()
+
 
 class WitnessActionContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_finished_action_does_not_wipe_a_waiting_actions_context(self):
@@ -33,6 +50,7 @@ class WitnessActionContextTests(unittest.IsolatedAsyncioTestCase):
             dirs = {name: root / name / "s1" for name in ("artifacts", "auth", "uploads")}
             for folder in dirs.values():
                 folder.mkdir(parents=True)
+            lock = SignallingLock()
             manager.sessions["s1"] = BrowserSession(
                 id="s1",
                 name="fake",
@@ -44,6 +62,7 @@ class WitnessActionContextTests(unittest.IsolatedAsyncioTestCase):
                 upload_dir=dirs["uploads"],
                 takeover_url="http://x",
                 trace_path=dirs["artifacts"] / "trace.zip",
+                lock=lock,
             )
             manager._light_snapshot = AsyncMock(return_value={"url": "https://example.com", "title": "t"})
             manager._observation_payload = AsyncMock(
@@ -71,13 +90,12 @@ class WitnessActionContextTests(unittest.IsolatedAsyncioTestCase):
             first = BrowserActionDecision(action="click", selector="#a", reason="A", risk_category="payment")
             second = BrowserActionDecision(action="click", selector="#b", reason="B", risk_category="account_change")
             task_a = asyncio.create_task(manager.execute_decision("s1", first, approval_id="APPROVAL-A"))
-            await inside.wait()  # A holds the session lock, mid-click
+            await asyncio.wait_for(inside.wait(), WAIT_SECONDS)  # A holds the session lock, mid-click
             task_b = asyncio.create_task(manager.execute_decision("s1", second, approval_id="APPROVAL-B"))
-            for _ in range(20):
-                await asyncio.sleep(0)  # B is now waiting for the lock
+            await asyncio.wait_for(lock.waited_on.wait(), WAIT_SECONDS)  # B is now waiting for the lock
             release.set()
-            await task_a
-            await task_b
+            await asyncio.wait_for(task_a, WAIT_SECONDS)
+            await asyncio.wait_for(task_b, WAIT_SECONDS)
 
             receipts = await manager.witness.list("s1", limit=10)
             by_risk = {receipt.risk_category: receipt for receipt in receipts if receipt.action == "click"}
