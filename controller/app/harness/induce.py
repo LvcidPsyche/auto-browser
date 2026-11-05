@@ -149,7 +149,6 @@ class SkillInducer:
                 "cost_usd": cost_usd,
                 "model_tiers": candidate.model_tiers,
                 "validated_executor_model": candidate.model_tiers.get("executor", ""),
-                "credential_free": True,
                 "simulated": candidate.simulated,
                 # Signed, so stripping the owner from a stored candidate is
                 # caught by the registry the way any other edit is.

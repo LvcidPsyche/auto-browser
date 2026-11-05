@@ -294,7 +294,7 @@ class SkillInducerTests(unittest.TestCase):
             peer = PeerRecord(node_id=identity.node_id, pubkey_b64=identity.pubkey_b64)
             payload = verify_envelope(envelope, peer)
             self.assertEqual(payload["kind"], "skill_candidate")
-            self.assertTrue(payload["metadata"]["credential_free"])
+            self.assertNotIn("credential_free", payload["metadata"])
 
     def test_mesh_signer_fails_closed_if_envelope_signing_fails(self) -> None:
         from app.mesh.identity import NodeIdentity

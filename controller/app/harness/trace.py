@@ -5,11 +5,15 @@ import json
 import sqlite3
 import time
 import uuid
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..config import get_settings
+from ..network_inspector import scrub_url
+from ..pii_scrub import PiiScrubber
 from ..sqlite_utils import connect_sqlite
 
 _SENSITIVE_KEY_FRAGMENTS = (
@@ -23,6 +27,11 @@ _SENSITIVE_KEY_FRAGMENTS = (
     "secret",
 )
 _REDACTED = "[REDACTED]"
+# The keys that hold what an action typed. They are redacted when the action is marked sensitive.
+_TYPED_TEXT_KEYS = frozenset({"text", "text_preview"})
+_SENSITIVE_FLAG_KEYS = ("sensitive", "text_redacted")
+_URL_SCHEMES = ("http://", "https://")
+_URL_SCRUB_MAX_BYTES = 16384
 
 
 def canonical_json(payload: Any) -> str:
@@ -128,6 +137,9 @@ class TraceEnvelope(BaseModel):
             if isinstance(step, BaseModel):
                 step = step.model_dump()
             decision = step.get("decision") or {}
+            if _execution_redacted_the_text(step.get("execution")):
+                # The controller found the field sensitive at run time, whatever the agent marked.
+                decision = {**decision, "sensitive": True}
             observation = step.get("observation") or {}
             if observation:
                 final_observation = observation
@@ -205,7 +217,8 @@ class TraceRecorder:
             events=events,
             final_observation=_redact_sensitive(final_observation or {}),
             network_entries=_redact_sensitive(network_entries or []),
-            extracted_data=_redact_sensitive(extracted_data or {}),
+            # The task's own output: its text is what the verifier checks, so only secret-named keys go.
+            extracted_data=_redact_sensitive(extracted_data or {}, scrub=False),
             metadata=metadata or {},
         )
         envelope.write_json(self.run_dir / "trace.json")
@@ -261,18 +274,39 @@ class TraceRecorder:
         return connect_sqlite(self.db_path, timeout=10)
 
 
-def _redact_sensitive(value: Any) -> Any:
+@lru_cache(maxsize=1)
+def _pii_scrubber() -> PiiScrubber:
+    return PiiScrubber.from_settings(get_settings())
+
+
+def _execution_redacted_the_text(execution: Any) -> bool:
+    target = execution.get("target") if isinstance(execution, dict) else None
+    return isinstance(target, dict) and bool(target.get("text_redacted"))
+
+
+def _scrub_string(value: str) -> str:
+    scrubber = _pii_scrubber()
+    if value.startswith(_URL_SCHEMES):
+        return scrub_url(value, scrubber, _URL_SCRUB_MAX_BYTES)[0]
+    return scrubber.text(value).text
+
+
+def _redact_sensitive(value: Any, *, scrub: bool = True) -> Any:
+    """Redact secret-named keys, typed text of sensitive actions, and (with `scrub`) PII in every string."""
     if isinstance(value, dict):
+        hide_typed_text = any(value.get(flag) for flag in _SENSITIVE_FLAG_KEYS)
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key).lower()
             if any(fragment in key_text for fragment in _SENSITIVE_KEY_FRAGMENTS):
                 redacted[key] = _REDACTED
+            elif hide_typed_text and key_text in _TYPED_TEXT_KEYS:
+                redacted[key] = _REDACTED
             else:
-                redacted[key] = _redact_sensitive(item)
+                redacted[key] = _redact_sensitive(item, scrub=scrub)
         return redacted
-    if isinstance(value, list):
-        return [_redact_sensitive(item) for item in value]
-    if isinstance(value, tuple):
-        return [_redact_sensitive(item) for item in value]
+    if isinstance(value, (list, tuple)):
+        return [_redact_sensitive(item, scrub=scrub) for item in value]
+    if scrub and isinstance(value, str):
+        return _scrub_string(value)
     return value
