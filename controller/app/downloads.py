@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,14 @@ logger = logging.getLogger(__name__)
 _RESERVE_ATTEMPTS = 20
 DEFAULT_DOWNLOAD_MAX_BYTES = 256 * 1024 * 1024
 DEFAULT_DOWNLOADS_MAX_PER_SESSION = 100
+
+
+def _loop_is_running() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
 
 
 class DownloadCaptureService:
@@ -55,12 +64,14 @@ class DownloadCaptureService:
                 failure = await download.failure()
         except Exception:
             failure = "download_save_failed"
-        except BaseException:
-            # Cancelled mid-save: the reserved name would count toward the cap for good, and the browser's copy
-            # would stay until its context closes. That delete goes on in the background (it waits for the
-            # download to finish), so the cancellation is neither held up nor swallowed.
+        except BaseException as exc:
+            # Whatever ended the save, the reserved name would count toward the cap for good.
             destination.unlink(missing_ok=True)
-            spawn_background_task(self._discard(download))
+            if isinstance(exc, asyncio.CancelledError) and _loop_is_running():
+                # Cancelled mid-save: the browser's copy would stay until its context closes. That delete goes on
+                # in the background (it waits for the download to finish), so the cancellation is neither held
+                # up nor swallowed. Not for a coroutine closed at teardown, which has no loop to run it on.
+                spawn_background_task(self._discard(download))
             raise
 
         oversized = not failure and destination.stat().st_size > self.max_bytes
