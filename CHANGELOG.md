@@ -139,7 +139,10 @@ All notable changes to auto-browser are documented here.
 
 - **The reverse-SSH sidecar now reports `inactive` when its tunnel ends.** The entrypoint ran under `set -e`, so an `autossh` that exited with an error (or was stopped) ended the script before the final status was written, and `reverse-ssh.json` kept saying `active` after the tunnel was gone. The exit status is unchanged.
 
-- **Human-like typing now has a time limit.** It paused 40-130 ms after every character with no overall cap, so a 5000-character text held the session for about 11 minutes. The pauses now add up to at most 20 seconds: a long text is typed faster, and a short one keeps its usual pace.
+- **Human-like typing now has a time limit.** It paused 40-130 ms after every character with no overall cap, so a
+  5000-character text held the session for about 11 minutes. Typing, keystrokes and pauses together now take at most 20
+  seconds: the pauses of a long text are shortened to fit, and if the time is still used up, the rest of the text is
+  inserted in one go (as pasted text, without key events). A short text keeps its usual pace.
 
 - **Ordinary pages are no longer mistaken for bot challenges.** After each action the controller looked for words such as
   "captcha", "security check" and "access denied" anywhere in the URL, the title and the first 500 characters of the
