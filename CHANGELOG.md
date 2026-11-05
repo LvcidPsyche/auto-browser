@@ -271,7 +271,8 @@ All notable changes to auto-browser are documented here.
   method, value or class at 120, where the script reads them. A URL that was cut ends in `…[truncated]`, so a client
   does not follow it as if it were whole.
   A title is also cut at 200 wherever the controller reads it itself: the session summary, the tab list, the fast
-  perception preset, the share snapshot and the bot-challenge report. The element-intelligence `attributes` are cut the
+  perception preset, the share snapshot, the bot-challenge report, an approval request's observation and a saved
+  auth profile's `saved_from_title`. The element-intelligence `attributes` are cut the
   same way (an address attribute at 2,000 with the marker, any other value at 120) and limited to 50, as are the
   inline event names. The bot-challenge report names only the frames that matched, as scheme, host and path without
   the query, instead of every frame's full address.
@@ -279,7 +280,8 @@ All notable changes to auto-browser are documented here.
   side, and says when it cut a `value`, `id` or `class` (`value_truncated`, `id_truncated`, `class_truncated`; a class
   list is cut between classes). The caps are applied again in Python on what the page's own script returned, because
   that script runs where a page can replace `String.prototype.slice`; the same goes for the asset references of an
-  element read. A cut never leaves half of an emoji. The `value` of a password field, a one-time-code field or any
+  element read. A cut never leaves half of an emoji: not in those fields, in the `context_text` window, in an element's
+  label, a heading or the text excerpt of an observation. The `value` of a password field, a one-time-code field or any
   other field the typing check treats as secret is now `null` with `value_redacted: true`, as typing into one is not
   echoed either.
 

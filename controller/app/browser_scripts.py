@@ -367,7 +367,7 @@ _ELEMENT_NAMING_JS = (
       element_id: elementIds ? elementIds.idOf(el) : null,
       name: abCap(el.getAttribute('name'), AB_ATTR_MAX),
       id: abCap(el.id || null, AB_ATTR_MAX),
-      label: abName(el).slice(0, 120)
+      label: abSlice(abName(el), 120)
     };
   }
 """
@@ -425,7 +425,7 @@ INTERACTABLES_SCRIPT = _with_element_naming(
       tag: el.tagName.toLowerCase(),
       type: abCap(el.getAttribute('type'), AB_ATTR_MAX),
       role: abRole(el),
-      label: abName(el).slice(0, 160),
+      label: abSlice(abName(el), 160),
       checked: abChecked(el),
       disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
       href: abCapUrl(el.href || null),
@@ -476,7 +476,7 @@ PAGE_SUMMARY_SCRIPT = _with_element_naming(
 (textLimit, elementIds) => {
 /*__ELEMENT_NAMING__*/
   const squash = (value, maxLength = textLimit) =>
-    String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
+    abSlice(String(value || '').replace(/\s+/g, ' ').trim(), maxLength);
 
 /*__READABLE_TEXT__*/
 
@@ -499,7 +499,7 @@ PAGE_SUMMARY_SCRIPT = _with_element_naming(
           tag: field.tagName.toLowerCase(),
           type: abCap(field.getAttribute('type') || null, AB_ATTR_MAX),
           name: abCap(field.getAttribute('name') || null, AB_ATTR_MAX),
-          label: abName(field).slice(0, 80),
+          label: abSlice(abName(field), 80),
           disabled: Boolean(field.disabled || field.getAttribute('aria-disabled') === 'true')
         }))
     }));
@@ -509,7 +509,7 @@ PAGE_SUMMARY_SCRIPT = _with_element_naming(
   return {
     title: abCap(document.title, AB_TITLE_MAX),
     active_element: abActiveElement(),
-    text_excerpt: readable(document.body?.innerText).slice(0, textLimit),
+    text_excerpt: abSlice(readable(document.body?.innerText), textLimit),
     dom_outline: {
       headings,
       forms,
@@ -666,8 +666,11 @@ FIND_ELEMENTS_TEXT_SCRIPT = _with_find_fields(
         const r = el.getBoundingClientRect();
         // A regex can match a whole text node: the match is cut, and the context is `context` on each side of it.
         const shownMatch = abCap(matchText, AB_MATCH_MAX);
-        const start = Math.max(0, matchIndex - context);
-        const end = Math.min(text.length, matchIndex + shownMatch.length + context);
+        // The window is cut by units: step off a low surrogate at its start and back off a high one at its end.
+        let start = Math.max(0, matchIndex - context);
+        if (text.charCodeAt(start) >= 0xDC00 && text.charCodeAt(start) <= 0xDFFF) start++;
+        let end = Math.min(text.length, matchIndex + shownMatch.length + context);
+        if (text.charCodeAt(end - 1) >= 0xD800 && text.charCodeAt(end - 1) <= 0xDBFF) end--;
         results.push({
             tag: el.tagName.toLowerCase(),
             text: abCap(text.trim(), AB_TEXT_MAX),

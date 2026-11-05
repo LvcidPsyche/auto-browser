@@ -164,6 +164,20 @@ def test_a_cut_never_leaves_half_of_a_surrogate_pair() -> None:
         assert len(found["href"]) <= AB_HREF_MAX
 
 
+@needs_node
+def test_the_context_never_starts_or_ends_inside_an_emoji() -> None:
+    # Context 1 around "abc": the window's start lands on the emoji's low surrogate on the left, and its end on the
+    # emoji's high surrogate on the right.
+    left = _run(text=EMOJI + "abc", query="abc", context=1)["byText"][0]["context_text"]
+    right = _run(text="abc" + EMOJI, query="abc", context=1)["byText"][0]["context_text"]
+    both = _run(text=EMOJI + "abc" + EMOJI, query="abc", context=1)["byText"][0]["context_text"]
+
+    assert (left, right, both) == ("abc", "abc", "abc")
+    # A window that holds the whole emoji keeps it.
+    whole = _run(text=EMOJI + "abc" + EMOJI, query="abc", context=2)["byText"][0]["context_text"]
+    assert whole == EMOJI + "abc" + EMOJI
+
+
 def _has_lone_surrogate(text: str) -> bool:
     return any(0xD800 <= ord(char) <= 0xDFFF for char in text)
 
