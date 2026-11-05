@@ -128,7 +128,8 @@ async def run_deep_health_probe(manager: "BrowserManager") -> dict[str, Any]:
 
 def _load_deep_health_fixture() -> tuple[str, str]:
     try:
-        return _DEEP_HEALTH_FIXTURE.read_text(encoding="utf-8"), str(_DEEP_HEALTH_FIXTURE)
+        # The source is named, not its path: the answer goes to any caller of an authenticated endpoint.
+        return _DEEP_HEALTH_FIXTURE.read_text(encoding="utf-8"), "fixture"
     except OSError:
         logger.warning("deep health fixture unavailable at %s; using embedded fallback", _DEEP_HEALTH_FIXTURE)
         return _DEEP_HEALTH_FALLBACK, "embedded"

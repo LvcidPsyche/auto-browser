@@ -99,18 +99,33 @@ class DeepHealthTimeoutTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(response.json()["error"], "deep_health_probe_timed_out")
 
                 self.assertEqual(len(connects), 1)
-                pending = list(system._PENDING_CONNECTS.values())
-                self.assertEqual(len(pending), 1)
+                pending = system._PENDING_CONNECTS.get(id(manager))  # this manager's entry, not the whole dict
+                self.assertIsNotNone(pending)
                 release.set()
-                await asyncio.wait_for(asyncio.shield(pending[0]), timeout=5)
+                await asyncio.wait_for(asyncio.shield(pending), timeout=5)
                 await asyncio.sleep(0)  # its done callbacks run
-                self.assertEqual(system._PENDING_CONNECTS, {})
+                self.assertIsNone(system._PENDING_CONNECTS.get(id(manager)))
 
                 response = await asyncio.wait_for(client.get("/healthz/deep"), timeout=5)
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
         self.assertEqual(len(connects), 2)  # a finished connect is not reused: the next probe asks the manager
+
+
+class DeepHealthAnswerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_the_answer_names_the_fixture_source_not_a_server_path(self) -> None:
+        async def ensure_browser() -> object:
+            return _rendering_browser()
+
+        manager = SimpleNamespace(ensure_browser=ensure_browser, sessions={})
+        async with _client(manager) as client:
+            response = await asyncio.wait_for(client.get("/healthz/deep"), timeout=5)
+
+        self.assertEqual(response.status_code, 200)
+        source = response.json()["checks"][0]["details"]["source"]
+        self.assertIn(source, {"fixture", "embedded"})
+        self.assertNotIn(str(system._REPO_ROOT), response.text)
 
 
 def _rendering_browser() -> object:

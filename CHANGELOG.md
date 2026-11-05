@@ -32,6 +32,7 @@ All notable changes to auto-browser are documented here.
   bounded, not the connect: it is left to finish in the background rather than cancelled mid-connect, which leaked a
   half-acquired browser connection. While it runs, later probes wait on that same connect instead of each starting
   another, so polling through an outage does not pile up connects behind the browser lock.
+  A successful answer also names its fixture as `fixture` (or `embedded`) rather than an absolute server path.
 - **An `approval_id` presented on an action that needs no approval no longer makes its Witness receipt say the action
   required one.** The receipt recorded the id with `required: true`, so a caller could make a receipt read as if the
   action had been approval-gated. The receipt still shows the id, as the record of what was presented, with no status;
@@ -136,7 +137,7 @@ All notable changes to auto-browser are documented here.
 
 - **One unparseable Witness receipt line no longer hides the rest.** Listing a session's receipts and exporting its bundle failed (HTTP 400) on the first line that did not parse. They now skip it and report `unparseable_lines` with how many they skipped (in the listed window, the last `limit` lines, for a listing; in the whole chain for a bundle). The bundle keeps the receipts that parse, and its chain check still fails on the gap (`chain_valid_at_export` is false, with the reason in `chain_reason_at_export`). With a gap its `head_hash` is `null`, and `scripts/verify_witness_bundle.py` now fails a bundle whose `unparseable_lines` is present and anything but the integer 0, or whose `chain_valid_at_export` is false, `--allow-unsigned` or not (an unsigned chain that is intact exports `true`). Both fields are the exporter's own report and are unsigned, so this catches an honest incomplete export, not a forged one.
 
-- **Two MCP tool calls without a `session_id` no longer create two sessions.** Each saw no live session and created its own. Creating the implicit session is now serialized among calls from the same operator, so the second call uses the session the first one made. A call that finds a live session, a tool that never creates one, and another operator's call do not wait behind a create.
+- **Two MCP tool calls without a `session_id` no longer create two sessions.** Each saw no live session and created its own. Creating the implicit session is now serialized among calls from the same verified operator (all callers without a token share one lock), so the second call uses the session the first one made. A call that finds a live session, a tool that never creates one, and a call from another verified operator do not wait behind a create. The lock is per owner: a token operator and an unauthenticated caller can still each create a session when both find none live, and the next session-less call then answers `ambiguous_session`.
 
 - **Cancelling a cron trigger while it queues the run no longer strands the job.** The slot that marks a job as running and the browser session it had opened were only released when queuing raised an ordinary error, so a cancellation left the session open and every later trigger of that job answered `previous_run_active` until the controller restarted. Both are now released on cancellation too.
 

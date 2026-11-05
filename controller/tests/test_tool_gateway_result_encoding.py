@@ -18,8 +18,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from app.action_errors import BrowserActionError
+from app.approval_execution import ApprovalRequiredError
 from app.config import Settings
-from app.models import McpToolCallRequest
+from app.models import ApprovalRecord, BrowserActionDecision, McpToolCallRequest
 from app.tool_gateway.gateway import McpToolGateway
 
 SECRET = "JBSWY3DPEHPK3PXP"
@@ -137,6 +138,38 @@ class ResultEncodingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("session", parsed)
         self.assertNotIn(SECRET, str(response.model_dump()))
+
+    async def test_a_nan_in_an_approval_required_answer_is_valid_json(self) -> None:
+        stamp = "2026-01-01T00:00:00+00:00"
+        record = ApprovalRecord(
+            id="appr-1",
+            session_id="session-1",
+            kind="payment",
+            status="pending",
+            created_at=stamp,
+            updated_at=stamp,
+            reason="r",
+            action=BrowserActionDecision(action="click", reason="pay", selector="#b"),
+            observation={"scroll_ratio": float("nan"), "url": "https://example.com"},
+        )
+
+        response = await self._call(error=ApprovalRequiredError(record))
+
+        self.assertTrue(response.isError)
+        parsed = _strict_loads(response.content[0].text)
+        self.assertEqual(parsed["approval_id"], "appr-1")
+        self.assertEqual(parsed["approval"]["observation"], {"scroll_ratio": None, "url": "https://example.com"})
+        self.assertEqual(response.structuredContent, parsed)
+
+    def test_a_refusal_sends_only_what_can_be_encoded(self) -> None:
+        structured = {"error": "bad", "ratio": float("nan"), "session": SessionLike(id="s1", totp_secret=SECRET)}
+
+        response = McpToolGateway._refusal_response("bad", structured, ValueError("bad"))
+
+        self.assertTrue(response.isError)
+        self.assertEqual(response.structuredContent, {"error": "bad", "ratio": None})
+        self.assertNotIn(SECRET, str(response.model_dump()))
+        json.dumps(response.structuredContent, allow_nan=False)  # strict JSON
 
     async def test_a_result_that_cannot_be_encoded_says_the_action_ran(self) -> None:
         loop: dict = {}
