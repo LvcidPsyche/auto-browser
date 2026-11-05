@@ -142,6 +142,10 @@ All notable changes to auto-browser are documented here.
   a wildcard, a longer wildcard prefix beats a shorter one, and ties go to the entry listed first. A broad `tool:*`
   listed early no longer shadows a stricter grant for one tool listed later. `docs/mesh.md` also states that
   `url_allowlist` covers the request's URL arguments only, not redirects or later navigation.
+- Mesh replay protection no longer depends on a size-evicted, memory-only nonce cache alone: nonces now expire after
+  twice `MESH_TIMESTAMP_WINDOW`, and `/mesh/receive` refuses an envelope stamped before the controller started (so one
+  captured before a restart cannot be replayed after it; a sender with a slow clock may be refused for its first
+  seconds after a restart and succeeds on retry).
 
 ### Security
 

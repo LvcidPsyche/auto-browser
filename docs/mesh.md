@@ -106,6 +106,12 @@ node and its Ed25519 signature verifies against the pinned key; the nonce has no
 peer's grants decide whether the request may run. A request that fails one of the first four gets
 `403` and nothing runs; one that no grant covers is answered `rejected`.
 
+Replay protection: the timestamp window bounds how long an envelope can be replayed, and a seen nonce is
+remembered for twice that window, then forgotten. Nonces are kept in memory only, so a restart empties them;
+to close that gap the controller also refuses any envelope stamped before the moment it started (`403`, so a
+sender whose clock runs behind may be refused for its first few seconds after a restart and succeeds on
+retry). Replay protection therefore holds across a restart for anything captured before it.
+
 ## Upgrading from a release that had `POST /mesh/peers`
 
 `POST /mesh/peers` and `DELETE /mesh/peers/{node_id}` are removed (they answer 405 and 404), and the

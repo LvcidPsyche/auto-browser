@@ -61,10 +61,21 @@ class DelegationReplayError(DelegationError):
 
 
 class _NonceCache:
-    """Thread-safe LRU nonce cache for replay defense."""
+    """Thread-safe nonce cache for replay defense: bounded by age (when `ttl_seconds` is set) and by size.
 
-    def __init__(self, max_size: int = _NONCE_CACHE_MAX) -> None:
+    A nonce only needs remembering while its envelope could still pass the timestamp check, so the manager sets
+    the age to twice the timestamp window; the size cap is a backstop against flooding.
+    """
+
+    def __init__(
+        self,
+        max_size: int = _NONCE_CACHE_MAX,
+        ttl_seconds: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._max = max_size
+        self._ttl = ttl_seconds
+        self._clock = clock
         self._seen: OrderedDict[str, float] = OrderedDict()
         self._lock = Lock()
 
@@ -73,9 +84,14 @@ class _NonceCache:
         Returns True (first time seen → OK) or False (replay detected → reject).
         """
         with self._lock:
+            now = self._clock()
+            if self._ttl is not None:
+                # Entries are in insertion order, so the oldest are at the front.
+                while self._seen and now - next(iter(self._seen.values())) > self._ttl:
+                    self._seen.popitem(last=False)
             if nonce in self._seen:
                 return False
-            self._seen[nonce] = time.time()
+            self._seen[nonce] = now
             if len(self._seen) > self._max:
                 self._seen.popitem(last=False)
             return True
@@ -121,7 +137,10 @@ class DelegationManager:
         self._peers = peers
         self._timestamp_window = timestamp_window
         self._policy = PolicyEvaluator()
-        self._nonce_cache = _NonceCache()
+        # An envelope passes the timestamp check for at most twice the window (from window-early to window-late).
+        self._nonce_cache = _NonceCache(ttl_seconds=2 * timestamp_window)
+        # Nonces are not persisted, so an envelope captured before a restart is refused by its timestamp instead.
+        self._started_at = time.time()
         self._tool_gateway = tool_gateway
         self._approval_fn = approval_fn
 
@@ -208,6 +227,11 @@ class DelegationManager:
         if not abs(age) <= self._timestamp_window:
             raise DelegationRejected(
                 f"envelope timestamp out of window: age={age:.1f}s limit={self._timestamp_window}s"
+            )
+
+        if envelope.timestamp < self._started_at:
+            raise DelegationRejected(
+                "envelope was stamped before this node started; the nonce cache does not survive a restart"
             )
 
         # Signature verification BEFORE nonce cache write.
