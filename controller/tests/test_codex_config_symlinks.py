@@ -125,6 +125,44 @@ class EnsureCodexConfigTests(unittest.TestCase):
         self.assertEqual(self.linked, [Path("/home/bob/.codex")])
         self.assertIn("/home/alice/.codex", "\n".join(captured.output))
 
+    def test_a_root_that_cannot_be_linked_is_logged_and_the_next_one_is_still_linked(self) -> None:
+        # Python 3.14's exists() returns False on EACCES, so an uncheckable root reaches mkdir; a non-root controller
+        # under a root-owned /home fails there too. Both were skipped without a word.
+        self.config.write_text('a = "/home/alice/.codex/x"\nb = "/home/bob/.codex/y"\n', encoding="utf-8")
+
+        def mkdir(path: Path, *args, **kwargs) -> None:
+            if path == Path("/home/alice"):
+                raise PermissionError(13, "Permission denied", str(path))
+            self.made.append(path)
+
+        with (
+            patch.object(Path, "mkdir", mkdir),
+            self.assertLogs("app.providers.openai_adapter", level="WARNING") as captured,
+        ):
+            self.adapter._ensure_codex_config_path_compatibility()
+
+        self.assertEqual(self.linked, [Path("/home/bob/.codex")])
+        self.assertIn("/home/alice/.codex", "\n".join(captured.output))
+        self.assertIn("PermissionError", "\n".join(captured.output))
+
+    def test_a_root_with_a_nul_byte_is_logged_and_the_next_one_is_still_linked(self) -> None:
+        # exists() answers False for a path the OS cannot take, and mkdir then raises ValueError, not OSError.
+        self.config.write_text('a = "/home/a\\u0000b/.codex/x"\nb = "/home/bob/.codex/y"\n', encoding="utf-8")
+
+        def mkdir(path: Path, *args, **kwargs) -> None:
+            if "\x00" in str(path):
+                raise ValueError("embedded null byte")
+            self.made.append(path)
+
+        with (
+            patch.object(Path, "mkdir", mkdir),
+            self.assertLogs("app.providers.openai_adapter", level="WARNING") as captured,
+        ):
+            self.adapter._ensure_codex_config_path_compatibility()
+
+        self.assertEqual(self.linked, [Path("/home/bob/.codex")])
+        self.assertIn("ValueError", "\n".join(captured.output))
+
 
 if __name__ == "__main__":
     unittest.main()

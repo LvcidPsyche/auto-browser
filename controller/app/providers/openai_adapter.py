@@ -383,7 +383,7 @@ class OpenAIAdapter(BaseProviderAdapter):
             try:
                 if expected_codex_home.exists():
                     continue
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 logger.warning(
                     "codex config names %s; not linking it to the CLI home: it cannot be checked (%s)",
                     expected_codex_home.as_posix(),
@@ -395,7 +395,13 @@ class OpenAIAdapter(BaseProviderAdapter):
                 expected_codex_home.symlink_to(actual_codex_home, target_is_directory=True)
             except FileExistsError:
                 continue
-            except OSError:
+            except (OSError, ValueError) as exc:
+                # ValueError: a path the OS cannot take (a NUL byte), which exists() answers False for.
+                logger.warning(
+                    "codex config names %s; not linking it to the CLI home: the link could not be made (%s)",
+                    expected_codex_home.as_posix(),
+                    type(exc).__name__,
+                )
                 continue
 
     @classmethod

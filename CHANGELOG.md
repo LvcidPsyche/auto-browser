@@ -193,7 +193,8 @@ All notable changes to auto-browser are documented here.
   one) now creates a link only under the CLI home or at `/home/<user>/.codex`, never makes parent directories anywhere
   else, logs each path it skips, and runs once per adapter instead of on every CLI call. It checks where a path is
   before it looks at it, so a refused one such as `/root/.codex` is never read (for a non-root controller on Python
-  3.11 and 3.12 that read raised and ended the call), and a path it cannot check is logged and skipped.
+  3.11 and 3.12 that read raised and ended the call), and a path it cannot check or link (a parent it may not
+  create, a NUL byte) is logged and skipped.
 - `browser.cdp_attach` now logs, audits and returns the Chrome it attached to as `scheme://host:port` only. A CDP
   URL's userinfo, query and `/devtools/browser/<id>` path can be the credential for that Chrome; the attach itself
   still uses the full URL. The startup log line for `CDP_CONNECT_URL` shows it the same way, and a connect that fails
