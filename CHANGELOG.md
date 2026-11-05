@@ -70,7 +70,8 @@ All notable changes to auto-browser are documented here.
 - **`screenshot_diff` now redacts PII like every other screenshot path.** It captured the comparison shot
   unredacted, so the saved baseline and the second shot held the page's raw pixels even with
   `PII_SCRUB_SCREENSHOT` on. Both are now redacted before they settle on disk, and the diff image is computed from
-  them. When OCR is unavailable or redaction fails, the result carries the same `screenshot_pii_scrub` notice as
+  them. The earlier screenshot it compares against may be raw (`PII_SCRUB_ACTION_SCREENSHOTS=false`, or an earlier OCR
+  failure), so a redacted copy of it is made and compared instead, and `a_url` points at that copy. When OCR is unavailable or redaction fails, the result carries the same `screenshot_pii_scrub` notice as
   `observe`, and strict mode withholds the shot.
 
 ## [1.14.1] — 2026-11-04

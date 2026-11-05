@@ -736,6 +736,8 @@ class BrowserDiagnosticsService:
                     **_scrub_disclosure(new_shot),
                 }
 
+            # The prior may be raw: diffing raw pixels against a redacted shot reproduces them in the diff.
+            prior = await self.manager.observation.redacted_copy(session, prior, "diff-a")
             diff = await asyncio.to_thread(
                 self.compute_diff,
                 prior["path"],
@@ -744,7 +746,7 @@ class BrowserDiagnosticsService:
                 new_shot["url"],
                 session.artifact_dir,
             )
-            return {**diff, **_scrub_disclosure(new_shot)}
+            return {**diff, **(_scrub_disclosure(prior) or _scrub_disclosure(new_shot))}
 
     @staticmethod
     def compute_diff(

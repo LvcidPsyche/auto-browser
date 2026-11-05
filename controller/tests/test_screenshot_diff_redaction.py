@@ -8,8 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 from PIL import Image
 
+from app.action_errors import SCREENSHOT_WITHHELD, BrowserActionError
 from tests.test_allowed_hosts_rechecks import manager_for
 
 EMAIL_BOX = {"x": 10, "y": 10, "width": 100, "height": 20}
@@ -87,3 +89,61 @@ async def test_screenshot_diff_reports_a_redaction_that_could_not_run(tmp_path: 
     first = await manager.diagnostics.screenshot_diff("s1")
 
     assert first["screenshot_pii_scrub"] == {"applied": False, "reason": "tesseract_not_found"}
+
+
+def _raw_prior(session: SimpleNamespace, tmp_path: Path) -> Path:
+    prior = tmp_path / "prior.png"
+    Image.new("RGB", (200, 60), "white").save(prior)
+    session.last_screenshot = {"path": str(prior), "url": "/a/prior.png"}
+    return prior
+
+
+async def test_screenshot_diff_redacts_an_unredacted_prior_before_comparing(tmp_path: Path) -> None:
+    manager = manager_for(tmp_path)
+    manager.allowed_hosts = None
+    session = _session(manager, tmp_path)
+    _raw_prior(session, tmp_path)
+    manager.artifacts.capture_screenshot = AsyncMock(side_effect=_capture)
+    manager.pii_scrubber.screenshot_enabled = True
+    manager.ocr.extract_from_image = AsyncMock(return_value=OCR_WITH_EMAIL)
+
+    result = await manager.diagnostics.screenshot_diff("s1")
+
+    assert result["changed_pixels"] == 0, "the raw prior was diffed against the redacted shot"
+    assert not result["a_url"].endswith("prior.png"), "the diff points at the raw prior"
+    diff = Image.open(result["diff_path"]).convert("RGB")
+    assert diff.getpixel(INSIDE_BOX) == BLACK
+
+
+async def test_strict_mode_refuses_a_diff_whose_prior_cannot_be_scrubbed(tmp_path: Path) -> None:
+    manager = manager_for(tmp_path)
+    manager.allowed_hosts = None
+    session = _session(manager, tmp_path)
+    _raw_prior(session, tmp_path)
+    manager.artifacts.capture_screenshot = AsyncMock(side_effect=_capture)
+    manager.pii_scrubber.screenshot_enabled = True
+    manager.pii_scrubber.screenshot_strict = True
+    # the new shot scrubs; the prior's OCR fails
+    manager.ocr.extract_from_image = AsyncMock(
+        side_effect=[OCR_WITH_EMAIL, {"available": False, "error": "ocr_extraction_failed"}]
+    )
+
+    with pytest.raises(BrowserActionError) as raised:
+        await manager.diagnostics.screenshot_diff("s1")
+
+    assert raised.value.code == SCREENSHOT_WITHHELD
+
+
+async def test_strict_mode_refuses_a_diff_whose_new_shot_cannot_be_scrubbed(tmp_path: Path) -> None:
+    manager = manager_for(tmp_path)
+    manager.allowed_hosts = None
+    _session(manager, tmp_path)
+    manager.artifacts.capture_screenshot = AsyncMock(side_effect=_capture)
+    manager.pii_scrubber.screenshot_enabled = True
+    manager.pii_scrubber.screenshot_strict = True
+    manager.ocr.extract_from_image = AsyncMock(return_value={"available": False, "error": "tesseract_not_found"})
+
+    with pytest.raises(BrowserActionError) as raised:
+        await manager.diagnostics.screenshot_diff("s1")
+
+    assert raised.value.code == SCREENSHOT_WITHHELD

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -378,6 +379,21 @@ class BrowserObservationService:
             ocr = await self.manager.ocr.extract_from_image(screenshot["path"])
             await self._scrub_screenshot_if_needed(session, screenshot, ocr)
         return screenshot
+
+    async def redacted_copy(self, session: "BrowserSession", screenshot: dict[str, str], label: str) -> dict[str, str]:
+        """A PII-redacted copy of a screenshot already on disk, for reading it without trusting how it was taken.
+
+        The original may be raw (PII_SCRUB_ACTION_SCREENSHOTS=false, or an earlier OCR failure). It is left
+        alone; the copy goes through the same OCR, redaction, strict-mode refusal and disclosure as a fresh
+        capture. With screenshot scrubbing off, or the file gone, the screenshot is returned as it is.
+        """
+        if not self.manager.pii_scrubber.screenshot_enabled or not Path(screenshot["path"]).is_file():
+            return screenshot
+        copy = self.manager.artifacts.screenshot_target(session, label)
+        await asyncio.to_thread(shutil.copyfile, screenshot["path"], copy["path"])
+        ocr = await self.manager.ocr.extract_from_image(copy["path"])
+        await self._scrub_screenshot_if_needed(session, copy, ocr)
+        return copy
 
     async def light_snapshot(self, session: "BrowserSession", *, label: str) -> dict[str, Any]:
         read = start_read(self.manager, session)
