@@ -46,6 +46,9 @@ _DEEP_HEALTH_CLOSE_SECONDS = 2.0
 _PENDING_CONNECTS: dict[int, asyncio.Future[Any]] = {}
 # Connects a probe stopped waiting for: a failure then reaches no probe, and is logged.
 _UNFINISHED_CONNECTS: set[asyncio.Future[Any]] = set()
+# The probe's context closes and context creations it stopped waiting for, held (the loop keeps only weak references to
+# tasks) until they end.
+_CLOSING: set[asyncio.Future[Any]] = set()
 
 
 def _shared_connect(manager: "BrowserManager") -> "asyncio.Future[Any]":
@@ -122,7 +125,7 @@ async def run_deep_health_probe(manager: "BrowserManager") -> dict[str, Any]:
 
 
 async def _render_fixture(browser: Any, fixture_html: str) -> None:
-    context = await browser.new_context(viewport={"width": 640, "height": 360})
+    context = await _new_context(browser)
     try:
         page = await context.new_page()
         await page.set_content(
@@ -139,16 +142,43 @@ async def _render_fixture(browser: Any, fixture_html: str) -> None:
         await _close_context(context)
 
 
+async def _new_context(browser: Any) -> Any:
+    """A new context. If the probe's total cancels the wait, Chromium may still create it, so it is closed when it does."""
+    creating = _hold(asyncio.ensure_future(browser.new_context(viewport={"width": 640, "height": 360})))
+    try:
+        return await asyncio.shield(creating)
+    except BaseException:
+        if not creating.done():
+            creating.add_done_callback(_close_late_context)
+        raise
+
+
+def _close_late_context(creating: "asyncio.Future[Any]") -> None:
+    if creating.cancelled() or creating.exception() is not None:
+        return
+    logger.debug("deep health probe: closing a browser context created after the probe gave up")
+    _hold(asyncio.ensure_future(creating.result().close())).add_done_callback(_log_failed_close)
+
+
+def _hold(task: "asyncio.Future[Any]") -> "asyncio.Future[Any]":
+    _CLOSING.add(task)
+    task.add_done_callback(_CLOSING.discard)
+    return task
+
+
 async def _close_context(context: Any) -> None:
-    """Close the probe's context, waiting at most _DEEP_HEALTH_CLOSE_SECONDS; a close that hangs is left to finish."""
-    closing = asyncio.ensure_future(context.close())
+    """Close the probe's context, waiting at most _DEEP_HEALTH_CLOSE_SECONDS; a close that hangs is left to finish,
+    also when the probe's own total expires first."""
+    closing = _hold(asyncio.ensure_future(context.close()))
     try:
         await asyncio.wait_for(asyncio.shield(closing), timeout=_DEEP_HEALTH_CLOSE_SECONDS)
-    except TimeoutError:
+    except (TimeoutError, asyncio.CancelledError) as stopped:
         logger.warning(
             "deep health probe: closing its browser context took over %ss; left to finish", _DEEP_HEALTH_CLOSE_SECONDS
         )
         closing.add_done_callback(_log_failed_close)
+        if isinstance(stopped, asyncio.CancelledError):
+            raise
 
 
 def _log_failed_close(closing: "asyncio.Future[Any]") -> None:

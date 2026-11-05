@@ -106,8 +106,9 @@ All notable changes to auto-browser are documented here.
   another, so polling through an outage does not pile up connects behind the browser lock.
   Once the browser is connected, the rest of the probe (opening a context and a page, rendering the fixture) shares one
   10-second limit, answering the same 503 `deep_health_probe_timed_out`, so a browser that connects but never answers
-  no longer holds the request open. Closing the probe's context gets 2 more seconds; a close that hangs is left to
-  finish in the background and logged at warning level.
+  no longer holds the request open. Closing the probe's context gets 2 more seconds; a close that hangs, or one cut
+  short because the 10 seconds ran out, is left to finish in the background and logged at warning level. A context the
+  browser creates after the probe gave up on it is closed when it appears.
   A successful answer also names its fixture as `fixture` (or `embedded`) rather than an absolute server path.
   `/readyz`, which any caller may poll (it needs no token and is not rate limited), now waits the same way: it gave up
   after 5 seconds by cancelling the connect, which leaked a half-acquired connection per probe; it now stops waiting

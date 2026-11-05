@@ -126,7 +126,7 @@ class DeepHealthConnectedBrowserTests(unittest.IsolatedAsyncioTestCase):
         return mock.AsyncMock(side_effect=wait)
 
     async def _probe(
-        self, browser: object, probe_seconds: float = TEST_TIMEOUT_SECONDS
+        self, browser: object, probe_seconds: float = TEST_TIMEOUT_SECONDS, close_seconds: float = TEST_TIMEOUT_SECONDS
     ) -> tuple[httpx.Response, float]:
         async def ensure_browser() -> object:
             return browser
@@ -135,7 +135,7 @@ class DeepHealthConnectedBrowserTests(unittest.IsolatedAsyncioTestCase):
         started = time.perf_counter()
         with (
             mock.patch.object(system, "_DEEP_HEALTH_PROBE_SECONDS", probe_seconds),
-            mock.patch.object(system, "_DEEP_HEALTH_CLOSE_SECONDS", TEST_TIMEOUT_SECONDS),
+            mock.patch.object(system, "_DEEP_HEALTH_CLOSE_SECONDS", close_seconds),
         ):
             async with _client(manager) as client:
                 response = await asyncio.wait_for(client.get("/healthz/deep"), timeout=5)
@@ -177,6 +177,60 @@ class DeepHealthConnectedBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["status"], "ok")
         self.assertLess(elapsed, TEST_TIMEOUT_SECONDS + 2)
         self.assertTrue([line for line in logged.output if "closing its browser context" in line])
+
+    async def test_a_context_created_after_the_probe_gave_up_is_closed(self) -> None:
+        # Cancelling `await new_context()` leaves Chromium to create the context anyway; nothing else holds it.
+        release = asyncio.Event()
+        context = SimpleNamespace(close=mock.AsyncMock())
+
+        async def new_context(*_args: object, **_kwargs: object) -> object:
+            await release.wait()
+            return context
+
+        browser = SimpleNamespace(new_context=new_context)
+
+        with self.assertLogs(system.logger, level="DEBUG") as logged:
+            response, _elapsed = await self._probe(browser)
+            context.close.assert_not_awaited()
+            release.set()
+            for _ in range(50):
+                if context.close.await_count:
+                    break
+                await asyncio.sleep(0.01)
+
+        self.assertEqual(response.json()["error"], "deep_health_probe_timed_out")
+        context.close.assert_awaited_once()
+        self.assertTrue([line for line in logged.output if "created after the probe gave up" in line])
+
+    async def test_a_close_left_to_finish_is_held_until_it_ends(self) -> None:
+        release = asyncio.Event()
+        browser = _rendering_browser()
+        context = await browser.new_context()
+        context.close = self._never(release)
+
+        await self._probe(browser, probe_seconds=2.0)
+
+        self.assertEqual(len(system._CLOSING), 1)
+        release.set()
+        await asyncio.sleep(0.05)
+        self.assertEqual(len(system._CLOSING), 0)
+
+    async def test_a_total_that_expires_during_the_close_grace_still_logs_and_lets_the_close_finish(self) -> None:
+        release = asyncio.Event()
+        browser = _rendering_browser()
+        context = await browser.new_context()
+        context.close = self._never(release)
+
+        with self.assertLogs(system.logger, level="WARNING") as logged:
+            response, _elapsed = await self._probe(browser, probe_seconds=TEST_TIMEOUT_SECONDS, close_seconds=5.0)
+
+        self.assertEqual(response.json()["error"], "deep_health_probe_timed_out")
+        self.assertTrue([line for line in logged.output if "left to finish" in line])
+        (closing,) = system._CLOSING
+        self.assertFalse(closing.done())  # not cancelled with the probe
+        release.set()
+        await asyncio.sleep(0.05)
+        self.assertEqual(len(system._CLOSING), 0)
 
 
 class DeepHealthAnswerTests(unittest.IsolatedAsyncioTestCase):
