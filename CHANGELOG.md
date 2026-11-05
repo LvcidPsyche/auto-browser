@@ -84,6 +84,8 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **Ordinary pages are no longer mistaken for bot challenges.** After each action the controller looked for words such as "captcha", "security check" and "access denied" anywhere in the URL, the title and the first 500 characters of the page, so a blog post about CAPTCHAs, a `?q=captcha` search or a docs paragraph about HTTP 403 failed an action that had already run with `captcha_detected` and asked for a human takeover. A challenge is now recognised by a frame from a challenge provider (Google reCAPTCHA, hCaptcha, Cloudflare, Arkose Labs, GeeTest), by a known interstitial title ("Just a moment...", "Attention Required! | Cloudflare"), or by the "verify you are human" prompt in the page text.
+
 - **Element intelligence now works on a real browser.** `get_element_intelligence` asked Chromium for computed styles without first enabling the DOM and CSS agents, so the style lookup failed there. It now enables both before it reads.
 
 - **A refused fork or create now says why.** With the default `MAX_SESSIONS=1`, forking a session (which counts as a new session) or creating a second one answered a bare `409 {"detail":"Conflict"}`. The 409 now carries the session-limit message, naming the limit and the live sessions. Other conflicts still answer "Conflict". Forking needs `MAX_SESSIONS` of at least 2; this is now stated in `docs/architecture.md`.

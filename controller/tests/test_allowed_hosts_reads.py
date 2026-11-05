@@ -356,7 +356,7 @@ async def test_a_bot_challenge_is_not_probed_on_a_page_refused_before_the_probe(
     async def probe(*_args) -> dict:
         page.url = ALLOWED
         manager.page_provenance.committed(page, ALLOWED, url_refused=False)
-        return {"title": f"access denied {LEAKED}", "text": "", "iframes": []}
+        return {"title": f"Just a moment... {LEAKED}", "text": "", "iframes": []}
 
     page.evaluate = AsyncMock(side_effect=probe)
 
@@ -370,7 +370,7 @@ async def test_a_bot_challenge_on_a_page_that_moved_while_it_was_probed_is_refus
 ) -> None:
     """R-05: the probe's title and iframe sources went to the agent in the error details."""
     manager = manager_for(tmp_path)
-    probe = {"title": f"access denied - {LEAKED}", "text": "", "iframes": [f"http://10.0.0.7/{LEAKED}"]}
+    probe = {"title": f"Just a moment... {LEAKED}", "text": "", "iframes": [f"http://10.0.0.7/{LEAKED}"]}
     session = read_session(manager, kind, tmp_path, evaluated=probe)
 
     with pytest.raises(PermissionError, match="ALLOWED_HOSTS"):
@@ -379,13 +379,13 @@ async def test_a_bot_challenge_on_a_page_that_moved_while_it_was_probed_is_refus
 
 async def test_control_a_bot_challenge_on_a_page_that_stayed_put_is_described(tmp_path: Path) -> None:
     manager = manager_for(tmp_path)
-    probe = {"title": "access denied", "text": "", "iframes": []}
+    probe = {"title": "Just a moment...", "text": "", "iframes": []}
     session = read_session(manager, "returns", tmp_path, evaluated=probe)
     session.page.move = None
 
     challenge = await manager._check_bot_challenge(session)
 
-    assert challenge is not None and challenge["signal"] == "access denied"
+    assert challenge is not None and challenge["signal"] == "challenge page title"
 
 
 # ── MCP tools and the DOM resource ───────────────────────────────────────────
