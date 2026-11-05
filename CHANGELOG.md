@@ -84,6 +84,8 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **Asking for an auth profile that does not exist no longer creates an empty folder for it.** Each `GET` of a missing profile name left a directory under `AUTH_ROOT/profiles`, so any name could add one. Reads now create nothing; only saving a profile does.
+
 - **A harness contract of only optional postconditions no longer passes with nothing satisfied.** The verifier passed it at confidence 1.0 even when the page matched none of them. When every postcondition is optional, at least one must now be satisfied; a contract with any required postcondition is judged as before.
 
 - **Harness traces of a live agent run now record its screenshots.** The trace built from an agent result held only `action` events, so a run that took screenshots never met a `screenshots` evidence requirement. Each step that has a screenshot now adds a `screenshot` event (the same event type the mock attempt records) after its action.
