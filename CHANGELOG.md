@@ -42,6 +42,12 @@ All notable changes to auto-browser are documented here.
   `create_session` would have set them (the fork used the deployment defaults before). `POST /sessions/{id}/fork` and
   `browser.fork_session` take optional `proxy_persona`, `user_agent` and `protection_mode`; a value named there wins.
   A source created with a raw request proxy (`proxy_server`) stored no proxy to carry, so its fork gets the default.
+- `close_session` (`DELETE /sessions/{id}`) now runs its whole teardown as one task that a cancelled caller does not stop
+  (a dropped client, shutdown used to leave the audit event, the witness receipt and the stored record unwritten), and
+  says when a step failed: the answer's `closed` is true only when every step succeeded, `failed_steps` names the ones
+  that did not (trace stop, tunnel release, browser context, isolated browser, isolated runtime), and the
+  `session_closed` audit event and witness receipt carry status `partial` and those names instead of `ok`. The session
+  is unregistered either way, so its `MAX_SESSIONS` slot is free.
 
 ### Security
 

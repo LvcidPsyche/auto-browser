@@ -192,7 +192,12 @@ class BrowserSessionService(SessionCreation):
         return (record.status, record.close_reason) if may_use(record.owner) else (None, None)
 
     async def close(self, session_id: str, *, reason: str | None = None) -> dict[str, Any]:
-        """Close a session; ``reason`` is the controller's own (SessionRecord.close_reason), the next call names it."""
+        """Close a session; ``reason`` is the controller's own (SessionRecord.close_reason), the next call names it.
+
+        The teardown runs to its end even when the caller is cancelled (the HTTP client gave up, shutdown): a
+        half-done close left the audit event, the witness receipt and the stored record unwritten. ``closed`` in
+        the answer is True only when every teardown step succeeded; ``failed_steps`` names the ones that did not.
+        """
         session = await self.manager.get_session(session_id)
         locked = await self._lock_for_close(session)
         try:
@@ -203,62 +208,91 @@ class BrowserSessionService(SessionCreation):
                 raise SessionNotFoundError(session_id, status="closed")
             # A cancelled action's record may still be finishing behind it: the close is recorded after it.
             await wait_for_pending_record(session)
-            try:
-                if session.tunnel is not None:
-                    await self._teardown_step(
-                        session, "release session tunnel", lambda: self.manager.tunnel_broker.release(session.tunnel)
-                    )
-                try:
-                    summary = await self.manager._session_summary(session, status="closed", live=False)
-                except BaseException:
-                    # The session is closing all the same: its record says so, with the reason the next call names.
-                    await self._persist_closed_without_summary(session, reason)
-                    raise
-                finally:
-                    # Released even when the summary fails: the context must not outlive the session.
-                    await self._release_resources(session)
-            finally:
-                # Whatever teardown step failed, the session is gone. It used to
-                # stay registered when context.close() or the runtime release
-                # raised (a crashed browser, a docker error), every retry failed
-                # the same way, and it held a MAX_SESSIONS slot until restart.
-                self.manager.sessions.pop(session_id, None)
-                _events.emit_session(session_id, "closed")
-            if self.manager._session_closed_hook is not None:
-                try:
-                    await self.manager._session_closed_hook(session_id)
-                except Exception as exc:
-                    logger.warning("session closed hook failed for %s: %s", session_id, exc)
-            await self.manager.audit.append(
-                event_type="session_closed",
-                status="ok",
-                action="close_session",
-                session_id=session.id,
-                details={
-                    "trace_path": str(session.trace_path),
-                    "isolation_mode": session.isolation_mode,
-                    "browser_node": session.browser_node_name,
-                },
-            )
-            await self.manager._record_witness_receipt(
-                session,
-                event_type="session",
-                status="ok",
-                action="close_session",
-                action_class="control",
-                metadata={
-                    "trace_path": str(session.trace_path),
-                    "isolation_mode": session.isolation_mode,
-                    "browser_node": session.browser_node_name,
-                },
-            )
-            summary["witness_remote"] = session.witness_remote_state.model_dump()
-            summary["close_reason"] = reason
-            await self.manager.session_store.upsert(SessionRecord.model_validate(summary))
-            return {"closed": True, "trace_path": str(session.trace_path), "session": summary}
+            return await self._run_to_completion(self._close_locked(session, reason))
         finally:
             if locked:
                 session.lock.release()
+
+    @staticmethod
+    async def _run_to_completion(work: Any) -> Any:
+        """Await ``work`` as its own task, which a cancel aimed at the caller does not stop; the cancel is raised
+        once the work has finished (as the tunnel release does)."""
+        task = asyncio.create_task(work)
+        cancelled: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+        result = task.result()
+        if cancelled is not None:
+            raise cancelled
+        return result
+
+    async def _close_locked(self, session: "BrowserSession", reason: str | None) -> dict[str, Any]:
+        session_id = session.id
+        failed_steps: list[str] = []
+        try:
+            if session.tunnel is not None:
+                await self._teardown_step(
+                    session,
+                    "release session tunnel",
+                    lambda: self.manager.tunnel_broker.release(session.tunnel),
+                    failed_steps,
+                )
+            try:
+                summary = await self.manager._session_summary(session, status="closed", live=False)
+            except BaseException:
+                # The session is closing all the same: its record says so, with the reason the next call names.
+                await self._persist_closed_without_summary(session, reason)
+                raise
+            finally:
+                # Released even when the summary fails: the context must not outlive the session.
+                await self._release_resources(session, failed_steps)
+        finally:
+            # Whatever teardown step failed, the session is gone. It used to
+            # stay registered when context.close() or the runtime release
+            # raised (a crashed browser, a docker error), every retry failed
+            # the same way, and it held a MAX_SESSIONS slot until restart.
+            self.manager.sessions.pop(session_id, None)
+            _events.emit_session(session_id, "closed")
+        if self.manager._session_closed_hook is not None:
+            try:
+                await self.manager._session_closed_hook(session_id)
+            except Exception as exc:
+                logger.warning("session closed hook failed for %s: %s", session_id, exc)
+        status = "partial" if failed_steps else "ok"
+        details: dict[str, Any] = {
+            "trace_path": str(session.trace_path),
+            "isolation_mode": session.isolation_mode,
+            "browser_node": session.browser_node_name,
+        }
+        if failed_steps:
+            details["failed_steps"] = list(failed_steps)
+        await self.manager.audit.append(
+            event_type="session_closed",
+            status=status,
+            action="close_session",
+            session_id=session.id,
+            details=details,
+        )
+        await self.manager._record_witness_receipt(
+            session,
+            event_type="session",
+            status=status,
+            action="close_session",
+            action_class="control",
+            metadata=dict(details),
+        )
+        summary["witness_remote"] = session.witness_remote_state.model_dump()
+        summary["close_reason"] = reason
+        await self.manager.session_store.upsert(SessionRecord.model_validate(summary))
+        return {
+            "closed": not failed_steps,
+            "failed_steps": failed_steps,
+            "trace_path": str(session.trace_path),
+            "session": summary,
+        }
 
     async def _persist_closed_without_summary(self, session: "BrowserSession", reason: str | None) -> None:
         store = self.manager.session_store
@@ -308,14 +342,18 @@ class BrowserSessionService(SessionCreation):
             logger.warning("session %s is still busy after its context closed; closing it anyway", session.id)
             return False
 
-    async def _release_resources(self, session: "BrowserSession") -> None:
+    async def _release_resources(self, session: "BrowserSession", failed_steps: list[str]) -> None:
         """Tear down everything a live session holds, each step independently.
 
         A failing step is logged and the rest still run, so one broken resource
         does not strand the others (the runtime container, the tunnel process).
+        The label of each step that failed is appended to ``failed_steps``.
         """
         await self._teardown_step(
-            session, "stop trace recording", lambda: self.manager.observation.stop_trace_recording(session)
+            session,
+            "stop trace recording",
+            lambda: self.manager.observation.stop_trace_recording(session),
+            failed_steps,
         )
         if session.network_inspector is not None:
             session.network_inspector.detach()
@@ -323,17 +361,22 @@ class BrowserSessionService(SessionCreation):
         # The window-birth watcher is per-browser and shared with other sessions on it; drop only this
         # session's context mapping (the watcher itself is released with its browser).
         self.manager.window_births.forget_session(session)
-        await self._teardown_step(session, "close browser context", session.context.close)
+        await self._teardown_step(session, "close browser context", session.context.close, failed_steps)
         if session.browser is not None and session.owns_browser:
-            await self._close_owned_browser(session.browser, session.id)
+            if not await self._close_owned_browser(session.browser, session.id):
+                failed_steps.append("close isolated browser")
         if session.runtime is not None:
             await self._teardown_step(
-                session, "release isolated runtime", lambda: self.manager.runtime_provisioner.release(session.runtime)
+                session,
+                "release isolated runtime",
+                lambda: self.manager.runtime_provisioner.release(session.runtime),
+                failed_steps,
             )
 
-    async def _close_owned_browser(self, browser: Any, session_id: str) -> None:
-        """Close a browser the session owns, then release its gate. Until the close has succeeded the gate stays
-        attached, still gating whatever runs there, and the close taking the gate's session down is no loss."""
+    async def _close_owned_browser(self, browser: Any, session_id: str) -> bool:
+        """Close a browser the session owns, then release its gate; False when the close failed. Until the close has
+        succeeded the gate stays attached, still gating whatever runs there, and the close taking the gate's session
+        down is no loss."""
         gates = self.manager.request_gates
         gates.ending(browser)
         try:
@@ -345,12 +388,16 @@ class BrowserSessionService(SessionCreation):
                 session_id,
                 f"{type(exc).__name__}: {exc}"[:200],
             )
-            return
+            return False
         await gates.release(browser)
         await self.manager.window_births.release(browser)
+        return True
 
     @staticmethod
-    async def _teardown_step(session: "BrowserSession", label: str, step: Any) -> bool:
+    async def _teardown_step(
+        session: "BrowserSession", label: str, step: Any, failed_steps: list[str] | None = None
+    ) -> bool:
+        """Run one teardown step, bounded; on failure log it and append ``label`` to ``failed_steps``."""
         try:
             await asyncio.wait_for(step(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
         except TimeoutError:
@@ -359,6 +406,8 @@ class BrowserSessionService(SessionCreation):
             logger.warning("failed to %s for session %s: %s", label, session.id, exc)
         else:
             return True
+        if failed_steps is not None:
+            failed_steps.append(label)
         return False
 
     async def fork(

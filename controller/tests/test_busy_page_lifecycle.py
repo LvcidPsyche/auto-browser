@@ -149,7 +149,10 @@ class BusyPageTests(unittest.IsolatedAsyncioTestCase):
         _session(self.manager, "busy", page=SilentPage(), context=context)
         with patch.object(sessions_module, "TEARDOWN_STEP_TIMEOUT_SECONDS", 0.05):
             result = await asyncio.wait_for(self.manager.close_session("busy"), timeout=5)
-        self.assertTrue(result["closed"])
+        # Answered, and gone, but the step that timed out is named (NAV-37).
+        self.assertFalse(result["closed"])
+        self.assertEqual(result["failed_steps"], ["close browser context"])
+        self.assertNotIn("busy", self.manager.sessions)
 
 
 @requires_chromium
