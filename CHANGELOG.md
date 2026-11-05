@@ -125,8 +125,13 @@ All notable changes to auto-browser are documented here.
   `autossh_start_failed`, `provision_cancelled`, `provision_failed`) instead of autossh's stderr, which is logged by
   the controller.
 - `browser.request_human_takeover` no longer writes the takeover URL and the remote-access block to the session's
-  `actions.jsonl` (served under `/artifacts` to the session's users): the line keeps the reason and the session, without `takeover_url` or
-  `remote_access`. The tool's own result still carries them, as before.
+  `actions.jsonl` (served under `/artifacts` to the session's users): the line keeps the reason and the
+  session, without `takeover_url` or `remote_access`. The tool's own result still carries them, as before.
+- The `tunnel` block of the remote-access report (`GET /remote-access`, a session's `remote_access.shared_tunnel`) now
+  carries only `status`, `updated_at`, `public_takeover_url`, `public_api_url` and `stale_after_seconds` from the
+  reverse-ssh sidecar file, not the whole file (bastion, user, pid, log path). A file that is not a JSON object is
+  reported as unreadable, a `stale_after_seconds` that is not a positive finite number falls back to
+  `REMOTE_ACCESS_STALE_AFTER_SECONDS` instead of raising, and a public URL that is not a string is ignored.
 
 ## [1.15.0] — 2026-11-05
 

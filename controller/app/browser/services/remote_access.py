@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -14,6 +15,9 @@ if TYPE_CHECKING:
     from ...browser_manager import BrowserSession
 
 logger = logging.getLogger(__name__)
+
+# The fields of the reverse-ssh sidecar file that global_info passes on in its "tunnel" block.
+_TUNNEL_FIELDS_SHOWN = ("status", "updated_at", "public_takeover_url", "public_api_url", "stale_after_seconds")
 
 
 class BrowserRemoteAccessService:
@@ -52,6 +56,8 @@ class BrowserRemoteAccessService:
             return payload
         try:
             tunnel = json.loads(info_path.read_text(encoding="utf-8"))
+            if not isinstance(tunnel, dict):
+                raise ValueError(f"expected a JSON object, found {type(tunnel).__name__}")
         except Exception as exc:
             logger.warning("failed to read remote access info %s: %s", info_path, exc)
             payload["status"] = "error"
@@ -68,14 +74,18 @@ class BrowserRemoteAccessService:
         age_seconds = None
         if last_updated is not None:
             age_seconds = max(0.0, (datetime.now(UTC) - last_updated).total_seconds())
-        stale_after_seconds = float(
-            tunnel.get("stale_after_seconds") or self.manager.settings.remote_access_stale_after_seconds
-        )
+        stale_after_seconds = self._stale_after_seconds(tunnel.get("stale_after_seconds"))
         raw_status = str(tunnel.get("status") or "active")
         stale = bool(age_seconds is not None and age_seconds > stale_after_seconds)
         active = raw_status == "active" and not stale
-        takeover_url = tunnel.get("public_takeover_url") if active else self.manager.settings.takeover_url
-        api_url = tunnel.get("public_api_url") if active else None
+        public_takeover_url = tunnel.get("public_takeover_url")
+        public_api_url = tunnel.get("public_api_url")
+        takeover_url = (
+            public_takeover_url
+            if active and isinstance(public_takeover_url, str) and public_takeover_url
+            else self.manager.settings.takeover_url
+        )
+        api_url = public_api_url if active and isinstance(public_api_url, str) and public_api_url else None
         payload.update(
             {
                 "active": active,
@@ -87,10 +97,22 @@ class BrowserRemoteAccessService:
                 "last_updated": (last_updated.isoformat().replace("+00:00", "Z") if last_updated is not None else None),
                 "age_seconds": age_seconds,
                 "stale_after_seconds": stale_after_seconds,
-                "tunnel": tunnel,
+                # Only these: the file also names the bastion, its user, a pid and the log path.
+                "tunnel": {key: tunnel[key] for key in _TUNNEL_FIELDS_SHOWN if key in tunnel},
             }
         )
         return payload
+
+    def _stale_after_seconds(self, value: Any) -> float:
+        """The file's stale_after_seconds when it is a positive finite number, else the setting."""
+        default = float(self.manager.settings.remote_access_stale_after_seconds)
+        if value is None or isinstance(value, bool):
+            return default
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            return default
+        return seconds if math.isfinite(seconds) and seconds > 0 else default
 
     def session_info(self, session: "BrowserSession") -> dict[str, Any]:
         if session.isolation_mode != "docker_ephemeral":
