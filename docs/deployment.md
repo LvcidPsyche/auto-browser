@@ -273,6 +273,13 @@ another session's browser by name, nor its Playwright server (9223), nor the sha
 `browser-node` or any other service on the compose network. Published noVNC ports are
 the exception (below).
 
+The controller joins each session network at gateway priority -1, so its own compose network keeps its default
+gateway and its published API port. That needs Docker Engine 28 or later (API 1.48). On an older engine Docker picks
+the gateway by network name, lowest first, so a session network whose name sorts before the compose network takes it
+and the request creating the session can be cut: the controller logs a warning when that would happen. Upgrade the
+engine, or set `ISOLATED_BROWSER_CONTAINER_PREFIX` to a prefix that sorts after the compose network's name (the
+default `browser-session` sorts after `auto-browser_default`).
+
 - **Upgrading:** isolated browsers no longer reach compose-network services. A proxy
   sidecar named in `DEFAULT_PROXY_SERVER` or a proxy persona must be reachable some
   other way than by its compose service name, or keep `ISOLATED_BROWSER_NETWORK_MODE=shared`.
