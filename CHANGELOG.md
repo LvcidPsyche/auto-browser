@@ -124,6 +124,9 @@ All notable changes to auto-browser are documented here.
   runs with no verified operator share one count.
 - **Upgrade note:** with the new default, harness runs and staged skill candidates older than 30 days are deleted on
   the next start. Set `HARNESS_RETENTION_DAYS=0` to keep them.
+- **Upgrade note:** a controller rolled back to 1.15.0 cannot read a harness run this version has saved with an
+  attempt in it (each attempt now records a `trace_hash`, which 1.15.0 rejects), including an older run this version's
+  startup sweep marked `interrupted`: such runs drop out of `harness.list_runs`, and `harness.get_status` fails on them.
 - The harness's `login_redirect` forbidden state now looks at where the browser is, not what the page says: a URL path
   segment of `login`, `log-in`, `log_in`, `logon`, `signin`, `sign-in`, `sign_in`, `auth` or `authorize`, a host whose
   first label is one of those (`login.microsoftonline.com`), a 401 or 403 status, or the caller's value inside the URL.
