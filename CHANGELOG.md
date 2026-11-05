@@ -32,6 +32,9 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- `browser.cdp_attach` now logs, audits and returns the Chrome it attached to as `scheme://host:port` only. A CDP URL's
+  userinfo, query and `/devtools/browser/<id>` path can be the credential for that Chrome; the attach itself still
+  uses the full URL.
 - `.gitignore` now ignores everything under `data/` except each directory's `.gitkeep` (it listed directories one by one
   and missed `data/memory`, `data/mesh` with the node identity key, `data/harness`, the proxy and cron stores), and
   ignores `.env.*` except `.env.example`.

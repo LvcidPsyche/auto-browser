@@ -4,6 +4,7 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from playwright.async_api import Browser
 
@@ -22,6 +23,20 @@ ATTACHED: dict[str, Any] = {"sandbox": "attached"}
 
 # Closing the browser a CDP attach replaces must not hang the browser lock.
 PREVIOUS_BROWSER_CLOSE_TIMEOUT_SECONDS = 10.0
+
+
+def scrubbed_cdp_url(url: str) -> str:
+    """scheme://host[:port] of a CDP URL: its userinfo, path and query can be the credential for that Chrome."""
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return "<unparseable CDP URL>"
+    host = parsed.hostname
+    if not parsed.scheme or not host:
+        return "<unparseable CDP URL>"
+    shown_host = f"[{host}]" if ":" in host else host
+    return f"{parsed.scheme}://{shown_host}" + (f":{port}" if port is not None else "")
 
 
 class BrowserRuntimeService:
@@ -138,7 +153,11 @@ class BrowserRuntimeService:
             manager.browser = browser
             self.shared_sandbox = dict(ATTACHED)
             self._watch_disconnect(browser)
-            logger.info("attached to Chrome via CDP at %s", cdp_url)
+            # Everything below shows the scrubbed URL. The guards on this tool are the ones above (refused with more than
+            # one operator credential and under BROWSER_SANDBOX=on); the attach target is the caller's to name, as it
+            # is for CDP_CONNECT_URL, so it is not matched against ALLOWED_HOSTS.
+            shown_url = scrubbed_cdp_url(cdp_url)
+            logger.info("attached to Chrome via CDP at %s", shown_url)
             if previous is not None and previous is not browser:
                 await manager.request_gates.release(previous)
                 await self._close_previous_browser(previous)
@@ -147,11 +166,11 @@ class BrowserRuntimeService:
                 status="ok",
                 action="cdp_attach",
                 session_id=None,
-                details={"cdp_url": cdp_url},
+                details={"cdp_url": shown_url},
             )
             return {
                 "attached": True,
-                "cdp_url": cdp_url,
+                "cdp_url": shown_url,
                 "browser_version": browser.version,
             }
 
