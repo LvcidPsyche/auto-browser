@@ -110,12 +110,20 @@ class NodeIdentityLooseDirectoryTests(unittest.TestCase):
         NodeIdentity(self.dir)
 
     def _load(self, dir_mode: int, *, ours: bool, chmod=None):
-        """Load with the directory's mode and owner injected (the key reads as 0600); returns the chmod mock."""
+        """Load with the directory's mode and owner injected (the key reads as 0600); returns the chmod mock.
+
+        The default chmod sets the injected mode, as a filesystem that keeps modes does.
+        """
+        modes = {"dir": dir_mode}
+
+        def keep_mode(path, mode):
+            modes["dir"] = mode
+
         with (
             patch.object(identity_module, "_POSIX", True),
-            patch.object(identity_module, "_mode_bits", side_effect=lambda p: dir_mode if p == self.dir else 0o600),
+            patch.object(identity_module, "_mode_bits", side_effect=lambda p: modes["dir"] if p == self.dir else 0o600),
             patch.object(identity_module, "_owned_by_this_process", return_value=ours),
-            patch.object(identity_module.os, "chmod", chmod or Mock()) as chmod_mock,
+            patch.object(identity_module.os, "chmod", chmod or Mock(side_effect=keep_mode)) as chmod_mock,
         ):
             NodeIdentity(self.dir)
         return chmod_mock
@@ -143,6 +151,28 @@ class NodeIdentityLooseDirectoryTests(unittest.TestCase):
             self._load(0o755, ours=True, chmod=Mock(side_effect=PermissionError(1, "Operation not permitted")))
 
         self.assertTrue(any("could not be tightened (PermissionError)" in line for line in logs.output))
+
+    def test_a_chmod_the_filesystem_does_not_keep_is_reported_not_called_tightened(self):
+        # A mount that fakes its modes (a Windows folder through Docker Desktop shows 0777) takes the chmod and keeps
+        # showing the old mode: "tightened" would be logged on every start, and be false.
+        with self.assertLogs("app.mesh.identity", level="WARNING") as logs:
+            chmod = self._load(0o777, ours=True, chmod=Mock())
+
+        chmod.assert_called_once_with(self.dir, 0o700)
+        text = "\n".join(logs.output)
+        self.assertNotIn("tightened it to 700", text)
+        self.assertIn("did not change", text)
+
+    @_POSIX_ONLY
+    def test_a_loose_directory_is_really_tightened(self):
+        # Nothing injected: the real owner check and the real chmod (the test owns its temp directory, as root too).
+        os.chmod(self.dir, 0o740)  # readable by the group: loose
+
+        with self.assertLogs("app.mesh.identity", level="WARNING") as logs:
+            NodeIdentity(self.dir)
+
+        self.assertEqual(self.dir.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(len([line for line in logs.output if "identity directory" in line]), 1)
 
     def test_a_private_directory_is_left_alone(self):
         with self.assertNoLogs("app.mesh.identity", level="WARNING"):

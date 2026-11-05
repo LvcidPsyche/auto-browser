@@ -138,6 +138,17 @@ class NodeIdentity:
                 type(exc).__name__,
             )
             return
+        kept = _mode_bits(self._dir)
+        if kept & _GROUP_OR_WORLD_BITS:
+            # A mount that fakes its modes (a Windows folder through Docker Desktop shows 0777) takes the chmod and
+            # keeps the mode it shows.
+            logger.warning(
+                "mesh.identity: identity directory %s is open to group or others (mode %o), and chmod 700 did not "
+                "change that: the filesystem may not keep modes",
+                self._dir,
+                kept,
+            )
+            return
         logger.warning(
             "mesh.identity: identity directory %s was open to group or others (mode %o); tightened it to 700",
             self._dir,
