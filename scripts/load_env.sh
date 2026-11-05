@@ -54,8 +54,9 @@ __lre_refused() {
       fi
       ;;
   esac
-  # `${!1+set}` (not `[[ -v ]]`, which needs bash 4.2) is empty for a name that is not set.
-  [[ -n "${!1+set}" ]] || return 1
+  # `declare -p` (not `[[ -v ]]`, which needs bash 4.2, nor `${!1+set}`, which reads a `local x` with no value as
+  # unset) succeeds for any declared name.
+  declare -p "$1" >/dev/null 2>&1 || return 1
   local __lre_decl
   __lre_decl="$(declare -p "$1" 2>/dev/null)" || return 1
   case "$__lre_decl" in

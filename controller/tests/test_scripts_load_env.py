@@ -359,13 +359,14 @@ class LoadRepoEnvTests(unittest.TestCase):
     def test_a_key_that_is_not_set_costs_no_subprocess(self) -> None:
         # Each fork costs about 130 ms on Git Bash, so a copied .env.example (176 keys) took 20 s. The wrappers
         # shadow the builtin and `tr` and log to a file (declare's own stderr is redirected away by the caller);
-        # `declare -p` is only for a name that is set, and the case fold on Windows shells needs no `tr`.
+        # `declare` is logged only when it runs in a subshell (a `$(declare -p x)`), which is the fork: the plain
+        # `declare -p x >/dev/null` existence test is a builtin, and the case fold on Windows shells needs no `tr`.
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         log = _bash_path(Path(tempdir.name) / "forks.log")
         wrappers = (
             f'tr() {{ echo "tr" >> "{log}"; command tr "$@"; }}; '
-            f'declare() {{ echo "declare $*" >> "{log}"; builtin declare "$@"; }}; '
+            f'declare() {{ [[ "$BASHPID" == "$$" ]] || echo "declare $*" >> "{log}"; builtin declare "$@"; }}; '
         )
         for ostype in ("cygwin", "linux-gnu"):
             with self.subTest(ostype=ostype):
@@ -428,6 +429,18 @@ class LoadRepoEnvTests(unittest.TestCase):
         self.assertNotIn("MY_INTERNAL", exported)  # set but not exported, and .env does not export it
         self.assertEqual(exported["EXPORTED_ONE"], "from-env")  # an exported variable stays overridable
         self.assertIn("MY_INTERNAL", stderr)
+
+    def test_a_variable_the_script_declared_without_a_value_is_not_overwritten(self) -> None:
+        # `local x` / `declare x` makes x the script's own, with no value yet: ${x+set} reads it as unset.
+        exported, _, stderr = self.load(
+            "MY_DECLARED=from-env\nFINE=1\n",
+            prelude="declare MY_DECLARED; ",
+            watch=("MY_DECLARED",),
+        )
+
+        self.assertNotIn("MY_DECLARED", exported)
+        self.assertEqual(exported["FINE"], "1")
+        self.assertIn("MY_DECLARED", stderr)
 
     def test_the_parsers_own_names_are_ordinary_keys(self) -> None:
         exported, _, stderr = self.load("pair_re=.*\nline=L\nkey=K\nvalue=V\nenv_file=E\nOTHER=1\n")

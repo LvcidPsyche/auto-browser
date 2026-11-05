@@ -19,6 +19,8 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- The scripts' `.env` loader no longer overwrites a variable the calling script declared without a value (`local x`,
+  `declare x`): it read such a name as unset and let `.env` set it.
 - `scripts/bootstrap_cli_auth.sh` now refuses a `CLI_HOME` with a `..` component (`/data/../etc` matched `/data/*`).
 - `scripts/agent_eval.py --execute` reads the controller token from `AUTO_BROWSER_TOKEN`; `--bearer-token` still works
   but is deprecated, warns, and is documented as visible to every local user in the process list.
