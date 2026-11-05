@@ -116,7 +116,7 @@ class CDPPassthroughTests(unittest.IsolatedAsyncioTestCase):
         responses["DOM.getAttributes"] = {"attributes": pairs}
         responses["Runtime.evaluate"] = [
             {"result": {"value": [huge] + ["click"] * 200}},
-            {"result": {"value": {}}},
+            {"result": {"value": {"src": "https://e.example/" + huge, "href": "plain"}}},
         ]
 
         result = await CDPPassthrough(_FakeCDPSession(responses)).get_element_intelligence("#hero")
@@ -128,6 +128,10 @@ class CDPPassthroughTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(attributes["href"].endswith(AB_TRUNCATED_MARK))
         self.assertEqual(len(attributes["srcset"]), AB_HREF_MAX)
         self.assertTrue(all(len(name) <= AB_ATTR_MAX for name in attributes))
+        # The asset script runs in the page's own JS world, where a page can defeat its in-page cap.
+        self.assertEqual(len(result["assets"]["src"]), AB_HREF_MAX)
+        self.assertTrue(result["assets"]["src"].endswith(AB_TRUNCATED_MARK))
+        self.assertEqual(result["assets"]["href"], "plain")
         self.assertEqual(len(result["event_listener_types"]), AB_MAX_ATTRIBUTES)
         self.assertTrue(all(len(name) <= AB_ATTR_MAX for name in result["event_listener_types"]))
 

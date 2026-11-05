@@ -265,7 +265,7 @@ class CDPPassthrough:
                 },
                 "computed_styles": styles,
                 "event_listener_types": listener_types,
-                "assets": {k: v for k, v in assets.items() if v and v != "none"},
+                "assets": {k: cap_url(v) for k, v in assets.items() if v and v != "none"},
             }
 
         except Exception as exc:

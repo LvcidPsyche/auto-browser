@@ -26,9 +26,15 @@ from ..approvals import CONTROLLER_SCOPE, ApprovalRequiredError, given_back_note
 from ..browser.element_ids import refuse_selector_hint
 from ..browser.page_read import MOVED_DETAIL, bounded, locked_read, start_read
 from ..browser.request_gate import block_summary
+from ..browser.services.actions import BrowserActionService
 from ..browser.services.diagnostics import checked_screenshot
 from ..browser_sandbox import browser_sandbox_status
-from ..browser_scripts import FIND_ELEMENTS_SELECTOR_SCRIPT, FIND_ELEMENTS_TEXT_SCRIPT, PAGE_TEXT_SCRIPT
+from ..browser_scripts import (
+    FIND_ELEMENTS_SELECTOR_SCRIPT,
+    FIND_ELEMENTS_TEXT_SCRIPT,
+    PAGE_TEXT_SCRIPT,
+    cap_found_elements,
+)
 from ..cron_service import CronJobDisabledError
 from ..models import (
     ActionName,
@@ -1109,6 +1115,7 @@ class McpToolGateway:
                     code="invalid_regex",
                     action="find_elements",
                 )
+            elements = cap_found_elements(elements, payload.context, BrowserActionService.is_sensitive_field)
             return {"session_id": payload.session_id, "query": payload.query, "elements": elements}
 
         elements = await bounded(
@@ -1117,6 +1124,7 @@ class McpToolGateway:
                 [payload.selector, payload.limit],
             )
         )
+        elements = cap_found_elements(elements, 0, BrowserActionService.is_sensitive_field)
         return {"session_id": payload.session_id, "selector": payload.selector, "elements": elements}
 
     async def _drag_drop(self, payload: DragDropInput) -> dict[str, Any]:
