@@ -11,7 +11,12 @@ from ..action_errors import BrowserActionError
 from ..approvals import CONTROLLER_SCOPE
 from ..browser.page_provenance import CLOSED_PAGE_GRACE_SECONDS
 from ..browser.services.tabs import REFUSED_BY_ANOTHER_TAB_MESSAGE, REFUSED_TAB_MESSAGE, UNJUDGED_TAB_MESSAGE
-from ..proxy_personas import PROXY_PERSONA_FILE_UNREADABLE, ProxyPersonaFileError
+from ..proxy_personas import (
+    PROXY_PERSONA_DUPLICATE_ENTRIES,
+    PROXY_PERSONA_FILE_UNREADABLE,
+    ProxyPersonaDuplicateError,
+    ProxyPersonaFileError,
+)
 
 _SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -55,11 +60,14 @@ UNJUDGED_TAB_DETAIL = UNJUDGED_TAB_MESSAGE
 
 @contextmanager
 def persona_file_errors() -> Iterator[None]:
-    """Answer an unreadable proxy persona file as 503 with its fixed text (the path stays in the log)."""
+    """Answer an unreadable proxy persona file as 503 with its fixed text (the path stays in the log), and a
+    name the file holds more than one entry for as 409 with its own (the raw keys stay in the log)."""
     try:
         yield
     except ProxyPersonaFileError:
         raise HTTPException(status_code=503, detail=PROXY_PERSONA_FILE_UNREADABLE) from None
+    except ProxyPersonaDuplicateError:
+        raise HTTPException(status_code=409, detail=PROXY_PERSONA_DUPLICATE_ENTRIES) from None
 
 
 def internal_error(logger: Logger, message: str, *args: object) -> HTTPException:

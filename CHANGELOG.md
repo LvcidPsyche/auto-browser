@@ -258,7 +258,13 @@ All notable changes to auto-browser are documented here.
   logs the error and carries on; without them the file is not read at startup.
 - **Saving or deleting a proxy persona no longer erases the others' hand edits.** A save rewrote the file from the
   normalized view, so an entry the store ignores (a misspelled `server`) and any extra key on another entry were
-  dropped. Only the named persona is replaced or removed now; every other entry is written back as it was.
+  dropped. Only the named persona is replaced or removed now; every other entry is written back as it was, in the
+  file's own order (a save sorted the entries, which could change which of two entries for one name was used). A name
+  that two entries share after a hand edit (`"a "` beside `"a"`) is no longer saved or deleted, since removing both
+  could drop another operator's: REST answers 409 and MCP returns "the proxy persona file (PROXY_PERSONA_FILE) holds
+  more than one entry for this name (their keys differ only in surrounding spaces); remove all but one by hand. It was
+  not changed.", and the server log names the entries. A save no longer overwrites an entry the store ignores under
+  the same name when another operator owns it.
 
 - **Two actions on one session no longer mix up their Witness context.** An action's risk category and approval id were parked on the session until its turn for the session lock, and the first action to finish cleared them, so an action that had been waiting could be receipted with no approval and no risk, or with another action's. Each action now carries its own context.
 
