@@ -54,11 +54,12 @@ class AgentJobStore:
         request: dict,
         operator=None,
         parent_job_id: str | None = None,
+        job_id: str | None = None,
     ) -> AgentJobRecord:
         async with self._lock:
             now = utc_now()
             record = AgentJobRecord(
-                id=uuid4().hex[:12],
+                id=job_id or uuid4().hex[:12],
                 session_id=session_id,
                 kind=kind,  # type: ignore[arg-type]
                 status="queued",
@@ -68,7 +69,19 @@ class AgentJobStore:
                 parent_job_id=parent_job_id,
                 operator=operator,
             )
-            await asyncio.to_thread(self._write_sync, record)
+            write = asyncio.ensure_future(asyncio.to_thread(self._write_sync, record))
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                # A thread cannot be stopped, so the record may still land: keep the lock until it has, however
+                # often this call is cancelled meanwhile, so a caller handling the cancellation
+                # (AgentJobQueue._enqueue) finds the record under the lock.
+                while not write.done():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.wait([write])
+                if not write.cancelled() and write.exception() is not None:
+                    logger.error("agent job %s could not be written: %s", record.id, write.exception())
+                raise
             return record
 
     async def update(self, record: AgentJobRecord) -> None:
@@ -402,13 +415,27 @@ class AgentJobQueue:
         parent_job_id: str | None = None,
         on_finish: Callable[[], Awaitable[None]] | None = None,
     ) -> dict:
-        record = await self.store.create(
-            session_id=session_id,
-            kind=kind,
-            request=payload.model_dump(),
-            operator=get_current_operator(),
-            parent_job_id=parent_job_id,
-        )
+        # Made here, so a cancellation during the write still knows which record it left behind.
+        job_id = uuid4().hex[:12]
+        try:
+            record = await self.store.create(
+                session_id=session_id,
+                kind=kind,
+                request=payload.model_dump(),
+                operator=get_current_operator(),
+                parent_job_id=parent_job_id,
+                job_id=job_id,
+            )
+        except asyncio.CancelledError:
+            # The record may have landed queued, and nothing would put it on the queue now: the next startup
+            # would run it after its caller gave up on it (a cron trigger has closed its session by then).
+            try:
+                await self.store.request_cancel(job_id)
+            except KeyError:
+                pass  # cancelled before the write began: there is no record
+            except Exception:
+                logger.exception("agent job %s was left queued after its create was cancelled", job_id)
+            raise
         if on_finish is not None:
             self._on_finish[record.id] = on_finish
         try:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -165,6 +166,75 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([item.status for item in await self.queue.store.list()], ["completed"])
         self.assertEqual(self.queue._on_finish, {})
+
+    async def test_a_cancellation_while_the_job_record_is_written_leaves_no_queued_job(self) -> None:
+        await self._cancel_while_the_record_is_written(times=1)
+
+    async def test_a_second_cancellation_while_the_job_record_is_written_still_leaves_no_queued_job(self) -> None:
+        # The wait for the write ended at the next cancellation, which let go of the store's lock before the record
+        # landed: the withdrawal found no record, and the record then landed queued.
+        await self._cancel_while_the_record_is_written(times=2)
+
+    async def test_a_record_write_that_fails_after_a_cancellation_is_logged(self) -> None:
+        # Nothing awaited the write's outcome once the call was cancelled, so its error surfaced, if ever, as
+        # asyncio's "Task exception was never retrieved" when the task was collected.
+        await self.queue.store.startup()  # no workers
+        writing, proceed = threading.Event(), threading.Event()
+
+        def failing_write(_record) -> None:
+            writing.set()
+            proceed.wait(5)
+            raise OSError("No space left on device")
+
+        self.queue.store._write_sync = failing_write  # type: ignore[method-assign]
+        task = asyncio.create_task(self.cron.trigger_job(self.job["id"]))
+        self.assertTrue(await asyncio.to_thread(writing.wait, 5))
+        with self.assertLogs("app.agent_jobs", level="ERROR") as logged:
+            task.cancel()
+            await asyncio.wait([task], timeout=0.2)
+            proceed.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        self.assertTrue(any("could not be written" in line for line in logged.output), logged.output)
+        self.assertEqual(await self.queue.store.list(), [])
+        self.manager.close_session.assert_awaited_once_with("session-1")
+
+    async def _cancel_while_the_record_is_written(self, *, times: int) -> None:
+        # to_thread cannot stop a write that has begun, so the record lands after the cancellation. Left queued,
+        # nothing would withdraw it, and the next startup would run it on a session already closed.
+        await self.queue.store.startup()  # no workers
+        writing, proceed, written = threading.Event(), threading.Event(), threading.Event()
+        write = self.queue.store._write_sync
+
+        def slow_write(record) -> None:
+            if record.status == "queued":
+                writing.set()
+                proceed.wait(5)
+            write(record)
+            written.set()
+
+        self.queue.store._write_sync = slow_write  # type: ignore[method-assign]
+        task = asyncio.create_task(self.cron.trigger_job(self.job["id"]))
+        self.assertTrue(await asyncio.to_thread(writing.wait, 5))
+        for _ in range(times):
+            task.cancel()
+            await asyncio.wait([task], timeout=0.2)  # the cleanup runs as far as it can before the write lands
+        proceed.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(await asyncio.to_thread(written.wait, 5))
+
+        self.manager.close_session.assert_awaited_once_with("session-1")
+        self.assertEqual([record.status for record in await self.queue.store.list()], ["cancelled"])
+        restarted = AgentJobQueue(
+            orchestrator=FakeOrchestrator(),
+            store_root=self.queue.store.root,
+            session_accessible=every_session_usable,
+        )
+        await restarted.startup()
+        self.addAsyncCleanup(restarted.shutdown)
+        self.assertEqual(restarted.queue.qsize(), 0, "startup put the abandoned job back on the queue")
 
     async def test_the_finish_callback_is_dropped_even_when_the_withdrawal_is_cancelled(self) -> None:
         self.queue.cancel_job = AsyncMock(side_effect=asyncio.CancelledError())
