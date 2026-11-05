@@ -72,6 +72,28 @@ class MaintenanceServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.run_cleanup()
         self.assertFalse(run_dir.exists())
 
+    async def test_the_harness_prune_reads_its_setting_only_once_a_harness_is_attached(self) -> None:
+        # It read harness_retention_days before checking for a harness, so settings without the field raised on
+        # every sweep. A harness with no retention setting prunes nothing.
+        from types import SimpleNamespace
+
+        from app.harness.iterate import HarnessService
+
+        harness = HarnessService(Path(self.tempdir.name) / "harness")
+        old_run = harness.store.runs_root / "oldrun000001"
+        old_run.mkdir()
+        ancient = 1_000_000_000
+        utime(old_run, (ancient, ancient))
+        settings = self.service.settings
+        self.service.settings = SimpleNamespace()
+        try:
+            await self.service._prune_harness()
+            self.service.harness_service = harness
+            await self.service._prune_harness()
+        finally:
+            self.service.settings = settings
+        self.assertTrue(old_run.exists())
+
     async def test_an_entry_that_cannot_be_removed_is_counted_and_the_sweep_goes_on(self) -> None:
         # P3#8: one PermissionError used to abort the whole sweep: later roots were never swept.
         from unittest.mock import patch

@@ -140,8 +140,10 @@ class MaintenanceService:
 
     async def _prune_harness(self) -> None:
         service = self.harness_service
-        days = self.settings.harness_retention_days
-        if service is None or days <= 0:
+        if service is None:
+            return
+        days = getattr(self.settings, "harness_retention_days", 0)
+        if days <= 0:
             return
         try:
             pruned = await asyncio.to_thread(service.store.prune, days)

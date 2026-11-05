@@ -173,6 +173,32 @@ class CancelAndRestartTests(_Base):
         self.assertIn("restart", restarted.store.get("stale000001").notes[-1])
         self.assertEqual(restarted.store.get("done0000001").status, "converged")
 
+    async def test_a_stale_run_that_cannot_be_saved_is_logged_and_the_sweep_goes_on(self) -> None:
+        # One record the sweep could not rewrite raised out of startup and left the controller without a harness.
+        earlier = HarnessService(self.root)
+        for run_id in ("stale000001", "stale000002"):
+            earlier.store.save(
+                HarnessRunRecord(
+                    id=run_id, contract_id="c", contract_hash="h", status="running", created_at=time.time() - 60
+                )
+            )
+        restarted = HarnessService(self.root)
+        save = restarted.store.save
+
+        def failing_save(record: HarnessRunRecord) -> None:
+            if record.id == "stale000001":
+                raise OSError("disk full")
+            save(record)
+
+        with (
+            patch.object(restarted.store, "save", side_effect=failing_save),
+            self.assertLogs("app.harness.iterate", "WARNING") as logs,
+        ):
+            self.assertEqual(restarted.store.mark_stale_running(), 1)
+
+        self.assertEqual(restarted.store.get("stale000002").status, "interrupted")
+        self.assertIn("stale000001", "\n".join(logs.output))
+
     async def test_startup_sweep_leaves_a_run_this_process_is_driving(self) -> None:
         verifier = _GatedVerifier()
         service = HarnessService(self.root, verifier=verifier)
@@ -298,6 +324,19 @@ class RetentionTests(_Base):
 
         self.assertEqual(service.store.prune(30), 0)
         self.assertTrue(service.store.run_dir(record.id).exists())
+
+    async def test_prune_goes_on_to_the_staging_area_when_the_runs_folder_cannot_be_listed(self) -> None:
+        # The listing sat outside prune's error handling, so a missing or unreadable runs folder raised out of a
+        # sweep whose docstring says it never raises.
+        service = HarnessService(self.root)
+        staged = service.store.staging_root / "oldskill"
+        staged.mkdir()
+        _age(staged, 40)
+        shutil.rmtree(service.store.runs_root)
+
+        with self.assertLogs("app.harness.iterate", "WARNING"):
+            self.assertEqual(service.store.prune(30), 1)
+        self.assertFalse(staged.exists())
 
     async def test_the_per_operator_cap_refuses_a_run_past_it_and_counts_each_operator_apart(self) -> None:
         service = HarnessService(self.root, max_runs_per_operator=2)

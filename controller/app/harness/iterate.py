@@ -130,7 +130,8 @@ class HarnessRunStore:
         """Flip every run an earlier process left `running` to `interrupted`; returns how many.
 
         Run once at startup, before requests are served. A run this process is driving, or created since it
-        started, is left alone.
+        started, is left alone. A record that cannot be rewritten is logged and left `running`: one bad record must
+        not stop the harness from starting.
         """
         flipped = 0
         for path in self.runs_root.glob("*/run.json"):
@@ -143,7 +144,11 @@ class HarnessRunStore:
                 continue
             record.status = "interrupted"
             record.notes.append("Harness run interrupted by a controller restart.")
-            self.save(record)
+            try:
+                self.save(record)
+            except (OSError, ValueError) as exc:
+                logger.warning("could not mark harness run %s interrupted; it still reads running: %s", record.id, exc)
+                continue
             flipped += 1
         return flipped
 
@@ -170,8 +175,12 @@ class HarnessRunStore:
             return 0
         cutoff = time.time() - max_age_days * 86400
         removed = 0
-        candidates = [(path, "run.json") for path in self.runs_root.iterdir()]
-        candidates += [(path, "candidate.json") for path in self.staging_root.iterdir()]
+        candidates: list[tuple[Path, str]] = []
+        for root, marker in ((self.runs_root, "run.json"), (self.staging_root, "candidate.json")):
+            try:
+                candidates += [(path, marker) for path in root.iterdir()]
+            except OSError as exc:
+                logger.warning("harness prune could not list %s: %s", root, exc)
         for directory, marker in candidates:
             if not directory.is_dir() or directory.name in self._active:
                 continue
