@@ -351,6 +351,25 @@ class BridgeShutdownTests(unittest.TestCase):
         self.assertEqual([grouped for _process, grouped in killed], [hasattr(os, "killpg")])
         self.assertEqual(service.kill_in_flight(), 0)  # a finished run is no longer tracked
 
+    def test_a_decision_that_reaches_codex_after_the_sweep_does_not_start_it(self) -> None:
+        # Handler threads are daemon threads: one between its body read and Popen when the sweep ran would start a
+        # codex nothing kills once main() returns.
+        _FakeCodex.stderr_text = b""
+        started: list[list[str]] = []
+        service = bridge.CodexBridgeService(codex_path="codex")
+
+        def popen(command, **kwargs):
+            started.append(command)
+            return _RunningCodex(command, **kwargs)
+
+        with patch.object(bridge.subprocess, "Popen", side_effect=popen):
+            self.assertEqual(service.kill_in_flight(), 0)
+            with self.assertRaises(bridge.BridgeError) as raised:
+                service.handle_openai_decide(dict(PAYLOAD))
+
+        self.assertEqual(started, [])
+        self.assertEqual(raised.exception.status_code, 503)
+
     def test_killing_the_runs_in_flight_ends_a_real_child(self) -> None:
         # A real process this time: its own process group on POSIX (killpg), the process itself on Windows.
         service = bridge.CodexBridgeService(codex_path="codex")
@@ -359,8 +378,9 @@ class BridgeShutdownTests(unittest.TestCase):
         worker = threading.Thread(target=lambda: results.append(service._run_codex(sleeper, b"")))
         worker.start()
         deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and service.kill_in_flight() == 0:
+        while time.monotonic() < deadline and not service._in_flight:  # the sweep would stop the service: wait first
             time.sleep(0.05)
+        self.assertEqual(service.kill_in_flight(), 1)
         worker.join(10)
 
         self.assertFalse(worker.is_alive())

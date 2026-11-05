@@ -130,9 +130,11 @@ class CodexBridgeService:
         max_concurrent_decisions: int = MAX_CONCURRENT_DECISIONS,
     ) -> None:
         self._decision_slots = threading.BoundedSemaphore(max(1, max_concurrent_decisions))
-        # Codex runs still going, and whether each leads its own process group: kill_in_flight stops them.
+        # Codex runs still going, and whether each leads its own process group: kill_in_flight stops them. Codex is
+        # started under the lock and the sweep sets _stopping under it, so a run is either swept or never started.
         self._in_flight: dict[subprocess.Popen, bool] = {}
         self._in_flight_lock = threading.Lock()
+        self._stopping = False
         self.codex_path = codex_path
         self.default_model = default_model
         self.request_timeout_seconds = request_timeout_seconds
@@ -234,14 +236,16 @@ class CodexBridgeService:
     def _run_codex(self, command: list[str], prompt: bytes) -> tuple[int, bytes, bytes]:
         """Run codex with `prompt` on stdin; on timeout kill its whole process group, not just the direct child."""
         grouped = hasattr(os, "killpg")  # POSIX; the bridge listens on a Unix socket, so this is its normal case
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=grouped,
-        )
         with self._in_flight_lock:
+            if self._stopping:
+                raise BridgeError("the bridge is stopping", status_code=503)
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=grouped,
+            )
             self._in_flight[process] = grouped
         try:
             stdout, stderr = process.communicate(prompt, timeout=self.request_timeout_seconds)
@@ -265,9 +269,11 @@ class CodexBridgeService:
         """Kill every codex run still going (its whole process group on POSIX), for bridge shutdown; returns how many.
 
         Codex leads its own session, so it does not get the terminal's SIGINT when the bridge is stopped by hand, and
-        the handler threads that wait on it are daemon threads: without this it would run on, orphaned.
+        the handler threads that wait on it are daemon threads: without this it would run on, orphaned. From here on
+        the service starts no codex: a decision that gets that far is refused with 503.
         """
         with self._in_flight_lock:
+            self._stopping = True  # no codex starts after this sweep
             # A run communicate() has already reaped is left alone: its pid may belong to someone else by now.
             running = [(process, grouped) for process, grouped in self._in_flight.items() if process.returncode is None]
         for process, grouped in running:
