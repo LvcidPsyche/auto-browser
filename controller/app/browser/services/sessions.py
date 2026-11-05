@@ -389,11 +389,14 @@ class BrowserSessionService(SessionCreation):
             self.manager.auth_profiles.mark_session_auth_dir(session.auth_dir, session.owner)
             auth_info = await self.manager.auth_state.write_storage_state(session.context, fork_auth_path)
 
+        # A blank or data: page is no URL create_session can open (it refuses every non-http(s) scheme):
+        # the fork starts on a blank page with the source's cookies instead.
+        start_url = start_url or (current_url if current_url.lower().startswith(("http://", "https://")) else None)
         # Create the new session using the forked state
         try:
             forked = await self.manager.create_session(
                 name=name or f"fork-of-{session.name}",
-                start_url=start_url or current_url,
+                start_url=start_url,
                 storage_state_path=auth_info["path"],
             )
         finally:
@@ -407,7 +410,7 @@ class BrowserSessionService(SessionCreation):
             status="ok",
             action="fork_session",
             session_id=session_id,
-            details={"new_session_id": forked["id"], "start_url": start_url or current_url},
+            details={"new_session_id": forked["id"], "start_url": start_url},
         )
         return forked
 
