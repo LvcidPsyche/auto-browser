@@ -104,6 +104,12 @@ All notable changes to auto-browser are documented here.
   edited on disk (`TraceIntegrityError`): each attempt records the trace's hash when it is written, and the read
   compares it. The hash chain alone covered only the events. A run recorded before this release has no hash and is
   read as before.
+- The convergence harness no longer grows without bound: `HARNESS_RETENTION_DAYS` (default 30, `0` keeps everything)
+  removes run directories and staged candidates not touched for that long, at startup and in each maintenance sweep
+  (never a run the process is driving), and `HARNESS_MAX_RUNS_PER_OPERATOR` (default 200, `0` for no cap) refuses a
+  new run once the verified operator has that many stored; runs with no verified operator share one count.
+- **Upgrade note:** with the new default, harness runs and staged skill candidates older than 30 days are deleted on
+  the next start. Set `HARNESS_RETENTION_DAYS=0` to keep them.
 
 ### Security
 

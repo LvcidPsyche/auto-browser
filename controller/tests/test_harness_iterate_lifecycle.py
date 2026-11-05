@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import tempfile
 import time
@@ -11,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from app.audit import reset_current_operator, set_current_operator
 from app.harness import Budget, Postcondition, TaskContract
 from app.harness.iterate import HarnessRunRecord, HarnessService
 from app.harness.trace import TraceIntegrityError
@@ -249,6 +251,78 @@ class TraceBindingTests(_Base):
         self._edit_observation(record)
 
         self.assertEqual(service.get_trace(record.id)["final_observation"]["url"], "https://example.com/forged")
+
+
+def _age(path: Path, days: float) -> None:
+    old = time.time() - days * 86400
+    os.utime(path, (old, old))
+
+
+class RetentionTests(_Base):
+    async def _run(self, service) -> HarnessRunRecord:
+        return await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+
+    async def test_prune_removes_runs_and_candidates_past_the_age_and_keeps_newer_ones(self) -> None:
+        service = HarnessService(self.root)
+        old = await self._run(service)
+        new = await self._run(service)
+        _age(service.store.run_dir(old.id) / "run.json", 40)
+        _age(service.store.run_dir(old.id), 40)
+        (service.store.staging_root / ".tmp-leftover").mkdir()
+        _age(service.store.staging_root / ".tmp-leftover", 40)
+
+        removed = service.store.prune(30)
+
+        self.assertEqual(removed, 2)
+        self.assertFalse(service.store.run_dir(old.id).exists())
+        self.assertTrue(service.store.run_dir(new.id).exists())
+        self.assertFalse((service.store.staging_root / ".tmp-leftover").exists())
+        self.assertTrue(Path(new.candidate.files["candidate.json"]).exists())
+
+    async def test_zero_days_keeps_everything(self) -> None:
+        service = HarnessService(self.root)
+        record = await self._run(service)
+        _age(service.store.run_dir(record.id) / "run.json", 400)
+        _age(service.store.run_dir(record.id), 400)
+
+        self.assertEqual(service.store.prune(0), 0)
+        self.assertTrue(service.store.run_dir(record.id).exists())
+
+    async def test_prune_leaves_a_run_this_process_is_driving(self) -> None:
+        service = HarnessService(self.root)
+        record = await self._run(service)
+        _age(service.store.run_dir(record.id) / "run.json", 400)
+        _age(service.store.run_dir(record.id), 400)
+        service.store.mark_active(record.id)
+
+        self.assertEqual(service.store.prune(30), 0)
+        self.assertTrue(service.store.run_dir(record.id).exists())
+
+    async def test_the_per_operator_cap_refuses_a_run_past_it_and_counts_each_operator_apart(self) -> None:
+        service = HarnessService(self.root, max_runs_per_operator=2)
+        token = set_current_operator("alice", source="token")
+        try:
+            await self._run(service)
+            await self._run(service)
+            with self.assertRaisesRegex(ValueError, "HARNESS_MAX_RUNS_PER_OPERATOR"):
+                await self._run(service)
+        finally:
+            reset_current_operator(token)
+
+        token = set_current_operator("bob", source="token")
+        try:
+            await self._run(service)
+        finally:
+            reset_current_operator(token)
+        # The unowned bucket has its own count too.
+        await self._run(service)
+        self.assertEqual(len(service.store.list(limit=50)), 4)
+
+    async def test_no_cap_by_default(self) -> None:
+        service = HarnessService(self.root)
+        for _ in range(3):
+            await self._run(service)
+        self.assertEqual(len(service.store.list()), 3)
 
 
 if __name__ == "__main__":

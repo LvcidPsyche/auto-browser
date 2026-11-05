@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -127,6 +129,45 @@ class HarnessRunStore:
             flipped += 1
         return flipped
 
+    def count_owned(self, owner: str | None) -> int:
+        """How many stored runs belong to `owner` (None counts the runs nobody owns)."""
+        count = 0
+        for path in self.runs_root.glob("*/run.json"):
+            try:
+                stored = json.loads(path.read_text(encoding="utf-8")).get("owner")
+            except (OSError, ValueError):
+                continue
+            if stored == owner:
+                count += 1
+        return count
+
+    def prune(self, max_age_days: float) -> int:
+        """Remove run and staged-candidate directories untouched for `max_age_days`; returns how many.
+
+        Age is the modification time of run.json (candidate.json for a staged skill, the directory for anything
+        else, such as a leftover .tmp-* build). A run this process is driving is never removed. 0 or less keeps
+        everything. A directory that cannot be removed is logged and left; this never raises.
+        """
+        if max_age_days <= 0:
+            return 0
+        cutoff = time.time() - max_age_days * 86400
+        removed = 0
+        candidates = [(path, "run.json") for path in self.runs_root.iterdir()]
+        candidates += [(path, "candidate.json") for path in self.staging_root.iterdir()]
+        for directory, marker in candidates:
+            if not directory.is_dir() or directory.name in self._active:
+                continue
+            try:
+                marker_path = directory / marker
+                newest = max(directory.stat().st_mtime, marker_path.stat().st_mtime if marker_path.exists() else 0.0)
+                if newest >= cutoff:
+                    continue
+                shutil.rmtree(directory)
+                removed += 1
+            except OSError as exc:
+                logger.warning("harness prune could not remove %s: %s", directory, exc)
+        return removed
+
     def run_dir(self, run_id: str) -> Path:
         if not _RUN_ID_RE.fullmatch(run_id):
             raise ValueError(f"invalid harness run id: {run_id!r}")
@@ -185,8 +226,10 @@ class HarnessService:
         signer=None,
         envelope_verifier=None,
         model_tiers: dict[str, str] | None = None,
+        max_runs_per_operator: int = 0,
     ):
         self.store = HarnessRunStore(root)
+        self.max_runs_per_operator = max_runs_per_operator
         self.verifier = verifier or ProgrammaticVerifier()
         self.model_tiers = {key: value for key, value in (model_tiers or {}).items() if value}
         self.inducer = SkillInducer(self.store.staging_root, signer=signer)
@@ -205,6 +248,12 @@ class HarnessService:
         provider: str = "openai",
         max_attempts: int | None = None,
     ) -> HarnessRunRecord:
+        owner = verified_operator()
+        if self.max_runs_per_operator > 0 and self.store.count_owned(owner) >= self.max_runs_per_operator:
+            raise ValueError(
+                f"harness run limit reached: {self.max_runs_per_operator} stored runs for this operator "
+                "(HARNESS_MAX_RUNS_PER_OPERATOR); old runs are removed after HARNESS_RETENTION_DAYS"
+            )
         run_id = uuid.uuid4().hex[:12]
         run_dir = self.store.run_dir(run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -216,7 +265,7 @@ class HarnessService:
             contract_id=contract.id,
             contract_hash=contract.hash(),
             status="running",
-            owner=verified_operator(),
+            owner=owner,
             strategy_path=str(strategy_path),
             model_tiers=self.model_tiers,
         )

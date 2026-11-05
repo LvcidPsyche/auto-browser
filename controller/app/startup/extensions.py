@@ -138,10 +138,14 @@ def _init_harness(app) -> None:
             signer=signer,
             envelope_verifier=mesh_identity_verifier(identity) if identity is not None else None,
             model_tiers=_harness_model_tiers(settings),
+            max_runs_per_operator=int(getattr(settings, "harness_max_runs_per_operator", 0) or 0),
         )
         swept = service.store.mark_stale_running()
         if swept:
             logger.warning("startup.harness: marked %d run(s) left running by the last process interrupted", swept)
+        pruned = service.store.prune(float(getattr(settings, "harness_retention_days", 0) or 0))
+        if pruned:
+            logger.info("startup.harness: removed %d run/candidate directories past HARNESS_RETENTION_DAYS", pruned)
         app.state.harness_service = service
         gateway = getattr(app.state, "tool_gateway", None)
         if gateway is not None:

@@ -59,6 +59,8 @@ class MaintenanceService:
         self._stop_event = asyncio.Event()
         self._lock = asyncio.Lock()
         self._last_report: CleanupReport | None = None
+        # Set once the convergence harness is initialized (after startup); its old runs go in each sweep.
+        self.harness_service = None
 
     @property
     def last_report(self) -> dict | None:
@@ -127,6 +129,7 @@ class MaintenanceService:
                 # for 6000 files on NTFS); on the loop they froze every
                 # session and request for the whole sweep.
                 reports.append(await asyncio.to_thread(self._cleanup_root, Path(root), retention, protected_roots))
+            await self._prune_harness()
             completed = datetime.now(UTC)
             self._last_report = CleanupReport(
                 started_at=started.isoformat().replace("+00:00", "Z"),
@@ -134,6 +137,19 @@ class MaintenanceService:
                 roots=reports,
             )
             return self._last_report.model_dump()
+
+    async def _prune_harness(self) -> None:
+        service = self.harness_service
+        days = self.settings.harness_retention_days
+        if service is None or days <= 0:
+            return
+        try:
+            pruned = await asyncio.to_thread(service.store.prune, days)
+        except Exception:
+            logger.exception("harness retention sweep failed")
+            return
+        if pruned:
+            logger.info("harness retention sweep removed %d run/candidate directories", pruned)
 
     async def _run_loop(self) -> None:
         while not self._stop_event.is_set():

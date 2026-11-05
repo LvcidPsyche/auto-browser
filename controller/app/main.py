@@ -85,6 +85,7 @@ async def lifespan(application: FastAPI):
         from .startup.extensions import register_extensions
 
         register_extensions(application)
+        maintenance.harness_service = getattr(application.state, "harness_service", None)
     except Exception as exc:
         logger.error("v1.0 extensions init failed (non-fatal): %s", exc)
     try:
