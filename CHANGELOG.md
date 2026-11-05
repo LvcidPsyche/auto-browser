@@ -20,6 +20,9 @@ All notable changes to auto-browser are documented here.
   says its check compares network names only, so the gateway move it describes can also happen where it stays silent.
 - `harness.check_drift` and `harness.check_all_drifts` now say what they do: they re-verify a staged candidate's stored
   contract and trace and cannot detect a site change. `docs/convergence-harness.md` says the same.
+- Known limit: the `takeover` step the agent loop guard appends to an agent run carries the previous step's
+  observation (the page as it was before that step's action), not a fresh one; the harness trace ignores it when it
+  picks the run's final observation.
 
 ### Fixed
 
