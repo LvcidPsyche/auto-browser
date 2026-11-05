@@ -31,6 +31,8 @@ _REDACTED = "[REDACTED]"
 # The keys that hold what an action typed. They are redacted when the action is marked sensitive.
 _TYPED_TEXT_KEYS = frozenset({"text", "text_preview"})
 _SENSITIVE_FLAG_KEYS = ("sensitive", "text_redacted")
+# The keys of an agent step's observation that point at its screenshot.
+_SCREENSHOT_KEYS = ("screenshot_path", "screenshot_url")
 _URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 _URL_SCRUB_MAX_BYTES = 16384
 
@@ -161,22 +163,31 @@ class TraceEnvelope(BaseModel):
             observation = step.get("observation") or {}
             if observation:
                 final_observation = observation
-            event = TraceEvent(
-                run_id=trace.run_id,
-                step_idx=index,
-                event_type="action",
-                payload=_redact_sensitive(
+            payloads = [
+                (
+                    "action",
                     {
                         "status": step.get("status"),
                         "decision": decision,
                         "observation": observation,
                         "execution": step.get("execution"),
-                    }
-                ),
-                previous_hash=previous_hash,
-            ).with_hash()
-            previous_hash = event.entry_hash
-            trace.events.append(event)
+                    },
+                )
+            ]
+            # The same event type the mock attempt records, so the "screenshots" evidence kind is met.
+            screenshot = {key: observation[key] for key in _SCREENSHOT_KEYS if observation.get(key)}
+            if screenshot:
+                payloads.append(("screenshot", screenshot))
+            for event_type, payload in payloads:
+                event = TraceEvent(
+                    run_id=trace.run_id,
+                    step_idx=index,
+                    event_type=event_type,
+                    payload=_redact_sensitive(payload),
+                    previous_hash=previous_hash,
+                ).with_hash()
+                previous_hash = event.entry_hash
+                trace.events.append(event)
         final_session = result.get("final_session") or {}
         if final_session:
             final_observation = {
