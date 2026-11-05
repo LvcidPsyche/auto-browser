@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 from ... import events as _events
 from ...action_errors import SCREENSHOT_WITHHELD, BrowserActionError
 from ...browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
+from ...pii_scrub import pii_words
 from ..aria_outline import outline_from_aria_snapshot, unavailable_outline
 from ..page_read import bounded, start_read
 
@@ -35,6 +36,12 @@ async def _gather_settled(*aws: Any) -> list[Any]:
         if isinstance(result, BaseException):
             raise result
     return results
+
+
+def _word_key(block: dict[str, Any]) -> tuple[Any, ...]:
+    """What identifies one OCR word: its text and its box."""
+    box = block.get("bbox") or {}
+    return block.get("text"), box.get("x"), box.get("y"), box.get("width"), box.get("height")
 
 
 def _scrub_disclosure(screenshot: dict[str, Any]) -> dict[str, Any]:
@@ -317,8 +324,16 @@ class BrowserObservationService:
             return returned
         if returned.get("text_excerpt"):
             returned["text_excerpt"] = scrubber.text(returned["text_excerpt"]).text
+        # The same words the screenshot redaction blacks out, found on whole lines: a card number OCR'd as four
+        # blocks is no PII word by word. The returned blocks have no line key, so they are matched by box.
+        redacted = {
+            _word_key(word) for word, *_ in pii_words(ocr.get("redaction_blocks") or [], scrubber.enabled_patterns)
+        }
         returned["blocks"] = [
-            {**block, "text": scrubber.text(block["text"]).text} for block in returned.get("blocks", [])
+            {**block, "text": scrubber.replacement}
+            if _word_key(block) in redacted
+            else {**block, "text": scrubber.text(block["text"]).text}
+            for block in returned.get("blocks", [])
         ]
         return returned
 

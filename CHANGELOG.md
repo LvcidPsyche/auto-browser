@@ -64,7 +64,9 @@ All notable changes to auto-browser are documented here.
 - **`observe` no longer returns the OCR word list that screenshot redaction blacks out.** The `ocr` field carried
   `redaction_blocks` (every word with its box, including the emails and card numbers the screenshot hides) and the
   OCR text unscrubbed. `redaction_blocks` is gone from the result, and the OCR `text_excerpt` and block text now go
-  through the PII scrubber when `PII_SCRUB_ENABLED` is on.
+  through the PII scrubber when `PII_SCRUB_ENABLED` is on. A block that belongs to a match spanning words (a card
+  number OCR'd as four blocks, a split phone number) is replaced whole, using the same line grouping as the
+  screenshot redaction.
 - **`screenshot_diff` now redacts PII like every other screenshot path.** It captured the comparison shot
   unredacted, so the saved baseline and the second shot held the page's raw pixels even with
   `PII_SCRUB_SCREENSHOT` on. Both are now redacted before they settle on disk, and the diff image is computed from
