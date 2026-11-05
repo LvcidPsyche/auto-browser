@@ -157,7 +157,7 @@ All notable changes to auto-browser are documented here.
   `size=invisible` (reCAPTCHA v2 and v3) or `checkbox-invisible` (hCaptcha), is ignored, so a login page with a
   reCAPTCHA v3 badge no longer fails every action.
 
-- **Element intelligence now works on a real browser.** `get_element_intelligence` asked Chromium for computed styles without first enabling the DOM and CSS agents, so the style lookup failed there. It now enables both before it reads.
+- **Element intelligence now works on a real browser.** `get_element_intelligence` asked Chromium for computed styles without first enabling the DOM and CSS agents, so the style lookup failed there. It now enables both for the length of the read and switches them off again afterwards (a CSS agent left on keeps streaming stylesheet events for the life of the session), each enable and disable bounded at 5 seconds. A raw `CSS.getComputedStyleForNode` or `CSS.getMatchedStylesForNode` through `/cdp/raw` is scoped the same way, so it no longer fails on a session that has not read an element yet.
 
 - **A refused fork or create now says why.** With the default `MAX_SESSIONS=1`, forking a session (which counts as a new session) or creating a second one answered a bare `409 {"detail":"Conflict"}`. The 409 now carries the session-limit message, naming the limit and the live sessions. Other conflicts still answer "Conflict". Forking needs `MAX_SESSIONS` of at least 2; this is now stated in `docs/architecture.md`.
 

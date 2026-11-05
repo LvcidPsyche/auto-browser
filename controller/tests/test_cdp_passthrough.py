@@ -1,22 +1,32 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import unittest
+from unittest.mock import patch
 
 from app.cdp import passthrough as cdp_passthrough
 from app.cdp.passthrough import CDPPassthrough
 
 
 class _FakeCDPSession:
-    def __init__(self, responses: dict[str, object]) -> None:
+    def __init__(
+        self, responses: dict[str, object], *, fail: frozenset[str] = frozenset(), hang: frozenset[str] = frozenset()
+    ) -> None:
         self.responses = responses
+        self.fail = fail
+        self.hang = hang
         self.calls: list[tuple[str, dict]] = []
 
     async def send(self, method: str, params: dict | None = None) -> dict:
         payload = params or {}
         self.calls.append((method, payload))
-        if method.endswith(".enable"):
+        if method in self.hang:
+            await asyncio.Event().wait()
+        if method in self.fail:
+            raise RuntimeError(f"{method} failed: target closed")
+        if method.endswith((".enable", ".disable")):
             return {}
         response = self.responses[method]
         if isinstance(response, list):
@@ -119,8 +129,8 @@ class CDPPassthroughTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(json.loads(literal), selector)
 
     async def test_dom_and_css_agents_are_enabled_before_their_calls(self) -> None:
-        # On real Chromium, DOM.getDocument and every CSS.* call fail until the agent is enabled
-        # (and CSS.enable itself needs DOM.enable first).
+        # On real Chromium, CSS.* calls fail until CSS.enable has run, and CSS.enable needs DOM.enable first.
+        # (DOM.getDocument enables the DOM agent itself, so only the DOM.enable order is stricter than needed.)
         fake = _FakeCDPSession(
             {
                 "DOM.getDocument": {"root": {"nodeId": 11}},
@@ -140,6 +150,70 @@ class CDPPassthroughTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(order.index("DOM.enable"), order.index("CSS.enable"))
         self.assertLess(order.index("CSS.enable"), order.index("CSS.getComputedStyleForNode"))
         self.assertLess(order.index("DOM.enable"), order.index("DOM.getDocument"))
+
+    _READ_RESPONSES = {  # noqa: RUF012 - read only
+        "DOM.getDocument": {"root": {"nodeId": 11}},
+        "DOM.querySelector": {"nodeId": 22},
+        "DOM.getAttributes": {"attributes": []},
+        "DOM.getBoxModel": {"model": {}},
+        "CSS.getComputedStyleForNode": {"computedStyle": []},
+        "CSS.getMatchedStylesForNode": {"matchedCSSRules": []},
+        "Runtime.evaluate": {"result": {"value": []}},
+    }
+
+    async def test_the_agents_are_disabled_when_the_read_is_done(self) -> None:
+        # A CSS agent left on streams stylesheet events for the life of the cached passthrough.
+        fake = _FakeCDPSession(dict(self._READ_RESPONSES))
+
+        await CDPPassthrough(fake).get_element_intelligence("#hero")
+
+        order = [method for method, _ in fake.calls]
+        self.assertEqual(order[-2:], ["CSS.disable", "DOM.disable"])
+        self.assertLess(order.index("CSS.getComputedStyleForNode"), order.index("CSS.disable"))
+
+    async def test_the_agents_are_disabled_when_the_read_fails_and_a_failed_disable_is_not_raised(self) -> None:
+        fake = _FakeCDPSession({"DOM.getDocument": RuntimeError("boom")}, fail=frozenset({"CSS.disable"}))
+
+        result = await CDPPassthrough(fake).get_element_intelligence("#hero")
+
+        self.assertEqual(result["error"], "cdp_element_intelligence_failed")
+        order = [method for method, _ in fake.calls]
+        self.assertEqual(order[-2:], ["CSS.disable", "DOM.disable"])
+
+    async def test_a_stalled_agent_enable_gives_up_and_still_cleans_up(self) -> None:
+        fake = _FakeCDPSession(dict(self._READ_RESPONSES), hang=frozenset({"CSS.enable"}))
+
+        with patch.object(cdp_passthrough, "CDP_AGENT_TIMEOUT_SECONDS", 0.05):
+            result = await asyncio.wait_for(CDPPassthrough(fake).get_element_intelligence("#hero"), timeout=5)
+
+        self.assertEqual(result["error"], "cdp_element_intelligence_failed")
+        self.assertIn("DOM.disable", [method for method, _ in fake.calls])
+
+    async def test_raw_css_commands_work_on_a_fresh_passthrough_and_leave_the_agents_off(self) -> None:
+        for method in ("CSS.getComputedStyleForNode", "CSS.getMatchedStylesForNode"):
+            fake = _FakeCDPSession(dict(self._READ_RESPONSES))
+
+            with self.subTest(method=method):
+                result = await CDPPassthrough(fake).raw_cdp_command(method, {"nodeId": 22})
+
+                self.assertNotIn("error", result)
+                self.assertEqual(
+                    [name for name, _ in fake.calls],
+                    ["DOM.enable", "CSS.enable", method, "CSS.disable", "DOM.disable"],
+                )
+
+    async def test_other_raw_commands_do_not_touch_the_agents(self) -> None:
+        fake = _FakeCDPSession(dict(self._READ_RESPONSES))
+
+        await CDPPassthrough(fake).raw_cdp_command("DOM.getDocument", {"depth": 1})
+
+        self.assertEqual([name for name, _ in fake.calls], ["DOM.getDocument"])
+
+    async def test_the_agent_switches_are_not_reachable_through_the_allowlist(self) -> None:
+        for blocked in ("DOM.enable", "CSS.enable", "CSS.disable", "DOM.disable"):
+            with self.subTest(method=blocked):
+                with self.assertRaisesRegex(ValueError, "not in the allowed list"):
+                    await CDPPassthrough(_FakeCDPSession({})).raw_cdp_command(blocked)
 
     async def test_get_element_intelligence_returns_not_found_error(self) -> None:
         fake = _FakeCDPSession(

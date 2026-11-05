@@ -9,14 +9,20 @@ raw_cdp_command() is a constrained passthrough for trusted CDP commands.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import fnmatch
 import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 from ..browser_scripts import ELEMENT_ASSETS_SCRIPT
 
 logger = logging.getLogger(__name__)
+
+# How long one DOM/CSS agent enable or disable may take. CSS.enable waits for the page's stylesheets to load.
+CDP_AGENT_TIMEOUT_SECONDS = 5.0
 
 # Commands allowed through the raw CDP passthrough.
 #
@@ -77,6 +83,7 @@ class CDPPassthrough:
         self._cdp = cdp_session
         # The page the CDP session is attached to; CDP sessions are per page.
         self.page = page
+        self._agents_lock = asyncio.Lock()
 
     async def detach(self) -> None:
         try:
@@ -84,7 +91,39 @@ class CDPPassthrough:
         except Exception as exc:
             logger.debug("cdp session detach failed (page likely closed): %s", exc)
 
+    @contextlib.asynccontextmanager
+    async def _css_agents(self) -> AsyncIterator[None]:
+        """
+        The DOM and CSS agents, on for the length of one read. CSS.* calls fail until CSS.enable has run, and CSS.enable
+        needs DOM.enable first. Left on, the CSS agent streams stylesheet events for the life of this cached session,
+        so both are switched off again, and a switch that fails on a closed page is only logged. One read at a time:
+        a second read's disable would turn the agents off under the first.
+        """
+        async with self._agents_lock:
+            try:
+                await self._send_bounded("DOM.enable")
+                await self._send_bounded("CSS.enable")
+                yield
+            finally:
+                for method in ("CSS.disable", "DOM.disable"):
+                    try:
+                        await self._send_bounded(method)
+                    except Exception as exc:
+                        logger.debug("cdp %s failed (page likely closed): %s", method, exc)
+
+    async def _send_bounded(self, method: str) -> None:
+        await asyncio.wait_for(self._cdp.send(method), CDP_AGENT_TIMEOUT_SECONDS)
+
     async def get_element_intelligence(self, selector: str) -> dict[str, Any]:
+        """Element data for a CSS selector (see _read_element), with the DOM and CSS agents on for the read only."""
+        try:
+            async with self._css_agents():
+                return await self._read_element(selector)
+        except Exception as exc:
+            logger.warning("cdp.element_intelligence error selector=%r: %s", selector, exc)
+            return {"error": "cdp_element_intelligence_failed", "selector": selector}
+
+    async def _read_element(self, selector: str) -> dict[str, Any]:
         """
         Return rich element data for a CSS selector:
         - Computed styles (relevant subset)
@@ -95,10 +134,6 @@ class CDPPassthrough:
         - Asset references (src, href, background-image URLs)
         """
         try:
-            # CSS.* calls fail until the agent is enabled, and CSS.enable needs DOM.enable first.
-            await self._cdp.send("DOM.enable")
-            await self._cdp.send("CSS.enable")
-
             # Get document node
             doc = await self._cdp.send("DOM.getDocument", {"depth": 1})
             doc_node_id = doc["root"]["nodeId"]
@@ -211,8 +246,10 @@ class CDPPassthrough:
                 f"CDP command {method!r} is not in the allowed list. Allowed: {sorted(_ALLOWED_CDP_COMMANDS)}"
             )
         try:
-            result = await self._cdp.send(method, params)
-            return result
+            if method.startswith("CSS."):
+                async with self._css_agents():
+                    return await self._cdp.send(method, params)
+            return await self._cdp.send(method, params)
         except Exception as exc:
             logger.warning("cdp.raw_command error method=%r: %s", method, exc)
             return {"error": "cdp_command_failed", "method": method}
