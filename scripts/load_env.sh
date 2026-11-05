@@ -18,14 +18,18 @@
 # Locals use a __lre_ prefix so a .env key cannot overwrite the parser's own state.
 
 # Whether a .env key is on the fixed denylist: shell startup, expansion and behaviour hooks, the dynamic
-# loader, the interpreters' startup hooks (PYTHON*, PERL5*, NODE_OPTIONS, BROWSER, which webbrowser.open() runs),
-# HOME (which login shells read profiles from), and the smoke scripts' own names. SMOKE_* is not refused as a
+# loader, the interpreters' startup hooks (PYTHON*, PERL5*, PERLLIB, NODE_OPTIONS, BROWSER, which webbrowser.open()
+# runs), HOME and XDG_CONFIG_HOME (which login shells and curl read profiles and a .curlrc from), CURL_HOME, the
+# locale (LANG, LC_*), the proxy variables curl reads (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY and their
+# lower-case forms), and the smoke scripts' own names. SMOKE_* is not refused as a
 # whole: doctor.sh reads SMOKE_URL, SMOKE_PROVIDER and SMOKE_GOAL from .env.
 __lre_denied_name() {
   case "$1" in
     BASH_ENV | ENV | BASH_FUNC_* | SHELLOPTS | BASHOPTS | IFS | PATH | PS4 | PROMPT_COMMAND | CDPATH | GLOBIGNORE) return 0 ;;
-    POSIXLY_CORRECT | BASH_COMPAT | EXECIGNORE | FUNCNEST | TMOUT | LC_ALL | LC_CTYPE | HOME) return 0 ;;
-    PYTHON* | BROWSER | PERL5OPT | PERL5LIB | NODE_OPTIONS) return 0 ;;
+    POSIXLY_CORRECT | BASH_COMPAT | EXECIGNORE | FUNCNEST | TMOUT | LANG | LC_* | HOME) return 0 ;;
+    PYTHON* | BROWSER | PERL5* | PERLLIB | NODE_OPTIONS) return 0 ;;
+    CURL_HOME | XDG_CONFIG_HOME | HTTP_PROXY | HTTPS_PROXY | ALL_PROXY | NO_PROXY) return 0 ;;
+    http_proxy | https_proxy | all_proxy | no_proxy) return 0 ;;
     LD_* | DYLD_* | COMSPEC | PATHEXT) return 0 ;;
     SMOKE_PROJECT | SMOKE_COMPOSE_* | SMOKE_SESSION_* | SMOKE_*_LABEL | ROOT_DIR | COMPOSE | __lre_*) return 0 ;;
   esac
@@ -246,5 +250,7 @@ curl_auth_config() {
 # curl that sends the controller's bearer token. Without it every API call is a
 # 401 and the smoke scripts could only pass against an open controller.
 bearer_curl() {
-  curl_auth_config | curl --config - "$@"
+  # -q first: curl would otherwise read a .curlrc (through CURL_HOME, XDG_CONFIG_HOME or HOME) that can add a proxy
+  # or another header to a request carrying the token.
+  curl_auth_config | curl -q --config - "$@"
 }

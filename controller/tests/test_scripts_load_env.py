@@ -327,6 +327,22 @@ class LoadRepoEnvTests(unittest.TestCase):
                 self.assertIn(f": {key} is not loaded from .env (", stderr)
                 self.assertNotIn("poisoned", stderr)
 
+    def test_keys_that_redirect_curl_perl_or_the_locale_are_refused(self) -> None:
+        # curl reads CURL_HOME/XDG_CONFIG_HOME for a .curlrc and the *_PROXY variables for where it connects; perl
+        # reads PERL5* and PERLLIB; LANG and LC_* decide which locale files a child loads.
+        denied = [
+            "CURL_HOME", "XDG_CONFIG_HOME", "PERLLIB", "PERL5DB", "PERL5LIB", "PERL5OPT", "LANG", "LC_MESSAGES",
+            "LC_NUMERIC", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy",
+            "all_proxy", "no_proxy",
+        ]  # fmt: skip
+        for key in denied:
+            with self.subTest(key=key):
+                exported, _, stderr = self.load(f"{key}=poisoned\nFINE=1\n")
+
+                self.assertNotEqual(exported.get(key), "poisoned")
+                self.assertEqual(exported["FINE"], "1")
+                self.assertIn(f": {key} is not loaded from .env (", stderr)
+
     def test_on_windows_shells_the_denylist_ignores_the_case_of_a_key(self) -> None:
         # Windows treats environment names case-insensitively, so `Path=` would reach a child as PATH.
         denied = ["Path", "ComSpec", "Ld_Preload", "Bash_Env", "Pythonpath"]

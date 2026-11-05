@@ -35,6 +35,11 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- `bearer_curl` (scripts/load_env.sh) now runs `curl -q`, so a `.curlrc` cannot add a proxy or header to a request that
+  carries the token, and the scripts' `.env` loader also refuses `CURL_HOME`, `XDG_CONFIG_HOME`, `PERL5*`, `PERLLIB`,
+  `LANG`, `LC_*` and the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and their lower-case
+  forms). Before, only `LC_ALL`, `LC_CTYPE`, `PERL5OPT` and `PERL5LIB` of these were refused. A proxy set in `.env` for
+  the scripts must now be exported in your shell instead.
 - The Codex path-compatibility shim (which links a `.codex` home named in the CLI home's `config.toml` to the real one)
   now creates a link only under the CLI home or at `/home/<user>/.codex`, never makes parent directories anywhere else,
   logs each path it skips, and runs once per adapter instead of on every CLI call.

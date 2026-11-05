@@ -98,7 +98,7 @@ class BearerCurlTests(unittest.TestCase):
         _, argv, stdin = self.run_bearer_curl(token=TOKEN, xtrace=True)
 
         self.assertIn("+ ", self.trace)  # the trace is on
-        self.assertIn("curl --config -", self.trace)
+        self.assertIn("curl -q --config -", self.trace)
         self.assertNotIn(TOKEN, self.trace)
         self.assertNotIn(TOKEN, argv)
         self.assertIn(f'header = "Authorization: Bearer {TOKEN}"', stdin)
@@ -114,6 +114,13 @@ class BearerCurlTests(unittest.TestCase):
         self.assertIn(f'header = "Authorization: Bearer {TOKEN}"', stdin)
         # The caller's own arguments still reach curl.
         self.assertIn("http://127.0.0.1:8000/sessions", argv.splitlines())
+
+    def test_curl_is_told_to_skip_its_own_config_file(self) -> None:
+        # -q must be curl's first argument: a .curlrc (found through CURL_HOME, XDG_CONFIG_HOME or HOME) could
+        # otherwise add a proxy or another header to a request that carries the token.
+        _, argv, _ = self.run_bearer_curl(token=TOKEN)
+
+        self.assertEqual(argv.splitlines()[0], "-q")
 
     def test_without_a_token_no_authorization_is_sent(self) -> None:
         _, argv, stdin = self.run_bearer_curl(token=None)
