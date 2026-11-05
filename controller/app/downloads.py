@@ -49,34 +49,38 @@ class DownloadCaptureService:
         destination = self._reserve(downloads_dir, suggested)
 
         failure: str | None = None
-        status = "completed"
         try:
             await download.save_as(str(destination))
             if hasattr(download, "failure"):
                 failure = await download.failure()
         except Exception:
             failure = "download_save_failed"
-            status = "failed"
-
-        if failure:
-            status = "failed"
-        elif destination.stat().st_size > self.max_bytes:
+        except BaseException:
+            # Cancelled mid-save: the reserved name would count toward the cap for good.
             destination.unlink(missing_ok=True)
+            raise
+
+        oversized = not failure and destination.stat().st_size > self.max_bytes
+        if failure or oversized:
+            # A partial or empty file is no download, and a reserved name would count toward the cap.
+            destination.unlink(missing_ok=True)
+        if oversized:
             return await self.refuse(
                 session,
                 download,
                 f"download is larger than {self.max_bytes} bytes (DOWNLOAD_MAX_BYTES) and was deleted",
                 cancel=False,
             )
+        await self._discard(download)
 
         record = {
             "id": uuid4().hex[:12],
             "timestamp": utc_now(),
-            "status": status,
-            "filename": destination.name,
+            "status": "failed" if failure else "completed",
+            "filename": None if failure else destination.name,
             "suggested_filename": suggested,
-            "path": str(destination),
-            "url": f"/artifacts/{session.id}/downloads/{destination.name}",
+            "path": None if failure else str(destination),
+            "url": None if failure else f"/artifacts/{session.id}/downloads/{destination.name}",
             "source_url": getattr(download, "url", None),
             "failure": failure,
         }
@@ -116,6 +120,7 @@ class DownloadCaptureService:
                 await download.cancel()
             except PlaywrightError as exc:
                 logger.debug("could not cancel a refused download for session %s: %s", session.id, exc)
+        await self._discard(download)
         record = {
             "id": uuid4().hex[:12],
             "timestamp": utc_now(),
@@ -130,6 +135,18 @@ class DownloadCaptureService:
         self._bounded_append(session.downloads, record, limit=100)
         await self.artifacts.append_jsonl(session.artifact_dir / "downloads.jsonl", record)
         return record
+
+    @staticmethod
+    async def _discard(download: Any) -> None:
+        """Delete the browser's own copy of a download, which it keeps until its context closes.
+
+        Only the controller's copy (if any) is kept; the browser's would otherwise hold every download
+        a page started, refused ones included.
+        """
+        try:
+            await download.delete()
+        except PlaywrightError as exc:
+            logger.debug("could not delete the browser's copy of a download: %s", exc)
 
     @staticmethod
     def _saved_count(directory: Path) -> int:

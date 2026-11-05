@@ -744,13 +744,12 @@ async def test_a_download_after_the_agent_navigated_the_page_is_not_refused_for_
 # ── A download of a popup the context never reported (round 4e, item 2) ──
 
 
-def capturing_session(manager, page: EventPage) -> SimpleNamespace:
-    """A session on `page`, with the real download capture service and its file writes faked."""
+def capturing_session(manager, page: EventPage, artifact_dir: Path) -> SimpleNamespace:
+    """A session on `page`, with the real download capture service writing under `artifact_dir`."""
     session = popup_session(page)
     session.downloads = []
-    session.artifact_dir = Path("virtual-artifacts")
+    session.artifact_dir = artifact_dir
     capture = DownloadCaptureService(SimpleNamespace(append_jsonl=AsyncMock()))
-    capture._reserve = lambda folder, name: folder / name
     manager.diagnostics.download_capture = capture
     manager.audit.append = AsyncMock()
     manager._attach_page_listeners(page, session)
@@ -764,6 +763,7 @@ def file_download(saved: list[str]) -> SimpleNamespace:
         save_as=AsyncMock(side_effect=saved.append),
         failure=AsyncMock(return_value=None),
         cancel=AsyncMock(),
+        delete=AsyncMock(),
     )
 
 
@@ -781,7 +781,7 @@ async def test_a_download_an_unreported_popups_refused_redirect_chose_is_refused
     remembered nothing: the allowed opener's download was saved, its source_url whole."""
     manager = manager_for(tmp_path)
     opener = EventPage(ALLOWED)
-    session = capturing_session(manager, opener)
+    session = capturing_session(manager, opener, tmp_path)
     first = UnframedRequest(REFUSED if through_refused_host else f"{ALLOWED}/go")
     landing = UnframedRequest(CHOSEN_FILE, redirected_from=first)
     for request in (first, landing):  # the context's request event for each hop (coreBundle.js requestStarted)
@@ -810,7 +810,7 @@ async def test_control_a_refused_redirect_of_a_reported_page_is_remembered_by_th
     page's own record (round 4d, R4C-NET-1), and a later download from the same URL was refused."""
     manager = manager_for(tmp_path)
     page = EventPage(ALLOWED)
-    session = capturing_session(manager, page)
+    session = capturing_session(manager, page, tmp_path)
     first = NavigationRequest(page, REFUSED)
     landing = NavigationRequest(page, CHOSEN_FILE, redirected_from=first)
     for request in (first, landing):

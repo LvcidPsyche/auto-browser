@@ -31,7 +31,10 @@ All notable changes to auto-browser are documented here.
   written whole to the session's artifact folder. A download larger than the new `DOWNLOAD_MAX_BYTES` (default
   256 MiB) is deleted once Playwright has saved it, and once a session holds `DOWNLOADS_MAX_PER_SESSION` files
   (default 100) further downloads are cancelled and not saved. Both are recorded in the session's downloads as
-  `refused`, with the reason. Raise the settings if you download larger or more files on purpose.
+  `refused`, with the reason. Raise the settings if you download larger or more files on purpose. The browser's own
+  copy of every download (kept, refused or failed) is deleted once it has been handled, so refused downloads do not
+  pile up inside the browser until its context closes. A download that fails, or whose save is interrupted, leaves no
+  file behind (so it does not count toward the cap) and is recorded as `failed` with no `path`, `filename` or `url`.
 - **Provider CLI children no longer inherit the controller's whole environment.** `claude`, `codex` and `gemini`
   ran with a copy of the controller's environment, so the bearer token, the Witness remote key, Stripe keys and every
   other provider's API key were visible to them, and to anything a prompt-injected CLI could run. They now get an
