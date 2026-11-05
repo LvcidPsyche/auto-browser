@@ -13,6 +13,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import traceback
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
@@ -30,6 +32,13 @@ MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024
 # Seconds a client may stall between bytes of a request. Without it one idle or
 # slow connection pinned a handler thread forever.
 REQUEST_READ_TIMEOUT_SECONDS = 30.0
+# Seconds a client may take to deliver the whole body. The per-read timeout above restarts on every byte, so a
+# client sending one byte every 29 s would otherwise hold a handler thread for hours.
+REQUEST_BODY_DEADLINE_SECONDS = 60.0
+# Codex runs at once. Each is a heavy host process, and the socket has no other limit on concurrent requests.
+MAX_CONCURRENT_DECISIONS = 2
+# Seconds a request waits for one of those slots before it is answered 503.
+DECISION_SLOT_WAIT_SECONDS = 2.0
 
 
 def build_sandbox_flags(*, allow_host_exec: bool, sandbox_mode: str) -> list[str]:
@@ -115,7 +124,9 @@ class CodexBridgeService:
         request_timeout_seconds: float = 55.0,
         sandbox_mode: str = DEFAULT_SANDBOX_MODE,
         allow_host_exec: bool = False,
+        max_concurrent_decisions: int = MAX_CONCURRENT_DECISIONS,
     ) -> None:
+        self._decision_slots = threading.BoundedSemaphore(max(1, max_concurrent_decisions))
         self.codex_path = codex_path
         self.default_model = default_model
         self.request_timeout_seconds = request_timeout_seconds
@@ -130,6 +141,14 @@ class CodexBridgeService:
             )
 
     def handle_openai_decide(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self._decision_slots.acquire(timeout=DECISION_SLOT_WAIT_SECONDS):
+            raise BridgeError("bridge is busy: too many decisions in flight", status_code=503)
+        try:
+            return self._decide(payload)
+        finally:
+            self._decision_slots.release()
+
+    def _decide(self, payload: dict[str, Any]) -> dict[str, Any]:
         prompt = str(payload.get("prompt") or "").strip()
         schema = payload.get("schema")
         screenshot = payload.get("screenshot")
@@ -188,26 +207,15 @@ class CodexBridgeService:
                 ]
             )
 
-            try:
-                result = subprocess.run(
-                    command,
-                    input=prompt.encode("utf-8"),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=False,
-                    timeout=self.request_timeout_seconds,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise BridgeError(
-                    f"codex timed out after {self.request_timeout_seconds:.0f}s",
-                    status_code=504,
-                ) from exc
-
-            stdout = result.stdout.decode("utf-8", errors="replace")
-            stderr = result.stderr.decode("utf-8", errors="replace")
+            returncode, stdout_bytes, stderr_bytes = self._run_codex(command, prompt.encode("utf-8"))
+            stdout = stdout_bytes.decode("utf-8", errors="replace")
+            stderr = stderr_bytes.decode("utf-8", errors="replace")
+            if stderr.strip():
+                # Codex's stderr stays on the bridge side; the reply to the controller carries the decision only.
+                print(f"[codex-bridge] codex stderr: {stderr.strip()[:2000]}", file=sys.stderr, flush=True)
             raw_text = output_path.read_text(encoding="utf-8") if output_path.exists() else stdout
-            if result.returncode != 0:
-                detail = (stderr or stdout or f"codex exited with {result.returncode}").strip()
+            if returncode != 0:
+                detail = (stderr or stdout or f"codex exited with {returncode}").strip()
                 raise BridgeError(detail[:4000], status_code=502)
             if not raw_text.strip():
                 raise BridgeError("codex returned an empty response", status_code=502)
@@ -215,8 +223,42 @@ class CodexBridgeService:
             return {
                 "model": model or self.default_model or "",
                 "raw_text": raw_text,
-                "stderr": stderr,
             }
+
+    def _run_codex(self, command: list[str], prompt: bytes) -> tuple[int, bytes, bytes]:
+        """Run codex with `prompt` on stdin; on timeout kill its whole process group, not just the direct child."""
+        grouped = hasattr(os, "killpg")  # POSIX; the bridge listens on a Unix socket, so this is its normal case
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=grouped,
+        )
+        try:
+            stdout, stderr = process.communicate(prompt, timeout=self.request_timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            _kill_process_tree(process, grouped)
+            process.communicate()
+            raise BridgeError(
+                f"codex timed out after {self.request_timeout_seconds:.0f}s",
+                status_code=504,
+            ) from exc
+        except BaseException:
+            _kill_process_tree(process, grouped)
+            process.communicate()
+            raise
+        return process.returncode, stdout, stderr
+
+
+def _kill_process_tree(process: subprocess.Popen, grouped: bool) -> None:
+    try:
+        if grouped:
+            os.killpg(process.pid, signal.SIGKILL)  # the group codex leads (start_new_session): its children too
+        else:
+            process.kill()
+    except (ProcessLookupError, PermissionError):
+        pass  # already gone
 
 
 class UnixHTTPServer(ThreadingMixIn, UnixStreamServer):
@@ -252,12 +294,17 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": f"invalid json: {exc}"})
             return
+        except UnicodeDecodeError:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "request body must be UTF-8 encoded JSON"})
+            return
         except TimeoutError:
             self.close_connection = True
             self._send_json(HTTPStatus.REQUEST_TIMEOUT, {"error": "timed out reading the request body"})
             return
-        except Exception as exc:  # pragma: no cover - defensive
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+        except Exception:
+            # The detail goes to the bridge's log, not to the caller.
+            traceback.print_exc(file=sys.stderr)
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error"})
             return
 
         self._send_json(HTTPStatus.OK, response)
@@ -281,11 +328,29 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
                 f"request body of {length} bytes exceeds the {MAX_REQUEST_BODY_BYTES} byte limit",
                 status_code=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             )
-        body = self.rfile.read(length)
+        body = self._read_exactly(length)
         payload = json.loads(body.decode("utf-8"))
         if not isinstance(payload, dict):
             raise BridgeError("request body must be a JSON object", status_code=400)
         return payload
+
+    def _read_exactly(self, length: int) -> bytes:
+        """`length` bytes of the body, within REQUEST_BODY_DEADLINE_SECONDS in total (TimeoutError past it)."""
+        deadline = time.monotonic() + REQUEST_BODY_DEADLINE_SECONDS
+        chunks: list[bytes] = []
+        remaining = length
+        while remaining > 0:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError("request body not delivered in time")
+            self.connection.settimeout(min(left, self.timeout))
+            chunk = self.rfile.read1(min(remaining, 65536))
+            if not chunk:
+                self.close_connection = True
+                raise BridgeError("request body shorter than its Content-Length", status_code=400)
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
 
     def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

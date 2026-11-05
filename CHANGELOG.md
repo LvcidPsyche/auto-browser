@@ -146,6 +146,13 @@ All notable changes to auto-browser are documented here.
   twice `MESH_TIMESTAMP_WINDOW`, and `/mesh/receive` refuses an envelope stamped before the controller started (so one
   captured before a restart cannot be replayed after it; a sender with a slow clock may be refused for its first
   seconds after a restart and succeeds on retry).
+- The Codex host bridge reads a request body within 60 seconds in total (a client trickling a byte every 29 s used
+  to hold a handler thread indefinitely; it now gets 408), runs at most two Codex decisions at once (a third waits 2 s,
+  then gets 503), and on a Codex timeout kills Codex's whole process group, not only the direct child.
+- The Codex host bridge answers a request body that is not UTF-8 with 400 and a fixed message instead of a 500 carrying
+  the exception text, answers any other unexpected error with a fixed `internal error` and logs the detail on the
+  bridge side, and no longer returns Codex's stderr to the controller on success (it logs it instead; the controller
+  never read that field).
 
 ### Security
 
