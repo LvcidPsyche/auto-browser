@@ -6,6 +6,7 @@ save wrote one persona over it and erased every other one.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 from pathlib import Path
@@ -62,6 +63,35 @@ def test_a_transient_read_failure_does_not_wipe_the_file(tmp_path: Path):
             store.set_persona("c", server="http://c:1")
 
     assert path.read_text(encoding="utf-8") == before
+
+
+def test_a_missing_folder_reads_as_empty_too(tmp_path: Path):
+    assert ProxyPersonaStore(tmp_path / "missing" / "personas.json").list_personas() == []
+
+
+def test_a_file_in_a_folder_the_controller_cannot_read_gets_the_fixed_error(tmp_path: Path, caplog):
+    # As a folder without search permission answers: stat and open both fail with EACCES. Patched, since CI runs
+    # as root, which a real permission would not stop.
+    path = tmp_path / "personas.json"
+    _write(path, {"a": {"server": "http://a:1"}})
+    denied = PermissionError(errno.EACCES, "Permission denied", str(path))
+    real_stat, real_read_text = Path.stat, Path.read_text
+
+    def stat(self, *args, **kwargs):
+        if self == path:
+            raise denied
+        return real_stat(self, *args, **kwargs)
+
+    def read_text(self, *args, **kwargs):
+        if self == path:
+            raise denied
+        return real_read_text(self, *args, **kwargs)
+
+    with patch.object(Path, "stat", stat), patch.object(Path, "read_text", read_text):
+        with caplog.at_level(logging.ERROR, logger="app.proxy_personas"), pytest.raises(ProxyPersonaFileError):
+            ProxyPersonaStore(path).list_personas()
+
+    assert any(str(path) in record.getMessage() for record in caplog.records)
 
 
 def test_the_startup_warning_reports_an_unusable_file_and_does_not_crash(tmp_path: Path, caplog):

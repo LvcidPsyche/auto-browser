@@ -100,12 +100,15 @@ class ProxyPersonaStore:
         """The file's top-level object as written; {} only when there is no file.
 
         A file that exists but cannot be read or parsed raises: answering {} let the next save write
-        one persona over it and erase the rest.
+        one persona over it and erase the rest. Existence is not checked first: Path.exists() raises a
+        permission error as itself (EACCES on Python 3.11 and 3.12), outside the handling below.
         """
-        if self._path is None or not self._path.exists():
+        if self._path is None:
             return {}
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
         except Exception as exc:
             logger.error("failed to load proxy persona file %s: %s", self._path, exc)
             raise ProxyPersonaFileError() from exc
