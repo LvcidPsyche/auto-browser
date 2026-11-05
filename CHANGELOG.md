@@ -4,6 +4,14 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Security
+
+- **`screenshot_diff` now redacts PII like every other screenshot path.** It captured the comparison shot
+  unredacted, so the saved baseline and the second shot held the page's raw pixels even with
+  `PII_SCRUB_SCREENSHOT` on. Both are now redacted before they settle on disk, and the diff image is computed from
+  them. When OCR is unavailable or redaction fails, the result carries the same `screenshot_pii_scrub` notice as
+  `observe`, and strict mode withholds the shot.
+
 ## [1.14.1] — 2026-11-04
 
 A patch release over 1.14.0. A session whose start page fails to load now gets a 400 the agent can act on instead

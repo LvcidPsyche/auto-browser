@@ -22,6 +22,7 @@ from ...pii_scrub import PiiScrubber
 from ...utils import UTC, spawn_background_task
 from ..page_provenance import is_http, redirect_chain
 from ..window_births import BirthVerdict
+from .observation import _scrub_disclosure
 
 logger = logging.getLogger(__name__)
 
@@ -717,7 +718,9 @@ class BrowserDiagnosticsService:
             # cut off while its page moved can leave a refused page's frame there.
             prior = checked_screenshot(session)
 
-            new_shot = await self.manager._capture_screenshot(session, "diff-b")
+            # Redacted like every other screenshot write: the baseline is a copy of this capture, and
+            # the diff image is computed from it, so neither may hold the page's raw pixels.
+            new_shot = await self.manager.observation._capture_screenshot_redacted(session, "diff-b")
             # Compared against what came before, not against the compare's own captures.
             session.last_screenshot = prior
 
@@ -730,9 +733,10 @@ class BrowserDiagnosticsService:
                     "baseline_captured": True,
                     "baseline_url": baseline_url,
                     "message": "Baseline saved. Navigate to a new state and call compare again to see the diff.",
+                    **_scrub_disclosure(new_shot),
                 }
 
-            return await asyncio.to_thread(
+            diff = await asyncio.to_thread(
                 self.compute_diff,
                 prior["path"],
                 new_shot["path"],
@@ -740,6 +744,7 @@ class BrowserDiagnosticsService:
                 new_shot["url"],
                 session.artifact_dir,
             )
+            return {**diff, **_scrub_disclosure(new_shot)}
 
     @staticmethod
     def compute_diff(
