@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 
+from app.harness import Budget, Postcondition, TaskContract
+from app.harness.iterate import HarnessService
 from app.harness.trace import TraceEnvelope, TraceEvent
 
 SHOT = "/data/artifacts/s1/shot-1.png"
@@ -89,6 +92,84 @@ class AgentResultEventTests(unittest.TestCase):
         decision = next(e for e in trace.events if e.event_type == "model_decision")
         self.assertEqual(decision.payload["decision"]["text"], "[REDACTED]")
         self.assertNotIn(secret, trace.model_dump_json())
+
+    def test_a_sensitive_decision_hides_its_value_and_username_in_both_events(self) -> None:
+        account, user = "ACCT-99812", "jdoe-admin"
+        decision = {"action": "select_option", "selector": "#acct", "value": account, "username": user}
+        result = {
+            "steps": [
+                {
+                    "status": "ok",
+                    "decision": {**decision, "sensitive": True},
+                    "observation": {"url": "https://x.test/"},
+                    "execution": {},
+                }
+            ]
+        }
+
+        trace = TraceEnvelope.from_agent_result(contract_hash="h", result=result)
+
+        for event_type in ("model_decision", "action"):
+            stored = next(e for e in trace.events if e.event_type == event_type).payload["decision"]
+            self.assertEqual((stored["value"], stored["username"]), ("[REDACTED]", "[REDACTED]"), event_type)
+            self.assertEqual(stored["selector"], "#acct")
+        self.assertNotIn(account, trace.model_dump_json())
+        self.assertNotIn(user, trace.model_dump_json())
+
+    def test_an_ordinary_decision_keeps_its_value(self) -> None:
+        result = {"steps": [{"status": "ok", "decision": {"action": "select_option", "value": "blue"}}]}
+
+        trace = TraceEnvelope.from_agent_result(contract_hash="h", result=result)
+
+        self.assertEqual(next(e for e in trace.events if e.event_type == "action").payload["decision"]["value"], "blue")
+
+    def test_the_after_action_screenshot_is_a_second_screenshot_event_after_the_action(self) -> None:
+        after = {"url": "https://x.test/done", "screenshot_path": "/data/artifacts/s1/after-click.png"}
+        result = _result()
+        result["steps"][0]["execution"] = {"after": after}
+        result["steps"][1]["execution"] = {"after": {"url": "https://x.test/b", "screenshot_path": None}}
+
+        trace = TraceEnvelope.from_agent_result(contract_hash="h", result=result)
+
+        self.assertEqual(
+            [(e.step_idx, e.event_type) for e in trace.events],
+            [
+                (1, "screenshot"),
+                (1, "model_decision"),
+                (1, "action"),
+                (1, "screenshot"),
+                (2, "model_decision"),
+                (2, "action"),
+            ],
+        )
+        self.assertEqual(trace.events[3].payload, {"screenshot_path": after["screenshot_path"]})
+        self.assertTrue(trace.verify_chain())
+
+    def test_an_after_screenshot_alone_meets_a_screenshots_requirement(self) -> None:
+        result = {"steps": [{"status": "ok", "decision": {"action": "click"}, "observation": {}}]}
+        result["steps"][0]["execution"] = {"after": {"screenshot_url": "/artifacts/s1/after-click.png"}}
+
+        trace = TraceEnvelope.from_agent_result(contract_hash="h", result=result)
+
+        self.assertIn("screenshots", trace.evidence)
+
+
+class MockAttemptEventTests(unittest.IsolatedAsyncioTestCase):
+    async def test_the_mock_attempts_decision_and_action_say_they_are_simulated(self) -> None:
+        contract = TaskContract(
+            id="mock-events",
+            goal="Open the page.",
+            postconditions=[Postcondition(kind="url_contains", value="x.test/done")],
+            budget=Budget(max_attempts=1, max_steps=2),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            service = HarnessService(tmp)
+            record = await service.start_convergence(contract, mock_final_observation={"url": "https://x.test/done"})
+
+            events = service.get_trace(record.id)["events"]
+
+        simulated = {event["event_type"]: event["payload"].get("simulated") for event in events}
+        self.assertEqual(simulated, {"model_decision": True, "action": True, "screenshot": None})
 
 
 class ScreenshotEvidenceTests(unittest.TestCase):

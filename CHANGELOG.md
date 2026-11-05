@@ -125,8 +125,9 @@ All notable changes to auto-browser are documented here.
 - **Harness traces no longer keep typed secrets or URL tokens, and induced skills no longer claim to be
   credential free.** A trace redacted only keys with secret-sounding names, so the text typed into a field marked
   sensitive (or found sensitive when the step ran), tokens in a URL query or fragment, and PII in free text all
-  stayed in `trace.json`. Typed text of a sensitive action is now redacted, and every string in the events, and in
-  the final observation and network entries as they are stored (`trace.json` and the staged skill candidate), goes
+  stayed in `trace.json`. Typed text of a sensitive action is now redacted (and so are its `value`, for a
+  `select_option`, and its `username`, in its action and its model decision alike), and every string in the events,
+  and in the final observation and network entries as they are stored (`trace.json` and the staged skill candidate), goes
   through the PII scrubber (URLs through the URL scrubber) when `PII_SCRUB_ENABLED` is on. The harness verifier
   still checks the original observation, so a forbidden email or a required `dom_contains` gives the same verdict
   as before. A URL is recognised in any letter case and anywhere in a string. `extracted_data`, the task's own
@@ -172,7 +173,7 @@ All notable changes to auto-browser are documented here.
 
 - **A harness contract of only optional postconditions no longer passes with nothing satisfied.** The verifier passed it at confidence 1.0 even when the page matched none of them. When every postcondition is optional, at least one must now be satisfied; a contract with any required postcondition is judged as before.
 
-- **Harness traces of a live agent run now record its screenshots.** The trace built from an agent result held only `action` events, so a run that took screenshots never met a `screenshots` evidence requirement. Each step that has a screenshot now adds a `screenshot` event (the same event type the mock attempt records) before its action, because the screenshot is the page the agent saw before it acted.
+- **Harness traces of a live agent run now record its screenshots.** The trace built from an agent result held only `action` events, so a run that took screenshots never met a `screenshots` evidence requirement. Each step that has a screenshot now adds a `screenshot` event (the same event type the mock attempt records) before its action, because the screenshot is the page the agent saw before it acted, and a second one after its action when the action's result carries the screenshot of the page after it (`execution.after`).
 
 - **The Codespaces overlay now accepts the forwarded host name.** The forwarder is expected to send `<codespace>-8000.app.github.dev` as Host (not yet observed in a Codespace), and the overlay's loopback-only host list would refuse it with "Invalid host header". It now defaults `CONTROLLER_ALLOWED_HOSTS` to the loopback names plus `*.app.github.dev`, and `.devcontainer/allow-forwarded-host.sh` appends the exact forwarded name to a `CONTROLLER_ALLOWED_HOSTS` that `.env` already sets (for example one copied from `.env.example`). It runs when the dev container is created and again each time it starts, so a `.env` copied in afterwards is covered too. It edits a copy kept beside `.env` (mode kept, removed on any exit) and moves it into place, keeps a CRLF `.env` as it was, and leaves a quoted value or one with a trailing ` # comment` untouched, saying so without printing the value. If you set it by hand, include `*.app.github.dev` in it.
 
@@ -289,7 +290,10 @@ All notable changes to auto-browser are documented here.
   required `screenshots` kind with no image; a screenshot event now counts only when it carries a `screenshot_path` or
   `screenshot_url` and is not marked unavailable. So a mock run (`--mock-final-url`, `mock_final_observation`) of a
   contract that requires `screenshots` evidence now fails with `missing_evidence`, and a drift check of an existing
-  mock-staged candidate whose contract requires screenshots now reports it degraded.
+  mock-staged candidate whose contract requires screenshots now reports it degraded. The mock attempt's decision and
+  action events now say `simulated: true`. They still meet `model_decisions` and `actions` evidence, by construction
+  (the default contract requires `actions`, so a mock run could not converge otherwise); a mock-staged candidate is
+  marked `simulated`.
 
 ### Changed
 

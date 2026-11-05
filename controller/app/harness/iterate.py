@@ -337,7 +337,9 @@ class HarnessService:
             contract_hash=contract.hash(),
             nest_run_dir=False,
         )
-        recorder.append("model_decision", {"strategy": "initial" if attempt_index == 1 else "reflexion"})
+        # The mock attempt's decision and action are made up, not a model's or a browser's: they say so.
+        strategy = "initial" if attempt_index == 1 else "reflexion"
+        recorder.append("model_decision", {"strategy": strategy, "simulated": True})
         if orchestrator is not None and session_id:
             result = await orchestrator.run(
                 session_id=session_id,
@@ -355,7 +357,7 @@ class HarnessService:
             return trace
 
         final_observation = mock_final_observation or contract.metadata.get("mock_final_observation") or {}
-        recorder.append("action", {"action": "mock_attempt", "goal": contract.goal}, step_idx=1)
+        recorder.append("action", {"action": "mock_attempt", "goal": contract.goal, "simulated": True}, step_idx=1)
         recorder.append("screenshot", {"available": False, "reason": "mock_mode"}, step_idx=1)
         return recorder.finalize(
             final_observation=final_observation,

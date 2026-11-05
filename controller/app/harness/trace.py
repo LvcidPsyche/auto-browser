@@ -28,8 +28,9 @@ _SENSITIVE_KEY_FRAGMENTS = (
     "secret",
 )
 _REDACTED = "[REDACTED]"
-# The keys that hold what an action typed. They are redacted when the action is marked sensitive.
-_TYPED_TEXT_KEYS = frozenset({"text", "text_preview"})
+# The keys that hold what an action typed or chose (`value`, for select_option) and who it signed in as. They are
+# redacted when the action is marked sensitive.
+_TYPED_TEXT_KEYS = frozenset({"text", "text_preview", "value", "username"})
 _SENSITIVE_FLAG_KEYS = ("sensitive", "text_redacted")
 # The keys of an agent step's observation that point at its screenshot.
 _SCREENSHOT_KEYS = ("screenshot_path", "screenshot_url")
@@ -184,6 +185,14 @@ class TraceEnvelope(BaseModel):
                     },
                 )
             )
+            # The page after the action, when the action's result carries its screenshot.
+            execution = step.get("execution")
+            after = execution.get("after") if isinstance(execution, dict) else None
+            after_shot = (
+                {key: after[key] for key in _SCREENSHOT_KEYS if after.get(key)} if isinstance(after, dict) else {}
+            )
+            if after_shot:
+                payloads.append(("screenshot", after_shot))
             for event_type, payload in payloads:
                 event = TraceEvent(
                     run_id=trace.run_id,
