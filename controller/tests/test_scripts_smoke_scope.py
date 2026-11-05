@@ -29,6 +29,7 @@ from tests.test_scripts_token_argv import BASH, SCRIPTS, _bash_path
 SMOKE_SCRIPTS = sorted(SCRIPTS.glob("smoke_*.sh")) if SCRIPTS.is_dir() else []
 # The scripts that start a compose stack: every smoke_*.sh except the library.
 SMOKE_RUNNERS = [path for path in SMOKE_SCRIPTS if path.name != "smoke_lib.sh"]
+BS = chr(92)  # a backslash, for Windows paths
 LABEL = "auto-browser.managed=true"
 MODE = "auto-browser.mode=docker_ephemeral"
 SESSION = "auto-browser.session_id=abc"
@@ -122,9 +123,9 @@ class _FakeDockerCase(unittest.TestCase):
             "|| { echo 'docker is not the fake' >&2; exit 99; }; "
         )
 
-    def bash(self, body: str) -> subprocess.CompletedProcess[str]:
+    def bash(self, body: str, prelude: str = "") -> subprocess.CompletedProcess[str]:
         script = (
-            f"{self.fake_docker_guard()}"
+            f"{self.fake_docker_guard()}{prelude}"
             f'export FAKE_DOCKER_DIR="{_bash_path(self.state)}"; ROOT_DIR="{_bash_path(self.root)}"; '
             f'source "{_bash_path(SCRIPTS / "load_env.sh")}"; source "{_bash_path(SCRIPTS / "smoke_lib.sh")}"; {body}'
         )
@@ -138,8 +139,18 @@ class _FakeDockerCase(unittest.TestCase):
 
 @unittest.skipUnless(SCRIPTS.is_dir() and BASH, "scripts/ or bash is not available here")
 class SmokePreflightTests(_FakeDockerCase):
-    def preflight(self, mode: str = "isolated") -> subprocess.CompletedProcess[str]:
-        return self.bash(f"smoke_setup; smoke_preflight {mode}; echo PREFLIGHT_OK")
+    def preflight(self, mode: str = "isolated", ostype: str | None = None) -> subprocess.CompletedProcess[str]:
+        prelude = f"OSTYPE={ostype}; " if ostype else ""
+        return self.bash(f"smoke_setup; smoke_preflight {mode}; echo PREFLIGHT_OK", prelude=prelude)
+
+    def normalized(self, path: str, ostype: str, force_mnt: str = "") -> str:
+        result = self.bash(f"smoke_normalize_path '{path}' '{force_mnt}'", prelude=f"OSTYPE={ostype}; ")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def same_dir(self, candidate: str, label: str, ostype: str) -> bool:
+        result = self.bash(f"smoke_same_dir '{candidate}' '{label}'", prelude=f"OSTYPE={ostype}; ")
+        return result.returncode == 0
 
     def test_a_child_whose_docker_is_not_the_fake_stops_before_running_anything(self) -> None:
         other = self.temp / "other-bin"
@@ -238,42 +249,55 @@ class SmokePreflightTests(_FakeDockerCase):
                     self.assertNotIn("PREFLIGHT_OK", result.stdout)
                     self.assertIn("operator-controller-1", result.stderr)
 
-    @unittest.skipUnless(os.name == "nt", "msys/cygwin bash only: a Windows path is case-insensitive")
-    def test_a_stack_whose_directory_label_differs_in_case_is_still_found_on_windows(self) -> None:
+    def test_a_stack_whose_directory_label_differs_in_case_is_found_under_msys_and_not_on_linux(self) -> None:
         # Windows treats C:\Users\Me\Repo and c:\users\me\repo as one directory, and compose records whatever
-        # spelling the shell that started the stack used.
+        # spelling the shell that started the stack used; a Linux directory is case-sensitive. OSTYPE is set, so the
+        # test says the same on every host.
         root = _bash_path(self.root)
-        drive = re.sub(r"^/([a-z])/", lambda m: m.group(1).upper() + ":/", root)
-        for label, spelling in {"upper case": drive.upper(), "lower case": drive.lower()}.items():
-            with self.subTest(spelling=label):
-                self.put("stack.txt", [f"{spelling}|operator-project|operator-controller-1"])
-
-                result = self.preflight("shared")
+        for label, spelling in {"upper case": root.upper(), "lower case": root.lower()}.items():
+            self.put("stack.txt", [f"{spelling}|operator-project|operator-controller-1"])
+            with self.subTest(spelling=label, ostype="msys"):
+                result = self.preflight("shared", ostype="msys")
 
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn("PREFLIGHT_OK", result.stdout)
                 self.assertIn("operator-controller-1", result.stderr)
+            with self.subTest(spelling=label, ostype="linux-gnu"):
+                self.assertEqual(self.preflight("shared", ostype="linux-gnu").returncode, 0)
 
-    def test_a_stack_whose_directory_label_is_a_wsl_mnt_path_is_still_found(self) -> None:
-        # Docker Desktop's WSL integration reports /mnt/c/Users/me/repo for C:\Users\me\repo.
-        root = _bash_path(self.root)
-        if not re.match(r"^/[a-z]/", root):
-            self.skipTest("this checkout is not under a drive letter")
-        for mode in ("isolated", "shared"):
-            with self.subTest(mode=mode):
-                self.put("stack.txt", [f"/mnt{root}|operator-project|operator-controller-1"])
+    def test_the_wsl_mnt_spelling_of_a_drive_is_one_directory_with_the_windows_spellings(self) -> None:
+        # Docker Desktop's WSL integration reports /mnt/c/Users/me/repo for C:\Users\me\repo. The paths are
+        # synthetic (a checkout on this host need not be on a drive), so this runs everywhere.
+        windows = f"C:{BS}Users{BS}Me{BS}Repo"
+        for ostype in ("msys", "cygwin"):
+            for spelling in (
+                windows,
+                "C:/Users/Me/Repo",
+                "/c/Users/Me/Repo",
+                "/mnt/c/Users/Me/Repo",
+                "/mnt/C/Users/Me/Repo/",
+            ):
+                with self.subTest(ostype=ostype, spelling=spelling):
+                    self.assertEqual(self.normalized(spelling, ostype), "c:/users/me/repo")
 
-                result = self.preflight(mode)
-
-                self.assertNotEqual(result.returncode, 0)
-                self.assertNotIn("PREFLIGHT_OK", result.stdout)
-                self.assertIn("operator-controller-1", result.stderr)
+    def test_a_linux_hosts_mnt_c_is_not_the_c_drive_unless_the_other_spelling_is_a_windows_path(self) -> None:
+        self.assertEqual(self.normalized("/mnt/c/repo", "linux-gnu"), "/mnt/c/repo")
+        self.assertEqual(self.normalized("/c/repo", "linux-gnu"), "c:/repo")
+        self.assertFalse(self.same_dir("/mnt/c/repo", "/c/repo", "linux-gnu"))
+        self.assertTrue(self.same_dir("/mnt/c/repo", "/mnt/c/repo", "linux-gnu"))
+        # Compose on Windows labels the directory with a Windows path: then a /mnt/c candidate is that drive.
+        self.assertTrue(self.same_dir("/mnt/c/Users/Me/Repo", f"C:{BS}Users{BS}Me{BS}Repo", "linux-gnu"))
+        self.assertFalse(self.same_dir("/mnt/c/Users/Me/Repo", f"C:{BS}Users{BS}Me{BS}Other", "linux-gnu"))
+        self.assertTrue(self.same_dir("/mnt/c/repo", "/c/repo", "msys"))
 
     def test_a_mnt_path_of_another_checkout_is_not_confused_with_this_one(self) -> None:
         root = _bash_path(self.root)
         self.put("stack.txt", [f"/mnt{root}-other|x|prefix-lookalike-1", "/mnt/c/elsewhere|x|other-checkout-1"])
 
-        self.assertEqual(self.preflight().returncode, 0)
+        for ostype in ("msys", "linux-gnu"):
+            with self.subTest(ostype=ostype):
+                self.assertEqual(self.preflight(ostype=ostype).returncode, 0)
+        self.assertFalse(self.same_dir("/mnt/c/repo-other", "/mnt/c/repo", "msys"))
 
     def test_a_stack_of_another_checkout_is_not_confused_with_this_one(self) -> None:
         root = _bash_path(self.root)

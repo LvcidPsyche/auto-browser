@@ -320,7 +320,9 @@ All notable changes to auto-browser are documented here.
 - **The smoke preflight finds this checkout's stack however Windows or WSL spells its folder.** It compared the
   compose project directory by exact text, so on Git Bash or Cygwin `C:\USERS\me\Repo` did not match `/c/Users/me/repo`
   (Windows paths ignore case), and a WSL `/mnt/c/Users/me/repo` did not match either, and the smoke started beside a
-  running stack it should have refused to touch. Both now compare equal.
+  running stack it should have refused to touch. Both now compare equal. A `/mnt/c/...` folder is read as the C drive
+  only on Git Bash and Cygwin, or when it is compared with a Windows-style folder; on a Linux host it stays an ordinary
+  directory, so a stack at `/mnt/c/repo` is not mistaken for one at `/c/repo`.
 - **A harness trace of a live run now ends on the page the last action left, not the page before it.** The final
   observation was the observation each step made before acting, so a run that ended on an action was verified against
   the page it started that action on. It is now the action's `after` (a full observation) whenever that was read; a

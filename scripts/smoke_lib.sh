@@ -84,12 +84,17 @@ smoke_check_managed() {
 # One spelling for a directory, so that compose's label (a Windows path with backslashes, C:\Users\me\repo, when
 # the stack was started by Docker Desktop's compose), Git Bash's /c/Users/me/repo, pwd -W's C:/Users/me/repo and
 # WSL's /mnt/c/Users/me/repo compare equal: forward slashes, no trailing slash, and a lowercase drive letter written
-# c:/... On Git Bash and Cygwin the whole path is lowercased too, because Windows paths ignore case.
+# c:/... On Git Bash and Cygwin the whole path is lowercased too, because Windows paths ignore case, and /mnt/<drive>
+# is the drive. Elsewhere /mnt/c/repo is an ordinary directory, not /c/repo, unless a second argument says the path
+# is being compared with a Windows one (see smoke_same_dir).
 smoke_normalize_path() {
-  local path="${1//\\//}"
+  local path="${1//\\//}" map_mnt="${2:-}"
   while [[ "$path" == */ && "$path" != "/" ]]; do path="${path%/}"; done
+  case "${OSTYPE:-}" in
+    msys* | cygwin*) map_mnt=1 ;;
+  esac
   case "$path" in
-    /mnt/[A-Za-z]/* | /mnt/[A-Za-z]) path="/${path#/mnt/}" ;;
+    /mnt/[A-Za-z]/* | /mnt/[A-Za-z]) [[ -z "$map_mnt" ]] || path="/${path#/mnt/}" ;;
   esac
   case "$path" in
     [A-Za-z]:/* | [A-Za-z]:) path="$(printf '%s' "${path:0:1}" | tr '[:upper:]' '[:lower:]')${path:1}" ;;
@@ -99,6 +104,17 @@ smoke_normalize_path() {
     msys* | cygwin*) path="$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')" ;;
   esac
   printf '%s' "$path"
+}
+
+# Whether `label`, a compose project directory, is the directory `candidate` (a spelling of this checkout). A Windows
+# label (C:\Users\me\repo) means compose ran on Windows, so a /mnt/c candidate is that drive even when this shell is
+# WSL's.
+smoke_same_dir() {
+  local candidate="$1" label="$2" map_mnt=""
+  case "$label" in
+    [A-Za-z]:*) map_mnt=1 ;;
+  esac
+  [[ "$(smoke_normalize_path "$candidate" "$map_mnt")" == "$(smoke_normalize_path "$label" "$map_mnt")" ]]
 }
 
 # Refuses (exit 1) unless the smoke can run without touching anything that is not its own.
@@ -124,11 +140,11 @@ smoke_preflight() {
   local rows row dir project name candidate others="" own="" is_here
   local -a candidates=()
   rows="$(docker ps --format "{{.Label \"${SMOKE_COMPOSE_DIR_LABEL}\"}}|{{.Label \"${SMOKE_COMPOSE_PROJECT_LABEL}\"}}|{{.Names}}")" || exit 1
-  candidates+=("$(smoke_normalize_path "${ROOT_DIR}")")
-  candidates+=("$(smoke_normalize_path "$(cd "${ROOT_DIR}" && pwd -P)")")
-  candidates+=("$(smoke_normalize_path "$(cd "${ROOT_DIR}" && pwd -W 2>/dev/null || true)")")
+  candidates+=("${ROOT_DIR}")
+  candidates+=("$(cd "${ROOT_DIR}" && pwd -P)")
+  candidates+=("$(cd "${ROOT_DIR}" && pwd -W 2>/dev/null || true)")
   if command -v cygpath >/dev/null 2>&1; then
-    candidates+=("$(smoke_normalize_path "$(cygpath -m "${ROOT_DIR}" 2>/dev/null || true)")")
+    candidates+=("$(cygpath -m "${ROOT_DIR}" 2>/dev/null || true)")
   fi
   while IFS= read -r row; do
     [[ -n "$row" ]] || continue
@@ -141,10 +157,9 @@ smoke_preflight() {
       continue
     fi
     [[ -n "$dir" ]] || continue
-    dir="$(smoke_normalize_path "$dir")"
     is_here=""
     for candidate in "${candidates[@]}"; do
-      [[ -z "$candidate" || "$candidate" != "$dir" ]] || is_here=1
+      [[ -z "$candidate" ]] || ! smoke_same_dir "$candidate" "$dir" || is_here=1
     done
     [[ -z "$is_here" ]] || others+="  ${name} (compose project ${project})"$'\n'
   done <<<"$rows"
