@@ -472,7 +472,7 @@ class BrowserAuthProfileService:
         self.require_access(normalized, action="reading an auth profile")
         profile_dir = self.dir(normalized, create=False)
         metadata = self.read_metadata(normalized)
-        state_path = self.resolve_state_path(normalized, must_exist=False, create=False)
+        state_path = self.resolve_state_path(normalized, must_exist=False)
         profile_root_str = os.path.realpath(os.fspath(self.root()))
         state_path_str = os.path.realpath(os.fspath(state_path))
         profile_root_prefix = profile_root_str if profile_root_str.endswith(os.sep) else profile_root_str + os.sep
@@ -801,9 +801,9 @@ class BrowserAuthProfileService:
     def state_base_path(self, profile_name: str, *, create: bool) -> Path:
         return self.dir(profile_name, create=create) / "state.json"
 
-    def resolve_state_path(self, profile_name: str, *, must_exist: bool, create: bool | None = None) -> Path:
-        # A read passes create=False; the default creates the profile folder for a path that is about to be written.
-        base_path = self.state_base_path(profile_name, create=not must_exist if create is None else create)
+    def resolve_state_path(self, profile_name: str, *, must_exist: bool) -> Path:
+        # Never creates the profile folder: only a save does (state_base_path(create=True)).
+        base_path = self.state_base_path(profile_name, create=False)
         candidates = [base_path.with_name(f"{base_path.name}.enc"), base_path]
         existing = [candidate for candidate in candidates if candidate.exists()]
         if existing:
