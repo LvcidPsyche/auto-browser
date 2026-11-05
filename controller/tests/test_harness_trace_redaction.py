@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.harness import Budget, ForbiddenState, Postcondition, TaskContract
+from app.harness.iterate import HarnessService
 from app.harness.trace import TraceEnvelope, TraceRecorder
 
 SECRET_TEXT = "Sup3rS3cret-Passw0rd!"
@@ -15,7 +17,8 @@ EMAIL = "alice@example.com"
 
 
 def _trace_text(trace: TraceEnvelope) -> str:
-    return json.dumps(trace.model_dump(mode="json"))
+    """The trace as it is stored."""
+    return json.dumps(trace.scrubbed().model_dump(mode="json"))
 
 
 def _agent_result(**step: object) -> dict:
@@ -63,7 +66,7 @@ class TraceRedactionTests(unittest.TestCase):
         )
 
         self.assertNotIn(URL_TOKEN, _trace_text(trace))
-        self.assertTrue(trace.final_observation["url"].startswith("https://app.example.com/cb"))
+        self.assertTrue(trace.scrubbed().final_observation["url"].startswith("https://app.example.com/cb"))
 
     def test_free_text_is_scrubbed_by_the_pii_scrubber(self) -> None:
         trace = TraceEnvelope.from_agent_result(
@@ -103,6 +106,63 @@ class TraceRedactionTests(unittest.TestCase):
             )
 
         self.assertNotIn("credential_free", candidate.envelope["metadata"])
+
+
+def _contract(**extra: object) -> TaskContract:
+    return TaskContract(
+        id="pii-verdict",
+        goal="Open the page.",
+        postconditions=[Postcondition(kind="url_contains", value="example.com/done")],
+        budget=Budget(max_attempts=1, max_steps=2),
+        **extra,
+    )
+
+
+def _observation() -> dict:
+    return {
+        "url": "https://example.com/done",
+        "text": "done",
+        "accessibility_outline": {"headings": [f"Signed in as {EMAIL}"]},
+    }
+
+
+class VerificationSeesTheOriginalTests(unittest.IsolatedAsyncioTestCase):
+    """Scrubbing is for what is stored; the verdict must not depend on it."""
+
+    async def test_a_forbidden_state_on_an_email_still_fails_the_run(self) -> None:
+        contract = _contract(forbidden_states=[ForbiddenState(kind="text_contains", value=EMAIL)])
+        with tempfile.TemporaryDirectory() as tmp:
+            record = await HarnessService(tmp).start_convergence(contract, mock_final_observation=_observation())
+
+        self.assertEqual(record.status, "unconverged")
+        self.assertTrue(record.attempts[0].verification.forbidden_state_hits)
+
+    async def test_a_required_dom_contains_on_an_email_still_passes(self) -> None:
+        contract = TaskContract(
+            id="pii-dom",
+            goal="Open the page.",
+            postconditions=[Postcondition(kind="dom_contains", value=EMAIL)],
+            budget=Budget(max_attempts=1, max_steps=2),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            record = await HarnessService(tmp).start_convergence(contract, mock_final_observation=_observation())
+
+        self.assertEqual(record.status, "converged")
+
+    async def test_what_is_stored_holds_no_email(self) -> None:
+        contract = _contract()
+        with tempfile.TemporaryDirectory() as tmp:
+            record = await HarnessService(tmp).start_convergence(contract, mock_final_observation=_observation())
+
+            self.assertEqual(record.status, "converged")
+            stored = [path for path in Path(tmp).rglob("*") if path.is_file() and path.suffix != ".sqlite3"]
+            self.assertTrue(any(path.name == "trace.json" for path in stored))
+            self.assertIsNotNone(record.candidate)
+            self.assertTrue(any(path.name == "candidate.json" for path in stored))
+            for path in stored:
+                self.assertNotIn(EMAIL, path.read_text(encoding="utf-8"), f"{path.name} holds the email")
+            trace = (Path(tmp) / "runs" / record.id / "attempt-1" / "trace.json").read_text(encoding="utf-8")
+            self.assertIn("[REDACTED]", trace)
 
 
 if __name__ == "__main__":

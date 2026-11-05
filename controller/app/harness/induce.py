@@ -67,6 +67,8 @@ class SkillInducer:
         model_tiers: dict[str, str] | None = None,
         owner: str | None = None,
     ) -> SkillCandidate:
+        # The candidate stores the trace, so it stores the scrubbed one; the hash must match what is on disk.
+        trace = trace.scrubbed()
         skill_id = _skill_id(contract, owner)
         staging_root = self.staging_root.resolve()
         target_dir = (self.staging_root / skill_id).resolve()

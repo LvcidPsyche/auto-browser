@@ -108,11 +108,28 @@ class TraceEnvelope(BaseModel):
             previous_hash = event.entry_hash
         return True
 
+    def scrubbed(self) -> "TraceEnvelope":
+        """A copy that is safe to store: PII and URL tokens scrubbed from every string.
+
+        The envelope the recorder returns keeps its observation, network entries and extracted data as the
+        page gave them (secret-named keys aside), because the verifier checks those: scrubbing before the
+        verdict turned a forbidden email into "[REDACTED]" and let a run pass. Whatever is written to disk
+        or handed to the skill inducer goes through here first. Events are scrubbed when recorded.
+        """
+        return self.model_copy(
+            update={
+                "final_observation": _redact_sensitive(self.final_observation),
+                "network_entries": _redact_sensitive(self.network_entries),
+                "extracted_data": _redact_sensitive(self.extracted_data, scrub=False),
+            },
+            deep=True,
+        )
+
     def write_json(self, path: str | Path) -> Path:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(target.suffix + ".tmp")
-        tmp.write_text(self.model_dump_json(indent=2), encoding="utf-8")
+        tmp.write_text(self.scrubbed().model_dump_json(indent=2), encoding="utf-8")
         tmp.replace(target)
         return target
 
@@ -166,7 +183,7 @@ class TraceEnvelope(BaseModel):
                 "url": final_session.get("current_url") or final_observation.get("url"),
                 "title": final_session.get("title") or final_observation.get("title"),
             }
-        trace.final_observation = _redact_sensitive(final_observation)
+        trace.final_observation = _redact_sensitive(final_observation, scrub=False)
         trace.metadata["source"] = "agent_result"
         return trace
 
@@ -215,8 +232,8 @@ class TraceRecorder:
             run_id=self.run_id,
             contract_hash=self.contract_hash,
             events=events,
-            final_observation=_redact_sensitive(final_observation or {}),
-            network_entries=_redact_sensitive(network_entries or []),
+            final_observation=_redact_sensitive(final_observation or {}, scrub=False),
+            network_entries=_redact_sensitive(network_entries or [], scrub=False),
             # The task's own output: its text is what the verifier checks, so only secret-named keys go.
             extracted_data=_redact_sensitive(extracted_data or {}, scrub=False),
             metadata=metadata or {},

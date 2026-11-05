@@ -39,9 +39,11 @@ All notable changes to auto-browser are documented here.
 - **Harness traces no longer keep typed secrets or URL tokens, and induced skills no longer claim to be
   credential free.** A trace redacted only keys with secret-sounding names, so the text typed into a field marked
   sensitive (or found sensitive when the step ran), tokens in a URL query or fragment, and PII in free text all
-  stayed in `trace.json`. Typed text of a sensitive action is now redacted, and every string in the events, the
-  final observation and network entries goes through the PII scrubber (URLs through the URL scrubber) when
-  `PII_SCRUB_ENABLED` is on. `extracted_data`, the task's own output, is not text-scrubbed. A staged skill
+  stayed in `trace.json`. Typed text of a sensitive action is now redacted, and every string in the events, and in
+  the final observation and network entries as they are stored (`trace.json` and the staged skill candidate), goes
+  through the PII scrubber (URLs through the URL scrubber) when `PII_SCRUB_ENABLED` is on. The harness verifier
+  still checks the original observation, so a forbidden email or a required `dom_contains` gives the same verdict
+  as before. `extracted_data`, the task's own output, is not text-scrubbed. A staged skill
   candidate's signed metadata used to say `credential_free: true` for every candidate; nothing computed it, so the
   field is removed.
 - **Confidential sessions now keep restricted evidence for every action, not only for the session record.** The
