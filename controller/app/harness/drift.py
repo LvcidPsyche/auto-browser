@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .contracts import TaskContract
+from .contracts import Postcondition, TaskContract
 from .register import SkillStagingRegistry
 from .trace import TraceEnvelope, _scrub_string, _scrub_text, _scrub_url, _scrub_url_and_path, _scrub_urls_only
 from .verifier.base import VerificationResult, VerifierAdapter
@@ -144,12 +144,21 @@ def _expecting_scrubbed_text(contract: TaskContract) -> TaskContract:
     copy handed to the verifier changes; the contract hash is taken from the original.
     """
     postconditions = [
-        item.model_copy(update={"value": _STORED_TEXT_SCRUBBERS[item.kind](item.value)})
+        item.model_copy(update={"value": _scrubbed_or_as_written(item)})
         if item.kind in _STORED_TEXT_SCRUBBERS
         else item
         for item in contract.postconditions
     ]
     return contract.model_copy(update={"postconditions": postconditions})
+
+
+def _scrubbed_or_as_written(item: Postcondition) -> str:
+    """The value scrubbed, or as written if a non-empty value scrubbed to nothing.
+
+    "" is in every page, so it would pass the check whatever the page shows. A failed scrubber gives it: scrub_url
+    catches the PII scrubber's error and returns the value's path, which is "" for a `?...` or `#...` value.
+    """
+    return _STORED_TEXT_SCRUBBERS[item.kind](item.value) or item.value
 
 
 def _artifact_path(candidate_dir: Path, name: str) -> Path:
