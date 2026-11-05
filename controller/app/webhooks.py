@@ -32,6 +32,7 @@ from .version import __version__
 logger = logging.getLogger(__name__)
 
 _client: httpx.AsyncClient | None = None
+_direct_client: httpx.AsyncClient | None = None
 _DISALLOWED_WEBHOOK_HOSTS = {
     "localhost",
     "localhost.localdomain",
@@ -62,9 +63,10 @@ def _loggable(webhook_url: str) -> str:
 
 @dataclass(frozen=True)
 class _Target:
-    url: str
-    headers: dict[str, str] = field(default_factory=dict)
-    extensions: dict[str, str] = field(default_factory=dict)
+    url: str  # as written: what an IP literal, or a name sent through a proxy, is posted to
+    pinned_url: str | None = None  # the same URL aimed at the checked address (None for an IP literal)
+    headers: dict[str, str] = field(default_factory=dict)  # the pinned request's Host
+    extensions: dict[str, str] = field(default_factory=dict)  # the pinned request's TLS server name
 
 
 async def _resolve_host(host: str, port: int) -> list[str]:
@@ -75,12 +77,23 @@ async def _resolve_host(host: str, port: int) -> list[str]:
     return list(dict.fromkeys(info[4][0] for info in infos))
 
 
-async def _pinned_target(webhook_url: str, *, allow_private: bool) -> _Target | None:
+def _env_proxy_applies(url: str) -> bool:
+    """Whether httpx sends `url` through a proxy from the environment (HTTP(S)_PROXY or ALL_PROXY, less NO_PROXY).
+
+    Asked of the client that sends a request by name, so the answer is httpx's own routing for that URL; httpx 0.28
+    has no public call for it.
+    """
+    client = get_client()
+    return client._transport_for_url(httpx.URL(url)) is not client._transport
+
+
+async def _checked_target(webhook_url: str, *, allow_private: bool) -> _Target | None:
     """Where to send the request, or None (after a warning) when the target is refused.
 
-    The host is read as a browser reads it (numeric spellings of loopback are refused), resolved here, every
-    answer must be a public address, and the request goes to the first one with the original name kept in the
-    Host header and the TLS server name, so a second lookup cannot return a different address.
+    The host is read as a browser reads it (numeric spellings of loopback are refused), resolved here, and every
+    answer must be a public address. With no proxy the request goes to the first answer (pinned_url), with the
+    original name kept in the Host header and the TLS server name, so a second lookup cannot return a different
+    address; dispatch_approval_event decides that.
     """
     label = _loggable(webhook_url)
     try:
@@ -120,14 +133,25 @@ async def _pinned_target(webhook_url: str, *, allow_private: bool) -> _Target | 
     pinned_host = f"[{pinned}]" if ":" in pinned else pinned
     netloc = (f"{userinfo}@" if userinfo else "") + pinned_host + (f":{port}" if port is not None else "")
     return _Target(
-        url=parsed._replace(netloc=netloc).geturl(),
+        url=webhook_url,
+        pinned_url=parsed._replace(netloc=netloc).geturl(),
         headers={"Host": authority},
         extensions={"sni_hostname": host} if parsed.scheme == "https" else {},
     )
 
 
-def get_client() -> httpx.AsyncClient:
-    global _client
+def get_client(*, direct: bool = False) -> httpx.AsyncClient:
+    """The client for a request sent by name, which takes its proxies from the environment; or, `direct`, the one for
+    a request pinned to a checked address, which never uses a proxy (NO_PROXY spares the name, not the address).
+
+    The direct client's transport of its own turns httpx's proxies from the environment off; that transport still
+    reads SSL_CERT_FILE and SSL_CERT_DIR, as the other client does.
+    """
+    global _client, _direct_client
+    if direct:
+        if _direct_client is None or _direct_client.is_closed:
+            _direct_client = httpx.AsyncClient(timeout=10.0, transport=httpx.AsyncHTTPTransport())
+        return _direct_client
     if _client is None or _client.is_closed:
         _client = httpx.AsyncClient(timeout=10.0)
     return _client
@@ -146,7 +170,7 @@ async def dispatch_approval_event(
     allow_private_targets: bool = False,
 ) -> None:
     """Fire-and-forget: POST approval event to webhook_url."""
-    target = await _pinned_target(webhook_url, allow_private=allow_private_targets)
+    target = await _checked_target(webhook_url, allow_private=allow_private_targets)
     if target is None:
         return
 
@@ -173,13 +197,20 @@ async def dispatch_approval_event(
     headers: dict[str, str] = {
         "Content-Type": "application/json",
         "User-Agent": f"auto-browser/{__version__}",
-        **target.headers,
     }
     if webhook_secret:
         headers["X-Webhook-Signature"] = _sign(raw, webhook_secret)
 
     try:
-        resp = await get_client().post(target.url, content=raw, headers=headers, extensions=target.extensions)
+        if target.pinned_url is None or _env_proxy_applies(target.url):
+            # An IP literal goes as written. Through a proxy from the environment the request goes by name: a CONNECT
+            # tunnel takes its TLS name from the URL and NO_PROXY is written by name, so the proxy then owns
+            # resolution (the answers were still checked above).
+            resp = await get_client().post(target.url, content=raw, headers=headers)
+        else:
+            resp = await get_client(direct=True).post(
+                target.pinned_url, content=raw, headers={**headers, **target.headers}, extensions=target.extensions
+            )
         if resp.status_code >= 400:
             logger.warning("webhook %s returned %d", _loggable(webhook_url), resp.status_code)
     except Exception as exc:

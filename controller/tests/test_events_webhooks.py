@@ -70,10 +70,15 @@ class EventsTests(unittest.TestCase):
 
 class WebhookTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        # The webhook target is resolved before it is posted to: hooks.example.com stands for a public address.
-        resolver = patch.object(webhooks, "_resolve_host", AsyncMock(return_value=["93.184.216.34"]))
-        resolver.start()
-        self.addCleanup(resolver.stop)
+        # The webhook target is resolved before it is posted to: hooks.example.com stands for a public address,
+        # reached with no proxy (test_webhooks.WebhookWireTests covers one).
+        for name, value in (
+            ("_resolve_host", AsyncMock(return_value=["93.184.216.34"])),
+            ("_env_proxy_applies", Mock(return_value=False)),
+        ):
+            patcher = patch.object(webhooks, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     async def test_dispatch_posts_signed_approval_event_and_ignores_failures(self) -> None:
         approval = ApprovalRecord(

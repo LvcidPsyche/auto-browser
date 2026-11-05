@@ -7,14 +7,21 @@ The old check read an IP literal only: 0x7f.1 and 2130706433 passed it, and a na
 from __future__ import annotations
 
 import json
+import os
 import socket
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
+
+import httpcore
 
 from app import webhooks
 from app.models import ApprovalRecord, BrowserActionDecision
 
 _PUBLIC = "93.184.216.34"
+_PROXY = "http://proxy.example:3128"
+_OK = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+_TUNNEL_OPEN = b"HTTP/1.1 200 Connection established\r\n\r\n"
+_CLIENTS = ("_client", "_direct_client")
 
 
 def _approval() -> ApprovalRecord:
@@ -34,9 +41,11 @@ class WebhookTargetTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.client = Mock()
         self.client.post = AsyncMock(return_value=Mock(status_code=200))
-        patcher = patch.object(webhooks, "get_client", return_value=self.client)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # No proxy here (WebhookWireTests covers one): both clients are this mock.
+        for name, value in (("get_client", self.client), ("_env_proxy_applies", False)):
+            patcher = patch.object(webhooks, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def _resolver(self, *addresses: str) -> AsyncMock:
         mock = AsyncMock(return_value=list(addresses))
@@ -139,6 +148,111 @@ class WebhookTargetTests(unittest.IsolatedAsyncioTestCase):
         await self._send("https://hooks.example.com/approval")
         body = json.loads(self.client.post.await_args.kwargs["content"])
         self.assertEqual(body["approval_id"], "approval-w")
+
+
+class _Wire:
+    """What reaches the network: httpx and httpcore run for real over a fake socket layer (httpcore's mock stream)."""
+
+    def __init__(self, replies: dict[str, list[bytes] | Exception]) -> None:
+        self.connects: list[tuple[str, int]] = []
+        self.tls_names: list[str | None] = []
+        self.sent: list[bytes] = []
+        wire = self
+
+        class Stream(httpcore.AsyncMockStream):
+            async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+                wire.sent.append(buffer)
+
+            async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+                wire.tls_names.append(server_hostname)
+                return self
+
+        async def connect_tcp(_backend, host, port, timeout=None, local_address=None, socket_options=None):
+            self.connects.append((host, port))
+            reply = replies.get(host, httpcore.ConnectError(f"no route to {host}"))
+            if isinstance(reply, Exception):
+                raise reply
+            return Stream(list(reply))
+
+        self.connect_tcp = connect_tcp
+
+    def request_head(self, method: bytes = b"POST") -> tuple[bytes, dict[bytes, bytes]]:
+        head = next(chunk for chunk in self.sent if chunk.startswith(method + b" "))
+        request_line, *lines = head.split(b"\r\n\r\n", 1)[0].split(b"\r\n")
+        fields = (line.partition(b":") for line in lines)
+        return request_line, {name.strip().lower(): value.strip() for name, _, value in fields}
+
+
+class WebhookWireTests(unittest.IsolatedAsyncioTestCase):
+    """STORE-20 behind a proxy: the asserts see the TCP connects, the CONNECT line and the TLS name."""
+
+    async def asyncSetUp(self) -> None:
+        for name in _CLIENTS:  # fresh clients, built under each test's environment
+            self.addCleanup(setattr, webhooks, name, getattr(webhooks, name, None))
+            setattr(webhooks, name, None)
+
+    async def asyncTearDown(self) -> None:
+        for name in _CLIENTS:
+            client = getattr(webhooks, name, None)
+            if client is not None:
+                await client.aclose()
+
+    async def _dispatch(self, env: dict[str, str], replies: dict, *answers: str, **kwargs) -> _Wire:
+        wire = _Wire(replies)
+        self.resolver = AsyncMock(return_value=list(answers))
+        # Only the proxy variables go: OpenSSL on Windows cannot build a context in an empty environment.
+        kept = {name: value for name, value in os.environ.items() if not name.lower().endswith("_proxy")}
+        with (
+            patch.dict(os.environ, {**kept, **env}, clear=True),
+            patch.object(httpcore.AnyIOBackend, "connect_tcp", wire.connect_tcp),
+            patch.object(webhooks, "_resolve_host", self.resolver),
+            patch.object(webhooks.logger, "warning") as self.warnings,
+        ):
+            await webhooks.dispatch_approval_event(
+                _approval(), webhook_url="https://hooks.example.com:8443/approval?x=1", **kwargs
+            )
+        return wire
+
+    async def test_without_a_proxy_the_connection_goes_to_the_checked_address_with_the_name_for_tls(self) -> None:
+        wire = await self._dispatch({}, {_PUBLIC: [_OK]}, _PUBLIC)
+
+        self.assertEqual(wire.connects, [(_PUBLIC, 8443)])
+        self.assertEqual(wire.tls_names, ["hooks.example.com"])
+        self.assertEqual(wire.request_head()[1][b"host"], b"hooks.example.com:8443")
+
+    async def test_through_a_proxy_from_the_environment_the_request_goes_by_name(self) -> None:
+        wire = await self._dispatch({"HTTPS_PROXY": _PROXY}, {"proxy.example": [_TUNNEL_OPEN, _OK]}, _PUBLIC)
+
+        self.resolver.assert_awaited()  # the answers are still checked before anything is sent
+        self.assertEqual(wire.connects, [("proxy.example", 3128)])
+        self.assertEqual(wire.request_head(b"CONNECT")[0], b"CONNECT hooks.example.com:8443 HTTP/1.1")
+        self.assertEqual(wire.tls_names, ["hooks.example.com"])
+        request_line, headers = wire.request_head()
+        self.assertEqual(request_line, b"POST /approval?x=1 HTTP/1.1")
+        self.assertEqual(headers[b"host"], b"hooks.example.com:8443")
+
+    async def test_no_proxy_naming_the_host_keeps_the_direct_pinned_connection(self) -> None:
+        env = {"HTTPS_PROXY": _PROXY, "NO_PROXY": "hooks.example.com"}
+        wire = await self._dispatch(env, {_PUBLIC: [_OK]}, _PUBLIC)
+
+        self.assertEqual(wire.connects, [(_PUBLIC, 8443)])
+        self.assertEqual(wire.tls_names, ["hooks.example.com"])
+
+    async def test_a_private_answer_is_refused_before_any_proxy_is_used(self) -> None:
+        wire = await self._dispatch({"HTTPS_PROXY": _PROXY}, {"proxy.example": [_TUNNEL_OPEN, _OK]}, "10.0.0.5")
+
+        self.resolver.assert_awaited()
+        self.assertEqual(wire.connects, [])
+
+    async def test_a_proxy_httpx_cannot_use_is_logged_by_type_and_never_raised(self) -> None:
+        # Without socksio, httpx raises while it builds a client for a socks5:// proxy; with it, the fake socket
+        # refuses the connect. Either way the dispatch logs the error type, as for a failed post, and returns: the
+        # proxy URL, which can carry credentials, is not logged.
+        await self._dispatch({"ALL_PROXY": "socks5://user:pw-in-proxy@127.0.0.1:1080"}, {}, _PUBLIC)
+
+        logged = [call.args for call in self.warnings.call_args_list]
+        self.assertTrue(any(args[0] == "webhook dispatch to %s failed: %s" for args in logged), logged)
+        self.assertNotIn("pw-in-proxy", repr(logged))
 
 
 if __name__ == "__main__":
