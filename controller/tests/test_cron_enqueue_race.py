@@ -66,8 +66,19 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
         self.cron = CronService(root / "crons.json", job_queue=self.queue, manager=self.manager)
         self.job = await self.cron.create_job(name="race", goal="run", webhook_enabled=True)
 
+    def _statuses_at_close(self) -> dict[str, list[str]]:
+        """As each session is closed, record the stored status of the jobs that ran in it."""
+        seen: dict[str, list[str]] = {}
+
+        async def close_session(session_id: str) -> None:
+            seen[session_id] = [record.status for record in await self.queue.store.list(session_id=session_id)]
+
+        self.manager.close_session.side_effect = close_session
+        return seen
+
     async def test_a_cancellation_after_the_job_was_queued_withdraws_it_before_closing_the_session(self) -> None:
         await self.queue.store.startup()  # no workers: a queued job stays queued
+        at_close = self._statuses_at_close()
         task = asyncio.create_task(self.cron.trigger_job(self.job["id"]))
         await asyncio.wait_for(self.audit.reached.wait(), timeout=5)
         self.assertEqual(len(await self.queue.store.list(status="queued")), 1)
@@ -79,6 +90,7 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.queue.store.list(status="queued"), [], "a runnable job is left on a closed session")
         self.assertEqual([record.status for record in await self.queue.store.list()], ["cancelled"])
         self.manager.close_session.assert_awaited_once_with("session-1")
+        self.assertEqual(at_close, {"session-1": ["cancelled"]}, "the session closed before its job was withdrawn")
         self.assertEqual(self.cron._active_runs, {})
 
     async def test_a_job_that_finishes_before_enqueue_returns_still_releases_the_slot(self) -> None:
@@ -108,8 +120,10 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
         job_id = self.job["id"]
         self.manager.create_session.side_effect = [{"id": "session-1"}, {"id": "session-2"}]
         newer: list[asyncio.Task] = []
+        at_close: dict[str, list[str]] = {}
 
         async def close_session(session_id: str) -> None:
+            at_close[session_id] = [record.status for record in await self.queue.store.list(session_id=session_id)]
             if session_id == "session-1" and not newer:
                 # A newer trigger takes the slot as soon as this run has given it up.
                 newer.append(asyncio.create_task(self.cron.trigger_job(job_id)))
@@ -131,6 +145,7 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.cron._active_runs, {job_id: "session-2"}, "the newer trigger's slot was freed")
         self.manager.close_session.assert_awaited_once_with("session-1")
+        self.assertEqual(at_close["session-1"], ["cancelled"], "the session closed before its job was withdrawn")
 
     async def _cancel_while_queuing(self) -> str:
         """Start a trigger, cancel it while its job is queued (no workers), return the job id once it has raised."""
