@@ -93,6 +93,10 @@ class Budget(HarnessModel):
     max_usd: float = Field(default=5.0, ge=0.0, le=100000.0)
 
 
+# A run id names a directory under the harness runs root: no separators, no leading dot, so no "..".
+RUN_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$"
+
+
 class TaskContract(HarnessModel):
     id: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.-]+$")
     goal: str = Field(min_length=1, max_length=5000)

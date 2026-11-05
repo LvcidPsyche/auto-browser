@@ -12,7 +12,7 @@ from typing import Any, Literal
 from pydantic import Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
-from .harness.contracts import TaskContract
+from .harness.contracts import RUN_ID_PATTERN, TaskContract
 from .models import (
     AGENT_RUN_MAX_STEPS,
     CDP_URL_SCHEMES,
@@ -130,6 +130,7 @@ class HarnessGetStatusInput(StrictInputModel):
     run_id: str = Field(
         min_length=1,
         max_length=120,
+        pattern=RUN_ID_PATTERN,
         description=(
             "ID of the convergence run, as returned by harness.start_convergence or listed by harness.list_runs."
         ),

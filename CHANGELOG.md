@@ -11,6 +11,8 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- A harness `run_id` must now look like the ids the harness generates (letters, digits, `.`, `_`, `-`; no leading dot), at
+  the tool boundary and again in the run store, so an id cannot name a directory outside the harness runs root.
 - `provider_model` on the agent step and run requests, and the model the Codex host bridge passes to `codex --model`,
   must now match one pattern (letters, digits, `.`, `_`, `:`, `/`, `-`; 1 to 128 characters; starting with a letter or
   digit; no `..`). The bridge answers 400 otherwise, so a model can no longer be read as a CLI flag. The Gemini adapter

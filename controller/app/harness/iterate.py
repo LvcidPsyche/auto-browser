@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import Any, Callable
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from ..session_ownership import may_use, verified_operator
-from .contracts import TaskContract
+from .contracts import RUN_ID_PATTERN, TaskContract
 from .converge import ConvergenceDecision, ConvergenceDetector
 from .drift import SkillDriftMonitor
 from .induce import SkillCandidate, SkillInducer
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 # Validation context key for a run record read back from run.json.
 _STORED_RECORD = "stored_record"
+_RUN_ID_RE = re.compile(RUN_ID_PATTERN)
 
 
 class HarnessAttempt(BaseModel):
@@ -90,6 +92,8 @@ class HarnessRunStore:
         self.staging_root.mkdir(parents=True, exist_ok=True)
 
     def run_dir(self, run_id: str) -> Path:
+        if not _RUN_ID_RE.fullmatch(run_id):
+            raise ValueError(f"invalid harness run id: {run_id!r}")
         return self.runs_root / run_id
 
     def save(self, record: HarnessRunRecord) -> None:
@@ -101,6 +105,8 @@ class HarnessRunStore:
         tmp.replace(target)
 
     def get(self, run_id: str) -> HarnessRunRecord:
+        if not _RUN_ID_RE.fullmatch(run_id):
+            raise KeyError(run_id)
         path = self.run_dir(run_id) / "run.json"
         if not path.exists():
             raise KeyError(run_id)
