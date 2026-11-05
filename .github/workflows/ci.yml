@@ -45,6 +45,9 @@ jobs:
         run: python scripts/fixture_eval.py
 
   host-tests:
+    # A fixed name: the include value below would otherwise make the 3.11 check "host-tests (3.11, true)", and
+    # branch protection requires "host-tests (3.11)".
+    name: host-tests (${{ matrix.python-version }})
     timeout-minutes: 45
     needs: lint
     runs-on: ubuntu-latest

@@ -110,3 +110,14 @@ def test_ci_installs_chromium_on_the_leg_that_requires_it() -> None:
     switch = re.search(r"AUTO_BROWSER_REQUIRE_CHROMIUM: (.+)\n", body)
     assert switch and switch.group(1).strip() == "${{ matrix.real_browser && '1' || '' }}"
     assert "python-version == " not in body
+
+
+@pytest.mark.skipif(not CI_WORKFLOW.is_file(), reason="repo checkout not available (controller image)")
+def test_ci_keeps_the_required_check_names_of_host_tests() -> None:
+    """An `include` value joins the default job name ("host-tests (3.11, true)"), and branch protection requires
+    "host-tests (3.11)" and "host-tests (3.14)": the job names itself from the Python version only. (The other
+    matrix job, langchain-tests, has no include, so its default name is already "langchain-tests (<version>)".)"""
+    text = CI_WORKFLOW.read_text(encoding="utf-8")
+    job = re.search(r"^  host-tests:\n(.*?)^  [a-z][a-z-]*:\n", text, flags=re.M | re.S)
+    assert job, "no host-tests job in ci.yml"
+    assert "    name: host-tests (${{ matrix.python-version }})\n" in job.group(1)
