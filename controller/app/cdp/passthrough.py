@@ -84,6 +84,8 @@ class CDPPassthrough:
         # The page the CDP session is attached to; CDP sessions are per page.
         self.page = page
         self._agents_lock = asyncio.Lock()
+        # Disables running after a cancelled read; held here so the tasks are not collected mid-run.
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     async def detach(self) -> None:
         try:
@@ -96,20 +98,38 @@ class CDPPassthrough:
         """
         The DOM and CSS agents, on for the length of one read. CSS.* calls fail until CSS.enable has run, and CSS.enable
         needs DOM.enable first. Left on, the CSS agent streams stylesheet events for the life of this cached session,
-        so both are switched off again, and a switch that fails on a closed page is only logged. One read at a time:
-        a second read's disable would turn the agents off under the first.
+        so it is switched off again, and a switch that fails on a closed page is only logged. The DOM agent is left as
+        DOM.getDocument leaves it: DOM.disable discards every node id the client holds, among them the node_id a read
+        returns and the ones a raw chain still means to use. One read at a time: a second read's disable would turn the
+        CSS agent off under the first.
+
+        A cancelled read (the route's time limit) does not wait for the disable, which can take as long as a page that
+        does not answer: the disable runs in the background, which also keeps the lock until it is done.
         """
-        async with self._agents_lock:
+        await self._agents_lock.acquire()
+        handed_off = False
+        try:
             try:
                 await self._send_bounded("DOM.enable")
                 await self._send_bounded("CSS.enable")
                 yield
-            finally:
-                for method in ("CSS.disable", "DOM.disable"):
-                    try:
-                        await self._send_bounded(method)
-                    except Exception as exc:
-                        logger.debug("cdp %s failed (page likely closed): %s", method, exc)
+            except asyncio.CancelledError:
+                handed_off = True
+                task = asyncio.get_running_loop().create_task(self._disable_css_then_unlock())
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+                raise
+        finally:
+            if not handed_off:
+                await self._disable_css_then_unlock()
+
+    async def _disable_css_then_unlock(self) -> None:
+        try:
+            await self._send_bounded("CSS.disable")
+        except Exception as exc:
+            logger.debug("cdp CSS.disable failed (page likely closed): %s", exc)
+        finally:
+            self._agents_lock.release()
 
     async def _send_bounded(self, method: str) -> None:
         await asyncio.wait_for(self._cdp.send(method), CDP_AGENT_TIMEOUT_SECONDS)
