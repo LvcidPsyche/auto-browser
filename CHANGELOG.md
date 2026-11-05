@@ -204,7 +204,8 @@ All notable changes to auto-browser are documented here.
   key events, except that a newline, carriage return or tab in it is still pressed as Enter or Tab, so a text ending in
   a newline still submits a form. A keystroke or the final insert that the page does not acknowledge now fails the
   action with the retryable `typing_timeout` (after the time left, and at least 2 seconds) instead of holding the
-  session until the browser answers. A short text keeps its usual pace.
+  session until the browser answers. Once the 20 seconds are used up, the rest of the text shares one more 2 seconds,
+  however many newlines or tabs it holds. A short text keeps its usual pace.
 
 - **Ordinary pages are no longer mistaken for bot challenges.** After each action the controller looked for words such as
   "captcha", "security check" and "access denied" anywhere in the URL, the title and the first 500 characters of the
