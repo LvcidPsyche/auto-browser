@@ -6,8 +6,8 @@
 # after the first = is the value, kept intact. Quoting follows docker compose's .env
 # reader where that is safe:
 #   'single'  literal; only a backslash before the quote is an escape (see __lre_parse_quoted)
-#   "double"  escapes as compose-go's expandEscapes: \" \\ \$ \a \b \f \n \r \t \v and \0 plus three octal
-#             digits (any other backslash stays as written)
+#   "double"  escapes as compose-go's expandEscapes: \" \\ \$ \a \b \f \n \r \t \v (any other backslash stays as
+#             written; a value holding \0 is skipped, see __lre_parse_quoted)
 #   unquoted  ends at a whitespace-preceded # comment; `KEY=   # note` is empty
 # Text after a closing quote (other than a # comment), a quote that spans several lines (the lines up to the
 # closing quote are skipped too), an escape bash cannot hold, and any line that is not KEY=VALUE are skipped
@@ -54,12 +54,13 @@ __lre_refused() {
 #   0  a value, followed by nothing or a # comment
 #   1  text after the closing quote
 #   2  no closing quote
-#   3  an escape that bash cannot hold the way compose reads it (a NUL, or a byte above 0177)
+#   3  a double-quoted \0, which compose-go reads in a way not worth copying (it rewrites \0 to a backslash first
+#      and returns that text when the octal then fails to decode, so "a\012b" is a\12b there)
 # In both kinds of quote a backslash before the quote character is that character, and a backslash pair is
 # \\ in double quotes and stays two backslashes in single quotes. Only double quotes expand: \a \b \f \n \r \t \v
-# \$ (a literal $), \" and \\, and \0 plus three octal digits. A backslash before any other character is kept.
+# \$ (a literal $), \" and \\. A backslash before any other character is kept.
 __lre_parse_quoted() {
-  local __lre_text="$1" __lre_quote="${1:0:1}" __lre_i __lre_c __lre_n __lre_tail __lre_oct
+  local __lre_text="$1" __lre_quote="${1:0:1}" __lre_i __lre_c __lre_n __lre_tail
   __lre_out=""
   for ((__lre_i = 1; __lre_i < ${#__lre_text}; __lre_i++)); do
     __lre_c="${__lre_text:__lre_i:1}"
@@ -91,18 +92,9 @@ __lre_parse_quoted() {
           f) __lre_out+=$'\f'; ((__lre_i++)); continue ;;
           v) __lre_out+=$'\v'; ((__lre_i++)); continue ;;
           '$') __lre_out+='$'; ((__lre_i++)); continue ;;
-          0)
-            __lre_oct="${__lre_text:__lre_i+2:3}"
-            case "$__lre_oct" in
-              000 | [23][0-7][0-7]) return 3 ;;
-              [01][0-7][0-7])
-                printf -v __lre_n '%b' "\\0${__lre_oct}"
-                __lre_out+="$__lre_n"
-                ((__lre_i += 4))
-                continue
-                ;;
-            esac
-            ;;
+          # compose-go rewrites \0 before decoding and returns the rewritten text when decoding fails, so which
+          # \0 forms decode is not worth guessing: every one is left to compose.
+          0) return 3 ;;
         esac
       fi
       __lre_out+="\\"

@@ -63,9 +63,9 @@ All notable changes to auto-browser are documented here.
   smoke scripts do no `$VAR` or `${VAR}` expansion, so `DATA=${PWD}/data` stays that text. Plain `docker compose`
   expands `${PWD}` when it reads `.env`, but under `make up` (`compose_local.sh`) the scripts' literal value is
   exported and wins, for every `${VAR}` in the compose files. Double-quoted values take the escapes of compose-go's
-  reader (`\"`, `\\`, `\$`, `\a`, `\b`, `\f`, `\n`, `\r`, `\t`, `\v` and `\0` plus three octal digits for an ASCII
-  character); a single-quoted value keeps its backslashes, except that `\'` is a quote. A value with text after its
-  closing quote, an escape bash cannot hold (a NUL or a byte above ASCII), or a quote that spans several lines (a
+  reader (`\"`, `\\`, `\$`, `\a`, `\b`, `\f`, `\n`, `\r`, `\t` and `\v`); a single-quoted value keeps its backslashes,
+  except that `\'` is a quote. A value with text after its closing quote, a `\0` escape inside double quotes (compose
+  reads it in a way not worth copying), or a quote that spans several lines (a
   PEM; its lines are skipped up to the closing quote) is not exported, with one warning naming the line number, and
   `docker compose` reads that key from `.env` itself. The scripts also refuse, with a warning naming the key, these `.env` keys, which
   change how the shell, the loader or the programs the scripts start behave: `BASH_ENV`, `ENV`, `BASH_FUNC_*`,

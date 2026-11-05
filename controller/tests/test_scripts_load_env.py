@@ -119,11 +119,10 @@ class LoadRepoEnvTests(unittest.TestCase):
 
     def test_double_quote_escapes_match_compose_go(self) -> None:
         # compose-go dotenv/parser.go: escapeSeqRegex = `\\(?:[abcfnrtv$"\\]|0\d{0,3})`, applied by expandEscapes.
-        # \$ is a literal $ (compose turns it into $$), \0 plus three octal digits is that character, and a backslash
-        # before any other character stays as written.
+        # \$ is a literal $ (compose turns it into $$), and a backslash before any other character stays as written.
+        # \0 is not decoded here: see the next test.
         exported, _, stderr = self.load(
-            'T="a\\tb"\nA="a\\ab"\nB="a\\bb"\nF="a\\fb"\nV="a\\vb"\nD="a\\$b"\nO="a\\0101b"\nQ="a\\qb"\n'
-            'C="a\\cb"\nSHORT="a\\012b"\nBAD="a\\0789b"\nBIG="a\\0400b"\nSQ="a\\\'b"\n'
+            'T="a\\tb"\nA="a\\ab"\nB="a\\bb"\nF="a\\fb"\nV="a\\vb"\nD="a\\$b"\nQ="a\\qb"\nC="a\\cb"\nSQ="a\\\'b"\n'
         )
 
         self.assertEqual(exported["T"], "a\tb")
@@ -132,14 +131,25 @@ class LoadRepoEnvTests(unittest.TestCase):
         self.assertEqual(exported["F"], "a\x0cb")
         self.assertEqual(exported["V"], "a\x0bb")
         self.assertEqual(exported["D"], "a$b")
-        self.assertEqual(exported["O"], "aAb")
         self.assertEqual(exported["Q"], "a\\qb")
         self.assertEqual(exported["C"], "a\\cb")
-        self.assertEqual(exported["SHORT"], "a\\012b")  # \0 needs three digits after it
-        self.assertEqual(exported["BAD"], "a\\0789b")  # 8 and 9 are not octal digits
-        self.assertEqual(exported["BIG"], "a\\0400b")  # above 255: Go's UnquoteChar refuses it
         self.assertEqual(exported["SQ"], "a\\'b")
         self.assertEqual(stderr, "")
+
+    def test_a_double_quoted_zero_escape_is_skipped_with_a_warning(self) -> None:
+        # compose-go replaces `\0` with a backslash before decoding and returns that text when decoding fails, so
+        # "a\012b" is a\12b there. The loader does not guess which cases decode: it leaves every \0 to compose.
+        exported, _, stderr = self.load(
+            'OCT="a\\0101b"\nSHORT="a\\012b"\nBAD="a\\0789b"\nBIG="a\\0400b"\nBARE="pa\\0ss"\nSQ=\'a\\0b\'\nOK=1\n'
+        )
+
+        for key in ("OCT", "SHORT", "BAD", "BIG", "BARE"):
+            self.assertNotIn(key, exported)
+        self.assertEqual(exported["SQ"], "a\\0b")  # single quotes expand nothing
+        self.assertEqual(exported["OK"], "1")
+        for line in (":1:", ":2:", ":3:", ":4:", ":5:"):
+            self.assertIn(line, stderr)
+        self.assertNotIn("pa", stderr)
 
     def test_an_escape_the_loader_cannot_hold_is_skipped_with_a_warning(self) -> None:
         # \0000 is a NUL and \0200 a byte above ASCII, which compose-go turns into a two-byte rune: bash cannot
