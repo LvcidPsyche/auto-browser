@@ -90,7 +90,7 @@ wait_for \
   2
 
 REMOTE_ACCESS_JSON="$(bearer_curl -fsS "${API_BASE_URL}/remote-access")"
-python3 - <<'PY' "${REMOTE_ACCESS_JSON}"
+python3 -I - <<'PY' "${REMOTE_ACCESS_JSON}"
 import json
 import sys
 
@@ -103,7 +103,7 @@ print("remote-access endpoint ok")
 PY
 
 SESSION_JSON="$(bastion_curl "-fsS http://127.0.0.1:18000/sessions -X POST -H 'content-type: application/json' -d '{\"name\":\"smoke\",\"start_url\":\"https://example.com\"}'")"
-SESSION_ID="$(python3 - <<'PY' "${SESSION_JSON}"
+SESSION_ID="$(python3 -I - <<'PY' "${SESSION_JSON}"
 import json
 import sys
 print(json.loads(sys.argv[1])["id"])
@@ -111,7 +111,7 @@ PY
 )"
 
 OBSERVE_JSON="$(bastion_curl "-fsS http://127.0.0.1:18000/sessions/${SESSION_ID}/observe")"
-python3 - <<'PY' "${OBSERVE_JSON}"
+python3 -I - <<'PY' "${OBSERVE_JSON}"
 import json
 import sys
 

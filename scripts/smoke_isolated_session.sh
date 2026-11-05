@@ -42,7 +42,7 @@ trap cleanup EXIT
 wait_for "controller readiness" "curl -fsS ${API_BASE_URL}/readyz" 120 2
 
 SESSION_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions" -X POST -H 'content-type: application/json' -d '{"name":"isolated-smoke","start_url":"https://example.com"}')"
-read -r SESSION_ID CONTAINER_NAME NOVNC_PORT SESSION_NETWORK <<<"$(python3 - <<'PY' "${SESSION_JSON}"
+read -r SESSION_ID CONTAINER_NAME NOVNC_PORT SESSION_NETWORK <<<"$(python3 -I - <<'PY' "${SESSION_JSON}"
 import json
 import sys
 
@@ -87,7 +87,7 @@ sandbox_report() {
 sandbox_report "${CONTAINER_NAME}" "session A"
 
 OBSERVE_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}/observe")"
-python3 - <<'PY' "${OBSERVE_JSON}" "${CONTAINER_NAME}" "${NOVNC_PORT}"
+python3 -I - <<'PY' "${OBSERVE_JSON}" "${CONTAINER_NAME}" "${NOVNC_PORT}"
 import json
 import sys
 
@@ -105,7 +105,7 @@ print("isolated observe ok (no password in the observation)")
 PY
 
 REMOTE_ACCESS_JSON="$(bearer_curl -fsS "${API_BASE_URL}/remote-access?session_id=${SESSION_ID}")"
-python3 - <<'PY' "${REMOTE_ACCESS_JSON}" "${NOVNC_PORT}"
+python3 -I - <<'PY' "${REMOTE_ACCESS_JSON}" "${NOVNC_PORT}"
 import json
 import sys
 
@@ -119,14 +119,14 @@ PY
 
 # NOVNC_PORT is the session's published noVNC port, as the API reported it above.
 # Every isolated container has its own noVNC password, whatever VNC_PASSWORD is.
-python3 "${ROOT_DIR}/scripts/check_vnc_exposure.py" "${CONTAINER_NAME}" "${NOVNC_PORT}" --expect-password
+python3 -I "${ROOT_DIR}/scripts/check_vnc_exposure.py" "${CONTAINER_NAME}" "${NOVNC_PORT}" --expect-password
 
 # Cross-session probe: a second session, B, on its own network. From A's
 # browser container, B's Playwright server and the shared browser-node must be
 # unreachable, by name and by address. The controller joins each network but
 # refuses every request from one with 403.
 B_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions" -X POST -H 'content-type: application/json' -d '{"name":"isolated-smoke-b","start_url":"https://example.com"}')"
-read -r B_SESSION_ID B_CONTAINER_NAME B_NETWORK <<<"$(python3 - <<'PY' "${B_JSON}"
+read -r B_SESSION_ID B_CONTAINER_NAME B_NETWORK <<<"$(python3 -I - <<'PY' "${B_JSON}"
 import json
 import sys
 
@@ -280,7 +280,7 @@ bearer_curl -fsS "${API_BASE_URL}/sessions/${B_SESSION_ID}" -X DELETE >/dev/null
 wait_for "session B network removal" "! docker network inspect '${B_NETWORK}'" 30 1
 
 CLOSE_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}" -X DELETE)"
-python3 - <<'PY' "${CLOSE_JSON}"
+python3 -I - <<'PY' "${CLOSE_JSON}"
 import json
 import sys
 payload = json.loads(sys.argv[1])

@@ -94,7 +94,7 @@ chmod 644 "${SMOKE_KNOWN_HOSTS}"
 wait_for "controller readiness" "curl -fsS ${API_BASE_URL}/readyz" 120 2
 
 SESSION_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions" -X POST -H 'content-type: application/json' -d '{"name":"isolated-tunnel-smoke","start_url":"https://example.com"}')"
-read -r SESSION_ID CONTAINER_NAME REMOTE_PORT REMOTE_URL <<<"$(python3 - <<'PY' "${SESSION_JSON}"
+read -r SESSION_ID CONTAINER_NAME REMOTE_PORT REMOTE_URL <<<"$(python3 -I - <<'PY' "${SESSION_JSON}"
 import json
 import sys
 
@@ -124,7 +124,7 @@ wait_for \
   2
 
 OBSERVE_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}/observe")"
-python3 - <<'PY' "${OBSERVE_JSON}" "${REMOTE_URL}"
+python3 -I - <<'PY' "${OBSERVE_JSON}" "${REMOTE_URL}"
 import json
 import sys
 
@@ -141,7 +141,7 @@ print("isolated tunnel observe ok")
 PY
 
 REMOTE_ACCESS_JSON="$(bearer_curl -fsS "${API_BASE_URL}/remote-access?session_id=${SESSION_ID}")"
-python3 - <<'PY' "${REMOTE_ACCESS_JSON}" "${REMOTE_URL}"
+python3 -I - <<'PY' "${REMOTE_ACCESS_JSON}" "${REMOTE_URL}"
 import json
 import sys
 
@@ -154,7 +154,7 @@ print("isolated tunnel remote-access endpoint ok")
 PY
 
 CLOSE_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}" -X DELETE)"
-python3 - <<'PY' "${CLOSE_JSON}"
+python3 -I - <<'PY' "${CLOSE_JSON}"
 import json
 import sys
 

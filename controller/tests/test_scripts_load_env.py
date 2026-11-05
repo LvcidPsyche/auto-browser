@@ -199,6 +199,63 @@ class LoadRepoEnvTests(unittest.TestCase):
                 self.assertIn(key, stderr)
         self.assertNotIn("poisoned", stderr)
 
+    def test_keys_that_make_a_child_python_perl_node_or_browser_run_code_are_refused(self) -> None:
+        # PYTHONWARNINGS imports any module named in it at startup, and BROWSER is what webbrowser.open() runs;
+        # HOME decides which profile `bash -lc` reads. Each key is loaded alone: FUNCNEST=1 breaks the loader itself.
+        denied = [
+            "PYTHONWARNINGS", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "PYTHONINSPECT", "PYTHONUSERBASE",
+            "BROWSER", "PERL5OPT", "PERL5LIB", "NODE_OPTIONS", "HOME",
+            "POSIXLY_CORRECT", "BASH_COMPAT", "EXECIGNORE", "FUNCNEST", "TMOUT", "LC_ALL", "LC_CTYPE",
+        ]  # fmt: skip
+        for key in denied:
+            with self.subTest(key=key):
+                exported, _, stderr = self.load(f"{key}=poisoned\nFINE=1\n")
+
+                self.assertNotEqual(exported.get(key), "poisoned")
+                self.assertEqual(exported["FINE"], "1")
+                self.assertIn(f": {key} is not loaded from .env (", stderr)
+                self.assertNotIn("poisoned", stderr)
+
+    def test_on_windows_shells_the_denylist_ignores_the_case_of_a_key(self) -> None:
+        # Windows treats environment names case-insensitively, so `Path=` would reach a child as PATH.
+        denied = ["Path", "ComSpec", "Ld_Preload", "Bash_Env", "Pythonpath"]
+        env_text = "".join(f"{key}=poisoned\n" for key in denied) + "FINE=1\n"
+        for ostype in ("msys", "cygwin"):
+            with self.subTest(ostype=ostype):
+                exported, _, stderr = self.load(env_text, prelude=f"OSTYPE={ostype}; ")
+
+                self.assertEqual(exported["FINE"], "1")
+                for key in denied:
+                    self.assertNotEqual(exported.get(key), "poisoned", key)
+                    self.assertIn(f": {key} is not loaded from .env (", stderr)
+
+    def test_elsewhere_a_key_differing_only_in_case_is_an_ordinary_key(self) -> None:
+        exported, _, stderr = self.load("Ld_Preload=kept\nFINE=1\n", prelude="OSTYPE=linux-gnu; ")
+
+        self.assertEqual((exported["Ld_Preload"], exported["FINE"]), ("kept", "1"))
+        self.assertEqual(stderr, "")
+
+    def test_only_the_smoke_scripts_own_names_are_refused(self) -> None:
+        # doctor.sh reads SMOKE_URL, SMOKE_PROVIDER and SMOKE_GOAL from .env.
+        ours = [
+            "SMOKE_PROJECT", "SMOKE_COMPOSE_PROJECT", "SMOKE_SESSION_PREFIX", "SMOKE_MANAGED_LABEL",
+            "SMOKE_MODE_LABEL", "SMOKE_SESSION_ID_LABEL", "SMOKE_COMPOSE_DIR_LABEL", "SMOKE_COMPOSE_PROJECT_LABEL",
+        ]  # fmt: skip
+        env_text = (
+            "SMOKE_URL=https://example.test\nSMOKE_PROVIDER=claude\nSMOKE_GOAL=look\n"
+            + "".join(f"{key}=poisoned\n" for key in ours)
+        )
+        exported, _, stderr = self.load(env_text)
+
+        self.assertEqual(
+            (exported["SMOKE_URL"], exported["SMOKE_PROVIDER"], exported["SMOKE_GOAL"]),
+            ("https://example.test", "claude", "look"),
+        )
+        for key in ours:
+            self.assertNotEqual(exported.get(key), "poisoned", key)
+            self.assertIn(f": {key} is not loaded from .env (", stderr)
+        self.assertNotIn("SMOKE_URL", stderr)
+
     def test_a_variable_the_script_set_before_loading_is_not_overwritten(self) -> None:
         exported, _, stderr = self.load(
             "MY_INTERNAL=from-env\nEXPORTED_ONE=from-env\n",
@@ -235,6 +292,23 @@ BASH4_ONLY = {
     "wait -n": re.compile(r"\bwait\s+-[a-zA-Z]*n"),
     "${x@Q}": re.compile(r"\$\{[^}]*@[QEPAa]\}"),
 }
+
+
+@unittest.skipUnless(SCRIPTS.is_dir(), "scripts/ is not available here")
+class HostPythonIsIsolatedTests(unittest.TestCase):
+    def test_every_host_python_a_loading_script_starts_ignores_the_environment(self) -> None:
+        # A .env value reaches these children, and python reads PYTHONWARNINGS, PYTHONSTARTUP and the like at startup
+        # unless it runs with -I. (Containers' `docker exec ... python3 -I` is already isolated.)
+        loaders = [s for s in sorted(SCRIPTS.glob("*.sh")) if "scripts/load_env.sh" in s.read_text(encoding="utf-8")]
+        self.assertGreaterEqual(len(loaders), 6)
+        for script in loaders:
+            with self.subTest(script=script.name):
+                bare = [
+                    f"{number}: {line.strip()}"
+                    for number, line in enumerate(script.read_text(encoding="utf-8").splitlines(), start=1)
+                    if re.search(r"(?<![\w./-])python3?(?:\.\d+)?\s+(?!-\w*I)", line) and not line.lstrip().startswith("#")
+                ]
+                self.assertEqual(bare, [])
 
 
 @unittest.skipUnless(SCRIPTS.is_dir(), "scripts/ is not available here")

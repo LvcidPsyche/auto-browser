@@ -15,13 +15,28 @@
 #
 # Locals use a __lre_ prefix so a .env key cannot overwrite the parser's own state.
 
-# Whether a .env key must not be exported: shell startup and expansion hooks, the dynamic
-# loader, and the scripts' own names. A variable the calling script set and did not export
-# is the script's own, so it is refused too.
-__lre_refused() {
+# Whether a .env key is on the fixed denylist: shell startup, expansion and behaviour hooks, the dynamic
+# loader, the interpreters' startup hooks (PYTHON*, PERL5*, NODE_OPTIONS, BROWSER, which webbrowser.open() runs),
+# HOME (which login shells read profiles from), and the smoke scripts' own names. SMOKE_* is not refused as a
+# whole: doctor.sh reads SMOKE_URL, SMOKE_PROVIDER and SMOKE_GOAL from .env.
+__lre_denied_name() {
   case "$1" in
     BASH_ENV | ENV | BASH_FUNC_* | SHELLOPTS | BASHOPTS | IFS | PATH | PS4 | PROMPT_COMMAND | CDPATH | GLOBIGNORE) return 0 ;;
-    LD_* | DYLD_* | SMOKE_* | ROOT_DIR | COMPOSE | __lre_*) return 0 ;;
+    POSIXLY_CORRECT | BASH_COMPAT | EXECIGNORE | FUNCNEST | TMOUT | LC_ALL | LC_CTYPE | HOME) return 0 ;;
+    PYTHON* | BROWSER | PERL5OPT | PERL5LIB | NODE_OPTIONS) return 0 ;;
+    LD_* | DYLD_* | COMSPEC | PATHEXT) return 0 ;;
+    SMOKE_PROJECT | SMOKE_COMPOSE_* | SMOKE_SESSION_* | SMOKE_*_LABEL | ROOT_DIR | COMPOSE | __lre_*) return 0 ;;
+  esac
+  return 1
+}
+
+# Whether a .env key must not be exported: a denylisted name, or a variable the calling script (or bash itself)
+# set and did not export, which is the script's own. On Git Bash and Cygwin the denylist ignores case, because
+# Windows reads environment names case-insensitively (`Path=` would reach a child as PATH).
+__lre_refused() {
+  __lre_denied_name "$1" && return 0
+  case "${OSTYPE:-}" in
+    msys* | cygwin*) __lre_denied_name "$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')" && return 0 ;;
   esac
   # `declare -p` (not `[[ -v ]]`, which needs bash 4.2) fails for a name that is not set.
   local __lre_decl

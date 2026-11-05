@@ -49,9 +49,16 @@ All notable changes to auto-browser are documented here.
   smoke scripts do no `$VAR` or `${VAR}` expansion, so `DATA=${PWD}/data` stays that text (docker compose itself still
   expands it when it reads `.env`). Backslash escapes work only inside double quotes (`\"`, `\\`, `\n` and `\r`); a
   value with text after its closing quote, or with an unterminated quote (a multi-line value), is skipped with a
-  warning naming the line number. The scripts also refuse, with a warning naming the key, any `.env` key that changes
-  how the shell or the loader behaves: `BASH_ENV`, `ENV`, `BASH_FUNC_*`, `SHELLOPTS`, `BASHOPTS`, `IFS`, `PATH`,
-  `PS4`, `PROMPT_COMMAND`, `CDPATH`, `GLOBIGNORE`, `LD_*`, `DYLD_*`, `SMOKE_*`, `ROOT_DIR` and `COMPOSE`.
+  warning naming the line number. The scripts also refuse, with a warning naming the key, these `.env` keys, which
+  change how the shell, the loader or the programs the scripts start behave: `BASH_ENV`, `ENV`, `BASH_FUNC_*`,
+  `SHELLOPTS`, `BASHOPTS`, `IFS`, `PATH`, `PS4`, `PROMPT_COMMAND`, `CDPATH`, `GLOBIGNORE`, `POSIXLY_CORRECT`,
+  `BASH_COMPAT`, `EXECIGNORE`, `FUNCNEST`, `TMOUT`, `LC_ALL`, `LC_CTYPE`, `HOME`, `PYTHON*`, `BROWSER`, `PERL5OPT`,
+  `PERL5LIB`, `NODE_OPTIONS`, `COMSPEC`, `PATHEXT`, `LD_*`, `DYLD_*`, `ROOT_DIR`, `COMPOSE`, and the smoke scripts' own
+  `SMOKE_PROJECT`, `SMOKE_COMPOSE_*`, `SMOKE_SESSION_*` and `SMOKE_*_LABEL` (`SMOKE_URL`, `SMOKE_PROVIDER` and
+  `SMOKE_GOAL`, which `doctor.sh` reads, still load). On Git Bash and Cygwin the names are compared without regard to
+  case (`Path` is refused like `PATH`). Any name that the script or bash itself already set without exporting it
+  (`HOSTNAME`, `OSTYPE` and `MACHTYPE`, for example) is refused too. The scripts' own `python3` calls now run with
+  `-I`, so `PYTHON*` variables in the shell do not reach them either.
 
 ### Security
 
