@@ -296,12 +296,19 @@ All notable changes to auto-browser are documented here.
 
 - **A `.env` line is no longer executed as shell by the repo's scripts.** `doctor.sh`, `compose_local.sh`, `bootstrap_cli_auth.sh` and the smoke scripts loaded `.env` by sourcing it, so a value such as `X=$(cmd)` ran `cmd`, and an unquoted `&`, `;` or `(` in a value broke the script. They now read `KEY=VALUE` lines as text: blank lines and `#` comments are skipped, quoted values lose one level of quotes, an unquoted ` # comment` is dropped, `KEY=   # note` is empty, a UTF-8 BOM is ignored, and a value keeps every `=` and `$` in it. Keys that change how the shell or the loader behaves (`BASH_ENV`, `PATH`, `LD_*` and the others listed under Upgrade notes) are refused with a warning, and a line that cannot be read is skipped with a warning naming its line number. The values are still passed to the programs the scripts start, so keep `.env` to values you trust.
 
+- **A stored harness trace scrubs the text next to a URL and the PII in a URL's path.** A URL ran to the next
+  whitespace, so in `{"url":"https://example.com","email":"alice@example.com"}` the email was part of the "URL" and got
+  only the URL scrubber, which reads the query and fragment. A URL now ends at a quote, an angle bracket or whitespace,
+  without a trailing run of `,;)]}`, so the text after it is scrubbed as text, and the host and path of every URL are
+  read by the text scrubber too (`https://a.example/users/alice@example.com/profile`). `extracted_data` is still not
+  text-scrubbed. A staged skill's `url_contains` expectation is scrubbed the same way when drift is checked.
 - **A newly staged harness skill is no longer reported degraded at once.** A staged skill keeps a scrubbed trace, so a
   required `dom_contains` or `text_contains` on an email that passed in the live run no longer matched when the drift
   monitor checked the stored copy. The monitor now scrubs the expected strings the way the stored trace was scrubbed
-  before it verifies. A `url_contains` value with a `?` or `#` goes through the URL scrubber, which rewrites only the
-  query and fragment, as the stored URL was; one with neither but an `=` (`email=...`, `&email=...`) is scrubbed as a
-  piece of a query; a path or bare text is compared as it is, as the stored path was kept. A skill whose recorded page
+  before it verifies. A `url_contains` value with a `?` or `#` goes through the URL scrubber for its query and
+  fragment and the text scrubber for its host and path, as the stored URL was; one with neither but an `=`
+  (`email=...`, `&email=...`) is scrubbed as a piece of a query; a path or bare text is scrubbed as text, as the stored
+  path was. A skill whose recorded page
   no longer holds the expected text still reports degraded. Limits: a text expectation (`text_contains`,
   `dom_contains`) that is wholly PII is scrubbed to the bare replacement, so it is checked as "some redaction is
   present" in the stored text; a `url_contains` that is a bare email (no `=`) which stood in the final URL's query

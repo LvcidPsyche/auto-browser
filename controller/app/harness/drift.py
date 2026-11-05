@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .contracts import TaskContract
 from .register import SkillStagingRegistry
-from .trace import TraceEnvelope, _scrub_string, _scrub_url, _scrub_urls_only
+from .trace import TraceEnvelope, _scrub_string, _scrub_text, _scrub_url, _scrub_url_and_path, _scrub_urls_only
 from .verifier.base import VerificationResult, VerifierAdapter
 from .verifier.programmatic import ProgrammaticVerifier
 
@@ -101,15 +101,15 @@ class SkillDriftMonitor:
 def _scrub_url_contains(value: str) -> str:
     """A `url_contains` value scrubbed the way the part of the stored URL it should match was.
 
-    The stored URL has only its query and fragment rewritten. A value with a `?` or `#` is a URL or its tail, and
-    goes through the URL scrubber; one with neither but an `=` (`email=...`, `&email=...`) is a piece of a query,
-    and is scrubbed as one; anything else (a path, bare text) stays as it is, as the stored path did.
+    The stored URL has its query and fragment rewritten and its host and path read as text. A value with a `?` or `#`
+    is a URL or its tail, and goes through both; one with neither but an `=` (`email=...`, `&email=...`) is a piece of
+    a query, and is scrubbed as one; anything else (a path, bare text) is scrubbed as text, as the stored path was.
     """
     if "?" in value or "#" in value:
-        return _scrub_url(value)
+        return _scrub_url_and_path(value)
     if "=" in value:
         return _scrub_url("?" + value)[1:]
-    return value
+    return _scrub_text(value)
 
 
 # How the stored trace scrubs the field each kind of postcondition reads. `url_matches` is a regex, left alone.

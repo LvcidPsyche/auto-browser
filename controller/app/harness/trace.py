@@ -34,7 +34,8 @@ _TYPED_TEXT_KEYS = frozenset({"text", "text_preview", "value", "label", "usernam
 _SENSITIVE_FLAG_KEYS = ("sensitive", "text_redacted")
 # The keys of an agent step's observation that point at its screenshot.
 _SCREENSHOT_KEYS = ("screenshot_path", "screenshot_url")
-_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
+# A URL in text ends at whitespace, a quote or an angle bracket, and a trailing run of `,;)]}` is punctuation after it.
+_URL_PATTERN = re.compile(r"""https?://[^\s"'<>]*[^\s"'<>,;)\]}]""", re.IGNORECASE)
 _URL_SCRUB_MAX_BYTES = 16384
 
 
@@ -360,7 +361,7 @@ def _execution_redacted_the_text(execution: Any) -> bool:
 
 def _scrub_string(value: str) -> str:
     """URLs through the URL scrubber wherever they sit in the string, the rest through the text scrubber."""
-    return _map_urls(value, _scrub_url, _scrub_text)
+    return _map_urls(value, _scrub_url_and_path, _scrub_text)
 
 
 def _scrub_text(text: str) -> str:
@@ -374,6 +375,16 @@ def _scrub_urls_only(value: str) -> str:
 
 def _scrub_url(url: str) -> str:
     return scrub_url(url, _pii_scrubber(), _URL_SCRUB_MAX_BYTES)[0]
+
+
+def _scrub_url_and_path(url: str) -> str:
+    """A URL (or the tail of one) with its query and fragment scrubbed, and its host and path read as text too."""
+    scrubbed = _scrub_url(url)
+    cut = min((index for index in (scrubbed.find("?"), scrubbed.find("#")) if index >= 0), default=len(scrubbed))
+    scheme, separator, rest = scrubbed[:cut].partition("://")
+    if not separator:
+        scheme, rest = "", scrubbed[:cut]
+    return f"{scheme}{separator}{_scrub_text(rest)}{scrubbed[cut:]}"
 
 
 def _map_urls(value: str, on_url: Callable[[str], str], on_text: Callable[[str], str]) -> str:

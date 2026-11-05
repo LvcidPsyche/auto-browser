@@ -141,6 +141,30 @@ class StoredUrlTests(unittest.TestCase):
         self.assertTrue(out.startswith("Redirected to https://x.test/cb"))
         self.assertTrue(out.endswith("after login"))
 
+    def test_text_right_after_a_url_is_scrubbed_as_text_not_swallowed_by_the_url(self) -> None:
+        # The URL ends at a quote, so the email after it is text; a bare comma may be inside a URL, so there the email
+        # is in the URL's path, which the text scrubber reads too.
+        for text in (
+            f'{{"url":"https://example.com","email":"{EMAIL}"}}',
+            f"see <https://example.com>,{EMAIL}",
+            f"https://a.example/x,{EMAIL}",
+            f"https://a.example/users/{EMAIL}/profile",
+        ):
+            with self.subTest(text=text):
+                out = self._stored(final_observation={"text": text}).final_observation["text"]
+
+                self.assertNotIn(EMAIL, out)
+                self.assertIn("example", out)
+
+    def test_a_url_keeps_its_host_and_clean_path_and_loses_an_email_in_its_query(self) -> None:
+        out = self._stored(
+            final_observation={"text": f"go to https://a.example/docs/page?email={EMAIL}&x=1, then stop"}
+        ).final_observation["text"]
+
+        self.assertNotIn(EMAIL, out)
+        self.assertTrue(out.startswith("go to https://a.example/docs/page?"))
+        self.assertTrue(out.endswith(", then stop"))
+
     def test_a_url_in_extracted_data_loses_its_token_but_other_text_is_kept(self) -> None:
         stored = self._stored(
             extracted_data={
