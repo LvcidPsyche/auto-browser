@@ -215,7 +215,7 @@ class TraceEnvelope(BaseModel):
                     run_id=trace.run_id,
                     step_idx=index,
                     event_type=event_type,
-                    payload=_redact_sensitive(payload),
+                    payload=_redact_sensitive(payload, decision=True),
                     previous_hash=previous_hash,
                 ).with_hash()
                 previous_hash = event.entry_hash
@@ -249,7 +249,7 @@ class TraceRecorder:
             run_id=self.run_id,
             step_idx=step_idx,
             event_type=event_type,
-            payload=_redact_sensitive(payload),
+            payload=_redact_sensitive(payload, decision=True),
             previous_hash=self._previous_hash,
         ).with_hash()
         with self.jsonl_path.open("a", encoding="utf-8") as handle:
@@ -426,10 +426,17 @@ def _map_urls(value: str, on_url: Callable[[str], str], on_text: Callable[[str],
     return "".join(parts)
 
 
-def _redact_sensitive(value: Any, *, strings: Callable[[str], str] | None = _scrub_string) -> Any:
-    """Redact secret-named keys, typed text of sensitive actions, and (with `strings`) rewrite every string."""
+def _redact_sensitive(
+    value: Any, *, strings: Callable[[str], str] | None = _scrub_string, decision: bool = False
+) -> Any:
+    """Redact secret-named keys and (with `strings`) rewrite every string.
+
+    With `decision` (an event payload: the agent's decision and its action), the typed text of a dict flagged
+    sensitive is hidden too. Page data (an observation, extracted data) is not: a "sensitive" key a site's own
+    data carries must not blank its neighbours.
+    """
     if isinstance(value, dict):
-        hide_typed_text = any(value.get(flag) for flag in _SENSITIVE_FLAG_KEYS)
+        hide_typed_text = decision and any(value.get(flag) for flag in _SENSITIVE_FLAG_KEYS)
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key).lower()
@@ -438,10 +445,10 @@ def _redact_sensitive(value: Any, *, strings: Callable[[str], str] | None = _scr
             elif hide_typed_text and key_text in _TYPED_TEXT_KEYS:
                 redacted[key] = _REDACTED
             else:
-                redacted[key] = _redact_sensitive(item, strings=strings)
+                redacted[key] = _redact_sensitive(item, strings=strings, decision=decision)
         return redacted
     if isinstance(value, (list, tuple)):
-        return [_redact_sensitive(item, strings=strings) for item in value]
+        return [_redact_sensitive(item, strings=strings, decision=decision) for item in value]
     if strings is not None and isinstance(value, str):
         return strings(value)
     return value

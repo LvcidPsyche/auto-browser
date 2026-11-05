@@ -31,6 +31,36 @@ def _event(trace: TraceEnvelope, event_type: str):
     return next(event for event in trace.events if event.event_type == event_type)
 
 
+class PageDataKeepsItsValuesTests(unittest.TestCase):
+    """`value`, `label` and `username` are hidden only in an action's own payload, not in what the page held."""
+
+    ROW = {"label": "Plan", "value": "Pro", "username": "team-admin", "sensitive": True}
+
+    def test_a_sensitive_flag_in_page_data_does_not_hide_its_neighbours(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = TraceRecorder(tmp, run_id="r1", contract_hash="h")
+            trace = recorder.finalize(final_observation={"rows": [self.ROW]}, extracted_data={"row": self.ROW})
+
+        stored = trace.scrubbed()
+        self.assertEqual(stored.final_observation["rows"][0]["value"], "Pro")
+        self.assertEqual(stored.extracted_data["row"]["label"], "Plan")
+        self.assertEqual(stored.extracted_data["row"]["username"], "team-admin")
+
+    def test_an_agent_result_final_observation_keeps_page_data(self) -> None:
+        result = {"steps": [{"status": "ok", "observation": {"url": "https://example.com/", "rows": [self.ROW]}}]}
+
+        trace = TraceEnvelope.from_agent_result(contract_hash="h", result=result)
+
+        self.assertEqual(trace.final_observation["rows"][0]["value"], "Pro")
+
+    def test_an_action_payload_still_hides_what_it_typed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = TraceRecorder(tmp, run_id="r1", contract_hash="h")
+            event = recorder.append("action", {"action": "type", "value": SECRET_TEXT, "sensitive": True}, step_idx=1)
+
+        self.assertNotIn(SECRET_TEXT, json.dumps(event.payload))
+
+
 class TraceRedactionTests(unittest.TestCase):
     def test_typed_text_of_a_sensitive_action_is_redacted(self) -> None:
         trace = TraceEnvelope.from_agent_result(

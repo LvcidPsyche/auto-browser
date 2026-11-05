@@ -123,6 +123,9 @@ All notable changes to auto-browser are documented here.
 - A drift check whose expected-text scrubber returns nothing keeps the expectation as written (it had become the empty
   string, which every URL contains), and one whose scrubber raises is reported `unverified` with the exception type
   instead of failing the call.
+- The harness trace no longer blanks the `value`, `label` and `username` of a dict in page data (an observation or
+  extracted data) just because the site's own data carries a `sensitive` or `text_redacted` key: that hiding applies to
+  an action's own event payload only.
 
 ### Security
 
