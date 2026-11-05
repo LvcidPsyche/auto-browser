@@ -61,6 +61,9 @@ PROXY_PERSONA_FILE_UNREADABLE = (
 class ProxyPersonaFileError(RuntimeError):
     """The persona file exists but cannot be read or parsed.
 
+    The store refuses and leaves the file where it is, rather than moving it aside as the cron store does: a
+    transient read error (a sharing violation, a brief permission fault) must never displace a good, hand-edited file.
+
     The message is fixed and path-free, because callers (REST and MCP) show it as it is. The path and the
     cause are logged at ERROR where the file is read.
     """

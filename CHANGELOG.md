@@ -135,7 +135,8 @@ All notable changes to auto-browser are documented here.
   empty set, so the next save rewrote it and erased every other persona. Reads and saves now fail, and the file is
   left as it was; a missing file still reads as empty. REST answers 503 and MCP returns the same fixed text, "the
   proxy persona file (PROXY_PERSONA_FILE) is unreadable; fix or move it. It was not changed."; the file's path and
-  the cause are in the server log only. At startup the ownerless-persona warning logs the error and carries on.
+  the cause are in the server log only. With named tokens (`API_BEARER_TOKENS`) the startup ownerless-persona warning
+  logs the error and carries on; without them the file is not read at startup.
 - **Saving or deleting a proxy persona no longer erases the others' hand edits.** A save rewrote the file from the
   normalized view, so an entry the store ignores (a misspelled `server`) and any extra key on another entry were
   dropped. Only the named persona is replaced or removed now; every other entry is written back as it was.
