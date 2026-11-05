@@ -17,8 +17,9 @@ def _session(profile: str, **overrides) -> WitnessSessionContext:
     return WitnessSessionContext(session_id="s1", profile=profile, operator=NAMED_OPERATOR, **overrides)
 
 
-def _codes(outcome) -> list[str]:
-    return [concern.code for concern in outcome.concerns]
+def _codes(outcome) -> set[str]:
+    """The concern codes as a set: the order the engine appends them in is not part of what is pinned."""
+    return {concern.code for concern in outcome.concerns}
 
 
 def test_normal_session_with_encrypted_auth_state_has_no_concerns() -> None:
@@ -32,7 +33,7 @@ def test_normal_session_with_plain_auth_state_warns_but_does_not_block() -> None
     outcome = WitnessPolicyEngine().evaluate_session(_session("normal"))
 
     assert outcome.evidence_mode == "standard"
-    assert _codes(outcome) == ["auth_state_unencrypted"]
+    assert _codes(outcome) == {"auth_state_unencrypted"}
     assert outcome.concerns[0].severity == "warn"
     assert not outcome.should_block and not outcome.require_approval
 
@@ -41,7 +42,7 @@ def test_confidential_session_on_the_shared_defaults_raises_both_isolation_conce
     outcome = WitnessPolicyEngine().evaluate_session(_session("confidential"))
 
     assert outcome.evidence_mode == "restricted"
-    assert _codes(outcome) == ["shared_takeover_surface", "shared_browser_process"]
+    assert _codes(outcome) == {"shared_takeover_surface", "shared_browser_process"}
     assert {concern.severity for concern in outcome.concerns} == {"high"}
     # A session-level check informs; only an action can be blocked or need approval.
     assert not outcome.should_block and not outcome.require_approval
@@ -50,19 +51,22 @@ def test_confidential_session_on_the_shared_defaults_raises_both_isolation_conce
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [
-        ({"shared_takeover_surface": False}, ["shared_browser_process"]),
-        ({"shared_browser_process": False}, ["shared_takeover_surface"]),
-        ({"shared_takeover_surface": False, "shared_browser_process": False}, []),
+        ({"shared_takeover_surface": False}, {"shared_browser_process"}),
+        ({"shared_browser_process": False}, {"shared_takeover_surface"}),
+        ({"shared_takeover_surface": False, "shared_browser_process": False}, set()),
     ],
 )
-def test_confidential_session_reports_only_the_isolation_it_lacks(overrides: dict, expected: list[str]) -> None:
+def test_confidential_session_reports_only_the_isolation_it_lacks(overrides: dict, expected: set[str]) -> None:
     outcome = WitnessPolicyEngine().evaluate_session(_session("confidential", **overrides))
 
     assert outcome.evidence_mode == "restricted"
     assert _codes(outcome) == expected
 
 
-def test_confidential_session_does_not_raise_the_unencrypted_auth_concern() -> None:
+def test_characterization_confidential_session_currently_raises_no_unencrypted_auth_concern() -> None:
+    # Pins what evaluate_session does today, not a policy: a normal session with plain auth state gets a warn, and the
+    # confidential profile skips that branch. Whether it should report auth_state_unencrypted is undecided; if it
+    # should, this test is the one to change.
     outcome = WitnessPolicyEngine().evaluate_session(
         _session(
             "confidential", shared_takeover_surface=False, shared_browser_process=False, auth_state_encrypted=False
