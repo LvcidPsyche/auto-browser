@@ -130,6 +130,9 @@ class CodexBridgeService:
         max_concurrent_decisions: int = MAX_CONCURRENT_DECISIONS,
     ) -> None:
         self._decision_slots = threading.BoundedSemaphore(max(1, max_concurrent_decisions))
+        # Codex runs still going, and whether each leads its own process group: kill_in_flight stops them.
+        self._in_flight: dict[subprocess.Popen, bool] = {}
+        self._in_flight_lock = threading.Lock()
         self.codex_path = codex_path
         self.default_model = default_model
         self.request_timeout_seconds = request_timeout_seconds
@@ -238,6 +241,8 @@ class CodexBridgeService:
             stderr=subprocess.PIPE,
             start_new_session=grouped,
         )
+        with self._in_flight_lock:
+            self._in_flight[process] = grouped
         try:
             stdout, stderr = process.communicate(prompt, timeout=self.request_timeout_seconds)
         except subprocess.TimeoutExpired as exc:
@@ -251,7 +256,23 @@ class CodexBridgeService:
             _kill_process_tree(process, grouped)
             process.communicate()
             raise
+        finally:
+            with self._in_flight_lock:
+                self._in_flight.pop(process, None)
         return process.returncode, stdout, stderr
+
+    def kill_in_flight(self) -> int:
+        """Kill every codex run still going (its whole process group on POSIX), for bridge shutdown; returns how many.
+
+        Codex leads its own session, so it does not get the terminal's SIGINT when the bridge is stopped by hand, and
+        the handler threads that wait on it are daemon threads: without this it would run on, orphaned.
+        """
+        with self._in_flight_lock:
+            # A run communicate() has already reaped is left alone: its pid may belong to someone else by now.
+            running = [(process, grouped) for process, grouped in self._in_flight.items() if process.returncode is None]
+        for process, grouped in running:
+            _kill_process_tree(process, grouped)
+        return len(running)
 
 
 def _kill_process_tree(process: subprocess.Popen, grouped: bool) -> None:
@@ -456,6 +477,9 @@ def main() -> int:
     try:
         server.serve_forever()
     finally:
+        stopped = service.kill_in_flight()
+        if stopped:
+            print(f"[codex-bridge] stopped {stopped} codex run(s) still in flight", file=sys.stderr)
         server.server_close()
         if socket_path.exists():
             socket_path.unlink()

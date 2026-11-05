@@ -273,6 +273,101 @@ class BridgeLimitsTests(unittest.TestCase):
         self.assertEqual(len([item for item in outcomes if isinstance(item, dict)]), 2)
 
 
+class _RunningCodex(_FakeCodex):
+    """A fake codex with Popen's returncode: None until communicate() has returned."""
+
+    def __init__(self, command, **kwargs) -> None:
+        super().__init__(command, **kwargs)
+        self.returncode = None
+
+    def communicate(self, input=None, timeout=None):
+        output = super().communicate(input, timeout)
+        self.returncode = 0
+        return output
+
+
+@unittest.skipIf(bridge is None, "scripts/ is not shipped in the controller image")
+class BridgeShutdownTests(unittest.TestCase):
+    """HARN-45: codex runs in its own session, so stopping a hand-run bridge (Ctrl+C) left it running, orphaned."""
+
+    def test_the_codex_runs_in_flight_can_be_killed(self) -> None:
+        _FakeCodex.stderr_text = b""
+        _FakeCodex.gate = threading.Event()
+        _FakeCodex.entered = threading.Semaphore(0)
+        self.addCleanup(setattr, _FakeCodex, "gate", None)
+        service = bridge.CodexBridgeService(codex_path="codex")
+        killed: list[tuple[object, bool]] = []
+
+        with (
+            patch.object(bridge.subprocess, "Popen", _RunningCodex),
+            patch.object(
+                bridge, "_kill_process_tree", side_effect=lambda process, grouped: killed.append((process, grouped))
+            ),
+        ):
+            worker = threading.Thread(target=service.handle_openai_decide, args=(dict(PAYLOAD),))
+            worker.start()
+            self.assertTrue(_FakeCodex.entered.acquire(timeout=5))
+            stopped = service.kill_in_flight()
+            _FakeCodex.gate.set()
+            worker.join(5)
+
+        self.assertEqual(stopped, 1)
+        self.assertEqual([grouped for _process, grouped in killed], [hasattr(os, "killpg")])
+        self.assertEqual(service.kill_in_flight(), 0)  # a finished run is no longer tracked
+
+    def test_killing_the_runs_in_flight_ends_a_real_child(self) -> None:
+        # A real process this time: its own process group on POSIX (killpg), the process itself on Windows.
+        service = bridge.CodexBridgeService(codex_path="codex")
+        results: list[tuple[int, bytes, bytes]] = []
+        sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
+        worker = threading.Thread(target=lambda: results.append(service._run_codex(sleeper, b"")))
+        worker.start()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and service.kill_in_flight() == 0:
+            time.sleep(0.05)
+        worker.join(10)
+
+        self.assertFalse(worker.is_alive())
+        self.assertNotEqual(results[0][0], 0)
+
+    def test_main_kills_the_runs_in_flight_when_the_server_stops(self) -> None:
+        calls: list[str] = []
+
+        class _StoppedServer:
+            def __init__(self, socket_path, service) -> None:
+                Path(socket_path).touch()
+
+            def serve_forever(self) -> None:
+                calls.append("served")  # returns at once, as it does after SIGINT or SIGTERM
+
+            def server_close(self) -> None:
+                calls.append("closed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            socket_path = Path(tmp) / "codex.sock"
+            args = SimpleNamespace(
+                socket_path=str(socket_path), codex_path="codex", model=None, request_timeout_seconds=55.0
+            )
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(bridge, "parse_args", return_value=args),
+                patch.object(bridge, "prepare_socket_path", return_value=socket_path),
+                patch.object(bridge, "UnixHTTPServer", _StoppedServer),
+                patch.object(bridge.signal, "signal"),
+                patch.object(bridge.os, "umask"),
+                patch.object(
+                    bridge.CodexBridgeService,
+                    "kill_in_flight",
+                    create=True,
+                    side_effect=lambda: calls.append("killed") or 0,
+                ),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(bridge.main(), 0)
+
+        self.assertEqual(calls, ["served", "killed", "closed"])
+
+
 @unittest.skipUnless(
     bridge is not None and hasattr(os, "killpg") and sys.platform != "darwin", "needs POSIX process groups"
 )
