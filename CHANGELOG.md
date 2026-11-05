@@ -97,6 +97,9 @@ All notable changes to auto-browser are documented here.
 - A staged skill's `SKILL.md` renders the contract's goal, precondition and postcondition values and the verifier notes
   as single-line code spans (with a fence longer than any backtick run inside), so a goal holding a heading, HTML, a
   link or a code fence can no longer change the document a reviewer reads before promotion.
+- A `url_matches` condition whose pattern is nested too deeply or repeats too many times (`RecursionError` or
+  `OverflowError` from `re.compile`) is now refused as an invalid regex like any other, instead of escaping the
+  contract validator as an unhandled error.
 
 ### Security
 

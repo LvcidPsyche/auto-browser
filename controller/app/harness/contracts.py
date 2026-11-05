@@ -46,6 +46,14 @@ class Precondition(HarnessModel):
         return self
 
 
+def _check_regex(value: str) -> None:
+    """Refuse a url_matches value that does not compile; RecursionError and OverflowError are compile failures too."""
+    try:
+        re.compile(value)
+    except (re.error, RecursionError, OverflowError) as err:
+        raise ValueError(f"url_matches value must be a valid regex: {err}") from None
+
+
 class Postcondition(HarnessModel):
     kind: PostconditionKind
     value: str = Field(min_length=1, max_length=4000)
@@ -56,10 +64,7 @@ class Postcondition(HarnessModel):
     @model_validator(mode="after")
     def validate_matcher(self) -> "Postcondition":
         if self.kind == "url_matches":
-            try:
-                re.compile(self.value)
-            except re.error as err:
-                raise ValueError(f"url_matches value must be a valid regex: {err}") from None
+            _check_regex(self.value)
         return self
 
 
@@ -73,10 +78,7 @@ class ForbiddenState(HarnessModel):
         if self.kind in {"url_contains", "url_matches", "text_contains", "url_status"} and not self.value:
             raise ValueError(f"{self.kind} forbidden state requires value")
         if self.kind == "url_matches":
-            try:
-                re.compile(self.value)
-            except re.error as err:
-                raise ValueError(f"url_matches value must be a valid regex: {err}") from None
+            _check_regex(self.value)
         return self
 
 

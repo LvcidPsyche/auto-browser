@@ -33,6 +33,15 @@ class ContractModelTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Postcondition(kind="url_matches", value="(unclosed")
 
+    def test_deeply_nested_and_oversized_patterns_are_a_validation_error_not_a_crash(self) -> None:
+        # re.compile raises RecursionError for deep nesting and OverflowError for a huge repeat count.
+        for pattern in ("(" * 500 + ")" * 500, "a{4294967296}"):
+            with self.subTest(pattern=pattern[:12]):
+                with self.assertRaises(ValidationError):
+                    Postcondition(kind="url_matches", value=pattern)
+                with self.assertRaises(ValidationError):
+                    ForbiddenState(kind="url_matches", value=pattern)
+
     def test_forbidden_state_requires_value(self) -> None:
         with self.assertRaises(ValidationError):
             ForbiddenState(kind="url_contains", value="")
