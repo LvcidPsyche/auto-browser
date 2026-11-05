@@ -1,6 +1,11 @@
 // node --test browser-node/  (CI runs it; locally: inside the browser-node image, see scripts in REPORT)
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   classifyFailure,
@@ -12,6 +17,7 @@ import {
   makeVerify,
   verifyServer,
   parseSetting,
+  redactEndpoints,
   verifySandbox,
 } from "./sandbox.mjs";
 
@@ -544,4 +550,42 @@ test("a verification that hangs ends with the phase, not after its own longer bo
   });
   assert.equal(state.sandbox, "off");
   assert.ok(Date.now() - started < BUDGET.phaseBudgetMs + 60, `took ${Date.now() - started} ms`);
+});
+
+const SECRET_PATH = "0123456789abcdef0123456789abcdef";
+
+test("redactEndpoints keeps a websocket endpoint's host and port and drops its path", () => {
+  const state = JSON.stringify({ sandbox: "on", endpoint: `ws://browser-node:9223/${SECRET_PATH}` });
+  const out = redactEndpoints(`state: ${state}; retry ws://127.0.0.1:9223/${SECRET_PATH}?x=1 now`);
+  assert.ok(!out.includes(SECRET_PATH), out);
+  assert.ok(out.includes("ws://browser-node:9223/<redacted>"), out);
+  assert.ok(out.includes("ws://127.0.0.1:9223/<redacted>"), out);
+  const failure = `browserType.connect: WebSocket error: wss://h.example:443/${SECRET_PATH} 502`;
+  assert.equal(redactEndpoints(failure), "browserType.connect: WebSocket error: wss://h.example:443/<redacted> 502");
+  assert.equal(redactEndpoints("no endpoint here"), "no endpoint here");
+});
+
+test("sandbox-report prints the state file and its errors without the Playwright connect path", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sandbox-report-"));
+  try {
+    const endpointFile = join(dir, "browser-ws-endpoint.txt");
+    writeFileSync(endpointFile, `ws://127.0.0.1:1/${SECRET_PATH}\n`);
+    writeFileSync(
+      join(dir, "browser-sandbox.json"),
+      JSON.stringify({ sandbox: "on", setting: "on", endpoint: `ws://browser-node:9223/${SECRET_PATH}` }),
+    );
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL("./sandbox-report.mjs", import.meta.url)), "t"], {
+      env: { PATH: process.env.PATH, BROWSER_WS_ENDPOINT_FILE: endpointFile },
+      encoding: "utf-8",
+      timeout: 60000,
+    });
+    const output = `${result.stdout}${result.stderr}`;
+    assert.equal(result.status, 0, output);
+    assert.ok(!output.includes(SECRET_PATH), output);
+    assert.match(output, /state file: .*"sandbox":"on"/);
+    assert.ok(output.includes("ws://browser-node:9223/<redacted>"), output);
+    assert.match(output, /live check failed/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

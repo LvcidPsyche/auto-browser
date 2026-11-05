@@ -429,3 +429,10 @@ export async function writeState(path, state) {
   await writeFile(tmp, `${JSON.stringify(state)}\n`, "utf-8");
   await rename(tmp, path);
 }
+
+// The Playwright server's endpoint (ws://<host>:<port>/<path>) is its only secret: the path is the credential. Text that
+// is printed (a report, a log line, an error that echoes the URL) goes through this first, which keeps scheme, host and
+// port, so the line still says where it pointed.
+export function redactEndpoints(text) {
+  return String(text).replace(/(wss?:\/\/[^/\s"'<>]+)\/[^\s"'<>]*/g, "$1/<redacted>");
+}
