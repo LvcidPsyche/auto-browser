@@ -4,6 +4,11 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- A `nan` or infinite value in any float setting (`ARTIFACT_RETENTION_HOURS=nan` swept every artifact on the next
+  cleanup) now stops startup with an error naming the setting. Zero and negative retention still mean "keep forever".
+
 ### Security
 
 - Every secret `Settings` field (the auth-state encryption key, the witness remote key, every provider API key, the

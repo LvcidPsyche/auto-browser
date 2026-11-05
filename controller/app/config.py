@@ -1,9 +1,10 @@
+import math
 import random
 import re
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .browser_sandbox import SECCOMP_PROFILE_PATH
@@ -462,6 +463,15 @@ class Settings(BaseSettings):
         # whitespace satisfied (40 spaces even cleared the 32-character floor); it is unset now.
         if isinstance(value, str):
             return value.strip() or None
+        return value
+
+    @field_validator("*")
+    @classmethod
+    def _floats_are_finite(cls, value: object, info: ValidationInfo) -> object:
+        # nan compares false with everything, so a nan retention swept every artifact and a nan timeout never fired.
+        # Zero and negative stay valid: ARTIFACT_RETENTION_HOURS <= 0 means "keep forever".
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"{info.field_name} must be a finite number, got {value!r}")
         return value
 
     @field_validator("session_isolation_mode", mode="before")
