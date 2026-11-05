@@ -1,19 +1,24 @@
-"""The smoke scripts' teardown only removes what the smoke run created.
+"""The smoke scripts only touch what the smoke run created, and refuse to start otherwise.
 
 smoke_isolated_session.sh and its tunnel twin removed every container and network
 carrying auto-browser.managed=true and ran `compose down` with no project, so on a
 machine that also runs the operator's own stack the smoke deleted their live session
-containers and, sharing the folder's default project name, their controller too.
+containers. Their own controller (docker_ephemeral mode) also removes every managed
+container on the daemon when it starts, and a second compose project from the same
+checkout shares ./data. So the smokes now run in their own compose project, fail closed
+in smoke_preflight before any side effect, and clean up by a container-name prefix
+(scripts/smoke_lib.sh).
 
-The dynamic test runs the real smoke_snapshot_managed / smoke_cleanup (scripts/load_env.sh)
-in bash against a stand-in docker that records its calls. The static test covers every
-smoke script. Repo-layout checks: skipped where scripts/ is absent (the controller
-image) or bash is missing.
+The dynamic tests run the real smoke_lib.sh and the real smoke scripts in bash against a
+stand-in docker that records its calls. The static tests cover every smoke script.
+Repo-layout checks: skipped where scripts/ is absent (the controller image) or bash is missing.
 """
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -22,72 +27,358 @@ from pathlib import Path
 from tests.test_scripts_token_argv import BASH, SCRIPTS, _bash_path
 
 SMOKE_SCRIPTS = sorted(SCRIPTS.glob("smoke_*.sh")) if SCRIPTS.is_dir() else []
+# The scripts that start a compose stack: every smoke_*.sh except the library.
+SMOKE_RUNNERS = [path for path in SMOKE_SCRIPTS if path.name != "smoke_lib.sh"]
+LABEL = "auto-browser.managed=true"
+MODE = "auto-browser.mode=docker_ephemeral"
+SESSION = "auto-browser.session_id=abc"
 
-FAKE_DOCKER = """#!/usr/bin/env bash
+# Rows in containers.txt / networks.txt are "name|label,label"; stack.txt rows are
+# "working_dir|compose project|container name". A `fail` file makes every call exit 1.
+FAKE_DOCKER = r"""#!/usr/bin/env bash
 state="$FAKE_DOCKER_DIR"
 echo "$*" >> "$state/calls.log"
+if [[ -e "$state/fail" ]]; then
+  echo "Cannot connect to the Docker daemon" >&2
+  exit 1
+fi
+filters=()
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  [[ "${args[i]}" == "--filter" ]] && filters+=("${args[i + 1]}")
+done
+list() {
+  local file="$1" name labels ok f
+  while IFS='|' read -r name labels; do
+    [[ -n "$name" ]] || continue
+    ok=1
+    for f in "${filters[@]}"; do
+      case "$f" in
+        name=*) [[ "$name" =~ ${f#name=} ]] || ok=0 ;;
+        label=*) [[ ",$labels," == *",${f#label=},"* || ",$labels," == *",${f#label=}="* ]] || ok=0 ;;
+      esac
+    done
+    ((ok)) && echo "$name"
+  done < "$file"
+  return 0
+}
 case "$1 $2" in
-  "ps -aq") cat "$state/containers.txt" ;;
-  "network ls") cat "$state/networks.txt" ;;
+  "ps -a") list "$state/containers.txt" ;;
+  "network ls") list "$state/networks.txt" ;;
+  "ps --filter")
+    for f in "${filters[@]}"; do
+      case "$f" in
+        label=com.docker.compose.project.working_dir=*)
+          dir="${f#label=com.docker.compose.project.working_dir=}"
+          while IFS='|' read -r wd project name; do
+            [[ "$wd" == "$dir" ]] && echo "$project|$name"
+          done < "$state/stack.txt"
+          ;;
+      esac
+    done
+    ;;
 esac
 exit 0
 """
 
 
+def _smoke_env(fake_bin: Path) -> dict[str, str]:
+    env = {"PATH": os.pathsep.join([str(fake_bin), str(Path(BASH).parent), os.environ["PATH"]])}
+    if os.name == "nt":
+        env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", r"C:\Windows")
+    return env
+
+
+class _FakeDockerCase(unittest.TestCase):
+    def setUp(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        self.temp = Path(tempdir.name)
+        self.fake_bin = self.temp / "bin"
+        self.fake_bin.mkdir()
+        docker = self.fake_bin / "docker"
+        docker.write_text(FAKE_DOCKER, encoding="utf-8", newline="\n")
+        docker.chmod(0o755)
+        self.state = self.temp / "state"
+        self.state.mkdir()
+        for name in ("containers.txt", "networks.txt", "stack.txt"):
+            (self.state / name).write_text("", encoding="utf-8")
+        self.root = self.temp / "repo"
+        self.root.mkdir()
+
+    def put(self, name: str, rows: list[str]) -> None:
+        (self.state / name).write_text("".join(f"{row}\n" for row in rows), encoding="utf-8", newline="\n")
+
+    def calls(self) -> list[str]:
+        log = self.state / "calls.log"
+        return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+    def bash(self, body: str) -> subprocess.CompletedProcess[str]:
+        script = (
+            f'export FAKE_DOCKER_DIR="{_bash_path(self.state)}"; ROOT_DIR="{_bash_path(self.root)}"; '
+            f'source "{_bash_path(SCRIPTS / "load_env.sh")}"; source "{_bash_path(SCRIPTS / "smoke_lib.sh")}"; {body}'
+        )
+        return subprocess.run(
+            [BASH, "-c", script], capture_output=True, text=True, timeout=60, env=_smoke_env(self.fake_bin)
+        )
+
+    def removals(self) -> list[str]:
+        return [c for c in self.calls() if c.split()[:1] == ["rm"] or c.startswith("network rm") or " down" in c]
+
+
 @unittest.skipUnless(SCRIPTS.is_dir() and BASH, "scripts/ or bash is not available here")
-class SmokeCleanupScopeTests(unittest.TestCase):
-    def test_cleanup_removes_only_what_appeared_after_the_snapshot(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            temp = Path(tempdir)
-            fake_bin = temp / "bin"
-            fake_bin.mkdir()
-            docker = fake_bin / "docker"
-            docker.write_text(FAKE_DOCKER, encoding="utf-8", newline="\n")
-            docker.chmod(0o755)
-            state = _bash_path(temp)
-            script = (
-                f'export PATH="{_bash_path(fake_bin)}:$PATH"; export FAKE_DOCKER_DIR="{state}"; '
-                f'source "{_bash_path(SCRIPTS / "load_env.sh")}"; '
-                f'printf "user-c1\\nuser-c2\\n" > "{state}/containers.txt"; '
-                f'printf "user-net\\n" > "{state}/networks.txt"; '
-                "smoke_snapshot_managed; "
-                f'printf "user-c1\\nuser-c2\\nsmoke-c1\\n" > "{state}/containers.txt"; '
-                f'printf "user-net\\nsmoke-net\\n" > "{state}/networks.txt"; '
-                "COMPOSE=(docker compose -p smoke-proj -f docker-compose.yml); "
-                "smoke_cleanup"
-            )
-            result = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=60)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            calls = (temp / "calls.log").read_text(encoding="utf-8").splitlines()
+class SmokePreflightTests(_FakeDockerCase):
+    def preflight(self, mode: str = "isolated") -> subprocess.CompletedProcess[str]:
+        return self.bash(f"smoke_setup; smoke_preflight {mode}; echo PREFLIGHT_OK")
 
-        self.assertIn("rm -f smoke-c1", calls)
-        self.assertIn("network rm smoke-net", calls)
-        self.assertFalse([c for c in calls if "user-" in c and ("rm" in c.split())], calls)
-        down = [c for c in calls if "down" in c.split()]
+    def test_a_clean_daemon_passes(self) -> None:
+        result = self.preflight()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PREFLIGHT_OK", result.stdout)
+
+    def test_a_daemon_that_cannot_be_listed_is_refused(self) -> None:
+        (self.state / "fail").write_text("", encoding="utf-8")
+
+        result = self.preflight()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("PREFLIGHT_OK", result.stdout)
+        self.assertIn("cannot list", result.stderr)
+        self.assertEqual(self.removals(), [])
+
+    def test_an_existing_managed_container_is_refused_and_named(self) -> None:
+        self.put("containers.txt", [f"operator-session-1|{LABEL},{MODE}", "unrelated|other=1"])
+
+        result = self.preflight()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("PREFLIGHT_OK", result.stdout)
+        self.assertIn("operator-session-1", result.stderr)
+        self.assertNotIn("unrelated", result.stderr)
+        self.assertIn("docker rm -f operator-session-1", result.stderr)
+        self.assertEqual(self.removals(), [])
+
+    def test_an_existing_managed_network_is_refused_and_named(self) -> None:
+        self.put("networks.txt", [f"operator-net|{LABEL},{MODE},{SESSION}"])
+
+        result = self.preflight()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("operator-net", result.stderr)
+        self.assertIn("docker network rm operator-net", result.stderr)
+        self.assertEqual(self.removals(), [])
+
+    def test_a_running_stack_of_this_checkout_in_another_project_is_refused(self) -> None:
+        root = _bash_path(self.root)
+        self.put("stack.txt", [f"{root}|operator-project|operator-controller-1", "/elsewhere|x|other-checkout-1"])
+
+        for mode in ("isolated", "shared"):
+            with self.subTest(mode=mode):
+                result = self.preflight(mode)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("PREFLIGHT_OK", result.stdout)
+                self.assertIn("operator-controller-1", result.stderr)
+                self.assertIn("operator-project", result.stderr)
+                self.assertNotIn("other-checkout-1", result.stderr)
+        self.assertEqual(self.removals(), [])
+
+    def test_the_smokes_own_project_does_not_block_a_rerun(self) -> None:
+        root = _bash_path(self.root)
+        self.put("stack.txt", [f"{root}|auto-browser-smoke|auto-browser-smoke-controller-1"])
+
+        self.assertEqual(self.preflight().returncode, 0)
+
+    def test_shared_mode_ignores_session_containers_but_not_a_dead_daemon(self) -> None:
+        self.put("containers.txt", [f"operator-session-1|{LABEL},{MODE}"])
+        self.assertEqual(self.preflight("shared").returncode, 0)
+
+        (self.state / "fail").write_text("", encoding="utf-8")
+        self.assertNotEqual(self.preflight("shared").returncode, 0)
+
+
+@unittest.skipUnless(SCRIPTS.is_dir() and BASH, "scripts/ or bash is not available here")
+class SmokeSetupTests(_FakeDockerCase):
+    def setup_output(self, env_text: str, *, ambient: str = "") -> subprocess.CompletedProcess[str]:
+        (self.root / ".env").write_text(env_text, encoding="utf-8")
+        body = (
+            f"{ambient} smoke_setup; "
+            'echo "project=$SMOKE_PROJECT compose=$COMPOSE_PROJECT_NAME prefix=$ISOLATED_BROWSER_CONTAINER_PREFIX"'
+        )
+        return self.bash(body)
+
+    def test_the_default_project_is_stable_and_ignores_compose_project_name(self) -> None:
+        result = self.setup_output(
+            "COMPOSE_PROJECT_NAME=operator-env\n", ambient="export COMPOSE_PROJECT_NAME=operator;"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "project=auto-browser-smoke compose=auto-browser-smoke prefix=auto-browser-smoke-session", result.stdout
+        )
+
+    def test_smoke_compose_project_names_the_project_and_env_cannot_change_it(self) -> None:
+        result = self.setup_output(
+            "SMOKE_COMPOSE_PROJECT=from-env\nSMOKE_PROJECT=from-env\nISOLATED_BROWSER_CONTAINER_PREFIX=browser-session\n",
+            ambient="export SMOKE_COMPOSE_PROJECT=ci-smoke;",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("project=ci-smoke compose=ci-smoke prefix=ci-smoke-session", result.stdout)
+
+    def test_a_project_name_compose_would_reject_is_refused(self) -> None:
+        result = self.setup_output("", ambient="export SMOKE_COMPOSE_PROJECT='x;touch y';")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SMOKE_COMPOSE_PROJECT", result.stderr)
+
+
+@unittest.skipUnless(SCRIPTS.is_dir() and BASH, "scripts/ or bash is not available here")
+class SmokeCleanupScopeTests(_FakeDockerCase):
+    def cleanup(self) -> subprocess.CompletedProcess[str]:
+        return self.bash(
+            'smoke_setup; COMPOSE=(docker compose -p "${SMOKE_PROJECT}" -f docker-compose.yml); smoke_cleanup'
+        )
+
+    def test_cleanup_removes_only_the_prefixed_session_containers_and_networks(self) -> None:
+        pre = "auto-browser-smoke-session"
+        self.put(
+            "containers.txt",
+            [
+                f"{pre}-aaa|{LABEL},{MODE}",
+                f"operator-session-bbb|{LABEL},{MODE}",
+                f"{pre}-nolabels|other=1",
+                f"{pre}-nomode|{LABEL}",
+                f"xx{pre}-embedded|{LABEL},{MODE}",
+            ],
+        )
+        self.put(
+            "networks.txt",
+            [
+                f"{pre}-aaa-net|{LABEL},{MODE},{SESSION}",
+                f"operator-session-bbb-net|{LABEL},{MODE},{SESSION}",
+                f"{pre}-foreign-net|{LABEL}",
+                f"{pre}-aaa-bridge|{LABEL},{MODE},{SESSION}",
+            ],
+        )
+
+        result = self.cleanup()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        self.assertEqual([c for c in calls if c.startswith("rm ")], [f"rm -f {pre}-aaa"])
+        self.assertEqual([c for c in calls if c.startswith("network rm")], [f"network rm {pre}-aaa-net"])
+        down = [c for c in calls if c.split()[:1] == ["compose"]]
         self.assertEqual(len(down), 1, calls)
-        self.assertIn("compose -p smoke-proj", down[0])
-        # The stack goes down between the containers and the networks.
-        self.assertLess(calls.index("rm -f smoke-c1"), calls.index(down[0]))
-        self.assertLess(calls.index(down[0]), calls.index("network rm smoke-net"))
+        self.assertIn("compose -p auto-browser-smoke", down[0])
+        self.assertLess(calls.index(f"rm -f {pre}-aaa"), calls.index(down[0]))
+        self.assertLess(calls.index(down[0]), calls.index(f"network rm {pre}-aaa-net"))
+
+    def test_a_failing_daemon_removes_nothing(self) -> None:
+        self.put("containers.txt", [f"auto-browser-smoke-session-aaa|{LABEL},{MODE}"])
+        (self.state / "fail").write_text("", encoding="utf-8")
+
+        result = self.cleanup()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c for c in self.calls() if c.startswith(("rm ", "network rm"))], [])
 
 
-@unittest.skipUnless(SMOKE_SCRIPTS, "scripts/ is not available here")
+@unittest.skipUnless(SMOKE_RUNNERS and BASH, "scripts/ or bash is not available here")
+class SmokeScriptsRefuseBeforeTouchingAnythingTests(_FakeDockerCase):
+    """The real tunnel and reverse-SSH smokes, run from a scratch copy of scripts/, with a live stack present."""
+
+    def run_script(self, name: str) -> subprocess.CompletedProcess[str]:
+        shutil.copytree(SCRIPTS, self.root / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+        tunnels = self.root / "data" / "tunnels"
+        (tunnels / "sessions").mkdir(parents=True)
+        for keep in (tunnels / "reverse-ssh.json", tunnels / "sessions" / "live.json"):
+            keep.write_text("operator", encoding="utf-8")
+        script = _bash_path(self.root / "scripts" / name)
+        return subprocess.run(
+            [BASH, script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**_smoke_env(self.fake_bin), "FAKE_DOCKER_DIR": _bash_path(self.state)},
+            cwd=self.temp,
+        )
+
+    def assert_untouched(self, result: subprocess.CompletedProcess[str]) -> None:
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.root / "data" / "tunnels" / "reverse-ssh.json").read_text(encoding="utf-8"), "operator")
+        self.assertTrue((self.root / "data" / "tunnels" / "sessions" / "live.json").exists())
+        self.assertFalse((self.root / "data" / "ssh").exists())
+        self.assertEqual([c for c in self.calls() if c.startswith(("compose", "rm ", "network rm"))], [])
+
+    def test_the_tunnel_smoke_refuses_beside_a_managed_container(self) -> None:
+        self.put("containers.txt", [f"operator-session-1|{LABEL},{MODE}"])
+
+        result = self.run_script("smoke_isolated_session_tunnel.sh")
+
+        self.assert_untouched(result)
+        self.assertIn("operator-session-1", result.stderr)
+
+    def test_the_tunnel_smoke_refuses_beside_this_checkouts_stack(self) -> None:
+        self.put("stack.txt", [f"{_bash_path(self.root)}|operator|operator-controller-1"])
+
+        self.assert_untouched(self.run_script("smoke_isolated_session_tunnel.sh"))
+
+    def test_the_reverse_ssh_smoke_refuses_beside_this_checkouts_stack(self) -> None:
+        self.put("stack.txt", [f"{_bash_path(self.root)}|operator|operator-controller-1"])
+
+        self.assert_untouched(self.run_script("smoke_reverse_ssh.sh"))
+
+    def test_the_reverse_ssh_smoke_refuses_when_docker_is_down(self) -> None:
+        (self.state / "fail").write_text("", encoding="utf-8")
+
+        self.assert_untouched(self.run_script("smoke_reverse_ssh.sh"))
+
+
+@unittest.skipUnless(SMOKE_RUNNERS, "scripts/ is not available here")
 class SmokeScriptsAreScopedTests(unittest.TestCase):
-    def test_no_smoke_script_removes_by_the_managed_label_alone(self) -> None:
-        for script in SMOKE_SCRIPTS:
+    def test_every_smoke_runs_the_preflight_before_any_side_effect(self) -> None:
+        for script in SMOKE_RUNNERS:
             with self.subTest(script=script.name):
                 text = script.read_text(encoding="utf-8")
-                self.assertNotIn("auto-browser.managed", text)
-                self.assertNotRegex(text, r"xargs\s+(-\S+\s+)*docker\s+(rm|network\s+rm)")
+                preflight = text.find("\nsmoke_preflight ")
+                self.assertGreater(preflight, 0, "no smoke_preflight call")
+                for effect in ("\ntrap cleanup EXIT", "\nrm -f", "\nmkdir ", '\n"${COMPOSE[@]}"'):
+                    position = text.find(effect)
+                    self.assertTrue(position == -1 or preflight < position, f"{effect.strip()} comes first")
+                self.assertEqual(text.count("trap cleanup EXIT"), 1)
 
-    def test_every_smoke_compose_names_its_own_project(self) -> None:
-        for script in SMOKE_SCRIPTS:
+    def test_every_smoke_cleans_up_through_smoke_cleanup_only(self) -> None:
+        for script in SMOKE_RUNNERS:
             with self.subTest(script=script.name):
                 text = script.read_text(encoding="utf-8")
+                body = re.search(r"^cleanup\(\) \{\n(.*?)^\}", text, flags=re.M | re.S)
+                self.assertIsNotNone(body, "no cleanup()")
+                self.assertEqual(body.group(1).strip(), "smoke_cleanup")
+
+    def test_every_smoke_names_its_own_project_and_ignores_the_ambient_one(self) -> None:
+        for script in SMOKE_RUNNERS:
+            with self.subTest(script=script.name):
+                text = script.read_text(encoding="utf-8")
+                self.assertIn('source "${ROOT_DIR}/scripts/smoke_lib.sh"', text)
+                self.assertLess(text.index("\nsmoke_setup\n"), text.index("\nCOMPOSE=("))
                 composes = re.findall(r"^COMPOSE=\((.*)\)$", text, flags=re.M)
                 self.assertTrue(composes, "no COMPOSE array")
                 for compose in composes:
                     self.assertIn('-p "${SMOKE_PROJECT}"', compose)
+                self.assertNotIn("COMPOSE_PROJECT_NAME:-", text)
+                self.assertNotIn("load_repo_env", text, "smoke_setup loads .env")
+
+    def test_the_smoke_helpers_live_only_in_smoke_lib(self) -> None:
+        load_env = (SCRIPTS / "load_env.sh").read_text(encoding="utf-8")
+        for name in ("smoke_", "SMOKE_MANAGED", "auto-browser.managed"):
+            self.assertNotIn(name, load_env)
+        for other in sorted(SCRIPTS.glob("*.sh")):
+            if other.name.startswith("smoke_"):
+                continue
+            with self.subTest(script=other.name):
+                self.assertNotIn("smoke_lib.sh", other.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

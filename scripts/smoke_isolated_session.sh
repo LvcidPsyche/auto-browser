@@ -5,12 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 source "${ROOT_DIR}/scripts/load_env.sh"
-# This run's own compose project, so teardown never touches the operator's stack. The
-# caller may name it (COMPOSE_PROJECT_NAME); read it before .env loads, where that name
-# is the operator's own project.
-SMOKE_PROJECT="${COMPOSE_PROJECT_NAME:-auto-browser-smoke-$$}"
-load_repo_env "${ROOT_DIR}/.env"
-export COMPOSE_PROJECT_NAME="${SMOKE_PROJECT}"
+source "${ROOT_DIR}/scripts/smoke_lib.sh"
+# This run's own compose project and session-container prefix (see smoke_lib.sh).
+smoke_setup
 
 COMPOSE=(docker compose -p "${SMOKE_PROJECT}" -f docker-compose.yml -f docker-compose.isolation.yml)
 # Two sessions at once, for the cross-session reach probe below.
@@ -38,7 +35,7 @@ wait_for() {
   return 1
 }
 
-smoke_snapshot_managed
+smoke_preflight isolated
 trap cleanup EXIT
 
 "${COMPOSE[@]}" up -d --build browser-node controller
