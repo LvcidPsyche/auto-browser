@@ -301,7 +301,7 @@ def _forbidden_state_hit(
         )
     combined = f"{url}\n{searchable_text}\n{dom_text}"
     if forbidden.kind == "captcha_screen":
-        return _has_phrase(combined, _CAPTCHA_PHRASES) or _has_value(combined, value)
+        return _has_phrase(combined, _CAPTCHA_PHRASES, underscore_ends_words=True) or _has_value(combined, value)
     if forbidden.kind == "payment_screen":
         return (
             _has_phrase(combined, _PAYMENT_PHRASES)
@@ -310,17 +310,18 @@ def _forbidden_state_hit(
         )
     if forbidden.kind == "login_redirect":
         # What the browser was sent to, not what the page says: a marketing page that offers "sign in" is not a
-        # redirect. The URL path, a 401/403 status, and the caller's value as part of the URL.
+        # redirect. The URL's path or host, a 401/403 status, and the caller's value as part of the URL.
         status = {str(observation.get(key) or "").strip() for key in ("status_code", "http_status", "status")}
         return (
             _path_has_segment(url, _LOGIN_SEGMENTS)
+            or _host_is_login(url)
             or bool(status & {"401", "403"})
             or bool(value and value.lower() in url.lower())
         )
     return False
 
 
-_CAPTCHA_PHRASES = ("captcha", "recaptcha", "hcaptcha", "verify you are human", "cloudflare")
+_CAPTCHA_PHRASES = ("captcha", "recaptcha", "hcaptcha", "grecaptcha", "verify you are human", "cloudflare")
 _PAYMENT_PHRASES = (
     "credit card",
     "card number",
@@ -331,16 +332,29 @@ _PAYMENT_PHRASES = (
     "payment information",
 )
 _PAYMENT_SEGMENTS = frozenset({"payment", "payments"})
-_LOGIN_SEGMENTS = frozenset({"login", "signin", "sign-in", "auth"})
+_LOGIN_SEGMENTS = frozenset({"login", "log-in", "log_in", "logon", "signin", "sign-in", "sign_in", "auth", "authorize"})
 
 
-def _has_phrase(text: str, phrases: list[str] | tuple[str, ...]) -> bool:
-    """Whether any phrase occurs in the text as whole words, ignoring case ("accredit cards" is not "credit card")."""
+def _has_phrase(text: str, phrases: list[str] | tuple[str, ...], *, underscore_ends_words: bool = False) -> bool:
+    """Whether any phrase occurs in the text as whole words, ignoring case ("accredit cards" is not "credit card").
+
+    With `underscore_ends_words`, `_` also separates words, for names in page code (`captcha_image`, `h_captcha`).
+    """
+    word = r"[^\W_]" if underscore_ends_words else r"\w"
     return any(
-        re.search(rf"(?<!\w){re.escape(phrase.strip())}(?!\w)", text, re.IGNORECASE)
+        re.search(rf"(?<!{word}){re.escape(phrase.strip())}(?!{word})", text, re.IGNORECASE)
         for phrase in phrases
         if phrase.strip()
     )
+
+
+def _host_is_login(url: str) -> bool:
+    """Whether the URL's host starts with a login label (`login.microsoftonline.com`, `signin.example.com`)."""
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    return host.split(".")[0] in _LOGIN_SEGMENTS
 
 
 def _has_value(text: str, value: str) -> bool:

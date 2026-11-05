@@ -39,6 +39,29 @@ class LoginRedirectTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(url=url):
                 self.assertEqual(len(await _hits("login_redirect", {"url": url, "text": "welcome"})), 1)
 
+    async def test_common_login_paths_and_login_hosts_are_hits(self) -> None:
+        for url in (
+            "https://example.com/users/sign_in",
+            "https://example.com/log-in",
+            "https://example.com/account/logon",
+            "https://example.com/authorize",
+            "https://idp.example.com/oauth2/authorize?client_id=x",
+            "https://login.microsoftonline.com/common/oauth2/authorize",
+            "https://login.example.com/",
+            "https://signin.example.com/?next=/home",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(len(await _hits("login_redirect", {"url": url, "text": "welcome"})), 1)
+
+    async def test_a_host_that_only_starts_with_a_needle_is_not_a_hit(self) -> None:
+        for url in (
+            "https://loginhelp.example.com/",
+            "https://authors.example.com/jane",
+            "https://example.com/authorship",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(await _hits("login_redirect", {"url": url, "text": "welcome"}), [])
+
     async def test_a_path_that_only_starts_with_a_needle_is_not_a_hit(self) -> None:
         for url in ("https://example.com/author/jane", "https://example.com/blog/login-tips"):
             with self.subTest(url=url):
@@ -83,6 +106,16 @@ class PaymentAndCaptchaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await _hits("captcha_screen", {"url": "https://example.com/x", "text": "captchaless sign up"}), []
         )
+
+    async def test_captcha_identifiers_in_page_code_are_hits(self) -> None:
+        # Widget code names the captcha with `_` joins or Google's `grecaptcha` global, not as a word.
+        for page in (
+            {"url": "https://example.com/x", "text": "ok", "dom": "<script>grecaptcha.render('w')</script>"},
+            {"url": "https://example.com/x", "text": "ok", "dom": "<img id='captcha_image'>"},
+            {"url": "https://example.com/x", "text": "ok", "dom": "<div class='h_captcha'></div>"},
+        ):
+            with self.subTest(dom=page["dom"]):
+                self.assertEqual(len(await _hits("captcha_screen", page)), 1)
 
     async def test_the_callers_value_is_a_substring_whatever_its_edge_characters(self) -> None:
         # Only the built-in phrases match as whole words; the caller's own value keeps its substring match, so a
