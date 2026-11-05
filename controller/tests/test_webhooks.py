@@ -172,6 +172,40 @@ class WebhookTargetTests(unittest.IsolatedAsyncioTestCase):
                     await self._send("http://hooks.internal/hook", allow_private_targets=allow_private_targets)
                     self.client.post.assert_not_awaited()
 
+    async def test_the_alibaba_cloud_metadata_address_is_refused_with_the_opt_in_on_and_off(self) -> None:
+        # 100.100.100.200 sits in 100.64.0.0/10, which is neither private nor reserved: it passed both checks.
+        for allow_private_targets in (False, True):
+            with self.subTest(answer="100.100.100.200", allow_private_targets=allow_private_targets):
+                self.client.post.reset_mock()
+                self._resolver("100.100.100.200")
+                await self._send("http://hooks.internal/hook", allow_private_targets=allow_private_targets)
+                self.client.post.assert_not_awaited()
+            with self.subTest(
+                url="http://100.100.100.200/latest/meta-data/", allow_private_targets=allow_private_targets
+            ):
+                self.client.post.reset_mock()
+                resolver = self._resolver(_PUBLIC)
+                await self._send(
+                    "http://100.100.100.200/latest/meta-data/", allow_private_targets=allow_private_targets
+                )
+                self.client.post.assert_not_awaited()
+                resolver.assert_not_awaited()
+
+    async def test_without_the_opt_in_an_address_that_is_not_global_is_refused(self) -> None:
+        # Shared address space (carrier-grade NAT, Tailscale) is not global, though Python calls it neither private
+        # nor reserved.
+        for address in ("100.64.0.1", "100.101.102.103", "100.127.255.254"):
+            with self.subTest(address=address):
+                self.client.post.reset_mock()
+                self._resolver(address)
+                await self._send("https://tailnet.example.com/hook")
+                self.client.post.assert_not_awaited()
+
+    async def test_with_the_opt_in_a_shared_address_space_answer_is_posted_to(self) -> None:
+        self._resolver("100.101.102.103")
+        await self._send("http://n8n.tailnet.internal:5678/hook", allow_private_targets=True)
+        self.assertEqual(self.client.post.await_args.args[0], "http://100.101.102.103:5678/hook")
+
     async def test_with_the_opt_in_a_private_address_spelled_inside_ipv6_is_still_allowed(self) -> None:
         self._resolver("64:ff9b::10.0.0.5")
         await self._send("http://n8n.internal:5678/hook", allow_private_targets=True)

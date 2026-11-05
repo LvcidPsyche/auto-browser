@@ -39,7 +39,10 @@ _DISALLOWED_WEBHOOK_HOSTS = {
 }
 # Cloud metadata: refused even when APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS opens loopback and private targets.
 _METADATA_HOSTS = frozenset({"metadata", "metadata.google.internal"})
-_METADATA_NETWORKS = tuple(ipaddress.ip_network(net) for net in ("169.254.0.0/16", "fe80::/10", "fd00:ec2::254/128"))
+_METADATA_NETWORKS = tuple(
+    ipaddress.ip_network(net)
+    for net in ("169.254.0.0/16", "100.100.100.200/32", "fe80::/10", "fd00:ec2::254/128")  # .200: Alibaba Cloud
+)
 # IPv6 prefixes whose last 32 bits are an IPv4 address: translated (::ffff:0:a.b.c.d), compatible (::a.b.c.d) and
 # NAT64's well-known prefix (64:ff9b::a.b.c.d). Mapped (::ffff:a.b.c.d) and 6to4 (2002::/16) have stdlib properties.
 _IPV4_SUFFIX_NETWORKS = tuple(ipaddress.ip_network(net) for net in ("::ffff:0:0:0/96", "::/96", "64:ff9b::/96"))
@@ -67,7 +70,17 @@ def _address_is_disallowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, *,
         return False
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
-    return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved
+    # Not global catches what the flags miss, such as shared address space (100.64.0.0/10: carrier-grade NAT,
+    # Tailscale); the flags catch what is_global misses, such as multicast and IPv4 spelled inside ::/8.
+    return (
+        not ip.is_global
+        or ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_unspecified
+        or ip.is_multicast
+        or ip.is_reserved
+    )
 
 
 def _is_disallowed_webhook_name(host: str, *, allow_private: bool) -> bool:
@@ -116,8 +129,9 @@ async def _checked_target(webhook_url: str, *, allow_private: bool) -> _Target |
     """Where to send the request, or None (after a warning) when the target is refused.
 
     The host is read as a browser reads it (numeric spellings of loopback are refused), resolved here, and every
-    answer must be a public address; `allow_private` admits any answer but cloud metadata (169.254.0.0/16, fe80::/10,
-    fd00:ec2::254, and the names metadata and metadata.google.internal, refused before any lookup). With no proxy the
+    answer must be a global address; `allow_private` admits any answer but cloud metadata (169.254.0.0/16,
+    100.100.100.200, fe80::/10, fd00:ec2::254, any of those spelled inside an IPv6 address, and the names metadata
+    and metadata.google.internal, refused before any lookup). With no proxy the
     request goes to the checked answers (pinned_urls), with the original name kept in the Host header and the TLS
     server name, so a second lookup cannot return a different address; dispatch_approval_event decides that.
     """
