@@ -253,17 +253,52 @@ class FakeDockerContainers:
         return [c for c in containers if c.labels.get(key) == value]
 
 
+class FakeDockerApi:
+    """The low-level docker-py client's three calls behind a raw POST: _url, _post_json and
+    _raise_for_status. Only /networks/{id}/connect is served; its body is kept in connect_bodies."""
+
+    def __init__(self, client: FakeDockerClient) -> None:
+        self.client = client
+        self._version = "1.48"
+        self.connect_bodies: list[dict] = []
+        self.connect_error: str | None = None
+
+    def _url(self, pathfmt: str, *args: str) -> str:
+        return pathfmt.format(*args)
+
+    def _post_json(self, url: str, data: dict | None = None) -> dict:
+        _, collection, network_id, action = url.split("/")
+        assert (collection, action) == ("networks", "connect"), url
+        if self.connect_error is not None:
+            return {"error": self.connect_error}
+        body = dict(data or {})
+        self.connect_bodies.append(body)
+        network = next(n for n in self.client.networks.by_name.values() if n.id == network_id)
+        network.connect(body["Container"])
+        return {}
+
+    def _raise_for_status(self, response: dict) -> None:
+        if "error" in response:
+            raise RuntimeError(response["error"])
+
+
 class FakeDockerClient:
     def __init__(self, controller_container: FakeDockerContainer) -> None:
         # One ordered log of every container and network call, for order checks.
         self.events: list[tuple] = []
         self.networks = FakeDockerNetworks(self.events)
+        self.api = FakeDockerApi(self)
+        # The daemon's API version, as client.version() reports it (Engine 28 is 1.48).
+        self.api_version = "1.48"
         self.containers = FakeDockerContainers(controller_container, events=self.events, networks=self.networks)
         # docker info's SecurityOptions; seccomp present unless a test removes it.
         self.security_options = ["name=seccomp,profile=builtin", "name=cgroupns"]
 
     def info(self) -> dict:
         return {"SecurityOptions": list(self.security_options)}
+
+    def version(self) -> dict:
+        return {"ApiVersion": self.api_version}
 
 
 class FakeTracing:

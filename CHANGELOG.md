@@ -381,6 +381,15 @@ All notable changes to auto-browser are documented here.
 - **The controller no longer hangs at startup with more than 100 queued agent jobs.** It waited to put every
   queued record on a queue that holds 100 before any worker existed, so record 101 blocked startup forever. The
   workers now start first and a background task puts the records on the queue, oldest first; shutdown stops it.
+- **Creating an isolated session could move the controller's published port to the session's network and cut the
+  request that created it.** On Linux, with per-session networks and a compose project whose network name sorts after
+  the session prefix (the project `web` or `prod` with the default `browser-session` prefix), joining the new session
+  network made Docker pick it as the controller's default gateway, which is where published ports are programmed; CI's
+  compose smoke saw the first `POST /sessions` end with an empty reply. The controller now joins session networks at
+  gateway priority -1, so its own networks keep the gateway. This needs Docker Engine 28 or later (API 1.48); on an older
+  daemon the field is ignored, and the controller logs one warning per start when a session network's name sorts before
+  its own network's, naming the remedies (Engine 28, or an `ISOLATED_BROWSER_CONTAINER_PREFIX` that sorts after the
+  compose network's name). Whether later requests through the moved port were served was not checked.
 
 ### Changed
 

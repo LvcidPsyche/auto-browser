@@ -200,24 +200,65 @@ class SessionNetworkTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_failed_controller_connect_leaves_nothing(self) -> None:
         provisioner, client = self.provisioner()
-        create = client.networks.create
-
-        def create_unjoinable(name, **kwargs):
-            network = create(name, **kwargs)
-
-            def refuse(container, **_kwargs):
-                raise RuntimeError("endpoint join failed")
-
-            network.connect = refuse  # type: ignore[method-assign]
-            return network
-
-        client.networks.create = create_unjoinable  # type: ignore[method-assign]
+        client.api.connect_error = "endpoint join failed"
 
         with self.assertRaisesRegex(RuntimeError, "endpoint join failed"):
             await provisioner.provision("s1")
 
         self.assertNotIn(("container.run", "browser-session-s1", "browser-session-s1-net"), client.events)
         self.assert_nothing_left(provisioner, client)
+
+    # --- the controller keeps its default gateway (and with it the published ports) ---------
+
+    async def test_the_controller_joins_a_session_network_without_taking_the_gateway(self) -> None:
+        """Docker moves a container's default gateway, and the ports published on it, to the network whose name
+        sorts first; GwPriority -1 (API 1.48) keeps the controller's own networks (priority 0) as the gateway."""
+        provisioner, client = self.provisioner()
+
+        await provisioner.provision("s1")
+
+        self.assertEqual(
+            client.api.connect_bodies, [{"Container": "controller-id", "EndpointConfig": {"GwPriority": -1}}]
+        )
+        self.assertIn(("network.connect", "browser-session-s1-net", "controller-id"), client.events)
+
+    async def test_an_old_daemon_warns_once_when_a_session_network_would_take_the_gateway(self) -> None:
+        provisioner, client = self.provisioner(ISOLATED_BROWSER_CONTAINER_PREFIX="aaa-session")
+        client.api_version = "1.47"
+
+        with self.assertLogs("app.session_isolation", level=logging.WARNING) as logs:
+            await provisioner.provision("a")
+            await provisioner.provision("b")
+
+        warnings = [line for line in logs.output if "GwPriority" in line]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("aaa-session-a-net", warnings[0])
+        self.assertIn("auto-browser_default", warnings[0])
+        self.assertIn("Docker Engine 28", warnings[0])
+        self.assertIn("ISOLATED_BROWSER_CONTAINER_PREFIX", warnings[0])
+        self.assertEqual(len(client.api.connect_bodies), 2)
+
+    async def test_an_old_daemon_does_not_warn_when_the_session_network_sorts_after_the_controllers(self) -> None:
+        provisioner, client = self.provisioner()
+        client.api_version = "1.47"
+
+        with self.assertNoLogs("app.session_isolation", level=logging.WARNING):
+            await provisioner.provision("s1")
+
+    async def test_a_current_daemon_does_not_warn_whatever_the_names(self) -> None:
+        provisioner, client = self.provisioner(ISOLATED_BROWSER_CONTAINER_PREFIX="aaa-session")
+
+        with self.assertNoLogs("app.session_isolation", level=logging.WARNING):
+            await provisioner.provision("s1")
+
+    async def test_a_client_pinned_below_1_48_counts_as_an_old_daemon(self) -> None:
+        provisioner, client = self.provisioner(ISOLATED_BROWSER_CONTAINER_PREFIX="aaa-session")
+        client.api._version = "1.43"
+
+        with self.assertLogs("app.session_isolation", level=logging.WARNING) as logs:
+            await provisioner.provision("s1")
+
+        self.assertIn("GwPriority", "\n".join(logs.output))
 
     async def test_a_failed_container_start_leaves_nothing(self) -> None:
         """containers.run is create + start: a refused start leaves a created

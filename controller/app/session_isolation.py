@@ -52,6 +52,17 @@ _NO_NEW_PRIVILEGES = "no-new-privileges:true"
 # A session's runtime dir name: one plain path component (session ids are uuid4 hex; orphans come from iterdir).
 _SESSION_DIR_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
+# The controller joins a session network at gateway priority -1, below its own networks' default 0 (see
+# _join_session_network). The field exists from Docker Engine 28, API 1.48; older daemons ignore it.
+GATEWAY_PRIORITY_OF_SESSION_NETWORKS = -1
+GW_PRIORITY_MIN_API_VERSION = (1, 48)
+
+
+def _api_version(text: str) -> tuple[int, int]:
+    major, _, minor = text.strip().lstrip("v").partition(".")
+    return int(major), int(re.match(r"\d+", minor or "0").group())
+
+
 # Each isolated session's noVNC gets its own random VNC password. Its 6080 is
 # reachable from other sessions' containers (Docker routes to published ports
 # across bridges), so one password shared by every container would let code in
@@ -165,6 +176,9 @@ class DockerBrowserNodeProvisioner:
         # The controller's own container, looked up once. per_session joins it
         # to each session network, and _discover_host_data_root reads its mounts.
         self._controller_container: Any | None = None
+        # Whether the daemon honours GwPriority (read once), and whether the sort-order hazard was already warned about.
+        self._gw_priority_ok: bool | None = None
+        self._gw_hazard_warned = False
         # Subnets of the session networks the controller is (or may still be)
         # attached to, by network name. Browser containers never call the
         # controller, so the HTTP layer refuses any peer inside one
@@ -515,7 +529,7 @@ class DockerBrowserNodeProvisioner:
                 # Join before the container starts: the controller reaches it by
                 # name (ws://<name>:9223, autossh to <name>:6080) through Docker
                 # DNS on this network.
-                network.connect(controller_id)
+                self._join_session_network(client, network, controller_id)
             return self._run_container_sync(
                 client,
                 session_id,
@@ -536,6 +550,52 @@ class DockerBrowserNodeProvisioner:
                 self._remove_session_network(network, session_id, controller_id)
             self._remove_runtime_dirs(session_id, client=client)
             raise
+
+    def _join_session_network(self, client, network, controller_id: str) -> None:
+        """Connect the controller to a session network without letting it become the default gateway.
+
+        Docker picks a container's default-gateway endpoint among its networks (gw-priority, then the network
+        name, lower first) and publishes the container's ports on it. A session network is an ordinary bridge, so
+        one whose name sorts first took the gateway while the request that created it was in flight, cutting
+        that request's connection. GwPriority -1 (Engine 28, API 1.48) keeps the controller's own networks
+        (priority 0) ahead. docker-py's connect_container_to_network cannot send it, so the same request is
+        posted through the low-level client.
+        """
+        api = client.api
+        if not self._gw_priority_supported(client):
+            self._warn_gateway_hazard(network.name)
+        body = {"Container": controller_id, "EndpointConfig": {"GwPriority": GATEWAY_PRIORITY_OF_SESSION_NETWORKS}}
+        response = api._post_json(api._url("/networks/{0}/connect", network.id), data=body)
+        api._raise_for_status(response)
+
+    def _gw_priority_supported(self, client) -> bool:
+        """Whether the daemon, and the API version this client speaks, honour GwPriority (read once)."""
+        if self._gw_priority_ok is None:
+            versions = [str(client.version()["ApiVersion"])]
+            pinned = getattr(client.api, "_version", None)
+            if isinstance(pinned, str):
+                versions.append(pinned)
+            self._gw_priority_ok = all(_api_version(v) >= GW_PRIORITY_MIN_API_VERSION for v in versions)
+        return self._gw_priority_ok
+
+    def _warn_gateway_hazard(self, session_network_name: str) -> None:
+        """One WARNING per controller start when a session network sorts ahead of every network the controller is on."""
+        if self._gw_hazard_warned:
+            return
+        own = sorted(((self._controller_container.attrs.get("NetworkSettings") or {}).get("Networks") or {}))
+        if not own or session_network_name >= own[0]:
+            return
+        self._gw_hazard_warned = True
+        logger.warning(
+            "This Docker daemon ignores GwPriority (API below 1.48), so the controller joins session network %s "
+            "without it, and that name sorts before %s, a network the controller is on. Docker then moves the "
+            "controller's default gateway, and its published ports, to the session network: the request that "
+            "creates a session can be cut, and the published port stops answering. Use Docker Engine 28 or "
+            "later, or set ISOLATED_BROWSER_CONTAINER_PREFIX to a prefix that sorts after %s.",
+            session_network_name,
+            own[0],
+            own[0],
+        )
 
     def _container_name(self, session_id: str) -> str:
         return f"{self.settings.isolated_browser_container_prefix}-{session_id}"
