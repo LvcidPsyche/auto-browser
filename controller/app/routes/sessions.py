@@ -34,6 +34,7 @@ from ._utils import (
     OFF_LIST_PAGE_DETAIL,
     OFF_LIST_TAB_DETAIL,
     UNJUDGED_TAB_DETAIL,
+    persona_file_errors,
     typed_route_errors,
 )
 
@@ -52,21 +53,22 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
         with typed_route_errors(logger, "create session failed"):
             try:
                 # A human-handoff response: its takeover URL carries the session's noVNC password.
-                created = await manager.create_session(
-                    name=payload.name,
-                    start_url=payload.start_url,
-                    storage_state_path=payload.storage_state_path,
-                    auth_profile=payload.auth_profile,
-                    memory_profile=payload.memory_profile,
-                    proxy_persona=payload.proxy_persona,
-                    request_proxy_server=payload.proxy_server,
-                    request_proxy_username=payload.proxy_username,
-                    request_proxy_password=payload.proxy_password,
-                    user_agent=payload.user_agent,
-                    protection_mode=payload.protection_mode,
-                    totp_secret=payload.totp_secret,
-                    totp_hosts=payload.totp_hosts,
-                )
+                with persona_file_errors():
+                    created = await manager.create_session(
+                        name=payload.name,
+                        start_url=payload.start_url,
+                        storage_state_path=payload.storage_state_path,
+                        auth_profile=payload.auth_profile,
+                        memory_profile=payload.memory_profile,
+                        proxy_persona=payload.proxy_persona,
+                        request_proxy_server=payload.proxy_server,
+                        request_proxy_username=payload.proxy_username,
+                        request_proxy_password=payload.proxy_password,
+                        user_agent=payload.user_agent,
+                        protection_mode=payload.protection_mode,
+                        totp_secret=payload.totp_secret,
+                        totp_hosts=payload.totp_hosts,
+                    )
             except SessionLimitError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from None
             except RuntimeError:

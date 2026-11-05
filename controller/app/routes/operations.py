@@ -10,7 +10,7 @@ from ..approvals import ServerStateRefusal
 from ..cron_service import CronJobDisabledError
 from ..models import ApprovalDecisionRequest
 from ..tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, TriggerCronJobInput
-from ._utils import typed_route_errors
+from ._utils import persona_file_errors, typed_route_errors
 
 logger = logging.getLogger(__name__)
 
@@ -95,18 +95,20 @@ def create_operations_router(
 
     @router.get("/proxy-personas")
     async def list_proxy_personas() -> list[Any]:
-        return proxy_store.list_personas()
+        with persona_file_errors():
+            return proxy_store.list_personas()
 
     @router.post("/proxy-personas")
     async def set_proxy_persona(payload: CreateProxyPersonaInput) -> dict[str, Any]:
         try:
-            return proxy_store.set_persona(
-                payload.name,
-                server=payload.server,
-                username=payload.username,
-                password=payload.password,
-                description=payload.description,
-            )
+            with persona_file_errors():
+                return proxy_store.set_persona(
+                    payload.name,
+                    server=payload.server,
+                    username=payload.username,
+                    password=payload.password,
+                    description=payload.description,
+                )
         except PermissionError:
             raise HTTPException(status_code=409, detail="Conflict") from None
         except (ValueError, RuntimeError):
@@ -114,14 +116,16 @@ def create_operations_router(
 
     @router.get("/proxy-personas/{name}")
     async def get_proxy_persona(name: str) -> dict[str, Any]:
-        try:
-            return proxy_store.get_persona(name)
-        except KeyError:
-            raise HTTPException(status_code=404, detail="Not found") from None
+        with persona_file_errors():
+            try:
+                return proxy_store.get_persona(name)
+            except KeyError:
+                raise HTTPException(status_code=404, detail="Not found") from None
 
     @router.delete("/proxy-personas/{name}")
     async def delete_proxy_persona(name: str) -> dict[str, Any]:
-        deleted = proxy_store.delete_persona(name)
+        with persona_file_errors():
+            deleted = proxy_store.delete_persona(name)
         if not deleted:
             raise HTTPException(status_code=404, detail=f"Proxy persona not found: {name!r}")
         return {"deleted": True, "name": name}

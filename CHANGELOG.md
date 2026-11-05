@@ -131,7 +131,11 @@ All notable changes to auto-browser are documented here.
 
 - **Vision targeting now posts to the right Anthropic URL.** With the default `ANTHROPIC_BASE_URL` (which already ends in `/v1`) it called `/v1/v1/messages` and every vision lookup failed. It now uses the same `<base>/messages` form as the Claude adapter.
 
-- **A proxy persona file that cannot be read is no longer overwritten.** An unreadable or corrupt file read as an empty set, so the next save or delete rewrote it and erased every other persona. Reads and saves now fail with an error that names the file and says to fix or move it, and the file is left as it was; a missing file still reads as empty. At startup the ownerless-persona warning logs the error and carries on.
+- **A proxy persona file that cannot be read is no longer overwritten.** An unreadable or corrupt file read as an
+  empty set, so the next save rewrote it and erased every other persona. Reads and saves now fail, and the file is
+  left as it was; a missing file still reads as empty. REST answers 503 and MCP returns the same fixed text, "the
+  proxy persona file (PROXY_PERSONA_FILE) is unreadable; fix or move it. It was not changed."; the file's path and
+  the cause are in the server log only. At startup the ownerless-persona warning logs the error and carries on.
 
 - **Two actions on one session no longer mix up their Witness context.** An action's risk category and approval id were parked on the session until its turn for the session lock, and the first action to finish cleared them, so an action that had been waiting could be receipted with no approval and no risk, or with another action's. Each action now carries its own context.
 

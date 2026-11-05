@@ -53,8 +53,20 @@ from .utils import PRIVATE_FILE_MODE, atomic_write_text
 logger = logging.getLogger(__name__)
 
 
+PROXY_PERSONA_FILE_UNREADABLE = (
+    "the proxy persona file (PROXY_PERSONA_FILE) is unreadable; fix or move it. It was not changed."
+)
+
+
 class ProxyPersonaFileError(RuntimeError):
-    """The persona file exists but cannot be read or parsed."""
+    """The persona file exists but cannot be read or parsed.
+
+    The message is fixed and path-free, because callers (REST and MCP) show it as it is. The path and the
+    cause are logged at ERROR where the file is read.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(PROXY_PERSONA_FILE_UNREADABLE)
 
 
 class ProxyPersonaStore:
@@ -75,14 +87,11 @@ class ProxyPersonaStore:
             data = json.loads(self._path.read_text(encoding="utf-8"))
         except Exception as exc:
             logger.error("failed to load proxy persona file %s: %s", self._path, exc)
-            raise ProxyPersonaFileError(self._unusable_message(exc)) from exc
+            raise ProxyPersonaFileError() from exc
         if not isinstance(data, dict):
             logger.error("proxy persona file is not a JSON object: %s", self._path)
-            raise ProxyPersonaFileError(self._unusable_message("it is not a JSON object"))
+            raise ProxyPersonaFileError()
         return data
-
-    def _unusable_message(self, reason: object) -> str:
-        return f"proxy persona file {self._path} is unreadable ({reason}); fix or move it. It was not changed."
 
     def _load(self) -> dict[str, dict[str, Any]]:
         normalized: dict[str, dict[str, Any]] = {}

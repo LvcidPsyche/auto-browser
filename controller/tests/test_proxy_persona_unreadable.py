@@ -30,7 +30,7 @@ def test_save_refuses_and_leaves_an_unusable_file_untouched(tmp_path: Path, cont
 
     with pytest.raises(ProxyPersonaFileError) as caught:
         store.set_persona("z", server="http://z:1")
-    assert str(path) in str(caught.value)
+    assert str(path) not in str(caught.value)
     assert "fix or move" in str(caught.value)
     with pytest.raises(ProxyPersonaFileError):
         store.delete_persona("a")
