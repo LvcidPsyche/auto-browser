@@ -331,11 +331,16 @@ jobs:
           python3 scripts/check_vnc_exposure.py "$container" "$novnc_port" \
             ${VNC_PASSWORD:+--expect-password}
 
+      - name: Stop the doctor stack
+        # The isolated smoke runs in its own compose project (auto-browser-smoke) and refuses to start beside a
+        # running stack of this checkout in another project: both share ./data, and the smoke's controller resets
+        # files there. The doctor and download steps above left the default project running, so take it down
+        # first (the checkout folder's name is whatever the runner makes it, so no project name is assumed). The
+        # sandbox steps below bring the default stack up again with `docker compose up --force-recreate`, which
+        # does not need the stack to be running; ./data and the built images survive `down`.
+        run: docker compose down --remove-orphans
+
       - name: Run isolated session smoke test
-        # The smoke runs in its own compose project unless told otherwise. The doctor step's stack is the
-        # default project, named after the checkout folder: keep that name so the smoke tears it down, as before.
-        env:
-          COMPOSE_PROJECT_NAME: auto-browser
         run: DOCTOR_BUILD=1 API_PORT=8010 ./scripts/smoke_isolated_session.sh
 
       - name: Chromium's sandbox engages and is verified (BROWSER_SANDBOX=on)

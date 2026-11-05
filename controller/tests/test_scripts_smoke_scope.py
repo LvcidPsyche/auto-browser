@@ -381,5 +381,21 @@ class SmokeScriptsAreScopedTests(unittest.TestCase):
                 self.assertNotIn("smoke_lib.sh", other.read_text(encoding="utf-8"))
 
 
+CI_WORKFLOW = SCRIPTS.parent / ".github" / "workflows" / "ci.yml"
+
+
+@unittest.skipUnless(CI_WORKFLOW.is_file(), ".github/workflows/ci.yml is not available here")
+class CiSmokeStepTests(unittest.TestCase):
+    def test_ci_runs_the_smoke_in_its_own_project_after_stopping_the_doctor_stack(self) -> None:
+        text = CI_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertFalse("COMPOSE_PROJECT_NAME" in text, "ci.yml pins a compose project name")
+        down = text.index("run: docker compose down --remove-orphans")
+        smoke = text.index("./scripts/smoke_isolated_session.sh")
+        doctor = text.index("./scripts/doctor.sh")
+        self.assertLess(doctor, down)
+        self.assertLess(down, smoke)
+
+
 if __name__ == "__main__":
     unittest.main()
