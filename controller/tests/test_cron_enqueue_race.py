@@ -35,9 +35,12 @@ class _HoldingAudit:
         self.release = asyncio.Event()
         self.until_finished: AgentJobQueue | None = None
         self.events: list[str] = []
+        self.failing: set[str] = set()
 
     async def append(self, **kwargs) -> None:
         self.events.append(kwargs["event_type"])
+        if kwargs["event_type"] in self.failing:
+            raise OSError("No space left on device")
         if kwargs["event_type"] != "agent_job_enqueued":
             return
         self.reached.set()
@@ -177,6 +180,16 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(any(job_id in line for line in logged.output), logged.output)
         self.assertEqual(self.queue._on_finish, {})
+
+    async def test_a_withdrawal_whose_audit_cannot_be_written_is_still_a_withdrawal(self) -> None:
+        self.audit.failing.add("agent_job_interrupted")
+
+        with self.assertLogs("app.agent_jobs", level="ERROR") as logged:
+            job_id = await self._cancel_while_queuing()
+
+        self.assertEqual([record.status for record in await self.queue.store.list()], ["interrupted"])
+        self.assertTrue(any("audit" in line and job_id in line for line in logged.output), logged.output)
+        self.assertFalse(any("could not be withdrawn" in line for line in logged.output), logged.output)
 
     async def test_a_withdrawal_that_cannot_read_the_job_is_logged_not_taken_for_a_finished_job(self) -> None:
         # A record that does not parse raises pydantic's ValidationError, a ValueError, which the cleanup took for

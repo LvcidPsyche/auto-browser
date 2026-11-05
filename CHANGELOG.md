@@ -281,6 +281,8 @@ All notable changes to auto-browser are documented here.
 
 - **An agent run or step that ends in an error is now recorded as a failed job.** The job queue recorded every job as `completed` whatever the run returned, so a run that ended in `error` looked successful in the job list. The job is now `failed` with the error the run reported; runs that end in `done`, `takeover`, `approval_required` or `max_steps_reached` stay `completed`, and a failed run can still be resumed.
 
+- **Cancelling an agent job now works when its audit events cannot be written.** The cancel recorded `cancelling` and wrote its audit event before it stopped the job, so an audit log the controller could not write made the cancel answer an error and left the job running. The job is now stopped first, the cancel answers the job's state, and an audit event that fails during a cancellation, a withdrawal or an interruption is logged with the job's id instead of raised. A job stopped as it starts, before its run begins, is now recorded like any other stopped job (`cancelled` when an operator cancelled it, `interrupted` when a shutdown or a withdrawal stopped it), where its record could stay `cancelling` or `running` until the next restart. A controller shutdown with a job running no longer waits forever when the job's interruption cannot be recorded (its audit event or, on a full disk, its own record).
+
 - **A provider's reply that holds two different decisions is now refused, not read for the first one.** The parser
   took the first decision-shaped JSON object anywhere in the text, so JSON the model quoted from the page (for example
   a click on `#delete-account`) beat the decision the model then gave, and taking the last one instead would let a
