@@ -54,6 +54,9 @@ All notable changes to auto-browser are documented here.
 - A `create_session` that fails no longer leaves its artifact, auth and upload directories behind or an `active` record
   in the session store: the directories are made only after every check that can refuse the request, removed again by
   the rollback, and a record the create had already written is marked `closed` (reason `create_failed`).
+- A shadow browse that fails or is cancelled after its Chromium started no longer leaves that browser running or the
+  shadow's artifact, auth and upload directories on disk: the rollback now also runs on a cancel, and the directories
+  are made only once the browser is up.
 
 ### Security
 
@@ -88,6 +91,9 @@ All notable changes to auto-browser are documented here.
 - Every secret `Settings` field (the auth-state encryption key, the witness remote key, every provider API key, the
   approval webhook secret, the default proxy password, the share-link secret) is now left out of `repr()`, so a logged
   `Settings` object no longer carries it.
+- `browser.enable_shadow_browse` is now refused under `SESSION_ISOLATION_MODE=docker_ephemeral`: its headed Chromium
+  runs in the controller's own process tree, outside the per-session container isolation. It stays exempt from
+  `MAX_SESSIONS`.
 
 ## [1.15.0] — 2026-11-05
 

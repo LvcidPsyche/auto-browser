@@ -494,6 +494,13 @@ class BrowserSessionService(SessionCreation):
         manager = self.manager
         if not manager.settings.shadow_browse_enabled:
             raise RuntimeError("Shadow browsing is disabled (SHADOW_BROWSE_ENABLED=false)")
+        if manager.settings.session_isolation_mode == "docker_ephemeral":
+            # The shadow is a local headed Chromium in the controller's own process tree: under docker_ephemeral
+            # it would run outside the isolation every session is promised (own container, network, profile).
+            raise RuntimeError(
+                "Shadow browsing is not available under SESSION_ISOLATION_MODE=docker_ephemeral: its headed "
+                "Chromium would run outside the session isolation."
+            )
         if manager.playwright is None:
             raise RuntimeError("Playwright not started")
         # Chromium refuses to start sandboxed as root; refuse rather than drop the sandbox.
@@ -522,7 +529,6 @@ class BrowserSessionService(SessionCreation):
         from ...browser_manager import BrowserSession
 
         shadow_session_id = new_session_id()
-        artifact_dir, auth_dir, upload_dir = self.prepare_dirs(shadow_session_id)
         context_kwargs: dict[str, Any] = {
             "viewport": {
                 "width": manager.settings.default_viewport_width,
@@ -552,6 +558,8 @@ class BrowserSessionService(SessionCreation):
         context = None
         shadow_session = None
         try:
+            # Made once the browser is up, inside the guarded block: any failure from here removes them again.
+            artifact_dir, auth_dir, upload_dir = self.prepare_dirs(shadow_session_id)
             # Launched by the controller (not an attach mode), and gated before its first context.
             await manager.request_gates.attach(headed_browser, attach_mode=False)
             gate = await manager.request_gates.require(headed_browser)
@@ -598,7 +606,8 @@ class BrowserSessionService(SessionCreation):
                     "Enable shadow browsing again."
                 )
             await manager._persist_session(shadow_session, status="active")
-        except Exception:
+        except BaseException:
+            # BaseException so a cancelled shadow browse (the caller gave up, shutdown) also closes the browser.
             manager.sessions.pop(shadow_session_id, None)
             if shadow_session is not None:
                 # As create's rollback: a session the window-birth watcher registered is forgotten with it.
@@ -614,6 +623,7 @@ class BrowserSessionService(SessionCreation):
                         "failed to close the shadow context during rollback: %s", f"{type(exc).__name__}: {exc}"
                     )
             await self._close_owned_browser(headed_browser, shadow_session_id)
+            self.remove_session_dirs(shadow_session_id)
             raise
 
         await manager.audit.append(

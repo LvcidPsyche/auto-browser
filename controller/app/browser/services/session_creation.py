@@ -390,8 +390,8 @@ class SessionCreation:
                 logger.warning("failed to release isolated runtime during create_session rollback: %s", exc)
         await self._forget_failed_session_state(session, session_id)
 
-    async def _forget_failed_session_state(self, session: "BrowserSession | None", session_id: str) -> None:
-        """Remove the directories a failed create made, and close the record it persisted, if it got that far."""
+    def remove_session_dirs(self, session_id: str) -> None:
+        """Remove what prepare_dirs made for a session that never came to be."""
         for directory in (
             self.manager.artifacts.artifact_root / session_id,
             self.auth_root(session_id),
@@ -399,7 +399,11 @@ class SessionCreation:
         ):
             shutil.rmtree(directory, ignore_errors=True)
             if directory.exists():
-                logger.warning("create_session rollback could not remove %s", directory)
+                logger.warning("rollback could not remove %s", directory)
+
+    async def _forget_failed_session_state(self, session: "BrowserSession | None", session_id: str) -> None:
+        """Remove the directories a failed create made, and close the record it persisted, if it got that far."""
+        self.remove_session_dirs(session_id)
         if session is None:
             return  # no record is written before the session object exists
         try:
