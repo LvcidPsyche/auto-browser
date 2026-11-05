@@ -22,6 +22,7 @@ import time
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "codex_host_bridge.py"
@@ -195,6 +196,49 @@ class BridgeLimitsTests(unittest.TestCase):
 
         self.assertIn(b"408", response.split(b"\r\n", 1)[0])
         self.assertLess(time.monotonic() - started, 4.0)
+
+    def test_a_client_that_drips_header_bytes_is_cut_off_by_the_header_deadline(self) -> None:
+        server = _Server(_Service())
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        # The headers never end and each byte arrives inside the 0.3 s per-read timeout: only a total deadline on
+        # the request line and headers frees the handler thread.
+        self.addCleanup(setattr, bridge.BridgeRequestHandler, "timeout", bridge.BridgeRequestHandler.timeout)
+        bridge.BridgeRequestHandler.timeout = 0.3
+
+        with (
+            patch.object(bridge, "REQUEST_HEADER_DEADLINE_SECONDS", 0.6, create=True),
+            socket.create_connection(server.server_address, timeout=8.0) as client,
+        ):
+            started = time.monotonic()
+            client.sendall(b"POST /openai/decide HTTP/1.1\r\nHost: x\r\nX-Drip: ")
+            for _ in range(30):
+                if select.select([client], [], [], 0.15)[0]:
+                    break  # the server closed the connection (or spoke)
+                try:
+                    client.sendall(b"a")
+                except OSError:
+                    break
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 3.0)
+
+    def test_the_per_read_timeout_is_restored_after_a_slow_body(self) -> None:
+        # The body's deadline shrinks the socket timeout as it nears. The reply and the next keep-alive request must
+        # get the full per-read timeout back, not the few milliseconds the body left.
+        handler = bridge.BridgeRequestHandler.__new__(bridge.BridgeRequestHandler)
+        timeouts: list[float] = []
+        handler.connection = SimpleNamespace(settimeout=timeouts.append)
+        handler.rfile = io.BytesIO(b"{}")
+        clock = iter([0.0, 59.99, 59.99, 59.99])
+
+        with patch.object(bridge, "time", SimpleNamespace(monotonic=lambda: next(clock))):
+            body = handler._read_exactly(2)
+
+        self.assertEqual(body, b"{}")
+        self.assertLess(timeouts[0], 1.0)
+        self.assertEqual(timeouts[-1], handler.timeout)
 
     def test_decisions_past_the_concurrency_limit_are_answered_503(self) -> None:
         _FakeCodex.stderr_text = b""

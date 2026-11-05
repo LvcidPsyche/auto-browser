@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -35,6 +36,8 @@ REQUEST_READ_TIMEOUT_SECONDS = 30.0
 # Seconds a client may take to deliver the whole body. The per-read timeout above restarts on every byte, so a
 # client sending one byte every 29 s would otherwise hold a handler thread for hours.
 REQUEST_BODY_DEADLINE_SECONDS = 60.0
+# Seconds a client may take to deliver the request line and headers, in total, for the same reason.
+REQUEST_HEADER_DEADLINE_SECONDS = 30.0
 # Codex runs at once. Each is a heavy host process, and the socket has no other limit on concurrent requests.
 MAX_CONCURRENT_DECISIONS = 2
 # Seconds a request waits for one of those slots before it is answered 503.
@@ -309,6 +312,34 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
 
         self._send_json(HTTPStatus.OK, response)
 
+    def handle_one_request(self) -> None:
+        # The request line and headers get a total deadline, as the body does. Past it the connection is shut down,
+        # which ends the blocked read; parse_request stops the timer once the headers are in.
+        self._headers_late = False
+        self._header_timer = threading.Timer(REQUEST_HEADER_DEADLINE_SECONDS, self._end_late_headers)
+        self._header_timer.daemon = True
+        self._header_timer.start()
+        try:
+            super().handle_one_request()
+        finally:
+            self._header_timer.cancel()
+
+    def parse_request(self) -> bool:
+        try:
+            parsed = super().parse_request()
+        finally:
+            self._header_timer.cancel()
+        # Headers cut short by the deadline are not a request.
+        return parsed and not self._headers_late
+
+    def _end_late_headers(self) -> None:
+        self._headers_late = True
+        self.close_connection = True
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass  # already closed
+
     def log_message(self, format: str, *args: Any) -> None:
         print(f"[codex-bridge] {format % args}", file=sys.stderr)
 
@@ -339,17 +370,21 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         deadline = time.monotonic() + REQUEST_BODY_DEADLINE_SECONDS
         chunks: list[bytes] = []
         remaining = length
-        while remaining > 0:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                raise TimeoutError("request body not delivered in time")
-            self.connection.settimeout(min(left, self.timeout))
-            chunk = self.rfile.read1(min(remaining, 65536))
-            if not chunk:
-                self.close_connection = True
-                raise BridgeError("request body shorter than its Content-Length", status_code=400)
-            chunks.append(chunk)
-            remaining -= len(chunk)
+        try:
+            while remaining > 0:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError("request body not delivered in time")
+                self.connection.settimeout(min(left, self.timeout))
+                chunk = self.rfile.read1(min(remaining, 65536))
+                if not chunk:
+                    self.close_connection = True
+                    raise BridgeError("request body shorter than its Content-Length", status_code=400)
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        finally:
+            # The reply and the next keep-alive request get the full per-read timeout, not what the body left.
+            self.connection.settimeout(self.timeout)
         return b"".join(chunks)
 
     def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
