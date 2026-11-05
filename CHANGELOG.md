@@ -39,7 +39,7 @@ All notable changes to auto-browser are documented here.
   "unusual activity", "suspicious activity", "bot detected" or "captcha" (Akamai's "Access Denied" block page
   included); a page with an invisible reCAPTCHA v3 or v2 badge, an invisible hCaptcha or Turnstile frame, or any
   provider frame that is not visible; a provider's own docs or marketing pages (`developers.google.com/recaptcha/docs`,
-  `www.hcaptcha.com`); and a title that merely contains "just a moment". A challenge frame the page keeps hidden until
+  `www.hcaptcha.com`, `www.google.com/recaptcha/about/`, `www.google.com/recaptcha/admin`); and a title that merely contains "just a moment". A challenge frame the page keeps hidden until
   it needs it is not seen until it is shown. Cloudflare's block page and DataDome's frame still count.
 - **`ANTHROPIC_BASE_URL` must end in `/v1`, as the Claude adapter already required.** Vision targeting and the curator
   now follow it with `/messages` appended. A proxy base without `/v1` (for example `https://proxy.example`) worked for
@@ -182,11 +182,15 @@ All notable changes to auto-browser are documented here.
   these: a visible frame from a challenge provider (Google reCAPTCHA, hCaptcha, Cloudflare Turnstile and challenges,
   Arkose Labs, GeeTest, DataDome) or any visible frame whose host name contains "captcha" (matched on the host, not the
   path or query); the page itself being on a Cloudflare challenge host, `recaptcha.net`, `captcha-delivery.com`, or
-  under `/cdn-cgi/challenge-platform/` or Google's `/recaptcha/`; a title that is exactly "Just a moment..." or
+  under `/cdn-cgi/challenge-platform/` or on one of the paths where google.com serves the challenge
+  (`/recaptcha/api2/`, `/recaptcha/enterprise/`, `/recaptcha/api/fallback`); a title that is exactly "Just a moment..." or
   "Attention Required! | Cloudflare", or ends in "used Cloudflare to restrict access"; or the "verify you are human"
   prompt in the page text. Invisible widgets do not count: a frame that is not rendered, or whose address says
   `size=invisible` (reCAPTCHA v2 and v3) or `checkbox-invisible` (hCaptcha), is ignored, so a login page with a
   reCAPTCHA v3 badge no longer fails every action.
+  A visible provider widget counts even when it is already solved (a ticked reCAPTCHA checkbox, a Turnstile "Success!"
+  box): that is deliberate for now, because the probe cannot tell a solved widget from an open one, so every action on a
+  page that shows one still fails with `captcha_detected` until the widget is gone.
 
 - **Element intelligence now works on a real browser.** `get_element_intelligence` asked Chromium for computed styles without first enabling the DOM and CSS agents, so the style lookup failed there. It now enables both for the length of the read and switches the CSS agent off again afterwards (a CSS agent left on keeps streaming stylesheet events for the life of the session), each enable and disable bounded at 5 seconds. The DOM agent stays as `DOM.getDocument` leaves it, because turning it off discards every node id, among them the `node_id` the read returns and the ones a raw chain still means to use. A read cut off by the route's 10-second limit switches the CSS agent off in the background rather than making the 504 wait for it. A raw `CSS.getComputedStyleForNode` or `CSS.getMatchedStylesForNode` through `/cdp/raw` is scoped the same way, so it no longer fails on a session that has not read an element yet.
 

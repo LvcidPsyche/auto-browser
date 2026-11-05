@@ -19,6 +19,12 @@ logger = logging.getLogger(__name__)
 # does not say it is invisible. Providers are matched by the parsed host (equal, or a subdomain), never by a
 # substring of the whole address, so a provider's docs or marketing pages are not challenges.
 #
+# A visible provider widget counts even when it is already solved: a ticked reCAPTCHA checkbox, or the "Success!"
+# box of a Cloudflare Turnstile that passed on its own, still fails the action with captcha_detected and asks for a
+# takeover. That is deliberate for now (the probe cannot tell a solved widget from an open one), and it is why a
+# widget on an ordinary form blocks every action on that page. Visible means a non-empty box that is not
+# display:none or visibility:hidden; a frame at opacity 0 or off screen counts as visible.
+#
 # Host (or parent domain) of a frame that is a challenge, mapped to the signal reported for it.
 CHALLENGE_FRAME_HOSTS = {
     "challenge.cloudflare.com": "challenge.cloudflare.com",
@@ -40,6 +46,10 @@ CHALLENGE_PAGE_HOSTS = (
 )
 GOOGLE_HOSTS = ("google.com", "www.google.com")
 RECAPTCHA_PATH = "/recaptcha/"
+# The paths on google.com that serve the challenge itself. As a top-level page, google.com/recaptcha/about/ (the
+# product page) and /recaptcha/admin (the console) are not challenges, so only these count; a frame keeps the wider
+# RECAPTCHA_PATH.
+RECAPTCHA_PAGE_PATHS = ("/recaptcha/api2/", "/recaptcha/enterprise/", "/recaptcha/api/fallback")
 CLOUDFLARE_CHALLENGE_PATH = "/cdn-cgi/challenge-platform/"
 # Any other visible frame whose hostname contains this is a challenge too (DataDome's captcha-delivery.com,
 # PerimeterX's captcha.px-cdn.net): the old bare "captcha" test, held to the hostname.
@@ -114,7 +124,7 @@ def _page_signal(url: str) -> str | None:
     for domain in CHALLENGE_PAGE_HOSTS:
         if _host_matches(host, domain):
             return CHALLENGE_FRAME_HOSTS.get(domain, "captcha")
-    if host in GOOGLE_HOSTS and path.startswith(RECAPTCHA_PATH):
+    if host in GOOGLE_HOSTS and path.startswith(RECAPTCHA_PAGE_PATHS):
         return "captcha"
     if path.startswith(CLOUDFLARE_CHALLENGE_PATH):
         return CLOUDFLARE_CHALLENGE_PATH

@@ -69,6 +69,27 @@ class BotChallengeServiceTests(unittest.IsolatedAsyncioTestCase):
         assert result is not None
         self.assertEqual(result["signal"], "captcha")
 
+    async def test_googles_recaptcha_serving_paths_are_challenge_pages(self) -> None:
+        for url in (
+            "https://www.google.com/recaptcha/api2/bframe?hl=en",
+            "https://google.com/recaptcha/enterprise/anchor?k=x",
+            "https://www.google.com/recaptcha/api/fallback?k=x",
+        ):
+            with self.subTest(url=url):
+                result = await self._check(url, "Home", "")
+                assert result is not None
+                self.assertEqual(result["signal"], "captcha")
+
+    async def test_googles_own_recaptcha_marketing_and_admin_pages_are_not_challenges(self) -> None:
+        for url in (
+            "https://www.google.com/recaptcha/about/",
+            "https://www.google.com/recaptcha/admin/create",
+            "https://google.com/recaptcha/",
+            "https://www.google.com/recaptcha/api2x/anchor",
+        ):
+            with self.subTest(url=url):
+                self.assertIsNone(await self._check(url, "reCAPTCHA", "Easy on humans, hard on bots."))
+
     async def test_an_unreadable_page_still_checks_the_url(self) -> None:
         page = SimpleNamespace(
             url="https://challenges.cloudflare.com/x",
