@@ -126,10 +126,11 @@ class HumanTypingBudgetTests(unittest.IsolatedAsyncioTestCase):
 
         settings = SimpleNamespace(human_typing_min_delay_ms=MIN_DELAY_MS, human_typing_max_delay_ms=MAX_DELAY_MS)
         service = BrowserActionService(SimpleNamespace(settings=settings))
-        # (keyboard, text, budget): a control key is only pressed past the deadline, so its case has none left.
+        # (keyboard, text, budget): the insert and a control key only run past the deadline, so those cases have no
+        # budget left; with one, a fast clock types every key in time and never reaches the insert.
         cases = {
             "a keystroke": (SimpleNamespace(type=never, insert_text=AsyncMock(), press=AsyncMock()), "hello", 0.1),
-            "the final insert": (SimpleNamespace(type=AsyncMock(), insert_text=never, press=AsyncMock()), "hello", 0.1),
+            "the final insert": (SimpleNamespace(type=AsyncMock(), insert_text=never, press=AsyncMock()), "hello", 0.0),
             "a control key": (SimpleNamespace(type=AsyncMock(), insert_text=AsyncMock(), press=never), "\n", 0.0),
         }
         for name, (keyboard, text, budget) in cases.items():
