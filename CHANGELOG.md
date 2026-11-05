@@ -94,6 +94,9 @@ All notable changes to auto-browser are documented here.
 - Staging a harness skill candidate is now atomic: it is built and signed in a `.tmp-*` directory beside the final one
   and renamed into place, so a signer failure no longer leaves unsigned `SKILL.md`, `helper.py` and `test_skill.py`
   files behind, and the run is saved as `failed` with the reason instead of staying `converged` with no candidate.
+- A staged skill's `SKILL.md` renders the contract's goal, precondition and postcondition values and the verifier notes
+  as single-line code spans (with a fence longer than any backtick run inside), so a goal holding a heading, HTML, a
+  link or a code fence can no longer change the document a reviewer reads before promotion.
 
 ### Security
 

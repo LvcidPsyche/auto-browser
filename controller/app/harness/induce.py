@@ -250,7 +250,7 @@ def _render_skill_markdown(
     candidate: SkillCandidate,
     verification: VerificationResult,
 ) -> str:
-    postconditions = "\n".join(f"- `{item.kind}`: {item.value}" for item in contract.postconditions)
+    postconditions = "\n".join(f"- `{item.kind}`: {_md_literal(item.value)}" for item in contract.postconditions)
     return f"""---
 name: {candidate.skill_id}
 description: {_yaml_quote(contract.goal)}
@@ -265,11 +265,11 @@ verifier: {candidate.verifier_backend}
 
 ## Goal
 
-{contract.goal}
+{_md_literal(contract.goal)}
 
 ## Preconditions
 
-{_render_list([f"{item.kind}: {item.value}" for item in contract.preconditions])}
+{_render_list([f"{item.kind}: {_md_literal(item.value)}" for item in contract.preconditions])}
 
 ## Postconditions
 
@@ -279,7 +279,7 @@ verifier: {candidate.verifier_backend}
 
 - passed: `{verification.passed}`
 - confidence: `{verification.confidence:.3f}`
-- notes: {verification.notes}
+- notes: {_md_literal(verification.notes)}
 
 ## Runtime
 
@@ -313,6 +313,20 @@ def _yaml_quote(value: str) -> str:
         else:
             out.append(f"\\U{ord(char):08x}")
     return '"' + "".join(out) + '"'
+
+
+def _md_literal(value: str) -> str:
+    """The value as one inline code span: newlines collapsed, and a fence longer than any backtick run inside.
+
+    The goal, condition values and notes come from the caller, and SKILL.md is what a reviewer reads before
+    promoting the skill, so none of it may add a heading, a link, HTML or a fence of its own.
+    """
+    flat = " ".join(str(value).split())
+    if not flat:
+        return "(empty)"
+    longest = max((len(run) for run in re.findall(r"`+", flat)), default=0)
+    fence = "`" * (longest + 1)
+    return f"{fence} {flat} {fence}"
 
 
 def _render_list(items: list[str]) -> str:
