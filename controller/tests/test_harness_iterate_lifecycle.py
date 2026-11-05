@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
 
 from app.harness import Budget, Postcondition, TaskContract
 from app.harness.iterate import HarnessService
+from app.harness.verifier.base import VerificationResult
 
 DONE = {"url": "https://example.com/done", "text": "done"}
 
@@ -36,6 +38,39 @@ class AttemptOverrideTests(_Base):
 
         self.assertEqual(record.status, "converged")
         self.assertEqual(len(record.attempts), 1)
+
+
+class _RaisingVerifier:
+    def __init__(self, error: BaseException):
+        self.error = error
+
+    async def verify(self, contract, trace):
+        raise self.error
+
+
+class _SlowVerifier:
+    async def verify(self, contract, trace):
+        await asyncio.sleep(30)
+        return VerificationResult(passed=True, confidence=1.0)
+
+
+class TimeoutClassificationTests(_Base):
+    async def test_a_timeout_inside_the_verifier_with_budget_left_is_a_failed_attempt(self) -> None:
+        service = HarnessService(self.root, verifier=_RaisingVerifier(TimeoutError("uv command timed out")))
+
+        record = await service.start_convergence(_contract(), mock_final_observation=DONE)
+
+        self.assertEqual(record.status, "failed")
+        self.assertEqual(record.decision.status, "failed")
+        self.assertEqual(record.attempts[-1].verification.notes, "Harness attempt failed: TimeoutError")
+
+    async def test_running_past_max_wall_seconds_is_still_over_budget(self) -> None:
+        service = HarnessService(self.root, verifier=_SlowVerifier())
+
+        record = await service.start_convergence(_contract(max_wall_seconds=1), mock_final_observation=DONE)
+
+        self.assertEqual(record.status, "over_budget")
+        self.assertEqual(record.decision.reason, "max_wall_seconds budget exhausted")
 
 
 if __name__ == "__main__":

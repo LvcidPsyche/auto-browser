@@ -83,6 +83,9 @@ All notable changes to auto-browser are documented here.
   tab is refused does the old choice stand.
 - A convergence run started with `max_attempts` below the contract's budget now needs that many consecutive passes at
   most: the threshold followed the contract's budget, so `max_attempts=1` on a budget of 5 could never converge.
+- A convergence run is `over_budget` only when `max_wall_seconds` actually ran out: a `TimeoutError` raised inside an
+  attempt or the verifier (an orchestrator or verifier-command timeout) with budget left now ends the run as `failed`
+  with "attempt failed: TimeoutError", instead of claiming the wall-clock budget was spent.
 
 ### Security
 

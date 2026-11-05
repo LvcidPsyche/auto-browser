@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 # Validation context key for a run record read back from run.json.
 _STORED_RECORD = "stored_record"
 _RUN_ID_RE = re.compile(RUN_ID_PATTERN)
+# The event loop may fire a wait_for timer a clock tick early (15 ms on Windows); within this much of the deadline the
+# wall-clock budget is what ran out.
+_DEADLINE_SLACK_SECONDS = 0.05
 
 
 class HarnessAttempt(BaseModel):
@@ -214,57 +217,18 @@ class HarnessService:
                     self.verifier.verify(contract, trace),
                     timeout=_remaining_seconds(deadline),
                 )
-            except asyncio.TimeoutError as exc:
-                trace = _error_trace(contract, run_id=run_id, attempt_index=attempt_index, error=exc)
-                trace.write_json(trace_path)
-                verification = VerificationResult(
-                    passed=None,
-                    confidence=0.0,
-                    notes="Harness budget exceeded: max_wall_seconds",
-                    backend="harness",
-                    details={"budget": "max_wall_seconds"},
-                )
-                record.attempts.append(
-                    HarnessAttempt(index=attempt_index, trace_path=str(trace_path), verification=verification)
-                )
-                record.decision = ConvergenceDecision(
-                    status="over_budget",
-                    converged=False,
-                    should_continue=False,
-                    reason="max_wall_seconds budget exhausted",
-                    successful_attempts=sum(1 for result in results if result.passed is True),
-                    total_attempts=len(record.attempts),
-                )
-                record.status = "over_budget"
-                record.notes.append(verification.notes)
-                _append_reflexion(strategy_path, verification, attempt_index)
-                self.store.save(record)
-                break
             except Exception as exc:
-                trace = _error_trace(contract, run_id=run_id, attempt_index=attempt_index, error=exc)
-                trace.write_json(trace_path)
-                verification = VerificationResult(
-                    passed=None,
-                    confidence=0.0,
-                    notes=f"Harness attempt failed: {type(exc).__name__}",
-                    backend="harness",
-                    details={"error_type": type(exc).__name__},
+                self._stop_on_error(
+                    record,
+                    contract,
+                    run_id=run_id,
+                    attempt_index=attempt_index,
+                    trace_path=trace_path,
+                    strategy_path=strategy_path,
+                    error=exc,
+                    deadline=deadline,
+                    successes=sum(1 for result in results if result.passed is True),
                 )
-                record.attempts.append(
-                    HarnessAttempt(index=attempt_index, trace_path=str(trace_path), verification=verification)
-                )
-                record.decision = ConvergenceDecision(
-                    status="failed",
-                    converged=False,
-                    should_continue=False,
-                    reason=f"attempt {attempt_index} failed",
-                    successful_attempts=sum(1 for result in results if result.passed is True),
-                    total_attempts=len(record.attempts),
-                )
-                record.status = "failed"
-                record.notes.append(verification.notes)
-                _append_reflexion(strategy_path, verification, attempt_index)
-                self.store.save(record)
                 break
             results.append(verification)
             record.attempts.append(
@@ -296,6 +260,61 @@ class HarnessService:
             record.notes.append("Staged skill candidate emitted; promotion requires review.")
             self.store.save(record)
         return record
+
+    def _stop_on_error(
+        self,
+        record: HarnessRunRecord,
+        contract: TaskContract,
+        *,
+        run_id: str,
+        attempt_index: int,
+        trace_path: Path,
+        strategy_path: Path,
+        error: Exception,
+        deadline: float,
+        successes: int,
+    ) -> None:
+        """End the run on an attempt that raised: over budget only when the wall-clock deadline is what ran out.
+
+        A TimeoutError from inside the attempt or the verifier (an orchestrator or UV timeout) with budget left
+        is an ordinary failed attempt.
+        """
+        over_budget = isinstance(error, asyncio.TimeoutError) and time.monotonic() >= deadline - _DEADLINE_SLACK_SECONDS
+        trace = _error_trace(contract, run_id=run_id, attempt_index=attempt_index, error=error)
+        trace.write_json(trace_path)
+        if over_budget:
+            verification = VerificationResult(
+                passed=None,
+                confidence=0.0,
+                notes="Harness budget exceeded: max_wall_seconds",
+                backend="harness",
+                details={"budget": "max_wall_seconds"},
+            )
+            status, reason = "over_budget", "max_wall_seconds budget exhausted"
+        else:
+            verification = VerificationResult(
+                passed=None,
+                confidence=0.0,
+                notes=f"Harness attempt failed: {type(error).__name__}",
+                backend="harness",
+                details={"error_type": type(error).__name__},
+            )
+            status, reason = "failed", f"attempt {attempt_index} failed"
+        record.attempts.append(
+            HarnessAttempt(index=attempt_index, trace_path=str(trace_path), verification=verification)
+        )
+        record.decision = ConvergenceDecision(
+            status=status,
+            converged=False,
+            should_continue=False,
+            reason=reason,
+            successful_attempts=successes,
+            total_attempts=len(record.attempts),
+        )
+        record.status = status
+        record.notes.append(verification.notes)
+        _append_reflexion(strategy_path, verification, attempt_index)
+        self.store.save(record)
 
     def _get_owned(self, run_id: str) -> HarnessRunRecord:
         """The run, refused to every operator but its owner (unowned runs are open)."""
