@@ -594,6 +594,47 @@ class CiSmokeStepTests(unittest.TestCase):
         self.assertLess(down, smoke)
 
 
+COMPOSE_FILE_FLAG = re.compile(r"-f (docker-compose[\w.-]*\.yml)")
+
+
+def final_controller_setting(script: Path, key: str) -> str | None:
+    """The value a smoke script's compose files leave for `key` under a service's `environment:`, by reading
+    the script's `-f` files in order (a later file wins) without a YAML parser. None when no file sets it."""
+    compose = re.search(r"^COMPOSE=\((.*)\)$", script.read_text(encoding="utf-8"), flags=re.M)
+    assert compose, f"{script.name} has no COMPOSE array"
+    value = None
+    for name in COMPOSE_FILE_FLAG.findall(compose.group(1)):
+        for line in (SCRIPTS.parent / name).read_text(encoding="utf-8").splitlines():
+            found = re.match(rf"^\s+{key}:\s*(.*?)\s*$", line)
+            if found:
+                value = found.group(1)
+    return value
+
+
+@unittest.skipUnless(
+    all((SCRIPTS.parent / name).is_file() for name in ("docker-compose.yml", "docker-compose.smoke.yml")),
+    "the compose files are not available here",
+)
+class SmokeControllerPinTests(unittest.TestCase):
+    """The controller gets every .env key through env_file, and the shell's export of ISOLATED_DOCKER_HOST= does not
+    override it, so a smoke that must not reap a daemon pins the settings in its compose files."""
+
+    def test_the_reverse_ssh_smokes_controller_cannot_run_isolated_sessions_or_reach_another_daemon(self) -> None:
+        script = SCRIPTS / "smoke_reverse_ssh.sh"
+
+        self.assertEqual(final_controller_setting(script, "SESSION_ISOLATION_MODE"), "shared_browser_node")
+        self.assertEqual(final_controller_setting(script, "ISOLATED_DOCKER_HOST"), '""')
+        self.assertEqual(final_controller_setting(script, "ISOLATED_HOST_DATA_ROOT"), '""')
+
+    def test_the_tunnel_smoke_keeps_docker_ephemeral(self) -> None:
+        script = SCRIPTS / "smoke_isolated_session_tunnel.sh"
+
+        mode = final_controller_setting(script, "SESSION_ISOLATION_MODE")
+        self.assertIn("docker_ephemeral", mode or "")
+        self.assertNotIn("shared_browser_node", mode or "")
+        self.assertNotEqual(final_controller_setting(script, "ISOLATED_DOCKER_HOST"), '""')
+
+
 REPO = SCRIPTS.parent
 REMOVAL = re.compile(
     r"\bdocker\s+(?:(?:container|network|system)\s+)?(?:rm|remove|prune)\b|\bxargs\b[^\n|]*\b(?:rm|remove)\b"

@@ -9,7 +9,7 @@ source "${ROOT_DIR}/scripts/smoke_lib.sh"
 # This run's own compose project and session-container prefix (see smoke_lib.sh).
 smoke_setup
 
-COMPOSE=(docker compose -p "${SMOKE_PROJECT}" -f docker-compose.yml -f docker-compose.smoke.yml --profile reverse-ssh)
+COMPOSE=(docker compose -p "${SMOKE_PROJECT}" -f docker-compose.yml -f docker-compose.smoke.yml -f docker-compose.smoke-shared.yml --profile reverse-ssh)
 API_PORT_VALUE="${API_PORT:-8000}"
 API_BASE_URL="http://127.0.0.1:${API_PORT_VALUE}"
 SSH_DIR="${ROOT_DIR}/data/ssh"
