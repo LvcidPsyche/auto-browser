@@ -332,7 +332,8 @@ All notable changes to auto-browser are documented here.
   failed. `text_excerpt` is now searched for both.
 - **A stored harness trace scrubs the text next to a URL and the PII in a URL's path.** A URL ran to the next
   whitespace, so in `{"url":"https://example.com","email":"alice@example.com"}` the email was part of the "URL" and got
-  only the URL scrubber, which reads the query and fragment. A URL now ends at a quote, an angle bracket or whitespace,
+  only the URL scrubber, which reads the query and fragment. A URL now ends at a double quote, an angle bracket or
+  whitespace (or at an apostrophe that closes a quoted string, not one inside it, as in `?q=o'neil&token=...`),
   without a trailing run of `,;)]}`, so the text after it is scrubbed as text, and the host and path of every URL are
   read by the text scrubber too (`https://a.example/users/alice@example.com/profile`). `extracted_data` is still not
   text-scrubbed. A staged skill's `url_contains` expectation is scrubbed the same way when drift is checked.

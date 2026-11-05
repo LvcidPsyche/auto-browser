@@ -9,7 +9,7 @@ from pathlib import Path
 
 from app.harness import Budget, ForbiddenState, Postcondition, TaskContract
 from app.harness.iterate import HarnessService
-from app.harness.trace import TraceEnvelope, TraceRecorder
+from app.harness.trace import _URL_PATTERN, TraceEnvelope, TraceRecorder
 
 SECRET_TEXT = "Sup3rS3cret-Passw0rd!"
 URL_TOKEN = "tok_live_ABC"
@@ -176,6 +176,24 @@ class StoredUrlTests(unittest.TestCase):
         dumped = json.dumps(stored.extracted_data)
         self.assertNotIn(PLAIN_TOKEN, dumped)
         self.assertIn(EMAIL, stored.extracted_data["note"])
+
+    def test_an_apostrophe_inside_a_url_does_not_end_it_but_one_closing_a_quote_does(self) -> None:
+        stored = self._stored(extracted_data={"note": f"see https://x.test/s?q=o'neil&email={PLAIN_TOKEN}%40a.com now"})
+
+        self.assertNotIn(PLAIN_TOKEN, json.dumps(stored.extracted_data))
+        self.assertIn("see https://x.test/s?q=o", stored.extracted_data["note"])
+
+        url = "https://example.com/a?b=1"
+        for text in (
+            f"{{'url': '{url}'}}",
+            f"['{url}', 'next']",
+            f"('{url}': 1)",
+            f"'{url}'",
+            f"x='{url}';",
+            f'{{"url":"{url}","email":"{EMAIL}"}}',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual([url], _URL_PATTERN.findall(text))
 
     def test_the_file_on_disk_holds_no_url_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

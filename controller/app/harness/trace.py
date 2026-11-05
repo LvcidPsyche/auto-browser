@@ -34,8 +34,13 @@ _TYPED_TEXT_KEYS = frozenset({"text", "text_preview", "value", "label", "usernam
 _SENSITIVE_FLAG_KEYS = ("sensitive", "text_redacted")
 # The keys of an agent step's observation that point at its screenshot.
 _SCREENSHOT_KEYS = ("screenshot_path", "screenshot_url")
-# A URL in text ends at whitespace, a quote or an angle bracket, and a trailing run of `,;)]}` is punctuation after it.
-_URL_PATTERN = re.compile(r"""https?://[^\s"'<>]*[^\s"'<>,;)\]}]""", re.IGNORECASE)
+# A URL in text ends at whitespace, a double quote or an angle bracket, and a trailing run of `,;)]}` is punctuation
+# after it. An apostrophe is legal inside a URL (`?q=o'neil&token=...`), so it ends one only when it closes a quoted
+# string: when whitespace, `,;:)]}` or the end follows it.
+_URL_PATTERN = re.compile(
+    r"""https?://(?:[^\s"'<>]|'(?![\s,;:)\]}]|\Z))*[^\s"'<>,;)\]}]""",
+    re.IGNORECASE,
+)
 _URL_SCRUB_MAX_BYTES = 16384
 
 
