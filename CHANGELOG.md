@@ -102,6 +102,8 @@ All notable changes to auto-browser are documented here.
 
 - **An action that fails unexpectedly or is cancelled after it began now leaves an audit entry and a receipt.** Only known failures were recorded, so a cancellation or an unforeseen error mid-action left no trace of an action whose effect may have happened. Both now record an `error` entry and receipt saying the outcome is unknown (the error type only, not its text), and then the error or cancellation carries on as before. An action that failed before it began is still not recorded, and its approval is still given back.
 
+- **The cron service now says so at every start when its store was quarantined and is empty.** A corrupt store is moved aside and the first read fails, but the next start found no file and ran with no jobs and no sign that they were in the `crons.corrupt-*.json` file. While such a file exists and the store holds no jobs, each start logs a warning naming it.
+
 ## [1.14.1] — 2026-11-04
 
 A patch release over 1.14.0. A session whose start page fails to load now gets a 400 the agent can act on instead

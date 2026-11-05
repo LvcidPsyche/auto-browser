@@ -92,11 +92,28 @@ class CronService:
             return
         self._scheduler = AsyncIOScheduler()
         jobs = self._load()
+        self._warn_if_store_was_quarantined(jobs)
         for job in jobs.values():
             if job.get("enabled") and job.get("schedule"):
                 self._register_job(job)
         self._scheduler.start()
         logger.info("cron service started with %d jobs", len(jobs))
+
+    def _warn_if_store_was_quarantined(self, jobs: dict[str, Any]) -> None:
+        """Say at every start that an empty store follows a quarantined one.
+
+        _load raises once, when it moves a corrupt store aside; the next start finds no file and reads an empty
+        store with no sign that the jobs are in the quarantined file.
+        """
+        if jobs:
+            return
+        for quarantined in sorted(self._store_path.parent.glob(f"{self._store_path.stem}.corrupt-*.json")):
+            logger.warning(
+                "cron store %s holds no jobs, and a corrupt store was set aside as %s; restore its jobs from "
+                "that file if they are still wanted",
+                self._store_path,
+                quarantined,
+            )
 
     async def shutdown(self) -> None:
         """Stop the scheduler."""

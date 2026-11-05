@@ -284,6 +284,42 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await service.trigger_job(created["id"]))["triggered"])
 
 
+class CronQuarantineWarningTests(unittest.IsolatedAsyncioTestCase):
+    """After a corrupt store is set aside, every later start says so while the store is empty."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store_path = Path(self.tmp.name) / "crons.json"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    async def _start_and_stop(self) -> None:
+        service = CronService(self.store_path)
+        await service.startup()
+        await service.shutdown()
+
+    async def test_each_start_warns_while_a_quarantine_file_exists_and_the_store_is_empty(self) -> None:
+        quarantined = self.store_path.with_suffix(".corrupt-20261105T042259Z.json")
+        quarantined.write_text("{truncated", encoding="utf-8")
+
+        for _ in range(2):
+            with self.assertLogs("app.cron_service", level="WARNING") as logged:
+                await self._start_and_stop()
+            self.assertTrue(any(str(quarantined) in line for line in logged.output), logged.output)
+
+    async def test_no_warning_once_the_store_holds_jobs(self) -> None:
+        self.store_path.with_suffix(".corrupt-20261105T042259Z.json").write_text("{truncated", encoding="utf-8")
+        await CronService(self.store_path).create_job(name="new", goal="g")
+
+        with self.assertNoLogs("app.cron_service", level="WARNING"):
+            await self._start_and_stop()
+
+    async def test_no_warning_without_a_quarantine_file(self) -> None:
+        with self.assertNoLogs("app.cron_service", level="WARNING"):
+            await self._start_and_stop()
+
+
 class CronTriggerIdentityTests(unittest.IsolatedAsyncioTestCase):
     """A job fires as the operator who owns it, and an unowned job fires as nobody.
 
