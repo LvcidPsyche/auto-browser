@@ -34,8 +34,9 @@ All notable changes to auto-browser are documented here.
   warning in the log). What is read back from the other files is not scrubbed again, so for such a run the staged
   candidate that `run.json` holds and `harness.get_trace` (its `trace.json`), and for such a skill
   `harness.list_candidates` and `harness.get_candidate` (the candidate's envelope), can still return the token. A
-  `run.json` written by this version has the new `scrubbed` field, which an earlier version does not read. The next drift check rewrites
-  `drift.json`. Delete those runs and staged skills where that matters; running the task again stages a clean copy (a
+  `run.json` written by this version has the new `scrubbed` field, and a 1.14.x controller cannot load such a file: its
+  attempt record forbids extra fields, so after a downgrade `harness.list_runs` drops the run and `harness.get_status`
+  fails on it. The next drift check rewrites `drift.json`. Delete those runs and staged skills where that matters; running the task again stages a clean copy (a
   staged skill's files cannot be edited, as they are covered by its signed envelope). A skill staged before this
   release with a PII expectation (an email in `text_contains`, `dom_contains` or `url_contains`) may now report
   degraded: the drift check scrubs the expectation, but that skill's `trace.json` was not scrubbed. Stage it again.
@@ -92,8 +93,11 @@ All notable changes to auto-browser are documented here.
   with `<redacted>` (scheme, host and port stay), as does the `the sandbox check failed: ...` detail that
   `browser-node/sandbox.mjs` writes into the state and the log when a connect error names the URL. The controller does
   the same for what it prints itself: its `connected to browser node ...` log line, the connect failure message
-  (which names a configured `BROWSER_WS_ENDPOINT`) and the `endpoint` in the browser_sandbox readiness details. The
-  state file and the endpoint file themselves still hold the path (the controller reads it there).
+  (which names a configured `BROWSER_WS_ENDPOINT`) and the `endpoint` in the browser_sandbox readiness details. A
+  failed connect no longer chains Playwright's own error to that message, because that error names the endpoint with
+  its path and `/readyz`, deep health and startup log the chain; the last error is logged at warning level with the
+  path redacted instead. The state file and the endpoint file themselves still hold the path (the controller reads it
+  there).
 - **`/healthz/deep` now gives up on a browser that does not answer.** The probe waited on the browser connection with
   no limit, so a stuck browser node held the request open (and the controller's browser lock with it). That step is
   now bounded by the same 5 seconds as `/readyz`, and a timeout answers 503 with `deep_health_probe_timed_out`. The wait is
@@ -145,7 +149,9 @@ All notable changes to auto-browser are documented here.
   writable directory; the paths, owners and modes refused are in the server log only. The Codex CLI's per-call
   directory is now made under the CLI home too, not in the system temp dir. With `CLI_HOME` set to a directory that
   cannot be created (a host run with no writable `/data`), that private directory is their working directory and their
-  `HOME`, and a warning says CLI mode needs `CLI_HOME` set to a writable directory.
+  `HOME`, and a warning says CLI mode needs `CLI_HOME` set to a writable directory. In the image, when the controller
+  runs as a host user id and `CLI_HOME` cannot be created, the fallback refuses `/home/controller` (a sticky directory
+  owned by uid 10002), so set `CLI_HOME` there.
 - **Harness traces no longer keep typed secrets or URL tokens, and induced skills no longer claim to be
   credential free.** A trace redacted only keys with secret-sounding names, so the text typed into a field marked
   sensitive (or found sensitive when the step ran), tokens in a URL query or fragment, and PII in free text all
@@ -210,13 +216,14 @@ All notable changes to auto-browser are documented here.
 - **The reverse-SSH sidecar now reports `inactive` when its tunnel ends.** The entrypoint ran under `set -e`, so an `autossh` that exited with an error (or was stopped) ended the script before the final status was written, and `reverse-ssh.json` kept saying `active` after the tunnel was gone. The exit status is unchanged.
 
 - **Human-like typing now has a time limit.** It paused 40-130 ms after every character with no overall cap, so a
-  5000-character text held the session for about 11 minutes. Typing now takes about 20 seconds at most: the pauses of a
+  5000-character text held the session for about 11 minutes. Typing now takes about 24 seconds at most: the pauses of a
   long text are shortened to fit, and once the time is used up the rest of the text is inserted as plain text without
   key events, except that a newline, carriage return or tab in it is still pressed as Enter or Tab, so a text ending in
   a newline still submits a form. A keystroke or the final insert that the page does not acknowledge now fails the
   action with the retryable `typing_timeout` (after the time left, and at least 2 seconds) instead of holding the
-  session until the browser answers. Once the 20 seconds are used up, the rest of the text shares one more 2 seconds,
-  however many newlines or tabs it holds. A short text keeps its usual pace.
+  session until the browser answers. The 24 seconds are the 20 of the budget, up to 2 for a keystroke started just
+  before it ends, and 2 more that the rest of the text shares, however many newlines or tabs it holds. A short text
+  keeps its usual pace.
 
 - **Ordinary pages are no longer mistaken for bot challenges.** After each action the controller looked for words such as
   "captcha", "security check" and "access denied" anywhere in the URL, the title and the first 500 characters of the
@@ -304,6 +311,14 @@ All notable changes to auto-browser are documented here.
 
 - **A `.env` line is no longer executed as shell by the repo's scripts.** `doctor.sh`, `compose_local.sh`, `bootstrap_cli_auth.sh` and the smoke scripts loaded `.env` by sourcing it, so a value such as `X=$(cmd)` ran `cmd`, and an unquoted `&`, `;` or `(` in a value broke the script. They now read `KEY=VALUE` lines as text: blank lines and `#` comments are skipped, quoted values lose one level of quotes, an unquoted ` # comment` is dropped, `KEY=   # note` is empty, a UTF-8 BOM is ignored, and a value keeps every `=` and `$` in it. Keys that change how the shell or the loader behaves (`BASH_ENV`, `PATH`, `LD_*` and the others listed under Upgrade notes) are refused with a warning, and a line that cannot be read is skipped with a warning naming its line number. The values are still passed to the programs the scripts start, so keep `.env` to values you trust.
 
+- **A skipped multi-line `.env` value no longer leaks its later lines as keys.** A double-quoted value with a `\0`
+  escape was skipped when the escape was met, before its closing quote, so on a value that spans lines the later lines
+  were read as `KEY=VALUE` (`BAD="\0000`, `MAX_SESSIONS=5000`, `"` exported `MAX_SESSIONS`). The loader now reads on to
+  the closing quote and skips the whole value with its one warning.
+- **The smoke preflight finds this checkout's stack however Windows or WSL spells its folder.** It compared the
+  compose project directory by exact text, so on Git Bash or Cygwin `C:\USERS\me\Repo` did not match `/c/Users/me/repo`
+  (Windows paths ignore case), and a WSL `/mnt/c/Users/me/repo` did not match either, and the smoke started beside a
+  running stack it should have refused to touch. Both now compare equal.
 - **A harness trace of a live run now ends on the page the last action left, not the page before it.** The final
   observation was the observation each step made before acting, so a run that ended on an action was verified against
   the page it started that action on. It is now the action's `after` (a full observation) whenever that was read; a
