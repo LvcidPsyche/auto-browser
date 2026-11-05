@@ -25,6 +25,10 @@ from .utils import PRIVATE_FILE_MODE, atomic_write_text, record_path, utc_now
 logger = logging.getLogger(__name__)
 
 
+class _AlreadyFinished(ValueError):
+    """AgentJobQueue._withdraw found nothing to take back: the job has already finished."""
+
+
 class AgentJobStore:
     def __init__(self, root: str | Path):
         self.root = Path(root)
@@ -115,6 +119,10 @@ class AgentJobStore:
     async def request_cancel(self, job_id: str) -> tuple[AgentJobRecord, bool]:
         async with self._lock:
             return await asyncio.to_thread(self._request_cancel_sync, job_id)
+
+    async def interrupt_queued(self, job_id: str) -> tuple[AgentJobRecord, bool]:
+        async with self._lock:
+            return await asyncio.to_thread(self._interrupt_queued_sync, job_id)
 
     async def discard(self, job_id: str) -> tuple[AgentJobRecord, bool]:
         async with self._lock:
@@ -226,6 +234,16 @@ class AgentJobStore:
             return record, False
         raise ValueError("Only queued or running jobs can be cancelled")
 
+    def _interrupt_queued_sync(self, job_id: str) -> tuple[AgentJobRecord, bool]:
+        record = self._get_sync(job_id)
+        if record.status != "queued":
+            return record, False
+        record.status = "interrupted"
+        record.error = "agent_job_interrupted"
+        record.updated_at = utc_now()
+        self._write_sync(record)
+        return record, True
+
     def _discard_sync(self, job_id: str) -> tuple[AgentJobRecord, bool]:
         record = self._get_sync(job_id)
         if record.status in {"running", "cancelling"}:
@@ -270,6 +288,8 @@ class AgentJobQueue:
         self.audit = audit_store
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._cancellation_reasons: dict[str, str] = {}
+        # Jobs done running whose task is still in its finish callback: _withdraw must not cancel those.
+        self._finishing: set[str] = set()
         # job_id -> coroutine function invoked once the job reaches a terminal
         # state, whatever that state is. Used by callers that created a session
         # solely to run this job and must close it afterwards (see CronService).
@@ -345,7 +365,8 @@ class AgentJobQueue:
 
         It is registered before the job is visible to a worker, so a job that finishes at once still calls
         it. A caller that passes one owns the session the job runs in and closes it there: if the enqueue
-        is cancelled after the job exists, the job is cancelled too, so none is left on a closed session.
+        is cancelled after the job exists, the job is withdrawn too (recorded as interrupted), so none is
+        left on a closed session.
         """
         return await self._enqueue(session_id, "agent_run", payload, on_finish=on_finish)
 
@@ -406,6 +427,28 @@ class AgentJobQueue:
             return self._public_record(await self.store.get(job_id))
         return self._public_record(await self.store.get(job_id))
 
+    async def _withdraw(self, job_id: str) -> None:
+        """Take back a job whose caller gave up on it while queuing it (a cron trigger cancelled mid-enqueue).
+
+        Nobody asked to cancel it, so it is recorded as a restart or a shutdown records the jobs it stops,
+        interrupted, not as an operator's cancel: a queued job is marked before a worker can start it, and a
+        running one is stopped the way shutdown stops it. Raises _AlreadyFinished for a job that already finished.
+        """
+        record, changed = await self.store.interrupt_queued(job_id)
+        if changed:
+            await self._audit("agent_job_interrupted", "interrupted", record)
+            return
+        task = self._running_tasks.get(job_id)
+        # The task of a finished job may still be running its finish callback (closing its session): cancelled, the
+        # close never happened, and nothing else would close the session. Its record can still say running when the
+        # write of its end failed, so the in-memory mark counts as much as the record.
+        if task is None or job_id in self._finishing or record.status not in {"running", "cancelling"}:
+            raise _AlreadyFinished(f"agent job {job_id} has already finished")
+        # Any reason but "user" makes the worker record an interruption; an operator's cancel under way keeps its own.
+        self._cancellation_reasons.setdefault(job_id, "withdrawn")
+        task.cancel()
+        await asyncio.wait([task], timeout=5)
+
     async def _enqueue(
         self,
         session_id: str,
@@ -430,7 +473,7 @@ class AgentJobQueue:
             # The record may have landed queued, and nothing would put it on the queue now: the next startup
             # would run it after its caller gave up on it (a cron trigger has closed its session by then).
             try:
-                await self.store.request_cancel(job_id)
+                await self._withdraw(job_id)
             except KeyError:
                 pass  # cancelled before the write began: there is no record
             except Exception:
@@ -452,9 +495,9 @@ class AgentJobQueue:
             if on_finish is not None:
                 # The caller is about to close the session this job runs in: take the job back first.
                 try:
-                    await self.cancel_job(record.id)
-                except ValueError:
-                    pass  # it already finished: there is nothing to take back
+                    await self._withdraw(record.id)
+                except _AlreadyFinished:
+                    pass  # there is nothing to take back
                 except Exception:
                     logger.exception("agent job %s could not be withdrawn before its session closes", record.id)
                 finally:
@@ -483,6 +526,7 @@ class AgentJobQueue:
             finally:
                 self._running_tasks.pop(job_id, None)
                 self._cancellation_reasons.pop(job_id, None)
+                self._finishing.discard(job_id)
                 self.queue.task_done()
 
     async def _process_job(self, job_id: str) -> None:
@@ -494,6 +538,7 @@ class AgentJobQueue:
         finally:
             # Runs on success, failure, and cancellation alike. Whoever created a
             # session purely to host this job gets it back here or not at all.
+            self._finishing.add(job_id)
             await self._run_finish_callback(job_id)
 
     async def _queued_by(self, job_id: str) -> OperatorIdentity | None:

@@ -34,8 +34,10 @@ class _HoldingAudit:
         self.reached = asyncio.Event()
         self.release = asyncio.Event()
         self.until_finished: AgentJobQueue | None = None
+        self.events: list[str] = []
 
     async def append(self, **kwargs) -> None:
+        self.events.append(kwargs["event_type"])
         if kwargs["event_type"] != "agent_job_enqueued":
             return
         self.reached.set()
@@ -88,10 +90,18 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
             await task
 
         self.assertEqual(await self.queue.store.list(status="queued"), [], "a runnable job is left on a closed session")
-        self.assertEqual([record.status for record in await self.queue.store.list()], ["cancelled"])
+        # Nobody cancelled it: the withdrawal is recorded as an interruption, not as an operator's cancel.
+        [record] = await self.queue.store.list()
+        self.assertEqual((record.status, record.error), ("interrupted", "agent_job_interrupted"))
+        self._assert_withdrawn_as_an_interruption()
         self.manager.close_session.assert_awaited_once_with("session-1")
-        self.assertEqual(at_close, {"session-1": ["cancelled"]}, "the session closed before its job was withdrawn")
+        self.assertEqual(at_close, {"session-1": ["interrupted"]}, "the session closed before its job was withdrawn")
         self.assertEqual(self.cron._active_runs, {})
+
+    def _assert_withdrawn_as_an_interruption(self) -> None:
+        self.assertIn("agent_job_interrupted", self.audit.events)
+        self.assertNotIn("agent_job_cancel_requested", self.audit.events)
+        self.assertNotIn("agent_job_cancelled", self.audit.events)
 
     async def test_a_job_that_finishes_before_enqueue_returns_still_releases_the_slot(self) -> None:
         await self.queue.startup()
@@ -145,7 +155,8 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.cron._active_runs, {job_id: "session-2"}, "the newer trigger's slot was freed")
         self.manager.close_session.assert_awaited_once_with("session-1")
-        self.assertEqual(at_close["session-1"], ["cancelled"], "the session closed before its job was withdrawn")
+        self.assertEqual(at_close["session-1"], ["interrupted"], "the session closed before its job was withdrawn")
+        self._assert_withdrawn_as_an_interruption()
 
     async def _cancel_while_queuing(self) -> str:
         """Start a trigger, cancel it while its job is queued (no workers), return the job id once it has raised."""
@@ -159,13 +170,71 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
         return record.id
 
     async def test_a_withdrawal_that_fails_unexpectedly_is_logged_with_the_job_id(self) -> None:
-        self.queue.cancel_job = AsyncMock(side_effect=OSError("store unavailable"))
+        self.queue._withdraw = AsyncMock(side_effect=OSError("store unavailable"))
 
         with self.assertLogs("app.agent_jobs", level="ERROR") as logged:
             job_id = await self._cancel_while_queuing()
 
         self.assertTrue(any(job_id in line for line in logged.output), logged.output)
         self.assertEqual(self.queue._on_finish, {})
+
+    async def test_a_withdrawal_that_cannot_read_the_job_is_logged_not_taken_for_a_finished_job(self) -> None:
+        # A record that does not parse raises pydantic's ValidationError, a ValueError, which the cleanup took for
+        # "already finished" and dropped without a word.
+        await self.queue.store.startup()
+        task = asyncio.create_task(self.cron.trigger_job(self.job["id"]))
+        await asyncio.wait_for(self.audit.reached.wait(), timeout=5)
+        [path] = self.queue.store.root.glob("*.json")
+        path.write_text("{", encoding="utf-8")
+
+        with self.assertLogs("app.agent_jobs", level="ERROR") as logged:
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        self.assertTrue(
+            any("could not be withdrawn" in line and path.stem in line for line in logged.output), logged.output
+        )
+
+    async def test_a_withdrawal_leaves_a_finished_job_to_close_its_session(self) -> None:
+        # The job had finished and its finish callback was closing the session when the trigger was cancelled. The
+        # withdrawal cancelled that close, and the run's slot was already free, so nothing closed the session.
+        closed = await self._withdraw_while_the_finished_job_closes_its_session()
+
+        self.assertEqual(closed, ["session-1"], "the finished job's session was never closed")
+
+    async def test_a_withdrawal_leaves_a_job_whose_end_was_not_recorded_to_close_its_session(self) -> None:
+        # The write of the job's end failed (a full disk), so its record still said running and the withdrawal took it
+        # for a running job: the close in its finish callback was cancelled all the same.
+        self.queue.store.finish = AsyncMock(side_effect=OSError("No space left on device"))  # type: ignore[method-assign]
+
+        closed = await self._withdraw_while_the_finished_job_closes_its_session()
+
+        self.assertEqual(closed, ["session-1"], "the session of a job whose end was not recorded was never closed")
+
+    async def _withdraw_while_the_finished_job_closes_its_session(self) -> list[str]:
+        """Cancel a trigger while the job it queued, done running, closes its session; return the sessions closed."""
+        closing, close = asyncio.Event(), asyncio.Event()
+        closed: list[str] = []
+
+        async def close_session(session_id: str) -> None:
+            closing.set()
+            await close.wait()
+            closed.append(session_id)
+
+        self.manager.close_session.side_effect = close_session
+        await self.queue.startup()
+        self.addAsyncCleanup(self.queue.shutdown)
+        task = asyncio.create_task(self.cron.trigger_job(self.job["id"]))
+        await asyncio.wait_for(closing.wait(), timeout=5)
+
+        task.cancel()
+        await asyncio.wait([task], timeout=0.5)
+        close.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        await _until(lambda: closed or not self.queue._running_tasks)
+        return closed
 
     async def test_a_job_that_already_finished_is_not_withdrawn_and_nothing_is_logged(self) -> None:
         await self.queue.store.startup()
@@ -241,7 +310,8 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await asyncio.to_thread(written.wait, 5))
 
         self.manager.close_session.assert_awaited_once_with("session-1")
-        self.assertEqual([record.status for record in await self.queue.store.list()], ["cancelled"])
+        self.assertEqual([record.status for record in await self.queue.store.list()], ["interrupted"])
+        self._assert_withdrawn_as_an_interruption()
         restarted = AgentJobQueue(
             orchestrator=FakeOrchestrator(),
             store_root=self.queue.store.root,
@@ -252,7 +322,7 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restarted.queue.qsize(), 0, "startup put the abandoned job back on the queue")
 
     async def test_the_finish_callback_is_dropped_even_when_the_withdrawal_is_cancelled(self) -> None:
-        self.queue.cancel_job = AsyncMock(side_effect=asyncio.CancelledError())
+        self.queue._withdraw = AsyncMock(side_effect=asyncio.CancelledError())
 
         await self._cancel_while_queuing()
 
