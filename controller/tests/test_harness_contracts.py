@@ -88,6 +88,39 @@ class ProgrammaticVerifierTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.missing_evidence, [])
 
+    async def test_the_page_text_an_observation_carries_in_text_excerpt_is_searched(self) -> None:
+        # A real observation (observation.py) keeps the page text in `text_excerpt`, not `text`.
+        observation = {
+            "url": "https://example.com/inbox",
+            "title": "Inbox",
+            "active_element": {},
+            "text_excerpt": "Welcome back. Your payment failed.",
+            "dom_outline": [],
+            "interactables": [],
+        }
+        trace = {"final_observation": observation, "evidence": ["trace"]}
+
+        def contract(*, postcondition: str = "", forbidden: str = "", kind: str = "text_contains") -> TaskContract:
+            return TaskContract(
+                id="task-excerpt",
+                goal="read the page text",
+                postconditions=[Postcondition(kind=kind, value=postcondition or "example.com")]
+                if postcondition
+                else [Postcondition(kind="url_contains", value="example.com")],
+                forbidden_states=[ForbiddenState(kind="text_contains", value=forbidden)] if forbidden else [],
+                evidence_required=[EvidenceRequirement(kind="trace")],
+            )
+
+        forbidden = await ProgrammaticVerifier().verify(contract(forbidden="payment failed"), trace)
+        required = await ProgrammaticVerifier().verify(contract(postcondition="Welcome back"), trace)
+        in_dom = await ProgrammaticVerifier().verify(contract(postcondition="Welcome back", kind="dom_contains"), trace)
+        absent = await ProgrammaticVerifier().verify(contract(postcondition="Order confirmed"), trace)
+
+        self.assertFalse(forbidden.passed)
+        self.assertTrue(required.passed)
+        self.assertTrue(in_dom.passed)
+        self.assertFalse(absent.passed)
+
     async def test_a_contract_of_only_optional_postconditions_needs_one_satisfied(self) -> None:
         contract = TaskContract(
             id="task-verify-optional",

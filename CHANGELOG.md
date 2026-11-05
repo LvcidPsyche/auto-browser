@@ -300,6 +300,10 @@ All notable changes to auto-browser are documented here.
 
 - **A `.env` line is no longer executed as shell by the repo's scripts.** `doctor.sh`, `compose_local.sh`, `bootstrap_cli_auth.sh` and the smoke scripts loaded `.env` by sourcing it, so a value such as `X=$(cmd)` ran `cmd`, and an unquoted `&`, `;` or `(` in a value broke the script. They now read `KEY=VALUE` lines as text: blank lines and `#` comments are skipped, quoted values lose one level of quotes, an unquoted ` # comment` is dropped, `KEY=   # note` is empty, a UTF-8 BOM is ignored, and a value keeps every `=` and `$` in it. Keys that change how the shell or the loader behaves (`BASH_ENV`, `PATH`, `LD_*` and the others listed under Upgrade notes) are refused with a warning, and a line that cannot be read is skipped with a warning naming its line number. The values are still passed to the programs the scripts start, so keep `.env` to values you trust.
 
+- **The harness verifier now searches the page text a real observation carries.** It looked for `text_contains`,
+  `dom_contains` and a forbidden `text_contains` in `text`, `body_text`, `content`, `title` and the like, but an
+  observation keeps the page text in `text_excerpt`, so a forbidden phrase present only there passed and a required one
+  failed. `text_excerpt` is now searched for both.
 - **A stored harness trace scrubs the text next to a URL and the PII in a URL's path.** A URL ran to the next
   whitespace, so in `{"url":"https://example.com","email":"alice@example.com"}` the email was part of the "URL" and got
   only the URL scrubber, which reads the query and fragment. A URL now ends at a quote, an angle bracket or whitespace,

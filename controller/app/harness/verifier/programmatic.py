@@ -219,8 +219,9 @@ async def _regex_search_child(patterns: list[str], text: str, *, timeout: float)
 
 
 def _searchable_text(observation: dict[str, Any]) -> tuple[str, str]:
-    text_fields = ("text", "body_text", "content", "title", "active_element")
-    dom_fields = ("dom", "dom_outline", "accessibility_outline", "text", "ocr", "interactables")
+    # `text_excerpt` is where an observation (observation.py) carries the page text.
+    text_fields = ("text", "text_excerpt", "body_text", "content", "title", "active_element")
+    dom_fields = ("dom", "dom_outline", "accessibility_outline", "text", "text_excerpt", "ocr", "interactables")
 
     text_parts: list[str] = [str(value) for key in text_fields if (value := observation.get(key)) is not None]
     dom_parts: list[str] = [
