@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 from app.browser.page_provenance import PageProvenance
 from app.browser.services.observation import BrowserObservationService
 from app.browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
+from app.pii_scrub import PiiScrubber
 from tests._fake_element_ids import FakePageElementIds
 
 
@@ -68,7 +69,7 @@ def _make_manager(
             perception_preset_default=preset_default,
             pii_scrub_action_screenshots=True,
         ),
-        pii_scrubber=SimpleNamespace(screenshot_enabled=scrubbing_active, audit_report=False),
+        pii_scrubber=PiiScrubber(enabled=scrubbing_active, screenshot_enabled=scrubbing_active, audit_report=False),
         _capture_screenshot=AsyncMock(return_value={"path": "/tmp/shot.png", "url": "/artifacts/shot.png"}),
         _session_summary=AsyncMock(return_value={"id": "session-1"}),
         _current_takeover_url=MagicMock(return_value=None),
