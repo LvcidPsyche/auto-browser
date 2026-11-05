@@ -64,7 +64,8 @@ def test_the_excerpt_and_get_html_share_one_normaliser() -> None:
     assert "const readable" in PAGE_TEXT_SCRIPT
     assert "const readable" in PAGE_SUMMARY_SCRIPT
     assert "__READABLE_TEXT__" not in PAGE_SUMMARY_SCRIPT
-    assert "readable(document.body?.innerText).slice(0, textLimit)" in PAGE_SUMMARY_SCRIPT
+    # The excerpt is the shared normaliser's text, cut at textLimit without splitting a surrogate pair.
+    assert "abSlice(readable(document.body?.innerText), textLimit)" in PAGE_SUMMARY_SCRIPT
 
 
 @requires_chromium
