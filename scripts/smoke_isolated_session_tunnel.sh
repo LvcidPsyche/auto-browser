@@ -5,7 +5,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 source "${ROOT_DIR}/scripts/load_env.sh"
+# This run's own compose project, so teardown never touches the operator's stack. The
+# caller may name it (COMPOSE_PROJECT_NAME); read it before .env loads, where that name
+# is the operator's own project.
+SMOKE_PROJECT="${COMPOSE_PROJECT_NAME:-auto-browser-smoke-$$}"
 load_repo_env "${ROOT_DIR}/.env"
+export COMPOSE_PROJECT_NAME="${SMOKE_PROJECT}"
 
 SSH_DIR="${ROOT_DIR}/data/ssh"
 TUNNEL_DIR="${ROOT_DIR}/data/tunnels"
@@ -32,14 +37,10 @@ export ISOLATED_TUNNEL_PUBLIC_HOST=test-bastion
 export ISOLATED_TUNNEL_PUBLIC_SCHEME=http
 export ISOLATED_TAKEOVER_HOST=127.0.0.1
 
-COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.isolation.yml -f docker-compose.smoke.yml)
+COMPOSE=(docker compose -p "${SMOKE_PROJECT}" -f docker-compose.yml -f docker-compose.isolation.yml -f docker-compose.smoke.yml)
 
 cleanup() {
-  docker ps -aq --filter label=auto-browser.managed=true | xargs -r docker rm -f >/dev/null 2>&1 || true
-  "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
-  # Only after compose down: the controller must be gone, or it still holds
-  # an endpoint on each session network.
-  docker network ls -q --filter label=auto-browser.managed=true | xargs -r docker network rm >/dev/null 2>&1 || true
+  smoke_cleanup
 }
 
 wait_for() {
@@ -58,6 +59,7 @@ wait_for() {
   return 1
 }
 
+smoke_snapshot_managed
 trap cleanup EXIT
 
 mkdir -p "${SSH_DIR}" "${TUNNEL_DIR}/sessions"

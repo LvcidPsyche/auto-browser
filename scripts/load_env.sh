@@ -17,6 +17,38 @@ load_repo_env() {
   fi
 }
 
+# Smoke runs share a Docker daemon with the operator's own stack. The controller labels
+# every per-session container and network auto-browser.managed=true, with no compose
+# project among the labels, so a label filter alone also matches the operator's live
+# sessions. smoke_snapshot_managed records what exists before the run starts, and
+# smoke_cleanup removes only what appeared after it. It needs COMPOSE (an array that
+# names this run's project with -p) and removes the containers, then the compose
+# stack, then the networks: the controller must be gone, or it still holds an
+# endpoint on each session network.
+SMOKE_MANAGED_FILTER="label=auto-browser.managed=true"
+SMOKE_PREEXISTING_CONTAINERS=""
+SMOKE_PREEXISTING_NETWORKS=""
+
+smoke_snapshot_managed() {
+  SMOKE_PREEXISTING_CONTAINERS="$(docker ps -aq --no-trunc --filter "$SMOKE_MANAGED_FILTER" 2>/dev/null || true)"
+  SMOKE_PREEXISTING_NETWORKS="$(docker network ls -q --no-trunc --filter "$SMOKE_MANAGED_FILTER" 2>/dev/null || true)"
+}
+
+smoke_cleanup() {
+  local id
+  while read -r id; do
+    [[ -n "$id" ]] || continue
+    grep -qxF "$id" <<<"$SMOKE_PREEXISTING_CONTAINERS" && continue
+    docker rm -f "$id" >/dev/null 2>&1 || true
+  done < <(docker ps -aq --no-trunc --filter "$SMOKE_MANAGED_FILTER" 2>/dev/null || true)
+  "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
+  while read -r id; do
+    [[ -n "$id" ]] || continue
+    grep -qxF "$id" <<<"$SMOKE_PREEXISTING_NETWORKS" && continue
+    docker network rm "$id" >/dev/null 2>&1 || true
+  done < <(docker network ls -q --no-trunc --filter "$SMOKE_MANAGED_FILTER" 2>/dev/null || true)
+}
+
 resolve_repo_host_path() {
   local root_dir="$1"
   local raw_path="$2"

@@ -328,6 +328,10 @@ jobs:
             ${VNC_PASSWORD:+--expect-password}
 
       - name: Run isolated session smoke test
+        # The smoke runs in its own compose project unless told otherwise. The doctor step's stack is the
+        # default project, named after the checkout folder: keep that name so the smoke tears it down, as before.
+        env:
+          COMPOSE_PROJECT_NAME: auto-browser
         run: DOCTOR_BUILD=1 API_PORT=8010 ./scripts/smoke_isolated_session.sh
 
       - name: Chromium's sandbox engages and is verified (BROWSER_SANDBOX=on)

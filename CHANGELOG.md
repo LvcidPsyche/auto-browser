@@ -130,6 +130,8 @@ All notable changes to auto-browser are documented here.
 
 - **Page-controlled `href`, `name` and `id` are now capped in observations.** A page could set a link's URL, a field's name or the focused element's name or id to megabytes of text, and it went whole into interactables, the active element, the form outline and so into model prompts. A `href` is cut at 2,000 characters, and a `name` or `id` at 120, where the script reads them.
 
+- **The smoke scripts no longer delete your own stack's containers.** `smoke_isolated_session.sh`, its tunnel twin and `smoke_reverse_ssh.sh` removed every container and network labelled `auto-browser.managed=true` and ran `docker compose down` in the folder's default project, so a smoke run on a machine that also runs your auto-browser stack removed your live session containers and could take your controller down too. Each run now uses its own compose project (`auto-browser-smoke-<pid>`, or the `COMPOSE_PROJECT_NAME` you set in the environment, which is not read from `.env`) and removes only the containers and networks that appeared after it started.
+
 ### Changed
 
 - **The stdio bridge docs now say it handles one request at a time.** `docs/mcp-clients.md` explains that a slow tool call holds up the calls behind it, and where to change the 60-second per-call timeout. No behaviour changed.

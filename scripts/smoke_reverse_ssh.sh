@@ -5,9 +5,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 source "${ROOT_DIR}/scripts/load_env.sh"
+# This run's own compose project, so teardown never touches the operator's stack. The
+# caller may name it (COMPOSE_PROJECT_NAME); read it before .env loads, where that name
+# is the operator's own project.
+SMOKE_PROJECT="${COMPOSE_PROJECT_NAME:-auto-browser-smoke-$$}"
 load_repo_env "${ROOT_DIR}/.env"
+export COMPOSE_PROJECT_NAME="${SMOKE_PROJECT}"
 
-COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.smoke.yml --profile reverse-ssh)
+COMPOSE=(docker compose -p "${SMOKE_PROJECT}" -f docker-compose.yml -f docker-compose.smoke.yml --profile reverse-ssh)
 API_PORT_VALUE="${API_PORT:-8000}"
 API_BASE_URL="http://127.0.0.1:${API_PORT_VALUE}"
 SSH_DIR="${ROOT_DIR}/data/ssh"
