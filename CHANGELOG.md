@@ -26,6 +26,9 @@ All notable changes to auto-browser are documented here.
 - The mesh identity's `node_meta.json` check no longer claims to detect tampering: the file sits beside the key, so
   anyone who can replace the key can replace it. It stays as a consistency check, and a mismatch now says "stored
   node_id does not match the key (corrupt or mixed identity directory)".
+- Mesh `require_approval` is deprecated: no approval handler is wired, so a grant that sets it always answered
+  `approval_required` and its capability could never run. Loading such a grant now logs a `mesh.peers:` warning saying
+  so, the field is still parsed (an existing peers file stays valid), and the docs example no longer shows it.
 
 ### Fixed
 

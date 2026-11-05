@@ -38,7 +38,6 @@ The file is a JSON object keyed by `node_id`; the key and the entry's own `node_
       {
         "capability": "tool:browser.get_html",
         "url_allowlist": ["https://*.example.com/*"],
-        "require_approval": true,
         "max_invocations_per_hour": 60,
         "expires_at": 1798761600
       }
@@ -56,8 +55,12 @@ The file is a JSON object keyed by `node_id`; the key and the entry's own `node_
   `start_url`, `urls` and `cdp_url`, at any depth). It does not constrain where the page then
   redirects or navigates, or what a later call does, so it limits the first URL a peer can name,
   not the sites a session ends up on.
-- `url_allowlist`, `require_approval`, `max_invocations_per_hour` (0 = unlimited) and
-  `expires_at` (Unix time, 0 = never) are optional.
+- `url_allowlist`, `max_invocations_per_hour` (0 = unlimited) and `expires_at` (Unix time, 0 = never)
+  are optional.
+- `require_approval` is deprecated. Nothing can approve a mesh request (inbound delegation has no approval
+  handler), so a grant that sets it to `true` always answers `approval_required` and its capability never
+  runs. The field is still read, so an existing file stays valid, and loading a grant that sets it logs a
+  `mesh.peers:` warning. To allow a capability, leave the field out; to refuse one, leave out its grant.
 - Use the `node_id` and `pubkey_b64` the peer's own `/mesh/identity` reports, exactly as it reports
   them. A `node_id` is the SHA-256 of the 32-byte key, in lower-case hex, and an entry where it is
   not (or whose key is not that base64) makes the whole file invalid, as below. The signature is

@@ -42,7 +42,13 @@ class CapabilityGrant(BaseModel):
             "separately; a pattern without a scheme, such as '*.example.com', matches the host only."
         ),
     )
-    require_approval: bool = Field(False, description="Gate this capability behind operator approval")
+    require_approval: bool = Field(
+        False,
+        description=(
+            "Deprecated: nothing can satisfy it. A grant with this set always answers approval_required and the "
+            "capability never runs; the field is still parsed so existing peers files stay valid"
+        ),
+    )
     max_invocations_per_hour: int = Field(0, description="Rate limit (0 = unlimited)")
     expires_at: float = Field(0.0, description="Unix timestamp, 0 = never expires")
 
