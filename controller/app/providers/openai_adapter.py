@@ -369,13 +369,25 @@ class OpenAIAdapter(BaseProviderAdapter):
         self._codex_config_checked = True
         cli_home_posix = PurePosixPath(Path(cli_home).as_posix())
         for expected_codex_home in sorted(self._extract_codex_roots(config)):
-            if expected_codex_home == actual_codex_home or expected_codex_home.exists():
+            if expected_codex_home == actual_codex_home:
                 continue
+            # The place is checked before anything touches the path: stat() on /root/.codex raises PermissionError
+            # for a non-root controller on Python 3.11 and 3.12, and that used to end the loop for every later root.
             if not _codex_root_allowed(PurePosixPath(expected_codex_home.as_posix()), cli_home_posix):
                 logger.warning(
                     "codex config names %s; not linking it to the CLI home (only the CLI home and /home/<user>/.codex "
                     "are linked)",
                     expected_codex_home.as_posix(),
+                )
+                continue
+            try:
+                if expected_codex_home.exists():
+                    continue
+            except OSError as exc:
+                logger.warning(
+                    "codex config names %s; not linking it to the CLI home: it cannot be checked (%s)",
+                    expected_codex_home.as_posix(),
+                    type(exc).__name__,
                 )
                 continue
             try:
