@@ -25,6 +25,7 @@ from .models import (
     BrowserActionDecision,
     CreateSessionRequest,
     PerceptionPreset,
+    ProtectionMode,
     ProviderName,
     StrictInputModel,
     WorkflowProfile,
@@ -388,6 +389,15 @@ class ForkSessionInput(SessionIdInput):
             "Omitted: the source session's current URL; refused while that is Chrome's error page for a stopped "
             "or failed navigation."
         ),
+    )
+    proxy_persona: str | None = Field(
+        default=None, min_length=1, max_length=200, description="Omitted: the source session's proxy persona."
+    )
+    user_agent: str | None = Field(
+        default=None, min_length=1, max_length=2000, description="Omitted: the source session's User-Agent."
+    )
+    protection_mode: ProtectionMode | None = Field(
+        default=None, description="Omitted: the source session's witness protection mode."
     )
 
     @field_validator("start_url")

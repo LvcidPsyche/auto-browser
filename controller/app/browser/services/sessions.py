@@ -367,8 +367,16 @@ class BrowserSessionService(SessionCreation):
         *,
         name: str | None = None,
         start_url: str | None = None,
+        proxy_persona: str | None = None,
+        user_agent: str | None = None,
+        protection_mode: str | None = None,
     ) -> dict[str, Any]:
-        """Fork a session: clone cookies + localStorage state into a new session."""
+        """Fork a session: clone cookies + localStorage state into a new session.
+
+        The fork keeps the source's proxy persona, User-Agent, protection mode and TOTP settings, as create
+        would have set them; a value the caller names wins. A source created with a raw request proxy (not a
+        persona) stored none to carry, so its fork gets the deployment default.
+        """
         session = await self.manager.get_session(session_id)
         # Refused on the limit before the source's cookies are written to disk; create_session keeps the
         # authoritative check, which holds against two forks racing.
@@ -398,6 +406,11 @@ class BrowserSessionService(SessionCreation):
                 name=name or f"fork-of-{session.name}",
                 start_url=start_url,
                 storage_state_path=auth_info["path"],
+                proxy_persona=proxy_persona or session.proxy_persona,
+                user_agent=user_agent or session.user_agent,
+                protection_mode=protection_mode or session.protection_mode,
+                totp_secret=session.totp_secret,
+                totp_hosts=list(session.totp_hosts) or None,
             )
         finally:
             # The new context has read the state by now, or never will: a copy left

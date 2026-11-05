@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from ..action_errors import ErrorPageSourceError, RefusedPageError
 from ..auth_state import AuthStateDecryptError
@@ -20,6 +20,7 @@ from ..models import (
     ObserveRequest,
     OpenTabRequest,
     PressRequest,
+    ProtectionMode,
     ScreenshotRequest,
     ScrollRequest,
     SelectOptionRequest,
@@ -260,7 +261,14 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
             return await manager.close_session(session_id)
 
     @router.post("/sessions/{session_id}/fork")
-    async def fork_session(session_id: str, name: str | None = None, start_url: str | None = None) -> dict[str, Any]:
+    async def fork_session(
+        session_id: str,
+        name: str | None = None,
+        start_url: str | None = None,
+        proxy_persona: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+        user_agent: Annotated[str | None, Query(min_length=1, max_length=2000)] = None,
+        protection_mode: ProtectionMode | None = None,
+    ) -> dict[str, Any]:
         # Query parameters skip the request models every other route uses, so
         # the URL gets the same validation here.
         with typed_route_errors(logger, "fork failed for session %s", session_id):
@@ -268,7 +276,14 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                 refuse_another_navigation_host(start_url, field_name="start_url")
                 start_url = validate_url(start_url, field_name="start_url", allowed_schemes=HTTP_URL_SCHEMES)
             try:
-                return await manager.fork_session(session_id, name=name, start_url=start_url)
+                return await manager.fork_session(
+                    session_id,
+                    name=name,
+                    start_url=start_url,
+                    proxy_persona=proxy_persona,
+                    user_agent=user_agent,
+                    protection_mode=protection_mode,
+                )
             except SessionLimitError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from None
             except RuntimeError:

@@ -36,6 +36,12 @@ All notable changes to auto-browser are documented here.
   file is corrupt" instead of an unhandled error.
 - A `nan` or infinite value in any float setting (`ARTIFACT_RETENTION_HOURS=nan` swept every artifact on the next
   cleanup) now stops startup with an error naming the setting. Zero and negative retention still mean "keep forever".
+- Forking a session that sits on `about:blank` or a `data:` page no longer fails with a 403: with no `start_url` named,
+  the fork starts on a blank page with the source's cookies, and the audit records no start URL.
+- A forked session now keeps the source's proxy persona, User-Agent, protection mode and TOTP secret and hosts, as
+  `create_session` would have set them (the fork used the deployment defaults before). `POST /sessions/{id}/fork` and
+  `browser.fork_session` take optional `proxy_persona`, `user_agent` and `protection_mode`; a value named there wins.
+  A source created with a raw request proxy (`proxy_server`) stored no proxy to carry, so its fork gets the default.
 
 ### Security
 

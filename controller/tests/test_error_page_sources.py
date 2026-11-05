@@ -171,7 +171,9 @@ class McpSurfaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.isError)
         self.assertEqual(response.content[0].text, ERROR_PAGE_SOURCE_FORK)
         self.assertEqual(response.structuredContent, {"error": ERROR_PAGE_SOURCE_FORK})
-        gateway.manager.fork_session.assert_awaited_once_with("s1", name=None, start_url=None)
+        gateway.manager.fork_session.assert_awaited_once_with(
+            "s1", name=None, start_url=None, proxy_persona=None, user_agent=None, protection_mode=None
+        )
 
     async def test_enable_shadow_browse_says_what_to_do(self) -> None:
         gateway = self.gateway(ErrorPageSourceError(ERROR_PAGE_SOURCE_SHADOW))

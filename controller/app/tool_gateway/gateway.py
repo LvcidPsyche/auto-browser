@@ -1024,6 +1024,9 @@ class McpToolGateway:
             payload.session_id,
             name=payload.name,
             start_url=payload.start_url,
+            proxy_persona=payload.proxy_persona,
+            user_agent=payload.user_agent,
+            protection_mode=payload.protection_mode,
         )
 
     async def _eval_js(self, payload: EvalJsInput) -> dict[str, Any]:

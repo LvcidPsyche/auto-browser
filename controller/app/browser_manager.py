@@ -145,6 +145,8 @@ class BrowserSession:
     refused_failures: deque[str] = field(default_factory=lambda: deque(maxlen=REFUSED_FAILURES_KEPT))
     last_action: str | None = None
     proxy_persona: str | None = None
+    # The User-Agent the create request named (None: the default), kept so a fork can carry it.
+    user_agent: str | None = None
     last_auth_state_path: Path | None = None
     # The last screenshot a checked read returned (see capture_session_screenshot).
     last_screenshot: dict[str, str] | None = None
@@ -444,9 +446,19 @@ class BrowserManager:
         *,
         name: str | None = None,
         start_url: str | None = None,
+        proxy_persona: str | None = None,
+        user_agent: str | None = None,
+        protection_mode: str | None = None,
     ) -> dict[str, Any]:
         """Fork a session: clone cookies + localStorage state into a new session."""
-        return await self.session_lifecycle.fork(session_id, name=name, start_url=start_url)
+        return await self.session_lifecycle.fork(
+            session_id,
+            name=name,
+            start_url=start_url,
+            proxy_persona=proxy_persona,
+            user_agent=user_agent,
+            protection_mode=protection_mode,
+        )
 
     async def enable_shadow_browse(self, session_id: str) -> dict[str, Any]:
         """Launch a headed clone of a session for visual debugging."""
