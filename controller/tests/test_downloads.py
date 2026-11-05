@@ -106,6 +106,51 @@ class DownloadCaptureServiceTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(record["filename"].startswith("download-"))
 
 
+class DownloadCapTests(unittest.IsolatedAsyncioTestCase):
+    def _session(self, tempdir: str):
+        artifacts = SessionArtifactService(tempdir)
+        artifact_dir = artifacts.prepare_session_dir("session-1")
+        return artifacts, SimpleNamespace(id="session-1", artifact_dir=artifact_dir, downloads=[])
+
+    async def test_a_download_over_the_size_cap_is_deleted_and_recorded_as_refused(self) -> None:
+        class Big(FakeDownload):
+            async def save_as(self, path: str) -> None:
+                Path(path).write_bytes(b"x" * 50)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            service = DownloadCaptureService(artifacts, max_bytes=10)
+
+            record = await service.capture(session, Big("big.bin"))
+            small = await service.capture(session, FakeDownload("small.txt"))
+
+            self.assertEqual(record["status"], "refused")
+            self.assertIn("DOWNLOAD_MAX_BYTES", record["failure"])
+            self.assertEqual((record["path"], record["filename"], record["url"]), (None, None, None))
+            self.assertEqual(small["status"], "completed")
+            kept = sorted(path.name for path in (session.artifact_dir / "downloads").iterdir())
+            self.assertEqual(kept, ["small.txt"])
+
+    async def test_the_count_cap_stops_the_next_download_before_it_is_saved(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            service = DownloadCaptureService(artifacts, max_per_session=3)
+            for index in range(3):
+                record = await service.capture(session, FakeDownload(f"f{index}.txt"))
+                self.assertEqual(record["status"], "completed")
+
+            extra = FakeDownload("f3.txt")
+            extra.cancel = mock.AsyncMock()
+            extra.save_as = mock.AsyncMock()
+            record = await service.capture(session, extra)
+
+            self.assertEqual(record["status"], "refused")
+            self.assertIn("DOWNLOADS_MAX_PER_SESSION", record["failure"])
+            extra.cancel.assert_awaited_once_with()
+            extra.save_as.assert_not_awaited()
+            self.assertEqual(len(list((session.artifact_dir / "downloads").iterdir())), 3)
+
+
 class ReserveBoundTests(unittest.TestCase):
     """`_reserve` runs on the event loop, so it must give up instead of spinning."""
 

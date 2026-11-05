@@ -37,6 +37,9 @@ UPLOAD_RETENTION_HOURS=168
 AUTH_RETENTION_HOURS=168
 ```
 
+Downloads a page starts are capped by `DOWNLOAD_MAX_BYTES` (default 256 MiB; a larger file is deleted) and
+`DOWNLOADS_MAX_PER_SESSION` (default 100; the rest are cancelled). Both are recorded as `refused`.
+
 `CONTROLLER_ALLOWED_HOSTS` protects the controller itself from unexpected HTTP Host headers.
 Keep `ALLOWED_HOSTS` for browser navigation targets, and set `CONTROLLER_ALLOWED_HOSTS`
 to the hostnames operators use to reach the controller, such as `browser.example.com`

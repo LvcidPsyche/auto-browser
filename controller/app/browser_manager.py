@@ -251,7 +251,11 @@ class BrowserManager:
             rejection_receipt=self.approval_service.rejection_receipt,
         )
         self.artifacts = SessionArtifactService(self.settings.artifact_root)
-        self.download_capture = DownloadCaptureService(self.artifacts)
+        self.download_capture = DownloadCaptureService(
+            self.artifacts,
+            max_bytes=self.settings.download_max_bytes,
+            max_per_session=self.settings.downloads_max_per_session,
+        )
         self.session_store = DurableSessionStore(
             file_root=self.settings.session_store_root,
             redis_url=self.settings.redis_url,

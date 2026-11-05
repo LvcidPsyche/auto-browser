@@ -269,6 +269,9 @@ class Settings(BaseSettings):
     cleanup_on_startup: bool = Field(True, alias="CLEANUP_ON_STARTUP")
     cleanup_interval_seconds: float = Field(3600.0, alias="CLEANUP_INTERVAL_SECONDS")
     artifact_retention_hours: float = Field(168.0, alias="ARTIFACT_RETENTION_HOURS")
+    # A page starts these downloads, not the operator: past either cap the file is not kept.
+    download_max_bytes: int = Field(268435456, alias="DOWNLOAD_MAX_BYTES")
+    downloads_max_per_session: int = Field(100, alias="DOWNLOADS_MAX_PER_SESSION")
     upload_retention_hours: float = Field(168.0, alias="UPLOAD_RETENTION_HOURS")
     auth_retention_hours: float = Field(168.0, alias="AUTH_RETENTION_HOURS")
 
