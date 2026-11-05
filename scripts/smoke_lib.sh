@@ -185,8 +185,29 @@ smoke_preflight() {
 # named <prefix>-...-net that carry the managed, mode and session_id labels (the controller's
 # own reaper requires all three). A failed listing removes nothing. Needs COMPOSE and
 # SMOKE_SESSION_PREFIX.
+# On a failed smoke, before the teardown removes the evidence: the state of this run's containers (an exit code, an
+# OOM kill, restarts) and the last lines of the controller's, browser-node's and session containers' logs. The
+# controller and browser-node redact the Playwright connect path in what they log.
+smoke_dump_state() {
+  local id name
+  echo "smoke failed; this run's containers before cleanup:" >&2
+  while IFS= read -r id; do
+    docker inspect -f '{{.Name}} {{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} restarts={{.RestartCount}} error={{.State.Error}}' "$id" >&2 2>/dev/null || true
+  done < <(docker ps -aq --filter "label=com.docker.compose.project=${SMOKE_PROJECT}" 2>/dev/null || true)
+  "${COMPOSE[@]}" logs --no-color --tail 150 controller browser-node >&2 2>/dev/null || true
+  while IFS= read -r name; do
+    [[ "$name" == "${SMOKE_SESSION_PREFIX}-"* ]] || continue
+    echo "--- ${name}" >&2
+    docker logs --tail 40 "$name" >&2 2>&1 || true
+  done < <(docker ps -a --filter "name=^${SMOKE_SESSION_PREFIX}-" --format '{{.Names}}' 2>/dev/null || true)
+}
+
 smoke_cleanup() {
-  local name
+  # The script's exit status: smoke_cleanup is the first thing each smoke's EXIT trap runs.
+  local status=$? name
+  if ((status != 0)); then
+    smoke_dump_state
+  fi
   while IFS= read -r name; do
     [[ "$name" == "${SMOKE_SESSION_PREFIX}-"* ]] || continue
     docker rm -f "$name" >/dev/null 2>&1 || true
