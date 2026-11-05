@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 from typing import Any
+from urllib.parse import urlsplit
 
 from ..contracts import ForbiddenState, Postcondition, TaskContract
 from .base import VerificationResult
@@ -289,23 +291,53 @@ def _forbidden_state_hit(
             or value.lower() in url.lower()
             or value.lower() in {item.lower() for item in status_values}
         )
-    combined = f"{url}\n{searchable_text}\n{dom_text}".lower()
+    combined = f"{url}\n{searchable_text}\n{dom_text}"
     if forbidden.kind == "captcha_screen":
-        needles = ["captcha", "recaptcha", "hcaptcha", "verify you are human", "cloudflare"]
-        if value:
-            needles.append(value.lower())
-        return any(needle in combined for needle in needles)
+        return _has_phrase(combined, [*_CAPTCHA_PHRASES, value])
     if forbidden.kind == "payment_screen":
-        needles = ["payment", "credit card", "card number", "billing address", "checkout payment"]
-        if value:
-            needles.append(value.lower())
-        return any(needle in combined for needle in needles)
+        return _has_phrase(combined, [*_PAYMENT_PHRASES, value]) or _path_has_segment(url, _PAYMENT_SEGMENTS)
     if forbidden.kind == "login_redirect":
-        needles = ["/login", "/signin", "sign in", "log in", "login required", "authenticate"]
-        if value:
-            needles.append(value.lower())
-        return any(needle in combined for needle in needles)
+        # What the browser was sent to, not what the page says: a marketing page that offers "sign in" is not a
+        # redirect. The URL path, a 401/403 status, and the caller's value as part of the URL.
+        status = {str(observation.get(key) or "").strip() for key in ("status_code", "http_status", "status")}
+        return (
+            _path_has_segment(url, _LOGIN_SEGMENTS)
+            or bool(status & {"401", "403"})
+            or bool(value and value.lower() in url.lower())
+        )
     return False
+
+
+_CAPTCHA_PHRASES = ("captcha", "recaptcha", "hcaptcha", "verify you are human", "cloudflare")
+_PAYMENT_PHRASES = (
+    "credit card",
+    "card number",
+    "billing address",
+    "checkout payment",
+    "payment method",
+    "payment details",
+    "payment information",
+)
+_PAYMENT_SEGMENTS = frozenset({"payment", "payments"})
+_LOGIN_SEGMENTS = frozenset({"login", "signin", "sign-in", "auth"})
+
+
+def _has_phrase(text: str, phrases: list[str] | tuple[str, ...]) -> bool:
+    """Whether any phrase occurs in the text as whole words, ignoring case ("accredit cards" is not "credit card")."""
+    return any(
+        re.search(rf"(?<!\w){re.escape(phrase.strip())}(?!\w)", text, re.IGNORECASE)
+        for phrase in phrases
+        if phrase.strip()
+    )
+
+
+def _path_has_segment(url: str, segments: frozenset[str]) -> bool:
+    """Whether a path segment of the URL is one of `segments`, with or without a file extension (`SignIn.html`)."""
+    try:
+        path = urlsplit(url).path.lower()
+    except ValueError:
+        return False
+    return any(segment.split(".")[0] in segments for segment in path.split("/") if segment)
 
 
 def _network_entries(trace: Any) -> list[Any]:

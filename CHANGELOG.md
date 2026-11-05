@@ -110,6 +110,11 @@ All notable changes to auto-browser are documented here.
   new run once the verified operator has that many stored; runs with no verified operator share one count.
 - **Upgrade note:** with the new default, harness runs and staged skill candidates older than 30 days are deleted on
   the next start. Set `HARNESS_RETENTION_DAYS=0` to keep them.
+- The harness's `login_redirect` forbidden state now looks at where the browser is, not what the page says: a URL path
+  segment of `login`, `signin`, `sign-in` or `auth`, a 401 or 403 status, or the caller's value inside the URL. A
+  marketing page that offers "sign in" or mentions "authenticate" no longer fails a run. `payment_screen` and
+  `captcha_screen` match whole words and phrases (`credit card`, `card number`, `payment method`, ...; the bare word
+  `payment` no longer counts, a `/payment` path does), so "accredit cards" or "captchaless" are not hits.
 
 ### Security
 
