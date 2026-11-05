@@ -145,6 +145,9 @@ class BrowserActionPipeline:
             # A cancelled action's record may still be finishing (its writes outlive the session lock): this action
             # starts after it, so the two actions' lines, audit entries and receipts land in order.
             await wait_for_pending_record(context.session)
+            # Outside the try on purpose: nothing has begun while it prepares (no effect, no record owed), and
+            # _record_interrupted returns early for an action that did not begin, so a failure or cancel here would
+            # lose only the witness context _prepare consumed. Not worth restructuring the pipeline for (NAV-34).
             witness_state = await self._prepare(context)
             try:
                 return await self._execute_and_record(context, witness_state)
