@@ -58,5 +58,7 @@ class SecretsStayOutOfReprTests(unittest.TestCase):
         ):
             with self.subTest(alias=alias):
                 settings = Settings(_env_file=None, **{alias: value})
+                # Settings ignores a name it does not know: the value must have landed for the checks below to count.
+                self.assertIn(_SENTINEL, repr(settings.model_dump()))
                 self.assertNotIn(_SENTINEL, repr(settings))
                 self.assertNotIn(_SENTINEL, str(settings))
