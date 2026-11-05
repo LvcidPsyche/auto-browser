@@ -17,6 +17,12 @@ All notable changes to auto-browser are documented here.
   chain whose anchor reads `anchor_missing`, `truncated` or `diverged`, with or without `--allow-unsigned`. The
   bundle now carries `chain_reason_at_export` and the verifier prints it, so the failure says why. A bundle made by an
   older version has no reason, and one whose chain failed at export no longer passes `--allow-unsigned`.
+- **Harness runs and staged skills written by earlier versions may still hold a URL token on disk.** Under
+  `HARNESS_ROOT` (default `/data/harness`), `runs/<id>/run.json`, `runs/<id>/strategy.md` and a staged skill's
+  `candidate.json`, `envelope.json` and `provenance.json` could carry the token from the final URL, and older
+  `trace.json` files were not text-scrubbed. Run responses hide it, but the files are not rewritten. Delete those runs
+  and staged skills where that matters; running the task again stages a clean copy (a staged skill's files cannot be
+  edited, as they are covered by its signed envelope).
 
 ### Security
 
@@ -63,6 +69,11 @@ All notable changes to auto-browser are documented here.
   output, is not text-scrubbed, but a URL in it still has its query and fragment scrubbed. A staged skill
   candidate's signed metadata used to say `credential_free: true` for every candidate; nothing computed it, so the
   field is removed.
+  The verifier's result, which copies the page URL, was also written as it came to `run.json`, `drift.json`,
+  `strategy.md` and a staged skill's `candidate.json`, `envelope.json` and `provenance.json`, so an `access_token` in
+  the final URL survived there. It is now scrubbed the same way wherever it is stored, and the run still verifies the
+  original observation. The harness run responses (`harness.start_convergence`, `get_status`, `list_runs` and the
+  CLI's `--json`) now return that scrubbed verification, so a URL token shows as `[REDACTED]` in them too.
 - **Confidential sessions now keep restricted evidence for every action, not only for the session record.** The
   Witness policy chose the evidence mode for an action without looking at the session's profile, so in a
   `confidential` session an ordinary action's receipt kept before/after evidence and the typed text preview. The
@@ -140,12 +151,6 @@ All notable changes to auto-browser are documented here.
 - **The smoke scripts no longer delete your own stack's containers.** `smoke_isolated_session.sh`, its tunnel twin and `smoke_reverse_ssh.sh` removed every container and network labelled `auto-browser.managed=true` and ran `docker compose down` in the folder's default project, so a smoke run on a machine that also runs your auto-browser stack removed your live session containers and could take your controller down too. Each run now uses its own compose project (`auto-browser-smoke-<pid>`, or the `COMPOSE_PROJECT_NAME` you set in the environment, which is not read from `.env`) and removes only the containers and networks that appeared after it started.
 
 - **A `.env` line can no longer run commands in the repo's scripts.** `doctor.sh`, `compose_local.sh`, `bootstrap_cli_auth.sh` and the smoke scripts loaded `.env` by sourcing it as shell, so a value such as `X=$(cmd)` ran `cmd`, and an unquoted `&`, `;` or `(` in a value broke the script. They now read `KEY=VALUE` lines as text: blank lines and `#` comments are skipped, one level of matching quotes is removed, an unquoted ` # comment` is dropped, and a value keeps every `=` and `$` in it. Quoted values are no longer expanded, so `KEY="$HOME/x"` is now the literal text `$HOME/x`.
-
-- **A harness verification no longer leaves a URL token on disk.** The verifier copies the page URL into its result,
-  and that result was written as it came to `run.json`, `drift.json`, and a staged skill's `candidate.json`,
-  `envelope.json` and `provenance.json`, so an `access_token` in the final URL survived there although the trace
-  itself was scrubbed. Verification results are now scrubbed with the trace's scrubber wherever they are stored; the
-  run still verifies the original observation.
 
 - **A newly staged harness skill is no longer reported degraded at once.** A staged skill keeps a scrubbed trace, so a
   required `dom_contains` or `text_contains` on an email that passed in the live run no longer matched when the drift
