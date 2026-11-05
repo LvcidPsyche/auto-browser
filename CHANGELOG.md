@@ -170,7 +170,13 @@ All notable changes to auto-browser are documented here.
 
 - **An MCP tool result is now always valid JSON.** A `NaN` or infinite number in a result was written as the bare word `NaN` with `isError` false, which strict JSON parsers reject, and a value that could not be serialized (a date, an object) answered "Tool execution failed" although the tool had already acted. NaN and infinities now become `null`; dates and times, paths, UUIDs and decimals become their text, and an enum its value. A result holding any other kind of object is not sent as that object's text (which could carry fields nobody meant to send): it answers an error saying the tool ran but its result could not be encoded. Error answers (an approval required, a failed browser action and other refusals) are encoded the same strict way, so a `NaN` in an error's details is `null` too, and a detail that cannot be encoded is left out of the answer.
 
-- **Page-controlled `href`, `name` and `id` are now capped in observations.** A page could set a link's URL, a field's name or the focused element's name or id to megabytes of text, and it went whole into interactables, the active element, the form outline and so into model prompts. A `href` is cut at 2,000 characters, and a `name` or `id` at 120, where the script reads them.
+- **Page-controlled strings are now capped in observations and element reads.** A page could set a link's URL, a field's
+  name, type or role, a form's action or method, the title or the focused element's name or id to megabytes of text, and it
+  went whole into interactables, the active element, the form outline and so into model prompts. The same held for
+  `find_elements` (`href`, `id`, `value`, `class`), the feed and profile extractors (link and image URLs, page URL and
+  avatar) and the element-intelligence asset references (`src`, `href`, `currentSrc`, `backgroundImage`). URLs are cut
+  at 2,000 characters, the title at 200, and a name, id, type, role, method, value or class at 120, where the script
+  reads them. A URL that was cut ends in `…[truncated]`, so a client does not follow it as if it were whole.
 
 - **The smoke scripts no longer delete your own stack's containers.** `smoke_isolated_session.sh`, its tunnel twin and `smoke_reverse_ssh.sh` removed every container and network labelled `auto-browser.managed=true` and ran `docker compose down` in the folder's default project, so a smoke run on a machine that also runs your auto-browser stack removed your live session containers and could take your controller down too. Each run now uses its own compose project (`auto-browser-smoke-<pid>`, or the `COMPOSE_PROJECT_NAME` you set in the environment, which is not read from `.env`) and removes only the containers and networks that appeared after it started.
 

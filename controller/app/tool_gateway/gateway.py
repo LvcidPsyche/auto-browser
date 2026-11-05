@@ -28,7 +28,7 @@ from ..browser.page_read import MOVED_DETAIL, bounded, locked_read, start_read
 from ..browser.request_gate import block_summary
 from ..browser.services.diagnostics import checked_screenshot
 from ..browser_sandbox import browser_sandbox_status
-from ..browser_scripts import PAGE_TEXT_SCRIPT
+from ..browser_scripts import FIND_ELEMENTS_SELECTOR_SCRIPT, FIND_ELEMENTS_TEXT_SCRIPT, PAGE_TEXT_SCRIPT
 from ..cron_service import CronJobDisabledError
 from ..models import (
     ActionName,
@@ -1090,53 +1090,7 @@ class McpToolGateway:
     async def _find_elements_read(self, session: Any, payload: FindElementsInput) -> dict[str, Any]:
         if payload.query is not None:
             evaluate = session.page.evaluate(
-                """([query, isRegex, context, limit]) => {
-                    let matcher = null;
-                    if (isRegex) {
-                        try {
-                            matcher = new RegExp(query, 'gi');
-                        } catch (e) {
-                            return {__invalid_regex: String((e && e.message) || e)};
-                        }
-                    }
-                    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
-                    const results = [];
-                    let node;
-                    while ((node = walker.nextNode()) && results.length < limit) {
-                        const text = node.textContent || '';
-                        if (!text.trim()) continue;
-                        let matchIndex = -1;
-                        let matchText = '';
-                        if (isRegex) {
-                            matcher.lastIndex = 0;
-                            const m = matcher.exec(text);
-                            if (m) { matchIndex = m.index; matchText = m[0]; }
-                        } else {
-                            const idx = text.toLowerCase().indexOf(query.toLowerCase());
-                            if (idx !== -1) { matchIndex = idx; matchText = text.substr(idx, query.length); }
-                        }
-                        if (matchIndex === -1) continue;
-                        const el = node.parentElement;
-                        if (!el) continue;
-                        const r = el.getBoundingClientRect();
-                        const start = Math.max(0, matchIndex - context);
-                        const end = Math.min(text.length, matchIndex + matchText.length + context);
-                        results.push({
-                            tag: el.tagName.toLowerCase(),
-                            text: text.trim().substring(0, 200),
-                            match: matchText,
-                            context_text: text.substring(start, end).trim(),
-                            value: el.value || null,
-                            href: el.href || null,
-                            id: el.id || null,
-                            class: (typeof el.className === 'string' ? el.className : el.getAttribute('class')) || null,
-                            visible: r.width > 0 && r.height > 0,
-                            x: Math.round(r.x), y: Math.round(r.y),
-                            width: Math.round(r.width), height: Math.round(r.height),
-                        });
-                    }
-                    return results;
-                }""",
+                FIND_ELEMENTS_TEXT_SCRIPT,
                 [payload.query, payload.regex, payload.context, payload.limit],
             )
             try:
@@ -1159,23 +1113,7 @@ class McpToolGateway:
 
         elements = await bounded(
             session.page.evaluate(
-                """([selector, limit]) => {
-                const els = [...document.querySelectorAll(selector)].slice(0, limit);
-                return els.map(el => {
-                    const r = el.getBoundingClientRect();
-                    return {
-                        tag: el.tagName.toLowerCase(),
-                        text: el.innerText?.substring(0, 200) || '',
-                        value: el.value || null,
-                        href: el.href || null,
-                        id: el.id || null,
-                        class: (typeof el.className === 'string' ? el.className : el.getAttribute('class')) || null,
-                        visible: r.width > 0 && r.height > 0,
-                        x: Math.round(r.x), y: Math.round(r.y),
-                        width: Math.round(r.width), height: Math.round(r.height),
-                    };
-                });
-            }""",
+                FIND_ELEMENTS_SELECTOR_SCRIPT,
                 [payload.selector, payload.limit],
             )
         )

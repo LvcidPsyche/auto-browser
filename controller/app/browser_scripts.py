@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 # Injected before every page load via add_init_script().
 # Removes automation signals, mocks realistic browser properties.
 # add_init_script runs the source as written, so this is an invoked function
@@ -112,6 +114,38 @@ STEALTH_INIT_SCRIPT = r"""
 })();
 """
 
+# Page-controlled strings are bounded where a script reads them: an attribute-like value (name, id, type, role,
+# class, form method) like a label, a URL longer, a title in between. A cut URL ends in AB_TRUNCATED_MARK, still within
+# its cap, so no consumer mistakes it for the real address. Injected into every script that returns page strings
+# (``/*__AB_CAP__*/`` or through _ELEMENT_NAMING_JS), and into the scripts in tool_gateway and cdp.
+AB_ATTR_MAX = 120
+AB_HREF_MAX = 2000
+AB_TITLE_MAX = 200
+AB_TRUNCATED_MARK = chr(0x2026) + "[truncated]"
+
+AB_CAP_JS = (
+    f"""
+  const AB_ATTR_MAX = {AB_ATTR_MAX};
+  const AB_HREF_MAX = {AB_HREF_MAX};
+  const AB_TITLE_MAX = {AB_TITLE_MAX};
+  const AB_TRUNCATED_MARK = {json.dumps(AB_TRUNCATED_MARK)};
+"""
+    + r"""
+  function abCap(value, max) {
+    return typeof value === 'string' ? value.slice(0, max) : value;
+  }
+  function abCapUrl(value, max = AB_HREF_MAX) {
+    if (typeof value !== 'string' || value.length <= max) return value;
+    return value.slice(0, max - AB_TRUNCATED_MARK.length) + AB_TRUNCATED_MARK;
+  }
+"""
+)
+
+
+def with_ab_cap(source: str) -> str:
+    return source.replace("/*__AB_CAP__*/", AB_CAP_JS)
+
+
 # Shared by the observation scripts below, which inject it at the top of their
 # function body (``/*__ELEMENT_NAMING__*/``) so all three name elements the same
 # way. It follows the order of the accessible-name computation that matters in
@@ -127,14 +161,9 @@ STEALTH_INIT_SCRIPT = r"""
 # submit/button/reset inputs are the one exception: that value is visible text.
 # The same holds for contenteditable editors and textbox-like ARIA widgets,
 # whose text content is what was typed into them.
-_ELEMENT_NAMING_JS = r"""
-  // Page-controlled attributes are bounded where they are read: a name or id like a label (120), a URL longer.
-  const AB_ATTR_MAX = 120;
-  const AB_HREF_MAX = 2000;
-  function abCap(value, max) {
-    return typeof value === 'string' ? value.slice(0, max) : value;
-  }
-
+_ELEMENT_NAMING_JS = (
+    AB_CAP_JS
+    + r"""
   function abClean(value) {
     return String(value || '').replace(/\s+/g, ' ').trim();
   }
@@ -196,7 +225,7 @@ _ELEMENT_NAMING_JS = r"""
   }
 
   function abRole(el) {
-    const explicit = abClean(el.getAttribute('role')).split(' ')[0];
+    const explicit = abCap(abClean(el.getAttribute('role')).split(' ')[0], AB_ATTR_MAX);
     if (explicit) return explicit;
     const tag = el.tagName.toLowerCase();
     const type = (el.getAttribute('type') || 'text').toLowerCase();
@@ -239,6 +268,7 @@ _ELEMENT_NAMING_JS = r"""
     };
   }
 """
+)
 
 
 def _with_element_naming(source: str) -> str:
@@ -290,12 +320,12 @@ INTERACTABLES_SCRIPT = _with_element_naming(
       element_id: elementId,
       selector_hint: elementId ? `[data-operator-id="${elementId}"]` : null,
       tag: el.tagName.toLowerCase(),
-      type: el.getAttribute('type'),
+      type: abCap(el.getAttribute('type'), AB_ATTR_MAX),
       role: abRole(el),
       label: abName(el).slice(0, 160),
       checked: abChecked(el),
       disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
-      href: abCap(el.href || null, AB_HREF_MAX),
+      href: abCapUrl(el.href || null),
       bbox: {
         x: Math.round(rect.x),
         y: Math.round(rect.y),
@@ -358,13 +388,13 @@ PAGE_SUMMARY_SCRIPT = _with_element_naming(
   const forms = Array.from(document.forms)
     .slice(0, 3)
     .map((form) => ({
-      action: form.getAttribute('action') || null,
-      method: (form.getAttribute('method') || 'get').toLowerCase(),
+      action: abCapUrl(form.getAttribute('action') || null),
+      method: abCap((form.getAttribute('method') || 'get').toLowerCase(), AB_ATTR_MAX),
       fields: Array.from(form.querySelectorAll('input, textarea, select, button'))
         .slice(0, 8)
         .map((field) => ({
           tag: field.tagName.toLowerCase(),
-          type: field.getAttribute('type') || null,
+          type: abCap(field.getAttribute('type') || null, AB_ATTR_MAX),
           name: abCap(field.getAttribute('name') || null, AB_ATTR_MAX),
           label: abName(field).slice(0, 80),
           disabled: Boolean(field.disabled || field.getAttribute('aria-disabled') === 'true')
@@ -374,7 +404,7 @@ PAGE_SUMMARY_SCRIPT = _with_element_naming(
   // The title and focused element ride along so an observation costs one
   // evaluate round trip instead of three (page.title() reads document.title).
   return {
-    title: document.title,
+    title: abCap(document.title, AB_TITLE_MAX),
     active_element: abActiveElement(),
     text_excerpt: readable(document.body?.innerText).slice(0, textLimit),
     dom_outline: {
@@ -393,8 +423,10 @@ PAGE_SUMMARY_SCRIPT = _with_element_naming(
 ).replace("/*__READABLE_TEXT__*/", _READABLE_TEXT_JS)
 
 # Feed/profile extraction helpers
-EXTRACT_POSTS_SCRIPT = r"""
+EXTRACT_POSTS_SCRIPT = with_ab_cap(
+    r"""
 (limit) => {
+/*__AB_CAP__*/
   const candidates = [];
   const seen = new Set();
   const els = document.querySelectorAll(
@@ -409,8 +441,8 @@ EXTRACT_POSTS_SCRIPT = r"""
     const rect = el.getBoundingClientRect();
     if (rect.width === 0) continue;
     const links = [...el.querySelectorAll('a[href]')]
-      .map(a => a.href).filter(h => h && !h.startsWith('javascript'));
-    const imgs = [...el.querySelectorAll('img[src]')].map(i => i.src).slice(0, 3);
+      .map(a => a.href).filter(h => h && !h.startsWith('javascript')).map(h => abCapUrl(h));
+    const imgs = [...el.querySelectorAll('img[src]')].map(i => abCapUrl(i.src)).slice(0, 3);
     candidates.push({
       text: text.slice(0, 600),
       links: links.slice(0, 5),
@@ -423,9 +455,12 @@ EXTRACT_POSTS_SCRIPT = r"""
   return candidates;
 }
 """
+)
 
-EXTRACT_PROFILE_SCRIPT = r"""
+EXTRACT_PROFILE_SCRIPT = with_ab_cap(
+    r"""
 () => {
+/*__AB_CAP__*/
   function first(selectors) {
     for (const s of selectors) {
       const el = document.querySelector(s);
@@ -445,20 +480,113 @@ EXTRACT_PROFILE_SCRIPT = r"""
     return null;
   }
   return {
-    page_title: document.title,
-    url: window.location.href,
+    page_title: abCap(document.title, AB_TITLE_MAX),
+    url: abCapUrl(window.location.href),
     username: first(['[data-testid="UserName"]', '.username', 'h1', '[class*="username"]']),
     display_name: first(['[data-testid="UserName"] span', '[class*="display-name"]', '[class*="displayName"]']),
     bio: first(['[data-testid="UserDescription"]', '[class*="bio"]', '[class*="about"]', '[class*="description"]']),
     followers: findCount('follower'),
     following: findCount('following'),
     post_count: findCount('post') || findCount('tweet') || findCount('video'),
-    avatar_url: document.querySelector(
+    avatar_url: abCapUrl(document.querySelector(
       'img[src*="profile_image"], img[src*="avatar"], img[class*="avatar"], img[class*="profile"]'
-    )?.src || null,
+    )?.src || null),
   };
 }
 """
+)
+
+# find_elements: text search and selector modes. Each returns page-controlled strings, so each is capped.
+FIND_ELEMENTS_TEXT_SCRIPT = with_ab_cap(
+    r"""([query, isRegex, context, limit]) => {
+/*__AB_CAP__*/
+    let matcher = null;
+    if (isRegex) {
+        try {
+            matcher = new RegExp(query, 'gi');
+        } catch (e) {
+            return {__invalid_regex: String((e && e.message) || e)};
+        }
+    }
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    const results = [];
+    let node;
+    while ((node = walker.nextNode()) && results.length < limit) {
+        const text = node.textContent || '';
+        if (!text.trim()) continue;
+        let matchIndex = -1;
+        let matchText = '';
+        if (isRegex) {
+            matcher.lastIndex = 0;
+            const m = matcher.exec(text);
+            if (m) { matchIndex = m.index; matchText = m[0]; }
+        } else {
+            const idx = text.toLowerCase().indexOf(query.toLowerCase());
+            if (idx !== -1) { matchIndex = idx; matchText = text.substr(idx, query.length); }
+        }
+        if (matchIndex === -1) continue;
+        const el = node.parentElement;
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        const start = Math.max(0, matchIndex - context);
+        const end = Math.min(text.length, matchIndex + matchText.length + context);
+        results.push({
+            tag: el.tagName.toLowerCase(),
+            text: text.trim().substring(0, 200),
+            match: matchText,
+            context_text: text.substring(start, end).trim(),
+            value: abCap(el.value || null, AB_ATTR_MAX),
+            href: abCapUrl(el.href || null),
+            id: abCap(el.id || null, AB_ATTR_MAX),
+            class: abCap((typeof el.className === 'string' ? el.className : el.getAttribute('class')) || null, AB_ATTR_MAX),
+            visible: r.width > 0 && r.height > 0,
+            x: Math.round(r.x), y: Math.round(r.y),
+            width: Math.round(r.width), height: Math.round(r.height),
+        });
+    }
+    return results;
+}
+"""
+)
+
+FIND_ELEMENTS_SELECTOR_SCRIPT = with_ab_cap(
+    r"""([selector, limit]) => {
+/*__AB_CAP__*/
+    const els = [...document.querySelectorAll(selector)].slice(0, limit);
+    return els.map(el => {
+        const r = el.getBoundingClientRect();
+        return {
+            tag: el.tagName.toLowerCase(),
+            text: el.innerText?.substring(0, 200) || '',
+            value: abCap(el.value || null, AB_ATTR_MAX),
+            href: abCapUrl(el.href || null),
+            id: abCap(el.id || null, AB_ATTR_MAX),
+            class: abCap((typeof el.className === 'string' ? el.className : el.getAttribute('class')) || null, AB_ATTR_MAX),
+            visible: r.width > 0 && r.height > 0,
+            x: Math.round(r.x), y: Math.round(r.y),
+            width: Math.round(r.width), height: Math.round(r.height),
+        };
+    });
+}
+"""
+)
+
+# CDP element intelligence: the asset references of one element. ``__SELECTOR__`` is replaced by a JS string literal.
+ELEMENT_ASSETS_SCRIPT = with_ab_cap(
+    r"""
+(function() {
+/*__AB_CAP__*/
+    const el = document.querySelector(__SELECTOR__);
+    if (!el) return {};
+    return {
+        src: abCapUrl(el.src || null),
+        href: abCapUrl(el.href || null),
+        currentSrc: abCapUrl(el.currentSrc || null),
+        backgroundImage: abCapUrl(window.getComputedStyle(el).backgroundImage)
+    };
+})()
+"""
+)
 
 SMOOTH_SCROLL_SCRIPT = r"""
 (deltaY) => {

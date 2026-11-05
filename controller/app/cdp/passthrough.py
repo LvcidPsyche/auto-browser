@@ -14,6 +14,8 @@ import json
 import logging
 from typing import Any
 
+from ..browser_scripts import ELEMENT_ASSETS_SCRIPT
+
 logger = logging.getLogger(__name__)
 
 # Commands allowed through the raw CDP passthrough.
@@ -174,18 +176,7 @@ class CDPPassthrough:
             asset_result = await self._cdp.send(
                 "Runtime.evaluate",
                 {
-                    "expression": f"""
-                    (function() {{
-                        const el = document.querySelector({selector_literal});
-                        if (!el) return {{}};
-                        return {{
-                            src: el.src || null,
-                            href: el.href || null,
-                            currentSrc: el.currentSrc || null,
-                            backgroundImage: window.getComputedStyle(el).backgroundImage
-                        }};
-                    }})()
-                """,
+                    "expression": ELEMENT_ASSETS_SCRIPT.replace("__SELECTOR__", selector_literal),
                     "returnByValue": True,
                 },
             )
