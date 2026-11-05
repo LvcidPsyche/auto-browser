@@ -52,6 +52,10 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.14"]
+        include:
+          # The one leg that installs Chromium and requires it: both steps below read this flag.
+          - python-version: "3.11"
+            real_browser: true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.1.0
@@ -63,13 +67,13 @@ jobs:
       # dashboard) skip when no browser is installed, and until now none was, so
       # they never ran in CI. One leg is enough: they test the page, not Python.
       - name: Install Chromium for the real-browser tests
-        if: matrix.python-version == '3.11'
+        if: matrix.real_browser
         run: python -m playwright install --with-deps chromium
       - name: Run controller tests on host Python
         # The leg that installed Chromium must run its tests: with this set, a missing
         # browser fails the run instead of skipping the real-browser tests.
         env:
-          AUTO_BROWSER_REQUIRE_CHROMIUM: ${{ matrix.python-version == '3.11' && '1' || '' }}
+          AUTO_BROWSER_REQUIRE_CHROMIUM: ${{ matrix.real_browser && '1' || '' }}
         run: |
           cd controller
           python -m pytest tests/ \
