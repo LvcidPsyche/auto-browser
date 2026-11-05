@@ -53,6 +53,19 @@ class LoginRedirectTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(url=url):
                 self.assertEqual(len(await _hits("login_redirect", {"url": url, "text": "welcome"})), 1)
 
+    async def test_common_identity_provider_login_paths_and_an_sso_host_are_hits(self) -> None:
+        for url in (
+            "https://blog.example.com/wp-login.php?redirect_to=%2F",
+            "https://blog.example.com/wp-login",
+            "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmail.google.com",
+            "https://accounts.example.com/v3/servicelogin",
+            "https://id.example.com/realms/acme/login-actions/authenticate?session_code=x",
+            "https://app.example.com/signin-oidc",
+            "https://sso.example.com/",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(len(await _hits("login_redirect", {"url": url, "text": "welcome"})), 1)
+
     async def test_a_session_id_path_parameter_or_a_hash_route_still_names_the_login_page(self) -> None:
         # 1.15.0's "/login" substring caught these: a Tomcat or Spring first redirect, and hash-routed apps.
         for url in (
@@ -140,6 +153,30 @@ class PaymentAndCaptchaTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(dom=page["dom"]):
                 self.assertEqual(len(await _hits("captcha_screen", page)), 1)
+
+    async def test_camel_case_and_widget_captcha_identifiers_are_hits(self) -> None:
+        for dom in (
+            "<input name='captchaToken'>",
+            "<div data-widget='reCaptcha'></div>",
+            "<script>if (isCaptchaRequired) show()</script>",
+            "<script src='/js/recaptchaV3.js'></script>",
+            "<div id='reCAPTCHAWidget'></div>",
+            "<script>hcaptcha.render('box')</script>",
+            "<script>grecaptcha.execute('key')</script>",
+        ):
+            with self.subTest(dom=dom):
+                self.assertEqual(len(await _hits("captcha_screen", {"url": "https://example.com/x", "dom": dom})), 1)
+
+    async def test_a_word_that_only_contains_captcha_is_still_not_a_hit(self) -> None:
+        for text in ("captchaless sign up", "Captchaless sign up", "CAPTCHALESS"):
+            with self.subTest(text=text):
+                self.assertEqual(await _hits("captcha_screen", {"url": "https://example.com/x", "text": text}), [])
+
+    async def test_a_built_in_phrase_written_in_camel_case_still_hits(self) -> None:
+        # Splitting at humps must not cost a hit the unsplit text has ("CloudFlare" is not "Cloud Flare").
+        for text in ("Checking your browser: CloudFlare", "Cloudflare Ray ID", "HCaptcha", "ReCAPTCHA"):
+            with self.subTest(text=text):
+                self.assertEqual(len(await _hits("captcha_screen", {"url": "https://example.com/x", "text": text})), 1)
 
     async def test_the_callers_value_is_a_substring_whatever_its_edge_characters(self) -> None:
         # Only the built-in phrases match as whole words; the caller's own value keeps its substring match, so a

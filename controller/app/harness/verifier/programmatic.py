@@ -279,6 +279,13 @@ def _forbidden_state_hit(
     searchable_text: str,
     dom_text: str,
 ) -> bool:
+    """Whether the observation shows the forbidden state.
+
+    The built-in kinds are heuristics. captcha_screen and payment_screen match their phrases as whole words in the URL
+    and the page text (for captcha names `_`, `-` and camelCase humps end words too); login_redirect reads where the
+    browser is. Known false hits, left as they are: a page-code flag such as `captcha_enabled` counts as a captcha
+    name, and an API path such as `/payments/1/authorize` as a login page (`authorize`).
+    """
     value = forbidden.value
     if forbidden.kind == "url_contains":
         return value.lower() in url.lower()
@@ -301,7 +308,7 @@ def _forbidden_state_hit(
         )
     combined = f"{url}\n{searchable_text}\n{dom_text}"
     if forbidden.kind == "captcha_screen":
-        return _has_phrase(combined, _CAPTCHA_PHRASES, underscore_ends_words=True) or _has_value(combined, value)
+        return _has_captcha_name(combined) or _has_value(combined, value)
     if forbidden.kind == "payment_screen":
         return (
             _has_phrase(combined, _PAYMENT_PHRASES)
@@ -332,7 +339,37 @@ _PAYMENT_PHRASES = (
     "payment information",
 )
 _PAYMENT_SEGMENTS = frozenset({"payment", "payments"})
-_LOGIN_SEGMENTS = frozenset({"login", "log-in", "log_in", "logon", "signin", "sign-in", "sign_in", "auth", "authorize"})
+_LOGIN_SEGMENTS = frozenset(
+    {
+        "login",
+        "log-in",
+        "log_in",
+        "logon",
+        "signin",
+        "sign-in",
+        "sign_in",
+        "auth",
+        "authorize",
+        "wp-login",  # WordPress, with or without .php
+        "servicelogin",  # Google accounts (ServiceLogin; paths are compared lower-cased)
+        "login-actions",  # Keycloak
+        "signin-oidc",  # ASP.NET Core
+    }
+)
+_LOGIN_HOST_LABELS = _LOGIN_SEGMENTS | {"sso"}
+# Where an identifier in page code changes case: captchaToken -> captcha Token, reCAPTCHAWidget -> re CAPTCHA Widget.
+_CAMEL_HUMP = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def _has_captcha_name(text: str) -> bool:
+    """A captcha phrase as whole words, in the text as written or split at camelCase humps (`captchaToken`).
+
+    Both, so splitting costs no hit the text as written has (`CloudFlare` is not `Cloud Flare`); `captchaless` is not
+    a hit either way.
+    """
+    return _has_phrase(text, _CAPTCHA_PHRASES, underscore_ends_words=True) or _has_phrase(
+        _CAMEL_HUMP.sub(" ", text), _CAPTCHA_PHRASES, underscore_ends_words=True
+    )
 
 
 def _has_phrase(text: str, phrases: list[str] | tuple[str, ...], *, underscore_ends_words: bool = False) -> bool:
@@ -349,12 +386,12 @@ def _has_phrase(text: str, phrases: list[str] | tuple[str, ...], *, underscore_e
 
 
 def _host_is_login(url: str) -> bool:
-    """Whether the URL's host starts with a login label (`login.microsoftonline.com`, `signin.example.com`)."""
+    """Whether the URL's host starts with a login label (`login.microsoftonline.com`, `sso.example.com`)."""
     try:
         host = urlsplit(url).hostname or ""
     except ValueError:
         return False
-    return host.split(".")[0] in _LOGIN_SEGMENTS
+    return host.split(".")[0] in _LOGIN_HOST_LABELS
 
 
 def _has_value(text: str, value: str) -> bool:
