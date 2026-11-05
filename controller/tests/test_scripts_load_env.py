@@ -2,15 +2,19 @@
 
 It used to `source` the file, so `X=$(touch marker)` in a .env ran the command, and an
 unquoted `&`, `;` or `(` in a value broke or hijacked every script that loads it (doctor,
-bootstrap_cli_auth, compose_local and the smoke scripts). It now parses the lines itself.
+bootstrap_cli_auth, compose_local and the smoke scripts). It now parses the lines itself,
+refuses the keys that change how the shell or the loader behaves, and warns (key name or
+line number only, never a value) about every line it skips.
 
 The tests run the real function in bash against a scratch file in a temp directory, never
-the repo's .env. Repo-layout checks: skipped where scripts/ or bash is absent (the
-controller image).
+the repo's .env, in a child with a minimal environment that prints only the keys under test.
+Repo-layout checks: skipped where scripts/ or bash is absent (the controller image).
 """
 
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -18,30 +22,45 @@ from pathlib import Path
 
 from tests.test_scripts_token_argv import BASH, SCRIPTS, _bash_path
 
+KEY_RE = re.compile(r"^[ \t﻿]*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=", re.M)
+# A child bash prints "KEY=value" NUL-terminated for each named variable that is set and exported.
+PRINT_KEYS = r"""bash -c 'for k in "$@"; do if [[ -v $k ]]; then printf "%s=%s\0" "$k" "${!k}"; fi; done' _"""
+
+
+def _minimal_env() -> dict[str, str]:
+    # The directory of the bash under test leads PATH, so the child `bash -c` is the same bash.
+    env = {"PATH": os.pathsep.join([str(Path(BASH).parent), os.environ["PATH"]])}
+    if os.name == "nt":
+        env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", r"C:\Windows")
+    return env
+
 
 @unittest.skipUnless(SCRIPTS.is_dir() and BASH, "scripts/ or bash is not available here")
 class LoadRepoEnvTests(unittest.TestCase):
-    def load(self, env_text: str, *, extra: str = "") -> tuple[dict[str, str], Path]:
-        """The variables exported to a child after load_repo_env, and the temp dir (for markers)."""
+    def load(
+        self, env_text: str | bytes, *, prelude: str = "", watch: tuple[str, ...] = ()
+    ) -> tuple[dict[str, str], Path, str]:
+        """The watched variables a child sees after load_repo_env, the temp dir (for markers), stderr."""
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         temp = Path(tempdir.name)
         env_file = temp / "scratch.env"
-        env_file.write_bytes(env_text.replace("{MARKER}", _bash_path(temp / "marker")).encode())
+        data = env_text if isinstance(env_text, bytes) else env_text.encode()
+        env_file.write_bytes(data.replace(b"{MARKER}", _bash_path(temp / "marker").encode()))
+        keys = sorted({*KEY_RE.findall(data.decode("utf-8", "replace")), *watch})
         script = (
-            f'source "{_bash_path(SCRIPTS / "load_env.sh")}"; '
-            f'load_repo_env "{_bash_path(env_file)}"; {extra} '
-            "bash -c 'env'"
+            f'source "{_bash_path(SCRIPTS / "load_env.sh")}"; {prelude} '
+            f'load_repo_env "{_bash_path(env_file)}"; {PRINT_KEYS} {" ".join(keys)}'
         )
         # Bytes, decoded by hand: text mode would turn a stray carriage return into a newline.
-        result = subprocess.run([BASH, "-c", script], capture_output=True, timeout=60)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        stdout = result.stdout.decode("utf-8")
-        exported = dict(line.split("=", 1) for line in stdout.split("\n") if "=" in line)
-        return exported, temp
+        result = subprocess.run([BASH, "-c", script], capture_output=True, timeout=60, env=_minimal_env())
+        stderr = result.stderr.decode("utf-8", "replace")
+        self.assertEqual(result.returncode, 0, stderr)
+        pairs = [chunk.split("=", 1) for chunk in result.stdout.decode("utf-8").split("\0") if "=" in chunk]
+        return {key: value for key, value in pairs}, temp, stderr
 
     def test_a_command_substitution_in_a_value_is_not_run(self) -> None:
-        exported, temp = self.load("SAFE=1\nX=$(touch {MARKER})\nY=`touch {MARKER}`\nZ=a;touch {MARKER}\n")
+        exported, temp, _ = self.load("SAFE=1\nX=$(touch {MARKER})\nY=`touch {MARKER}`\nZ=a;touch {MARKER}\n")
 
         self.assertFalse((temp / "marker").exists(), "the .env line was executed")
         self.assertEqual(exported["SAFE"], "1")
@@ -50,27 +69,58 @@ class LoadRepoEnvTests(unittest.TestCase):
         self.assertTrue(exported["Z"].startswith("a;touch "), exported["Z"])
 
     def test_values_keep_equals_signs_and_shell_characters(self) -> None:
-        exported, _ = self.load("URL=postgres://u:p@h/db?a=b=c\nAMP=a&b|c(d)\nPATH_LIKE=$HOME/x\n")
+        exported, _, _ = self.load("URL=postgres://u:p@h/db?a=b=c\nAMP=a&b|c(d)\nPATH_LIKE=$HOME/x\n")
 
         self.assertEqual(exported["URL"], "postgres://u:p@h/db?a=b=c")
         self.assertEqual(exported["AMP"], "a&b|c(d)")
         self.assertEqual(exported["PATH_LIKE"], "$HOME/x")
 
-    def test_one_level_of_matching_quotes_is_stripped(self) -> None:
-        exported, _ = self.load(
-            'A="hello world"\nB=\'single $HOME\'\nC="it\'s"\nD="a # b"\nE="mismatched\nF=\'"nested"\'\n'
+    def test_quoted_values_are_literal_and_unexpanded(self) -> None:
+        exported, _, _ = self.load(
+            'A="hello world"\nB=\'single $HOME\'\nC="it\'s"\nD="a # b"\nF=\'"nested"\'\nG="$HOME/x"\nH="a\\tb"\n'
         )
 
         self.assertEqual(exported["A"], "hello world")
         self.assertEqual(exported["B"], "single $HOME")
         self.assertEqual(exported["C"], "it's")
         self.assertEqual(exported["D"], "a # b")
-        self.assertEqual(exported["E"], '"mismatched')
         self.assertEqual(exported["F"], '"nested"')
+        self.assertEqual(exported["G"], "$HOME/x")
+        # Only \", \\, \n and \r are escapes; any other backslash stays as written.
+        self.assertEqual(exported["H"], "a\\tb")
+
+    def test_double_quotes_handle_escaped_quote_backslash_and_newline(self) -> None:
+        exported, _, stderr = self.load('ESC="a\\"b"\nBS="a\\\\b"\nNL="a\\nb"\nEND="x\\\\"\n')
+
+        self.assertEqual(exported["ESC"], 'a"b')
+        self.assertEqual(exported["BS"], "a\\b")
+        self.assertEqual(exported["NL"], "a\nb")
+        self.assertEqual(exported["END"], "x\\")
+        self.assertEqual(stderr, "")
+
+    def test_text_after_a_closing_quote_is_an_error_line(self) -> None:
+        exported, _, stderr = self.load("GOOD=1\nAFTER=\"x\"y\nSINGLE='x'y\nOK=\"x\" # note\nOK2='x'   # note\n")
+
+        self.assertNotIn("AFTER", exported)
+        self.assertNotIn("SINGLE", exported)
+        self.assertEqual((exported["OK"], exported["OK2"]), ("x", "x"))
+        self.assertIn(":2:", stderr)
+        self.assertIn(":3:", stderr)
+
+    def test_an_unterminated_quote_warns_and_is_skipped(self) -> None:
+        exported, _, stderr = self.load('GOOD=1\nPEM="-----BEGIN\nabc\n-----END"\nS=\'open\n')
+
+        self.assertEqual(exported["GOOD"], "1")
+        self.assertNotIn("PEM", exported)
+        self.assertNotIn("S", exported)
+        self.assertIn(":2:", stderr)
+        self.assertIn(":5:", stderr)
+        self.assertNotIn("BEGIN", stderr)
 
     def test_comments_blanks_export_prefix_and_crlf(self) -> None:
-        exported, _ = self.load(
-            "# a comment\n\n   \n  INDENT=1\nexport EXPORTED=2\nLOG=INFO  # trailing note\nWIN=3\r\nEMPTY=\nnot a pair\n9BAD=x\n"
+        exported, _, _ = self.load(
+            "# a comment\n\n   \n  INDENT=1\nexport EXPORTED=2\nLOG=INFO  # trailing note\nWIN=3\r\nEMPTY=\n"
+            'EMPTY_WITH_NOTE=   # set me\nHASH=#kept\nQ="q"\r\nnot a pair\n9BAD=x\n'
         )
 
         self.assertEqual(exported["INDENT"], "1")
@@ -78,10 +128,28 @@ class LoadRepoEnvTests(unittest.TestCase):
         self.assertEqual(exported["LOG"], "INFO")
         self.assertEqual(exported["WIN"], "3")
         self.assertEqual(exported["EMPTY"], "")
+        self.assertEqual(exported["EMPTY_WITH_NOTE"], "")
+        self.assertEqual(exported["HASH"], "#kept")
+        self.assertEqual(exported["Q"], "q")
         self.assertNotIn("9BAD", exported)
 
+    def test_a_utf8_bom_before_the_first_key_is_stripped(self) -> None:
+        exported, _, _ = self.load(b"\xef\xbb\xbfBOMKEY=1\nNEXT=2\n")
+
+        self.assertEqual((exported["BOMKEY"], exported["NEXT"]), ("1", "2"))
+
+    def test_every_unparseable_line_warns_with_its_number_and_never_its_text(self) -> None:
+        exported, _, stderr = self.load("A=1\n# note\n\nKEY value-with-secret-xyz\n9BAD=secret-abc\nB=2\n")
+
+        self.assertEqual((exported["A"], exported["B"]), ("1", "2"))
+        self.assertIn(":4:", stderr)
+        self.assertIn(":5:", stderr)
+        self.assertNotIn(":2:", stderr)
+        self.assertNotIn(":3:", stderr)
+        self.assertNotIn("secret", stderr)
+
     def test_a_last_line_without_a_newline_is_read(self) -> None:
-        exported, _ = self.load("FIRST=1\nLAST=2")
+        exported, _, _ = self.load("FIRST=1\nLAST=2")
 
         self.assertEqual(exported["LAST"], "2")
 
@@ -91,9 +159,66 @@ class LoadRepoEnvTests(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=60,
+            env=_minimal_env(),
         )
 
         self.assertEqual((result.returncode, result.stdout.strip()), (0, "done"))
+
+    def test_bash_env_cannot_run_a_command_in_a_child_shell(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        temp = Path(tempdir.name)
+        marker = _bash_path(temp / "marker")
+        env_file = temp / "scratch.env"
+        env_file.write_text(f"BASH_ENV=$(touch {marker})\nENV=$(touch {marker})\nSAFE=1\n", encoding="utf-8")
+        script = (
+            f'source "{_bash_path(SCRIPTS / "load_env.sh")}"; load_repo_env "{_bash_path(env_file)}"; '
+            "bash -c true; bash -lc true; printf '%s' \"${SAFE-unset}\""
+        )
+        result = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=60, env=_minimal_env())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((temp / "marker").exists(), "BASH_ENV from .env ran in a child shell")
+        self.assertEqual(result.stdout, "1")
+        self.assertIn("BASH_ENV", result.stderr)
+        self.assertNotIn("touch", result.stderr)
+
+    def test_keys_that_change_the_shell_or_the_loader_are_refused(self) -> None:
+        denied = [
+            "BASH_ENV", "ENV", "BASH_FUNC_evil", "SHELLOPTS", "BASHOPTS", "IFS", "PATH", "PS4", "PROMPT_COMMAND",
+            "CDPATH", "GLOBIGNORE", "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "SMOKE_PROJECT",
+            "SMOKE_COMPOSE_PROJECT", "ROOT_DIR", "COMPOSE",
+        ]  # fmt: skip
+        env_text = "".join(f"{key}=poisoned-{index}\n" for index, key in enumerate(denied)) + "FINE=1\n"
+        exported, _, stderr = self.load(env_text, prelude="SMOKE_PROJECT=mine; ROOT_DIR=/repo; ")
+
+        self.assertEqual(exported["FINE"], "1")
+        for index, key in enumerate(denied):
+            with self.subTest(key=key):
+                self.assertNotEqual(exported.get(key), f"poisoned-{index}")
+                self.assertIn(key, stderr)
+        self.assertNotIn("poisoned", stderr)
+
+    def test_a_variable_the_script_set_before_loading_is_not_overwritten(self) -> None:
+        exported, _, stderr = self.load(
+            "MY_INTERNAL=from-env\nEXPORTED_ONE=from-env\n",
+            prelude="MY_INTERNAL=mine; export EXPORTED_ONE=old; ",
+            watch=("MY_INTERNAL",),
+        )
+
+        self.assertNotIn("MY_INTERNAL", exported)  # set but not exported, and .env does not export it
+        self.assertEqual(exported["EXPORTED_ONE"], "from-env")  # an exported variable stays overridable
+        self.assertIn("MY_INTERNAL", stderr)
+
+    def test_the_parsers_own_names_are_ordinary_keys(self) -> None:
+        exported, _, stderr = self.load("pair_re=.*\nline=L\nkey=K\nvalue=V\nenv_file=E\nOTHER=1\n")
+
+        self.assertEqual(stderr, "")
+        self.assertEqual(
+            (exported["pair_re"], exported["line"], exported["key"], exported["value"], exported["env_file"]),
+            (".*", "L", "K", "V", "E"),
+        )
+        self.assertEqual(exported["OTHER"], "1")
 
 
 if __name__ == "__main__":
