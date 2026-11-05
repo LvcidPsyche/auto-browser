@@ -124,8 +124,9 @@ All notable changes to auto-browser are documented here.
 - The harness's `login_redirect` forbidden state now looks at where the browser is, not what the page says: a URL path
   segment of `login`, `signin`, `sign-in` or `auth`, a 401 or 403 status, or the caller's value inside the URL. A
   marketing page that offers "sign in" or mentions "authenticate" no longer fails a run. `payment_screen` and
-  `captcha_screen` match whole words and phrases (`credit card`, `card number`, `payment method`, ...; the bare word
-  `payment` no longer counts, a `/payment` path does), so "accredit cards" or "captchaless" are not hits.
+  `captcha_screen` match their built-in words and phrases whole (`credit card`, `card number`, `payment method`, ...;
+  the bare word `payment` no longer counts, a `/payment` path does), so "accredit cards" or "captchaless" are not hits.
+  The caller's own `value` still matches as a case-insensitive substring, as before, so a path such as `/billing` does.
 - The harness's `HARNESS_UV_COMMAND` verifier reads its stdout with a 1 MiB cap (it used to buffer all of it): a
   command that writes more is killed and the verification is `unverified`. The docs now say the command receives the
   full contract and the unscrubbed trace on stdin.

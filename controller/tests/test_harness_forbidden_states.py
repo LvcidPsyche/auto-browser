@@ -84,6 +84,24 @@ class PaymentAndCaptchaTests(unittest.IsolatedAsyncioTestCase):
             await _hits("captcha_screen", {"url": "https://example.com/x", "text": "captchaless sign up"}), []
         )
 
+    async def test_the_callers_value_is_a_substring_whatever_its_edge_characters(self) -> None:
+        # Only the built-in phrases match as whole words; the caller's own value keeps its substring match, so a
+        # value that starts or ends with a non-word character (a path) still finds itself next to a letter.
+        cases = (
+            ("/billing", "https://shop.com/billing"),
+            ("checkout/", "https://shop.com/checkout/pay"),
+            ("/checkout", "https://shop.com/checkout"),
+            ("/Billing", "https://shop.com/billing/history"),
+        )
+        for kind in ("payment_screen", "captcha_screen"):
+            for value, url in cases:
+                with self.subTest(kind=kind, value=value, url=url):
+                    self.assertEqual(len(await _hits(kind, {"url": url, "text": "Step 3"}, value=value)), 1)
+            with self.subTest(kind=kind, absent=True):
+                self.assertEqual(
+                    await _hits(kind, {"url": "https://shop.com/home", "text": "Step 3"}, value="/billing"), []
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

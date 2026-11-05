@@ -298,9 +298,13 @@ def _forbidden_state_hit(
         )
     combined = f"{url}\n{searchable_text}\n{dom_text}"
     if forbidden.kind == "captcha_screen":
-        return _has_phrase(combined, [*_CAPTCHA_PHRASES, value])
+        return _has_phrase(combined, _CAPTCHA_PHRASES) or _has_value(combined, value)
     if forbidden.kind == "payment_screen":
-        return _has_phrase(combined, [*_PAYMENT_PHRASES, value]) or _path_has_segment(url, _PAYMENT_SEGMENTS)
+        return (
+            _has_phrase(combined, _PAYMENT_PHRASES)
+            or _path_has_segment(url, _PAYMENT_SEGMENTS)
+            or _has_value(combined, value)
+        )
     if forbidden.kind == "login_redirect":
         # What the browser was sent to, not what the page says: a marketing page that offers "sign in" is not a
         # redirect. The URL path, a 401/403 status, and the caller's value as part of the URL.
@@ -334,6 +338,12 @@ def _has_phrase(text: str, phrases: list[str] | tuple[str, ...]) -> bool:
         for phrase in phrases
         if phrase.strip()
     )
+
+
+def _has_value(text: str, value: str) -> bool:
+    """The caller's own value, as a case-insensitive substring as it always was: a path such as `/billing` must
+    still match next to a letter, so the whole-word rule is for the built-in phrases only."""
+    return bool(value) and value.lower() in text.lower()
 
 
 def _path_has_segment(url: str, segments: frozenset[str]) -> bool:
