@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -184,7 +185,9 @@ class CuratorLLMAdapter:
     def _build_gemini(self, prompt: str, system: Optional[str]) -> tuple[str, dict, dict]:
         # The key goes in a header: httpx puts the request URL in its error
         # messages, and a ?key= query string put the key in the logs with them.
-        url = f"{self._settings_in_use().gemini_base_url.rstrip('/')}/models/{self.model}:generateContent"
+        # Quoted as the Gemini provider adapter quotes provider_model: CURATOR_MODEL is not checked against its pattern.
+        model = quote(self.model, safe="/:")
+        url = f"{self._settings_in_use().gemini_base_url.rstrip('/')}/models/{model}:generateContent"
         headers = {"Content-Type": "application/json", "x-goog-api-key": self._api_key()}
         parts: list[dict[str, str]] = []
         if system:

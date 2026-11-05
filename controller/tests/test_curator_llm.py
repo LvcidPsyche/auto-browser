@@ -133,6 +133,21 @@ class CuratorLLMAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["contents"][0]["parts"][0]["text"], "System: use bullets\n\n")
         self.assertEqual(body["contents"][0]["parts"][1]["text"], "idea list")
 
+    async def test_the_gemini_model_is_quoted_into_the_url_path(self) -> None:
+        # STORE-29: CURATOR_MODEL went into the path as written, so ?, # or a space ended or split it; quoted as
+        # the Gemini provider adapter quotes provider_model ('/' and ':' kept for ids such as tunedModels/x).
+        settings = SimpleNamespace(gemini_base_url="https://gemini.example/v1beta")
+        fake_client = _FakeAsyncClient(_FakeResponse({"candidates": []}))
+
+        with (
+            patch.dict(os.environ, {"GEMINI_API_KEY": "key"}, clear=True),
+            patch("app.curator_llm.httpx.AsyncClient", return_value=fake_client),
+        ):
+            await CuratorLLMAdapter("gemini", model="m 1?alt=sse#x", settings=settings).complete("hi")
+
+        url = fake_client.calls[0][0]
+        self.assertEqual(url, "https://gemini.example/v1beta/models/m%201%3Falt%3Dsse%23x:generateContent")
+
     async def test_openai_and_gemini_requests_follow_their_base_url_settings(self) -> None:
         # Same flaw as the Claude branch had: a gateway or proxy the operator routes provider traffic through.
         settings = SimpleNamespace(
