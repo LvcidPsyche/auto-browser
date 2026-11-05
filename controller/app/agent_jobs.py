@@ -264,10 +264,6 @@ class AgentJobQueue:
         # sessions these callbacks would close are gone with it.
         self._on_finish: dict[str, Callable[[], Awaitable[None]]] = {}
 
-    def on_finish(self, job_id: str, callback: Callable[[], Awaitable[None]]) -> None:
-        """Register a callback to run when `job_id` reaches a terminal state."""
-        self._on_finish[job_id] = callback
-
     async def _run_finish_callback(self, job_id: str) -> None:
         callback = self._on_finish.pop(job_id, None)
         if callback is None:
@@ -325,8 +321,20 @@ class AgentJobQueue:
     async def enqueue_step(self, session_id: str, payload: AgentStepRequest) -> dict:
         return await self._enqueue(session_id, "agent_step", payload)
 
-    async def enqueue_run(self, session_id: str, payload: AgentRunRequest) -> dict:
-        return await self._enqueue(session_id, "agent_run", payload)
+    async def enqueue_run(
+        self,
+        session_id: str,
+        payload: AgentRunRequest,
+        *,
+        on_finish: Callable[[], Awaitable[None]] | None = None,
+    ) -> dict:
+        """Queue a run. `on_finish` runs once the job reaches a terminal state, whatever that state is.
+
+        It is registered before the job is visible to a worker, so a job that finishes at once still calls
+        it. A caller that passes one owns the session the job runs in and closes it there: if the enqueue
+        is cancelled after the job exists, the job is cancelled too, so none is left on a closed session.
+        """
+        return await self._enqueue(session_id, "agent_run", payload, on_finish=on_finish)
 
     async def resume_job(self, job_id: str, *, max_steps: int | None = None) -> dict:
         source = await self._accessible(job_id)
@@ -392,6 +400,7 @@ class AgentJobQueue:
         payload: AgentStepRequest | AgentRunRequest,
         *,
         parent_job_id: str | None = None,
+        on_finish: Callable[[], Awaitable[None]] | None = None,
     ) -> dict:
         record = await self.store.create(
             session_id=session_id,
@@ -400,14 +409,25 @@ class AgentJobQueue:
             operator=get_current_operator(),
             parent_job_id=parent_job_id,
         )
+        if on_finish is not None:
+            self._on_finish[record.id] = on_finish
         try:
             self.queue.put_nowait(record.id)
         except asyncio.QueueFull:
+            self._on_finish.pop(record.id, None)
             record.status = "failed"
             record.error = "Job queue is full (max 100 queued jobs)"
             await self.store.update(record)
             raise RuntimeError("Job queue is at capacity. Try again later.")
-        await self._audit("agent_job_enqueued", "queued", record)
+        try:
+            await self._audit("agent_job_enqueued", "queued", record)
+        except BaseException:
+            if on_finish is not None:
+                # The caller is about to close the session this job runs in: take the job back first.
+                with contextlib.suppress(Exception):
+                    await self.cancel_job(record.id)
+                self._on_finish.pop(record.id, None)
+            raise
         return self._public_record(record)
 
     async def _worker_loop(self, worker_index: int) -> None:

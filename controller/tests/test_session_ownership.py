@@ -200,11 +200,11 @@ class SessionOwnershipTests(unittest.IsolatedAsyncioTestCase):
             (profiles / name / "profile.json").write_text(json.dumps({"owner": owner}), encoding="utf-8")
         queued_as: list[str] = []
 
-        async def enqueue_run(session_id, _request):
+        async def enqueue_run(session_id, _request, **_kwargs):
             queued_as.append(get_current_operator().id)
             return {"id": f"job-{session_id}"}
 
-        job_queue = SimpleNamespace(enqueue_run=enqueue_run, on_finish=lambda *_args: None)
+        job_queue = SimpleNamespace(enqueue_run=enqueue_run)
         cron = CronService(store_path=Path(self.tmp.name) / "crons.json", job_queue=job_queue, manager=self.manager)
         created_session = {}
 

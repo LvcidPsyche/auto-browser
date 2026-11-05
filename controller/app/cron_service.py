@@ -376,25 +376,25 @@ class CronService:
         session_id = session_result["id"]
         self._active_runs[job_id] = session_id
 
-        try:
-            with acting_as(owner):
-                queued = await self.job_queue.enqueue_run(session_id, run_request)
-        except BaseException:
-            # Enqueue can reject (queue at capacity), and the trigger can be cancelled while it waits. The
-            # session exists but nothing will ever run in it, so release it here rather than stranding it
-            # (and the job's slot) until restart.
-            await self._release_run(job_id, session_id)
-            raise
-
         # This session exists only to host this job, and nothing else will ever
         # close it. Before this, the first cron fire consumed a session slot
         # permanently — with MAX_SESSIONS defaulting to 1, every later fire and
         # every manual create_session then failed "Session limit reached", and
         # under docker_ephemeral each fire also leaked a browser container.
-        self.job_queue.on_finish(
-            queued["id"],
-            lambda: self._release_run(job_id, session_id),
-        )
+        # The callback goes in with the job: a worker can finish it before enqueue_run returns.
+        try:
+            with acting_as(owner):
+                queued = await self.job_queue.enqueue_run(
+                    session_id,
+                    run_request,
+                    on_finish=lambda: self._release_run(job_id, session_id),
+                )
+        except BaseException:
+            # Enqueue can reject (queue at capacity), and the trigger can be cancelled while it waits. The
+            # session exists but nothing will ever run in it, so release it here rather than stranding it
+            # (and the job's slot) until restart. A job the queue already accepted is withdrawn by the queue.
+            await self._release_run(job_id, session_id)
+            raise
 
         # Update run metadata
         async with self._lock:

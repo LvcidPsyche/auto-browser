@@ -337,7 +337,7 @@ class CronTriggerIdentityTests(unittest.IsolatedAsyncioTestCase):
             self.seen["session"] = _who()
             return {"id": "session-1"}
 
-        async def enqueue_run(_session_id, _request):
+        async def enqueue_run(_session_id, _request, **_kwargs):
             self.seen["agent_job"] = _who()
             return {"id": "agent-job-1"}
 
