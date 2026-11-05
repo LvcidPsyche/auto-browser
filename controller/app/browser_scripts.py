@@ -128,6 +128,13 @@ STEALTH_INIT_SCRIPT = r"""
 # The same holds for contenteditable editors and textbox-like ARIA widgets,
 # whose text content is what was typed into them.
 _ELEMENT_NAMING_JS = r"""
+  // Page-controlled attributes are bounded where they are read: a name or id like a label (120), a URL longer.
+  const AB_ATTR_MAX = 120;
+  const AB_HREF_MAX = 2000;
+  function abCap(value, max) {
+    return typeof value === 'string' ? value.slice(0, max) : value;
+  }
+
   function abClean(value) {
     return String(value || '').replace(/\s+/g, ' ').trim();
   }
@@ -226,8 +233,8 @@ _ELEMENT_NAMING_JS = r"""
     return {
       tag: el.tagName.toLowerCase(),
       element_id: elementIds ? elementIds.idOf(el) : null,
-      name: el.getAttribute('name'),
-      id: el.id || null,
+      name: abCap(el.getAttribute('name'), AB_ATTR_MAX),
+      id: abCap(el.id || null, AB_ATTR_MAX),
       label: abName(el).slice(0, 120)
     };
   }
@@ -288,7 +295,7 @@ INTERACTABLES_SCRIPT = _with_element_naming(
       label: abName(el).slice(0, 160),
       checked: abChecked(el),
       disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
-      href: el.href || null,
+      href: abCap(el.href || null, AB_HREF_MAX),
       bbox: {
         x: Math.round(rect.x),
         y: Math.round(rect.y),
@@ -358,7 +365,7 @@ PAGE_SUMMARY_SCRIPT = _with_element_naming(
         .map((field) => ({
           tag: field.tagName.toLowerCase(),
           type: field.getAttribute('type') || null,
-          name: field.getAttribute('name') || null,
+          name: abCap(field.getAttribute('name') || null, AB_ATTR_MAX),
           label: abName(field).slice(0, 80),
           disabled: Boolean(field.disabled || field.getAttribute('aria-disabled') === 'true')
         }))

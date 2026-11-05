@@ -106,6 +106,8 @@ All notable changes to auto-browser are documented here.
 
 - **An MCP tool result is now always valid JSON.** A `NaN` or infinite number in a result was written as the bare word `NaN` with `isError` false, which strict JSON parsers reject, and a value that could not be serialized (a date, an object) answered "Tool execution failed" although the tool had already acted. NaN and infinities now become `null` and other values become their text. A result that still cannot be encoded answers an error saying the tool ran but its result could not be encoded.
 
+- **Page-controlled `href`, `name` and `id` are now capped in observations.** A page could set a link's URL, a field's name or the focused element's name or id to megabytes of text, and it went whole into interactables, the active element, the form outline and so into model prompts. A `href` is cut at 2,000 characters, and a `name` or `id` at 120, where the script reads them.
+
 ## [1.14.1] — 2026-11-04
 
 A patch release over 1.14.0. A session whose start page fails to load now gets a 400 the agent can act on instead
