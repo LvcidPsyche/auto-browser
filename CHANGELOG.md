@@ -193,8 +193,9 @@ All notable changes to auto-browser are documented here.
   ignores `.env.*` except `.env.example`.
 - The approval webhook target is now checked after DNS: the host is read as a browser reads it (`2130706433`, `0x7f.1`
   and `127.1` are refused), resolved, and refused when any answer is a loopback, private, link-local, unspecified,
-  multicast or reserved address; the request is then sent to the address that was checked, with the original name kept
-  as the `Host` header and the TLS server name, so a second lookup cannot return a different one. When a proxy from
+  multicast or reserved address; the request is then sent to the addresses that were checked, in the resolver's order
+  and moving to the next only when one cannot be connected to, with the original name kept as the `Host` header and
+  the TLS server name, so a second lookup cannot return a different one. When a proxy from
   the environment applies to the URL (`HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY`, less `NO_PROXY`), the answers are
   still checked, but the request goes by name through the proxy, which then owns resolution. Logs carry only
   `scheme://host`, never the path, query or credentials. A name that does not resolve is not posted to.

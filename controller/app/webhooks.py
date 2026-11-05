@@ -72,7 +72,7 @@ def _loggable(webhook_url: str) -> str:
 @dataclass(frozen=True)
 class _Target:
     url: str  # as written: what an IP literal, or a name sent through a proxy, is posted to
-    pinned_url: str | None = None  # the same URL aimed at the checked address (None for an IP literal)
+    pinned_urls: tuple[str, ...] = ()  # the same URL aimed at each checked address, in the resolver's order
     headers: dict[str, str] = field(default_factory=dict)  # the pinned request's Host
     extensions: dict[str, str] = field(default_factory=dict)  # the pinned request's TLS server name
 
@@ -101,8 +101,8 @@ async def _checked_target(webhook_url: str, *, allow_private: bool) -> _Target |
     The host is read as a browser reads it (numeric spellings of loopback are refused), resolved here, and every
     answer must be a public address; `allow_private` admits any answer but cloud metadata (169.254.0.0/16, fe80::/10,
     fd00:ec2::254, and the names metadata and metadata.google.internal, refused before any lookup). With no proxy the
-    request goes to the first answer (pinned_url), with the original name kept in the Host header and the TLS server
-    name, so a second lookup cannot return a different address; dispatch_approval_event decides that.
+    request goes to the checked answers (pinned_urls), with the original name kept in the Host header and the TLS
+    server name, so a second lookup cannot return a different address; dispatch_approval_event decides that.
     """
     label = _loggable(webhook_url)
     try:
@@ -139,16 +139,38 @@ async def _checked_target(webhook_url: str, *, allow_private: bool) -> _Target |
     if literal is not None:
         return _Target(url=webhook_url)
 
-    pinned = addresses[0]
     userinfo, _, authority = parsed.netloc.rpartition("@")
-    pinned_host = f"[{pinned}]" if ":" in pinned else pinned
-    netloc = (f"{userinfo}@" if userinfo else "") + pinned_host + (f":{port}" if port is not None else "")
+    pinned_urls = []
+    for address in addresses:
+        pinned_host = f"[{address}]" if ":" in address else address
+        netloc = (f"{userinfo}@" if userinfo else "") + pinned_host + (f":{port}" if port is not None else "")
+        pinned_urls.append(parsed._replace(netloc=netloc).geturl())
     return _Target(
         url=webhook_url,
-        pinned_url=parsed._replace(netloc=netloc).geturl(),
+        pinned_urls=tuple(pinned_urls),
         headers={"Host": authority},
         extensions={"sni_hostname": host} if parsed.scheme == "https" else {},
     )
+
+
+async def _post_pinned(target: _Target, raw: bytes, headers: dict[str, str]) -> httpx.Response:
+    """Post to the checked addresses in turn, moving on only when one cannot be connected to.
+
+    Nothing was sent to an address that did not connect, so the next one is tried, as httpx's own lookup would; once
+    one connects, its answer (an HTTP error included) is final.
+    """
+    client = get_client(direct=True)
+    pinned_headers = {**headers, **target.headers}
+    *earlier, last = target.pinned_urls
+    for pinned_url in earlier:
+        try:
+            return await client.post(pinned_url, content=raw, headers=pinned_headers, extensions=target.extensions)
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            label = _loggable(target.url)
+            logger.info(
+                "webhook %s: a checked address did not connect (%s); trying the next", label, type(exc).__name__
+            )
+    return await client.post(last, content=raw, headers=pinned_headers, extensions=target.extensions)
 
 
 def get_client(*, direct: bool = False) -> httpx.AsyncClient:
@@ -213,15 +235,13 @@ async def dispatch_approval_event(
         headers["X-Webhook-Signature"] = _sign(raw, webhook_secret)
 
     try:
-        if target.pinned_url is None or _env_proxy_applies(target.url):
+        if not target.pinned_urls or _env_proxy_applies(target.url):
             # An IP literal goes as written. Through a proxy from the environment the request goes by name: a CONNECT
             # tunnel takes its TLS name from the URL and NO_PROXY is written by name, so the proxy then owns
             # resolution (the answers were still checked above).
             resp = await get_client().post(target.url, content=raw, headers=headers)
         else:
-            resp = await get_client(direct=True).post(
-                target.pinned_url, content=raw, headers={**headers, **target.headers}, extensions=target.extensions
-            )
+            resp = await _post_pinned(target, raw, headers)
         if resp.status_code >= 400:
             logger.warning("webhook %s returned %d", _loggable(webhook_url), resp.status_code)
     except Exception as exc:

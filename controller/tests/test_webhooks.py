@@ -18,8 +18,10 @@ from app import webhooks
 from app.models import ApprovalRecord, BrowserActionDecision
 
 _PUBLIC = "93.184.216.34"
+_SECOND = "93.184.216.35"
 _PROXY = "http://proxy.example:3128"
 _OK = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+_SERVER_ERROR = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"
 _TUNNEL_OPEN = b"HTTP/1.1 200 Connection established\r\n\r\n"
 _CLIENTS = ("_client", "_direct_client")
 
@@ -281,6 +283,47 @@ class WebhookWireTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(wire.connects, [(_PUBLIC, 8443)])
         self.assertEqual(wire.tls_names, ["hooks.example.com"])
+
+    async def test_the_next_checked_address_is_tried_when_one_refuses_the_connection(self) -> None:
+        # STORE-20: pinning to the first answer lost the failover httpx's own lookup had (anyio tries each address).
+        refused = httpcore.ConnectError("connection refused")
+        wire = await self._dispatch({}, {_PUBLIC: refused, _SECOND: [_OK]}, _PUBLIC, _SECOND)
+
+        self.assertEqual(wire.connects, [(_PUBLIC, 8443), (_SECOND, 8443)])
+        self.assertEqual(wire.tls_names, ["hooks.example.com"])
+        self.assertEqual(wire.request_head()[1][b"host"], b"hooks.example.com:8443")
+        self.assertEqual(sum(chunk.startswith(b"POST ") for chunk in wire.sent), 1)
+
+    async def test_the_next_checked_address_is_tried_when_one_times_out(self) -> None:
+        timed_out = httpcore.ConnectTimeout("timed out")
+        wire = await self._dispatch({}, {_PUBLIC: timed_out, _SECOND: [_OK]}, _PUBLIC, _SECOND)
+
+        self.assertEqual(wire.connects, [(_PUBLIC, 8443), (_SECOND, 8443)])
+        self.assertEqual(sum(chunk.startswith(b"POST ") for chunk in wire.sent), 1)
+
+    async def test_an_http_error_answer_is_final(self) -> None:
+        wire = await self._dispatch({}, {_PUBLIC: [_SERVER_ERROR], _SECOND: [_OK]}, _PUBLIC, _SECOND)
+
+        self.assertEqual(wire.connects, [(_PUBLIC, 8443)])
+        self.assertIn(("webhook %s returned %d", "https://hooks.example.com", 500), self._warned())
+
+    async def test_a_connection_that_drops_after_the_request_is_sent_is_not_tried_again(self) -> None:
+        # The request may have arrived: posting it to the next address could deliver the event twice.
+        wire = await self._dispatch({}, {_PUBLIC: [], _SECOND: [_OK]}, _PUBLIC, _SECOND)
+
+        self.assertEqual(wire.connects, [(_PUBLIC, 8443)])
+        self.assertEqual(sum(chunk.startswith(b"POST ") for chunk in wire.sent), 1)
+
+    async def test_when_no_checked_address_connects_the_failure_is_logged_once(self) -> None:
+        refused = httpcore.ConnectError("connection refused")
+        wire = await self._dispatch({}, {_PUBLIC: refused, _SECOND: refused}, _PUBLIC, _SECOND)
+
+        self.assertEqual(wire.connects, [(_PUBLIC, 8443), (_SECOND, 8443)])
+        failed = [args for args in self._warned() if args[0] == "webhook dispatch to %s failed: %s"]
+        self.assertEqual(failed, [("webhook dispatch to %s failed: %s", "https://hooks.example.com", "ConnectError")])
+
+    def _warned(self) -> list[tuple]:
+        return [call.args for call in self.warnings.call_args_list]
 
     async def test_a_private_answer_is_refused_before_any_proxy_is_used(self) -> None:
         wire = await self._dispatch({"HTTPS_PROXY": _PROXY}, {"proxy.example": [_TUNNEL_OPEN, _OK]}, "10.0.0.5")
