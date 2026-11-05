@@ -130,6 +130,10 @@ All notable changes to auto-browser are documented here.
 
 - **Page-controlled `href`, `name` and `id` are now capped in observations.** A page could set a link's URL, a field's name or the focused element's name or id to megabytes of text, and it went whole into interactables, the active element, the form outline and so into model prompts. A `href` is cut at 2,000 characters, and a `name` or `id` at 120, where the script reads them.
 
+### Changed
+
+- **The stdio bridge docs now say it handles one request at a time.** `docs/mcp-clients.md` explains that a slow tool call holds up the calls behind it, and where to change the 60-second per-call timeout. No behaviour changed.
+
 ## [1.14.1] — 2026-11-04
 
 A patch release over 1.14.0. A session whose start page fails to load now gets a 400 the agent can act on instead
