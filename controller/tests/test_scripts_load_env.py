@@ -221,5 +221,54 @@ class LoadRepoEnvTests(unittest.TestCase):
         self.assertEqual(exported["OTHER"], "1")
 
 
+# Syntax that needs bash 4 or later. macOS ships bash 3.2, and the repo's scripts support it (doctor.sh keeps
+# `${a[@]+...}` for an empty array under `set -u`): in 3.2 one of these is a parse error that aborts `source`.
+BASH4_ONLY = {
+    "[[ -v (bash 4.2)": re.compile(r"\[\[\s+(?:!\s+)?-v\s"),
+    "mapfile": re.compile(r"\bmapfile\b"),
+    "readarray": re.compile(r"\breadarray\b"),
+    "declare -A / -n": re.compile(r"\b(?:declare|typeset|local)\s+-[a-zA-Z]*[An]"),
+    "${x,,} / ${x^^}": re.compile(r"\$\{[A-Za-z_][A-Za-z_0-9]*(?:,,?|\^\^?)[^}]*\}"),
+    "|&": re.compile(r"\|&"),
+    "&>>": re.compile(r"&>>"),
+    "coproc": re.compile(r"\bcoproc\b"),
+    "wait -n": re.compile(r"\bwait\s+-[a-zA-Z]*n"),
+    "${x@Q}": re.compile(r"\$\{[^}]*@[QEPAa]\}"),
+}
+
+
+@unittest.skipUnless(SCRIPTS.is_dir(), "scripts/ is not available here")
+class ScriptsStayBash32CompatibleTests(unittest.TestCase):
+    def test_the_detector_sees_each_bash4_construct(self) -> None:
+        samples = {
+            "[[ -v (bash 4.2)": 'if [[ -v "$1" ]]; then',
+            "mapfile": "mapfile -t lines < file",
+            "readarray": "readarray -t lines < file",
+            "declare -A / -n": "declare -A table",
+            "${x,,} / ${x^^}": 'echo "${name,,} ${name^^}"',
+            "|&": "cmd |& tee log",
+            "&>>": "cmd &>> log",
+            "coproc": "coproc cat",
+            "wait -n": "wait -n",
+            "${x@Q}": 'echo "${name@Q}"',
+        }
+        self.assertEqual(set(samples), set(BASH4_ONLY))
+        for label, sample in samples.items():
+            with self.subTest(label=label):
+                self.assertRegex(sample, BASH4_ONLY[label])
+
+    def test_no_script_uses_bash4_only_syntax(self) -> None:
+        for script in sorted(SCRIPTS.glob("*.sh")):
+            found = [
+                f"{number}: {label}"
+                for number, line in enumerate(script.read_text(encoding="utf-8").splitlines(), start=1)
+                if not line.lstrip().startswith("#")
+                for label, pattern in BASH4_ONLY.items()
+                if pattern.search(line)
+            ]
+            with self.subTest(script=script.name):
+                self.assertEqual(found, [], f"{script.name} uses syntax that bash 3.2 rejects")
+
+
 if __name__ == "__main__":
     unittest.main()

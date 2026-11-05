@@ -23,13 +23,13 @@ __lre_refused() {
     BASH_ENV | ENV | BASH_FUNC_* | SHELLOPTS | BASHOPTS | IFS | PATH | PS4 | PROMPT_COMMAND | CDPATH | GLOBIGNORE) return 0 ;;
     LD_* | DYLD_* | SMOKE_* | ROOT_DIR | COMPOSE | __lre_*) return 0 ;;
   esac
-  if [[ -v "$1" ]]; then
-    case "$(declare -p "$1" 2>/dev/null)" in
-      "declare -x"* | "declare -"[a-zA-Z]x*) return 1 ;;
-      *) return 0 ;;
-    esac
-  fi
-  return 1
+  # `declare -p` (not `[[ -v ]]`, which needs bash 4.2) fails for a name that is not set.
+  local __lre_decl
+  __lre_decl="$(declare -p "$1" 2>/dev/null)" || return 1
+  case "$__lre_decl" in
+    "declare -x"* | "declare -"[a-zA-Z]x*) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 # Parses a quoted value. $1 is the text starting at the opening quote. Sets __lre_out to the
