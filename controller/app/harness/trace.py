@@ -28,9 +28,9 @@ _SENSITIVE_KEY_FRAGMENTS = (
     "secret",
 )
 _REDACTED = "[REDACTED]"
-# The keys that hold what an action typed or chose (`value`, for select_option) and who it signed in as. They are
-# redacted when the action is marked sensitive.
-_TYPED_TEXT_KEYS = frozenset({"text", "text_preview", "value", "username"})
+# The keys that hold what an action typed or chose (`value` and `label`, for select_option) and who it signed in as.
+# They are redacted when the action is marked sensitive.
+_TYPED_TEXT_KEYS = frozenset({"text", "text_preview", "value", "label", "username"})
 _SENSITIVE_FLAG_KEYS = ("sensitive", "text_redacted")
 # The keys of an agent step's observation that point at its screenshot.
 _SCREENSHOT_KEYS = ("screenshot_path", "screenshot_url")
@@ -165,6 +165,9 @@ class TraceEnvelope(BaseModel):
             observation = step.get("observation") or {}
             if observation:
                 final_observation = observation
+            execution = (
+                _flag_sensitive_execution(step.get("execution")) if decision.get("sensitive") else step.get("execution")
+            )
             payloads: list[tuple[str, dict[str, Any]]] = []
             # The orchestrator observes, then decides and acts, so the observation's screenshot is the page
             # before this step's action: it comes first, then the decision (the type the mock attempt records,
@@ -181,12 +184,11 @@ class TraceEnvelope(BaseModel):
                         "status": step.get("status"),
                         "decision": decision,
                         "observation": observation,
-                        "execution": step.get("execution"),
+                        "execution": execution,
                     },
                 )
             )
             # The page after the action, when the action's result carries its screenshot.
-            execution = step.get("execution")
             after = execution.get("after") if isinstance(execution, dict) else None
             after_shot = (
                 {key: after[key] for key in _SCREENSHOT_KEYS if after.get(key)} if isinstance(after, dict) else {}
@@ -335,6 +337,20 @@ def _is_screenshot_evidence(event: TraceEvent) -> bool:
     if not event.event_type.startswith("screenshot") or event.payload.get("available") is False:
         return False
     return any(event.payload.get(key) for key in _SCREENSHOT_KEYS)
+
+
+def _flag_sensitive_execution(execution: Any) -> Any:
+    """The execution with the sensitive flag on its target and its before/after snapshots.
+
+    The target of a select_option is {**target, value, label, index} with no flag of its own, so the decision's flag
+    has to reach it for _redact_sensitive to hide what was chosen. The input is not changed."""
+    if not isinstance(execution, dict):
+        return execution
+    flagged = dict(execution)
+    for key in ("target", "before", "after"):
+        if isinstance(flagged.get(key), dict):
+            flagged[key] = {**flagged[key], "sensitive": True}
+    return flagged
 
 
 def _execution_redacted_the_text(execution: Any) -> bool:

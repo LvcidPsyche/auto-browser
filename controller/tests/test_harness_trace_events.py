@@ -116,6 +116,45 @@ class AgentResultEventTests(unittest.TestCase):
         self.assertNotIn(account, trace.model_dump_json())
         self.assertNotIn(user, trace.model_dump_json())
 
+    def test_a_sensitive_select_option_hides_its_choice_in_the_executions_target_too(self) -> None:
+        # The real execution shape: the action's target is {**target, value, label, index} with no sensitive flag of
+        # its own, so the decision's flag has to reach it.
+        account, label = "ACCT-99812", "Savings 9812"
+        execution = {
+            "target": {"selector": "#acct", "value": account, "label": label, "index": None},
+            "before": {"url": "https://x.test/"},
+            "after": {"url": "https://x.test/done"},
+        }
+        decision = {"action": "select_option", "selector": "#acct", "value": account, "label": label}
+        for name, step_decision, step_execution in (
+            ("declared", {**decision, "sensitive": True}, execution),
+            (
+                "found at run time",
+                decision,
+                {**execution, "target": {**execution["target"], "text_redacted": True}},
+            ),
+        ):
+            with self.subTest(sensitive=name):
+                result = {"steps": [{"status": "ok", "decision": step_decision, "execution": step_execution}]}
+
+                trace = TraceEnvelope.from_agent_result(contract_hash="h", result=result)
+
+                stored = trace.model_dump_json()
+                self.assertNotIn(account, stored)
+                self.assertNotIn(label, stored)
+                action = next(e for e in trace.events if e.event_type == "action").payload
+                self.assertEqual(action["execution"]["target"]["selector"], "#acct")
+                self.assertEqual(action["execution"]["after"]["url"], "https://x.test/done")
+
+    def test_an_ordinary_selects_target_keeps_its_value_and_label(self) -> None:
+        execution = {"target": {"selector": "#size", "value": "m", "label": "Medium"}}
+        result = {"steps": [{"status": "ok", "decision": {"action": "select_option"}, "execution": execution}]}
+
+        trace = TraceEnvelope.from_agent_result(contract_hash="h", result=result)
+
+        target = next(e for e in trace.events if e.event_type == "action").payload["execution"]["target"]
+        self.assertEqual((target["value"], target["label"]), ("m", "Medium"))
+
     def test_an_ordinary_decision_keeps_its_value(self) -> None:
         result = {"steps": [{"status": "ok", "decision": {"action": "select_option", "value": "blue"}}]}
 
