@@ -104,6 +104,8 @@ All notable changes to auto-browser are documented here.
 
 - **The cron service now says so at every start when its store was quarantined and is empty.** A corrupt store is moved aside and the first read fails, but the next start found no file and ran with no jobs and no sign that they were in the `crons.corrupt-*.json` file. While such a file exists and the store holds no jobs, each start logs a warning naming it.
 
+- **An MCP tool result is now always valid JSON.** A `NaN` or infinite number in a result was written as the bare word `NaN` with `isError` false, which strict JSON parsers reject, and a value that could not be serialized (a date, an object) answered "Tool execution failed" although the tool had already acted. NaN and infinities now become `null` and other values become their text. A result that still cannot be encoded answers an error saying the tool ran but its result could not be encoded.
+
 ## [1.14.1] — 2026-11-04
 
 A patch release over 1.14.0. A session whose start page fails to load now gets a 400 the agent can act on instead

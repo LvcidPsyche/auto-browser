@@ -6,6 +6,7 @@ import difflib
 import hashlib
 import json
 import logging
+import math
 import re
 import time
 from pathlib import Path
@@ -182,6 +183,20 @@ def _read_inline_image(path: Path) -> bytes | None:
 _ACTION_NAMES = frozenset(get_args(ActionName))
 
 
+def _json_safe(value: Any) -> Any:
+    """``value`` with only what strict JSON can hold: NaN and the infinities become null, a tuple or set a list,
+    a key its string, and anything else that is not JSON (a datetime, an object) its ``str()``."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {(key if isinstance(key, str) else str(key)): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
 def _error_text(err: dict[str, Any]) -> str:
     # Pydantic prefixes a validator's own message with "Value error, ", which
     # reads as noise to the agent that has to fix the call.
@@ -342,11 +357,18 @@ class McpToolGateway:
                 ):
                     result = await spec.handler(arguments)
             result = shape_mcp_result(spec.name, result, detail=getattr(arguments, "detail", "compact"))
+            try:
+                result = _json_safe(result)
+                text = json.dumps(result, ensure_ascii=False, allow_nan=False)
+            except (TypeError, ValueError, RecursionError):
+                # The handler has run: say so, rather than "Tool execution failed", which reads as nothing done.
+                logger.exception("tool %s: result could not be encoded", payload.name)
+                return self._error_response(
+                    f"{payload.name} ran, but its result could not be encoded. Observe the page before acting again."
+                )
             # The JSON stays the first block: clients (and the LangChain
             # adapter) read content[0].text as the result.
-            content: list[McpToolCallContent | McpImageContent] = [
-                McpToolCallContent(text=json.dumps(result, ensure_ascii=False))
-            ]
+            content: list[McpToolCallContent | McpImageContent] = [McpToolCallContent(text=text)]
             image = await self._inline_image(spec.name, result)
             if image is not None:
                 content.append(image)
