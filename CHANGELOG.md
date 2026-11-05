@@ -132,6 +132,8 @@ All notable changes to auto-browser are documented here.
 
 - **The smoke scripts no longer delete your own stack's containers.** `smoke_isolated_session.sh`, its tunnel twin and `smoke_reverse_ssh.sh` removed every container and network labelled `auto-browser.managed=true` and ran `docker compose down` in the folder's default project, so a smoke run on a machine that also runs your auto-browser stack removed your live session containers and could take your controller down too. Each run now uses its own compose project (`auto-browser-smoke-<pid>`, or the `COMPOSE_PROJECT_NAME` you set in the environment, which is not read from `.env`) and removes only the containers and networks that appeared after it started.
 
+- **A `.env` line can no longer run commands in the repo's scripts.** `doctor.sh`, `compose_local.sh`, `bootstrap_cli_auth.sh` and the smoke scripts loaded `.env` by sourcing it as shell, so a value such as `X=$(cmd)` ran `cmd`, and an unquoted `&`, `;` or `(` in a value broke the script. They now read `KEY=VALUE` lines as text: blank lines and `#` comments are skipped, one level of matching quotes is removed, an unquoted ` # comment` is dropped, and a value keeps every `=` and `$` in it. Quoted values are no longer expanded, so `KEY="$HOME/x"` is now the literal text `$HOME/x`.
+
 ### Changed
 
 - **The stdio bridge docs now say it handles one request at a time.** `docs/mcp-clients.md` explains that a slow tool call holds up the calls behind it, and where to change the 60-second per-call timeout. No behaviour changed.

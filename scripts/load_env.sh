@@ -1,20 +1,39 @@
 #!/usr/bin/env bash
 
+# Reads KEY=VALUE lines from a .env file and exports them. The file is parsed, never
+# sourced: a value like $(cmd) or `cmd` is kept as text and not run. Blank lines and
+# # comments are skipped, as is an `export ` prefix; one level of matching single or
+# double quotes is stripped (no escapes or expansion inside), and an unquoted value
+# ends at a ` #` comment. Everything after the first = is the value, kept intact.
 load_repo_env() {
   local env_file="${1:-.env}"
   if [[ ! -f "$env_file" ]]; then
     return 0
   fi
 
-  local previous_allexport
-  previous_allexport="$(set -o | awk '$1 == "allexport" { print $2 }')"
-  set -a
-  # Trusted repo-local config file. Supports quoted values and embedded spaces.
-  # shellcheck disable=SC1090
-  source "$env_file"
-  if [[ "$previous_allexport" != "on" ]]; then
-    set +a
-  fi
+  local pair_re='^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$'
+  local double_re='^"([^"]*)"'
+  local single_re="^'([^']*)'"
+  local line key value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "$line" || "$line" == "#"* ]] && continue
+    line="${line#export[[:space:]]}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ "$line" =~ $pair_re ]] || continue
+    key="${BASH_REMATCH[1]}"
+    value="${BASH_REMATCH[2]}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    if [[ "$value" =~ $double_re ]]; then
+      value="${BASH_REMATCH[1]}"
+    elif [[ "$value" =~ $single_re ]]; then
+      value="${BASH_REMATCH[1]}"
+    else
+      value="${value%%[[:space:]]\#*}"
+      value="${value%"${value##*[![:space:]]}"}"
+    fi
+    export "$key=$value"
+  done < "$env_file"
 }
 
 # Smoke runs share a Docker daemon with the operator's own stack. The controller labels
