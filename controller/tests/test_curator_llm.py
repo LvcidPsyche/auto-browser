@@ -84,7 +84,9 @@ class CuratorLLMAdapterTests(unittest.IsolatedAsyncioTestCase):
             patch("app.curator_llm.httpx.AsyncClient", return_value=fake_client),
             patch(
                 "app.curator_llm.get_settings",
-                return_value=SimpleNamespace(anthropic_base_url="https://proxy.example/v1/"),
+                return_value=SimpleNamespace(
+                    anthropic_base_url="https://proxy.example/v1/", anthropic_version="2023-06-01"
+                ),
             ),
         ):
             await adapter.complete("hello")
@@ -130,6 +132,59 @@ class CuratorLLMAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(headers["Content-Type"], "application/json")
         self.assertEqual(body["contents"][0]["parts"][0]["text"], "System: use bullets\n\n")
         self.assertEqual(body["contents"][0]["parts"][1]["text"], "idea list")
+
+    async def test_openai_and_gemini_requests_follow_their_base_url_settings(self) -> None:
+        # Same flaw as the Claude branch had: a gateway or proxy the operator routes provider traffic through.
+        settings = SimpleNamespace(
+            openai_base_url="https://openai-proxy.example/v1/",
+            gemini_base_url="https://gemini-proxy.example/v1beta/",
+            anthropic_base_url="https://unused.example/v1",
+            anthropic_version="2024-01-01",
+        )
+        for provider, env_var, payload, expected in (
+            ("openai", "OPENAI_API_KEY", {"choices": []}, "https://openai-proxy.example/v1/chat/completions"),
+            (
+                "gemini",
+                "GEMINI_API_KEY",
+                {"candidates": []},
+                "https://gemini-proxy.example/v1beta/models/m-test:generateContent",
+            ),
+        ):
+            with self.subTest(provider=provider):
+                fake_client = _FakeAsyncClient(_FakeResponse(payload))
+                with (
+                    patch.dict(os.environ, {env_var: "key"}, clear=True),
+                    patch("app.curator_llm.httpx.AsyncClient", return_value=fake_client),
+                    patch("app.curator_llm.get_settings", side_effect=AssertionError("cached settings were read")),
+                ):
+                    await CuratorLLMAdapter(provider, model="m-test", settings=settings).complete("hi")
+                self.assertEqual(fake_client.calls[0][0], expected)
+
+    async def test_the_claude_request_uses_the_settings_it_was_built_with(self) -> None:
+        settings = SimpleNamespace(anthropic_base_url="https://injected.example/v1", anthropic_version="2024-01-01")
+        fake_client = _FakeAsyncClient(_FakeResponse({"content": []}))
+
+        with (
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}, clear=True),
+            patch("app.curator_llm.httpx.AsyncClient", return_value=fake_client),
+            patch("app.curator_llm.get_settings", side_effect=AssertionError("cached settings were read")),
+        ):
+            await CuratorLLMAdapter("claude", settings=settings).complete("hi")
+
+        url, headers, _ = fake_client.calls[0]
+        self.assertEqual(url, "https://injected.example/v1/messages")
+        self.assertEqual(headers["anthropic-version"], "2024-01-01")
+
+    async def test_the_default_anthropic_version_is_unchanged(self) -> None:
+        fake_client = _FakeAsyncClient(_FakeResponse({"content": []}))
+
+        with (
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}, clear=True),
+            patch("app.curator_llm.httpx.AsyncClient", return_value=fake_client),
+        ):
+            await CuratorLLMAdapter("claude").complete("hi")
+
+        self.assertEqual(fake_client.calls[0][1]["anthropic-version"], "2023-06-01")
 
     async def test_complete_requires_api_key(self) -> None:
         adapter = CuratorLLMAdapter("openai")
@@ -194,6 +249,23 @@ class CuratorOptInTests(unittest.TestCase):
 
     def test_on_when_asked_for(self) -> None:
         self.assertIsNotNone(self._init(Settings(_env_file=None, CURATOR_ENABLED=True)))
+
+    def test_the_adapter_is_built_with_the_controllers_settings_not_the_cached_ones(self) -> None:
+        from types import SimpleNamespace
+
+        from app.startup.extensions import _init_curator
+
+        settings = Settings(_env_file=None, CURATOR_ENABLED=True, OPENAI_BASE_URL="https://proxy.example/v1")
+        app = SimpleNamespace(state=SimpleNamespace(settings=settings))
+        env = {"CURATOR_PROVIDER": "openai", "OPENAI_API_KEY": "key"}
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("app.curator_llm.get_settings", side_effect=AssertionError("cached settings were read")),
+        ):
+            _init_curator(app)
+            url = app.state.curator_adapter._build_openai("prompt", None)[0]
+
+        self.assertEqual(url, "https://proxy.example/v1/chat/completions")
 
     def test_enabling_says_the_review_is_not_wired(self) -> None:
         with self.assertLogs("app.startup.extensions", level="WARNING") as captured:

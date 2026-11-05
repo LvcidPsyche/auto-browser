@@ -26,9 +26,6 @@ from .config import get_settings
 logger = logging.getLogger(__name__)
 
 
-_OPENAI_URL = "https://api.openai.com/v1/chat/completions"
-_GEMINI_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-
 _CLAUDE_DEFAULT_MODEL = "claude-opus-4-7"
 _OPENAI_DEFAULT_MODEL = "gpt-4o"
 _GEMINI_DEFAULT_MODEL = "gemini-1.5-pro"
@@ -58,6 +55,7 @@ class CuratorLLMAdapter:
         api_key_env: Optional[str] = None,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         timeout: float = _DEFAULT_TIMEOUT,
+        settings: Any = None,
     ) -> None:
         provider_norm = provider.lower().strip()
         if provider_norm not in {"claude", "openai", "gemini"}:
@@ -67,11 +65,14 @@ class CuratorLLMAdapter:
         self.max_tokens = max_tokens
         self.timeout = timeout
         self._api_key_env_override = api_key_env
+        # The controller's settings (base URLs, API version). Without them the cached get_settings() is read when a
+        # request is built, which differs from app.state.settings if the controller was started with injected ones.
+        self._settings = settings
 
     # ── Construction helpers ──────────────────────────────────────────────
 
     @classmethod
-    def from_env(cls) -> Optional["CuratorLLMAdapter"]:
+    def from_env(cls, settings: Any = None) -> Optional["CuratorLLMAdapter"]:
         """
         Build an adapter from env config. Returns None when no API key is
         available for the requested provider (graceful degraded mode).
@@ -79,7 +80,7 @@ class CuratorLLMAdapter:
         provider = os.environ.get("CURATOR_PROVIDER", "claude").lower().strip()
         model = os.environ.get("CURATOR_MODEL") or None
         try:
-            adapter = cls(provider, model=model)
+            adapter = cls(provider, model=model, settings=settings)
         except ValueError as exc:
             logger.warning("curator: invalid provider %r — %s", provider, exc)
             return None
@@ -102,6 +103,9 @@ class CuratorLLMAdapter:
         # Read here rather than through Settings, so its stripping (#248) never applied: a key
         # pasted with a space or newline went out as-is and the provider answered 401.
         return os.environ.get(self._api_key_env(), "").strip()
+
+    def _settings_in_use(self) -> Any:
+        return self._settings if self._settings is not None else get_settings()
 
     def _default_model(self) -> str:
         return {
@@ -143,9 +147,10 @@ class CuratorLLMAdapter:
     # ── Provider-specific request builders ────────────────────────────────
 
     def _build_claude(self, prompt: str, system: Optional[str]) -> tuple[str, dict, dict]:
+        settings = self._settings_in_use()
         headers = {
             "x-api-key": self._api_key(),
-            "anthropic-version": "2023-06-01",
+            "anthropic-version": settings.anthropic_version,
             "content-type": "application/json",
         }
         body: dict[str, Any] = {
@@ -155,7 +160,7 @@ class CuratorLLMAdapter:
         }
         if system:
             body["system"] = system
-        return f"{get_settings().anthropic_base_url.rstrip('/')}/messages", headers, body
+        return f"{settings.anthropic_base_url.rstrip('/')}/messages", headers, body
 
     def _build_openai(self, prompt: str, system: Optional[str]) -> tuple[str, dict, dict]:
         headers = {
@@ -171,12 +176,12 @@ class CuratorLLMAdapter:
             "messages": messages,
             "max_tokens": self.max_tokens,
         }
-        return _OPENAI_URL, headers, body
+        return f"{self._settings_in_use().openai_base_url.rstrip('/')}/chat/completions", headers, body
 
     def _build_gemini(self, prompt: str, system: Optional[str]) -> tuple[str, dict, dict]:
         # The key goes in a header: httpx puts the request URL in its error
         # messages, and a ?key= query string put the key in the logs with them.
-        url = _GEMINI_URL_TMPL.format(model=self.model)
+        url = f"{self._settings_in_use().gemini_base_url.rstrip('/')}/models/{self.model}:generateContent"
         headers = {"Content-Type": "application/json", "x-goog-api-key": self._api_key()}
         parts: list[dict[str, str]] = []
         if system:
@@ -209,10 +214,10 @@ class CuratorLLMAdapter:
         return ""
 
 
-def build_curator_adapter() -> Optional[CuratorLLMAdapter]:
+def build_curator_adapter(settings: Any = None) -> Optional[CuratorLLMAdapter]:
     """Factory that is safe to call from startup. Returns None on any failure."""
     try:
-        return CuratorLLMAdapter.from_env()
+        return CuratorLLMAdapter.from_env(settings)
     except Exception as exc:  # never let curator wiring break boot
         logger.warning("curator: adapter build failed — %s", exc)
         return None

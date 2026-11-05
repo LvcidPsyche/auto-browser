@@ -44,7 +44,8 @@ All notable changes to auto-browser are documented here.
 - **`ANTHROPIC_BASE_URL` must end in `/v1`, as the Claude adapter already required.** Vision targeting and the curator
   now follow it with `/messages` appended. A proxy base without `/v1` (for example `https://proxy.example`) worked for
   vision before, because vision added `/v1` itself, and now answers 404; add the `/v1`. The curator, which ignored the
-  setting, now sends its Claude calls to whatever the setting names.
+  setting, now sends its Claude calls to whatever the setting names; with `CURATOR_PROVIDER=openai` or `gemini` it
+  likewise follows `OPENAI_BASE_URL` (as `<base>/chat/completions`) or `GEMINI_BASE_URL`.
 - **The repo's scripts read `.env` values literally.** `doctor.sh`, `compose_local.sh`, `bootstrap_cli_auth.sh` and the
   smoke scripts do no `$VAR` or `${VAR}` expansion, so `DATA=${PWD}/data` stays that text. Plain `docker compose`
   expands `${PWD}` when it reads `.env`, but under `make up` (`compose_local.sh`) the scripts' literal value is
@@ -199,7 +200,7 @@ All notable changes to auto-browser are documented here.
 
 - **A refused fork or create now says why.** With the default `MAX_SESSIONS=1`, forking a session (which counts as a new session) or creating a second one answered a bare `409 {"detail":"Conflict"}`. The 409 now carries the session-limit message, naming the limit and the live sessions. Other conflicts still answer "Conflict". Forking needs `MAX_SESSIONS` of at least 2; this is now stated in `docs/architecture.md` and in the `browser.fork_session` tool description. A refused fork now checks the limit first, so it no longer writes the source session's cookies to disk (and deletes them) on the way to the refusal. Shadow browse stays outside the limit, and says so.
 
-- **Vision targeting now posts to the right Anthropic URL.** With the default `ANTHROPIC_BASE_URL` (which already ends in `/v1`) it called `/v1/v1/messages` and every vision lookup failed. It now uses the same `<base>/messages` form as the Claude adapter. The curator's Claude calls (`CURATOR_PROVIDER=claude`) went straight to `https://api.anthropic.com/v1/messages` whatever `ANTHROPIC_BASE_URL` said; they now follow it too, so a gateway or proxy you route Anthropic traffic through sees them.
+- **Vision targeting now posts to the right Anthropic URL.** With the default `ANTHROPIC_BASE_URL` (which already ends in `/v1`) it called `/v1/v1/messages` and every vision lookup failed. It now uses the same `<base>/messages` form as the Claude adapter. The curator's Claude calls (`CURATOR_PROVIDER=claude`) went straight to `https://api.anthropic.com/v1/messages` whatever `ANTHROPIC_BASE_URL` said; they now follow it too, so a gateway or proxy you route Anthropic traffic through sees them. The curator's OpenAI and Gemini calls follow `OPENAI_BASE_URL` and `GEMINI_BASE_URL` the same way, and its `anthropic-version` header comes from `ANTHROPIC_VERSION`; the curator is built from the controller's own settings rather than the cached ones.
 
 - **A proxy persona file that cannot be read is no longer overwritten.** An unreadable or corrupt file read as an
   empty set, so the next save rewrote it and erased every other persona. Reads and saves now fail, and the file is

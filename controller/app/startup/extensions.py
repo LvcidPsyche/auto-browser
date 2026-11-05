@@ -58,7 +58,7 @@ def _init_curator(app) -> None:
     try:
         from app.curator_llm import build_curator_adapter
 
-        adapter = build_curator_adapter()
+        adapter = build_curator_adapter(settings)
         app.state.curator_adapter = adapter
         if adapter is not None and adapter.ready:
             # The post-session review has no transcript to send yet: it used to send a
