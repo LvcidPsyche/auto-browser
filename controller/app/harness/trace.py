@@ -166,6 +166,11 @@ class TraceEnvelope(BaseModel):
             observation = step.get("observation") or {}
             if observation:
                 final_observation = observation
+            # The page the action left behind is newer than the observation made before it; a later step's own
+            # observation replaces it in turn. Read from the step's execution as it came, not the sensitive-flagged copy.
+            after_page = _page_after(step.get("execution"))
+            if after_page:
+                final_observation = after_page
             execution = (
                 _flag_sensitive_execution(step.get("execution")) if decision.get("sensitive") else step.get("execution")
             )
@@ -352,6 +357,20 @@ def _flag_sensitive_execution(execution: Any) -> Any:
         if isinstance(flagged.get(key), dict):
             flagged[key] = {**flagged[key], "sensitive": True}
     return flagged
+
+
+def _page_after(execution: Any) -> dict[str, Any]:
+    """The page an action left behind, from its execution's `after`; empty when that observation did not succeed.
+
+    A successful `after` is a full observation (pipeline._record_success). One that could not be read holds only the
+    url and an `observation_error` or `snapshot_error`, and then the verifier is better served by the earlier page.
+    """
+    after = execution.get("after") if isinstance(execution, dict) else None
+    if not isinstance(after, dict) or "text_excerpt" not in after:
+        return {}
+    if "observation_error" in after or "snapshot_error" in after:
+        return {}
+    return after
 
 
 def _execution_redacted_the_text(execution: Any) -> bool:

@@ -193,6 +193,54 @@ class AgentResultEventTests(unittest.TestCase):
         self.assertIn("screenshots", trace.evidence)
 
 
+class FinalObservationTests(unittest.TestCase):
+    """The final observation is the page the run ended on: the last action's `after`, not the page before it."""
+
+    BEFORE = {"url": "https://x.test/cart", "title": "Cart", "text_excerpt": "Your cart"}
+    AFTER = {"url": "https://x.test/done", "title": "Done", "text_excerpt": "Order confirmed", "dom_outline": {}}
+
+    def _final(self, *steps: dict, final_session: dict | None = None) -> dict:
+        result = {"steps": list(steps), **({"final_session": final_session} if final_session else {})}
+        return TraceEnvelope.from_agent_result(contract_hash="h", result=result).final_observation
+
+    def test_a_run_ending_on_an_action_ends_on_the_page_after_it(self) -> None:
+        final = self._final({"status": "ok", "observation": self.BEFORE, "execution": {"after": self.AFTER}})
+
+        self.assertEqual(final["text_excerpt"], "Order confirmed")
+        self.assertEqual(final["url"], "https://x.test/done")
+
+    def test_a_later_steps_observation_replaces_an_earlier_after(self) -> None:
+        later = {"url": "https://x.test/later", "text_excerpt": "Later page"}
+        final = self._final(
+            {"status": "ok", "observation": self.BEFORE, "execution": {"after": self.AFTER}},
+            {"status": "ok", "observation": later, "execution": None},
+        )
+
+        self.assertEqual(final["text_excerpt"], "Later page")
+
+    def test_an_after_that_could_not_be_observed_leaves_the_page_before_the_action(self) -> None:
+        for name, after in {
+            "observation_error": {"url": "https://x.test/done", "observation_error": "page changed"},
+            "snapshot_error": {"url": "https://x.test/done", "snapshot_error": "withheld"},
+            "no_page_fields": {"url": "https://x.test/done"},
+            "not_a_dict": "done",
+        }.items():
+            with self.subTest(after=name):
+                final = self._final({"status": "ok", "observation": self.BEFORE, "execution": {"after": after}})
+
+                self.assertEqual(final["text_excerpt"], "Your cart")
+
+    def test_a_sensitive_step_does_not_flag_the_final_observation(self) -> None:
+        # The sensitive flag put on the stored execution would hide `text` keys in the observation the verifier reads.
+        after = {**self.AFTER, "text": "Order confirmed"}
+        final = self._final(
+            {"status": "ok", "decision": {"sensitive": True}, "observation": self.BEFORE, "execution": {"after": after}}
+        )
+
+        self.assertEqual(final["text"], "Order confirmed")
+        self.assertNotIn("sensitive", final)
+
+
 class MockAttemptEventTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_mock_attempts_decision_and_action_say_they_are_simulated(self) -> None:
         contract = TaskContract(

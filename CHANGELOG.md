@@ -304,6 +304,12 @@ All notable changes to auto-browser are documented here.
 
 - **A `.env` line is no longer executed as shell by the repo's scripts.** `doctor.sh`, `compose_local.sh`, `bootstrap_cli_auth.sh` and the smoke scripts loaded `.env` by sourcing it, so a value such as `X=$(cmd)` ran `cmd`, and an unquoted `&`, `;` or `(` in a value broke the script. They now read `KEY=VALUE` lines as text: blank lines and `#` comments are skipped, quoted values lose one level of quotes, an unquoted ` # comment` is dropped, `KEY=   # note` is empty, a UTF-8 BOM is ignored, and a value keeps every `=` and `$` in it. Keys that change how the shell or the loader behaves (`BASH_ENV`, `PATH`, `LD_*` and the others listed under Upgrade notes) are refused with a warning, and a line that cannot be read is skipped with a warning naming its line number. The values are still passed to the programs the scripts start, so keep `.env` to values you trust.
 
+- **A harness trace of a live run now ends on the page the last action left, not the page before it.** The final
+  observation was the observation each step made before acting, so a run that ended on an action was verified against
+  the page it started that action on. It is now the action's `after` (a full observation) whenever that was read; a
+  later step's own observation still replaces it. When the page after the action could not be read (the action's
+  `after` holds an `observation_error` or `snapshot_error`), the earlier observation is kept with the session's
+  final `url` and `title`, so its other fields, the page text among them, are from before the action.
 - **The harness verifier now searches the page text a real observation carries.** It looked for `text_contains`,
   `dom_contains` and a forbidden `text_contains` in `text`, `body_text`, `content`, `title` and the like, but an
   observation keeps the page text in `text_excerpt`, so a forbidden phrase present only there passed and a required one
