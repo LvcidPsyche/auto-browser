@@ -174,7 +174,9 @@ def create_operations_router(
             # The path names the job; a job_id in the body must not redirect the
             # trigger to a different one.
             payload = TriggerCronJobInput.model_validate({**body, "job_id": job_id})
-            return await cron_service.trigger_via_webhook(payload.job_id, payload.webhook_key or "")
+            # The run's session reads the job's proxy persona.
+            with persona_file_errors():
+                return await cron_service.trigger_via_webhook(payload.job_id, payload.webhook_key or "")
         except KeyError:
             raise HTTPException(status_code=404, detail="Not found") from None
         except PermissionError:

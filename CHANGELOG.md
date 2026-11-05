@@ -46,9 +46,10 @@ All notable changes to auto-browser are documented here.
   resumable, as an interrupted one is. Other outcomes (`done`, `acted`, `takeover`, `approval_required`,
   `max_steps_reached`) still finish `completed`.
 - **A proxy persona file that cannot be read now answers 503, with a fixed text.** `GET /proxy-personas` (list and by
-  name), `POST /proxy-personas`, `DELETE /proxy-personas/{name}` and `POST /sessions` with a `proxy_persona` answer
-  503 with the detail "the proxy persona file (PROXY_PERSONA_FILE) is unreadable; fix or move it. It was not
-  changed.", and the MCP persona tools and `browser.create_session` return the same text. Before this release a
+  name), `POST /proxy-personas`, `DELETE /proxy-personas/{name}`, `POST /sessions` with a `proxy_persona` and the cron
+  webhook `POST /crons/{job_id}/trigger` of a job with one answer 503 with the detail "the proxy persona file
+  (PROXY_PERSONA_FILE) is unreadable; fix or move it. It was not changed.", and the MCP persona tools,
+  `browser.create_session` and `browser.trigger_cron_job` return the same text. Before this release a
   corrupt file read as an empty set, so the list answered `[]` and a persona session create answered 404; a client
   that handled those should handle the 503. The file's path and the cause are in the server log.
 - **Fewer pages count as bot challenges (`captcha_detected`).** An agent or runbook that relied on that code for any of

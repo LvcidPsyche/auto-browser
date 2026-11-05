@@ -16,6 +16,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.cron_service import CronService
 from app.models import McpToolCallRequest
 from app.proxy_personas import (
     PROXY_PERSONA_FILE_UNREADABLE,
@@ -90,6 +91,71 @@ def test_rest_answers_503_with_the_fixed_text(client: TestClient, corrupt_path: 
     response = client.request(verb.upper(), path, json=body)
     _assert_fixed(response, corrupt_path)
     assert corrupt_path.read_text(encoding="utf-8") == CORRUPT
+
+
+def _resolving_manager(store: ProxyPersonaStore) -> SimpleNamespace:
+    """A manager whose create_session reads the persona the way BrowserManager does."""
+
+    async def create_session(**kwargs):
+        store.resolve_proxy(kwargs["proxy_persona"])
+
+    return SimpleNamespace(
+        create_session=create_session,
+        settings=SimpleNamespace(force_governed_approvals=False, autonomous_approvals=False),
+    )
+
+
+def _gateway(store: ProxyPersonaStore, *, cron_service=None) -> McpToolGateway:
+    return McpToolGateway(
+        manager=_resolving_manager(store),
+        orchestrator=SimpleNamespace(),
+        job_queue=SimpleNamespace(),
+        tool_profile="full",
+        cron_service=cron_service,
+        share_manager=Mock(),
+        proxy_store=store,
+        vision_targeter=Mock(),
+    )
+
+
+def test_the_cron_webhook_trigger_answers_503_with_the_fixed_text(tmp_path: Path, corrupt_path: Path):
+    store = ProxyPersonaStore(corrupt_path)
+    manager = _resolving_manager(store)
+    cron = CronService(tmp_path / "crons.json", job_queue=Mock(), manager=manager)
+    app = FastAPI()
+    app.include_router(create_operations_router(manager=manager, proxy_store=store, cron_service=cron))
+    client = TestClient(app, raise_server_exceptions=False)
+    job = client.post("/crons", json={"name": "j", "goal": "g", "proxy_persona": "a", "webhook_enabled": True}).json()
+
+    response = client.post(f"/crons/{job['id']}/trigger", json={"webhook_key": job["webhook_key"]})
+
+    _assert_fixed(response, corrupt_path)
+    assert cron._active_runs == {}
+
+
+async def test_mcp_create_session_with_a_persona_gets_the_fixed_text(corrupt_path: Path):
+    response = await _gateway(ProxyPersonaStore(corrupt_path)).call_tool(
+        McpToolCallRequest(name="browser.create_session", arguments={"proxy_persona": "a"})
+    )
+
+    assert response.isError
+    assert PROXY_PERSONA_FILE_UNREADABLE in response.content[0].text
+    assert str(corrupt_path.parent) not in response.content[0].text
+
+
+async def test_mcp_cron_trigger_of_a_persona_job_gets_the_fixed_text(tmp_path: Path, corrupt_path: Path):
+    store = ProxyPersonaStore(corrupt_path)
+    cron = CronService(tmp_path / "crons.json", job_queue=Mock(), manager=_resolving_manager(store))
+    job = await cron.create_job(name="j", goal="g", proxy_persona="a")
+
+    response = await _gateway(store, cron_service=cron).call_tool(
+        McpToolCallRequest(name="browser.trigger_cron_job", arguments={"job_id": job["id"]})
+    )
+
+    assert response.isError
+    assert PROXY_PERSONA_FILE_UNREADABLE in response.content[0].text
+    assert str(corrupt_path.parent) not in response.content[0].text
+    assert cron._active_runs == {}
 
 
 @pytest.mark.parametrize(
