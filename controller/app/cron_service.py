@@ -73,6 +73,13 @@ CRON_STORE_UNREADABLE = (
 )
 
 
+class CronStoreUnreadableError(RuntimeError):
+    """The cron store could not be used; the text is the fixed CRON_STORE_UNREADABLE (REST answers it as 503)."""
+
+    def __init__(self) -> None:
+        super().__init__(CRON_STORE_UNREADABLE)
+
+
 class CronService:
     """Manages cron jobs and webhook triggers for browser automation."""
 
@@ -460,14 +467,14 @@ class CronService:
             # Possibly passing (a sharing violation, a brief permission fault): a good, hand-edited store is
             # never moved aside for one. It stays where it is, and reads fail until it can be read.
             logger.error("cron store %s could not be read (%s); it was left where it is", self._store_path, exc)
-            raise RuntimeError(CRON_STORE_UNREADABLE) from exc
+            raise CronStoreUnreadableError from exc
         except (ValueError, RecursionError) as exc:  # json.JSONDecodeError, UnicodeDecodeError: the file is corrupt
             self._quarantine(exc)
-            raise RuntimeError(CRON_STORE_UNREADABLE) from exc
+            raise CronStoreUnreadableError from exc
         if not isinstance(data, dict):
             # It parses, but every caller would fail on it later (a list has no .values()).
             self._quarantine(f"it holds a JSON {type(data).__name__}, not an object")
-            raise RuntimeError(CRON_STORE_UNREADABLE)
+            raise CronStoreUnreadableError
         return data
 
     def _quarantine(self, cause: object) -> None:
