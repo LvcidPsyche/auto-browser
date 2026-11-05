@@ -4,6 +4,16 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+## [1.15.0] — 2026-11-05
+
+A security and correctness release over 1.14.1, from an internal review of the whole controller and of this release's
+own fixes. Read the upgrade notes first: provider CLIs now get a fixed environment and need a usable `CLI_HOME`, a
+misspelled `SESSION_ISOLATION_MODE` stops startup, an unreadable proxy persona file or cron store answers 503, and the
+repo's scripts read `.env` literally. On Linux with per-session networks, the fix that keeps the controller's
+published port in place when it joins a session network needs Docker Engine 28 or later (older engines get a warning).
+The controller and browser-node images change; the LangChain package's `crewai` extra now installs `langchain-core`;
+the client and the MCP bridge packages change only in version.
+
 ### Upgrade notes
 
 - **A misspelled `SESSION_ISOLATION_MODE` now stops the controller from starting.** It used to fall back to the shared
@@ -12,11 +22,12 @@ All notable changes to auto-browser are documented here.
 - **A provider CLI (`claude`, `codex`, `gemini`) now gets only a fixed set of environment variables.** If your CLI
   needs one that is not in the set, name it in the new `CLI_PROVIDER_ENV_PASSTHROUGH` setting (comma-separated
   variable names, empty by default). The set is the operating-system basics (`PATH`, `HOME`, `TEMP`, `LANG`, `LC_*`,
-  proxy and certificate variables) plus that provider's own key, endpoint and config-directory variables (for `codex`, that includes `CODEX_API_KEY`).
-  With `CLI_HOME` unset, or set to a directory that cannot be created, a CLI call now fails (with an error that says to
-  set `CLI_HOME`) where the controller's user has no home directory it can write, or where its private directory is
-  refused (see Security); before this release the CLI started in the controller's working directory instead. Set
-  `CLI_HOME` to a writable directory there; the image's default, `/data/cli-home`, is one.
+  proxy and certificate variables) plus that provider's own key, endpoint and config-directory variables (for `codex`,
+  that includes `CODEX_API_KEY`). With `CLI_HOME` unset, or set to a directory that cannot be created, a CLI call now
+  fails (with an error that says to set `CLI_HOME`) where the controller's user has no home directory it can write, or
+  where its private directory is refused (see Security); before this release the CLI started in the controller's
+  working directory instead. Set `CLI_HOME` to a writable directory there; the image's default, `/data/cli-home`, is
+  one.
 - **A Witness bundle whose chain failed the exporter's own check now fails the offline verifier.** That covers, for
   example, a chain whose anchor reads `anchor_missing`, `anchor_unreadable`, `truncated` or `diverged`, or whose hash
   walk fails, with or without `--allow-unsigned`; a `chain_valid_at_export` that is present and not exactly `true`
@@ -28,60 +39,63 @@ All notable changes to auto-browser are documented here.
   Under `HARNESS_ROOT` (default `/data/harness`), `runs/<id>/run.json`, `runs/<id>/strategy.md` and a staged skill's
   `candidate.json`, `envelope.json`, `provenance.json` and `drift.json` could carry the token from the final URL, and
   older `trace.json` files were not text-scrubbed. The files are not rewritten. An attempt in `run.json` now carries
-  `scrubbed: true` once its verification is scrubbed: an attempt without it (written by an earlier version) is scrubbed
-  when read, so `harness.get_status`, `harness.list_runs` and `harness.graduate` no longer return the token from its
-  verification (a scrubber that fails on such a record leaves the run listed, with only the verdict kept and a
-  warning in the log). What is read back from the other files is not scrubbed again, so for such a run the staged
+  `scrubbed: true` once its verification is scrubbed: an attempt without it (written by an earlier version) is
+  scrubbed when read, so `harness.get_status`, `harness.list_runs` and `harness.graduate` no longer return the token
+  from its verification (a scrubber that fails on such a record leaves the run listed, with only the verdict kept and
+  a warning in the log). What is read back from the other files is not scrubbed again, so for such a run the staged
   candidate that `run.json` holds and `harness.get_trace` (its `trace.json`), and for such a skill
   `harness.list_candidates` and `harness.get_candidate` (the candidate's envelope), can still return the token. A
-  `run.json` written by this version has the new `scrubbed` field, and a 1.14.x controller cannot load such a file: its
-  attempt record forbids extra fields, so after a downgrade `harness.list_runs` drops the run and `harness.get_status`
-  fails on it. The next drift check rewrites `drift.json`. Delete those runs and staged skills where that matters; running the task again stages a clean copy (a
-  staged skill's files cannot be edited, as they are covered by its signed envelope). A skill staged before this
-  release with a PII expectation (an email in `text_contains`, `dom_contains` or `url_contains`) may now report
-  degraded: the drift check scrubs the expectation, but that skill's `trace.json` was not scrubbed. Stage it again.
+  `run.json` written by this version has the new `scrubbed` field, and a 1.14.x controller cannot load such a file:
+  its attempt record forbids extra fields, so after a downgrade `harness.list_runs` drops the run and
+  `harness.get_status` fails on it. The next drift check rewrites `drift.json`. Delete those runs and staged skills
+  where that matters; running the task again stages a clean copy (a staged skill's files cannot be edited, as they are
+  covered by its signed envelope). A skill staged before this release with a PII expectation (an email in
+  `text_contains`, `dom_contains` or `url_contains`) may now report degraded: the drift check scrubs the expectation,
+  but that skill's `trace.json` was not scrubbed. Stage it again.
 - **A queued agent job whose run or step reports `error` now finishes `failed`, not `completed`.** `error` carries the
-  reason the run or step gave, and `result.status` is still `error`. A client or automation that waits for
-  `completed` and then reads `result.status` should wait for a terminal state and handle `failed`; a failed run is
-  resumable, as an interrupted one is. Other outcomes (`done`, `acted`, `takeover`, `approval_required`,
-  `max_steps_reached`) still finish `completed`.
+  reason the run or step gave, and `result.status` is still `error`. A client or automation that waits for `completed`
+  and then reads `result.status` should wait for a terminal state and handle `failed`; a failed run is resumable, as
+  an interrupted one is. Other outcomes (`done`, `acted`, `takeover`, `approval_required`, `max_steps_reached`) still
+  finish `completed`.
 - **A proxy persona file that cannot be read now answers 503, with a fixed text.** `GET /proxy-personas` (list and by
   name), `POST /proxy-personas`, `DELETE /proxy-personas/{name}`, `POST /sessions` with a `proxy_persona` and the cron
   webhook `POST /crons/{job_id}/trigger` of a job with one answer 503 with the detail "the proxy persona file
   (PROXY_PERSONA_FILE) is unreadable; fix or move it. It was not changed.", and the MCP persona tools,
-  `browser.create_session` and `browser.trigger_cron_job` return the same text. Before this release a
-  corrupt file read as an empty set, so the list answered `[]` and a persona session create answered 404; a client
-  that handled those should handle the 503. The file's path and the cause are in the server log.
+  `browser.create_session` and `browser.trigger_cron_job` return the same text. Before this release a corrupt file
+  read as an empty set, so the list answered `[]` and a persona session create answered 404; a client that handled
+  those should handle the 503. The file's path and the cause are in the server log.
 - **The REST cron routes now answer 503 for a cron store that cannot be used.** A corrupt store made `GET /crons`,
-  `POST /crons`, `GET /crons/{job_id}`, `DELETE /crons/{job_id}` and `POST /crons/{job_id}/trigger` answer 500; a store
-  holding JSON other than an object could instead answer 400 (create) or 404 (delete, trigger), and on Python 3.11 a
-  store whose folder could not be searched made the trigger answer 403. All of these now answer 503 with a fixed
-  detail that names `CRON_STORE_PATH` and not the path, as the persona-file note above says for its routes.
-- **Fewer pages count as bot challenges (`captcha_detected`).** An agent or runbook that relied on that code for any of
-  these will now see the action succeed: a page whose title or text only says "access denied", "security check",
+  `POST /crons`, `GET /crons/{job_id}`, `DELETE /crons/{job_id}` and `POST /crons/{job_id}/trigger` answer 500; a
+  store holding JSON other than an object could instead answer 400 (create) or 404 (delete, trigger), and on Python
+  3.11 a store whose folder could not be searched made the trigger answer 403. All of these now answer 503 with a
+  fixed detail that names `CRON_STORE_PATH` and not the path, as the persona-file note above says for its routes.
+- **Fewer pages count as bot challenges (`captcha_detected`).** An agent or runbook that relied on that code for any
+  of these will now see the action succeed: a page whose title or text only says "access denied", "security check",
   "unusual activity", "suspicious activity", "bot detected" or "captcha" (Akamai's "Access Denied" block page
   included); a page with an invisible reCAPTCHA v3 or v2 badge, an invisible hCaptcha or Turnstile frame, or any
-  provider frame that is not visible; a provider's own docs or marketing pages (`developers.google.com/recaptcha/docs`,
-  `www.hcaptcha.com`, `www.google.com/recaptcha/about/`, `www.google.com/recaptcha/admin`); and a title that merely contains "just a moment". A challenge frame the page keeps hidden until
-  it needs it is not seen until it is shown. Cloudflare's block page and DataDome's frame still count.
+  provider frame that is not visible; a provider's own docs or marketing pages
+  (`developers.google.com/recaptcha/docs`, `www.hcaptcha.com`, `www.google.com/recaptcha/about/`,
+  `www.google.com/recaptcha/admin`); and a title that merely contains "just a moment". A challenge frame the page
+  keeps hidden until it needs it is not seen until it is shown. Cloudflare's block page and DataDome's frame still
+  count.
 - **`ANTHROPIC_BASE_URL` must end in `/v1`, as the Claude adapter already required.** Vision targeting and the curator
   now follow it with `/messages` appended. A proxy base without `/v1` (for example `https://proxy.example`) worked for
   vision before, because vision added `/v1` itself, and now answers 404; add the `/v1`. The curator, which ignored the
   setting, now sends its Claude calls to whatever the setting names; with `CURATOR_PROVIDER=openai` or `gemini` it
   likewise follows `OPENAI_BASE_URL` (as `<base>/chat/completions`) or `GEMINI_BASE_URL`.
-- **The repo's scripts read `.env` values literally.** `doctor.sh`, `compose_local.sh`, `bootstrap_cli_auth.sh` and the
-  smoke scripts do no `$VAR` or `${VAR}` expansion, so `DATA=${PWD}/data` stays that text. Plain `docker compose`
+- **The repo's scripts read `.env` values literally.** `doctor.sh`, `compose_local.sh`, `bootstrap_cli_auth.sh` and
+  the smoke scripts do no `$VAR` or `${VAR}` expansion, so `DATA=${PWD}/data` stays that text. Plain `docker compose`
   expands `${PWD}` when it reads `.env`, but under `make up` (`compose_local.sh`) the scripts' literal value is
   exported and wins, for every `${VAR}` in the compose files. Double-quoted values take the escapes of compose-go's
   reader (`\"`, `\\`, `\$`, `\a`, `\b`, `\f`, `\n`, `\r`, `\t` and `\v`); a single-quoted value keeps its backslashes,
   except that `\'` is a quote. A value with text after its closing quote, a `\0` escape inside double quotes (compose
-  reads it in a way not worth copying), or a quote that spans several lines (a
-  PEM; its lines are skipped up to the closing quote) is not exported, with one warning naming the line number, and
-  `docker compose` reads that key from `.env` itself. The scripts also refuse, with a warning naming the key, these `.env` keys, which
-  change how the shell, the loader or the programs the scripts start behave: `BASH_ENV`, `ENV`, `BASH_FUNC_*`,
-  `SHELLOPTS`, `BASHOPTS`, `IFS`, `PATH`, `PS4`, `PROMPT_COMMAND`, `CDPATH`, `GLOBIGNORE`, `POSIXLY_CORRECT`,
-  `BASH_COMPAT`, `EXECIGNORE`, `FUNCNEST`, `TMOUT`, `LC_ALL`, `LC_CTYPE`, `HOME`, `PYTHON*`, `BROWSER`, `PERL5OPT`,
-  `PERL5LIB`, `NODE_OPTIONS`, `COMSPEC`, `PATHEXT`, `LD_*`, `DYLD_*`, `ROOT_DIR`, `COMPOSE`, and the smoke scripts' own
+  reads it in a way not worth copying), or a quote that spans several lines (a PEM; its lines are skipped up to the
+  closing quote) is not exported, with one warning naming the line number, and `docker compose` reads that key from
+  `.env` itself. The scripts also refuse, with a warning naming the key, these `.env` keys, which change how the
+  shell, the loader or the programs the scripts start behave: `BASH_ENV`, `ENV`, `BASH_FUNC_*`, `SHELLOPTS`,
+  `BASHOPTS`, `IFS`, `PATH`, `PS4`, `PROMPT_COMMAND`, `CDPATH`, `GLOBIGNORE`, `POSIXLY_CORRECT`, `BASH_COMPAT`,
+  `EXECIGNORE`, `FUNCNEST`, `TMOUT`, `LC_ALL`, `LC_CTYPE`, `HOME`, `PYTHON*`, `BROWSER`, `PERL5OPT`, `PERL5LIB`,
+  `NODE_OPTIONS`, `COMSPEC`, `PATHEXT`, `LD_*`, `DYLD_*`, `ROOT_DIR`, `COMPOSE`, and the smoke scripts' own
   `SMOKE_PROJECT`, `SMOKE_COMPOSE_*`, `SMOKE_SESSION_*` and `SMOKE_*_LABEL` (`SMOKE_URL`, `SMOKE_PROVIDER` and
   `SMOKE_GOAL`, which `doctor.sh` reads, still load). On Git Bash and Cygwin the names are compared without regard to
   case (`Path` is refused like `PATH`). Any name that the script or bash itself already set without exporting it
@@ -98,84 +112,83 @@ All notable changes to auto-browser are documented here.
   the `wrote <file>: <endpoint>` line that `browser-node/server.mjs` logs when it starts. Each now replaces the path
   with `<redacted>` (scheme, host and port stay), as does the `the sandbox check failed: ...` detail that
   `browser-node/sandbox.mjs` writes into the state and the log when a connect error names the URL. The controller does
-  the same for what it prints itself: its `connected to browser node ...` log line, the connect failure message
-  (which names a configured `BROWSER_WS_ENDPOINT`) and the `endpoint` in the browser_sandbox readiness details. A
-  failed connect no longer chains Playwright's own error to that message, because that error names the endpoint with
-  its path and `/readyz`, deep health and startup log the chain; the last error is logged at warning level with the
-  path redacted instead. The state file and the endpoint file themselves still hold the path (the controller reads it
+  the same for what it prints itself: its `connected to browser node ...` log line, the connect failure message (which
+  names a configured `BROWSER_WS_ENDPOINT`) and the `endpoint` in the browser_sandbox readiness details. A failed
+  connect no longer chains Playwright's own error to that message, because that error names the endpoint with its path
+  and `/readyz`, deep health and startup log the chain; the last error is logged at warning level with the path
+  redacted instead. The state file and the endpoint file themselves still hold the path (the controller reads it
   there).
 - **`/healthz/deep` now gives up on a browser that does not answer.** The probe waited on the browser connection with
   no limit, so a stuck browser node held the request open (and the controller's browser lock with it). That step is
-  now bounded by the same 5 seconds as `/readyz`, and a timeout answers 503 with `deep_health_probe_timed_out`. The wait is
-  bounded, not the connect: it is left to finish in the background rather than cancelled mid-connect, which leaked a
-  half-acquired browser connection. While it runs, later probes wait on that same connect instead of each starting
-  another, so polling through an outage does not pile up connects behind the browser lock.
-  Once the browser is connected, the rest of the probe (opening a context and a page, rendering the fixture) shares one
-  10-second limit, answering the same 503 `deep_health_probe_timed_out`, so a browser that connects but never answers
-  no longer holds the request open. Closing the probe's context gets 2 more seconds; a close that hangs, or one cut
-  short because the 10 seconds ran out, is left to finish in the background and logged at warning level. A context the
-  browser creates after the probe gave up on it is closed when it appears.
-  A successful answer also names its fixture as `fixture` (or `embedded`) rather than an absolute server path.
-  `/readyz`, which any caller may poll (it needs no token and is not rate limited), now waits the same way: it gave up
-  after 5 seconds by cancelling the connect, which leaked a half-acquired connection per probe; it now stops waiting
-  and leaves the connect to finish, sharing it with every other probe.
+  now bounded by the same 5 seconds as `/readyz`, and a timeout answers 503 with `deep_health_probe_timed_out`. The
+  wait is bounded, not the connect: it is left to finish in the background rather than cancelled mid-connect, which
+  leaked a half-acquired browser connection. While it runs, later probes wait on that same connect instead of each
+  starting another, so polling through an outage does not pile up connects behind the browser lock. Once the browser
+  is connected, the rest of the probe (opening a context and a page, rendering the fixture) shares one 10-second
+  limit, answering the same 503 `deep_health_probe_timed_out`, so a browser that connects but never answers no longer
+  holds the request open. Closing the probe's context gets 2 more seconds; a close that hangs, or one cut short
+  because the 10 seconds ran out, is left to finish in the background and logged at warning level. A context the
+  browser creates after the probe gave up on it is closed when it appears. A successful answer also names its fixture
+  as `fixture` (or `embedded`) rather than an absolute server path. `/readyz`, which any caller may poll (it needs no
+  token and is not rate limited), now waits the same way: it gave up after 5 seconds by cancelling the connect, which
+  leaked a half-acquired connection per probe; it now stops waiting and leaves the connect to finish, sharing it with
+  every other probe.
 - **An `approval_id` presented on an action that needs no approval no longer makes its Witness receipt say the action
   required one.** The receipt recorded the id with `required: true`, so a caller could make a receipt read as if the
   action had been approval-gated. The receipt still shows the id, as the record of what was presented, with no status;
   `required` is now true only for an action that needed an approval or ran under one.
 - **A disabled cron job can no longer be run through its webhook or `trigger_cron_job`.** The scheduler skipped a
-  disabled job, but both manual paths started it anyway. They now refuse with "job is disabled; enable it to run
-  it" (HTTP 409 on the webhook route; over MCP an error with `code: cron_job_disabled`). A wrong webhook key is still answered 403, so a disabled job does not tell a
-  stranger its state.
-- **Page-started downloads are capped.** A page could start any number of downloads of any size, and each was
-  written whole to the session's artifact folder. A download larger than the new `DOWNLOAD_MAX_BYTES` (default
-  256 MiB) is deleted once Playwright has saved it, and once a session holds `DOWNLOADS_MAX_PER_SESSION` files
-  (default 100) further downloads are cancelled and not saved. Both are recorded in the session's downloads as
-  `refused`, with the reason. Raise the settings if you download larger or more files on purpose. The browser's own
-  copy of every download (kept, refused, failed, or cancelled mid-save) is deleted once it has been handled, so
-  refused downloads do not pile up inside the browser until its context closes. A download whose save
-  fails leaves no file behind (so it does not count toward the cap) and is recorded as `failed` with no `path`,
-  `filename` or `url`. One whose save is cancelled midway writes no record, and the browser's copy is deleted in the
-  background once the browser has finished with it. It also leaves no file, with one narrow exception: Playwright opens
-  the file in a thread of its own, so a cancellation that lands during that open can leave an empty file (which then
-  counts toward the cap) or, on Windows, a file the still-open handle keeps from being deleted; that is logged, and the
-  cancellation still goes on.
-- **Provider CLI children no longer inherit the controller's whole environment.** `claude`, `codex` and `gemini`
-  ran with a copy of the controller's environment, so the bearer token, the Witness remote key, Stripe keys and every
+  disabled job, but both manual paths started it anyway. They now refuse with "job is disabled; enable it to run it"
+  (HTTP 409 on the webhook route; over MCP an error with `code: cron_job_disabled`). A wrong webhook key is still
+  answered 403, so a disabled job does not tell a stranger its state.
+- **Page-started downloads are capped.** A page could start any number of downloads of any size, and each was written
+  whole to the session's artifact folder. A download larger than the new `DOWNLOAD_MAX_BYTES` (default 256 MiB) is
+  deleted once Playwright has saved it, and once a session holds `DOWNLOADS_MAX_PER_SESSION` files (default 100)
+  further downloads are cancelled and not saved. Both are recorded in the session's downloads as `refused`, with the
+  reason. Raise the settings if you download larger or more files on purpose. The browser's own copy of every download
+  (kept, refused, failed, or cancelled mid-save) is deleted once it has been handled, so refused downloads do not pile
+  up inside the browser until its context closes. A download whose save fails leaves no file behind (so it does not
+  count toward the cap) and is recorded as `failed` with no `path`, `filename` or `url`. One whose save is cancelled
+  midway writes no record, and the browser's copy is deleted in the background once the browser has finished with it.
+  It also leaves no file, with one narrow exception: Playwright opens the file in a thread of its own, so a
+  cancellation that lands during that open can leave an empty file (which then counts toward the cap) or, on Windows,
+  a file the still-open handle keeps from being deleted; that is logged, and the cancellation still goes on.
+- **Provider CLI children no longer inherit the controller's whole environment.** `claude`, `codex` and `gemini` ran
+  with a copy of the controller's environment, so the bearer token, the Witness remote key, Stripe keys and every
   other provider's API key were visible to them, and to anything a prompt-injected CLI could run. They now get an
   allowlist (see the upgrade note). They also start in `CLI_HOME` instead of the controller's working directory,
   because the Gemini CLI loads a `.env` from its working directory and its parents, which on a host checkout would
-  hand the withheld secrets back. With `CLI_HOME` unset they start in a private directory the controller makes
-  for this user: `$XDG_RUNTIME_DIR/auto-browser-cli` when that is an absolute path to a directory the user owns that
-  no one else can write, otherwise `~/.cache/auto-browser/cli-home` (under `%LOCALAPPDATA%` on Windows), never the
-  shared system temp dir. On Linux and macOS it, and any parent it needs, is created 0700 and checked on every use: a
+  hand the withheld secrets back. With `CLI_HOME` unset they start in a private directory the controller makes for
+  this user: `$XDG_RUNTIME_DIR/auto-browser-cli` when that is an absolute path to a directory the user owns that no
+  one else can write, otherwise `~/.cache/auto-browser/cli-home` (under `%LOCALAPPDATA%` on Windows), never the shared
+  system temp dir. On Linux and macOS it, and any parent it needs, is created 0700 and checked on every use: a
   symlink, another owner or another mode, or a parent (up to the first root-owned one) that group or others can write
-  without the sticky bit or that another user owns, refuses that place and the next one is tried; a directory a cleaner removed is made again. It
-  holds empty `.env` and `.gemini/.env` files, which stop the Gemini CLI looking for a `.env` in its parents (the
-  user's home is one). When no place can be used, the CLI call fails with an error that says to set `CLI_HOME` to a
-  writable directory; the paths, owners and modes refused are in the server log only. The Codex CLI's per-call
-  directory is now made under the CLI home too, not in the system temp dir. With `CLI_HOME` set to a directory that
-  cannot be created (a host run with no writable `/data`), that private directory is their working directory and their
-  `HOME`, and a warning says CLI mode needs `CLI_HOME` set to a writable directory. In the image, when the controller
-  runs as a host user id and `CLI_HOME` cannot be created, the fallback refuses `/home/controller` (a sticky directory
-  owned by uid 10002), so set `CLI_HOME` there.
-- **Harness traces no longer keep typed secrets or URL tokens, and induced skills no longer claim to be
-  credential free.** A trace redacted only keys with secret-sounding names, so the text typed into a field marked
-  sensitive (or found sensitive when the step ran), tokens in a URL query or fragment, and PII in free text all
-  stayed in `trace.json`. Typed text of a sensitive action is now redacted (and so are its `value` and `label`, for a
-  `select_option`, and its `username`, in its action and its model decision alike, and in the action's executed target), and every string in the events,
-  and in the final observation and network entries as they are stored (`trace.json` and the staged skill candidate), goes
-  through the PII scrubber (URLs through the URL scrubber) when `PII_SCRUB_ENABLED` is on. The harness verifier
-  still checks the original observation, so a forbidden email or a required `dom_contains` gives the same verdict
-  as before. A URL is recognised in any letter case and anywhere in a string. `extracted_data`, the task's own
-  output, is not text-scrubbed, but a URL in it still has its query and fragment scrubbed. A staged skill
-  candidate's signed metadata used to say `credential_free: true` for every candidate; nothing computed it, so the
-  field is removed.
-  The verifier's result, which copies the page URL, was also written as it came to `run.json`, `drift.json`,
-  `strategy.md` and a staged skill's `candidate.json`, `envelope.json` and `provenance.json`, so an `access_token` in
-  the final URL survived there. It is now scrubbed the same way wherever it is stored, and the run still verifies the
-  original observation. The harness run responses (`harness.start_convergence`, `get_status`, `list_runs` and the
-  CLI's `--json`) now return that scrubbed verification, so a URL token shows as `[REDACTED]` in them too.
+  without the sticky bit or that another user owns, refuses that place and the next one is tried; a directory a
+  cleaner removed is made again. It holds empty `.env` and `.gemini/.env` files, which stop the Gemini CLI looking for
+  a `.env` in its parents (the user's home is one). When no place can be used, the CLI call fails with an error that
+  says to set `CLI_HOME` to a writable directory; the paths, owners and modes refused are in the server log only. The
+  Codex CLI's per-call directory is now made under the CLI home too, not in the system temp dir. With `CLI_HOME` set
+  to a directory that cannot be created (a host run with no writable `/data`), that private directory is their working
+  directory and their `HOME`, and a warning says CLI mode needs `CLI_HOME` set to a writable directory. In the image,
+  when the controller runs as a host user id and `CLI_HOME` cannot be created, the fallback refuses `/home/controller`
+  (a sticky directory owned by uid 10002), so set `CLI_HOME` there.
+- **Harness traces no longer keep typed secrets or URL tokens, and induced skills no longer claim to be credential
+  free.** A trace redacted only keys with secret-sounding names, so the text typed into a field marked sensitive (or
+  found sensitive when the step ran), tokens in a URL query or fragment, and PII in free text all stayed in
+  `trace.json`. Typed text of a sensitive action is now redacted (and so are its `value` and `label`, for a
+  `select_option`, and its `username`, in its action and its model decision alike, and in the action's executed
+  target), and every string in the events, and in the final observation and network entries as they are stored
+  (`trace.json` and the staged skill candidate), goes through the PII scrubber (URLs through the URL scrubber) when
+  `PII_SCRUB_ENABLED` is on. The harness verifier still checks the original observation, so a forbidden email or a
+  required `dom_contains` gives the same verdict as before. A URL is recognised in any letter case and anywhere in a
+  string. `extracted_data`, the task's own output, is not text-scrubbed, but a URL in it still has its query and
+  fragment scrubbed. A staged skill candidate's signed metadata used to say `credential_free: true` for every
+  candidate; nothing computed it, so the field is removed. The verifier's result, which copies the page URL, was also
+  written as it came to `run.json`, `drift.json`, `strategy.md` and a staged skill's `candidate.json`, `envelope.json`
+  and `provenance.json`, so an `access_token` in the final URL survived there. It is now scrubbed the same way
+  wherever it is stored, and the run still verifies the original observation. The harness run responses
+  (`harness.start_convergence`, `get_status`, `list_runs` and the CLI's `--json`) now return that scrubbed
+  verification, so a URL token shows as `[REDACTED]` in them too.
 - **Confidential sessions now keep restricted evidence for every action, not only for the session record.** The
   Witness policy chose the evidence mode for an action without looking at the session's profile, so in a
   `confidential` session an ordinary action's receipt kept before/after evidence and the typed text preview. The
@@ -185,108 +198,193 @@ All notable changes to auto-browser are documented here.
   `totp_secret` but kept the `value`, `label` and `index` of a `select_option`. All three are now `[REDACTED]` there
   (one left unset stays `null`, so the receipt still shows which way the option was chosen). Standard receipts are
   unchanged.
-- **Typed text is scrubbed before it reaches the audit log and action receipts.** A `type` action stores the
-  first 80 characters of what was typed (`text_preview`) in an ordinary field, and that went to disk as typed. With
-  `PII_SCRUB_ENABLED` on, the whole text is now run through the PII scrubber first and then cut to 80 characters,
-  so a secret that straddles the limit is still caught. A Playwright export now fills `[REDACTED]` where the typed
-  text matched a PII pattern, so replay such a script with the real value substituted by hand. With scrubbing off,
-  nothing changes.
-- **The network log masks secret-bearing headers by name pattern, not only from a fixed list.** Any header whose
-  name has a word such as token, secret, password, auth, session, cookie, csrf, signature or key (split on `-` and
-  `_`), or contains token, secret, password or apikey, now logs as `[MASKED]`. Before, `X-GitHub-Token`,
-  `X-Vault-Token`, `X-Session-Id`, `Api-Key` and similar were stored in clear. `Keep-Alive`, `:authority`,
-  `Accept*` and `Content-*` are unchanged.
+- **Typed text is scrubbed before it reaches the audit log and action receipts.** A `type` action stores the first 80
+  characters of what was typed (`text_preview`) in an ordinary field, and that went to disk as typed. With
+  `PII_SCRUB_ENABLED` on, the whole text is now run through the PII scrubber first and then cut to 80 characters, so a
+  secret that straddles the limit is still caught. A Playwright export now fills `[REDACTED]` where the typed text
+  matched a PII pattern, so replay such a script with the real value substituted by hand. With scrubbing off, nothing
+  changes.
+- **The network log masks secret-bearing headers by name pattern, not only from a fixed list.** Any header whose name
+  has a word such as token, secret, password, auth, session, cookie, csrf, signature or key (split on `-` and `_`), or
+  contains token, secret, password or apikey, now logs as `[MASKED]`. Before, `X-GitHub-Token`, `X-Vault-Token`,
+  `X-Session-Id`, `Api-Key` and similar were stored in clear. `Keep-Alive`, `:authority`, `Accept*` and `Content-*`
+  are unchanged.
 - **`observe` no longer returns the OCR word list that screenshot redaction blacks out.** The `ocr` field carried
-  `redaction_blocks` (every word with its box, including the emails and card numbers the screenshot hides) and the
-  OCR text unscrubbed. `redaction_blocks` is gone from the result, and the OCR `text_excerpt` and block text now go
+  `redaction_blocks` (every word with its box, including the emails and card numbers the screenshot hides) and the OCR
+  text unscrubbed. `redaction_blocks` is gone from the result, and the OCR `text_excerpt` and block text now go
   through the PII scrubber when `PII_SCRUB_ENABLED` is on. A block that belongs to a match spanning words (a card
-  number OCR'd as four blocks, a split phone number) is replaced whole, using the same line grouping as the
-  screenshot redaction.
-- **`screenshot_diff` now redacts PII like every other screenshot path.** It captured the comparison shot
-  unredacted, so the saved baseline and the second shot held the page's raw pixels even with
-  `PII_SCRUB_SCREENSHOT` on. Both are now redacted before they settle on disk, and the diff image is computed from
-  them. The earlier screenshot it compares against may be raw (`PII_SCRUB_ACTION_SCREENSHOTS=false`, or an earlier OCR
-  failure), so a redacted copy of it is made and compared instead, and `a_url` points at that copy. When OCR is unavailable or redaction fails, the result carries the same `screenshot_pii_scrub` notice as
-  `observe`, and strict mode withholds the shot.
+  number OCR'd as four blocks, a split phone number) is replaced whole, using the same line grouping as the screenshot
+  redaction.
+- **`screenshot_diff` now redacts PII like every other screenshot path.** It captured the comparison shot unredacted,
+  so the saved baseline and the second shot held the page's raw pixels even with `PII_SCRUB_SCREENSHOT` on. Both are
+  now redacted before they settle on disk, and the diff image is computed from them. The earlier screenshot it
+  compares against may be raw (`PII_SCRUB_ACTION_SCREENSHOTS=false`, or an earlier OCR failure), so a redacted copy of
+  it is made and compared instead, and `a_url` points at that copy. When OCR is unavailable or redaction fails, the
+  result carries the same `screenshot_pii_scrub` notice as `observe`, and strict mode withholds the shot.
 
 ### Fixed
 
-- **Asking for an auth profile that does not exist no longer creates an empty folder for it.** Each `GET` of a missing profile name left a directory under `AUTH_ROOT/profiles`, so any name could add one. Reads now create nothing; only saving a profile does.
+- **Asking for an auth profile that does not exist no longer creates an empty folder for it.** Each `GET` of a missing
+  profile name left a directory under `AUTH_ROOT/profiles`, so any name could add one. Reads now create nothing; only
+  saving a profile does.
 
-- **A harness contract of only optional postconditions no longer passes with nothing satisfied.** The verifier passed it at confidence 1.0 even when the page matched none of them. When every postcondition is optional, at least one must now be satisfied; a contract with any required postcondition is judged as before.
+- **A harness contract of only optional postconditions no longer passes with nothing satisfied.** The verifier passed
+  it at confidence 1.0 even when the page matched none of them. When every postcondition is optional, at least one
+  must now be satisfied; a contract with any required postcondition is judged as before.
 
-- **Harness traces of a live agent run now record its screenshots.** The trace built from an agent result held only `action` events, so a run that took screenshots never met a `screenshots` evidence requirement. Each step that has a screenshot now adds a `screenshot` event (the same event type the mock attempt records) before its action, because the screenshot is the page the agent saw before it acted, and a second one after its action when the action's result carries the screenshot of the page after it (`execution.after`).
+- **Harness traces of a live agent run now record its screenshots.** The trace built from an agent result held only
+  `action` events, so a run that took screenshots never met a `screenshots` evidence requirement. Each step that has a
+  screenshot now adds a `screenshot` event (the same event type the mock attempt records) before its action, because
+  the screenshot is the page the agent saw before it acted, and a second one after its action when the action's result
+  carries the screenshot of the page after it (`execution.after`).
 
-- **The Codespaces overlay now accepts the forwarded host name.** The forwarder is expected to send `<codespace>-8000.app.github.dev` as Host (not yet observed in a Codespace), and the overlay's loopback-only host list would refuse it with "Invalid host header". It now defaults `CONTROLLER_ALLOWED_HOSTS` to the loopback names plus `*.app.github.dev`, and `.devcontainer/allow-forwarded-host.sh` appends the exact forwarded name to a `CONTROLLER_ALLOWED_HOSTS` that `.env` already sets (for example one copied from `.env.example`). It runs when the dev container is created and again each time it starts, so a `.env` copied in afterwards is covered too. It edits a copy kept beside `.env` (mode kept, removed on any exit) and moves it into place, keeps a CRLF `.env` as it was, and leaves a quoted value or one with a trailing ` # comment` untouched, saying so without printing the value. If you set it by hand, include `*.app.github.dev` in it.
+- **The Codespaces overlay now accepts the forwarded host name.** The forwarder is expected to send
+  `<codespace>-8000.app.github.dev` as Host (not yet observed in a Codespace), and the overlay's loopback-only host
+  list would refuse it with "Invalid host header". It now defaults `CONTROLLER_ALLOWED_HOSTS` to the loopback names
+  plus `*.app.github.dev`, and `.devcontainer/allow-forwarded-host.sh` appends the exact forwarded name to a
+  `CONTROLLER_ALLOWED_HOSTS` that `.env` already sets (for example one copied from `.env.example`). It runs when the
+  dev container is created and again each time it starts, so a `.env` copied in afterwards is covered too. It edits a
+  copy kept beside `.env` (mode kept, removed on any exit) and moves it into place, keeps a CRLF `.env` as it was, and
+  leaves a quoted value or one with a trailing ` # comment` untouched, saying so without printing the value. If you
+  set it by hand, include `*.app.github.dev` in it.
 
-- **`pip install auto-browser-langchain[crewai]` now installs `langchain-core`.** Recent CrewAI releases no longer depend on LangChain, so the CrewAI example failed at `AutoBrowserTool(...)` with an `ImportError` asking for the `langchain` extra. The `crewai` extra now includes it.
+- **`pip install auto-browser-langchain[crewai]` now installs `langchain-core`.** Recent CrewAI releases no longer
+  depend on LangChain, so the CrewAI example failed at `AutoBrowserTool(...)` with an `ImportError` asking for the
+  `langchain` extra. The `crewai` extra now includes it.
 
-- **The reverse-SSH sidecar now reports `inactive` when its tunnel ends.** The entrypoint ran under `set -e`, so an `autossh` that exited with an error (or was stopped) ended the script before the final status was written, and `reverse-ssh.json` kept saying `active` after the tunnel was gone. The exit status is unchanged.
+- **The reverse-SSH sidecar now reports `inactive` when its tunnel ends.** The entrypoint ran under `set -e`, so an
+  `autossh` that exited with an error (or was stopped) ended the script before the final status was written, and
+  `reverse-ssh.json` kept saying `active` after the tunnel was gone. The exit status is unchanged.
 
 - **Human-like typing now has a time limit.** It paused 40-130 ms after every character with no overall cap, so a
-  5000-character text held the session for about 11 minutes. Typing now takes about 24 seconds at most: the pauses of a
-  long text are shortened to fit, and once the time is used up the rest of the text is inserted as plain text without
-  key events, except that a newline, carriage return or tab in it is still pressed as Enter or Tab, so a text ending in
-  a newline still submits a form. A keystroke or the final insert that the page does not acknowledge now fails the
-  action with the retryable `typing_timeout` (after the time left, and at least 2 seconds) instead of holding the
-  session until the browser answers. The 24 seconds are the 20 of the budget, up to 2 for a keystroke started just
-  before it ends, and 2 more that the rest of the text shares, however many newlines or tabs it holds. A short text
-  keeps its usual pace.
+  5000-character text held the session for about 11 minutes. Typing now takes about 24 seconds at most: the pauses of
+  a long text are shortened to fit, and once the time is used up the rest of the text is inserted as plain text
+  without key events, except that a newline, carriage return or tab in it is still pressed as Enter or Tab, so a text
+  ending in a newline still submits a form. A keystroke or the final insert that the page does not acknowledge now
+  fails the action with the retryable `typing_timeout` (after the time left, and at least 2 seconds) instead of
+  holding the session until the browser answers. The 24 seconds are the 20 of the budget, up to 2 for a keystroke
+  started just before it ends, and 2 more that the rest of the text shares, however many newlines or tabs it holds. A
+  short text keeps its usual pace.
 
-- **Ordinary pages are no longer mistaken for bot challenges.** After each action the controller looked for words such as
-  "captcha", "security check" and "access denied" anywhere in the URL, the title and the first 500 characters of the
-  page, so a blog post about CAPTCHAs, a `?q=captcha` search or a docs paragraph about HTTP 403 failed an action that
-  had already run with `captcha_detected` and asked for a human takeover. A challenge is now recognised by exactly
-  these: a visible frame from a challenge provider (Google reCAPTCHA, hCaptcha, Cloudflare Turnstile and challenges,
-  Arkose Labs, GeeTest, DataDome) or any visible frame whose host name contains "captcha" (matched on the host, not the
-  path or query); the page itself being on a Cloudflare challenge host, `recaptcha.net`, `captcha-delivery.com`, or
-  under `/cdn-cgi/challenge-platform/` or on one of the paths where google.com serves the challenge
-  (`/recaptcha/api2/`, `/recaptcha/enterprise/`, `/recaptcha/api/fallback`); a title that is exactly "Just a moment..." or
-  "Attention Required! | Cloudflare", or ends in "used Cloudflare to restrict access"; or the "verify you are human"
-  prompt in the page text. Invisible widgets do not count: a frame that is not rendered, or whose address says
-  `size=invisible` (reCAPTCHA v2 and v3) or `checkbox-invisible` (hCaptcha), is ignored, so a login page with a
-  reCAPTCHA v3 badge no longer fails every action.
-  A visible provider widget counts even when it is already solved (a ticked reCAPTCHA checkbox, a Turnstile "Success!"
-  box): that is deliberate for now, because the probe cannot tell a solved widget from an open one, so every action on a
-  page that shows one still fails with `captcha_detected` until the widget is gone.
+- **Ordinary pages are no longer mistaken for bot challenges.** After each action the controller looked for words such
+  as "captcha", "security check" and "access denied" anywhere in the URL, the title and the first 500 characters of
+  the page, so a blog post about CAPTCHAs, a `?q=captcha` search or a docs paragraph about HTTP 403 failed an action
+  that had already run with `captcha_detected` and asked for a human takeover. A challenge is now recognised by
+  exactly these: a visible frame from a challenge provider (Google reCAPTCHA, hCaptcha, Cloudflare Turnstile and
+  challenges, Arkose Labs, GeeTest, DataDome) or any visible frame whose host name contains "captcha" (matched on the
+  host, not the path or query); the page itself being on a Cloudflare challenge host, `recaptcha.net`,
+  `captcha-delivery.com`, or under `/cdn-cgi/challenge-platform/` or on one of the paths where google.com serves the
+  challenge (`/recaptcha/api2/`, `/recaptcha/enterprise/`, `/recaptcha/api/fallback`); a title that is exactly "Just a
+  moment..." or "Attention Required! | Cloudflare", or ends in "used Cloudflare to restrict access"; or the "verify
+  you are human" prompt in the page text. Invisible widgets do not count: a frame that is not rendered, or whose
+  address says `size=invisible` (reCAPTCHA v2 and v3) or `checkbox-invisible` (hCaptcha), is ignored, so a login page
+  with a reCAPTCHA v3 badge no longer fails every action. A visible provider widget counts even when it is already
+  solved (a ticked reCAPTCHA checkbox, a Turnstile "Success!" box): that is deliberate for now, because the probe
+  cannot tell a solved widget from an open one, so every action on a page that shows one still fails with
+  `captcha_detected` until the widget is gone.
 
-- **Element intelligence now works on a real browser.** `get_element_intelligence` asked Chromium for computed styles without first enabling the DOM and CSS agents, so the style lookup failed there. It now enables both for the length of the read and switches the CSS agent off again afterwards (a CSS agent left on keeps streaming stylesheet events for the life of the session), each enable and disable bounded at 5 seconds. The DOM agent stays as `DOM.getDocument` leaves it, because turning it off discards every node id, among them the `node_id` the read returns and the ones a raw chain still means to use. A read cut off by the route's 10-second limit switches the CSS agent off in the background rather than making the 504 wait for it. A raw `CSS.getComputedStyleForNode` or `CSS.getMatchedStylesForNode` through `/cdp/raw` is scoped the same way, so it no longer fails on a session that has not read an element yet.
+- **Element intelligence now works on a real browser.** `get_element_intelligence` asked Chromium for computed styles
+  without first enabling the DOM and CSS agents, so the style lookup failed there. It now enables both for the length
+  of the read and switches the CSS agent off again afterwards (a CSS agent left on keeps streaming stylesheet events
+  for the life of the session), each enable and disable bounded at 5 seconds. The DOM agent stays as `DOM.getDocument`
+  leaves it, because turning it off discards every node id, among them the `node_id` the read returns and the ones a
+  raw chain still means to use. A read cut off by the route's 10-second limit switches the CSS agent off in the
+  background rather than making the 504 wait for it. A raw `CSS.getComputedStyleForNode` or
+  `CSS.getMatchedStylesForNode` through `/cdp/raw` is scoped the same way, so it no longer fails on a session that has
+  not read an element yet.
 
-- **A refused fork or create now says why.** With the default `MAX_SESSIONS=1`, forking a session (which counts as a new session) or creating a second one answered a bare `409 {"detail":"Conflict"}`. The 409 now carries the session-limit message, naming the limit and the live sessions. Other conflicts still answer "Conflict". Forking needs `MAX_SESSIONS` of at least 2; this is now stated in `docs/architecture.md` and in the `browser.fork_session` tool description. A refused fork now checks the limit first, so it no longer writes the source session's cookies to disk (and deletes them) on the way to the refusal; a fork at the limit therefore answers the limit before it checks the page (Chrome's error page, a page the allowed-hosts list refuses, a missing start URL). Shadow browse is not refused by the limit, and says so; once open, a shadow session does count toward it.
+- **A refused fork or create now says why.** With the default `MAX_SESSIONS=1`, forking a session (which counts as a
+  new session) or creating a second one answered a bare `409 {"detail":"Conflict"}`. The 409 now carries the
+  session-limit message, naming the limit and the live sessions. Other conflicts still answer "Conflict". Forking
+  needs `MAX_SESSIONS` of at least 2; this is now stated in `docs/architecture.md` and in the `browser.fork_session`
+  tool description. A refused fork now checks the limit first, so it no longer writes the source session's cookies to
+  disk (and deletes them) on the way to the refusal; a fork at the limit therefore answers the limit before it checks
+  the page (Chrome's error page, a page the allowed-hosts list refuses, a missing start URL). Shadow browse is not
+  refused by the limit, and says so; once open, a shadow session does count toward it.
 
-- **Vision targeting now posts to the right Anthropic URL.** With the default `ANTHROPIC_BASE_URL` (which already ends in `/v1`) it called `/v1/v1/messages` and every vision lookup failed. It now uses the same `<base>/messages` form as the Claude adapter. The curator's Claude calls (`CURATOR_PROVIDER=claude`) went straight to `https://api.anthropic.com/v1/messages` whatever `ANTHROPIC_BASE_URL` said; they now follow it too, so a gateway or proxy you route Anthropic traffic through sees them. The curator's OpenAI and Gemini calls follow `OPENAI_BASE_URL` and `GEMINI_BASE_URL` the same way, and its `anthropic-version` header comes from `ANTHROPIC_VERSION`; the curator is built from the controller's own settings rather than the cached ones.
+- **Vision targeting now posts to the right Anthropic URL.** With the default `ANTHROPIC_BASE_URL` (which already ends
+  in `/v1`) it called `/v1/v1/messages` and every vision lookup failed. It now uses the same `<base>/messages` form as
+  the Claude adapter. The curator's Claude calls (`CURATOR_PROVIDER=claude`) went straight to
+  `https://api.anthropic.com/v1/messages` whatever `ANTHROPIC_BASE_URL` said; they now follow it too, so a gateway or
+  proxy you route Anthropic traffic through sees them. The curator's OpenAI and Gemini calls follow `OPENAI_BASE_URL`
+  and `GEMINI_BASE_URL` the same way, and its `anthropic-version` header comes from `ANTHROPIC_VERSION`; the curator
+  is built from the controller's own settings rather than the cached ones.
 
 - **A proxy persona file that cannot be read is no longer overwritten.** An unreadable or corrupt file read as an
   empty set, so the next save rewrote it and erased every other persona. Reads and saves now fail, and the file is
   left as it was; a missing file still reads as empty. REST answers 503 and MCP returns the same fixed text, "the
-  proxy persona file (PROXY_PERSONA_FILE) is unreadable; fix or move it. It was not changed."; the file's path and
-  the cause are in the server log only. A file in a folder the controller may not read now gets the same answer; its
-  bare permission error used to answer 500 on the persona routes (409 on a save), 403 on `POST /sessions` and on the
-  cron webhook, and "Tool execution failed" over MCP. With named tokens (`API_BEARER_TOKENS`) the startup ownerless-persona warning
-  logs the error and carries on; without them the file is not read at startup.
+  proxy persona file (PROXY_PERSONA_FILE) is unreadable; fix or move it. It was not changed."; the file's path and the
+  cause are in the server log only. A file in a folder the controller may not read now gets the same answer; its bare
+  permission error used to answer 500 on the persona routes (409 on a save), 403 on `POST /sessions` and on the cron
+  webhook, and "Tool execution failed" over MCP. With named tokens (`API_BEARER_TOKENS`) the startup ownerless-persona
+  warning logs the error and carries on; without them the file is not read at startup.
 - **Saving or deleting a proxy persona no longer erases the others' hand edits.** A save rewrote the file from the
   normalized view, so an entry the store ignores (a misspelled `server`) and any extra key on another entry were
   dropped. Only the named persona is replaced or removed now; every other entry is written back as it was, in the
   file's own order (a save sorted the entries, which could change which of two entries for one name was used). An
   update of a persona keeps its place in the file and the keys added to its own entry by hand, where it kept only the
-  store's fields. A name that two entries share after a hand edit (`"a "` beside `"a"`) is no longer saved or
-  deleted, since removing both could drop another operator's: REST answers 409 and MCP returns "the proxy persona
-  file (PROXY_PERSONA_FILE) holds more than one entry for this name (their keys differ only in surrounding spaces);
-  remove all but one by hand. It was not changed.", and the server log names the entries; a caller who may not use
-  the persona that name resolves to (the last of the entries) gets the answer it gets for another operator's
-  persona. A save no longer overwrites an entry the store ignores under the same name when another operator owns it.
+  store's fields. A name that two entries share after a hand edit (`"a "` beside `"a"`) is no longer saved or deleted,
+  since removing both could drop another operator's: REST answers 409 and MCP returns "the proxy persona file
+  (PROXY_PERSONA_FILE) holds more than one entry for this name (their keys differ only in surrounding spaces); remove
+  all but one by hand. It was not changed.", and the server log names the entries; a caller who may not use the
+  persona that name resolves to (the last of the entries) gets the answer it gets for another operator's persona. A
+  save no longer overwrites an entry the store ignores under the same name when another operator owns it.
 
-- **Two actions on one session no longer mix up their Witness context.** An action's risk category and approval id were parked on the session until its turn for the session lock, and the first action to finish cleared them, so an action that had been waiting could be receipted with no approval and no risk, or with another action's. Each action now carries its own context.
+- **Two actions on one session no longer mix up their Witness context.** An action's risk category and approval id
+  were parked on the session until its turn for the session lock, and the first action to finish cleared them, so an
+  action that had been waiting could be receipted with no approval and no risk, or with another action's. Each action
+  now carries its own context.
 
-- **One unparseable Witness receipt line no longer hides the rest.** Listing a session's receipts and exporting its bundle failed (HTTP 400) on the first line that did not parse. They now skip it and report `unparseable_lines` with how many they skipped (in the listed window, the last `limit` lines, for a listing; in the whole chain for a bundle). The bundle keeps the receipts that parse, and its chain check still fails on the gap (`chain_valid_at_export` is false, with verify's reason in `chain_reason_at_export` and the anchor's status code in `chain_anchor_status_at_export`). With a gap its `head_hash` is `null`, and `scripts/verify_witness_bundle.py` now fails a bundle whose `unparseable_lines` is present and anything but the integer 0, or whose `chain_valid_at_export` is present and anything but `true`, `--allow-unsigned` or not (an unsigned chain that is intact exports `true`; a bundle made before the field passes without it). It prints the bundle's own text (the reason, the scope, ids) with control characters escaped and cut at 200 characters, so a bundle cannot hide or rewrite lines of its output. Both fields are the exporter's own report and are unsigned, so this catches an honest incomplete export, not a forged one. A torn tail (an append cut short, with no newline) is skipped by the listing and the bundle alike and counted by neither; the bundle says `torn_tail: true`, and its chain check fails on the fragment until the next append sets it aside.
+- **One unparseable Witness receipt line no longer hides the rest.** Listing a session's receipts and exporting its
+  bundle failed (HTTP 400) on the first line that did not parse. They now skip it and report `unparseable_lines` with
+  how many they skipped (in the listed window, the last `limit` lines, for a listing; in the whole chain for a
+  bundle). The bundle keeps the receipts that parse, and its chain check still fails on the gap
+  (`chain_valid_at_export` is false, with verify's reason in `chain_reason_at_export` and the anchor's status code in
+  `chain_anchor_status_at_export`). With a gap its `head_hash` is `null`, and `scripts/verify_witness_bundle.py` now
+  fails a bundle whose `unparseable_lines` is present and anything but the integer 0, or whose `chain_valid_at_export`
+  is present and anything but `true`, `--allow-unsigned` or not (an unsigned chain that is intact exports `true`; a
+  bundle made before the field passes without it). It prints the bundle's own text (the reason, the scope, ids) with
+  control characters escaped and cut at 200 characters, so a bundle cannot hide or rewrite lines of its output. Both
+  fields are the exporter's own report and are unsigned, so this catches an honest incomplete export, not a forged
+  one. A torn tail (an append cut short, with no newline) is skipped by the listing and the bundle alike and counted
+  by neither; the bundle says `torn_tail: true`, and its chain check fails on the fragment until the next append sets
+  it aside.
 
-- **Two MCP tool calls without a `session_id` no longer create two sessions.** Each saw no live session and created its own. Creating the implicit session is now serialized among calls from the same verified operator (all callers without a token share one lock), so the second call uses the session the first one made. A call that finds a live session, a tool that never creates one, and a call from another verified operator do not wait behind a create. The lock is per owner: a token operator and an unauthenticated caller can still each create a session when both find none live, and the token operator's next session-less call then answers `ambiguous_session` (an unauthenticated caller sees only the unowned session).
+- **Two MCP tool calls without a `session_id` no longer create two sessions.** Each saw no live session and created
+  its own. Creating the implicit session is now serialized among calls from the same verified operator (all callers
+  without a token share one lock), so the second call uses the session the first one made. A call that finds a live
+  session, a tool that never creates one, and a call from another verified operator do not wait behind a create. The
+  lock is per owner: a token operator and an unauthenticated caller can still each create a session when both find
+  none live, and the token operator's next session-less call then answers `ambiguous_session` (an unauthenticated
+  caller sees only the unowned session).
 
-- **Cancelling a cron trigger while it queues the run no longer strands the job.** The slot that marks a job as running and the browser session it had opened were only released when queuing raised an ordinary error, so a cancellation left the session open and every later trigger of that job answered `previous_run_active` until the controller restarted. Both are now released on cancellation too. A cancellation after the queue accepted the job now withdraws that job before the session closes, so no queued job is left on a closed session. A withdrawn job is recorded as `interrupted` (audit event `agent_job_interrupted`), as a restart records the jobs it stops, not as an operator's cancel; like any interrupted run it can be resumed by hand, and nothing re-runs it on its own. That also holds when the cancellation lands while the job's record is still being written (for any queued agent job, not only a cron run): the record is withdrawn once it has landed, where before it stayed `queued` and the next start ran it. A job that cannot be taken back is logged as an error with its id, where it used to be passed over in silence. The cron service also hands its finish callback to the queue with the job, so a job that finishes before the trigger returns still releases its slot and session. When a worker was already running the job, the run is released once: its session is not closed a second time, and a trigger that took the slot in the meantime keeps it.
+- **Cancelling a cron trigger while it queues the run no longer strands the job.** The slot that marks a job as
+  running and the browser session it had opened were only released when queuing raised an ordinary error, so a
+  cancellation left the session open and every later trigger of that job answered `previous_run_active` until the
+  controller restarted. Both are now released on cancellation too. A cancellation after the queue accepted the job now
+  withdraws that job before the session closes, so no queued job is left on a closed session. A withdrawn job is
+  recorded as `interrupted` (audit event `agent_job_interrupted`), as a restart records the jobs it stops, not as an
+  operator's cancel; like any interrupted run it can be resumed by hand, and nothing re-runs it on its own. That also
+  holds when the cancellation lands while the job's record is still being written (for any queued agent job, not only
+  a cron run): the record is withdrawn once it has landed, where before it stayed `queued` and the next start ran it.
+  A job that cannot be taken back is logged as an error with its id, where it used to be passed over in silence. The
+  cron service also hands its finish callback to the queue with the job, so a job that finishes before the trigger
+  returns still releases its slot and session. When a worker was already running the job, the run is released once:
+  its session is not closed a second time, and a trigger that took the slot in the meantime keeps it.
 
-- **An agent run or step that ends in an error is now recorded as a failed job.** The job queue recorded every job as `completed` whatever the run returned, so a run that ended in `error` looked successful in the job list. The job is now `failed` with the error the run reported; runs that end in `done`, `takeover`, `approval_required` or `max_steps_reached` stay `completed`, and a failed run can still be resumed.
+- **An agent run or step that ends in an error is now recorded as a failed job.** The job queue recorded every job as
+  `completed` whatever the run returned, so a run that ended in `error` looked successful in the job list. The job is
+  now `failed` with the error the run reported; runs that end in `done`, `takeover`, `approval_required` or
+  `max_steps_reached` stay `completed`, and a failed run can still be resumed.
 
-- **Cancelling an agent job now works when its audit events cannot be written.** The cancel recorded `cancelling` and wrote its audit event before it stopped the job, so an audit log the controller could not write made the cancel answer an error and left the job running. The job is now stopped first, the cancel answers the job's state, and an audit event that fails during a cancellation, a withdrawal or an interruption is logged with the job's id instead of raised. A job stopped as it starts, before its run begins, is now recorded like any other stopped job (`cancelled` when an operator cancelled it, `interrupted` when a shutdown or a withdrawal stopped it), where its record could stay `cancelling` or `running` until the next restart. A controller shutdown with a job running no longer waits forever when the job's interruption cannot be recorded (its audit event or, on a full disk, its own record).
+- **Cancelling an agent job now works when its audit events cannot be written.** The cancel recorded `cancelling` and
+  wrote its audit event before it stopped the job, so an audit log the controller could not write made the cancel
+  answer an error and left the job running. The job is now stopped first, the cancel answers the job's state, and an
+  audit event that fails during a cancellation, a withdrawal or an interruption is logged with the job's id instead of
+  raised. A job stopped as it starts, before its run begins, is now recorded like any other stopped job (`cancelled`
+  when an operator cancelled it, `interrupted` when a shutdown or a withdrawal stopped it), where its record could
+  stay `cancelling` or `running` until the next restart. A controller shutdown with a job running no longer waits
+  forever when the job's interruption cannot be recorded (its audit event or, on a full disk, its own record).
 
 - **A provider's reply that holds two different decisions is now refused, not read for the first one.** The parser
   took the first decision-shaped JSON object anywhere in the text, so JSON the model quoted from the page (for example
@@ -296,67 +394,130 @@ All notable changes to auto-browser are documented here.
   fails as an unparseable reply does, and the step fails. The same decision given twice (fenced and bare, say) is
   still accepted. A reply nested too deeply to decode also fails as unparseable instead of raising `RecursionError`.
 
-- **An action that fails unexpectedly or is cancelled after it began now leaves an audit entry and a receipt.** Only known failures were recorded, so a cancellation or an unforeseen error mid-action left no trace of an action whose effect may have happened. Whatever interrupts an action that began (during its operation, while a known failure is handled, or while the page is read after it), it now leaves one `error` entry and receipt (the error type only, not its text), and then the error or cancellation carries on as before. The record says the outcome is unknown, or, when the action certainly ran, that it ran and says what was cut short (reading the page after it, or recording it). A cancellation that lands while an action's record is being written no longer cuts the writes short (the `actions.jsonl` line, the audit entry and the receipt, written one after another); they finish behind it. The session's next action waits up to 5 seconds for them before it starts, and so do closing the session and a takeover's record (which is now written the same way, so a cancelled takeover request no longer leaves part of its record); the controller's shutdown waits up to 5 seconds in all for any still being written, and logs those it gave up on. A cancellation that lands while an unexpected error is being recorded wins: the action ends cancelled (so a cancelled agent job ends cancelled, not failed), and the error is in the server log and, by its type, in the record; a second cancellation while a cancelled action is recorded is absorbed. A write that itself fails (a full disk) can still leave a partial record. An action that failed before it began is still not recorded, and its approval is still given back; but a policy refusal before the action began whose handling (going back, the snapshot) fails or is cancelled is still recorded as `blocked`, without reading the page.
+- **An action that fails unexpectedly or is cancelled after it began now leaves an audit entry and a receipt.** Only
+  known failures were recorded, so a cancellation or an unforeseen error mid-action left no trace of an action whose
+  effect may have happened. Whatever interrupts an action that began (during its operation, while a known failure is
+  handled, or while the page is read after it), it now leaves one `error` entry and receipt (the error type only, not
+  its text), and then the error or cancellation carries on as before. The record says the outcome is unknown, or, when
+  the action certainly ran, that it ran and says what was cut short (reading the page after it, or recording it). A
+  cancellation that lands while an action's record is being written no longer cuts the writes short (the
+  `actions.jsonl` line, the audit entry and the receipt, written one after another); they finish behind it. The
+  session's next action waits up to 5 seconds for them before it starts, and so do closing the session and a
+  takeover's record (which is now written the same way, so a cancelled takeover request no longer leaves part of its
+  record); the controller's shutdown waits up to 5 seconds in all for any still being written, and logs those it gave
+  up on. A cancellation that lands while an unexpected error is being recorded wins: the action ends cancelled (so a
+  cancelled agent job ends cancelled, not failed), and the error is in the server log and, by its type, in the record;
+  a second cancellation while a cancelled action is recorded is absorbed. A write that itself fails (a full disk) can
+  still leave a partial record. An action that failed before it began is still not recorded, and its approval is still
+  given back; but a policy refusal before the action began whose handling (going back, the snapshot) fails or is
+  cancelled is still recorded as `blocked`, without reading the page.
 
-- **The cron service now says so at every start when its store was quarantined and is empty.** A corrupt store is moved aside and the first read fails, but the next start found no file and ran with no jobs and no sign that they were in the `crons.corrupt-*.json` file. While such a file exists and the store holds no jobs, each start logs a warning naming it, also on a deployment without APScheduler, and saying that moving or deleting that file silences it. Without APScheduler, a corrupt cron store now stops startup once, as it already did with it. A store that cannot be read (rather than a corrupt one) is not moved, so it stops every start until it can be read, with or without APScheduler.
+- **The cron service now says so at every start when its store was quarantined and is empty.** A corrupt store is
+  moved aside and the first read fails, but the next start found no file and ran with no jobs and no sign that they
+  were in the `crons.corrupt-*.json` file. While such a file exists and the store holds no jobs, each start logs a
+  warning naming it, also on a deployment without APScheduler, and saying that moving or deleting that file silences
+  it. Without APScheduler, a corrupt cron store now stops startup once, as it already did with it. A store that cannot
+  be read (rather than a corrupt one) is not moved, so it stops every start until it can be read, with or without
+  APScheduler.
 
-- **A cron store that cannot be used no longer shows its path to callers, and only a corrupt one is set aside.** Its error carried the store's path and the parser's message, which MCP callers received as they were. MCP callers now get "the cron store (CRON_STORE_PATH) is unreadable; cron jobs are not loaded until it is fixed. The server log has the cause and where the file is." (the REST cron routes now answer 503 with the same text; the Upgrade notes say what they answered before), and the path and the cause are in the server log. Any error moved the store aside, so a passing read error (a sharing violation, a brief permission fault) set a good, hand-edited store aside; now only a store that does not parse, is not UTF-8 or holds JSON other than an object is moved, and one that cannot be read is left where it is. A store holding JSON other than an object used to load, and its callers then failed on it.
+- **A cron store that cannot be used no longer shows its path to callers, and only a corrupt one is set aside.** Its
+  error carried the store's path and the parser's message, which MCP callers received as they were. MCP callers now
+  get "the cron store (CRON_STORE_PATH) is unreadable; cron jobs are not loaded until it is fixed. The server log has
+  the cause and where the file is." (the REST cron routes now answer 503 with the same text; the Upgrade notes say
+  what they answered before), and the path and the cause are in the server log. Any error moved the store aside, so a
+  passing read error (a sharing violation, a brief permission fault) set a good, hand-edited store aside; now only a
+  store that does not parse, is not UTF-8 or holds JSON other than an object is moved, and one that cannot be read is
+  left where it is. A store holding JSON other than an object used to load, and its callers then failed on it.
 
-- **An MCP tool result is now always valid JSON.** A `NaN` or infinite number in a result was written as the bare word `NaN` with `isError` false, which strict JSON parsers reject, and a value that could not be serialized (a date, an object) answered "Tool execution failed" although the tool had already acted. NaN and infinities now become `null`; dates and times, paths, UUIDs and decimals become their text, and an enum its value. A result holding any other kind of object is not sent as that object's text (which could carry fields nobody meant to send): it answers an error saying the tool ran but its result could not be encoded. Error answers (an approval required, a failed browser action and other refusals) are encoded the same strict way, so a `NaN` in an error's details is `null` too, and a detail that cannot be encoded is left out of the answer. MCP resource reads (`browser://sessions`, `browser://audit/events` and a session's `console` and `network`) are encoded the same strict way too; one that cannot be encoded is logged at warning level and not served.
+- **An MCP tool result is now always valid JSON.** A `NaN` or infinite number in a result was written as the bare word
+  `NaN` with `isError` false, which strict JSON parsers reject, and a value that could not be serialized (a date, an
+  object) answered "Tool execution failed" although the tool had already acted. NaN and infinities now become `null`;
+  dates and times, paths, UUIDs and decimals become their text, and an enum its value. A result holding any other kind
+  of object is not sent as that object's text (which could carry fields nobody meant to send): it answers an error
+  saying the tool ran but its result could not be encoded. Error answers (an approval required, a failed browser
+  action and other refusals) are encoded the same strict way, so a `NaN` in an error's details is `null` too, and a
+  detail that cannot be encoded is left out of the answer. MCP resource reads (`browser://sessions`,
+  `browser://audit/events` and a session's `console` and `network`) are encoded the same strict way too; one that
+  cannot be encoded is logged at warning level and not served.
 
-- **Page-controlled strings are now capped in observations and element reads.** A page could set a link's URL, a field's
-  name, type or role, a form's action or method, the title or the focused element's name or id to megabytes of text, and it
-  went whole into interactables, the active element, the form outline and so into model prompts. The same held for
-  `find_elements` (`href`, `id`, `value`, `class`) and the element-intelligence asset references (`src`, `href`,
-  `currentSrc`, `backgroundImage`). URLs are cut at 2,000 characters, the title at 200, and a name, id, type, role,
-  method, value or class at 120, where the script reads them. A URL that was cut ends in `…[truncated]`, so a client
-  does not follow it as if it were whole.
-  A title is also cut at 200 wherever the controller reads it itself: the session summary, the tab list, the fast
-  perception preset, the share snapshot, the bot-challenge report, an approval request's observation and a saved
-  auth profile's `saved_from_title`. The element-intelligence `attributes` are cut the
-  same way (an address attribute at 2,000 with the marker, any other value at 120) and limited to 50, as are the
-  inline event names. The bot-challenge report names only the frames that matched, as scheme, host and path without
-  the query, instead of every frame's full address.
-  `find_elements` also cuts a regex `match` at 500 characters and its `context_text` to the requested context on each
-  side, and says when it cut a `value`, `id` or `class` (`value_truncated`, `id_truncated`, `class_truncated`; a class
-  list is cut between classes). The caps are applied again in Python on what the page's own script returned, because
-  that script runs where a page can replace `String.prototype.slice`; the same goes for the asset references of an
-  element read. A cut never leaves half of an emoji: not in those fields, in the `context_text` window, in an element's
-  label, a heading or the text excerpt of an observation. The `value` of a password field, a one-time-code field or any
-  other field the typing check treats as secret is now `null` with `value_redacted: true`, as typing into one is not
-  echoed either.
-  The check reads the field's `type`, `name`, `id`, `autocomplete`, `placeholder` and `aria-label` up to 1,024
-  characters each, not the 120 shown elsewhere, so a long name cannot push `password` out of it; a field with a longer
-  attribute than that has its `value` withheld too, as the check could not read all of it.
+- **Page-controlled strings are now capped in observations and element reads.** A page could set a link's URL, a
+  field's name, type or role, a form's action or method, the title or the focused element's name or id to megabytes of
+  text, and it went whole into interactables, the active element, the form outline and so into model prompts. The same
+  held for `find_elements` (`href`, `id`, `value`, `class`) and the element-intelligence asset references (`src`,
+  `href`, `currentSrc`, `backgroundImage`). URLs are cut at 2,000 characters, the title at 200, and a name, id, type,
+  role, method, value or class at 120, where the script reads them. A URL that was cut ends in `…[truncated]`, so a
+  client does not follow it as if it were whole. A title is also cut at 200 wherever the controller reads it itself:
+  the session summary, the tab list, the fast perception preset, the share snapshot, the bot-challenge report, an
+  approval request's observation and a saved auth profile's `saved_from_title`. The element-intelligence `attributes`
+  are cut the same way (an address attribute at 2,000 with the marker, any other value at 120) and limited to 50, as
+  are the inline event names. The bot-challenge report names only the frames that matched, as scheme, host and path
+  without the query, instead of every frame's full address. `find_elements` also cuts a regex `match` at 500
+  characters and its `context_text` to the requested context on each side, and says when it cut a `value`, `id` or
+  `class` (`value_truncated`, `id_truncated`, `class_truncated`; a class list is cut between classes). The caps are
+  applied again in Python on what the page's own script returned, because that script runs where a page can replace
+  `String.prototype.slice`; the same goes for the asset references of an element read. A cut never leaves half of an
+  emoji: not in those fields, in the `context_text` window, in an element's label, a heading or the text excerpt of an
+  observation. The `value` of a password field, a one-time-code field or any other field the typing check treats as
+  secret is now `null` with `value_redacted: true`, as typing into one is not echoed either. The check reads the
+  field's `type`, `name`, `id`, `autocomplete`, `placeholder` and `aria-label` up to 1,024 characters each, not the
+  120 shown elsewhere, so a long name cannot push `password` out of it; a field with a longer attribute than that has
+  its `value` withheld too, as the check could not read all of it.
 
-- **The compose smoke scripts no longer remove your own stack's containers.** `smoke_isolated_session.sh` and its tunnel twin removed every container and network labelled `auto-browser.managed=true` on the daemon, their own docker_ephemeral controller did the same when it started, and all three scripts (`smoke_reverse_ssh.sh` never removed by label) ran `docker compose down` in the folder's default project. Each now runs in its own compose project (`auto-browser-smoke`, or `SMOKE_COMPOSE_PROJECT`; an exported or `.env` `COMPOSE_PROJECT_NAME` is ignored), refuses to start, before it changes anything, when the daemon cannot be listed, when this checkout's own stack is running in another project (it shares `./data`; the project directory is compared however the platform spells the path, so a Windows `C:\Users\me\repo` label is found), when the smoke's own project already has running containers (a smoke run is in progress, or a killed run left this behind; the message gives the `docker compose -p auto-browser-smoke down --remove-orphans` that clears it), when `SMOKE_COMPOSE_PROJECT` names this checkout's own default compose project, or (the two isolated smokes) when any `auto-browser.managed` container or network exists, which they check again after the image build and before the controller starts, and removes only the session containers and networks named `<project>-session-...` that it created. To run a smoke beside your stack, stop that stack, or (if it has no isolated session containers) use another checkout and set `API_PORT` and `NOVNC_PORT` in the environment (they win over that checkout's `.env`); the two isolated smokes ignore `ISOLATED_DOCKER_HOST` and `ISOLATED_HOST_DATA_ROOT` from `.env`, so their controller reaps only the local daemon that was checked, and the reverse-SSH smoke, whose controller would otherwise read `SESSION_ISOLATION_MODE`, `ISOLATED_DOCKER_HOST` and `ISOLATED_HOST_DATA_ROOT` from `.env`, pins them (`shared_browser_node` and empty, in `docker-compose.smoke-shared.yml`, which only that script adds); the smoke still rebuilds the shared `auto-browser-browser-node:latest` tag, which your controller launches isolated sessions from. If a killed run left session containers behind, the refusal names them and the command that removes them.
+- **The compose smoke scripts no longer remove your own stack's containers.** `smoke_isolated_session.sh` and its
+  tunnel twin removed every container and network labelled `auto-browser.managed=true` on the daemon, their own
+  docker_ephemeral controller did the same when it started, and all three scripts (`smoke_reverse_ssh.sh` never
+  removed by label) ran `docker compose down` in the folder's default project. Each now runs in its own compose
+  project (`auto-browser-smoke`, or `SMOKE_COMPOSE_PROJECT`; an exported or `.env` `COMPOSE_PROJECT_NAME` is ignored),
+  refuses to start, before it changes anything, when the daemon cannot be listed, when this checkout's own stack is
+  running in another project (it shares `./data`; the project directory is compared however the platform spells the
+  path, so a Windows `C:\Users\me\repo` label is found), when the smoke's own project already has running containers
+  (a smoke run is in progress, or a killed run left this behind; the message gives the `docker compose -p
+  auto-browser-smoke down --remove-orphans` that clears it), when `SMOKE_COMPOSE_PROJECT` names this checkout's own
+  default compose project, or (the two isolated smokes) when any `auto-browser.managed` container or network exists,
+  which they check again after the image build and before the controller starts, and removes only the session
+  containers and networks named `<project>-session-...` that it created. To run a smoke beside your stack, stop that
+  stack, or (if it has no isolated session containers) use another checkout and set `API_PORT` and `NOVNC_PORT` in the
+  environment (they win over that checkout's `.env`); the two isolated smokes ignore `ISOLATED_DOCKER_HOST` and
+  `ISOLATED_HOST_DATA_ROOT` from `.env`, so their controller reaps only the local daemon that was checked, and the
+  reverse-SSH smoke, whose controller would otherwise read `SESSION_ISOLATION_MODE`, `ISOLATED_DOCKER_HOST` and
+  `ISOLATED_HOST_DATA_ROOT` from `.env`, pins them (`shared_browser_node` and empty, in
+  `docker-compose.smoke-shared.yml`, which only that script adds); the smoke still rebuilds the shared
+  `auto-browser-browser-node:latest` tag, which your controller launches isolated sessions from. If a killed run left
+  session containers behind, the refusal names them and the command that removes them.
 
-- **A `.env` line is no longer executed as shell by the repo's scripts.** `doctor.sh`, `compose_local.sh`, `bootstrap_cli_auth.sh` and the smoke scripts loaded `.env` by sourcing it, so a value such as `X=$(cmd)` ran `cmd`, and an unquoted `&`, `;` or `(` in a value broke the script. They now read `KEY=VALUE` lines as text: blank lines and `#` comments are skipped, quoted values lose one level of quotes, an unquoted ` # comment` is dropped, `KEY=   # note` is empty, a UTF-8 BOM is ignored, and a value keeps every `=` and `$` in it. Keys that change how the shell or the loader behaves (`BASH_ENV`, `PATH`, `LD_*` and the others listed under Upgrade notes) are refused with a warning, and a line that cannot be read is skipped with a warning naming its line number. The values are still passed to the programs the scripts start, so keep `.env` to values you trust.
+- **A `.env` line is no longer executed as shell by the repo's scripts.** `doctor.sh`, `compose_local.sh`,
+  `bootstrap_cli_auth.sh` and the smoke scripts loaded `.env` by sourcing it, so a value such as `X=$(cmd)` ran `cmd`,
+  and an unquoted `&`, `;` or `(` in a value broke the script. They now read `KEY=VALUE` lines as text: blank lines
+  and `#` comments are skipped, quoted values lose one level of quotes, an unquoted ` # comment` is dropped, `KEY=   #
+  note` is empty, a UTF-8 BOM is ignored, and a value keeps every `=` and `$` in it. Keys that change how the shell or
+  the loader behaves (`BASH_ENV`, `PATH`, `LD_*` and the others listed under Upgrade notes) are refused with a
+  warning, and a line that cannot be read is skipped with a warning naming its line number. The values are still
+  passed to the programs the scripts start, so keep `.env` to values you trust.
 
 - **A skipped multi-line `.env` value no longer leaks its later lines as keys.** A double-quoted value with a `\0`
   escape was skipped when the escape was met, before its closing quote, so on a value that spans lines the later lines
-  were read as `KEY=VALUE` (`BAD="\0000`, `MAX_SESSIONS=5000`, `"` exported `MAX_SESSIONS`). The loader now reads on to
-  the closing quote and skips the whole value with its one warning.
+  were read as `KEY=VALUE` (`BAD="\0000`, `MAX_SESSIONS=5000`, `"` exported `MAX_SESSIONS`). The loader now reads on
+  to the closing quote and skips the whole value with its one warning.
 - **The smoke preflight finds this checkout's stack however Windows or WSL spells its folder.** It compared the
-  compose project directory by exact text, so on Git Bash or Cygwin `C:\USERS\me\Repo` did not match `/c/Users/me/repo`
-  (Windows paths ignore case), and a WSL `/mnt/c/Users/me/repo` did not match either, and the smoke started beside a
-  running stack it should have refused to touch. Both now compare equal. A `/mnt/c/...` folder is read as the C drive
-  only on Git Bash and Cygwin, or when it is compared with a Windows-style folder; on a Linux host it stays an ordinary
-  directory, so a stack at `/mnt/c/repo` is not mistaken for one at `/c/repo`.
+  compose project directory by exact text, so on Git Bash or Cygwin `C:\USERS\me\Repo` did not match
+  `/c/Users/me/repo` (Windows paths ignore case), and a WSL `/mnt/c/Users/me/repo` did not match either, and the smoke
+  started beside a running stack it should have refused to touch. Both now compare equal. A `/mnt/c/...` folder is
+  read as the C drive only on Git Bash and Cygwin, or when it is compared with a Windows-style folder; on a Linux host
+  it stays an ordinary directory, so a stack at `/mnt/c/repo` is not mistaken for one at `/c/repo`.
 - **A harness trace of a live run now ends on the page the last action left, not the page before it.** The final
   observation was the observation each step made before acting, so a run that ended on an action was verified against
   the page it started that action on. It is now the action's `after` (a full observation) whenever that was read; a
   later step's own observation still replaces it (a loop-guard takeover step, which only repeats the previous step's
-  observation, does not). When the page after the action could not be read (the action's
-  `after` holds an `observation_error` or `snapshot_error`), the earlier observation is kept with the session's
-  final `url` and `title`, so its other fields, the page text among them, are from before the action.
+  observation, does not). When the page after the action could not be read (the action's `after` holds an
+  `observation_error` or `snapshot_error`), the earlier observation is kept with the session's final `url` and
+  `title`, so its other fields, the page text among them, are from before the action.
 - **The harness verifier now searches the page text a real observation carries.** It looked for `text_contains`,
   `dom_contains` and a forbidden `text_contains` in `text`, `body_text`, `content`, `title` and the like, but an
-  observation keeps the page text in `text_excerpt`, so a forbidden phrase present only there passed and a required one
-  failed. `text_excerpt` is now searched for both.
+  observation keeps the page text in `text_excerpt`, so a forbidden phrase present only there passed and a required
+  one failed. `text_excerpt` is now searched for both.
 - **A stored harness trace scrubs the text next to a URL and the PII in a URL's path.** A URL ran to the next
-  whitespace, so in `{"url":"https://example.com","email":"alice@example.com"}` the email was part of the "URL" and got
-  only the URL scrubber, which reads the query and fragment. A URL now ends at a double quote, an angle bracket or
+  whitespace, so in `{"url":"https://example.com","email":"alice@example.com"}` the email was part of the "URL" and
+  got only the URL scrubber, which reads the query and fragment. A URL now ends at a double quote, an angle bracket or
   whitespace (or at an apostrophe that closes a quoted string, not one inside it, as in `?q=o'neil&token=...`),
   without a trailing run of `,;)]}`, so the text after it is scrubbed as text, and the host and path of every URL are
   read by the text scrubber too (`https://a.example/users/alice@example.com/profile`). `extracted_data` is still not
@@ -366,12 +527,12 @@ All notable changes to auto-browser are documented here.
   monitor checked the stored copy. The monitor now scrubs the expected strings the way the stored trace was scrubbed
   before it verifies. A `url_contains` value with a `?` or `#` goes through the URL scrubber for its query and
   fragment and the text scrubber for its host and path, as the stored URL was; one with neither but an `=`
-  (`email=...`, `&email=...`) is scrubbed as a piece of a query; a path or bare text is scrubbed as text, as the stored
-  path was. A skill whose recorded page no longer holds the expected text still reports degraded. Limits: a text
-  expectation (`text_contains`, `dom_contains`) or a `url_contains` that is wholly PII (a bare email) is scrubbed to
-  the bare replacement, so it is checked as "some redaction is present" in the stored text or URL; and the stored copy
-  is compared under the scrub settings in force now, so changing `PII_SCRUB_*` after staging can still report a fresh
-  skill degraded.
+  (`email=...`, `&email=...`) is scrubbed as a piece of a query; a path or bare text is scrubbed as text, as the
+  stored path was. A skill whose recorded page no longer holds the expected text still reports degraded. Limits: a
+  text expectation (`text_contains`, `dom_contains`) or a `url_contains` that is wholly PII (a bare email) is scrubbed
+  to the bare replacement, so it is checked as "some redaction is present" in the stored text or URL; and the stored
+  copy is compared under the scrub settings in force now, so changing `PII_SCRUB_*` after staging can still report a
+  fresh skill degraded.
 - **A live harness run now records its model decisions, and a mock run no longer counts as having screenshots.** The
   trace of a live agent run had no `model_decision` events, so a contract that required `model_decisions` evidence
   passed on a mock attempt and always failed on a live one. Each step with a decision now adds one, before its action
@@ -383,26 +544,31 @@ All notable changes to auto-browser are documented here.
   action events now say `simulated: true`. They still meet `model_decisions` and `actions` evidence, by construction
   (the default contract requires `actions`, so a mock run could not converge otherwise); a mock-staged candidate is
   marked `simulated`.
-- **The controller no longer hangs at startup with more than 100 queued agent jobs.** It waited to put every
-  queued record on a queue that holds 100 before any worker existed, so record 101 blocked startup forever. The
-  workers now start first and a background task puts the records on the queue, oldest first; shutdown stops it.
+- **The controller no longer hangs at startup with more than 100 queued agent jobs.** It waited to put every queued
+  record on a queue that holds 100 before any worker existed, so record 101 blocked startup forever. The workers now
+  start first and a background task puts the records on the queue, oldest first; shutdown stops it.
 - **Creating an isolated session could move the controller's published port to the session's network and cut the
   request that created it.** On Linux, with per-session networks and a compose project whose network name sorts after
   the session prefix (the project `web` or `prod` with the default `browser-session` prefix), joining the new session
   network made Docker pick it as the controller's default gateway, which is where published ports are programmed; CI's
   compose smoke saw the first `POST /sessions` end with an empty reply. The controller now joins session networks at
-  gateway priority -1, so its own networks keep the gateway. This needs Docker Engine 28 or later (API 1.48); on an older
-  daemon the field is ignored, and the controller logs one warning per start when a session network's name sorts before
-  its own network's, naming the remedies (Engine 28, or an `ISOLATED_BROWSER_CONTAINER_PREFIX` that sorts after the
-  compose network's name). Whether later requests through the moved port were served was not checked.
+  gateway priority -1, so its own networks keep the gateway. This needs Docker Engine 28 or later (API 1.48); on an
+  older daemon the field is ignored, and the controller logs one warning per start when a session network's name sorts
+  before its own network's, naming the remedies (Engine 28, or an `ISOLATED_BROWSER_CONTAINER_PREFIX` that sorts after
+  the compose network's name). Whether later requests through the moved port were served was not checked.
 
 ### Changed
 
-- **The stdio bridge docs now say it handles one request at a time.** `docs/mcp-clients.md` explains that a slow tool call holds up the calls behind it, and where to change the 60-second per-request timeout. No behaviour changed.
+- **The stdio bridge docs now say it handles one request at a time.** `docs/mcp-clients.md` explains that a slow tool
+  call holds up the calls behind it, and where to change the 60-second per-request timeout. No behaviour changed.
 
-- **CI now fails when the real-Chromium tests cannot run.** The tests that drive a real Chromium skip when none is installed, so the CI leg that installs one could lose it and stay green. Setting `AUTO_BROWSER_REQUIRE_CHROMIUM=1` makes a missing Chromium fail the test run instead of skipping, and the Python 3.11 host-test leg sets it. A developer without Chromium is unaffected: unset, the tests still skip.
+- **CI now fails when the real-Chromium tests cannot run.** The tests that drive a real Chromium skip when none is
+  installed, so the CI leg that installs one could lose it and stay green. Setting `AUTO_BROWSER_REQUIRE_CHROMIUM=1`
+  makes a missing Chromium fail the test run instead of skipping, and the Python 3.11 host-test leg sets it. A
+  developer without Chromium is unaffected: unset, the tests still skip.
 
-- **More tests for Witness's session policy and receipt redaction.** `evaluate_session` is now tested for each protection profile, and `redact_target` for each redacted key in standard and restricted mode. No behaviour changed.
+- **More tests for Witness's session policy and receipt redaction.** `evaluate_session` is now tested for each
+  protection profile, and `redact_target` for each redacted key in standard and restricted mode. No behaviour changed.
 
 ## [1.14.1] — 2026-11-04
 
