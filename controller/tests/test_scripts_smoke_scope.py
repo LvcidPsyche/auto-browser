@@ -254,7 +254,10 @@ class SmokePreflightTests(_FakeDockerCase):
         # spelling the shell that started the stack used; a Linux directory is case-sensitive. OSTYPE is set, so the
         # test says the same on every host.
         root = _bash_path(self.root)
-        for label, spelling in {"upper case": root.upper(), "lower case": root.lower()}.items():
+        # Both spellings differ from the root on every host: a Linux temp path is all lower case, so its lower-case
+        # spelling would be the root itself and the Linux case below would compare the root with itself.
+        for label, spelling in {"upper case": root.upper(), "swapped case": root.swapcase()}.items():
+            self.assertNotEqual(spelling, root)
             self.put("stack.txt", [f"{spelling}|operator-project|operator-controller-1"])
             with self.subTest(spelling=label, ostype="msys"):
                 result = self.preflight("shared", ostype="msys")
