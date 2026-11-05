@@ -263,8 +263,10 @@ or start the controller as `user: "10002:10002"` and give yourself access throug
 is readable by any host user who can enter `./data`, and its `ws://` URL is what connecting to the shared browser
 takes. It cannot be private to one uid: browser-node (uid 10001) writes it and the controller, another uid, reads it.
 On such a host, keep `./data` closed to other users: owned by the user the controller runs as (above), with mode
-0700, or 0750 with a group only the operators are in. browser-node, the per-session browser containers and the
-reverse-ssh sidecar are unaffected: they mount the subdirectories they use directly.
+0700, or 0750 with a group only the operators are in. The host scripts that create files there
+(`scripts/bootstrap_cli_auth.sh`, `scripts/smoke_reverse_ssh.sh`) need write access as well: run them as the owner,
+or make it 0770 for that group. browser-node, the per-session browser containers and the reverse-ssh sidecar are
+unaffected: they mount the subdirectories they use directly.
 
 `CONTROLLER_RUN_AS=root` restores the root controller of earlier releases. It is not recommended, and the
 `controller_user` readiness check warns while it is set; that check also reports the uid in use and why.
