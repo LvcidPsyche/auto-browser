@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import datetime
+import decimal
 import difflib
+import enum
 import hashlib
 import json
 import logging
 import math
 import re
 import time
-from pathlib import Path
+import uuid
+from pathlib import Path, PurePath
 from typing import Any, get_args
 
 from playwright.async_api import Error as PlaywrightError
@@ -183,18 +187,53 @@ def _read_inline_image(path: Path) -> bytes | None:
 _ACTION_NAMES = frozenset(get_args(ActionName))
 
 
+# Types strict JSON has no form for that a result may still carry, sent as their text.
+_SENT_AS_TEXT = (datetime.date, datetime.time, PurePath, uuid.UUID, decimal.Decimal)
+
+
 def _json_safe(value: Any) -> Any:
     """``value`` with only what strict JSON can hold: NaN and the infinities become null, a tuple or set a list,
-    a key its string, and anything else that is not JSON (a datetime, an object) its ``str()``."""
+    an Enum its value, and a known type (_SENT_AS_TEXT) its text.
+
+    Any other object raises TypeError rather than going out as its ``str()``: a repr is not a result anyone shaped,
+    and can hold what model_dump would have left out (a BrowserSession's holds its totp_secret).
+    """
     if value is None or isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, dict):
-        return {(key if isinstance(key, str) else str(key)): _json_safe(item) for key, item in value.items()}
+        return {_json_key(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):
         return [_json_safe(item) for item in value]
-    return str(value)
+    if isinstance(value, enum.Enum):
+        return _json_safe(value.value)
+    if isinstance(value, _SENT_AS_TEXT):
+        return str(value)
+    raise TypeError(f"a {type(value).__name__} is not sent in a tool result")
+
+
+def _json_key(key: Any) -> str:
+    """A dict key as json.dumps spells it (``1``, ``true``, ``null``), or a known type's text; any other refused."""
+    if isinstance(key, str):
+        return key
+    if key is None or isinstance(key, (bool, int, float)):
+        return json.dumps(key)
+    if isinstance(key, _SENT_AS_TEXT):
+        return str(key)
+    raise TypeError(f"a {type(key).__name__} key is not sent in a tool result")
+
+
+def _json_safe_detail(detail: dict[str, Any]) -> dict[str, Any]:
+    """An error's detail as strictly as a result (_json_safe), less any entry that cannot be: an error answer
+    still goes out, with what it can say."""
+    safe: dict[str, Any] = {}
+    for key, value in detail.items():
+        try:
+            safe[_json_key(key)] = _json_safe(value)
+        except (TypeError, ValueError, RecursionError) as exc:
+            logger.warning("left %r out of an error's detail: %s", key, exc)
+    return safe
 
 
 def _error_text(err: dict[str, Any]) -> str:
@@ -374,19 +413,10 @@ class McpToolGateway:
                 content.append(image)
             return McpToolCallResponse(content=content, structuredContent=result, isError=False)
         except ApprovalRequiredError as exc:
-            detail = exc.payload
-            return McpToolCallResponse(
-                content=[McpToolCallContent(text=json.dumps(detail, ensure_ascii=False))],
-                structuredContent=detail,
-                isError=True,
-            )
+            return self._detail_response(exc.payload)
         except BrowserActionError as exc:
-            detail = exc.payload
-            return McpToolCallResponse(
-                content=[McpToolCallContent(text=json.dumps(detail, ensure_ascii=False))],
-                structuredContent=detail,
-                isError=True,
-            )
+            # Its details carry snapshots read from the page, which can hold a NaN.
+            return self._detail_response(exc.payload)
         except ValidationError as exc:
             # Invalid tool arguments — report the field errors so the calling
             # agent can fix its call, instead of "Tool execution failed".
@@ -514,7 +544,17 @@ class McpToolGateway:
             structured = {**structured, **notes}
             message = f"{message} ({notes['approval_given_back']['message']})"
         return McpToolCallResponse(
-            content=[McpToolCallContent(text=message)], structuredContent=structured, isError=True
+            content=[McpToolCallContent(text=message)], structuredContent=_json_safe_detail(structured), isError=True
+        )
+
+    @staticmethod
+    def _detail_response(detail: dict[str, Any]) -> McpToolCallResponse:
+        """An error answer whose text is its detail as JSON, encoded as strictly as a result."""
+        structured = _json_safe_detail(detail)
+        return McpToolCallResponse(
+            content=[McpToolCallContent(text=json.dumps(structured, ensure_ascii=False, allow_nan=False))],
+            structuredContent=structured,
+            isError=True,
         )
 
     @staticmethod
