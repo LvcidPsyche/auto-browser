@@ -193,6 +193,24 @@ class LoadRepoEnvTests(unittest.TestCase):
         self.assertEqual(exported["D"], "x\\\\")
         self.assertEqual(stderr, "")
 
+    def test_a_long_multi_line_value_is_parsed_only_where_a_quote_could_close_it(self) -> None:
+        # Re-parsing the whole accumulated value for every added line made a PEM-sized value quadratic. A line with
+        # no quote character in it cannot close the value, so only the opening line and the closing one are parsed.
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        log = Path(tempdir.name, "parses.log")
+        counting = (
+            'eval "__lre_orig$(declare -f __lre_parse_quoted)"; '
+            f'__lre_parse_quoted() {{ echo call >> "{_bash_path(log)}"; __lre_orig__lre_parse_quoted "$@"; }}; '
+        )
+        body = "".join("A" * 64 + "\n" for _ in range(60))
+        exported, _, stderr = self.load(f'PEM="-----BEGIN\n{body}-----END"\nFINE=1\n', prelude=counting)
+
+        self.assertEqual(exported["FINE"], "1")
+        self.assertNotIn("PEM", exported)
+        self.assertIn("a quoted value over several lines (to line 62), ignored", stderr)
+        self.assertLessEqual(len(log.read_text().splitlines()), 3)
+
     def test_the_lines_of_an_unterminated_quote_are_skipped_until_it_closes(self) -> None:
         # A PEM's base64 padding is KEY=VALUE-shaped: it must not be exported as a key.
         pem = 'PEM="-----BEGIN KEY-----\nMIIBabc\nAbCdEfGh12==\n-----END KEY-----"\nAFTER=1\n'

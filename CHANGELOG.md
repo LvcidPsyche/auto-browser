@@ -19,6 +19,8 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- The scripts' `.env` loader no longer re-parses a whole multi-line quoted value for every added line: only a line that
+  holds the opening quote character can close it, so a PEM-sized value is no longer quadratic.
 - The scripts' `.env` loader no longer overwrites a variable the calling script declared without a value (`local x`,
   `declare x`): it read such a name as unset and let `.env` set it.
 - `scripts/bootstrap_cli_auth.sh` now refuses a `CLI_HOME` with a `..` component (`/data/../etc` matched `/data/*`).

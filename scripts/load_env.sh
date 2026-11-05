@@ -159,6 +159,13 @@ load_repo_env() {
       while ((__lre_rc == 2)) && IFS= read -r __lre_next || [[ -n "$__lre_next" ]]; do
         ((__lre_number++)) || true
         __lre_value+=$'\n'"${__lre_next%$'\r'}"
+        # A line without the opening quote character cannot close the value (an escape only protects a quote), so
+        # the whole accumulated value is parsed again only when one arrives: re-parsing it for every added line made
+        # a PEM-sized value quadratic.
+        if [[ "$__lre_next" != *"${__lre_value:0:1}"* ]]; then
+          __lre_next=""
+          continue
+        fi
         __lre_next=""
         __lre_rc=0
         __lre_parse_quoted "$__lre_value" || __lre_rc=$?
