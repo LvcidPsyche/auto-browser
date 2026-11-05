@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -110,7 +111,7 @@ class BrowserActionPipeline:
             # Raised before the operation began its change (a page off the list, a
             # witness that is not ready, a policy block): nothing ran, so the layer
             # holding the approval gives it back for a retry. Once the change has
-            # begun, nothing is recorded and the approval stays spent.
+            # begun, the approval stays spent (an unexpected error or a cancellation is recorded by _run).
             refused_before_effect(exc)
             raise
 
@@ -175,7 +176,40 @@ class BrowserActionPipeline:
                     url=context.manager._shown_url(context.session.page),
                     details={"snapshot": failed},
                 ) from exc
+            except (Exception, asyncio.CancelledError) as exc:
+                # Neither a known failure nor a policy block: say what is known, that the action began and its
+                # outcome is not, then let the error (or the cancellation) go on.
+                await self._record_interrupted(context, witness_state, exc)
+                raise
             return await self._record_success(context, witness_state)
+
+    async def _record_interrupted(
+        self, context: ActionRunContext, witness_state: ActionWitnessState, exc: BaseException
+    ) -> None:
+        """Audit entry and receipt for an action that began and ended in an unexpected error or a cancellation.
+
+        Only the error's type goes into the record (its text can hold page content or a path), and the page is
+        not read: a cancelled action's page may be the thing that hung. A record that cannot be written is
+        logged, never raised over the error being reported.
+        """
+        if not (witness_state.operation_started or context.began()):
+            return  # Nothing of the action ran; the approval holder gives its approval back.
+        how = "was cancelled" if isinstance(exc, asyncio.CancelledError) else f"ended in {type(exc).__name__}"
+        try:
+            await self._record_terminal_event(
+                context,
+                witness_state,
+                status="error",
+                after={"url": context.manager._shown_url(context.session.page)},
+                error=f"outcome unknown: the action began and {how}. Observe the page before acting again.",
+            )
+        except Exception:
+            logger.warning(
+                "could not record the interrupted %s in session %s",
+                context.action_name,
+                context.session.id,
+                exc_info=True,
+            )
 
     async def _prepare(self, context: ActionRunContext) -> ActionWitnessState:
         manager = context.manager

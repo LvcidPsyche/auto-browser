@@ -100,6 +100,8 @@ All notable changes to auto-browser are documented here.
 
 - **A provider CLI's decision is now the last one in its reply, not the first.** The parser took the first decision-shaped JSON object anywhere in the text, so JSON the model quoted from the page (for example a click on `#delete-account`) beat the decision the model then gave. It now takes the last ```json block that holds a decision, or with no such block the last decision-shaped object in the text.
 
+- **An action that fails unexpectedly or is cancelled after it began now leaves an audit entry and a receipt.** Only known failures were recorded, so a cancellation or an unforeseen error mid-action left no trace of an action whose effect may have happened. Both now record an `error` entry and receipt saying the outcome is unknown (the error type only, not its text), and then the error or cancellation carries on as before. An action that failed before it began is still not recorded, and its approval is still given back.
+
 ## [1.14.1] — 2026-11-04
 
 A patch release over 1.14.0. A session whose start page fails to load now gets a 400 the agent can act on instead
