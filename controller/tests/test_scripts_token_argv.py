@@ -48,6 +48,9 @@ BASH = _find_bash()
 # A token-bearing header on a command line: in a script, -H/--header with a
 # Bearer value built from a variable, or such a header string assigned for later use.
 ARGV_TOKEN = re.compile(r"""(-H|--header)\s+["']?Authorization:\s*Bearer\s+\$|["']Authorization:\s*Bearer\s+\$\{?\w""")
+# A curl that reads the token's config from stdin without -q (or --disable) as its first argument: curl honours it
+# only there, and otherwise a .curlrc found through CURL_HOME, XDG_CONFIG_HOME or HOME can add a proxy or a header.
+CURLRC_READ = re.compile(r"""\bcurl\s+(?!-q\b|--disable\b)[^|;&\n]*--config\s+-(?=[\s"']|$)""")
 
 
 def _bash_path(path: Path) -> str:
@@ -162,6 +165,25 @@ class NoTokenInArgvTests(unittest.TestCase):
         ):
             with self.subTest(line=line):
                 self.assertRegex(line, ARGV_TOKEN)
+
+    def test_every_curl_that_reads_the_token_from_stdin_skips_its_curlrc(self) -> None:
+        # D3b-7: bearer_curl got -q; doctor.sh's api_curl and smoke_reverse_ssh.sh's bastion curl did not.
+        offenders = []
+        for path in sorted(SCRIPTS.glob("*.sh")):
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                if not line.lstrip().startswith("#") and CURLRC_READ.search(line):
+                    offenders.append(f"{path.name}:{number}: {line.strip()}")
+        self.assertEqual(offenders, [], "a curl reads a .curlrc next to the token")
+
+    def test_the_curlrc_pattern_catches_the_old_forms_and_passes_the_fixed_one(self) -> None:
+        for line in (
+            '  curl_auth_config | curl --config - ${args[@]+"${args[@]}"} "$@"',
+            '  curl_auth_config | "${COMPOSE[@]}" exec -T test-bastion sh -lc "curl --config - $1"',
+            "  curl_auth_config | curl -fsS --config - http://127.0.0.1:8000/",
+        ):
+            with self.subTest(line=line):
+                self.assertRegex(line, CURLRC_READ)
+        self.assertNotRegex('  curl_auth_config | curl -q --config - "$@"', CURLRC_READ)
 
 
 if __name__ == "__main__":

@@ -174,7 +174,7 @@ fi
 # never in argv, where every local user could read it.
 api_curl() {
   local args=(${OPERATOR_ID_ARGS[@]+"${OPERATOR_ID_ARGS[@]}"})
-  curl_auth_config | curl --config - ${args[@]+"${args[@]}"} "$@"
+  curl_auth_config | curl -q --config - ${args[@]+"${args[@]}"} "$@"
 }
 
 require_bin docker
