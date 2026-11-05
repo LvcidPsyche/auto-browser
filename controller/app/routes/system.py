@@ -57,7 +57,8 @@ async def run_deep_health_probe(manager: "BrowserManager") -> dict[str, Any]:
         }
     )
 
-    browser = await manager.ensure_browser()
+    # Bounded like /readyz: a hung ensure_browser() otherwise holds the browser lock and the request open.
+    browser = await asyncio.wait_for(manager.ensure_browser(), timeout=READYZ_TIMEOUT_SECONDS)
     context = await browser.new_context(viewport={"width": 640, "height": 360})
     try:
         page = await context.new_page()
@@ -109,6 +110,16 @@ def create_system_router(
     async def healthz_deep() -> JSONResponse:
         try:
             payload = await run_deep_health_probe(manager)
+        except TimeoutError:
+            logger.warning("deep health probe timed out waiting for the browser after %ss", READYZ_TIMEOUT_SECONDS)
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "unhealthy",
+                    "environment": settings.environment_name,
+                    "error": "deep_health_probe_timed_out",
+                },
+            )
         except Exception as exc:
             logger.warning("deep health probe failed: %s", exc, exc_info=True)
             return JSONResponse(
