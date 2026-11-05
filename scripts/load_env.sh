@@ -197,6 +197,12 @@ load_repo_env() {
   done < "$__lre_file"
 }
 
+# True when a container path lies under /data/ with no ".." component: /data/../etc matches /data/* and
+# leaves /data (bootstrap_cli_auth.sh refuses any other CLI_HOME).
+container_path_under_data() {
+  [[ "$1" == /data/* && "/$1/" != */../* ]]
+}
+
 resolve_repo_host_path() {
   local root_dir="$1"
   local raw_path="$2"

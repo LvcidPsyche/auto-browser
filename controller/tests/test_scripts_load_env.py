@@ -538,5 +538,31 @@ class ScriptsStayBash32CompatibleTests(unittest.TestCase):
                 self.assertEqual(found, [], f"{script.name} uses syntax that bash 3.2 rejects")
 
 
+@unittest.skipUnless(SCRIPTS.is_dir() and BASH, "scripts/ or bash is not available here")
+class ContainerPathUnderDataTests(unittest.TestCase):
+    """HARN-39: bootstrap_cli_auth.sh takes CLI_HOME only under /data/, and a '..' component (/data/../etc matches
+    /data/*) is refused. The check is container_path_under_data in load_env.sh, run here through bash."""
+
+    REFUSED = ("/data/../etc", "/data/cli-home/..", "/data//../x", "/data/x/../y", "/data/..", "/etc/cli-home")
+    ALLOWED = ("/data/a..b", "/data/./x", "/data/cli-home")
+
+    def test_a_dot_dot_component_or_a_path_outside_data_is_refused(self) -> None:
+        paths = self.REFUSED + self.ALLOWED
+        script = (
+            f'source "{_bash_path(SCRIPTS / "load_env.sh")}"; '
+            'for p in "$@"; do if container_path_under_data "$p"; then echo "allowed $p"; else echo "refused $p"; fi; done'
+        )
+        result = subprocess.run(
+            [BASH, "-c", script, "_", *paths], capture_output=True, text=True, timeout=60, env=_minimal_env()
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        verdicts = dict(reversed(line.split(" ", 1)) for line in result.stdout.splitlines())
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertEqual(verdicts.get(path), "allowed" if path in self.ALLOWED else "refused")
+
+
 if __name__ == "__main__":
     unittest.main()
