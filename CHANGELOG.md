@@ -34,6 +34,13 @@ All notable changes to auto-browser are documented here.
   changed.", and the MCP persona tools and `browser.create_session` return the same text. Before this release a
   corrupt file read as an empty set, so the list answered `[]` and a persona session create answered 404; a client
   that handled those should handle the 503. The file's path and the cause are in the server log.
+- **Fewer pages count as bot challenges (`captcha_detected`).** An agent or runbook that relied on that code for any of
+  these will now see the action succeed: a page whose title or text only says "access denied", "security check",
+  "unusual activity", "suspicious activity", "bot detected" or "captcha" (Akamai's "Access Denied" block page
+  included); a page with an invisible reCAPTCHA v3 or v2 badge, an invisible hCaptcha or Turnstile frame, or any
+  provider frame that is not visible; a provider's own docs or marketing pages (`developers.google.com/recaptcha/docs`,
+  `www.hcaptcha.com`); and a title that merely contains "just a moment". A challenge frame the page keeps hidden until
+  it needs it is not seen until it is shown. Cloudflare's block page and DataDome's frame still count.
 
 ### Security
 
@@ -134,7 +141,18 @@ All notable changes to auto-browser are documented here.
 
 - **Human-like typing now has a time limit.** It paused 40-130 ms after every character with no overall cap, so a 5000-character text held the session for about 11 minutes. The pauses now add up to at most 20 seconds: a long text is typed faster, and a short one keeps its usual pace.
 
-- **Ordinary pages are no longer mistaken for bot challenges.** After each action the controller looked for words such as "captcha", "security check" and "access denied" anywhere in the URL, the title and the first 500 characters of the page, so a blog post about CAPTCHAs, a `?q=captcha` search or a docs paragraph about HTTP 403 failed an action that had already run with `captcha_detected` and asked for a human takeover. A challenge is now recognised by a frame from a challenge provider (Google reCAPTCHA, hCaptcha, Cloudflare, Arkose Labs, GeeTest), by a known interstitial title ("Just a moment...", "Attention Required! | Cloudflare"), or by the "verify you are human" prompt in the page text.
+- **Ordinary pages are no longer mistaken for bot challenges.** After each action the controller looked for words such as
+  "captcha", "security check" and "access denied" anywhere in the URL, the title and the first 500 characters of the
+  page, so a blog post about CAPTCHAs, a `?q=captcha` search or a docs paragraph about HTTP 403 failed an action that
+  had already run with `captcha_detected` and asked for a human takeover. A challenge is now recognised by exactly
+  these: a visible frame from a challenge provider (Google reCAPTCHA, hCaptcha, Cloudflare Turnstile and challenges,
+  Arkose Labs, GeeTest, DataDome) or any visible frame whose host name contains "captcha" (matched on the host, not the
+  path or query); the page itself being on a Cloudflare challenge host, `recaptcha.net`, `captcha-delivery.com`, or
+  under `/cdn-cgi/challenge-platform/` or Google's `/recaptcha/`; a title that is exactly "Just a moment..." or
+  "Attention Required! | Cloudflare", or ends in "used Cloudflare to restrict access"; or the "verify you are human"
+  prompt in the page text. Invisible widgets do not count: a frame that is not rendered, or whose address says
+  `size=invisible` (reCAPTCHA v2 and v3) or `checkbox-invisible` (hCaptcha), is ignored, so a login page with a
+  reCAPTCHA v3 badge no longer fails every action.
 
 - **Element intelligence now works on a real browser.** `get_element_intelligence` asked Chromium for computed styles without first enabling the DOM and CSS agents, so the style lookup failed there. It now enables both before it reads.
 

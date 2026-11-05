@@ -370,7 +370,11 @@ async def test_a_bot_challenge_on_a_page_that_moved_while_it_was_probed_is_refus
 ) -> None:
     """R-05: the probe's title and iframe sources went to the agent in the error details."""
     manager = manager_for(tmp_path)
-    probe = {"title": f"Just a moment... {LEAKED}", "text": "", "iframes": [f"http://10.0.0.7/{LEAKED}"]}
+    probe = {
+        "title": "Just a moment...",
+        "text": "",
+        "iframes": [{"src": f"https://challenges.cloudflare.com/{LEAKED}", "visible": True}],
+    }
     session = read_session(manager, kind, tmp_path, evaluated=probe)
 
     with pytest.raises(PermissionError, match="ALLOWED_HOSTS"):
