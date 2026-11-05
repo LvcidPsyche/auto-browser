@@ -75,8 +75,12 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y]) => {
 
 # Total time type_text_human_like may spend typing, keystrokes and pauses together. Longer text is typed faster, not
 # longer: 5000 characters at the default delays would hold the session lock for about 11 minutes. Past the budget the
-# rest goes in as one insert_text call.
+# rest goes in as plain text (insert_text), its newlines and tabs pressed as keys.
 HUMAN_TYPING_BUDGET_SECONDS = 20.0
+# The least a keystroke or the final insert is given once the budget is spent, before it counts as hung.
+HUMAN_TYPING_STEP_FLOOR_SECONDS = 2.0
+_CONTROL_KEYS = {"\n": "Enter", "\r": "Enter", "\t": "Tab"}
+_CONTROL_KEY_PATTERN = re.compile("([" + "".join(_CONTROL_KEYS) + "])")
 
 # Where the TOTP autofill looks for a one-time-code field, most specific first.
 # Every candidate must still pass is_one_time_code_field.
@@ -952,10 +956,40 @@ class BrowserActionService:
         deadline = loop.time() + HUMAN_TYPING_BUDGET_SECONDS
         for index, (char, delay_ms) in enumerate(zip(text, delays_ms)):
             if loop.time() >= deadline:
-                await page.keyboard.insert_text(text[index:])
+                await self._insert_rest(page, text[index:], deadline)
                 return
-            await page.keyboard.type(char)
+            await self._typing_step(page.keyboard.type(char), deadline)
             await asyncio.sleep(min(delay_ms * scale / 1000, max(deadline - loop.time(), 0)))
+
+    async def _insert_rest(self, page: "Page", rest: str, deadline: float) -> None:
+        """The text past the deadline: inserted as plain text, but newline and tab are still pressed as keys.
+
+        insert_text of a newline into an <input> drops it, so a long text ending in one would not submit the form
+        as the same text typed in time does (keyboard.type presses Enter and Tab for them).
+        """
+        for part in _CONTROL_KEY_PATTERN.split(rest):
+            if not part:
+                continue
+            if part in _CONTROL_KEYS:
+                await self._typing_step(page.keyboard.press(_CONTROL_KEYS[part]), deadline)
+            else:
+                await self._typing_step(page.keyboard.insert_text(part), deadline)
+
+    @staticmethod
+    async def _typing_step(step: Any, deadline: float) -> None:
+        """One keystroke or the insert, bounded: a page that never acknowledges input would hold the session lock."""
+        timeout = max(deadline - asyncio.get_running_loop().time(), HUMAN_TYPING_STEP_FLOOR_SECONDS)
+        try:
+            await asyncio.wait_for(step, timeout)
+        except TimeoutError:
+            raise BrowserActionError(
+                "Typing stopped: the page did not acknowledge a keystroke in time. Part of the text may have been "
+                "entered; check the field before typing again.",
+                code="typing_timeout",
+                action="type",
+                status_code=504,
+                retryable=True,
+            ) from None
 
     async def _find_one_time_code_field(self, page: "Page") -> tuple[Any, str] | None:
         for selector in _ONE_TIME_CODE_FIELD_SELECTORS:

@@ -10,6 +10,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from app.action_errors import BrowserActionError
 from app.browser.services import actions as actions_module
 from app.browser.services.actions import BrowserActionService
 
@@ -71,6 +72,80 @@ class HumanTypingBudgetTests(unittest.IsolatedAsyncioTestCase):
         rest = keyboard.insert_text.await_args.args[0]
         self.assertTrue(rest)
         self.assertEqual("".join(typed) + rest, text)
+
+    async def _type_past_the_deadline(self, text: str) -> list[tuple[str, str]]:
+        """Type `text` with the budget already spent, so all of it goes through the insert path; the calls made."""
+        calls: list[tuple[str, str]] = []
+
+        async def record(kind: str, value: str) -> None:
+            calls.append((kind, value))
+
+        async def insert(value: str) -> None:
+            await record("insert", value)
+
+        async def press(value: str) -> None:
+            await record("press", value)
+
+        keyboard = SimpleNamespace(type=AsyncMock(), insert_text=insert, press=press)
+        settings = SimpleNamespace(human_typing_min_delay_ms=MIN_DELAY_MS, human_typing_max_delay_ms=MAX_DELAY_MS)
+        service = BrowserActionService(SimpleNamespace(settings=settings))
+
+        with patch.object(actions_module, "HUMAN_TYPING_BUDGET_SECONDS", 0.0):
+            await service.type_text_human_like(SimpleNamespace(keyboard=keyboard), text)
+
+        keyboard.type.assert_not_awaited()
+        return calls
+
+    async def test_past_the_deadline_a_newline_or_tab_is_still_pressed_as_a_key(self) -> None:
+        # insert_text of a newline into an <input> drops it, so a trailing newline that should submit would not.
+        calls = await self._type_past_the_deadline("ab\ncd\te\r")
+
+        self.assertEqual(
+            calls,
+            [
+                ("insert", "ab"),
+                ("press", "Enter"),
+                ("insert", "cd"),
+                ("press", "Tab"),
+                ("insert", "e"),
+                ("press", "Enter"),
+            ],
+        )
+
+    async def test_past_the_deadline_plain_text_is_one_insert_and_consecutive_control_keys_are_each_pressed(
+        self,
+    ) -> None:
+        self.assertEqual(await self._type_past_the_deadline("plain text"), [("insert", "plain text")])
+        self.assertEqual(
+            await self._type_past_the_deadline("\n\nx"), [("press", "Enter"), ("press", "Enter"), ("insert", "x")]
+        )
+
+    async def test_a_keystroke_the_page_never_answers_is_a_retryable_error_not_a_hang(self) -> None:
+        async def never(*_args) -> None:
+            await asyncio.Event().wait()
+
+        settings = SimpleNamespace(human_typing_min_delay_ms=MIN_DELAY_MS, human_typing_max_delay_ms=MAX_DELAY_MS)
+        service = BrowserActionService(SimpleNamespace(settings=settings))
+        # (keyboard, text, budget): a control key is only pressed past the deadline, so its case has none left.
+        cases = {
+            "a keystroke": (SimpleNamespace(type=never, insert_text=AsyncMock(), press=AsyncMock()), "hello", 0.1),
+            "the final insert": (SimpleNamespace(type=AsyncMock(), insert_text=never, press=AsyncMock()), "hello", 0.1),
+            "a control key": (SimpleNamespace(type=AsyncMock(), insert_text=AsyncMock(), press=never), "\n", 0.0),
+        }
+        for name, (keyboard, text, budget) in cases.items():
+            with self.subTest(hang=name):
+                started = time.monotonic()
+                with (
+                    patch.object(actions_module, "HUMAN_TYPING_BUDGET_SECONDS", budget),
+                    patch.object(actions_module, "HUMAN_TYPING_STEP_FLOOR_SECONDS", 0.1),
+                ):
+                    with self.assertRaises(BrowserActionError) as raised:
+                        await asyncio.wait_for(
+                            service.type_text_human_like(SimpleNamespace(keyboard=keyboard), text), timeout=5
+                        )
+                self.assertLess(time.monotonic() - started, 2.0)
+                self.assertEqual(raised.exception.code, "typing_timeout")
+                self.assertTrue(raised.exception.retryable)
 
     async def test_the_budget_is_twenty_seconds(self) -> None:
         self.assertEqual(actions_module.HUMAN_TYPING_BUDGET_SECONDS, 20.0)
