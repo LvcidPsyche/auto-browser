@@ -93,6 +93,36 @@ class HarnessRunStore:
         self.staging_root = self.root / "skills" / "staging"
         self.runs_root.mkdir(parents=True, exist_ok=True)
         self.staging_root.mkdir(parents=True, exist_ok=True)
+        # Runs this process is driving, and when it began: the restart sweep touches neither.
+        self._active: set[str] = set()
+        self._started_at = time.time()
+
+    def mark_active(self, run_id: str) -> None:
+        self._active.add(run_id)
+
+    def release(self, run_id: str) -> None:
+        self._active.discard(run_id)
+
+    def mark_stale_running(self) -> int:
+        """Flip every run an earlier process left `running` to `interrupted`; returns how many.
+
+        Run once at startup, before requests are served. A run this process is driving, or created since it
+        started, is left alone.
+        """
+        flipped = 0
+        for path in self.runs_root.glob("*/run.json"):
+            try:
+                record = _read_record(path)
+            except Exception as exc:
+                logger.debug("skipping unreadable harness run record %s: %s", path, exc)
+                continue
+            if record.status != "running" or record.id in self._active or record.created_at >= self._started_at:
+                continue
+            record.status = "interrupted"
+            record.notes.append("Harness run interrupted by a controller restart.")
+            self.save(record)
+            flipped += 1
+        return flipped
 
     def run_dir(self, run_id: str) -> Path:
         if not _RUN_ID_RE.fullmatch(run_id):
@@ -188,6 +218,41 @@ class HarnessService:
             model_tiers=self.model_tiers,
         )
         self.store.save(record)
+        self.store.mark_active(run_id)
+        try:
+            await self._drive(
+                record,
+                contract,
+                run_dir=run_dir,
+                strategy_path=strategy_path,
+                mock_final_observation=mock_final_observation,
+                orchestrator=orchestrator,
+                session_id=session_id,
+                provider=provider,
+                max_attempts=max_attempts,
+            )
+        except BaseException as exc:
+            # A cancel (CancelledError is a BaseException) or a crash must not leave the run reading "running".
+            self._close_unfinished(record, exc)
+            raise
+        finally:
+            self.store.release(run_id)
+        return record
+
+    async def _drive(
+        self,
+        record: HarnessRunRecord,
+        contract: TaskContract,
+        *,
+        run_dir: Path,
+        strategy_path: Path,
+        mock_final_observation: dict[str, Any] | None,
+        orchestrator,
+        session_id: str | None,
+        provider: str,
+        max_attempts: int | None,
+    ) -> None:
+        run_id = record.id
         attempt_budget = min(max_attempts or contract.budget.max_attempts, contract.budget.max_attempts)
         detector = ConvergenceDetector(
             required_successes=min(3, attempt_budget),
@@ -259,7 +324,20 @@ class HarnessService:
             )
             record.notes.append("Staged skill candidate emitted; promotion requires review.")
             self.store.save(record)
-        return record
+
+    def _close_unfinished(self, record: HarnessRunRecord, error: BaseException) -> None:
+        if record.status != "running":
+            return
+        if isinstance(error, Exception):
+            record.status = "failed"
+            record.notes.append(f"Harness run failed: {type(error).__name__}")
+        else:
+            record.status = "cancelled"
+            record.notes.append("Harness run cancelled before it finished.")
+        try:
+            self.store.save(record)
+        except Exception:
+            logger.exception("harness run %s: could not record its %s end", record.id, record.status)
 
     def _stop_on_error(
         self,

@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.harness import Budget, Postcondition, TaskContract
-from app.harness.iterate import HarnessService
+from app.harness.iterate import HarnessRunRecord, HarnessService
 from app.harness.verifier.base import VerificationResult
 
 DONE = {"url": "https://example.com/done", "text": "done"}
@@ -99,6 +101,85 @@ class SimulatedTagTests(_Base):
         )
 
         self.assertIs(self._first_event(record)["payload"]["simulated"], False)
+
+
+class _GatedVerifier:
+    """Holds the first verification open until the test lets it go."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def verify(self, contract, trace):
+        self.started.set()
+        await self.release.wait()
+        return VerificationResult(passed=True, confidence=1.0)
+
+
+class CancelAndRestartTests(_Base):
+    async def test_a_cancelled_run_is_marked_cancelled(self) -> None:
+        verifier = _GatedVerifier()
+        service = HarnessService(self.root, verifier=verifier)
+        task = asyncio.create_task(service.start_convergence(_contract(), mock_final_observation=DONE))
+        await verifier.started.wait()
+
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        (stored,) = service.store.list()
+        self.assertEqual(stored.status, "cancelled")
+        self.assertIn("cancelled", stored.notes[-1])
+
+    async def test_a_crash_outside_the_attempts_marks_the_run_failed(self) -> None:
+        service = HarnessService(self.root)
+
+        class BrokenDetector:
+            def __init__(self, **kwargs):
+                pass
+
+            def decide(self, results):
+                raise RuntimeError("detector bug")
+
+        with patch("app.harness.iterate.ConvergenceDetector", BrokenDetector):
+            with self.assertRaises(RuntimeError):
+                await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+
+        (stored,) = service.store.list()
+        self.assertEqual(stored.status, "failed")
+
+    async def test_startup_sweep_interrupts_a_run_an_earlier_process_left_running(self) -> None:
+        earlier = HarnessService(self.root)
+        stale = HarnessRunRecord(
+            id="stale000001",
+            contract_id="c",
+            contract_hash="h",
+            status="running",
+            created_at=time.time() - 60,
+        )
+        done = HarnessRunRecord(id="done0000001", contract_id="c", contract_hash="h", status="converged")
+        earlier.store.save(stale)
+        earlier.store.save(done)
+
+        restarted = HarnessService(self.root)
+        self.assertEqual(restarted.store.mark_stale_running(), 1)
+
+        self.assertEqual(restarted.store.get("stale000001").status, "interrupted")
+        self.assertIn("restart", restarted.store.get("stale000001").notes[-1])
+        self.assertEqual(restarted.store.get("done0000001").status, "converged")
+
+    async def test_startup_sweep_leaves_a_run_this_process_is_driving(self) -> None:
+        verifier = _GatedVerifier()
+        service = HarnessService(self.root, verifier=verifier)
+        task = asyncio.create_task(service.start_convergence(_contract(), mock_final_observation=DONE))
+        await verifier.started.wait()
+
+        self.assertEqual(service.store.mark_stale_running(), 0)
+        (live,) = service.store.list()
+        self.assertEqual(live.status, "running")
+
+        verifier.release.set()
+        await task
 
 
 if __name__ == "__main__":

@@ -88,6 +88,9 @@ All notable changes to auto-browser are documented here.
   with "attempt failed: TimeoutError", instead of claiming the wall-clock budget was spent.
 - A harness attempt driven by a real orchestrator session no longer records its `model_decision` event as
   `simulated: true`; only the mock attempt does.
+- A convergence run that is cancelled (or crashes) is no longer left `running` forever: it is saved as `cancelled`
+  (or `failed`) with a note. At startup, before requests are served, every run an earlier process left `running` is
+  marked `interrupted`; a run the current process is driving is never touched.
 
 ### Security
 

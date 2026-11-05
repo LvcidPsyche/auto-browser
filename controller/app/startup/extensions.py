@@ -139,6 +139,9 @@ def _init_harness(app) -> None:
             envelope_verifier=mesh_identity_verifier(identity) if identity is not None else None,
             model_tiers=_harness_model_tiers(settings),
         )
+        swept = service.store.mark_stale_running()
+        if swept:
+            logger.warning("startup.harness: marked %d run(s) left running by the last process interrupted", swept)
         app.state.harness_service = service
         gateway = getattr(app.state, "tool_gateway", None)
         if gateway is not None:
