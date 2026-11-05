@@ -340,6 +340,10 @@ class WitnessPolicyEngine:
         for key in ("text", "text_preview", "file_path", "password", "totp_secret"):
             if key in redacted:
                 redacted[key] = "[REDACTED]"
+        # What a select_option chose; a None is the other way of choosing, kept so the receipt shows which was used.
+        for key in ("value", "label"):
+            if redacted.get(key) is not None:
+                redacted[key] = "[REDACTED]"
         return redacted
 
     @staticmethod

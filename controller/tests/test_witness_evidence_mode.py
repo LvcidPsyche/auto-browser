@@ -74,3 +74,18 @@ def test_redact_target_only_touches_the_secret_keys_when_restricted() -> None:
         "totp_secret": "[REDACTED]",
     }
     assert engine.redact_target(target, evidence_mode="standard") == target
+
+
+def test_a_restricted_receipt_does_not_keep_what_a_select_option_chose() -> None:
+    # The select_option target is {**target, value, label, index}; value and label are what it chose.
+    target = {"selector": "#plan", "value": "enterprise", "label": None, "index": None}
+    engine = WitnessPolicyEngine()
+
+    restricted = engine.redact_target(target, evidence_mode="restricted")
+    by_label = engine.redact_target(
+        {"selector": "#plan", "value": None, "label": "Enterprise"}, evidence_mode="restricted"
+    )
+
+    assert restricted == {"selector": "#plan", "value": "[REDACTED]", "label": None, "index": None}
+    assert by_label == {"selector": "#plan", "value": None, "label": "[REDACTED]"}
+    assert engine.redact_target(target, evidence_mode="standard") == target
