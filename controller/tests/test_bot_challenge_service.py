@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from app.browser.services.bot_challenge import BrowserBotChallengeService
+from app.browser_scripts import AB_HREF_MAX, AB_TITLE_MAX, AB_TRUNCATED_MARK
 
 
 def frame(src: str, visible: bool = True) -> dict:
@@ -25,6 +26,38 @@ class BotChallengeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["bot_challenge_detected"])
         self.assertEqual(result["signal"], "verify you are human")
         self.assertEqual(result["url"], "https://example.com/login")
+
+    async def test_the_report_is_capped_and_names_only_the_frames_that_matched(self) -> None:
+        secret = "oauth-code-123"
+        matched = "https://www.google.com/recaptcha/api2/anchor?k=" + secret
+        result = await self._check(
+            "https://example.com/",
+            "T" * 1_000_000,
+            "",
+            [
+                frame("https://tracker.example/pixel?token=" + secret),  # visible, but not a provider
+                frame("https://challenges.cloudflare.com/x?y=" + "q" * 1_000_000, visible=False),  # not shown
+                frame(matched),
+                frame("https://user:pw@www.google.com:8443/recaptcha/api2/bframe?" + "z" * 1_000_000),
+            ],
+        )
+
+        assert result is not None
+        self.assertLessEqual(len(result["title"]), AB_TITLE_MAX)
+        self.assertEqual(
+            result["iframes"],
+            ["https://www.google.com/recaptcha/api2/anchor", "https://www.google.com:8443/recaptcha/api2/bframe"],
+        )
+        self.assertNotIn(secret, str(result))
+
+    async def test_a_matched_frame_path_is_capped_like_a_url(self) -> None:
+        result = await self._check(
+            "https://example.com/", "Home", "", [frame("https://www.google.com/recaptcha/api2/" + "p" * 1_000_000)]
+        )
+
+        assert result is not None
+        self.assertEqual(len(result["iframes"][0]), AB_HREF_MAX)
+        self.assertTrue(result["iframes"][0].endswith(AB_TRUNCATED_MARK))
 
     async def test_returns_none_for_normal_page(self) -> None:
         self.assertIsNone(await self._check("https://example.com/dashboard", "Dashboard", "Welcome back"))

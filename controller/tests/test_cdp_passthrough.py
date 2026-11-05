@@ -6,6 +6,7 @@ import re
 import unittest
 from unittest.mock import patch
 
+from app.browser_scripts import AB_ATTR_MAX, AB_HREF_MAX, AB_MAX_ATTRIBUTES, AB_TRUNCATED_MARK
 from app.cdp import passthrough as cdp_passthrough
 from app.cdp.passthrough import CDPPassthrough
 
@@ -105,6 +106,30 @@ class CDPPassthroughTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["computed_styles"], {"display": "block", "width": "640px"})
         self.assertEqual(result["event_listener_types"], ["click"])
         self.assertEqual(result["assets"], {"src": "https://cdn.example.com/hero.png"})
+
+    async def test_page_controlled_attributes_and_listener_names_are_capped(self) -> None:
+        huge = "x" * 1_000_000
+        pairs = ["data-big", huge, "href", "https://e.example/" + huge, "srcset", huge, huge, "v"]
+        for index in range(200):
+            pairs += [f"data-{index}", "v"]
+        responses = dict(self._READ_RESPONSES)
+        responses["DOM.getAttributes"] = {"attributes": pairs}
+        responses["Runtime.evaluate"] = [
+            {"result": {"value": [huge] + ["click"] * 200}},
+            {"result": {"value": {}}},
+        ]
+
+        result = await CDPPassthrough(_FakeCDPSession(responses)).get_element_intelligence("#hero")
+
+        attributes = result["attributes"]
+        self.assertEqual(len(attributes), AB_MAX_ATTRIBUTES)
+        self.assertEqual(len(attributes["data-big"]), AB_ATTR_MAX)
+        self.assertEqual(len(attributes["href"]), AB_HREF_MAX)
+        self.assertTrue(attributes["href"].endswith(AB_TRUNCATED_MARK))
+        self.assertEqual(len(attributes["srcset"]), AB_HREF_MAX)
+        self.assertTrue(all(len(name) <= AB_ATTR_MAX for name in attributes))
+        self.assertEqual(len(result["event_listener_types"]), AB_MAX_ATTRIBUTES)
+        self.assertTrue(all(len(name) <= AB_ATTR_MAX for name in result["event_listener_types"]))
 
     async def test_selector_is_embedded_as_an_exact_js_string_literal(self) -> None:
         # repr() wrote "\U000e0001" for this tag character — not a JavaScript

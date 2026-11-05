@@ -17,12 +17,27 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from ..browser_scripts import ELEMENT_ASSETS_SCRIPT
+from ..browser_scripts import AB_ATTR_MAX, AB_MAX_ATTRIBUTES, ELEMENT_ASSETS_SCRIPT, cap_text, cap_url
 
 logger = logging.getLogger(__name__)
 
 # How long one DOM/CSS agent enable or disable may take. CSS.enable waits for the page's stylesheets to load.
 CDP_AGENT_TIMEOUT_SECONDS = 5.0
+
+# Attributes whose value is an address: capped like a URL, with the marker.
+_URL_ATTRIBUTES = frozenset(
+    ["href", "src", "srcset", "action", "formaction", "poster", "data", "cite", "background", "ping", "xlink:href"]
+)
+
+
+def _capped_attributes(pairs: list[str]) -> dict[str, str]:
+    """The element's attributes as a dict, bounded: a page can write any number of them, megabytes long."""
+    names, values = pairs[::2], pairs[1::2]
+    return {
+        cap_text(name, AB_ATTR_MAX): cap_url(value) if name.lower() in _URL_ATTRIBUTES else cap_text(value, AB_ATTR_MAX)
+        for name, value in list(zip(names, values))[:AB_MAX_ATTRIBUTES]
+    }
+
 
 # Commands allowed through the raw CDP passthrough.
 #
@@ -172,7 +187,7 @@ class CDPPassthrough:
 
             # Gather data in parallel conceptually (sequential here for clarity)
             attrs_raw = await self._cdp.send("DOM.getAttributes", {"nodeId": node_id})
-            attrs = dict(zip(attrs_raw["attributes"][::2], attrs_raw["attributes"][1::2]))
+            attrs = _capped_attributes(attrs_raw["attributes"])
 
             box_model = await self._cdp.send("DOM.getBoxModel", {"nodeId": node_id})
             box = box_model.get("model", {})
@@ -225,7 +240,9 @@ class CDPPassthrough:
                     "returnByValue": True,
                 },
             )
-            listener_types = listeners_result.get("result", {}).get("value", [])
+            listener_types = [
+                cap_text(name, AB_ATTR_MAX) for name in listeners_result.get("result", {}).get("value", [])
+            ][:AB_MAX_ATTRIBUTES]
 
             # Asset references
             asset_result = await self._cdp.send(

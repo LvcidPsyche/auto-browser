@@ -4,6 +4,7 @@ import logging
 from typing import Any
 from urllib.parse import urlsplit
 
+from ...browser_scripts import cap_title, cap_url
 from ..page_read import bounded
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,17 @@ def _split(url: str) -> tuple[str, str]:
         return "", ""
 
 
+def _origin_and_path(src: str) -> str:
+    """scheme://host[:port]/path of a frame address: no credentials, query or fragment, which can carry tokens."""
+    try:
+        parts = urlsplit(src)
+        host = parts.hostname or ""
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return ""
+    return cap_url(f"{parts.scheme}://{host}{port}{parts.path}")
+
+
 def _frame_signal(src: str) -> str | None:
     if any(marker in src for marker in INVISIBLE_FRAME_MARKERS):
         return None
@@ -114,7 +126,6 @@ class BrowserBotChallengeService:
         url = session.page.url.lower()
         title = ""
         body_text = ""
-        iframe_sources: list[str] = []
         visible_frames: list[str] = []
         try:
             # One evaluate, not three: this probe runs after every action. Bounded, under the session
@@ -124,30 +135,30 @@ class BrowserBotChallengeService:
             body_text = str(probe.get("text") or "").lower()
             for item in probe.get("iframes") or []:
                 src = str(item.get("src") or "").lower()
-                iframe_sources.append(src)
                 if item.get("visible"):
                     visible_frames.append(src)
         except Exception as exc:
             # Page may be mid-navigation or already closed; check with what we have.
             logger.debug("bot challenge probe could not read page content: %s", exc)
 
+        matched_frames = [_origin_and_path(src) for src in visible_frames if _frame_signal(src)]
         signal = _page_signal(url) or next(filter(None, map(_frame_signal, visible_frames)), None)
         if signal:
-            return self._detected(session, signal, title, iframe_sources)
+            return self._detected(session, signal, title, matched_frames)
         title = title.strip()
         if title in CHALLENGE_PAGE_TITLES or title.endswith(CHALLENGE_TITLE_SUFFIX):
-            return self._detected(session, "challenge page title", title, iframe_sources)
+            return self._detected(session, "challenge page title", title, matched_frames)
         for phrase in CHALLENGE_TEXT_PHRASES:
             if phrase in body_text:
-                return self._detected(session, phrase, title, iframe_sources)
+                return self._detected(session, phrase, title, matched_frames)
         return None
 
     @staticmethod
-    def _detected(session: Any, signal: str, title: str, iframe_sources: list[str]) -> dict[str, Any]:
+    def _detected(session: Any, signal: str, title: str, matched_frames: list[str]) -> dict[str, Any]:
         return {
             "bot_challenge_detected": True,
             "signal": signal,
             "url": session.page.url,
-            "title": title,
-            "iframes": iframe_sources[:10],
+            "title": cap_title(title),
+            "iframes": matched_frames[:10],
         }

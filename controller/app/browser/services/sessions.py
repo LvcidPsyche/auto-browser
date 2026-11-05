@@ -21,7 +21,7 @@ from ...action_errors import (
     SessionNotFoundError,
 )
 from ...auth_policy import has_named_credentials
-from ...browser_scripts import apply_stealth
+from ...browser_scripts import apply_stealth, cap_title
 from ...models import SessionRecord, SessionStatus
 from ...session_ownership import may_use
 from ...utils import UTC, utc_now
@@ -615,7 +615,7 @@ class BrowserSessionService(SessionCreation):
         # And after the read: the page can move while its title is read, and come back.
         if read.moved():
             return self.manager._shown_url(page), "", True
-        return page.url, title, True
+        return page.url, cap_title(title), True
 
     async def summary(
         self,

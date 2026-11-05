@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 
 from ... import events as _events
 from ...action_errors import SCREENSHOT_WITHHELD, BrowserActionError
-from ...browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
+from ...browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT, cap_title
 from ...pii_scrub import pii_words
 from ..aria_outline import outline_from_aria_snapshot, unavailable_outline
 from ..page_read import bounded, start_read
@@ -139,7 +139,7 @@ class BrowserObservationService:
             screenshot = None
             try:
                 screenshot = await self._capture_screenshot_redacted(session, SHARE_FRAME_LABEL)
-                title = await bounded(session.page.title())
+                title = cap_title(await bounded(session.page.title()))
             except Exception:
                 read.refuse_raised(screenshot and screenshot["path"])
                 raise
@@ -220,7 +220,7 @@ class BrowserObservationService:
 
         if preset == "fast":
             screenshot = await self._capture_screenshot_redacted(session, screenshot_label)
-            title = await bounded(session.page.title())
+            title = cap_title(await bounded(session.page.title()))
             tabs = await self.manager.tabs.summaries(session)
             return {
                 "session": await self.manager._session_summary(session),

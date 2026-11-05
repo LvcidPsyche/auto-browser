@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 # Injected before every page load via add_init_script().
 # Removes automation signals, mocks realistic browser properties.
@@ -121,6 +122,8 @@ STEALTH_INIT_SCRIPT = r"""
 AB_ATTR_MAX = 120
 AB_HREF_MAX = 2000
 AB_TITLE_MAX = 200
+# How many attributes (and inline event handler names) one element read returns.
+AB_MAX_ATTRIBUTES = 50
 AB_TRUNCATED_MARK = chr(0x2026) + "[truncated]"
 
 AB_CAP_JS = (
@@ -140,6 +143,22 @@ AB_CAP_JS = (
   }
 """
 )
+
+
+def cap_text(value: Any, max_len: int) -> Any:
+    """The Python side of abCap, for a string a script did not cap (page.title()) or one a hostile page could have."""
+    return value[:max_len] if isinstance(value, str) else value
+
+
+def cap_title(value: Any) -> Any:
+    return cap_text(value, AB_TITLE_MAX)
+
+
+def cap_url(value: Any, max_len: int = AB_HREF_MAX) -> Any:
+    """The Python side of abCapUrl: a cut URL still ends in the marker, within its cap."""
+    if not isinstance(value, str) or len(value) <= max_len:
+        return value
+    return value[: max_len - len(AB_TRUNCATED_MARK)] + AB_TRUNCATED_MARK
 
 
 def with_ab_cap(source: str) -> str:
