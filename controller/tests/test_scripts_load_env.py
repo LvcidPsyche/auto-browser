@@ -241,9 +241,8 @@ class LoadRepoEnvTests(unittest.TestCase):
             "SMOKE_PROJECT", "SMOKE_COMPOSE_PROJECT", "SMOKE_SESSION_PREFIX", "SMOKE_MANAGED_LABEL",
             "SMOKE_MODE_LABEL", "SMOKE_SESSION_ID_LABEL", "SMOKE_COMPOSE_DIR_LABEL", "SMOKE_COMPOSE_PROJECT_LABEL",
         ]  # fmt: skip
-        env_text = (
-            "SMOKE_URL=https://example.test\nSMOKE_PROVIDER=claude\nSMOKE_GOAL=look\n"
-            + "".join(f"{key}=poisoned\n" for key in ours)
+        env_text = "SMOKE_URL=https://example.test\nSMOKE_PROVIDER=claude\nSMOKE_GOAL=look\n" + "".join(
+            f"{key}=poisoned\n" for key in ours
         )
         exported, _, stderr = self.load(env_text)
 
@@ -306,7 +305,8 @@ class HostPythonIsIsolatedTests(unittest.TestCase):
                 bare = [
                     f"{number}: {line.strip()}"
                     for number, line in enumerate(script.read_text(encoding="utf-8").splitlines(), start=1)
-                    if re.search(r"(?<![\w./-])python3?(?:\.\d+)?\s+(?!-\w*I)", line) and not line.lstrip().startswith("#")
+                    if re.search(r"(?<![\w./-])python3?(?:\.\d+)?\s+(?!-\w*I)", line)
+                    and not line.lstrip().startswith("#")
                 ]
                 self.assertEqual(bare, [])
 
