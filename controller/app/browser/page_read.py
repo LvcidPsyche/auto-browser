@@ -16,6 +16,8 @@ from collections.abc import AsyncIterator, Awaitable
 from pathlib import Path
 from typing import Any, TypeVar
 
+from ..browser_scripts import cap_title
+
 T = TypeVar("T")
 
 # How long a read waits for a session another call holds, and for the page to answer. A read
@@ -134,4 +136,4 @@ async def title_or_blank(manager: Any, session: Any) -> str:
         return ""
     read = PageRead(manager, session)
     title = await bounded(session.page.title())
-    return "" if read.moved() else title
+    return "" if read.moved() else cap_title(title)

@@ -79,3 +79,31 @@ async def test_the_fast_presets_title_is_capped(tmp_path: Path) -> None:
     observed = await manager.observation.observation_payload(session, preset="fast")
 
     assert len(observed["title"]) == AB_TITLE_MAX
+
+
+async def test_a_megabyte_title_is_capped_in_an_approval_observation(tmp_path: Path) -> None:
+    manager = manager_for(tmp_path)
+    session = _session(manager, tmp_path, MovingPage(ALLOWED, ALLOWED, title=HUGE_TITLE))
+
+    observation = await manager.actions._approval_observation(session)
+
+    assert observation["title"] == "T" * AB_TITLE_MAX
+
+
+async def test_a_megabyte_title_is_capped_in_a_saved_auth_profiles_metadata(tmp_path: Path) -> None:
+    manager = manager_for(tmp_path)
+    auth_profiles = manager.auth_profiles
+    session = _session(manager, tmp_path, MovingPage(ALLOWED, ALLOWED, title=HUGE_TITLE))
+    manager.auth_profiles = auth_profiles  # _session stubs it; the save is the code under test
+    session.last_auth_state_path, session.auth_profile_name = None, None
+
+    async def write_empty_state(_context, destination: Path) -> dict:
+        destination.write_text("{}", encoding="utf-8")
+        return {"path": str(destination), "encrypted": False}
+
+    manager.auth_state.write_storage_state = AsyncMock(side_effect=write_empty_state)
+    auth_profiles.current_platform = lambda _session: "test"
+
+    saved = await auth_profiles.save_for_session(session, "p1")
+
+    assert saved["metadata"]["saved_from_title"] == "T" * AB_TITLE_MAX
