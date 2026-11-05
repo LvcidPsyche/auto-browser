@@ -9,7 +9,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from .artifacts import SessionArtifactService
 from .network_inspector import url_origin
-from .utils import utc_now
+from .utils import spawn_background_task, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +56,11 @@ class DownloadCaptureService:
         except Exception:
             failure = "download_save_failed"
         except BaseException:
-            # Cancelled mid-save: the reserved name would count toward the cap for good.
+            # Cancelled mid-save: the reserved name would count toward the cap for good, and the browser's copy
+            # would stay until its context closes. That delete goes on in the background (it waits for the
+            # download to finish), so the cancellation is neither held up nor swallowed.
             destination.unlink(missing_ok=True)
+            spawn_background_task(self._discard(download))
             raise
 
         oversized = not failure and destination.stat().st_size > self.max_bytes

@@ -245,6 +245,29 @@ class DownloadCleanupTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(retry["status"], "completed")
             self.assertEqual(self._files(session), ["report.csv"])
 
+    async def test_a_save_cancelled_midway_still_deletes_the_browsers_copy_and_stays_cancelled(self) -> None:
+        saving, deleted = asyncio.Event(), asyncio.Event()
+
+        class Hanging(FakeDownload):
+            async def save_as(self, path: str) -> None:
+                saving.set()
+                await asyncio.sleep(30)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            download = Hanging("report.csv")
+            download.delete = mock.AsyncMock(side_effect=lambda: deleted.set())
+            task = asyncio.create_task(DownloadCaptureService(artifacts).capture(session, download))
+            await asyncio.wait_for(saving.wait(), 5)
+
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+            await asyncio.wait_for(deleted.wait(), 5)
+
+            download.delete.assert_awaited_once_with()
+            self.assertEqual(self._files(session), [])
+
     async def test_a_failure_reported_after_a_complete_save_removes_the_file(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             artifacts, session = self._session(tempdir)
