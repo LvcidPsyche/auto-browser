@@ -165,7 +165,7 @@ class SessionOwnershipTests(unittest.IsolatedAsyncioTestCase):
             async def run(self_inner, **_kwargs):
                 ran_as.append(get_current_operator().id)
                 await self.manager.get_session(session_id)  # refused unless run as alice
-                return SimpleNamespace(model_dump=lambda: {"status": "done"})
+                return SimpleNamespace(status="done", model_dump=lambda: {"status": "done"})
 
         queue = AgentJobQueue(
             orchestrator=RecordingOrchestrator(),

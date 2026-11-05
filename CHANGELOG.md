@@ -96,6 +96,8 @@ All notable changes to auto-browser are documented here.
 
 - **Cancelling a cron trigger while it queues the run no longer strands the job.** The slot that marks a job as running and the browser session it had opened were only released when queuing raised an ordinary error, so a cancellation left the session open and every later trigger of that job answered `previous_run_active` until the controller restarted. Both are now released on cancellation too.
 
+- **An agent run or step that ends in an error is now recorded as a failed job.** The job queue recorded every job as `completed` whatever the run returned, so a run that ended in `error` looked successful in the job list. The job is now `failed` with the error the run reported; runs that end in `done`, `takeover`, `approval_required` or `max_steps_reached` stay `completed`, and a failed run can still be resumed.
+
 ## [1.14.1] — 2026-11-04
 
 A patch release over 1.14.0. A session whose start page fails to load now gets a 400 the agent can act on instead

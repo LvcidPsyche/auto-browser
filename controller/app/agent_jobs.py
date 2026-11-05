@@ -14,6 +14,7 @@ from .models import (
     AgentJobRecord,
     AgentJobStatus,
     AgentRunRequest,
+    AgentRunResult,
     AgentStepRequest,
     AgentStepResult,
     OperatorIdentity,
@@ -492,7 +493,14 @@ class AgentJobQueue:
                     workflow_profile=request.workflow_profile,
                     on_step=checkpoint_step,
                 )
-            record = await self.store.finish(record.id, status="completed", result=result.model_dump(), error=None)
+            # A run or step that ended in "error" did not complete: record it failed, with the reason it gave.
+            failed = result.status == "error"
+            record = await self.store.finish(
+                record.id,
+                status="failed" if failed else "completed",
+                result=result.model_dump(),
+                error=self._reported_error(result) if failed else None,
+            )
         except asyncio.CancelledError:
             user_cancelled = self._cancellation_reasons.get(job_id) == "user"
             record = await self.store.finish_cancelled(job_id, user_cancelled=user_cancelled)
@@ -533,6 +541,13 @@ class AgentJobQueue:
         payload["checkpoint_count"] = len(record.checkpoints)
         payload["resumable"] = cls._is_resumable(record)
         return payload
+
+    @classmethod
+    def _reported_error(cls, result: AgentStepResult | AgentRunResult) -> str:
+        """Why a step or run reported "error": the error of the step that did (the last such one for a run)."""
+        steps = [result] if isinstance(result, AgentStepResult) else result.steps
+        reasons = [step.error for step in steps if step.status == "error" and step.error]
+        return cls._truncate(reasons[-1] if reasons else "the agent reported an error without a reason", 500) or ""
 
     @staticmethod
     def _is_resumable(record: AgentJobRecord) -> bool:
