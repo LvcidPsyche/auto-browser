@@ -7,7 +7,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .contracts import Postcondition, TaskContract
 from .register import SkillStagingRegistry
-from .trace import TraceEnvelope, _scrub_string, _scrub_text, _scrub_url, _scrub_url_and_path, _scrub_urls_only
+from .trace import (
+    TraceEnvelope,
+    _map_urls,
+    _scrub_string,
+    _scrub_text,
+    _scrub_url,
+    _scrub_url_and_path,
+    _scrub_urls_only,
+)
 from .verifier.base import VerificationResult, VerifierAdapter
 from .verifier.programmatic import ProgrammaticVerifier
 
@@ -127,11 +135,28 @@ def _scrub_url_contains(value: str) -> str:
     return _scrub_text(value)
 
 
+def _lost_query_or_fragment(value: str, scrubbed: str) -> bool:
+    """Whether the scrub dropped a `?` or `#` the value had: a URL scrub that works keeps both, and a failed one
+    (scrub_url catches the PII scrubber's error) hands back the part before them."""
+    return any(mark in value and mark not in scrubbed for mark in ("?", "#"))
+
+
+def _scrub_page_text(value: str) -> str:
+    """A `text_contains` or `dom_contains` value scrubbed as the stored page text was: each URL in it as a URL, the
+    rest as text. A URL whose scrub lost its query or fragment is kept as written, as a `url_contains` value is."""
+    return _map_urls(value, _url_span_or_as_written, _scrub_text)
+
+
+def _url_span_or_as_written(span: str) -> str:
+    scrubbed = _scrub_url_and_path(span)
+    return span if _lost_query_or_fragment(span, scrubbed) else scrubbed
+
+
 # How the stored trace scrubs the field each kind of postcondition reads. `url_matches` is a regex, left alone.
 _STORED_TEXT_SCRUBBERS = {
     "url_contains": _scrub_url_contains,
-    "text_contains": _scrub_string,
-    "dom_contains": _scrub_string,
+    "text_contains": _scrub_page_text,
+    "dom_contains": _scrub_page_text,
     "network_response_shape": _scrub_string,
     "extracted_data_schema": _scrub_urls_only,
 }
@@ -157,13 +182,11 @@ def _scrubbed_or_as_written(item: Postcondition) -> str:
 
     A failed URL scrub leaves an expectation that passes whatever the page shows: scrub_url catches the PII
     scrubber's error and returns the value's path, "" for a `?...` or `#...` value and "/" for `/?...`. So a
-    non-empty value that scrubs to nothing, or a `url_contains` value whose `?` or `#` the scrub lost (a scrub that
-    works keeps both), is kept as written.
+    non-empty value that scrubs to nothing, or a `url_contains` value whose `?` or `#` the scrub lost, is kept as
+    written (a URL inside a text or DOM expectation is kept the same way, by _scrub_page_text).
     """
     scrubbed = _STORED_TEXT_SCRUBBERS[item.kind](item.value)
-    lost_its_query = item.kind == "url_contains" and any(
-        mark in item.value and mark not in scrubbed for mark in ("?", "#")
-    )
+    lost_its_query = item.kind == "url_contains" and _lost_query_or_fragment(item.value, scrubbed)
     return item.value if not scrubbed or lost_its_query else scrubbed
 
 

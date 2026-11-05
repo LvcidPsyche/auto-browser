@@ -157,7 +157,8 @@ All notable changes to auto-browser are documented here.
 - A drift check whose expected-text scrubber fails keeps the expectation as written: a failing URL scrubber hands
   back the value's path, the empty string for a `url_contains` value that starts with `?` or `#` and `/` for one
   that starts with `/?` or `/#`, and every URL contains either. A scrubber that raises is reported `unverified` with
-  the exception type instead of failing the call.
+  the exception type instead of failing the call. A URL inside a `text_contains` or `dom_contains` expectation
+  whose query or fragment a failing scrub dropped is kept as written too, instead of shrinking to its path.
 - The harness trace no longer blanks the `value`, `label` and `username` of a dict in page data (an observation or
   extracted data) just because the site's own data carries a `sensitive` or `text_redacted` key: that hiding applies
   to an action's own event payload only. A `text` or `text_preview` beside such a key is still hidden everywhere.
