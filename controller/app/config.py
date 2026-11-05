@@ -259,7 +259,6 @@ class Settings(BaseSettings):
         alias="WITNESS_REMOTE_REQUIRED_FOR_CONFIDENTIAL",
     )
     enable_tracing: bool = Field(False, alias="ENABLE_TRACING")
-    typing_delay_ms: int = Field(20, alias="TYPING_DELAY_MS")
     action_timeout_ms: int = Field(15000, alias="ACTION_TIMEOUT_MS")
     request_rate_limit_enabled: bool = Field(True, alias="REQUEST_RATE_LIMIT_ENABLED")
     request_rate_limit_requests: int = Field(120, alias="REQUEST_RATE_LIMIT_REQUESTS")
