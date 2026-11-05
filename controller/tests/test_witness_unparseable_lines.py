@@ -142,3 +142,49 @@ async def test_the_unparseable_count_alone_fails_a_bundle(signed_chain: WitnessR
 
     assert result["ok"] is False
     assert any("unparseable_lines is 2" in failure for failure in result["failures"]), result["failures"]
+
+
+async def _unsigned_chain(tmp_path: Path, count: int = 3) -> WitnessRecorder:
+    recorder = WitnessRecorder(tmp_path / "unsigned-witness")
+    await recorder.startup()
+    for index in range(count):
+        await recorder.record(SCOPE, **_receipt_kwargs(f"click-{index}"))
+    return recorder
+
+
+@requires_verifier
+async def test_a_clean_unsigned_bundle_says_valid_and_passes_when_allowed(tmp_path: Path) -> None:
+    bundle = await (await _unsigned_chain(tmp_path)).export_bundle(SCOPE)
+
+    result = _load_verify_bundle()(bundle, allow_unsigned=True)
+
+    assert bundle["chain_valid_at_export"] is True
+    assert result["ok"], result["failures"]
+
+
+@requires_verifier
+async def test_an_unsigned_chain_truncated_by_one_line_fails_even_when_unsigned_is_allowed(tmp_path: Path) -> None:
+    recorder = await _unsigned_chain(tmp_path)
+    path = recorder._path(SCOPE)
+    path.write_bytes(b"".join(path.read_bytes().splitlines(keepends=True)[:-1]))
+
+    bundle = await recorder.export_bundle(SCOPE)
+    result = _load_verify_bundle()(bundle, allow_unsigned=True)
+
+    assert (bundle["unparseable_lines"], bundle["chain_valid_at_export"]) == (0, False)
+    assert bundle["chain_reason_at_export"]
+    assert result["ok"] is False
+    assert any("chain_valid_at_export" in failure for failure in result["failures"]), result["failures"]
+    assert any(bundle["chain_reason_at_export"] in failure for failure in result["failures"]), result["failures"]
+
+
+@requires_verifier
+@pytest.mark.parametrize("value", [1.0, "1", True, None, [], 2])
+async def test_unparseable_lines_must_be_the_integer_zero(signed_chain: WitnessRecorder, value: object) -> None:
+    bundle = await signed_chain.export_bundle(SCOPE)
+    bundle["unparseable_lines"] = value
+
+    result = _load_verify_bundle()(bundle)
+
+    assert result["ok"] is False
+    assert any("unparseable_lines" in failure for failure in result["failures"]), result["failures"]

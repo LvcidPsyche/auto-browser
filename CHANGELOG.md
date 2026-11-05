@@ -13,6 +13,10 @@ All notable changes to auto-browser are documented here.
   needs one that is not in the set, name it in the new `CLI_PROVIDER_ENV_PASSTHROUGH` setting (comma-separated
   variable names, empty by default). The set is the operating-system basics (`PATH`, `HOME`, `TEMP`, `LANG`, `LC_*`,
   proxy and certificate variables) plus that provider's own key, endpoint and config-directory variables (for `codex`, that includes `CODEX_API_KEY`).
+- **A Witness bundle whose chain failed the exporter's own check now fails the offline verifier.** That covers a
+  chain whose anchor reads `anchor_missing`, `truncated` or `diverged`, with or without `--allow-unsigned`. The
+  bundle now carries `chain_reason_at_export` and the verifier prints it, so the failure says why. A bundle made by an
+  older version has no reason, and one whose chain failed at export no longer passes `--allow-unsigned`.
 
 ### Security
 
@@ -115,7 +119,7 @@ All notable changes to auto-browser are documented here.
 
 - **Two actions on one session no longer mix up their Witness context.** An action's risk category and approval id were parked on the session until its turn for the session lock, and the first action to finish cleared them, so an action that had been waiting could be receipted with no approval and no risk, or with another action's. Each action now carries its own context.
 
-- **One unparseable Witness receipt line no longer hides the rest.** Listing a session's receipts and exporting its bundle failed (HTTP 400) on the first line that did not parse. They now skip it and report `unparseable_lines` with how many they skipped (in the listed window, the last `limit` lines, for a listing; in the whole chain for a bundle). The bundle keeps the receipts that parse, and its chain check still fails on the gap (`chain_valid_at_export` is false). With a gap its `head_hash` is `null`, and `scripts/verify_witness_bundle.py` now fails a bundle whose `unparseable_lines` is above 0 or whose `chain_valid_at_export` is false. Both fields are the exporter's own report and are unsigned, so this catches an honest incomplete export, not a forged one.
+- **One unparseable Witness receipt line no longer hides the rest.** Listing a session's receipts and exporting its bundle failed (HTTP 400) on the first line that did not parse. They now skip it and report `unparseable_lines` with how many they skipped (in the listed window, the last `limit` lines, for a listing; in the whole chain for a bundle). The bundle keeps the receipts that parse, and its chain check still fails on the gap (`chain_valid_at_export` is false, with the reason in `chain_reason_at_export`). With a gap its `head_hash` is `null`, and `scripts/verify_witness_bundle.py` now fails a bundle whose `unparseable_lines` is present and anything but the integer 0, or whose `chain_valid_at_export` is false, `--allow-unsigned` or not (an unsigned chain that is intact exports `true`). Both fields are the exporter's own report and are unsigned, so this catches an honest incomplete export, not a forged one.
 
 - **Two MCP tool calls without a `session_id` no longer create two sessions.** Each saw no live session and created its own. Creating the implicit session is now serialized among calls from the same operator, so the second call uses the session the first one made. A call that finds a live session, a tool that never creates one, and another operator's call do not wait behind a create.
 

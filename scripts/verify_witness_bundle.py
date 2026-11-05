@@ -154,16 +154,21 @@ def verify_bundle(
         )
     if "receipt_count" in bundle and bundle["receipt_count"] != len(receipts):
         failures.append(f"bundle claims {bundle['receipt_count']} receipts but carries {len(receipts)}")
-    unparseable = bundle.get("unparseable_lines")
-    if isinstance(unparseable, int) and unparseable > 0:
-        failures.append(
-            f"unparseable_lines is {unparseable}: the exporter skipped chain lines that did not parse, so the bundle is incomplete"
-        )
+    if "unparseable_lines" in bundle:
+        unparseable = bundle["unparseable_lines"]
+        # Only the integer 0 passes: a bool, a float or a string is not a count this exporter writes.
+        if type(unparseable) is not int or unparseable != 0:
+            failures.append(
+                f"unparseable_lines is {unparseable!r}: the exporter skipped chain lines that did not parse, "
+                "so the bundle is incomplete"
+            )
     if bundle.get("chain_valid_at_export") is False:
-        # An unsigned chain is never "valid" to the exporter (it attests to nothing), so for a bundle that
-        # has no signed receipt the check below already says so, and --allow-unsigned accepts it.
-        message = "the exporter's own chain check failed when the bundle was made (chain_valid_at_export is false)"
-        (notes if allow_unsigned and not signed else failures).append(message)
+        reason = bundle.get("chain_reason_at_export")
+        failures.append(
+            "the exporter's own chain check failed when the bundle was made (chain_valid_at_export is false"
+            + (f": {reason}" if reason else "")
+            + ")"
+        )
     if expect_head and head != expect_head:
         failures.append(f"the chain ends at {head}, not the expected head {expect_head}")
 

@@ -666,6 +666,8 @@ class WitnessRecorder:
             # to a receipt list that has a gap, and look intact to a check that compares the two.
             "head_hash": None if receipts.unparseable_lines else chain.get("head_hash"),
             "chain_valid_at_export": chain.get("valid"),
+            # Why the exporter's own check failed (anchor_missing, truncated, diverged, ...); None when it passed.
+            "chain_reason_at_export": chain.get("reason"),
             "receipts": [r.model_dump(mode="json") for r in receipts],
         }
 
