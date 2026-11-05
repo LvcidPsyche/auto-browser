@@ -106,9 +106,11 @@ def test_a_failed_tunnel_still_writes_inactive_and_keeps_its_exit_status(tmp_pat
     source = ENTRYPOINT.read_text(encoding="utf-8")
     closing = source[source.index("terminate() {") :]
     prelude = "sh -c 'exit 3' &\nAUTOSSH_PID=$!\nsleep 30 >/dev/null 2>&1 &\nHEARTBEAT_PID=$!\n"
+    # The tunnel was up: the file already says "active", so a missed final write shows as a stale "active".
+    active = 'write_metadata "active"\n'
     result = subprocess.run(
         [SH, "-eu"],
-        input=f"{prelude}{shell_functions()}\n{closing}",
+        input=f"{prelude}{shell_functions()}\n{active}{closing}",
         cwd=tmp_path,
         env={**os.environ, **BASE_ENV},
         capture_output=True,
