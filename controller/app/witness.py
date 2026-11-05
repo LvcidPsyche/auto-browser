@@ -34,6 +34,26 @@ logger = logging.getLogger(__name__)
 ANCHORS_MIGRATED_MARKER = ".anchors-migrated"
 
 
+class ReceiptList(list):
+    """Receipts read from a chain file, with how many lines were skipped because they did not parse."""
+
+    unparseable_lines: int = 0
+
+
+def _parse_receipts(lines: list[str], path: Path) -> ReceiptList:
+    """The receipts among a chain's lines. A line that does not parse is skipped and counted, never fatal:
+    one bad line hid every good receipt. `verify` still fails on the gap."""
+    receipts = ReceiptList()
+    for line in lines:
+        try:
+            receipts.append(WitnessReceipt.model_validate_json(line))
+        except ValueError:
+            receipts.unparseable_lines += 1
+    if receipts.unparseable_lines:
+        logger.warning("witness: %s: skipped %d unparseable receipt line(s)", path.name, receipts.unparseable_lines)
+    return receipts
+
+
 def _chain_hash_of(record: str) -> str | None:
     try:
         return WitnessReceipt.model_validate_json(record).chain_hash
@@ -512,7 +532,7 @@ class WitnessRecorder:
         logger.warning("witness: %s: %s; recording the receipt and leaving the anchor as it is", path.name, reason)
         return None
 
-    async def list(self, scope: str, *, limit: int = 100) -> list[WitnessReceipt]:
+    async def list(self, scope: str, *, limit: int = 100) -> ReceiptList:
         return await asyncio.to_thread(self._list_sync, self._path(scope), limit)
 
     async def verify(self, scope: str) -> dict[str, Any]:
@@ -636,16 +656,19 @@ class WitnessRecorder:
             "signing_key_id": self.signer.key_id if self.signer is not None else None,
             "public_key_b64": self.signer.public_key_b64 if self.signer is not None else None,
             "receipt_count": len(receipts),
+            # Lines that did not parse and are not in `receipts`: the bundle is incomplete when this is above 0,
+            # and `chain_valid_at_export` is false because the chain has a gap there.
+            "unparseable_lines": receipts.unparseable_lines,
             "head_hash": chain.get("head_hash"),
             "chain_valid_at_export": chain.get("valid"),
             "receipts": [r.model_dump(mode="json") for r in receipts],
         }
 
     @staticmethod
-    def _read_all_sync(path: Path) -> list[WitnessReceipt]:
+    def _read_all_sync(path: Path) -> ReceiptList:
         if not path.exists():
-            return []
-        return [WitnessReceipt.model_validate_json(line) for line in chain_records(path.read_bytes())]
+            return ReceiptList()
+        return _parse_receipts(chain_records(path.read_bytes()), path)
 
     @classmethod
     def _verify_sync(cls, scope: str, path: Path) -> dict[str, Any]:
@@ -737,14 +760,14 @@ class WitnessRecorder:
             handle.write(text)
 
     @staticmethod
-    def _list_sync(path: Path, limit: int) -> list[WitnessReceipt]:
+    def _list_sync(path: Path, limit: int) -> ReceiptList:
         if not path.exists():
-            return []
+            return ReceiptList()
         # limit <= 0 returns nothing. It used to slice `lines[-0:]`, which is the
         # whole list — so a caller passing a computed limit that reached zero got
         # the entire receipt chain dumped into a response instead of an empty page.
         if limit <= 0:
-            return []
+            return ReceiptList()
         data = path.read_bytes()
         lines = chain_records(data)
         unterminated = data[data.rfind(b"\n") + 1 :]
@@ -752,7 +775,7 @@ class WitnessRecorder:
             # An append cut short; the next append sets it aside (see
             # _set_aside_torn_tail). Listing skips it rather than failing.
             lines.pop()
-        items = [WitnessReceipt.model_validate_json(line) for line in lines[-limit:]]
+        items = _parse_receipts(lines[-limit:], path)
         items.reverse()
         return items
 

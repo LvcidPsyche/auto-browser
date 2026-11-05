@@ -90,6 +90,8 @@ All notable changes to auto-browser are documented here.
 
 - **Two actions on one session no longer mix up their Witness context.** An action's risk category and approval id were parked on the session until its turn for the session lock, and the first action to finish cleared them, so an action that had been waiting could be receipted with no approval and no risk, or with another action's. Each action now carries its own context.
 
+- **One unparseable Witness receipt line no longer hides the rest.** Listing a session's receipts and exporting its bundle failed (HTTP 400) on the first line that did not parse. They now skip it and report `unparseable_lines` with how many they skipped. The bundle keeps the receipts that parse, and its chain check still fails on the gap (`chain_valid_at_export` is false), so it never claims to be intact.
+
 ## [1.14.1] — 2026-11-04
 
 A patch release over 1.14.0. A session whose start page fails to load now gets a 400 the agent can act on instead

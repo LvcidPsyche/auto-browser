@@ -232,6 +232,8 @@ def create_session_diagnostics_router(*, manager: Any, settings: Any) -> APIRout
         return {
             "session_id": session_id,
             "count": len(receipts),
+            # Lines of the chain file that did not parse and are not in `receipts`.
+            "unparseable_lines": getattr(receipts, "unparseable_lines", 0),
             "receipts": receipts,
         }
 

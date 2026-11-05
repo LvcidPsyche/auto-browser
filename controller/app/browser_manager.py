@@ -62,6 +62,7 @@ from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
 from .url_safety import browser_equivalent_url
 from .utils import spawn_background_task
 from .witness import (
+    ReceiptList,
     WitnessActionContext,
     WitnessApproval,
     WitnessPolicyEngine,
@@ -1095,9 +1096,11 @@ class BrowserManager:
         )
         return [item.model_dump() for item in events]
 
-    async def list_witness_receipts(self, session_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_witness_receipts(self, session_id: str, *, limit: int = 100) -> ReceiptList:
         receipts = await self.witness.list(session_id, limit=limit)
-        return [item.model_dump() for item in receipts]
+        listing = ReceiptList(item.model_dump() for item in receipts)
+        listing.unparseable_lines = receipts.unparseable_lines
+        return listing
 
     async def verify_witness_chain(self, session_id: str) -> dict[str, Any]:
         # A hash chain only proves internal consistency — anyone holding the file

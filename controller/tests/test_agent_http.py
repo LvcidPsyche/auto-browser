@@ -954,6 +954,7 @@ class AgentHttpTests(unittest.TestCase):
             {
                 "session_id": "session-1",
                 "count": 1,
+                "unparseable_lines": 0,
                 "receipts": [
                     {
                         "receipt_id": "rcpt-1",
