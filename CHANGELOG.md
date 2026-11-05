@@ -78,6 +78,9 @@ All notable changes to auto-browser are documented here.
   profile and downloads directories are kept instead of being deleted under a container that may still be running.
 - Two isolated sessions created at once now read the Docker daemon's API version once and log the "daemon ignores
   GwPriority" warning once; both were unsynchronised across the provisioning threads.
+- When the active tab closes (`browser.close_tab`, or the page closing itself), the session no longer moves to a tab that
+  `ALLOWED_HOSTS` refuses while an allowed one is left: it takes the nearest allowed tab, and only when every remaining
+  tab is refused does the old choice stand.
 
 ### Security
 

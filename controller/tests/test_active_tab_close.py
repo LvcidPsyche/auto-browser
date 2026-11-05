@@ -27,9 +27,13 @@ class FakePage:
             handler(self)
 
 
-def fake_manager() -> SimpleNamespace:
-    """What the close listener reads of the manager: provenance, and whether ALLOWED_HOSTS refuses a URL."""
-    return SimpleNamespace(page_provenance=PageProvenance(), _url_off_list=lambda _url: False)
+def fake_manager(refused: tuple[FakePage, ...] = ()) -> SimpleNamespace:
+    """What the close listener reads of the manager: provenance, and whether ALLOWED_HOSTS refuses a URL or a page."""
+    return SimpleNamespace(
+        page_provenance=PageProvenance(),
+        _url_off_list=lambda _url: False,
+        _page_refused=lambda page: page in refused,
+    )
 
 
 class ActiveTabCloseTests(unittest.TestCase):
@@ -69,6 +73,34 @@ class ActiveTabCloseTests(unittest.TestCase):
         background.close_itself()
 
         self.assertIs(session.page, active)
+
+
+class RefusedTabsAreNotChosenTests(unittest.TestCase):
+    """NAV-09: when the active tab closes, the session moves to a tab ALLOWED_HOSTS allows, if any is left."""
+
+    def test_a_refused_last_tab_is_passed_over(self) -> None:
+        opener, popup, refused = FakePage(), FakePage(), FakePage()
+        service = BrowserDiagnosticsService(fake_manager((refused,)), None, None)  # type: ignore[arg-type]
+        session = ActiveTabCloseTests._session(opener, popup, refused)
+        for page in (opener, popup, refused):
+            service.attach_page_listeners(page, session)
+        session.page = popup
+
+        popup.close_itself()
+
+        self.assertIs(session.page, opener)
+
+    def test_when_every_remaining_tab_is_refused_the_old_choice_stands(self) -> None:
+        popup, first, second = FakePage(), FakePage(), FakePage()
+        service = BrowserDiagnosticsService(fake_manager((first, second)), None, None)  # type: ignore[arg-type]
+        session = ActiveTabCloseTests._session(popup, first, second)
+        for page in (popup, first, second):
+            service.attach_page_listeners(page, session)
+        session.page = popup
+
+        popup.close_itself()
+
+        self.assertIs(session.page, second)
 
 
 class ClosedWhileHeldTests(unittest.TestCase):

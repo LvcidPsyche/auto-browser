@@ -591,7 +591,8 @@ class BrowserDiagnosticsService:
         context = getattr(session, "context", None)
         remaining = [p for p in getattr(context, "pages", []) if p is not page and not p.is_closed()]
         if remaining:
-            session.page = remaining[-1]
+            # The last one, unless ALLOWED_HOSTS refuses it: then the last one it allows, if any.
+            session.page = next((p for p in reversed(remaining) if not self.manager._page_refused(p)), remaining[-1])
 
     async def _sweep_after_grace(self, session: "BrowserSession") -> None:
         """Once the grace after a counting page closed is up and the session no longer counts, close every
