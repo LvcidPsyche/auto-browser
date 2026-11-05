@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
 
 from .auth_policy import is_loopback_host
 from .utils import utc_now
+
+logger = logging.getLogger(__name__)
+
+# What autossh prints when the remote port it was asked to bind is taken (ExitOnForwardFailure=yes): the only early
+# exits that another port can cure. Anything else (a refused key, an unreachable bastion) fails the next port too.
+_REMOTE_PORT_UNAVAILABLE = ("remote port forwarding failed", "address already in use")
+# The error session users see when the cause is autossh's own output (which can name the bastion, its user, key paths).
+TUNNEL_EXITED_CODE = "autossh_exited"
+# Errors set by the broker itself: short codes, safe to show as they are.
+_TUNNEL_ERROR_CODES = frozenset({"autossh_start_failed", "provision_cancelled", "provision_failed"})
 
 
 @dataclass
@@ -139,6 +150,9 @@ class IsolatedSessionTunnelBroker:
                         self._write_metadata(tunnel, status="error")
                         self._close_stderr(tunnel)
                         last_error = tunnel.error
+                        if not any(text in last_error.lower() for text in _REMOTE_PORT_UNAVAILABLE):
+                            # Not the port: the next one would fail the same way after another grace period.
+                            raise RuntimeError(last_error)
                         continue
 
                     self._write_metadata(tunnel, status="active")
@@ -222,12 +236,18 @@ class IsolatedSessionTunnelBroker:
 
         tunnel.status = "inactive"
         tunnel.error = None
-        self._write_metadata(tunnel, status="inactive")
         self._allocated_ports.discard(tunnel.remote_port)
         self._tunnels.pop(tunnel.session_id, None)
         if tunnel.stderr_handle is not None:
             tunnel.stderr_handle.close()
             tunnel.stderr_handle = None
+        # The metadata names the bastion, its user and key paths, and the log holds autossh's stderr: neither
+        # outlives the tunnel (an inactive tunnel's file has no reader, and the controller restarts without them).
+        for path in (tunnel.info_path, tunnel.log_path):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("could not remove %s for session %s: %s", path.name, tunnel.session_id, exc)
 
     def describe(self, tunnel: IsolatedSessionTunnel | None) -> dict[str, Any] | None:
         if tunnel is None:
@@ -242,15 +262,17 @@ class IsolatedSessionTunnelBroker:
             "local_host": tunnel.local_host,
             "local_port": tunnel.local_port,
             "public_takeover_url": tunnel.public_takeover_url,
-            "ssh_host": tunnel.ssh_host,
-            "ssh_port": tunnel.ssh_port,
-            "ssh_user": tunnel.ssh_user,
             "access_mode": tunnel.access_mode,
-            "info_path": str(tunnel.info_path),
-            "log_path": str(tunnel.log_path),
-            "error": tunnel.error,
+            # A short code: autossh's own text (the bastion, its user, key paths) stays in the controller log.
+            "error": self._error_code(tunnel),
             "last_updated": tunnel.last_updated,
         }
+
+    @staticmethod
+    def _error_code(tunnel: IsolatedSessionTunnel) -> str | None:
+        if tunnel.error is None:
+            return None
+        return tunnel.error if tunnel.error in _TUNNEL_ERROR_CODES else TUNNEL_EXITED_CODE
 
     def _build_tunnel(
         self,
@@ -327,6 +349,7 @@ class IsolatedSessionTunnelBroker:
         if tunnel.status in {"inactive", "error", "degraded"}:
             return
         tunnel.error = self._tail_file(tunnel.log_path) or (f"autossh exited with code {tunnel.process.returncode}")
+        logger.warning("session tunnel for %s degraded: %s", tunnel.session_id, tunnel.error)
         self._write_metadata(tunnel, status="degraded")
 
     def _write_metadata(self, tunnel: IsolatedSessionTunnel, *, status: str) -> None:

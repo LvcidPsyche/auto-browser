@@ -92,8 +92,9 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
 
             await broker.release(tunnel)
 
-            metadata = json.loads((root / "tunnels" / "sessions" / "session-1.json").read_text(encoding="utf-8"))
-            self.assertEqual(metadata["status"], "inactive")
+            # NAV-22: nothing of the tunnel's metadata or stderr log outlives it.
+            self.assertFalse((root / "tunnels" / "sessions" / "session-1.json").exists())
+            self.assertFalse((root / "tunnels" / "sessions" / "session-1.log").exists())
             self.assertTrue(tunnel.released)
 
     async def test_cancelled_provision_stops_the_autossh_process(self) -> None:
@@ -414,7 +415,8 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(broker._allocated_ports, set())
             self.assertEqual(broker._tunnels, {})
             self.assertIsNone(tunnel.stderr_handle)
-            self.assertEqual(json.loads(tunnel.info_path.read_text(encoding="utf-8"))["status"], "inactive")
+            self.assertFalse(tunnel.info_path.exists())
+            self.assertFalse(tunnel.log_path.exists())
 
     async def test_failed_metadata_write_does_not_leak_the_log_handle(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

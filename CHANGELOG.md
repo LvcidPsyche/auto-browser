@@ -63,6 +63,10 @@ All notable changes to auto-browser are documented here.
   on such a URL was not offered an isolated tunnel and the startup warning was skipped. The isolated tunnel's remote
   bind address check uses `is_loopback_host`, so it now also accepts another loopback address; `0.0.0.0` stays refused
   there without `unsafe-public`.
+- An isolated session tunnel whose autossh exits early for a reason other than a taken remote port (a refused key, an
+  unreachable bastion) now fails the provision at once with that message instead of retrying every port in
+  `ISOLATED_TUNNEL_REMOTE_PORT_START`..`END`, each after a full `ISOLATED_TUNNEL_STARTUP_GRACE_SECONDS`; "remote port
+  forwarding failed" and "address already in use" still move on to the next port.
 
 ### Security
 
@@ -100,6 +104,12 @@ All notable changes to auto-browser are documented here.
 - `browser.enable_shadow_browse` is now refused under `SESSION_ISOLATION_MODE=docker_ephemeral`: its headed Chromium
   runs in the controller's own process tree, outside the per-session container isolation. It stays exempt from
   `MAX_SESSIONS`.
+- A released session tunnel's metadata (`<session>.json`) and autossh log (`<session>.log`) under
+  `ISOLATED_TUNNEL_INFO_ROOT` are now deleted with it; they named the bastion, its user and the key path. The tunnel
+  block in `remote_access.session_tunnel` (a session's `remote_access` in its summary) no longer carries `ssh_host`,
+  `ssh_port`, `ssh_user`, `info_path` or `log_path`, and its `error` is a short code (`autossh_exited`,
+  `autossh_start_failed`, `provision_cancelled`, `provision_failed`) instead of autossh's stderr, which is logged by
+  the controller.
 
 ## [1.15.0] — 2026-11-05
 
