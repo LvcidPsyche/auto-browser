@@ -515,6 +515,20 @@ class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         contract = self.harness_service.start_convergence.await_args.args[0]
         self.assertEqual(contract.id, "task-1")
 
+    async def test_harness_list_runs_filters_on_cancelled_and_interrupted_runs(self) -> None:
+        # HARN-11: a run can end `cancelled` or `interrupted`; a client must be able to ask for those too.
+        listed = {tool["name"]: tool for tool in self.full_gateway.list_tools()}["harness.list_runs"]
+        for status in ("cancelled", "interrupted"):
+            with self.subTest(status=status):
+                response = await self.full_gateway.call_tool(
+                    McpToolCallRequest(name="harness.list_runs", arguments={"status": status})
+                )
+
+                self.assertFalse(response.isError, response.structuredContent)
+                self.assertEqual(response.structuredContent[0]["status"], status)
+                self.assertIn(status, listed["description"])
+                self.assertIn(status, listed["inputSchema"]["properties"]["status"]["anyOf"][0]["enum"])
+
     async def test_harness_tools_return_clear_error_when_service_unavailable(self) -> None:
         gateway = McpToolGateway(
             manager=self.manager,

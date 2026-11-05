@@ -143,7 +143,10 @@ class HarnessGetTraceInput(HarnessGetStatusInput):
 
 
 class HarnessListRunsInput(StrictInputModel):
-    status: Literal["created", "running", "converged", "unconverged", "failed", "over_budget"] | None = Field(
+    status: (
+        Literal["created", "running", "converged", "unconverged", "failed", "over_budget", "cancelled", "interrupted"]
+        | None
+    ) = Field(
         default=None,
         description="Only return runs in this state. Omit to list runs in every state.",
     )
