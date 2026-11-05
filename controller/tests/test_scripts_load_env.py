@@ -22,7 +22,7 @@ from pathlib import Path
 
 from tests.test_scripts_token_argv import BASH, SCRIPTS, _bash_path
 
-KEY_RE = re.compile(r"^[ \t﻿]*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=", re.M)
+KEY_RE = re.compile(r"^[ \t\ufeff]*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=", re.M)
 # A child bash prints "KEY=value" NUL-terminated for each named variable that is set and exported.
 PRINT_KEYS = r"""bash -c 'for k in "$@"; do if [[ -v $k ]]; then printf "%s=%s\0" "$k" "${!k}"; fi; done' _"""
 
@@ -243,7 +243,9 @@ class LoadRepoEnvTests(unittest.TestCase):
             f'source "{_bash_path(SCRIPTS / "load_env.sh")}"; load_repo_env "{_bash_path(env_file)}"; '
             "bash -c true; bash -lc true; printf '%s' \"${SAFE-unset}\""
         )
-        result = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=60, env=_minimal_env())
+        # HOME is the empty temp dir: the login shell reads no profile of this machine's user, which could print.
+        env = {**_minimal_env(), "HOME": _bash_path(temp)}
+        result = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=60, env=env)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((temp / "marker").exists(), "BASH_ENV from .env ran in a child shell")
@@ -264,8 +266,20 @@ class LoadRepoEnvTests(unittest.TestCase):
         for index, key in enumerate(denied):
             with self.subTest(key=key):
                 self.assertNotEqual(exported.get(key), f"poisoned-{index}")
-                self.assertIn(key, stderr)
+                # The whole warning, so that ENV in BASH_ENV, PATH in LD_LIBRARY_PATH or COMPOSE in SMOKE_COMPOSE_PROJECT
+                # cannot satisfy the check for another key.
+                self.assertIn(f": {key} is not loaded from .env (", stderr)
         self.assertNotIn("poisoned", stderr)
+
+    def test_the_scripts_own_names_are_refused_by_the_denylist_alone(self) -> None:
+        # With the prelude above, the set-and-not-exported rule would refuse these too, and deleting their entries
+        # from the denylist would go unnoticed: here nothing has set them.
+        exported, _, stderr = self.load("ROOT_DIR=poisoned\nSMOKE_PROJECT=poisoned\nCOMPOSE=poisoned\nFINE=1\n")
+
+        self.assertEqual(exported["FINE"], "1")
+        for key in ("ROOT_DIR", "SMOKE_PROJECT", "COMPOSE"):
+            self.assertNotIn(key, exported)
+            self.assertIn(f": {key} is not loaded from .env (", stderr)
 
     def test_keys_that_make_a_child_python_perl_node_or_browser_run_code_are_refused(self) -> None:
         # PYTHONWARNINGS imports any module named in it at startup, and BROWSER is what webbrowser.open() runs;

@@ -42,6 +42,12 @@ if [[ -e "$state/fail" ]]; then
   echo "Cannot connect to the Docker daemon" >&2
   exit 1
 fi
+# No test expects a compose command to succeed: a script that reaches one (its preflight let it through) stops
+# there, within a second, instead of going on into its readiness loops.
+if [[ "$1" == "compose" ]]; then
+  echo "fake docker: compose is not available" >&2
+  exit 1
+fi
 filters=()
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
@@ -105,8 +111,20 @@ class _FakeDockerCase(unittest.TestCase):
         log = self.state / "calls.log"
         return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
 
+    def fake_docker_guard(self) -> str:
+        """Bash that stops the child (exit 99) unless `docker` resolves to the fake: never a real daemon.
+
+        PATH puts the fake first, but bash skips a file it cannot execute (a noexec temp mount, say) and falls
+        through to the real docker, which these scripts would then drive (and `docker rm -f`) for real.
+        """
+        return (
+            f'[[ "$(command -v docker)" -ef "{_bash_path(self.fake_bin / "docker")}" ]] '
+            "|| { echo 'docker is not the fake' >&2; exit 99; }; "
+        )
+
     def bash(self, body: str) -> subprocess.CompletedProcess[str]:
         script = (
+            f"{self.fake_docker_guard()}"
             f'export FAKE_DOCKER_DIR="{_bash_path(self.state)}"; ROOT_DIR="{_bash_path(self.root)}"; '
             f'source "{_bash_path(SCRIPTS / "load_env.sh")}"; source "{_bash_path(SCRIPTS / "smoke_lib.sh")}"; {body}'
         )
@@ -122,6 +140,27 @@ class _FakeDockerCase(unittest.TestCase):
 class SmokePreflightTests(_FakeDockerCase):
     def preflight(self, mode: str = "isolated") -> subprocess.CompletedProcess[str]:
         return self.bash(f"smoke_setup; smoke_preflight {mode}; echo PREFLIGHT_OK")
+
+    def test_a_child_whose_docker_is_not_the_fake_stops_before_running_anything(self) -> None:
+        other = self.temp / "other-bin"
+        other.mkdir()
+        real = other / "docker"
+        real.write_text("#!/usr/bin/env bash\necho REAL DOCKER RAN\n", encoding="utf-8", newline="\n")
+        real.chmod(0o755)
+        env = _smoke_env(self.fake_bin)
+        env["PATH"] = os.pathsep.join([str(other), env["PATH"]])
+
+        result = subprocess.run(
+            [BASH, "-c", f"{self.fake_docker_guard()} docker ps"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+
+        self.assertEqual(result.returncode, 99, result.stderr)
+        self.assertNotIn("REAL DOCKER RAN", result.stdout)
+        self.assertIn("docker is not the fake", result.stderr)
 
     def test_a_clean_daemon_passes(self) -> None:
         result = self.preflight()
@@ -310,20 +349,9 @@ class SmokeSetupTests(_FakeDockerCase):
 
         named_like_the_default = self.temp / "Auto-Browser-Smoke"
         named_like_the_default.mkdir()
-        script = f'ROOT_DIR="{_bash_path(named_like_the_default)}"; smoke_setup; echo SETUP_OK'
-        result = subprocess.run(
-            [
-                BASH,
-                "-c",
-                f'source "{_bash_path(SCRIPTS / "load_env.sh")}"; source "{_bash_path(SCRIPTS / "smoke_lib.sh")}"; {script}',
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env=_smoke_env(self.fake_bin),
-        )
+        result = self.bash(f'ROOT_DIR="{_bash_path(named_like_the_default)}"; smoke_setup; echo SETUP_OK')
 
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("auto-browser-smoke", result.stderr)
 
     def test_a_project_name_compose_would_reject_is_refused(self) -> None:
@@ -395,12 +423,14 @@ class SmokeScriptsRefuseBeforeTouchingAnythingTests(_FakeDockerCase):
         for keep in (tunnels / "reverse-ssh.json", tunnels / "sessions" / "live.json"):
             keep.write_text("operator", encoding="utf-8")
         script = _bash_path(self.root / "scripts" / name)
+        # API_PORT names a port nothing listens on, so that a script that gets past its preflight cannot reach a
+        # controller of the developer's on 8000.
         return subprocess.run(
-            [BASH, script],
+            [BASH, "-c", f'{self.fake_docker_guard()}exec "{BASH}" "{script}"'],
             capture_output=True,
             text=True,
             timeout=60,
-            env={**_smoke_env(self.fake_bin), "FAKE_DOCKER_DIR": _bash_path(self.state)},
+            env={**_smoke_env(self.fake_bin), "FAKE_DOCKER_DIR": _bash_path(self.state), "API_PORT": "1"},
             cwd=self.temp,
         )
 
@@ -435,18 +465,73 @@ class SmokeScriptsRefuseBeforeTouchingAnythingTests(_FakeDockerCase):
         self.assert_untouched(self.run_script("smoke_reverse_ssh.sh"))
 
 
+ALLOWED_BEFORE_PREFLIGHT = re.compile(
+    r"""^(?:
+        set\ -[a-z]+(?:\ pipefail)?          # shell options
+        |source\ "\$\{ROOT_DIR\}/scripts/[a-z_]+\.sh"
+        |cd\ "\$\{ROOT_DIR\}"
+        |smoke_setup
+        |ROOT_DIR="\$\(cd\ "\$\(dirname\ "\$\{BASH_SOURCE\[0\]\}"\)/\.\."\ &&\ pwd\)"
+        |(?:export\ )?[A-Za-z_][A-Za-z0-9_]*=[^`$]*(?:\$\{[A-Za-z_0-9]+(?::-[^}]*)?\}[^`$]*)*   # an assignment, no $(...)
+        |[a-z_]+\(\)\ \{                     # a function definition opens
+    )$""",
+    re.X,
+)
+
+
+def statements_before_preflight(text: str) -> list[str]:
+    """The top-level statements before the first `smoke_preflight` call that are not a source, a setup call, an
+    assignment, an export or a function definition (a function's body is not run by defining it)."""
+    found = []
+    in_function = False
+    for line in text.splitlines():
+        if line.startswith("smoke_preflight "):
+            return found
+        stripped = line.strip()
+        if in_function:
+            in_function = line != "}"
+            continue
+        if not stripped or stripped.startswith("#") or line.startswith("#!"):
+            continue
+        if not ALLOWED_BEFORE_PREFLIGHT.match(line):
+            found.append(line)
+        elif line.endswith("() {"):
+            in_function = True
+    return [*found, "<no smoke_preflight call>"]
+
+
 @unittest.skipUnless(SMOKE_RUNNERS, "scripts/ is not available here")
 class SmokeScriptsAreScopedTests(unittest.TestCase):
+    def test_the_order_check_flags_a_side_effect_before_the_preflight(self) -> None:
+        clean = 'set -euo pipefail\nROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"\ncd "${ROOT_DIR}"\n'
+        clean += 'source "${ROOT_DIR}/scripts/load_env.sh"\nsmoke_setup\nexport MAX_SESSIONS=2\ncleanup() {\n  smoke_cleanup\n}\n'
+        self.assertEqual(statements_before_preflight(clean + "smoke_preflight isolated\n"), [])
+        for effect in (
+            "ssh-keygen -q -t ed25519 -N '' -f key",
+            "cp a b",
+            "chmod 600 key",
+            "docker rm -f x",
+            'bearer_curl -fsS "${API_BASE_URL}/sessions"',
+            "helper_that_removes_things",
+            'X="$(rm -rf data)"',
+            "if true; then rm -f x; fi",
+            "trap cleanup EXIT",
+        ):
+            with self.subTest(effect=effect):
+                found = statements_before_preflight(clean + effect + "\nsmoke_preflight isolated\n")
+                self.assertEqual(found, [effect])
+
     def test_every_smoke_runs_the_preflight_before_any_side_effect(self) -> None:
         for script in SMOKE_RUNNERS:
             with self.subTest(script=script.name):
                 text = script.read_text(encoding="utf-8")
-                preflight = text.find("\nsmoke_preflight ")
-                self.assertGreater(preflight, 0, "no smoke_preflight call")
-                for effect in ("\ntrap cleanup EXIT", "\nrm -f", "\nmkdir ", '\n"${COMPOSE[@]}"'):
-                    position = text.find(effect)
-                    self.assertTrue(position == -1 or preflight < position, f"{effect.strip()} comes first")
+                self.assertTrue(
+                    re.search(r"^smoke_preflight (isolated|shared)$", text, flags=re.M), "no preflight call"
+                )
+                # Before the preflight: sources, setup, assignments, exports and function definitions, nothing else.
+                self.assertEqual(statements_before_preflight(text), [])
                 self.assertEqual(text.count("trap cleanup EXIT"), 1)
+                self.assertLess(text.index("\nsmoke_preflight "), text.index("trap cleanup EXIT"))
 
     def test_the_isolated_smokes_look_again_after_the_build_and_before_their_controller_starts(self) -> None:
         # The controller reaps every managed container when it starts, and the image build before it takes minutes.
@@ -510,7 +595,13 @@ class CiSmokeStepTests(unittest.TestCase):
 
 
 REPO = SCRIPTS.parent
-REMOVAL = re.compile(r"\bdocker\s+(?:(?:container|network|system)\s+)?(?:rm|prune)\b|\bxargs\b[^\n|]*\brm\b")
+REMOVAL = re.compile(
+    r"\bdocker\s+(?:(?:container|network|system)\s+)?(?:rm|remove|prune)\b|\bxargs\b[^\n|]*\b(?:rm|remove)\b"
+)
+# A line whose command is echo or printf (a message that tells the operator which docker rm to run), alone or after a
+# `[[ ... ]] ||` guard or a YAML `run:`. A line that merely contains the word echo, as in `... | xargs docker rm -f ||
+# echo failed`, is code.
+MESSAGE_LINE = re.compile(r"^\s*(?:-\s+)?(?:run:\s+)?(?:\[\[.*?\]\]\s*(?:\|\||&&)\s*)?(?:echo|printf)\b")
 MANAGED = re.compile(r"auto-browser\.managed|SMOKE_MANAGED_LABEL|managed=true")
 SMOKE_CLEANUP = re.compile(r"^smoke_cleanup\(\) \{\n.*?^\}\n", flags=re.M | re.S)
 
@@ -518,14 +609,15 @@ SMOKE_CLEANUP = re.compile(r"^smoke_cleanup\(\) \{\n.*?^\}\n", flags=re.M | re.S
 def removes_by_the_managed_label(text: str, *, allow_smoke_cleanup: bool = False) -> bool:
     """Whether a script, Makefile or workflow both names the managed label and removes containers or networks.
 
-    Comments and echo lines (a message that tells the operator which docker rm to run) do not count. In
+    Comments and lines whose command is echo or printf (a message that tells the operator which docker rm to run)
+    do not count; a line that only ends in `|| echo failed` does. In
     scripts/smoke_lib.sh the body of smoke_cleanup, which removes by name prefix as well as by label, is the one
     place that may do both.
     """
     if allow_smoke_cleanup:
         text = SMOKE_CLEANUP.sub("", text)
     code = "\n".join(
-        line for line in text.splitlines() if not line.lstrip().startswith("#") and not re.search(r"\becho\b", line)
+        line for line in text.splitlines() if not line.lstrip().startswith("#") and not MESSAGE_LINE.match(line)
     )
     return bool(MANAGED.search(code) and REMOVAL.search(code))
 
@@ -539,11 +631,28 @@ class ManagedLabelRemovalGuardTests(unittest.TestCase):
         network = "docker network ls -q --filter label=auto-browser.managed=true | xargs -r docker network rm\n"
         prune = "docker container prune --filter label=auto-browser.managed=true -f\n"
         bare_xargs = "docker ps -aq --filter label=auto-browser.managed=true | xargs rm\n"
-        for text in (pipeline, loop, network, prune, bare_xargs):
+        # A trailing `|| echo` or `&& echo` does not make the line a message; `remove` is docker's alias of `rm`.
+        reported = "docker ps -aq --filter label=auto-browser.managed=true | xargs docker rm -f || echo failed\n"
+        confirmed = "docker ps -aq --filter label=auto-browser.managed=true | xargs docker rm -f && echo removed\n"
+        alias = "docker ps -aq --filter label=auto-browser.managed=true | xargs docker container remove\n"
+        network_alias = 'F=label=auto-browser.managed=true\nfor n in $(docker network ls -q --filter "$F"); do docker network remove "$n"; done\n'
+        workflow = (
+            "      - run: docker ps -aq --filter label=auto-browser.managed=true | xargs docker rm -f || echo x\n"
+        )
+        for text in (pipeline, loop, network, prune, bare_xargs, reported, confirmed, alias, network_alias, workflow):
             with self.subTest(text=text):
                 self.assertTrue(removes_by_the_managed_label(text))
         self.assertFalse(removes_by_the_managed_label("docker compose down --remove-orphans\ndocker rm -f one\n"))
         self.assertFalse(removes_by_the_managed_label("# docker rm -f x  auto-browser.managed\n"))
+        # Messages that name a docker rm for the operator to run are not removals.
+        for message in (
+            '  echo "  docker rm -f $names"  # auto-browser.managed=true\n',
+            '[[ -z "$c" ]] || echo "  docker rm -f $c" >&2  # managed=true\n',
+            "      - run: echo 'docker rm -f x'  # managed=true\n",
+            "printf 'docker network rm %s\\n' x  # managed=true\n",
+        ):
+            with self.subTest(message=message):
+                self.assertFalse(removes_by_the_managed_label(message))
 
     def test_the_allowance_covers_only_the_body_of_smoke_cleanup(self) -> None:
         inside = 'smoke_cleanup() {\n  docker rm -f "$n"\n  docker ps --filter label=auto-browser.managed=true\n}\n'
@@ -556,7 +665,8 @@ class ManagedLabelRemovalGuardTests(unittest.TestCase):
 
     @unittest.skipUnless(SMOKE_RUNNERS, "scripts/ is not available here")
     def test_nothing_in_the_repo_removes_by_the_managed_label_outside_smoke_cleanup(self) -> None:
-        files = [*sorted(SCRIPTS.glob("*.sh")), *sorted((REPO / ".github" / "workflows").glob("*.yml"))]
+        workflows = REPO / ".github" / "workflows"
+        files = [*sorted(SCRIPTS.glob("*.sh")), *sorted(workflows.glob("*.yml")), *sorted(workflows.glob("*.yaml"))]
         if (REPO / "Makefile").is_file():
             files.append(REPO / "Makefile")
         self.assertIn(SCRIPTS / "smoke_lib.sh", files)

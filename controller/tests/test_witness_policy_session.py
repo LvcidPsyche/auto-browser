@@ -17,9 +17,9 @@ def _session(profile: str, **overrides) -> WitnessSessionContext:
     return WitnessSessionContext(session_id="s1", profile=profile, operator=NAMED_OPERATOR, **overrides)
 
 
-def _codes(outcome) -> set[str]:
-    """The concern codes as a set: the order the engine appends them in is not part of what is pinned."""
-    return {concern.code for concern in outcome.concerns}
+def _codes(outcome) -> list[str]:
+    """The concern codes, sorted: the order the engine appends them in is not pinned, but a repeated code is."""
+    return sorted(concern.code for concern in outcome.concerns)
 
 
 def test_normal_session_with_encrypted_auth_state_has_no_concerns() -> None:
@@ -33,7 +33,7 @@ def test_normal_session_with_plain_auth_state_warns_but_does_not_block() -> None
     outcome = WitnessPolicyEngine().evaluate_session(_session("normal"))
 
     assert outcome.evidence_mode == "standard"
-    assert _codes(outcome) == {"auth_state_unencrypted"}
+    assert _codes(outcome) == ["auth_state_unencrypted"]
     assert outcome.concerns[0].severity == "warn"
     assert not outcome.should_block and not outcome.require_approval
 
@@ -42,7 +42,7 @@ def test_confidential_session_on_the_shared_defaults_raises_both_isolation_conce
     outcome = WitnessPolicyEngine().evaluate_session(_session("confidential"))
 
     assert outcome.evidence_mode == "restricted"
-    assert _codes(outcome) == {"shared_takeover_surface", "shared_browser_process"}
+    assert _codes(outcome) == ["shared_browser_process", "shared_takeover_surface"]
     assert {concern.severity for concern in outcome.concerns} == {"high"}
     # A session-level check informs; only an action can be blocked or need approval.
     assert not outcome.should_block and not outcome.require_approval
@@ -51,12 +51,12 @@ def test_confidential_session_on_the_shared_defaults_raises_both_isolation_conce
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [
-        ({"shared_takeover_surface": False}, {"shared_browser_process"}),
-        ({"shared_browser_process": False}, {"shared_takeover_surface"}),
-        ({"shared_takeover_surface": False, "shared_browser_process": False}, set()),
+        ({"shared_takeover_surface": False}, ["shared_browser_process"]),
+        ({"shared_browser_process": False}, ["shared_takeover_surface"]),
+        ({"shared_takeover_surface": False, "shared_browser_process": False}, []),
     ],
 )
-def test_confidential_session_reports_only_the_isolation_it_lacks(overrides: dict, expected: set[str]) -> None:
+def test_confidential_session_reports_only_the_isolation_it_lacks(overrides: dict, expected: list[str]) -> None:
     outcome = WitnessPolicyEngine().evaluate_session(_session("confidential", **overrides))
 
     assert outcome.evidence_mode == "restricted"
