@@ -40,7 +40,16 @@ async def _read_capped_body(request: Request, limit: int) -> bytes:
     return b"".join(chunks)
 
 
-@mesh_router.post("/receive")
+@mesh_router.post(
+    "/receive",
+    # The body is read by hand (capped before it is parsed), so FastAPI sees no body model: declare it for /docs.
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": MeshReceiveRequest.model_json_schema()}},
+        }
+    },
+)
 async def mesh_receive(request: Request):
     """
     Inbound delegation endpoint. Peers POST signed envelopes here.

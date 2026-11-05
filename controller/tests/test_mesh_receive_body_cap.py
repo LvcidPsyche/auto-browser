@@ -84,3 +84,26 @@ def test_a_normal_signed_envelope_still_works_under_the_default_cap(mesh) -> Non
     assert response.status_code == 200
     assert request_payload()["capability"] == OBSERVE
     assert mesh.calls == [(OBSERVE.removeprefix("tool:"), {})]
+
+
+def test_the_openapi_schema_still_shows_the_envelope_it_reads() -> None:
+    # The route reads its body by hand, capped before parsing, so FastAPI no longer sees a body model: the route
+    # declares the envelope for /docs itself.
+    from fastapi import FastAPI
+
+    from app.routes.extensions.mesh import mesh_router
+
+    app = FastAPI()
+    app.include_router(mesh_router)
+    body = app.openapi()["paths"]["/mesh/receive"]["post"].get("requestBody", {})
+    schema = body.get("content", {}).get("application/json", {}).get("schema", {})
+
+    assert body.get("required") is True
+    assert set(schema.get("required", [])) == {
+        "sender_node_id",
+        "recipient_node_id",
+        "nonce",
+        "timestamp",
+        "payload",
+        "signature_b64",
+    }
