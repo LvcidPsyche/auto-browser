@@ -38,9 +38,12 @@ class ReceiptList(list):
     """Receipts read from a chain file, with how many lines were skipped because they did not parse.
 
     For a listing that is the lines in the listed window (the last `limit` lines), not the whole file: a page
-    holding a bad line has fewer than `limit` receipts. An export counts the whole chain."""
+    holding a bad line has fewer than `limit` receipts. An export counts the whole chain.
+
+    A torn tail (see `_chain_lines`) is skipped by both and not counted; `torn_tail` says one was."""
 
     unparseable_lines: int = 0
+    torn_tail: bool = False
 
 
 def _parse_receipts(lines: list[str], path: Path) -> ReceiptList:
@@ -55,6 +58,20 @@ def _parse_receipts(lines: list[str], path: Path) -> ReceiptList:
     if receipts.unparseable_lines:
         logger.warning("witness: %s: skipped %d unparseable receipt line(s)", path.name, receipts.unparseable_lines)
     return receipts
+
+
+def _chain_lines(data: bytes) -> tuple[list[str], bool]:
+    """A chain's records without a torn tail, and whether it had one.
+
+    A torn tail is bytes after the last newline that do not parse as a receipt: an append cut short, which the
+    next append sets aside (`_set_aside_torn_tail`). It was never a receipt (nothing chains to it and the anchor
+    never named it), so list and export both skip it and neither counts it as an unparseable line."""
+    lines = chain_records(data)
+    unterminated = data[data.rfind(b"\n") + 1 :]
+    if unterminated.strip() and not _is_receipt(unterminated):
+        lines.pop()
+        return lines, True
+    return lines, False
 
 
 def _chain_hash_of(record: str) -> str | None:
@@ -662,12 +679,20 @@ class WitnessRecorder:
             # Lines that did not parse and are not in `receipts`: the bundle is incomplete when this is above 0,
             # and `chain_valid_at_export` is false because the chain has a gap there.
             "unparseable_lines": receipts.unparseable_lines,
+            # True when the chain ended in a torn tail (an append cut short, never a receipt), which is skipped
+            # as the listing skips it and not counted in `unparseable_lines`. The chain check still reads it as a
+            # record that does not parse until the next append sets it aside, so `chain_valid_at_export` is false.
+            "torn_tail": receipts.torn_tail,
             # None when a line was skipped: the chain stops at the first bad line, so its head would sit next
             # to a receipt list that has a gap, and look intact to a check that compares the two.
             "head_hash": None if receipts.unparseable_lines else chain.get("head_hash"),
             "chain_valid_at_export": chain.get("valid"),
-            # Why the exporter's own check failed (anchor_missing, truncated, diverged, ...); None when it passed.
+            # The exporter's own check: why it failed, as verify's sentence ("chain holds 2 receipts but the
+            # anchor records 3; ..."), and the anchor's status code (ok, anchor_missing, anchor_unreadable,
+            # truncated, diverged). The reason is None when the check passed; the status is None when the check
+            # stopped before the anchor (a record that does not parse, or a hash that does not match).
             "chain_reason_at_export": chain.get("reason"),
+            "chain_anchor_status_at_export": (chain.get("anchor") or {}).get("status"),
             "receipts": [r.model_dump(mode="json") for r in receipts],
         }
 
@@ -675,7 +700,10 @@ class WitnessRecorder:
     def _read_all_sync(path: Path) -> ReceiptList:
         if not path.exists():
             return ReceiptList()
-        return _parse_receipts(chain_records(path.read_bytes()), path)
+        lines, torn_tail = _chain_lines(path.read_bytes())
+        receipts = _parse_receipts(lines, path)
+        receipts.torn_tail = torn_tail
+        return receipts
 
     @classmethod
     def _verify_sync(cls, scope: str, path: Path) -> dict[str, Any]:
@@ -775,13 +803,7 @@ class WitnessRecorder:
         # the entire receipt chain dumped into a response instead of an empty page.
         if limit <= 0:
             return ReceiptList()
-        data = path.read_bytes()
-        lines = chain_records(data)
-        unterminated = data[data.rfind(b"\n") + 1 :]
-        if unterminated.strip() and not _is_receipt(unterminated):
-            # An append cut short; the next append sets it aside (see
-            # _set_aside_torn_tail). Listing skips it rather than failing.
-            lines.pop()
+        lines, _ = _chain_lines(path.read_bytes())
         items = _parse_receipts(lines[-limit:], path)
         items.reverse()
         return items

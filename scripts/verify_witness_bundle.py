@@ -37,9 +37,15 @@ What a PASS does NOT mean:
     independently, or pass it with --expect-head.
 
 The bundle's own `unparseable_lines` and `chain_valid_at_export` fields are checked too: a bundle that says
-it skipped a line, or that its chain did not verify when it was exported, fails. Both fields are self-reported
-by the exporter and unsigned, so this catches an honest but incomplete export, not a forgery; someone who
-edits the bundle can set them to look clean. The signatures and --expect-head are what hold against that.
+it skipped a line (`unparseable_lines` anything but the integer 0), or that its chain did not verify when it
+was exported (`chain_valid_at_export` anything but true; a bundle made before that field existed passes
+without it), fails. Both fields are self-reported by the exporter and unsigned, so this catches an honest but
+incomplete export, not a forgery; someone who edits the bundle can set them to look clean. The signatures and
+--expect-head are what hold against that.
+
+Text taken from the bundle (its scope, algorithm, key ids, head, receipt ids and the exporter's reason) is
+printed with control and format characters escaped and cut at 200 characters, so a bundle cannot hide or
+rewrite lines of this output.
 
 A bundle with no signed receipt at all fails: its hashes are consistent, but
 anyone holding the receipts can produce that. --allow-unsigned accepts it
@@ -57,6 +63,18 @@ import sys
 from typing import Any
 
 CHAIN_EXCLUDED_FIELDS = ("chain_hash", "chain_signature", "signing_key_id")
+# Longest bundle-supplied value printed, after escaping.
+MAX_SHOWN_CHARS = 200
+
+
+def _shown(value: Any) -> str:
+    """A bundle-supplied value as this script prints it. The bundle comes from a party the reader may not trust, so
+    a control or format character (an ANSI escape, a carriage return, a newline, a bidi override) is printed
+    escaped, where it could otherwise hide or rewrite lines of this output, and the text is cut at MAX_SHOWN_CHARS."""
+    text = "".join(char if char.isprintable() else char.encode("unicode_escape").decode("ascii") for char in str(value))
+    if len(text) > MAX_SHOWN_CHARS:
+        return text[:MAX_SHOWN_CHARS] + "...[cut]"
+    return text
 
 
 def canonical_chain_hash(receipt: dict[str, Any]) -> str:
@@ -93,7 +111,7 @@ def _check_key(bundle: dict[str, Any], expect_key_id: str | None, failures: list
         failures.append("the bundled public key is not valid base64")
     claimed = bundle.get("signing_key_id")
     if key_id and claimed and claimed != key_id:
-        failures.append(f"bundle names signing key {claimed} but carries the public key of {key_id}")
+        failures.append(f"bundle names signing key {_shown(claimed)} but carries the public key of {key_id}")
     if expect_key_id and key_id != expect_key_id:
         failures.append(f"signed by key {key_id}, not the expected {expect_key_id}")
     return public_key, key_id
@@ -105,7 +123,7 @@ def _check_chain(
     previous: str | None = None
     signed = unsigned = 0
     for index, receipt in enumerate(receipts):
-        label = f"receipt {index} ({receipt.get('receipt_id')})"
+        label = f"receipt {index} ({_shown(receipt.get('receipt_id'))})"
         if canonical_chain_hash(receipt) != receipt.get("chain_hash"):
             failures.append(f"{label}: content altered after write")
             break
@@ -122,7 +140,9 @@ def _check_chain(
             failures.append(f"{label}: signed, but the bundle carries no public key")
             break
         elif receipt.get("signing_key_id") and receipt.get("signing_key_id") != key_id:
-            failures.append(f"{label}: signed under key {receipt.get('signing_key_id')}, not the bundled key {key_id}")
+            failures.append(
+                f"{label}: signed under key {_shown(receipt.get('signing_key_id'))}, not the bundled key {key_id}"
+            )
             break
         elif not verify_signature(public_key, receipt["chain_hash"], signature):
             failures.append(f"{label}: signature does not verify")
@@ -150,27 +170,31 @@ def verify_bundle(
     head = receipts[-1].get("chain_hash") if receipts else None
     if bundle.get("head_hash") != head:
         failures.append(
-            f"bundle claims head {bundle.get('head_hash')} but its receipts end at {head} — receipts missing"
+            f"bundle claims head {_shown(bundle.get('head_hash'))} but its receipts end at {_shown(head)} — receipts missing"
         )
     if "receipt_count" in bundle and bundle["receipt_count"] != len(receipts):
-        failures.append(f"bundle claims {bundle['receipt_count']} receipts but carries {len(receipts)}")
+        failures.append(f"bundle claims {_shown(bundle['receipt_count'])} receipts but carries {len(receipts)}")
     if "unparseable_lines" in bundle:
         unparseable = bundle["unparseable_lines"]
         # Only the integer 0 passes: a bool, a float or a string is not a count this exporter writes.
         if type(unparseable) is not int or unparseable != 0:
             failures.append(
-                f"unparseable_lines is {unparseable!r}: the exporter skipped chain lines that did not parse, "
+                f"unparseable_lines is {_shown(repr(unparseable))}: the exporter skipped chain lines that did not parse, "
                 "so the bundle is incomplete"
             )
-    if bundle.get("chain_valid_at_export") is False:
+    # Absent in a bundle from before the field existed; when present, only true passes (as for unparseable_lines,
+    # a null, 0 or "false" is not what this exporter writes for a chain that verified).
+    if "chain_valid_at_export" in bundle and bundle["chain_valid_at_export"] is not True:
+        valid = bundle["chain_valid_at_export"]
         reason = bundle.get("chain_reason_at_export")
         failures.append(
-            "the exporter's own chain check failed when the bundle was made (chain_valid_at_export is false"
-            + (f": {reason}" if reason else "")
+            "the exporter's own chain check failed when the bundle was made (chain_valid_at_export is "
+            + ("false" if valid is False else _shown(repr(valid)))
+            + (f": {_shown(reason)}" if reason else "")
             + ")"
         )
     if expect_head and head != expect_head:
-        failures.append(f"the chain ends at {head}, not the expected head {expect_head}")
+        failures.append(f"the chain ends at {_shown(head)}, not the expected head {expect_head}")
 
     if receipts and not signed:
         message = "no receipt is signed: the hashes are consistent, which anyone holding the receipts can produce"
@@ -210,7 +234,7 @@ def main(argv: list[str]) -> int:
 
     if not isinstance(bundle, dict) or bundle.get("format") != "auto-browser-witness-bundle":
         print(
-            f"not a witness bundle: format={bundle.get('format') if isinstance(bundle, dict) else None!r}",
+            f"not a witness bundle: format={_shown(repr(bundle.get('format') if isinstance(bundle, dict) else None))}",
             file=sys.stderr,
         )
         return 2
@@ -222,11 +246,11 @@ def main(argv: list[str]) -> int:
         expect_head=args.expect_head,
     )
 
-    print(f"scope           : {bundle.get('scope')}")
+    print(f"scope           : {_shown(bundle.get('scope'))}")
     print(f"receipts        : {result['receipts']} ({result['signed']} signed)")
-    print(f"head_hash       : {result['head_hash']}   (computed from the receipts)")
+    print(f"head_hash       : {_shown(result['head_hash'])}   (computed from the receipts)")
     print(f"signing_key_id  : {result['key_id']}   (computed from the public key)")
-    print(f"algorithm       : {bundle.get('algorithm')}")
+    print(f"algorithm       : {_shown(bundle.get('algorithm'))}")
     for failure in result["failures"]:
         print(f"  FAIL: {failure}")
     for note in result["notes"]:

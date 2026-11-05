@@ -68,8 +68,10 @@ def register(registry, gateway):
             name="browser.export_witness_bundle",
             description=(
                 "Export a session's Witness receipts as a self-contained evidence "
-                "bundle: every receipt, the head hash, the signing key id, and the "
-                "Ed25519 public key. Anyone can verify it with "
+                "bundle: every receipt that parses, the head hash, the signing key id, "
+                "and the Ed25519 public key. Chain lines that do not parse are skipped "
+                "and counted in unparseable_lines, and head_hash is null when any "
+                "were. Anyone can verify it with "
                 "scripts/verify_witness_bundle.py, which imports nothing from this "
                 "project. Use when you need to hand proof of what happened in a "
                 "session to someone who does not run (or trust) this controller."
