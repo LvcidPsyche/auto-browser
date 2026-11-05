@@ -200,6 +200,8 @@ class WitnessPolicyEngine:
         action: WitnessActionContext,
     ) -> WitnessPolicyOutcome:
         outcome = WitnessPolicyOutcome(profile=session.profile)
+        # The session's own mode first: a confidential profile restricts the evidence of every action.
+        outcome.evidence_mode = self.evaluate_session(session).evidence_mode
         if action.sensitive_input or action.stores_auth_material or action.is_high_risk:
             outcome.evidence_mode = "restricted"
 

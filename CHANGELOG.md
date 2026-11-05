@@ -6,6 +6,10 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- **Confidential sessions now keep restricted evidence for every action, not only for the session record.** The
+  Witness policy chose the evidence mode for an action without looking at the session's profile, so in a
+  `confidential` session an ordinary action's receipt kept before/after evidence and the typed text preview. The
+  action now starts from the session's mode, as the session record already did. Standard sessions are unchanged.
 - **Typed text is scrubbed before it reaches the audit log and action receipts.** A `type` action stores the
   first 80 characters of what was typed (`text_preview`) in an ordinary field, and that went to disk as typed. With
   `PII_SCRUB_ENABLED` on, the whole text is now run through the PII scrubber first and then cut to 80 characters,
