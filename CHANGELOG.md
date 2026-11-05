@@ -71,6 +71,9 @@ All notable changes to auto-browser are documented here.
   (`ISOLATED_TUNNEL_PUBLIC_HOST`, else `ISOLATED_TUNNEL_HOST`) as a page host: its `NOVNC_ALLOWED_HOSTS` held only
   `ISOLATED_TAKEOVER_HOST`, so the takeover URL a session hands out through its tunnel was refused by noVNC's own
   Origin/Host guard.
+- Releasing an isolated session no longer takes an unreachable Docker daemon (or any Docker error other than "not
+  found") for a gone container: the release now fails, `close_session` reports it in `failed_steps`, and the session's
+  profile and downloads directories are kept instead of being deleted under a container that may still be running.
 
 ### Security
 

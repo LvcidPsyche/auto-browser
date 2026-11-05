@@ -615,7 +615,12 @@ class DockerBrowserNodeProvisioner:
         return f"{container_name}-net"
 
     def _remove_stale_container(self, client, container_name: str) -> None:
-        existing = self._safe_get_container(client, container_name)
+        try:
+            existing = self._safe_get_container(client, container_name)
+        except Exception as exc:
+            # Best effort, on a path that may be reporting another failure already.
+            logger.warning("Could not look up a stale container %s: %s", container_name, exc)
+            return
         if existing is None:
             return
         try:
@@ -1107,14 +1112,18 @@ class DockerBrowserNodeProvisioner:
 
     @staticmethod
     def _safe_get_container(client, identifier: str):
+        """The container, or None when the daemon says there is none. Any other failure (an unreachable daemon, an
+        API error) propagates: it is not the answer "gone", and a release that took it for one removed the session's
+        directories while the container may still have been running."""
         try:
             return client.containers.get(identifier)
-        except Exception:
+        except docker.errors.NotFound:
             return None
 
     @staticmethod
     def _safe_get_network(client, identifier: str):
+        """As _safe_get_container, for networks."""
         try:
             return client.networks.get(identifier)
-        except Exception:
+        except docker.errors.NotFound:
             return None

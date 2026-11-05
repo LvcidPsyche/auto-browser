@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import docker.errors
+
 from app.browser_manager import BrowserManager, BrowserSession
 from app.config import Settings
 from app.session_isolation import DockerBrowserNodeProvisioner, IsolatedBrowserRuntime
@@ -132,7 +134,7 @@ class FakeDockerNetworks:
         for network in self.by_name.values():
             if identifier in {network.id, network.name}:
                 return network
-        raise KeyError(identifier)
+        raise docker.errors.NotFound(identifier)
 
     def list(self, filters: dict | None = None) -> list[FakeDockerNetwork]:
         networks = list(self.by_name.values())
@@ -189,7 +191,7 @@ class FakeDockerContainers:
         for container in self.browser_containers.values():
             if identifier in {container.id, container.name}:
                 return container
-        raise KeyError(identifier)
+        raise docker.errors.NotFound(identifier)
 
     def run(self, image: str, *args, **kwargs) -> FakeDockerContainer | bytes:
         if (kwargs.get("labels") or {}).get("auto-browser.role") == "cleanup":
