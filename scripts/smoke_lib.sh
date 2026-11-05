@@ -82,14 +82,21 @@ smoke_check_managed() {
 }
 
 # One spelling for a directory, so that compose's label (a Windows path with backslashes, C:\Users\me\repo, when
-# the stack was started by Docker Desktop's compose), Git Bash's /c/Users/me/repo and pwd -W's C:/Users/me/repo
-# compare equal: forward slashes, no trailing slash, and a lowercase drive letter written c:/...
+# the stack was started by Docker Desktop's compose), Git Bash's /c/Users/me/repo, pwd -W's C:/Users/me/repo and
+# WSL's /mnt/c/Users/me/repo compare equal: forward slashes, no trailing slash, and a lowercase drive letter written
+# c:/... On Git Bash and Cygwin the whole path is lowercased too, because Windows paths ignore case.
 smoke_normalize_path() {
   local path="${1//\\//}"
   while [[ "$path" == */ && "$path" != "/" ]]; do path="${path%/}"; done
   case "$path" in
+    /mnt/[A-Za-z]/* | /mnt/[A-Za-z]) path="/${path#/mnt/}" ;;
+  esac
+  case "$path" in
     [A-Za-z]:/* | [A-Za-z]:) path="$(printf '%s' "${path:0:1}" | tr '[:upper:]' '[:lower:]')${path:1}" ;;
     /[A-Za-z]/* | /[A-Za-z]) path="$(printf '%s' "${path:1:1}" | tr '[:upper:]' '[:lower:]'):${path:2}" ;;
+  esac
+  case "${OSTYPE:-}" in
+    msys* | cygwin*) path="$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')" ;;
   esac
   printf '%s' "$path"
 }

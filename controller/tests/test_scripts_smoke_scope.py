@@ -238,6 +238,43 @@ class SmokePreflightTests(_FakeDockerCase):
                     self.assertNotIn("PREFLIGHT_OK", result.stdout)
                     self.assertIn("operator-controller-1", result.stderr)
 
+    @unittest.skipUnless(os.name == "nt", "msys/cygwin bash only: a Windows path is case-insensitive")
+    def test_a_stack_whose_directory_label_differs_in_case_is_still_found_on_windows(self) -> None:
+        # Windows treats C:\Users\Me\Repo and c:\users\me\repo as one directory, and compose records whatever
+        # spelling the shell that started the stack used.
+        root = _bash_path(self.root)
+        drive = re.sub(r"^/([a-z])/", lambda m: m.group(1).upper() + ":/", root)
+        for label, spelling in {"upper case": drive.upper(), "lower case": drive.lower()}.items():
+            with self.subTest(spelling=label):
+                self.put("stack.txt", [f"{spelling}|operator-project|operator-controller-1"])
+
+                result = self.preflight("shared")
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("PREFLIGHT_OK", result.stdout)
+                self.assertIn("operator-controller-1", result.stderr)
+
+    def test_a_stack_whose_directory_label_is_a_wsl_mnt_path_is_still_found(self) -> None:
+        # Docker Desktop's WSL integration reports /mnt/c/Users/me/repo for C:\Users\me\repo.
+        root = _bash_path(self.root)
+        if not re.match(r"^/[a-z]/", root):
+            self.skipTest("this checkout is not under a drive letter")
+        for mode in ("isolated", "shared"):
+            with self.subTest(mode=mode):
+                self.put("stack.txt", [f"/mnt{root}|operator-project|operator-controller-1"])
+
+                result = self.preflight(mode)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("PREFLIGHT_OK", result.stdout)
+                self.assertIn("operator-controller-1", result.stderr)
+
+    def test_a_mnt_path_of_another_checkout_is_not_confused_with_this_one(self) -> None:
+        root = _bash_path(self.root)
+        self.put("stack.txt", [f"/mnt{root}-other|x|prefix-lookalike-1", "/mnt/c/elsewhere|x|other-checkout-1"])
+
+        self.assertEqual(self.preflight().returncode, 0)
+
     def test_a_stack_of_another_checkout_is_not_confused_with_this_one(self) -> None:
         root = _bash_path(self.root)
         self.put("stack.txt", [f"{root}-other|x|prefix-lookalike-1", f"{root}/sub|x|subdir-1", "|x|no-compose-dir"])
