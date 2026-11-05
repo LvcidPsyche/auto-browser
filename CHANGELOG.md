@@ -210,7 +210,8 @@ All notable changes to auto-browser are documented here.
   warning on POSIX.
 - Every secret `Settings` field (the auth-state encryption key, the witness remote key, every provider API key, the
   approval webhook secret, the default proxy password, the share-link secret) is now left out of `repr()`, so a logged
-  `Settings` object no longer carries it.
+  `Settings` object no longer carries it. So are the URL fields that can carry a credential in their userinfo, path or
+  query: `APPROVAL_WEBHOOK_URL`, `REDIS_URL`, `CDP_CONNECT_URL`, `BROWSER_WS_ENDPOINT` and `DEFAULT_PROXY_SERVER`.
 - `browser.enable_shadow_browse` is now refused under `SESSION_ISOLATION_MODE=docker_ephemeral`: its headed Chromium
   runs in the controller's own process tree, outside the per-session container isolation. It stays exempt from
   `MAX_SESSIONS`.

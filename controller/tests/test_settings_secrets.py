@@ -46,3 +46,17 @@ class SecretsStayOutOfReprTests(unittest.TestCase):
                     settings = Settings(_env_file=None)
                 self.assertNotIn(_SENTINEL, repr(settings))
                 self.assertNotIn(_SENTINEL, str(settings))
+
+    def test_url_fields_that_can_carry_a_credential_stay_out_of_repr(self):
+        # AUTH-25: the secret word scan misses these, and a URL's userinfo, path or query can be its credential.
+        for alias, value in (
+            ("APPROVAL_WEBHOOK_URL", f"https://hooks.example.com/services/{_SENTINEL}"),
+            ("REDIS_URL", f"redis://:{_SENTINEL}@redis:6379/0"),
+            ("CDP_CONNECT_URL", f"ws://127.0.0.1:9222/devtools/browser/{_SENTINEL}"),
+            ("BROWSER_WS_ENDPOINT", f"ws://browser-node:9223/{_SENTINEL}"),
+            ("DEFAULT_PROXY_SERVER", f"http://user:{_SENTINEL}@proxy.example:3128"),
+        ):
+            with self.subTest(alias=alias):
+                settings = Settings(_env_file=None, **{alias: value})
+                self.assertNotIn(_SENTINEL, repr(settings))
+                self.assertNotIn(_SENTINEL, str(settings))

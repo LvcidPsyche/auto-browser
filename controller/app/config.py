@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     browser_ws_endpoint: str | None = Field(
         None,
         validation_alias=AliasChoices("BROWSER_WS_ENDPOINT", "BROWSER_CDP_ENDPOINT"),
+        repr=False,
     )
     browser_ws_endpoint_file: str = Field(
         "/data/browser-profile/browser-ws-endpoint.txt",
@@ -82,7 +83,7 @@ class Settings(BaseSettings):
         "/data/compliance-manifest.json",
         alias="COMPLIANCE_MANIFEST_PATH",
     )
-    redis_url: str | None = Field(None, alias="REDIS_URL")
+    redis_url: str | None = Field(None, alias="REDIS_URL", repr=False)
     session_store_redis_prefix: str = Field(
         "auto_browser:sessions",
         alias="SESSION_STORE_REDIS_PREFIX",
@@ -369,7 +370,7 @@ class Settings(BaseSettings):
     )
 
     # Approval webhooks — notified when approvals are created or decided
-    approval_webhook_url: str | None = Field(None, alias="APPROVAL_WEBHOOK_URL")
+    approval_webhook_url: str | None = Field(None, alias="APPROVAL_WEBHOOK_URL", repr=False)
     approval_webhook_secret: str | None = Field(None, alias="APPROVAL_WEBHOOK_SECRET", repr=False)
     # Off: a webhook host that is, or resolves to, a loopback, private, link-local or unspecified address is
     # refused (app/webhooks.py). On, for a receiver on the compose network or the LAN.
@@ -392,7 +393,7 @@ class Settings(BaseSettings):
     sse_keepalive_seconds: float = Field(15.0, alias="SSE_KEEPALIVE_SECONDS")
 
     # Proxy (session-level override supported in CreateSessionRequest)
-    default_proxy_server: str | None = Field(None, alias="DEFAULT_PROXY_SERVER")
+    default_proxy_server: str | None = Field(None, alias="DEFAULT_PROXY_SERVER", repr=False)
     default_proxy_username: str | None = Field(None, alias="DEFAULT_PROXY_USERNAME")
     default_proxy_password: str | None = Field(None, alias="DEFAULT_PROXY_PASSWORD", repr=False)
 
@@ -422,7 +423,7 @@ class Settings(BaseSettings):
     network_inspector_body_max_bytes: int = Field(16384, alias="NETWORK_INSPECTOR_BODY_MAX_BYTES")
 
     # CDP attach mode — connect to an already-running Chrome instance
-    cdp_connect_url: str | None = Field(None, alias="CDP_CONNECT_URL")
+    cdp_connect_url: str | None = Field(None, alias="CDP_CONNECT_URL", repr=False)
     # The operator's declaration that the Chrome reached over CDP (CDP_CONNECT_URL, browser.cdp_attach) was
     # started with --disable-features=BlockOriginHeaderModificationOnRedirect,AvoidCorsURLLoaderRestartOnRedirect
     # (request_gate.REDIRECT_ORIGIN_SWITCH). Without the first, older Chrome fails a cross-origin POST redirect the
