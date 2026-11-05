@@ -48,9 +48,27 @@ BASH = _find_bash()
 # A token-bearing header on a command line: in a script, -H/--header with a
 # Bearer value built from a variable, or such a header string assigned for later use.
 ARGV_TOKEN = re.compile(r"""(-H|--header)\s+["']?Authorization:\s*Bearer\s+\$|["']Authorization:\s*Bearer\s+\$\{?\w""")
-# A curl that reads the token's config from stdin without -q (or --disable) as its first argument: curl honours it
-# only there, and otherwise a .curlrc found through CURL_HOME, XDG_CONFIG_HOME or HOME can add a proxy or a header.
-CURLRC_READ = re.compile(r"""\bcurl\s+(?!-q\b|--disable\b)[^|;&\n]*--config\s+-(?=[\s"']|$)""")
+# The token reaches curl one way: as a config piped from curl_auth_config (load_env.sh). curl reads a .curlrc unless its
+# first argument is -q (or --disable), and that file, found through CURL_HOME, XDG_CONFIG_HOME or HOME, can add a
+# proxy or a header to the request that carries the token. So every use of curl_auth_config must pipe it into a curl
+# whose first argument is exactly one of those, however that curl then reads its config.
+TOKEN_USE = re.compile(r"\bcurl_auth_config\b(?!\s*\(\))")  # a use, not the definition
+TOKEN_PIPE = re.compile(r"\bcurl_auth_config\s*\|(?P<rest>.*)")
+PIPED_CURL = re.compile(r"""\bcurl\s+(?P<first>[^\s"';|&)`]+)""")
+
+
+def _token_curls_that_read_a_curlrc(text: str) -> list[str]:
+    """Each command (continued lines joined) that hands curl_auth_config's output to anything but a curl whose first
+    argument is -q or --disable: another curl, a program behind a variable, or a process substitution."""
+    offenders = []
+    for line in re.sub(r"\\\r?\n", " ", text).splitlines():
+        if line.lstrip().startswith("#") or not TOKEN_USE.search(line):
+            continue
+        pipe = TOKEN_PIPE.search(line)
+        curl = PIPED_CURL.search(pipe.group("rest")) if pipe else None
+        if curl is None or curl.group("first") not in ("-q", "--disable"):
+            offenders.append(line.strip())
+    return offenders
 
 
 def _bash_path(path: Path) -> str:
@@ -168,22 +186,41 @@ class NoTokenInArgvTests(unittest.TestCase):
 
     def test_every_curl_that_reads_the_token_from_stdin_skips_its_curlrc(self) -> None:
         # D3b-7: bearer_curl got -q; doctor.sh's api_curl and smoke_reverse_ssh.sh's bastion curl did not.
-        offenders = []
-        for path in sorted(SCRIPTS.glob("*.sh")):
-            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-                if not line.lstrip().startswith("#") and CURLRC_READ.search(line):
-                    offenders.append(f"{path.name}:{number}: {line.strip()}")
-        self.assertEqual(offenders, [], "a curl reads a .curlrc next to the token")
+        offenders = [
+            f"{path.name}: {command}"
+            for path in sorted(SCRIPTS.glob("*.sh"))
+            for command in _token_curls_that_read_a_curlrc(path.read_text(encoding="utf-8"))
+        ]
+        self.assertEqual(offenders, [], "the token reaches a curl that reads a .curlrc")
+        self.assertTrue(
+            any(TOKEN_PIPE.search(path.read_text(encoding="utf-8")) for path in SCRIPTS.glob("*.sh")),
+            "no script pipes curl_auth_config any more: the check above would pass on nothing",
+        )
 
-    def test_the_curlrc_pattern_catches_the_old_forms_and_passes_the_fixed_one(self) -> None:
-        for line in (
+    def test_the_check_catches_the_old_and_other_forms_and_passes_the_fixed_ones(self) -> None:
+        for text in (
             '  curl_auth_config | curl --config - ${args[@]+"${args[@]}"} "$@"',
             '  curl_auth_config | "${COMPOSE[@]}" exec -T test-bastion sh -lc "curl --config - $1"',
             "  curl_auth_config | curl -fsS --config - http://127.0.0.1:8000/",
+            '  curl_auth_config | curl -K - "$u"',
+            '  curl_auth_config | curl -fsS "$u" \\\n    --config -',
+            '  out="$(curl_auth_config | curl -fsS "$u" --config -)"',
+            '  curl_auth_config | curl --disable-epsv --config - "$u"',
+            '  curl_auth_config | "$CURL" -q --config - "$u"',
+            '  curl -fsS --config <(curl_auth_config) "$u"',
         ):
-            with self.subTest(line=line):
-                self.assertRegex(line, CURLRC_READ)
-        self.assertNotRegex('  curl_auth_config | curl -q --config - "$@"', CURLRC_READ)
+            with self.subTest(text=text):
+                self.assertEqual(len(_token_curls_that_read_a_curlrc(text)), 1)
+        for text in (
+            '  curl_auth_config | curl -q --config - "$@"',
+            '  curl_auth_config | "${COMPOSE[@]}" exec -T test-bastion sh -lc "curl -q --config - $1"',
+            '  out="$(curl_auth_config | curl -q --config - "$u")"',
+            '  curl_auth_config | curl --disable --config - "$u"',
+            "curl_auth_config() {",
+            "# pipe it in: curl_auth_config | curl --config - ...",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(_token_curls_that_read_a_curlrc(text), [])
 
 
 if __name__ == "__main__":
