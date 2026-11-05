@@ -43,8 +43,8 @@ class WitnessSigner:
     """Signs receipt chain hashes with this deployment's Ed25519 identity.
 
     Reuses `mesh.identity.NodeIdentity` rather than managing a second keypair:
-    it already handles generation, 0600 permissions, and node_id tamper
-    detection, and is a leaf module with no mesh runtime dependency. Witness
+    it already handles generation, 0600 permissions, and a node_id
+    consistency check, and is a leaf module with no mesh runtime dependency. Witness
     signing therefore works whether or not the mesh subsystem is enabled.
     """
 

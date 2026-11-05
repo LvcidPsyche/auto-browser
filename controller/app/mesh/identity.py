@@ -94,12 +94,13 @@ class NodeIdentity:
         if not meta_path.exists():
             meta_path.write_text(json.dumps({"node_id": self._node_id, "pubkey_b64": self._pubkey_b64}))
 
-        # Tamper detection — re-derive node_id from current public key and compare to stored meta
+        # A consistency check, not tamper detection: meta.json sits in the same directory as the key, so whoever
+        # can replace the key can replace it too. It catches a corrupt file or keys mixed from two identities.
         stored = json.loads(meta_path.read_text())
         if stored.get("node_id") != self._node_id:
             raise RuntimeError(
-                f"mesh.identity: node_id mismatch — stored={stored.get('node_id')!r} "
-                f"derived={self._node_id!r}. Key material may have been tampered with."
+                "mesh.identity: stored node_id does not match the key (corrupt or mixed identity directory): "
+                f"stored={stored.get('node_id')!r} derived={self._node_id!r}"
             )
 
         logger.info("mesh.identity: node_id=%s", self._node_id)

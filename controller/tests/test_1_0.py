@@ -53,7 +53,7 @@ class TestMeshIdentity:
         assert len(sig) == 64
         assert ident.verify_self(data, sig)
 
-    def test_tamper_detection(self, tmp_path):
+    def test_a_meta_file_that_disagrees_with_the_key_is_refused_as_inconsistent_not_tampered(self, tmp_path):
         from app.mesh.identity import NodeIdentity
 
         d = tmp_path / "identity"
@@ -61,8 +61,10 @@ class TestMeshIdentity:
         # Corrupt the meta file
         meta = d / "node_meta.json"
         meta.write_text(json.dumps({"node_id": "bad" * 16, "pubkey_b64": "x" * 44}))
-        with pytest.raises(RuntimeError, match="mismatch"):
+        with pytest.raises(RuntimeError, match="does not match the key") as raised:
             NodeIdentity(d)
+        # meta.json lives beside the key, so it proves nothing about tampering: the message must not claim it.
+        assert "tamper" not in str(raised.value).lower()
 
     def test_sign_detects_tampering(self, tmp_path):
         from app.mesh.identity import NodeIdentity

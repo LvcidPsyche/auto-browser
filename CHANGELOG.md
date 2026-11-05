@@ -23,6 +23,9 @@ All notable changes to auto-browser are documented here.
 - Known limit: the `takeover` step the agent loop guard appends to an agent run carries the previous step's
   observation (the page as it was before that step's action), not a fresh one; the harness trace ignores it when it
   picks the run's final observation.
+- The mesh identity's `node_meta.json` check no longer claims to detect tampering: the file sits beside the key, so
+  anyone who can replace the key can replace it. It stays as a consistency check, and a mismatch now says "stored
+  node_id does not match the key (corrupt or mixed identity directory)".
 
 ### Fixed
 
