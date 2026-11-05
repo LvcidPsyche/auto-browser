@@ -27,6 +27,9 @@ All notable changes to auto-browser are documented here.
 - `TYPING_DELAY_MS` is removed from the settings, `.env.example` and `docker-compose.yml`: nothing ever read it
   (typing pacing is `HUMAN_TYPING_MIN_DELAY_MS` and `HUMAN_TYPING_MAX_DELAY_MS`). An old env file that still sets it
   is ignored.
+- httpx's per-request `HTTP Request:` INFO lines are no longer logged, at any `LOG_LEVEL` and for every client (the
+  approval webhook, the providers, the curator): each named its URL whole, userinfo, path and query included. httpx's
+  warnings and errors still are.
 - The "daemon ignores GwPriority" startup warning now also covers a client that speaks an API version below 1.48, and
   says its check compares network names only, so the gateway move it describes can also happen where it stays silent.
 - `harness.check_drift` and `harness.check_all_drifts` now say what they do: they re-verify a staged candidate's
