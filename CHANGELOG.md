@@ -84,6 +84,8 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **`pip install auto-browser-langchain[crewai]` now installs `langchain-core`.** Recent CrewAI releases no longer depend on LangChain, so the CrewAI example failed at `AutoBrowserTool(...)` with an `ImportError` asking for the `langchain` extra. The `crewai` extra now includes it.
+
 - **The reverse-SSH sidecar now reports `inactive` when its tunnel ends.** The entrypoint ran under `set -e`, so an `autossh` that exited with an error (or was stopped) ended the script before the final status was written, and `reverse-ssh.json` kept saying `active` after the tunnel was gone. The exit status is unchanged.
 
 - **Human-like typing now has a time limit.** It paused 40-130 ms after every character with no overall cap, so a 5000-character text held the session for about 11 minutes. The pauses now add up to at most 20 seconds: a long text is typed faster, and a short one keeps its usual pace.
