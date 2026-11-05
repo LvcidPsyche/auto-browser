@@ -198,7 +198,7 @@ All notable changes to auto-browser are documented here.
 
 - **Element intelligence now works on a real browser.** `get_element_intelligence` asked Chromium for computed styles without first enabling the DOM and CSS agents, so the style lookup failed there. It now enables both for the length of the read and switches the CSS agent off again afterwards (a CSS agent left on keeps streaming stylesheet events for the life of the session), each enable and disable bounded at 5 seconds. The DOM agent stays as `DOM.getDocument` leaves it, because turning it off discards every node id, among them the `node_id` the read returns and the ones a raw chain still means to use. A read cut off by the route's 10-second limit switches the CSS agent off in the background rather than making the 504 wait for it. A raw `CSS.getComputedStyleForNode` or `CSS.getMatchedStylesForNode` through `/cdp/raw` is scoped the same way, so it no longer fails on a session that has not read an element yet.
 
-- **A refused fork or create now says why.** With the default `MAX_SESSIONS=1`, forking a session (which counts as a new session) or creating a second one answered a bare `409 {"detail":"Conflict"}`. The 409 now carries the session-limit message, naming the limit and the live sessions. Other conflicts still answer "Conflict". Forking needs `MAX_SESSIONS` of at least 2; this is now stated in `docs/architecture.md` and in the `browser.fork_session` tool description. A refused fork now checks the limit first, so it no longer writes the source session's cookies to disk (and deletes them) on the way to the refusal. Shadow browse stays outside the limit, and says so.
+- **A refused fork or create now says why.** With the default `MAX_SESSIONS=1`, forking a session (which counts as a new session) or creating a second one answered a bare `409 {"detail":"Conflict"}`. The 409 now carries the session-limit message, naming the limit and the live sessions. Other conflicts still answer "Conflict". Forking needs `MAX_SESSIONS` of at least 2; this is now stated in `docs/architecture.md` and in the `browser.fork_session` tool description. A refused fork now checks the limit first, so it no longer writes the source session's cookies to disk (and deletes them) on the way to the refusal; a fork at the limit therefore answers the limit before it checks the page (Chrome's error page, a page the allowed-hosts list refuses, a missing start URL). Shadow browse is not refused by the limit, and says so; once open, a shadow session does count toward it.
 
 - **Vision targeting now posts to the right Anthropic URL.** With the default `ANTHROPIC_BASE_URL` (which already ends in `/v1`) it called `/v1/v1/messages` and every vision lookup failed. It now uses the same `<base>/messages` form as the Claude adapter. The curator's Claude calls (`CURATOR_PROVIDER=claude`) went straight to `https://api.anthropic.com/v1/messages` whatever `ANTHROPIC_BASE_URL` said; they now follow it too, so a gateway or proxy you route Anthropic traffic through sees them. The curator's OpenAI and Gemini calls follow `OPENAI_BASE_URL` and `GEMINI_BASE_URL` the same way, and its `anthropic-version` header comes from `ANTHROPIC_VERSION`; the curator is built from the controller's own settings rather than the cached ones.
 
@@ -233,10 +233,10 @@ All notable changes to auto-browser are documented here.
 - **Page-controlled strings are now capped in observations and element reads.** A page could set a link's URL, a field's
   name, type or role, a form's action or method, the title or the focused element's name or id to megabytes of text, and it
   went whole into interactables, the active element, the form outline and so into model prompts. The same held for
-  `find_elements` (`href`, `id`, `value`, `class`), the feed and profile extractors (link and image URLs, page URL and
-  avatar) and the element-intelligence asset references (`src`, `href`, `currentSrc`, `backgroundImage`). URLs are cut
-  at 2,000 characters, the title at 200, and a name, id, type, role, method, value or class at 120, where the script
-  reads them. A URL that was cut ends in `…[truncated]`, so a client does not follow it as if it were whole.
+  `find_elements` (`href`, `id`, `value`, `class`) and the element-intelligence asset references (`src`, `href`,
+  `currentSrc`, `backgroundImage`). URLs are cut at 2,000 characters, the title at 200, and a name, id, type, role,
+  method, value or class at 120, where the script reads them. A URL that was cut ends in `…[truncated]`, so a client
+  does not follow it as if it were whole.
   A title is also cut at 200 wherever the controller reads it itself: the session summary, the tab list, the fast
   perception preset, the share snapshot and the bot-challenge report. The element-intelligence `attributes` are cut the
   same way (an address attribute at 2,000 with the marker, any other value at 120) and limited to 50, as are the
@@ -274,7 +274,7 @@ All notable changes to auto-browser are documented here.
 
 ### Changed
 
-- **The stdio bridge docs now say it handles one request at a time.** `docs/mcp-clients.md` explains that a slow tool call holds up the calls behind it, and where to change the 60-second per-call timeout. No behaviour changed.
+- **The stdio bridge docs now say it handles one request at a time.** `docs/mcp-clients.md` explains that a slow tool call holds up the calls behind it, and where to change the 60-second per-request timeout. No behaviour changed.
 
 - **CI now fails when the real-Chromium tests cannot run.** The tests that drive a real Chromium skip when none is installed, so the CI leg that installs one could lose it and stay green. Setting `AUTO_BROWSER_REQUIRE_CHROMIUM=1` makes a missing Chromium fail the test run instead of skipping, and the Python 3.11 host-test leg sets it. A developer without Chromium is unaffected: unset, the tests still skip.
 
