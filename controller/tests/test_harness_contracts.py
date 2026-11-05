@@ -88,6 +88,31 @@ class ProgrammaticVerifierTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.missing_evidence, [])
 
+    async def test_a_contract_of_only_optional_postconditions_needs_one_satisfied(self) -> None:
+        contract = TaskContract(
+            id="task-verify-optional",
+            goal="only optional checks",
+            postconditions=[
+                Postcondition(kind="text_contains", value="Order confirmed", required=False),
+                Postcondition(kind="url_contains", value="/checkout", required=False),
+            ],
+            evidence_required=[EvidenceRequirement(kind="trace")],
+        )
+        nothing_there = {"final_observation": {"url": "https://example.com/", "text": "Welcome"}, "evidence": ["trace"]}
+        one_there = {
+            "final_observation": {"url": "https://example.com/checkout", "text": "Welcome"},
+            "evidence": ["trace"],
+        }
+
+        failing = await ProgrammaticVerifier().verify(contract, nothing_there)
+        passing = await ProgrammaticVerifier().verify(contract, one_there)
+
+        self.assertFalse(failing.passed)
+        self.assertEqual(failing.confidence, 0.0)
+        self.assertIn("optional", failing.notes)
+        self.assertTrue(passing.passed)
+        self.assertEqual(passing.satisfied_postconditions, ["postcondition[1]:url_contains:/checkout"])
+
     async def test_programmatic_dom_condition_and_url_matches(self) -> None:
         contract = TaskContract(
             id="task-verify-2",

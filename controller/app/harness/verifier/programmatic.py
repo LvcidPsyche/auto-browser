@@ -87,9 +87,14 @@ class ProgrammaticVerifier:
                 forbidden_hits.append(hit_label)
 
         missing_evidence = sorted(contract.required_evidence_kinds - evidence)
-        passed = not failed and not forbidden_hits and not missing_evidence
+        # A contract whose postconditions are all optional has nothing that must hold, so passing it
+        # takes at least one of them being satisfied; otherwise it would pass on a page that matches none.
+        nothing_satisfied = not satisfied and not any(c.required for c in contract.postconditions)
+        passed = not failed and not forbidden_hits and not missing_evidence and not nothing_satisfied
         confidence = 1.0 if passed else 0.0
         notes = "Programmatic postconditions passed." if passed else "Programmatic verification failed."
+        if nothing_satisfied:
+            notes += " Every postcondition is optional and none was satisfied."
         if regex_timeouts:
             notes += f" A url_matches pattern did not finish within {self.regex_timeout_seconds:g}s."
         return VerificationResult(

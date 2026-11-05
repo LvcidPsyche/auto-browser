@@ -84,6 +84,8 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **A harness contract of only optional postconditions no longer passes with nothing satisfied.** The verifier passed it at confidence 1.0 even when the page matched none of them. When every postcondition is optional, at least one must now be satisfied; a contract with any required postcondition is judged as before.
+
 - **Harness traces of a live agent run now record its screenshots.** The trace built from an agent result held only `action` events, so a run that took screenshots never met a `screenshots` evidence requirement. Each step that has a screenshot now adds a `screenshot` event (the same event type the mock attempt records) after its action.
 
 - **The Codespaces overlay now accepts the forwarded host name.** The controller refused requests to `<codespace>-8000.app.github.dev` with "Invalid host header", because the overlay kept the loopback-only host list. It now defaults `CONTROLLER_ALLOWED_HOSTS` to the loopback names plus `*.app.github.dev`. If you set `CONTROLLER_ALLOWED_HOSTS` in `.env`, include `*.app.github.dev` in it.
