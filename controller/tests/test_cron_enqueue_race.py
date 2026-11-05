@@ -130,3 +130,45 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.cron._active_runs, {job_id: "session-2"}, "the newer trigger's slot was freed")
         self.manager.close_session.assert_awaited_once_with("session-1")
+
+    async def _cancel_while_queuing(self) -> str:
+        """Start a trigger, cancel it while its job is queued (no workers), return the job id once it has raised."""
+        await self.queue.store.startup()
+        task = asyncio.create_task(self.cron.trigger_job(self.job["id"]))
+        await asyncio.wait_for(self.audit.reached.wait(), timeout=5)
+        [record] = await self.queue.store.list()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        return record.id
+
+    async def test_a_withdrawal_that_fails_unexpectedly_is_logged_with_the_job_id(self) -> None:
+        self.queue.cancel_job = AsyncMock(side_effect=OSError("store unavailable"))
+
+        with self.assertLogs("app.agent_jobs", level="ERROR") as logged:
+            job_id = await self._cancel_while_queuing()
+
+        self.assertTrue(any(job_id in line for line in logged.output), logged.output)
+        self.assertEqual(self.queue._on_finish, {})
+
+    async def test_a_job_that_already_finished_is_not_withdrawn_and_nothing_is_logged(self) -> None:
+        await self.queue.store.startup()
+        task = asyncio.create_task(self.cron.trigger_job(self.job["id"]))
+        await asyncio.wait_for(self.audit.reached.wait(), timeout=5)
+        [record] = await self.queue.store.list()
+        await self.queue.store.finish(record.id, status="completed", result=None, error=None)
+
+        with self.assertNoLogs("app.agent_jobs", level="ERROR"):
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        self.assertEqual([item.status for item in await self.queue.store.list()], ["completed"])
+        self.assertEqual(self.queue._on_finish, {})
+
+    async def test_the_finish_callback_is_dropped_even_when_the_withdrawal_is_cancelled(self) -> None:
+        self.queue.cancel_job = AsyncMock(side_effect=asyncio.CancelledError())
+
+        await self._cancel_while_queuing()
+
+        self.assertEqual(self.queue._on_finish, {}, "a callback for a session already closed is left behind")

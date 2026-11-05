@@ -424,9 +424,14 @@ class AgentJobQueue:
         except BaseException:
             if on_finish is not None:
                 # The caller is about to close the session this job runs in: take the job back first.
-                with contextlib.suppress(Exception):
+                try:
                     await self.cancel_job(record.id)
-                self._on_finish.pop(record.id, None)
+                except ValueError:
+                    pass  # it already finished: there is nothing to take back
+                except Exception:
+                    logger.exception("agent job %s could not be withdrawn before its session closes", record.id)
+                finally:
+                    self._on_finish.pop(record.id, None)
             raise
         return self._public_record(record)
 
