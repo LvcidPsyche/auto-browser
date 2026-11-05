@@ -287,7 +287,7 @@ class BrowserObservationService:
             "text_excerpt": summary["text_excerpt"],
             "dom_outline": summary["dom_outline"],
             "accessibility_outline": summary["accessibility_outline"],
-            "ocr": ocr,
+            "ocr": await asyncio.to_thread(self._ocr_for_caller, ocr),
             "interactables": interactables,
             "screenshot_path": screenshot["path"],
             "screenshot_url": screenshot["url"],
@@ -301,6 +301,26 @@ class BrowserObservationService:
             "remote_access": self.manager.remote_access.session_info(session),
             "preset": preset,
         }
+
+    def _ocr_for_caller(self, ocr: dict[str, Any] | None) -> dict[str, Any] | None:
+        """The OCR result as observe returns it.
+
+        `redaction_blocks` is the screenshot redaction's own input: every word with its box, including the
+        words that redaction blacks out, so the caller never gets it. The text the caller does get goes
+        through the PII scrubber, since the pixels it came from are redacted too.
+        """
+        if not ocr:
+            return ocr
+        returned = {key: value for key, value in ocr.items() if key != "redaction_blocks"}
+        scrubber = self.manager.pii_scrubber
+        if not scrubber.enabled:
+            return returned
+        if returned.get("text_excerpt"):
+            returned["text_excerpt"] = scrubber.text(returned["text_excerpt"]).text
+        returned["blocks"] = [
+            {**block, "text": scrubber.text(block["text"]).text} for block in returned.get("blocks", [])
+        ]
+        return returned
 
     async def _extract_ocr_if_needed(
         self,
