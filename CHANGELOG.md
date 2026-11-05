@@ -6,6 +6,12 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- **Typed text is scrubbed before it reaches the audit log and action receipts.** A `type` action stores the
+  first 80 characters of what was typed (`text_preview`) in an ordinary field, and that went to disk as typed. With
+  `PII_SCRUB_ENABLED` on, the whole text is now run through the PII scrubber first and then cut to 80 characters,
+  so a secret that straddles the limit is still caught. A Playwright export now fills `[REDACTED]` where the typed
+  text matched a PII pattern, so replay such a script with the real value substituted by hand. With scrubbing off,
+  nothing changes.
 - **The network log masks secret-bearing headers by name pattern, not only from a fixed list.** Any header whose
   name has a word such as token, secret, password, auth, session, cookie, csrf, signature or key (split on `-` and
   `_`), or contains token, secret, password or apikey, now logs as `[MASKED]`. Before, `X-GitHub-Token`,

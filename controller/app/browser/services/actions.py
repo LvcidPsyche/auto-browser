@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from playwright.async_api import Page
 
     from ...browser_manager import BrowserSession
+    from ...pii_scrub import PiiScrubber
 
 logger = logging.getLogger(__name__)
 
@@ -293,6 +294,7 @@ class BrowserActionService:
             clear_first=clear_first,
             sensitive=sensitive,
             preview_chars=80,
+            scrubber=self.manager.pii_scrubber,
         )
 
         async def operation() -> None:
@@ -745,12 +747,15 @@ class BrowserActionService:
         clear_first: bool,
         sensitive: bool,
         preview_chars: int,
+        scrubber: PiiScrubber | None = None,
     ) -> dict[str, Any]:
         payload = {**target, "clear_first": clear_first}
         if sensitive:
             payload["text_redacted"] = True
         else:
-            payload["text_preview"] = text[:preview_chars]
+            # Scrubbed whole, then cut: a secret that straddles the limit would survive the other way round.
+            preview = scrubber.text(text).text if scrubber is not None else text
+            payload["text_preview"] = preview[:preview_chars]
         return payload
 
     async def locator_is_sensitive_input(self, locator: Any) -> bool:

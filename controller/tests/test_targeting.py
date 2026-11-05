@@ -16,6 +16,7 @@ import pytest
 
 from app.action_errors import BrowserActionError
 from app.browser.services.actions import BrowserActionService
+from app.pii_scrub import PiiScrubber
 from tests._chromium import chromium_executable, requires_chromium
 
 PAGE = """<!doctype html><body style="margin:40px">
@@ -55,6 +56,7 @@ def _service(page) -> tuple[BrowserActionService, SimpleNamespace]:
         get_session=lambda _sid: _as_awaitable(session),
         _run_action=run_action,
         _settle=settle,
+        pii_scrubber=PiiScrubber(),
     )
     return BrowserActionService(manager), session
 
