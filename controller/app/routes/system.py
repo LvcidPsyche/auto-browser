@@ -37,6 +37,9 @@ _DEEP_HEALTH_FALLBACK = """<!doctype html>
 </html>
 """
 _DEEP_HEALTH_TIMEOUT_MS = 5_000
+# The whole probe once the browser is connected (context, page, render), and the extra time its context gets to close.
+_DEEP_HEALTH_PROBE_SECONDS = 10.0
+_DEEP_HEALTH_CLOSE_SECONDS = 2.0
 # The connect a probe started, per manager (by id: the connect holds the manager, so the id is not reused while it
 # stands), until it finishes. A probe that finds one waits on it rather than starting another: each timed-out probe
 # otherwise left one more connect queued behind the same browser lock, one per poll through an outage.
@@ -107,6 +110,18 @@ async def run_deep_health_probe(manager: "BrowserManager") -> dict[str, Any]:
 
     # Bounded like /readyz: a hung ensure_browser() otherwise holds the browser lock and the request open.
     browser = await _wait_for_browser(manager)
+    # A connected browser can still stop answering; the render, with its context and page, gets one total.
+    await asyncio.wait_for(_render_fixture(browser, fixture_html), timeout=_DEEP_HEALTH_PROBE_SECONDS)
+
+    checks.append({"name": "browser_fixture_render", "status": "pass"})
+    return {
+        "status": "ok",
+        "checks": checks,
+        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+    }
+
+
+async def _render_fixture(browser: Any, fixture_html: str) -> None:
     context = await browser.new_context(viewport={"width": 640, "height": 360})
     try:
         page = await context.new_page()
@@ -121,14 +136,26 @@ async def run_deep_health_probe(manager: "BrowserManager") -> dict[str, Any]:
         if marker != "ready" or "Deep health ready" not in text:
             raise RuntimeError("deep health browser probe did not render the ready marker")
     finally:
-        await context.close()
+        await _close_context(context)
 
-    checks.append({"name": "browser_fixture_render", "status": "pass"})
-    return {
-        "status": "ok",
-        "checks": checks,
-        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
-    }
+
+async def _close_context(context: Any) -> None:
+    """Close the probe's context, waiting at most _DEEP_HEALTH_CLOSE_SECONDS; a close that hangs is left to finish."""
+    closing = asyncio.ensure_future(context.close())
+    try:
+        await asyncio.wait_for(asyncio.shield(closing), timeout=_DEEP_HEALTH_CLOSE_SECONDS)
+    except TimeoutError:
+        logger.warning(
+            "deep health probe: closing its browser context took over %ss; left to finish", _DEEP_HEALTH_CLOSE_SECONDS
+        )
+        closing.add_done_callback(_log_failed_close)
+
+
+def _log_failed_close(closing: "asyncio.Future[Any]") -> None:
+    if not closing.cancelled() and closing.exception() is not None:
+        logger.warning(
+            "deep health probe: the browser context it gave up closing failed to close: %s", closing.exception()
+        )
 
 
 def _load_deep_health_fixture() -> tuple[str, str]:
@@ -160,7 +187,11 @@ def create_system_router(
         try:
             payload = await run_deep_health_probe(manager)
         except TimeoutError:
-            logger.warning("deep health probe timed out waiting for the browser after %ss", READYZ_TIMEOUT_SECONDS)
+            logger.warning(
+                "deep health probe timed out (browser wait %ss, probe %ss)",
+                READYZ_TIMEOUT_SECONDS,
+                _DEEP_HEALTH_PROBE_SECONDS,
+            )
             return JSONResponse(
                 status_code=503,
                 content={

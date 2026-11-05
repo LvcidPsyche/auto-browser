@@ -115,6 +115,70 @@ class DeepHealthTimeoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(connects), 2)  # a finished connect is not reused: the next probe asks the manager
 
 
+class DeepHealthConnectedBrowserTests(unittest.IsolatedAsyncioTestCase):
+    """A browser that connects but then never answers must not hold the probe open either."""
+
+    @staticmethod
+    def _never(release: asyncio.Event) -> mock.AsyncMock:
+        async def wait(*_args: object, **_kwargs: object) -> None:
+            await release.wait()
+
+        return mock.AsyncMock(side_effect=wait)
+
+    async def _probe(
+        self, browser: object, probe_seconds: float = TEST_TIMEOUT_SECONDS
+    ) -> tuple[httpx.Response, float]:
+        async def ensure_browser() -> object:
+            return browser
+
+        manager = SimpleNamespace(ensure_browser=ensure_browser, sessions={})
+        started = time.perf_counter()
+        with (
+            mock.patch.object(system, "_DEEP_HEALTH_PROBE_SECONDS", probe_seconds),
+            mock.patch.object(system, "_DEEP_HEALTH_CLOSE_SECONDS", TEST_TIMEOUT_SECONDS),
+        ):
+            async with _client(manager) as client:
+                response = await asyncio.wait_for(client.get("/healthz/deep"), timeout=5)
+        return response, time.perf_counter() - started
+
+    async def test_a_new_context_that_never_returns_answers_503_timed_out(self) -> None:
+        release = asyncio.Event()
+        browser = SimpleNamespace(new_context=self._never(release))
+
+        response, elapsed = await self._probe(browser)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"], "deep_health_probe_timed_out")
+        self.assertLess(elapsed, TEST_TIMEOUT_SECONDS + 2)
+
+    async def test_a_new_page_that_never_returns_answers_503_and_closes_the_context(self) -> None:
+        release = asyncio.Event()
+        context = SimpleNamespace(new_page=self._never(release), close=mock.AsyncMock())
+        browser = SimpleNamespace(new_context=mock.AsyncMock(return_value=context))
+
+        response, elapsed = await self._probe(browser)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"], "deep_health_probe_timed_out")
+        self.assertLess(elapsed, TEST_TIMEOUT_SECONDS + 2)
+        context.close.assert_awaited_once()
+
+    async def test_a_close_that_never_returns_is_left_to_finish_and_logged(self) -> None:
+        release = asyncio.Event()
+        browser = _rendering_browser()
+        context = await browser.new_context()
+        context.close = self._never(release)
+
+        with self.assertLogs(system.logger, level="WARNING") as logged:
+            response, elapsed = await self._probe(browser, probe_seconds=2.0)  # room for the close grace inside it
+        release.set()
+
+        self.assertEqual(response.status_code, 200)  # the page rendered; only the cleanup hung
+        self.assertEqual(response.json()["status"], "ok")
+        self.assertLess(elapsed, TEST_TIMEOUT_SECONDS + 2)
+        self.assertTrue([line for line in logged.output if "closing its browser context" in line])
+
+
 class DeepHealthAnswerTests(unittest.IsolatedAsyncioTestCase):
     # The fixture is patched, so both branches run wherever the suite does (the controller image has no evals/).
     async def _answer(self, fixture: Path) -> dict:
