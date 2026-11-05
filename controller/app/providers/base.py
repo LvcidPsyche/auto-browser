@@ -8,6 +8,7 @@ import mimetypes
 import os
 import socket
 import stat
+import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -379,6 +380,17 @@ class BaseProviderAdapter(ABC):
         env.setdefault("NO_COLOR", "1")
         return env
 
+    def cli_working_directory(self) -> str:
+        """Where a provider CLI child starts: a directory with no .env and no checkout among its parents.
+
+        The Gemini CLI loads a .env from its working directory and parents into its environment, so a child
+        started in the controller's checkout re-reads the secrets `cli_environment` withheld.
+        """
+        cli_home = (self.settings.cli_home or "").strip()
+        folder = Path(cli_home) if cli_home else Path(tempfile.gettempdir()) / "auto-browser-cli-cwd"
+        folder.mkdir(parents=True, exist_ok=True)
+        return str(folder)
+
     @staticmethod
     def cli_binary_exists(path: str | None) -> bool:
         return bool(path and which(path))
@@ -485,7 +497,7 @@ class BaseProviderAdapter(ABC):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env or self.cli_environment(),
-            cwd=cwd,
+            cwd=cwd or self.cli_working_directory(),
         )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
