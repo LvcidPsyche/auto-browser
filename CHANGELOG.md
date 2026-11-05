@@ -128,8 +128,10 @@ All notable changes to auto-browser are documented here.
   attempt in it (each attempt now records a `trace_hash`, which 1.15.0 rejects), including an older run this version's
   startup sweep marked `interrupted`: such runs drop out of `harness.list_runs`, and `harness.get_status` fails on them.
 - The harness's `login_redirect` forbidden state now looks at where the browser is, not what the page says: a URL path
-  segment of `login`, `log-in`, `log_in`, `logon`, `signin`, `sign-in`, `sign_in`, `auth` or `authorize`, a host whose
-  first label is one of those (`login.microsoftonline.com`), a 401 or 403 status, or the caller's value inside the URL.
+  segment of `login`, `log-in`, `log_in`, `logon`, `signin`, `sign-in`, `sign_in`, `auth` or `authorize` (path
+  parameters such as `;jsessionid=...` aside, and an app's hash route such as `#/login` read as a path; `payment_screen`
+  reads paths the same way), a host whose first label is one of those (`login.microsoftonline.com`), a 401 or 403
+  status, or the caller's value inside the URL.
   A marketing page that offers "sign in" or mentions "authenticate" no longer fails a run. `payment_screen` and
   `captcha_screen` match their built-in words and phrases whole (`credit card`, `card number`, `payment method`, ...;
   the bare word `payment` no longer counts, a `/payment` path does), so "accredit cards" or "captchaless" are not hits;

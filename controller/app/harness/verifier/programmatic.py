@@ -364,12 +364,22 @@ def _has_value(text: str, value: str) -> bool:
 
 
 def _path_has_segment(url: str, segments: frozenset[str]) -> bool:
-    """Whether a path segment of the URL is one of `segments`, with or without a file extension (`SignIn.html`)."""
+    """Whether a path segment of the URL is one of `segments`, with or without a file extension (`SignIn.html`) or
+    path parameters (`login;jsessionid=...`). A fragment that is an app's route (`#/login`, `#!/signin`) is read as a
+    path too; an in-page anchor (`#login`) is not."""
     try:
-        path = urlsplit(url).path.lower()
+        parts = urlsplit(url)
+        paths = [parts.path]
+        if parts.fragment.startswith(("/", "!/")):
+            paths.append(urlsplit(parts.fragment.removeprefix("!")).path)
     except ValueError:
         return False
-    return any(segment.split(".")[0] in segments for segment in path.split("/") if segment)
+    return any(
+        segment.split(";")[0].split(".")[0] in segments
+        for path in paths
+        for segment in path.lower().split("/")
+        if segment
+    )
 
 
 def _network_entries(trace: Any) -> list[Any]:

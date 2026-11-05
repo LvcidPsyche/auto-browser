@@ -53,6 +53,22 @@ class LoginRedirectTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(url=url):
                 self.assertEqual(len(await _hits("login_redirect", {"url": url, "text": "welcome"})), 1)
 
+    async def test_a_session_id_path_parameter_or_a_hash_route_still_names_the_login_page(self) -> None:
+        # 1.15.0's "/login" substring caught these: a Tomcat or Spring first redirect, and hash-routed apps.
+        for url in (
+            "https://example.com/login;jsessionid=ABC123",
+            "https://example.com/app/login;jsessionid=ABC123.node0?next=/",
+            "https://app.example.com/#/login",
+            "https://app.example.com/#!/signin?next=%2Fhome",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(len(await _hits("login_redirect", {"url": url, "text": "welcome"})), 1)
+
+    async def test_an_in_page_anchor_is_not_a_route(self) -> None:
+        for url in ("https://example.com/pricing#login", "https://example.com/#sign-in-help"):
+            with self.subTest(url=url):
+                self.assertEqual(await _hits("login_redirect", {"url": url, "text": "welcome"}), [])
+
     async def test_a_host_that_only_starts_with_a_needle_is_not_a_hit(self) -> None:
         for url in (
             "https://loginhelp.example.com/",
@@ -98,6 +114,14 @@ class PaymentAndCaptchaTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_payment_path_is_a_payment_screen(self) -> None:
         page = {"url": "https://example.com/checkout/payment", "text": "Step 3"}
         self.assertEqual(len(await _hits("payment_screen", page)), 1)
+
+    async def test_a_payment_path_with_a_session_id_or_in_a_hash_route_is_a_payment_screen(self) -> None:
+        for url in (
+            "https://shop.example.com/payment;jsessionid=ABC123",
+            "https://shop.example.com/#/checkout/payment",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(len(await _hits("payment_screen", {"url": url, "text": "Step 3"})), 1)
 
     async def test_captcha_matches_whole_words(self) -> None:
         self.assertEqual(
