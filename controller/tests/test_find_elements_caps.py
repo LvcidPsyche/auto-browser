@@ -303,6 +303,41 @@ def test_a_long_attribute_cannot_push_the_secret_word_out_of_the_check() -> None
 
 
 @needs_node
+@pytest.mark.parametrize("attribute", ["id", "placeholder", "aria-label", "autocomplete"])
+def test_every_checked_attribute_keeps_its_secret_word_past_the_display_cap(attribute: str) -> None:
+    # The generic Python recap used to cut field["id"] to the display cap before the check, which then missed it.
+    out = _run(value="hunter2", attrs={"type": "text", attribute: "x" * 120 + "password"})
+
+    for mode in ("byText", "bySelector"):
+        (shown,) = cap_found_elements(out[mode], 0, BrowserActionService.is_sensitive_field)
+        assert shown["value"] is None
+        assert shown["value_redacted"] is True
+        assert "field" not in shown
+
+
+def test_the_recap_hands_the_check_the_field_whole_up_to_the_bound_and_withholds_past_it() -> None:
+    seen: list[dict] = []
+
+    def check(field: dict) -> bool:
+        seen.append(dict(field))
+        return False
+
+    whole = {"tag": "input", "value": "v", "field": {"id": "x" * 120 + "password"}}
+    (shown,) = cap_found_elements([whole], 0, check)
+
+    assert seen == [{"id": "x" * 120 + "password"}]  # not cut to the display cap
+    assert shown["value"] == "v"
+
+    # Past the bound the check is not asked: the cut alone withholds the value.
+    cut = {"tag": "input", "value": "v", "field": {"name": "n" * 5000}}
+    (shown,) = cap_found_elements([cut], 0, check)
+
+    assert len(seen) == 1
+    assert shown["value"] is None
+    assert shown["value_redacted"] is True
+
+
+@needs_node
 def test_an_attribute_longer_than_the_check_reads_withholds_the_value() -> None:
     # Past even the larger bound the check cannot see the whole attribute, so the value is withheld.
     out = _run(value="hunter2", attrs={"type": "text", "name": "x" * 5000 + "password"})

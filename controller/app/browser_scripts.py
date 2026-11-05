@@ -226,6 +226,18 @@ def _cap_found_strings(value: Any, caps: dict[str, int]) -> Any:
     return capped
 
 
+def _cap_field(field: Any) -> dict[str, Any] | None:
+    """The attributes the secret check reads, each held to AB_FIELD_ATTR_MAX; a cut sets `truncated`."""
+    if not isinstance(field, dict):
+        return None
+    capped: dict[str, Any] = {}
+    for key, item in field.items():
+        capped[key] = cap_text(item, AB_FIELD_ATTR_MAX)
+        if capped[key] != item:
+            capped["truncated"] = True
+    return capped
+
+
 def cap_found_elements(elements: Any, context: int, is_secret_field: Callable[[Mapping[str, Any]], bool]) -> Any:
     """What find_elements returns, made safe again on the Python side.
 
@@ -239,11 +251,15 @@ def cap_found_elements(elements: Any, context: int, is_secret_field: Callable[[M
     if not isinstance(elements, list):
         return _cap_found_strings(elements, caps)
     shown = []
-    for element in _cap_found_strings(elements, caps):
+    for raw in elements:
+        # `field` is the check's input, not output: it is held to its own bound, not the display caps.
+        field = _cap_field(raw.get("field")) if isinstance(raw, dict) else None
+        element = _cap_found_strings(
+            {k: v for k, v in raw.items() if k != "field"} if isinstance(raw, dict) else raw, caps
+        )
         if isinstance(element, dict):
-            field = element.pop("field", None)
             if (
-                isinstance(field, dict)
+                field is not None
                 and element.get("value")
                 and (field.get("truncated") is True or is_secret_field(field))
             ):
