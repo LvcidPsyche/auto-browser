@@ -75,7 +75,8 @@ class SkillDriftMonitor:
         else:
             status = "degraded"
         if verification.notes:
-            notes.append(verification.notes)
+            # drift.json and the drift responses hold the notes: the scrubbed copy, as for `verification`.
+            notes.append(_scrub_string(verification.notes))
 
         result = DriftCheckResult(
             skill_id=skill_id,

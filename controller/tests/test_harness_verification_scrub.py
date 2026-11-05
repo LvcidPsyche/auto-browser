@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.harness import Budget, Postcondition, TaskContract
 from app.harness.drift import DriftCheckResult
@@ -68,6 +70,36 @@ class VerificationScrubTests(unittest.IsolatedAsyncioTestCase):
         result = DriftCheckResult(skill_id="s", status="healthy", verification=raw)
 
         self.assertNotIn(URL_TOKEN, result.model_dump_json())
+
+    async def test_the_drift_result_notes_carry_the_verifiers_notes_scrubbed(self) -> None:
+        class NotingVerifier:
+            async def verify(self, contract, trace) -> VerificationResult:
+                return VerificationResult(passed=True, confidence=1.0, notes=f"checked {TOKEN_URL}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = HarnessService(tmp, verifier=NotingVerifier())
+            record = await service.start_convergence(_contract(), mock_final_observation={"url": TOKEN_URL})
+
+            drift = await service.check_drift(record.candidate.skill_id)
+
+            self.assertTrue(any(note.startswith("checked https://example.com/done") for note in drift["notes"]))
+            self.assertNotIn(URL_TOKEN, json.dumps(drift))
+            stored = Path(service.registry.candidate_dir(record.candidate.skill_id)) / "drift.json"
+            self.assertNotIn(URL_TOKEN.encode(), stored.read_bytes())
+
+    async def test_a_stored_run_is_read_back_without_scrubbing_it_again(self) -> None:
+        # Scrubbed once, when its attempt was made: a scrubber that fails later does not drop the run from the list.
+        with tempfile.TemporaryDirectory() as tmp:
+            service = HarnessService(tmp)
+            record = await service.start_convergence(_contract(), mock_final_observation={"url": TOKEN_URL})
+
+            with patch.object(VerificationResult, "scrubbed", side_effect=ValueError("unknown PII_SCRUB_PATTERNS")):
+                listed = service.list_runs()
+                status = service.get_status(record.id)
+
+            self.assertEqual([run["id"] for run in listed], [record.id])
+            self.assertEqual(status["attempts"], listed[0]["attempts"])
+            self.assertNotIn(URL_TOKEN, json.dumps(listed))
 
     def test_scrubbed_keeps_the_verdict_and_drops_the_token(self) -> None:
         result = VerificationResult(

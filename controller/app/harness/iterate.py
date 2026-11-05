@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from ..session_ownership import may_use, verified_operator
 from .contracts import TaskContract
@@ -21,6 +21,9 @@ from .verifier.programmatic import ProgrammaticVerifier
 
 logger = logging.getLogger(__name__)
 
+# Validation context key for a run record read back from run.json, which was scrubbed before it was written.
+_STORED_RECORD = "stored_record"
+
 
 class HarnessAttempt(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -32,8 +35,12 @@ class HarnessAttempt(BaseModel):
 
     @field_validator("verification")
     @classmethod
-    def _scrub_verification(cls, value: VerificationResult) -> VerificationResult:
-        # The record is written to run.json; the verifier's result holds the raw URL.
+    def _scrub_verification(cls, value: VerificationResult, info: ValidationInfo) -> VerificationResult:
+        # The record is written to run.json; the verifier's result holds the raw URL. Scrubbed once, when the
+        # attempt is made: a record read back from run.json is taken as it was stored, so a scrubber that fails
+        # later cannot drop the run from a listing.
+        if info.context and info.context.get(_STORED_RECORD):
+            return value
         return value.scrubbed()
 
 
@@ -80,7 +87,7 @@ class HarnessRunStore:
         path = self.run_dir(run_id) / "run.json"
         if not path.exists():
             raise KeyError(run_id)
-        return HarnessRunRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        return _read_record(path)
 
     def list(
         self,
@@ -92,7 +99,7 @@ class HarnessRunStore:
         records: list[HarnessRunRecord] = []
         for path in sorted(self.runs_root.glob("*/run.json"), key=lambda item: item.stat().st_mtime, reverse=True):
             try:
-                record = HarnessRunRecord.model_validate_json(path.read_text(encoding="utf-8"))
+                record = _read_record(path)
             except Exception as exc:
                 logger.debug("skipping unreadable harness run record %s: %s", path, exc)
                 continue
@@ -104,6 +111,10 @@ class HarnessRunStore:
             if len(records) >= limit:
                 break
         return records
+
+
+def _read_record(path: Path) -> HarnessRunRecord:
+    return HarnessRunRecord.model_validate_json(path.read_text(encoding="utf-8"), context={_STORED_RECORD: True})
 
 
 class HarnessService:

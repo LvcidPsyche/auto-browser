@@ -17,12 +17,18 @@ All notable changes to auto-browser are documented here.
   chain whose anchor reads `anchor_missing`, `truncated` or `diverged`, with or without `--allow-unsigned`. The
   bundle now carries `chain_reason_at_export` and the verifier prints it, so the failure says why. A bundle made by an
   older version has no reason, and one whose chain failed at export no longer passes `--allow-unsigned`.
-- **Harness runs and staged skills written by earlier versions may still hold a URL token on disk.** Under
-  `HARNESS_ROOT` (default `/data/harness`), `runs/<id>/run.json`, `runs/<id>/strategy.md` and a staged skill's
-  `candidate.json`, `envelope.json` and `provenance.json` could carry the token from the final URL, and older
-  `trace.json` files were not text-scrubbed. Run responses hide it, but the files are not rewritten. Delete those runs
-  and staged skills where that matters; running the task again stages a clean copy (a staged skill's files cannot be
-  edited, as they are covered by its signed envelope).
+- **Harness runs and staged skills written by earlier versions may still hold a URL token on disk, and return it.**
+  Under `HARNESS_ROOT` (default `/data/harness`), `runs/<id>/run.json`, `runs/<id>/strategy.md` and a staged skill's
+  `candidate.json`, `envelope.json`, `provenance.json` and `drift.json` could carry the token from the final URL, and
+  older `trace.json` files were not text-scrubbed. The files are not rewritten, and what is read back from them is not
+  scrubbed again (a record is scrubbed once, when it is written), so for such a run `harness.get_status`,
+  `harness.list_runs` and `harness.graduate` (its `run.json`: the attempts' verification and the staged candidate)
+  and `harness.get_trace` (its `trace.json`), and for such a skill `harness.list_candidates` and
+  `harness.get_candidate` (the candidate's envelope), can still return the token. The next drift check rewrites
+  `drift.json`. Delete those runs and staged skills where that matters; running the task again stages a clean copy (a
+  staged skill's files cannot be edited, as they are covered by its signed envelope). A skill staged before this
+  release with a PII expectation (an email in `text_contains`, `dom_contains` or `url_contains`) may now report
+  degraded: the drift check scrubs the expectation, but that skill's `trace.json` was not scrubbed. Stage it again.
 - **A queued agent job whose run or step reports `error` now finishes `failed`, not `completed`.** `error` carries the
   reason the run or step gave, and `result.status` is still `error`. A client or automation that waits for
   `completed` and then reads `result.status` should wait for a terminal state and handle `failed`; a failed run is
