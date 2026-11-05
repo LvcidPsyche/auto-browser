@@ -12,7 +12,7 @@
     }
   },
   "postCreateCommand": "bash .devcontainer/setup.sh",
-  "postStartCommand": "if [ -n \"${CODESPACE_NAME:-}\" ]; then docker compose -f docker-compose.yml -f docker-compose.codespaces.yml up --build -d; else docker compose up --build -d; fi && echo '\\nauto-browser is running.'",
+  "postStartCommand": "bash .devcontainer/allow-forwarded-host.sh && if [ -n \"${CODESPACE_NAME:-}\" ]; then docker compose -f docker-compose.yml -f docker-compose.codespaces.yml up --build -d; else docker compose up --build -d; fi && echo '\\nauto-browser is running.'",
   "forwardPorts": [8000, 6080],
   "portsAttributes": {
     "8000": {
