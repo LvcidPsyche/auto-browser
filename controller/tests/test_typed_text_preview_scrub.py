@@ -59,3 +59,19 @@ async def test_type_stores_the_scrubbed_preview_in_the_action_target() -> None:
 
     target = manager._run_action.await_args.args[2]
     assert target["text_preview"] == "[REDACTED]"
+
+
+async def test_the_export_of_a_typed_email_fills_the_redaction() -> None:
+    from app.playwright_export import _action_to_code
+
+    manager = SimpleNamespace(
+        get_session=AsyncMock(return_value=SimpleNamespace(id="s1")),
+        _run_action=AsyncMock(return_value={}),
+        pii_scrubber=PiiScrubber(),
+    )
+    await BrowserActionService(manager).type("s1", text="alice@example.com", selector="#note")
+
+    target = manager._run_action.await_args.args[2]
+
+    assert "fill('[REDACTED]')" in _action_to_code("type", {"target": target})
+    assert "alice" not in _action_to_code("type", {"target": target})
