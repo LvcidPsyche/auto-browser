@@ -175,8 +175,9 @@ All notable changes to auto-browser are documented here.
   action now starts from the session's mode, as the session record already did. Standard sessions are unchanged.
 - **A restricted receipt no longer keeps what a `select_option` chose.** In restricted evidence mode (a confidential
   session, or a sensitive action) the receipt's target hid `text`, `text_preview`, `file_path`, `password` and
-  `totp_secret` but kept the `value` and `label` of a `select_option`. Both are now `[REDACTED]` there (one left unset
-  stays `null`, so the receipt still shows which way the option was chosen). Standard receipts are unchanged.
+  `totp_secret` but kept the `value`, `label` and `index` of a `select_option`. All three are now `[REDACTED]` there
+  (one left unset stays `null`, so the receipt still shows which way the option was chosen). Standard receipts are
+  unchanged.
 - **Typed text is scrubbed before it reaches the audit log and action receipts.** A `type` action stores the
   first 80 characters of what was typed (`text_preview`) in an ordinary field, and that went to disk as typed. With
   `PII_SCRUB_ENABLED` on, the whole text is now run through the PII scrubber first and then cut to 80 characters,

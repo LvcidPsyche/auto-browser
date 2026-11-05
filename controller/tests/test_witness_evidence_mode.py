@@ -89,3 +89,13 @@ def test_a_restricted_receipt_does_not_keep_what_a_select_option_chose() -> None
     assert restricted == {"selector": "#plan", "value": "[REDACTED]", "label": None, "index": None}
     assert by_label == {"selector": "#plan", "value": None, "label": "[REDACTED]"}
     assert engine.redact_target(target, evidence_mode="standard") == target
+
+
+def test_a_restricted_receipt_does_not_keep_the_index_a_select_option_chose_by() -> None:
+    target = {"selector": "#plan", "value": None, "label": None, "index": 0}
+    engine = WitnessPolicyEngine()
+
+    restricted = engine.redact_target(target, evidence_mode="restricted")
+
+    assert restricted == {"selector": "#plan", "value": None, "label": None, "index": "[REDACTED]"}
+    assert engine.redact_target(target, evidence_mode="standard") == target
