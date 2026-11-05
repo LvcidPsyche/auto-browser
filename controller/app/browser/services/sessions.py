@@ -367,6 +367,9 @@ class BrowserSessionService(SessionCreation):
     ) -> dict[str, Any]:
         """Fork a session: clone cookies + localStorage state into a new session."""
         session = await self.manager.get_session(session_id)
+        # Refused on the limit before the source's cookies are written to disk; create_session keeps the
+        # authoritative check, which holds against two forks racing.
+        self.manager._check_session_limit()
         async with session.lock:
             # As shadow browse: without a start_url the fork opens the page's URL with the session's
             # cookies, and a refused page chose that URL, so a refused page is not forked onto it and the
@@ -415,6 +418,10 @@ class BrowserSessionService(SessionCreation):
         4. Returns the new session's info (the old session keeps running)
 
         The caller is expected to close the original session when done debugging.
+
+        A shadow session is exempt from MAX_SESSIONS, unlike a fork: it is a debugging copy, off by default
+        (SHADOW_BROWSE_ENABLED), and it runs in the controller's own local browser, not on the shared browser node
+        the limit protects.
         """
         manager = self.manager
         if not manager.settings.shadow_browse_enabled:
