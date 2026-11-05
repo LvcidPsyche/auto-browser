@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from app import browser_scripts
+from app.browser.services.actions import BrowserActionService
 from app.browser_scripts import (
     AB_ATTR_MAX,
     AB_HREF_MAX,
@@ -287,3 +288,36 @@ async def test_an_ordinary_result_passes_through_unchanged(tmp_path: Path) -> No
 def test_the_recap_tolerates_a_result_that_is_not_a_list_of_dicts() -> None:
     assert cap_found_elements("x" * HUGE, 0, lambda _f: False) == browser_scripts.cap_url("x" * HUGE)
     assert cap_found_elements([1, None, "s"], 0, lambda _f: False) == [1, None, "s"]
+
+
+@needs_node
+def test_a_long_attribute_cannot_push_the_secret_word_out_of_the_check() -> None:
+    # The attributes the check reads are sent past the display cap, or the word at their end is cut away.
+    out = _run(value="hunter2", attrs={"type": "text", "name": "x" * 120 + "password"})
+
+    for mode in ("byText", "bySelector"):
+        (shown,) = cap_found_elements(out[mode], 0, BrowserActionService.is_sensitive_field)
+        assert shown["value"] is None
+        assert shown["value_redacted"] is True
+        assert "field" not in shown
+
+
+@needs_node
+def test_an_attribute_longer_than_the_check_reads_withholds_the_value() -> None:
+    # Past even the larger bound the check cannot see the whole attribute, so the value is withheld.
+    out = _run(value="hunter2", attrs={"type": "text", "name": "x" * 5000 + "password"})
+
+    for mode in ("byText", "bySelector"):
+        (shown,) = cap_found_elements(out[mode], 0, BrowserActionService.is_sensitive_field)
+        assert shown["value"] is None
+        assert shown["value_redacted"] is True
+
+
+@needs_node
+def test_a_plain_field_with_ordinary_attributes_keeps_its_value() -> None:
+    out = _run(value="jane", attrs={"type": "text", "name": "first-name", "placeholder": "First name"})
+
+    for mode in ("byText", "bySelector"):
+        (shown,) = cap_found_elements(out[mode], 0, BrowserActionService.is_sensitive_field)
+        assert shown["value"] == "jane"
+        assert "value_redacted" not in shown

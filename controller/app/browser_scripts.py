@@ -126,6 +126,10 @@ AB_TITLE_MAX = 200
 # The visible text of a found element, and the text that matched a find_elements query (a regex can match a whole node).
 AB_TEXT_MAX = 200
 AB_MATCH_MAX = 500
+# The attributes a find_elements result sends only so the Python side can decide whether a value is a secret (they
+# never reach the caller). Read past the display cap, or a long name could push `password` out of the check; one
+# longer still is flagged `truncated`, and its value is withheld because the check did not see all of it.
+AB_FIELD_ATTR_MAX = 1024
 # How many attributes (and inline event handler names) one element read returns.
 AB_MAX_ATTRIBUTES = 50
 AB_TRUNCATED_MARK = chr(0x2026) + "[truncated]"
@@ -228,7 +232,8 @@ def cap_found_elements(elements: Any, context: int, is_secret_field: Callable[[M
     The scripts cap their strings, but they run in the page's own JS world, where a page can replace
     String.prototype.slice and get a megabyte through; so every string is cut again here. A field's `value` is
     withheld (null, `value_redacted: true`) when `is_secret_field` says its attributes (sent by the script as `field`,
-    which is removed) name a password, a one-time code and the like, as the type action does not echo them either.
+    which is removed) name a password, a one-time code and the like, or when one was too long to read whole; the type
+    action does not echo such values either.
     """
     caps = {**_FOUND_FIELD_CAPS, "context_text": AB_MATCH_MAX + 2 * context}
     if not isinstance(elements, list):
@@ -237,7 +242,11 @@ def cap_found_elements(elements: Any, context: int, is_secret_field: Callable[[M
     for element in _cap_found_strings(elements, caps):
         if isinstance(element, dict):
             field = element.pop("field", None)
-            if isinstance(field, dict) and element.get("value") and is_secret_field(field):
+            if (
+                isinstance(field, dict)
+                and element.get("value")
+                and (field.get("truncated") is True or is_secret_field(field))
+            ):
                 element["value"] = None
                 element["value_redacted"] = True
                 element.pop("value_truncated", None)
@@ -619,12 +628,14 @@ _FIND_FIELDS_JS = r"""
     if (out.value) {
       out.field = {};
       for (const name of ['type', 'name', 'id', 'autocomplete', 'placeholder', 'aria-label']) {
-        out.field[name] = abCap(el.getAttribute(name) || '', AB_ATTR_MAX);
+        const attr = el.getAttribute(name) || '';
+        out.field[name] = abCap(attr, AB_FIELD_ATTR_MAX);
+        if (out.field[name] !== attr) out.field.truncated = true;
       }
     }
     return out;
   }
-"""
+""".replace("AB_FIELD_ATTR_MAX", str(AB_FIELD_ATTR_MAX))
 
 
 def _with_find_fields(source: str) -> str:
