@@ -77,7 +77,9 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y]) => {
 # longer: 5000 characters at the default delays would hold the session lock for about 11 minutes. Past the budget the
 # rest goes in as plain text (insert_text), its newlines and tabs pressed as keys.
 HUMAN_TYPING_BUDGET_SECONDS = 20.0
-# The least a keystroke or the final insert is given once the budget is spent, before it counts as hung.
+# The least a keystroke or the final insert is given once the budget is spent, before it counts as hung. The worst
+# case is about 24 s, not 22: a keystroke started just before the deadline may take this long past it, and the rest
+# of the text is then bounded by max(deadline, now) + this.
 HUMAN_TYPING_STEP_FLOOR_SECONDS = 2.0
 _CONTROL_KEYS = {"\n": "Enter", "\r": "Enter", "\t": "Tab"}
 _CONTROL_KEY_PATTERN = re.compile("([" + "".join(_CONTROL_KEYS) + "])")
