@@ -76,6 +76,31 @@ class CdpAttachScrubTests(unittest.IsolatedAsyncioTestCase):
         for leaked in ("hunter2", "abc-secret-id", "tok-secret", "user:"):
             self.assertNotIn(leaked, text)
 
+    async def test_a_failed_connect_reports_why_without_the_url_playwright_names(self) -> None:
+        # Playwright's error repeats the whole CDP URL, credentials and all, in its call log (checked against
+        # Playwright itself); /readyz, deep health and the startup log show what this raises.
+        self.connect.side_effect = Exception(
+            "BrowserType.connect_over_cdp: WebSocket error: connect ECONNREFUSED 10.0.0.9:9222\n"
+            f"Call log:\n  - <ws connecting> {SECRET_URL}\n  - <ws error> {SECRET_URL} error connect ECONNREFUSED"
+        )
+        self.manager.settings.cdp_connect_url = SECRET_URL
+
+        for name, attach in (
+            ("startup", self.manager.ensure_browser),
+            ("cdp_attach", lambda: self.manager.cdp_attach(SECRET_URL)),
+        ):
+            with self.subTest(path=name), self.assertLogs("app.browser.services.runtime", level="INFO") as captured:
+                with self.assertRaises(RuntimeError) as raised:
+                    await attach()
+
+                shown = "\n".join(captured.output) + str(raised.exception)
+                self.assertIn("ECONNREFUSED", str(raised.exception))
+                self.assertIn("ws://10.0.0.9:9222", str(raised.exception))
+                self.assertIsNone(raised.exception.__cause__)
+                self.assertTrue(raised.exception.__suppress_context__)
+                for leaked in ("hunter2", "abc-secret-id", "tok-secret", "user:"):
+                    self.assertNotIn(leaked, shown)
+
 
 if __name__ == "__main__":
     unittest.main()

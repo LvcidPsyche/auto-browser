@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -39,6 +40,26 @@ def scrubbed_cdp_url(url: str) -> str:
     return f"{parsed.scheme}://{shown_host}" + (f":{port}" if port is not None else "")
 
 
+_URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+")
+
+
+async def _connect_over_cdp(playwright: Any, cdp_url: str) -> Browser:
+    """connect_over_cdp, failing with what went wrong but never with the URL's credentials.
+
+    Playwright's error repeats the whole CDP URL (userinfo, the /devtools/browser/<id> path) in its call log, and
+    /readyz, deep health and the startup log show what this raises: its first line is kept, any URL in it reduced to
+    scheme://host:port, and the error is not chained.
+    """
+    try:
+        return await playwright.chromium.connect_over_cdp(cdp_url)
+    except Exception as exc:
+        first_line = (str(exc).splitlines() or [type(exc).__name__])[0]
+        reason = _URL_IN_TEXT.sub(lambda match: scrubbed_cdp_url(match.group()), first_line)
+        message = f"could not connect to Chrome over CDP at {scrubbed_cdp_url(cdp_url)}: {reason}"
+        logger.warning("%s", message)
+        raise RuntimeError(message) from None
+
+
 class BrowserRuntimeService:
     def __init__(self, manager: Any) -> None:
         self.manager = manager
@@ -69,7 +90,7 @@ class BrowserRuntimeService:
                 logger.info(
                     "connecting to existing Chrome via CDP at %s", scrubbed_cdp_url(manager.settings.cdp_connect_url)
                 )
-                browser = await manager.playwright.chromium.connect_over_cdp(manager.settings.cdp_connect_url)
+                browser = await _connect_over_cdp(manager.playwright, manager.settings.cdp_connect_url)
                 logger.info("CDP attach succeeded")
                 await manager.request_gates.attach(browser, attach_mode=True)
                 manager.browser = browser
@@ -150,7 +171,7 @@ class BrowserRuntimeService:
                     "using the current browser first, since replacing it would end them."
                 )
             previous = manager.browser
-            browser = await manager.playwright.chromium.connect_over_cdp(cdp_url)
+            browser = await _connect_over_cdp(manager.playwright, cdp_url)
             await manager.request_gates.attach(browser, attach_mode=True)
             manager.browser = browser
             self.shared_sandbox = dict(ATTACHED)
