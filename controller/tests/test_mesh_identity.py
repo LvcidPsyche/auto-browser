@@ -5,12 +5,13 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app.mesh import identity as identity_module
 from app.mesh.identity import NodeIdentity
 
 _POSIX_ONLY = unittest.skipUnless(os.name == "posix", "POSIX file modes")
+_PRIVATE_DIR = 0o700
 
 
 class NodeIdentityKeyFileTests(unittest.TestCase):
@@ -68,11 +69,17 @@ class NodeIdentityLooseKeyWarningTests(unittest.TestCase):
         self.dir = Path(self._tmp.name) / "identity"
         NodeIdentity(self.dir)
 
+    def _key_mode(self, mode: int):
+        # The key's mode is injected so this runs the same on Windows, where chmod cannot loosen a file; the
+        # directory reads as private, so only the key is in question here.
+        return patch.object(
+            identity_module, "_mode_bits", side_effect=lambda path: _PRIVATE_DIR if path == self.dir else mode
+        )
+
     def _reload(self, mode: int):
-        # The mode is injected so this runs the same on Windows, where chmod cannot loosen a file.
         with (
             patch.object(identity_module, "_POSIX", True),
-            patch.object(identity_module, "_mode_bits", return_value=mode),
+            self._key_mode(mode),
             self.assertLogs("app.mesh.identity", level="WARNING") as logs,
         ):
             NodeIdentity(self.dir)
@@ -87,10 +94,61 @@ class NodeIdentityLooseKeyWarningTests(unittest.TestCase):
     def test_private_key_does_not_warn(self):
         with (
             patch.object(identity_module, "_POSIX", True),
-            patch.object(identity_module, "_mode_bits", return_value=0o600),
+            self._key_mode(0o600),
             self.assertNoLogs("app.mesh.identity", level="WARNING"),
         ):
             NodeIdentity(self.dir)
+
+
+class NodeIdentityLooseDirectoryTests(unittest.TestCase):
+    """ACT-39/HARN-29: mkdir's 0700 applies only to a new directory, so one an older release made at 0755 kept it."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name) / "identity"
+        NodeIdentity(self.dir)
+
+    def _load(self, dir_mode: int, *, ours: bool, chmod=None):
+        """Load with the directory's mode and owner injected (the key reads as 0600); returns the chmod mock."""
+        with (
+            patch.object(identity_module, "_POSIX", True),
+            patch.object(identity_module, "_mode_bits", side_effect=lambda p: dir_mode if p == self.dir else 0o600),
+            patch.object(identity_module, "_owned_by_this_process", return_value=ours),
+            patch.object(identity_module.os, "chmod", chmod or Mock()) as chmod_mock,
+        ):
+            NodeIdentity(self.dir)
+        return chmod_mock
+
+    def test_a_loose_directory_of_ours_is_tightened_and_logged_once(self):
+        for mode in (0o755, 0o750, 0o705):
+            with self.subTest(mode=oct(mode)):
+                with self.assertLogs("app.mesh.identity", level="WARNING") as logs:
+                    chmod = self._load(mode, ours=True)
+
+                chmod.assert_called_once_with(self.dir, 0o700)
+                warnings = [line for line in logs.output if "identity directory" in line]
+                self.assertEqual(len(warnings), 1)
+                self.assertIn(oct(mode)[2:], warnings[0])
+
+    def test_a_loose_directory_of_another_user_is_reported_and_left_alone(self):
+        with self.assertLogs("app.mesh.identity", level="WARNING") as logs:
+            chmod = self._load(0o755, ours=False)
+
+        chmod.assert_not_called()
+        self.assertTrue(any("belongs to another user" in line for line in logs.output))
+
+    def test_a_directory_that_cannot_be_tightened_is_reported(self):
+        with self.assertLogs("app.mesh.identity", level="WARNING") as logs:
+            self._load(0o755, ours=True, chmod=Mock(side_effect=PermissionError(1, "Operation not permitted")))
+
+        self.assertTrue(any("could not be tightened (PermissionError)" in line for line in logs.output))
+
+    def test_a_private_directory_is_left_alone(self):
+        with self.assertNoLogs("app.mesh.identity", level="WARNING"):
+            chmod = self._load(_PRIVATE_DIR, ours=True)
+
+        chmod.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -42,6 +42,10 @@ def _mode_bits(path: Path) -> int:
     return path.stat().st_mode & 0o777
 
 
+def _owned_by_this_process(path: Path) -> bool:
+    return path.stat().st_uid == os.geteuid()
+
+
 def _write_private_file(path: Path, data: bytes) -> None:
     # Created at 0600 from the first byte (O_EXCL: never reuse a file someone else put there), so the key is never
     # readable under the umask between a write and a chmod.
@@ -57,6 +61,8 @@ class NodeIdentity:
     def __init__(self, identity_dir: Path) -> None:
         self._dir = identity_dir
         self._dir.mkdir(parents=True, exist_ok=True, mode=_IDENTITY_DIR_MODE)
+        if _POSIX:
+            self._tighten_a_loose_directory()
 
         priv_path = self._dir / _PRIVKEY_FILE
         pub_path = self._dir / _PUBKEY_FILE
@@ -104,6 +110,39 @@ class NodeIdentity:
             )
 
         logger.info("mesh.identity: node_id=%s", self._node_id)
+
+    def _tighten_a_loose_directory(self) -> None:
+        """mkdir's mode applies only to a directory it creates: one an older release made at 0755 keeps that mode.
+
+        Ours: tightened to 0700, with one warning. Another user's, or one chmod refuses: a warning only.
+        """
+        mode = _mode_bits(self._dir)
+        if not mode & _GROUP_OR_WORLD_BITS:
+            return
+        if not _owned_by_this_process(self._dir):
+            logger.warning(
+                "mesh.identity: identity directory %s is open to group or others (mode %o) and belongs to another "
+                "user; run chmod 700 on it",
+                self._dir,
+                mode,
+            )
+            return
+        try:
+            os.chmod(self._dir, _IDENTITY_DIR_MODE)
+        except OSError as exc:
+            logger.warning(
+                "mesh.identity: identity directory %s is open to group or others (mode %o) and could not be "
+                "tightened (%s); run chmod 700 on it",
+                self._dir,
+                mode,
+                type(exc).__name__,
+            )
+            return
+        logger.warning(
+            "mesh.identity: identity directory %s was open to group or others (mode %o); tightened it to 700",
+            self._dir,
+            mode,
+        )
 
     @staticmethod
     def _extract_raw_ed25519(pem: bytes) -> bytes:
