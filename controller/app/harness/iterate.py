@@ -244,7 +244,8 @@ class HarnessService:
             record.decision = decision
             record.status = decision.status
             if verification.passed is not True:
-                _append_reflexion(strategy_path, verification, attempt_index)
+                # strategy.md is a stored file: the attempt's scrubbed copy, not the verifier's raw result.
+                _append_reflexion(strategy_path, record.attempts[-1].verification, attempt_index)
             self.store.save(record)
             if not decision.should_continue:
                 break
