@@ -89,6 +89,26 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
+def is_local_only_host(host: str) -> bool:
+    """Whether a bare host name (a URL's hostname, no port) names only this machine, or no host at all.
+
+    The empty host, ``localhost`` and ``*.localhost``, and any loopback or unspecified address, an IPv4-mapped IPv6
+    one included (127.0.0.2, ::ffff:127.0.0.1, 0.0.0.0). It judges what an address is, not whether it may be bound
+    to: 0.0.0.0 is local-only as a URL to open and public as an address to listen on, so a bind check uses
+    ``is_loopback_host``.
+    """
+    candidate = host.strip().lower()
+    if not candidate or candidate == "localhost" or candidate.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_loopback or address.is_unspecified
+
+
 def resolve_bind_scope(settings: Any, environ: Mapping[str, str] | None = None) -> str:
     """Where this API is reachable from: an explicit declaration, else inferred.
 

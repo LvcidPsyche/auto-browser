@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from .auth_policy import is_loopback_host
 from .utils import utc_now
 
 
@@ -396,9 +397,7 @@ class IsolatedSessionTunnelBroker:
             )
 
         bind_address = self.settings.isolated_tunnel_remote_bind_address
-        if bind_address not in {"127.0.0.1", "localhost", "::1"} and (
-            self.settings.isolated_tunnel_access_mode != "unsafe-public"
-        ):
+        if not is_loopback_host(bind_address) and (self.settings.isolated_tunnel_access_mode != "unsafe-public"):
             raise RuntimeError(
                 "isolated session tunnels refuse non-local remote bind addresses unless "
                 "ISOLATED_TUNNEL_ACCESS_MODE=unsafe-public."

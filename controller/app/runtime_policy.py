@@ -6,7 +6,14 @@ from shutil import which
 from typing import Sequence
 from urllib.parse import urlparse
 
-from .auth_policy import BIND_SCOPE_EXPOSED, Credential, credentials_for, resolve_bind_scope, tokenless_loopback_allowed
+from .auth_policy import (
+    BIND_SCOPE_EXPOSED,
+    Credential,
+    credentials_for,
+    is_local_only_host,
+    resolve_bind_scope,
+    tokenless_loopback_allowed,
+)
 from .config import Settings
 from .providers.base import BaseProviderAdapter
 
@@ -20,8 +27,6 @@ class RuntimePolicyReport:
     def ok(self) -> bool:
         return not self.errors
 
-
-LOCAL_HOSTS = {"", "127.0.0.1", "localhost", "::1", "0.0.0.0"}
 
 # Production floor for API_BEARER_TOKEN. "Required" alone was satisfied by
 # API_BEARER_TOKEN=x, which is not meaningfully different from no token.
@@ -296,7 +301,7 @@ def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
             )
 
     takeover_host = (urlparse(settings.takeover_url).hostname or "").strip().lower()
-    if takeover_host in LOCAL_HOSTS and not settings.isolated_tunnel_enabled:
+    if is_local_only_host(takeover_host) and not settings.isolated_tunnel_enabled:
         report.warnings.append(
             "TAKEOVER_URL is still local-only and ISOLATED_TUNNEL_ENABLED=false; front it with Cloudflare Access, Tailscale, or a tunnel before remote use"
         )

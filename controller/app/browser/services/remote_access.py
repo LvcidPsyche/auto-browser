@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
-from ...auth_policy import credentials_for
+from ...auth_policy import credentials_for, is_local_only_host
 from ...utils import UTC
 
 if TYPE_CHECKING:
@@ -235,4 +235,4 @@ class BrowserRemoteAccessService:
     @staticmethod
     def takeover_url_is_local_only(value: str) -> bool:
         host = (urlparse(value).hostname or "").strip().lower()
-        return host in {"", "127.0.0.1", "localhost", "::1", "0.0.0.0"}
+        return is_local_only_host(host)
