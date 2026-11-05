@@ -11,6 +11,9 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- The mesh and witness private key is now created with mode 0600 from the first byte (`O_EXCL`, no write-then-chmod
+  window) in an identity directory created at 0700, and loading a key that is readable by group or others logs a
+  warning on POSIX.
 - Every secret `Settings` field (the auth-state encryption key, the witness remote key, every provider API key, the
   approval webhook secret, the default proxy password, the share-link secret) is now left out of `repr()`, so a logged
   `Settings` object no longer carries it.

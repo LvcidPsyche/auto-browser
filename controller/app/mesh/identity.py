@@ -12,6 +12,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -31,13 +32,31 @@ _PRIVKEY_FILE = "node_private.pem"
 _PUBKEY_FILE = "node_public.pem"
 _META_FILE = "node_meta.json"
 
+_KEY_FILE_MODE = 0o600
+_IDENTITY_DIR_MODE = 0o700
+_GROUP_OR_WORLD_BITS = 0o077
+_POSIX = os.name == "posix"
+
+
+def _mode_bits(path: Path) -> int:
+    return path.stat().st_mode & 0o777
+
+
+def _write_private_file(path: Path, data: bytes) -> None:
+    # Created at 0600 from the first byte (O_EXCL: never reuse a file someone else put there), so the key is never
+    # readable under the umask between a write and a chmod.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags, _KEY_FILE_MODE)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+
 
 class NodeIdentity:
     """Loaded (or generated) Ed25519 identity for this mesh node."""
 
     def __init__(self, identity_dir: Path) -> None:
         self._dir = identity_dir
-        self._dir.mkdir(parents=True, exist_ok=True)
+        self._dir.mkdir(parents=True, exist_ok=True, mode=_IDENTITY_DIR_MODE)
 
         priv_path = self._dir / _PRIVKEY_FILE
         pub_path = self._dir / _PUBKEY_FILE
@@ -45,6 +64,12 @@ class NodeIdentity:
 
         if priv_path.exists():
             logger.info("mesh.identity: loading existing keypair from %s", self._dir)
+            if _POSIX and _mode_bits(priv_path) & _GROUP_OR_WORLD_BITS:
+                logger.warning(
+                    "mesh.identity: private key %s is readable by group or others (mode %o); run chmod 600 on it",
+                    priv_path,
+                    _mode_bits(priv_path),
+                )
             pem = priv_path.read_bytes()
             self._private_key = Ed25519PrivateKey.from_private_bytes(self._extract_raw_ed25519(pem))
         else:
@@ -52,8 +77,7 @@ class NodeIdentity:
             self._private_key = Ed25519PrivateKey.generate()
             # Write private key
             priv_pem = self._private_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
-            priv_path.write_bytes(priv_pem)
-            priv_path.chmod(0o600)
+            _write_private_file(priv_path, priv_pem)
 
         self._public_key: Ed25519PublicKey = self._private_key.public_key()
         pub_raw = self._public_key.public_bytes(Encoding.Raw, PublicFormat.Raw)  # 32 bytes
