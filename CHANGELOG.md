@@ -92,6 +92,8 @@ All notable changes to auto-browser are documented here.
 
 - **One unparseable Witness receipt line no longer hides the rest.** Listing a session's receipts and exporting its bundle failed (HTTP 400) on the first line that did not parse. They now skip it and report `unparseable_lines` with how many they skipped. The bundle keeps the receipts that parse, and its chain check still fails on the gap (`chain_valid_at_export` is false), so it never claims to be intact.
 
+- **Two MCP tool calls without a `session_id` no longer create two sessions.** Each saw no live session and created its own. Finding or creating the implicit session is now serialized, so the second call uses the session the first one made.
+
 ## [1.14.1] — 2026-11-04
 
 A patch release over 1.14.0. A session whose start page fails to load now gets a 400 the agent can act on instead

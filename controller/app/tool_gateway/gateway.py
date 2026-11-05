@@ -213,6 +213,9 @@ class McpToolGateway:
         self.vision_targeter = vision_targeter
         self.harness_service = harness_service
         self.metrics = metrics
+        # Serializes finding or creating the implicit session: two session-less calls at once each saw no live
+        # session and each created one.
+        self._implicit_session_lock = asyncio.Lock()
         self._registry = ToolRegistry(
             tool_profile=tool_profile,
             tool_packs=tool_packs,
@@ -515,13 +518,14 @@ class McpToolGateway:
         # was reported "ambiguous" — with MAX_SESSIONS=1, every create → close →
         # create cycle broke the convenience for good. Only a live session can
         # be acted on, so only live sessions are candidates.
-        sessions = [item for item in await self.manager.list_sessions() if item.get("live") is True]
+        async with self._implicit_session_lock:
+            sessions = [item for item in await self.manager.list_sessions() if item.get("live") is True]
+            if not sessions and spec.name in IMPLICIT_SESSION_CREATE_TOOLS:
+                created = await self.manager.create_session()
+                return arguments.model_copy(update={"session_id": created["id"]})
         if len(sessions) == 1:
             return arguments.model_copy(update={"session_id": sessions[0]["id"]})
         if not sessions:
-            if spec.name in IMPLICIT_SESSION_CREATE_TOOLS:
-                created = await self.manager.create_session()
-                return arguments.model_copy(update={"session_id": created["id"]})
             raise BrowserActionError(
                 f"{spec.name} needs a session and none are live{self._no_session_hint()}",
                 code="no_session",
