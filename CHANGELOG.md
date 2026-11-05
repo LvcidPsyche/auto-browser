@@ -25,7 +25,7 @@ All notable changes to auto-browser are documented here.
   `required` is now true only for an action that needed an approval or ran under one.
 - **A disabled cron job can no longer be run through its webhook or `trigger_cron_job`.** The scheduler skipped a
   disabled job, but both manual paths started it anyway. They now refuse with "job is disabled; enable it to run
-  it" (HTTP 409 on the webhook route). A wrong webhook key is still answered 403, so a disabled job does not tell a
+  it" (HTTP 409 on the webhook route; over MCP an error with `code: cron_job_disabled`). A wrong webhook key is still answered 403, so a disabled job does not tell a
   stranger its state.
 - **Page-started downloads are capped.** A page could start any number of downloads of any size, and each was
   written whole to the session's artifact folder. A download larger than the new `DOWNLOAD_MAX_BYTES` (default

@@ -24,6 +24,7 @@ from ..browser.request_gate import block_summary
 from ..browser.services.diagnostics import checked_screenshot
 from ..browser_sandbox import browser_sandbox_status
 from ..browser_scripts import PAGE_TEXT_SCRIPT
+from ..cron_service import CronJobDisabledError
 from ..models import (
     ActionName,
     ApprovalOrigin,
@@ -382,6 +383,10 @@ class McpToolGateway:
                 },
                 exc,
             )
+        except CronJobDisabledError as exc:
+            # The agent can enable the job, or stop triggering it; a code tells it which refusal this is.
+            message = str(exc.args[0]) if exc.args else "job is disabled"
+            return self._refusal_response(message, {"error": message, "code": "cron_job_disabled"}, exc)
         except (ValueError, KeyError, RuntimeError) as exc:
             # Handlers raise these with operator-facing messages ("Provide
             # source_selector or source_x/source_y", "Memory profile not found").
