@@ -16,6 +16,8 @@ All notable changes to auto-browser are documented here.
 - `TYPING_DELAY_MS` is removed from the settings, `.env.example` and `docker-compose.yml`: nothing ever read it (typing
   pacing is `HUMAN_TYPING_MIN_DELAY_MS` and `HUMAN_TYPING_MAX_DELAY_MS`). An old env file that still sets it is
   ignored.
+- The "daemon ignores GwPriority" startup warning now also covers a client that speaks an API version below 1.48, and
+  says its check compares network names only, so the gateway move it describes can also happen where it stays silent.
 
 ### Fixed
 

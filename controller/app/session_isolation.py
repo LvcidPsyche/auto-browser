@@ -601,11 +601,13 @@ class DockerBrowserNodeProvisioner:
                 return
             self._gw_hazard_warned = True
         logger.warning(
-            "This Docker daemon ignores GwPriority (API below 1.48), so the controller joins session network %s "
-            "without it, and that name sorts before %s, a network the controller is on. Docker then moves the "
-            "controller's default gateway, and its published ports, to the session network: the request that "
-            "creates a session can be cut, and the published port stops answering. Use Docker Engine 28 or "
-            "later, or set ISOLATED_BROWSER_CONTAINER_PREFIX to a prefix that sorts after %s.",
+            "GwPriority is not honoured (the Docker daemon's API, or the API version this client speaks, is below "
+            "1.48), so the controller joins session network %s without it, and that name sorts before %s, a "
+            "network the controller is on. Docker then moves the controller's default gateway, and its published "
+            "ports, to the session network: the request that creates a session can be cut, and the published port "
+            "stops answering. Use Docker Engine 28 or later, or set ISOLATED_BROWSER_CONTAINER_PREFIX to a prefix "
+            "that sorts after %s. This check compares network names only, so the same move can happen where it "
+            "stays silent (Docker also weighs a network's other properties).",
             session_network_name,
             own[0],
             own[0],
