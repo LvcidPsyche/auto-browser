@@ -7,12 +7,15 @@ fails on the gap, so a bundle never claims to be intact.
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 import pytest
-
 from app.browser_manager import BrowserManager
 from app.witness import WitnessRecorder
+from app.witness_signing import WitnessSigner
+
+from tests.test_witness_signing import VERIFIER, _receipt_kwargs, requires_verifier
 
 SCOPE = "sess-1"
 
@@ -86,3 +89,56 @@ async def test_the_manager_listing_carries_the_count(tmp_path: Path, recorder: W
 
     assert len(listing) == 3
     assert listing.unparseable_lines == 1
+
+
+def _load_verify_bundle():
+    spec = importlib.util.spec_from_file_location("verify_witness_bundle_under_test", VERIFIER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.verify_bundle
+
+
+@pytest.fixture
+async def signed_chain(tmp_path: Path) -> WitnessRecorder:
+    recorder = WitnessRecorder(tmp_path / "witness", signer=WitnessSigner(tmp_path / "keys"))
+    await recorder.startup()
+    for index in range(3):
+        await recorder.record(SCOPE, **_receipt_kwargs(f"click-{index}"))
+    return recorder
+
+
+@requires_verifier
+async def test_a_clean_signed_bundle_passes_the_offline_verifier(signed_chain: WitnessRecorder) -> None:
+    bundle = await signed_chain.export_bundle(SCOPE)
+
+    result = _load_verify_bundle()(bundle)
+
+    assert result["ok"], result["failures"]
+    assert bundle["head_hash"] and bundle["unparseable_lines"] == 0
+
+
+@requires_verifier
+async def test_a_bundle_whose_last_line_is_corrupt_fails_the_offline_verifier(signed_chain: WitnessRecorder) -> None:
+    path = signed_chain._path(SCOPE)
+    path.write_bytes(path.read_bytes() + b"{}\n")
+
+    bundle = await signed_chain.export_bundle(SCOPE)
+    result = _load_verify_bundle()(bundle)
+
+    assert (bundle["receipt_count"], bundle["unparseable_lines"], bundle["chain_valid_at_export"]) == (3, 1, False)
+    # No head is claimed next to a receipt list that has a gap at its end.
+    assert bundle["head_hash"] is None
+    assert result["ok"] is False
+    assert any("unparseable_lines" in failure for failure in result["failures"]), result["failures"]
+    assert any("chain_valid_at_export" in failure for failure in result["failures"]), result["failures"]
+
+
+@requires_verifier
+async def test_the_unparseable_count_alone_fails_a_bundle(signed_chain: WitnessRecorder) -> None:
+    bundle = await signed_chain.export_bundle(SCOPE)
+    bundle["unparseable_lines"] = 2
+
+    result = _load_verify_bundle()(bundle)
+
+    assert result["ok"] is False
+    assert any("unparseable_lines is 2" in failure for failure in result["failures"]), result["failures"]

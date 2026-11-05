@@ -36,6 +36,11 @@ What a PASS does NOT mean:
     whose signatures still verify. Compare the printed head with a head obtained
     independently, or pass it with --expect-head.
 
+The bundle's own `unparseable_lines` and `chain_valid_at_export` fields are checked too: a bundle that says
+it skipped a line, or that its chain did not verify when it was exported, fails. Both fields are self-reported
+by the exporter and unsigned, so this catches an honest but incomplete export, not a forgery; someone who
+edits the bundle can set them to look clean. The signatures and --expect-head are what hold against that.
+
 A bundle with no signed receipt at all fails: its hashes are consistent, but
 anyone holding the receipts can produce that. --allow-unsigned accepts it
 for deployments that never signed, and says so in the result.
@@ -149,6 +154,16 @@ def verify_bundle(
         )
     if "receipt_count" in bundle and bundle["receipt_count"] != len(receipts):
         failures.append(f"bundle claims {bundle['receipt_count']} receipts but carries {len(receipts)}")
+    unparseable = bundle.get("unparseable_lines")
+    if isinstance(unparseable, int) and unparseable > 0:
+        failures.append(
+            f"unparseable_lines is {unparseable}: the exporter skipped chain lines that did not parse, so the bundle is incomplete"
+        )
+    if bundle.get("chain_valid_at_export") is False:
+        # An unsigned chain is never "valid" to the exporter (it attests to nothing), so for a bundle that
+        # has no signed receipt the check below already says so, and --allow-unsigned accepts it.
+        message = "the exporter's own chain check failed when the bundle was made (chain_valid_at_export is false)"
+        (notes if allow_unsigned and not signed else failures).append(message)
     if expect_head and head != expect_head:
         failures.append(f"the chain ends at {head}, not the expected head {expect_head}")
 

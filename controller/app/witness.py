@@ -659,7 +659,9 @@ class WitnessRecorder:
             # Lines that did not parse and are not in `receipts`: the bundle is incomplete when this is above 0,
             # and `chain_valid_at_export` is false because the chain has a gap there.
             "unparseable_lines": receipts.unparseable_lines,
-            "head_hash": chain.get("head_hash"),
+            # None when a line was skipped: the chain stops at the first bad line, so its head would sit next
+            # to a receipt list that has a gap, and look intact to a check that compares the two.
+            "head_hash": None if receipts.unparseable_lines else chain.get("head_hash"),
             "chain_valid_at_export": chain.get("valid"),
             "receipts": [r.model_dump(mode="json") for r in receipts],
         }
