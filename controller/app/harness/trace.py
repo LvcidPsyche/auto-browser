@@ -82,7 +82,7 @@ class TraceEnvelope(BaseModel):
         event_types = {event.event_type for event in self.events}
         if any(event_type.startswith("action") for event_type in event_types):
             kinds.add("actions")
-        if any(event_type.startswith("screenshot") for event_type in event_types):
+        if any(_is_screenshot_evidence(event) for event in self.events):
             kinds.add("screenshots")
         if self.network_entries or any(event_type.startswith("network") for event_type in event_types):
             kinds.add("network")
@@ -163,7 +163,16 @@ class TraceEnvelope(BaseModel):
             observation = step.get("observation") or {}
             if observation:
                 final_observation = observation
-            payloads = [
+            payloads: list[tuple[str, dict[str, Any]]] = []
+            # The orchestrator observes, then decides and acts, so the observation's screenshot is the page
+            # before this step's action: it comes first, then the decision (the type the mock attempt records,
+            # which meets a "model_decisions" requirement), then the action.
+            screenshot = {key: observation[key] for key in _SCREENSHOT_KEYS if observation.get(key)}
+            if screenshot:
+                payloads.append(("screenshot", screenshot))
+            if decision:
+                payloads.append(("model_decision", {"decision": decision}))
+            payloads.append(
                 (
                     "action",
                     {
@@ -173,11 +182,7 @@ class TraceEnvelope(BaseModel):
                         "execution": step.get("execution"),
                     },
                 )
-            ]
-            # The same event type the mock attempt records, so the "screenshots" evidence kind is met.
-            screenshot = {key: observation[key] for key in _SCREENSHOT_KEYS if observation.get(key)}
-            if screenshot:
-                payloads.append(("screenshot", screenshot))
+            )
             for event_type, payload in payloads:
                 event = TraceEvent(
                     run_id=trace.run_id,
@@ -313,6 +318,13 @@ def _pii_scrubber() -> PiiScrubber:
     if _scrubber_for is None or _scrubber_for[0] is not settings:
         _scrubber_for = (settings, PiiScrubber.from_settings(settings))
     return _scrubber_for[1]
+
+
+def _is_screenshot_evidence(event: TraceEvent) -> bool:
+    """A screenshot event that points at an image. The mock attempt's {"available": False} one does not."""
+    if not event.event_type.startswith("screenshot") or event.payload.get("available") is False:
+        return False
+    return any(event.payload.get(key) for key in _SCREENSHOT_KEYS)
 
 
 def _execution_redacted_the_text(execution: Any) -> bool:

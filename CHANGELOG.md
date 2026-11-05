@@ -88,7 +88,7 @@ All notable changes to auto-browser are documented here.
 
 - **A harness contract of only optional postconditions no longer passes with nothing satisfied.** The verifier passed it at confidence 1.0 even when the page matched none of them. When every postcondition is optional, at least one must now be satisfied; a contract with any required postcondition is judged as before.
 
-- **Harness traces of a live agent run now record its screenshots.** The trace built from an agent result held only `action` events, so a run that took screenshots never met a `screenshots` evidence requirement. Each step that has a screenshot now adds a `screenshot` event (the same event type the mock attempt records) after its action.
+- **Harness traces of a live agent run now record its screenshots.** The trace built from an agent result held only `action` events, so a run that took screenshots never met a `screenshots` evidence requirement. Each step that has a screenshot now adds a `screenshot` event (the same event type the mock attempt records) before its action, because the screenshot is the page the agent saw before it acted.
 
 - **The Codespaces overlay now accepts the forwarded host name.** The controller refused requests to `<codespace>-8000.app.github.dev` with "Invalid host header", because the overlay kept the loopback-only host list. It now defaults `CONTROLLER_ALLOWED_HOSTS` to the loopback names plus `*.app.github.dev`. If you set `CONTROLLER_ALLOWED_HOSTS` in `.env`, include `*.app.github.dev` in it.
 
@@ -144,6 +144,13 @@ All notable changes to auto-browser are documented here.
   required `dom_contains` or `text_contains` on an email that passed in the live run no longer matched when the drift
   monitor checked the stored copy. The monitor now scrubs the expected strings the way the stored trace was scrubbed
   before it verifies. A skill whose recorded page no longer holds the expected text still reports degraded.
+
+- **A live harness run now records its model decisions, and a mock run no longer counts as having screenshots.** The
+  trace of a live agent run had no `model_decision` events, so a contract that required `model_decisions` evidence
+  passed on a mock attempt and always failed on a live one. Each step with a decision now adds one, before its action
+  and redacted like the action. The other way round, the mock attempt's screenshot event (`available: false`) met a
+  required `screenshots` kind with no image; a screenshot event now counts only when it carries a `screenshot_path` or
+  `screenshot_url` and is not marked unavailable.
 
 ### Changed
 

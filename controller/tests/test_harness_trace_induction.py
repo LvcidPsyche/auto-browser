@@ -34,7 +34,7 @@ class TraceRecorderTests(unittest.TestCase):
             recorder = TraceRecorder(tmp, run_id="run-1", contract_hash="abc")
             first = recorder.append("model_decision", {"strategy": "dom_first"})
             second = recorder.append("action", {"action": "click", "selector": "#go"}, step_idx=1)
-            recorder.append("screenshot", {"path": "shot.png"}, step_idx=1)
+            recorder.append("screenshot", {"screenshot_path": "shot.png"}, step_idx=1)
 
             trace = recorder.finalize(final_observation={"url": "https://example.com/done"})
 
