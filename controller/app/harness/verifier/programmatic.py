@@ -160,10 +160,12 @@ async def _regex_search_many(patterns: list[str], text: str, *, timeout: float) 
     None and its child is killed; the patterns after it run in a fresh child, so
     each stuck pattern costs one timeout and the others keep their own verdicts.
 
-    Cost, measured 2026-11-05 on the Windows 11 dev laptop (Python 3.12, 100 calls): 176 ms per call with one
-    pattern, and 180 ms for one call with 100 patterns, so the price is the interpreter spawn, paid once per
-    verification (at most once per attempt, 20 attempts at most), not once per check. A long-lived worker is not
-    worth its complexity for that; revisit if a verification ever needs more than one spawn per attempt.
+    Cost, measured 2026-11-05 with Python 3.12 on two Windows 11 laptops (100 calls with one pattern each): the
+    price is the interpreter spawn, about the same for one pattern as for 100, so it is paid once per verification
+    (at most once per attempt, 20 attempts at most), not once per check. With `-I` alone a call took 176 ms on one
+    laptop and 88-93 ms on the other; with `-I -S` (the worker needs no site module) 124 ms and 69 ms. A long-lived
+    worker is not worth its complexity for that; revisit if a verification ever needs more than one spawn per
+    attempt. Linux was not measured.
     """
     results: list[bool | None] = []
     remaining = patterns
@@ -182,6 +184,7 @@ async def _regex_search_child(patterns: list[str], text: str, *, timeout: float)
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-I",
+        "-S",  # the worker imports only json, re and sys: no site module, so a cheaper start
         "-c",
         _REGEX_WORKER,
         stdin=asyncio.subprocess.PIPE,
