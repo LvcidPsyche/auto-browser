@@ -321,6 +321,42 @@ class LoadRepoEnvTests(unittest.TestCase):
                     self.assertNotEqual(exported.get(key), "poisoned", key)
                     self.assertIn(f": {key} is not loaded from .env (", stderr)
 
+    def test_a_key_that_is_not_set_costs_no_subprocess(self) -> None:
+        # Each fork costs about 130 ms on Git Bash, so a copied .env.example (176 keys) took 20 s. The wrappers
+        # shadow the builtin and `tr` and log to a file (declare's own stderr is redirected away by the caller);
+        # `declare -p` is only for a name that is set, and the case fold on Windows shells needs no `tr`.
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        log = _bash_path(Path(tempdir.name) / "forks.log")
+        wrappers = (
+            f'tr() {{ echo "tr" >> "{log}"; command tr "$@"; }}; '
+            f'declare() {{ echo "declare $*" >> "{log}"; builtin declare "$@"; }}; '
+        )
+        for ostype in ("cygwin", "linux-gnu"):
+            with self.subTest(ostype=ostype):
+                Path(tempdir.name, "forks.log").unlink(missing_ok=True)
+                exported, _, stderr = self.load(
+                    "Mixed_Case=1\nUPPER=2\nlower=3\n", prelude=f"OSTYPE={ostype}; {wrappers}"
+                )
+
+                self.assertEqual((exported["Mixed_Case"], exported["UPPER"], exported["lower"]), ("1", "2", "3"))
+                self.assertEqual(stderr, "")
+                forks = Path(tempdir.name, "forks.log")
+                self.assertEqual(forks.read_text() if forks.exists() else "", "")
+
+    def test_a_set_key_still_gets_the_export_check_and_a_windows_key_the_case_fold(self) -> None:
+        exported, _, stderr = self.load(
+            "Mine=from-env\nExported=from-env\nPath=poisoned\n",
+            prelude="OSTYPE=cygwin; Mine=mine; export Exported=old; ",
+            watch=("Mine",),
+        )
+
+        self.assertNotIn("Mine", exported)
+        self.assertEqual(exported["Exported"], "from-env")
+        self.assertNotEqual(exported.get("Path"), "poisoned")
+        self.assertIn(": Path is not loaded from .env (", stderr)
+        self.assertIn(": Mine is not loaded from .env (", stderr)
+
     def test_elsewhere_a_key_differing_only_in_case_is_an_ordinary_key(self) -> None:
         exported, _, stderr = self.load("Ld_Preload=kept\nFINE=1\n", prelude="OSTYPE=linux-gnu; ")
 

@@ -37,10 +37,21 @@ __lre_denied_name() {
 # Windows reads environment names case-insensitively (`Path=` would reach a child as PATH).
 __lre_refused() {
   __lre_denied_name "$1" && return 0
+  # No fork for the common key: a subshell costs about 130 ms on Git Bash, and a copied .env.example has 176 keys.
   case "${OSTYPE:-}" in
-    msys* | cygwin*) __lre_denied_name "$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')" && return 0 ;;
+    msys* | cygwin*)
+      if [[ "$1" == *[a-z]* ]]; then
+        local __lre_nocase=0 __lre_hit=1
+        shopt -q nocasematch && __lre_nocase=1
+        shopt -s nocasematch
+        __lre_denied_name "$1" && __lre_hit=0
+        ((__lre_nocase)) || shopt -u nocasematch
+        ((__lre_hit)) || return 0
+      fi
+      ;;
   esac
-  # `declare -p` (not `[[ -v ]]`, which needs bash 4.2) fails for a name that is not set.
+  # `${!1+set}` (not `[[ -v ]]`, which needs bash 4.2) is empty for a name that is not set.
+  [[ -n "${!1+set}" ]] || return 1
   local __lre_decl
   __lre_decl="$(declare -p "$1" 2>/dev/null)" || return 1
   case "$__lre_decl" in
