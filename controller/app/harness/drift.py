@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .contracts import TaskContract
 from .register import SkillStagingRegistry
@@ -22,6 +22,12 @@ class DriftCheckResult(BaseModel):
     trace_hash: str = ""
     verification: VerificationResult | None = None
     notes: list[str] = Field(default_factory=list)
+
+    @field_validator("verification")
+    @classmethod
+    def _scrub_verification(cls, value: VerificationResult | None) -> VerificationResult | None:
+        # The result is written to drift.json; the verifier's result holds the URL it saw.
+        return value.scrubbed() if value is not None else None
 
 
 class SkillDriftMonitor:

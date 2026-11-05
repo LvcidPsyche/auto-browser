@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..session_ownership import may_use, verified_operator
 from .contracts import TaskContract
@@ -29,6 +29,12 @@ class HarnessAttempt(BaseModel):
     trace_path: str
     verification: VerificationResult
     created_at: float = Field(default_factory=time.time)
+
+    @field_validator("verification")
+    @classmethod
+    def _scrub_verification(cls, value: VerificationResult) -> VerificationResult:
+        # The record is written to run.json; the verifier's result holds the raw URL.
+        return value.scrubbed()
 
 
 class HarnessRunRecord(BaseModel):

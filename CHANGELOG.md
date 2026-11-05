@@ -134,6 +134,12 @@ All notable changes to auto-browser are documented here.
 
 - **A `.env` line can no longer run commands in the repo's scripts.** `doctor.sh`, `compose_local.sh`, `bootstrap_cli_auth.sh` and the smoke scripts loaded `.env` by sourcing it as shell, so a value such as `X=$(cmd)` ran `cmd`, and an unquoted `&`, `;` or `(` in a value broke the script. They now read `KEY=VALUE` lines as text: blank lines and `#` comments are skipped, one level of matching quotes is removed, an unquoted ` # comment` is dropped, and a value keeps every `=` and `$` in it. Quoted values are no longer expanded, so `KEY="$HOME/x"` is now the literal text `$HOME/x`.
 
+- **A harness verification no longer leaves a URL token on disk.** The verifier copies the page URL into its result,
+  and that result was written as it came to `run.json`, `drift.json`, and a staged skill's `candidate.json`,
+  `envelope.json` and `provenance.json`, so an `access_token` in the final URL survived there although the trace
+  itself was scrubbed. Verification results are now scrubbed with the trace's scrubber wherever they are stored; the
+  run still verifies the original observation.
+
 ### Changed
 
 - **The stdio bridge docs now say it handles one request at a time.** `docs/mcp-clients.md` explains that a slow tool call holds up the calls behind it, and where to change the 60-second per-call timeout. No behaviour changed.

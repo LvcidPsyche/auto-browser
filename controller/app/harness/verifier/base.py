@@ -20,6 +20,17 @@ class VerificationResult(BaseModel):
     backend: str = "programmatic"
     details: dict[str, Any] = Field(default_factory=dict)
 
+    def scrubbed(self) -> "VerificationResult":
+        """A copy that is safe to store: the trace's scrubbing applied to every field.
+
+        The verifier copies raw observation values into its result (the URL, a matched condition's
+        text), so a result is scrubbed before it is written to run.json, drift.json or a candidate's
+        provenance and envelope. A caller that keeps the result in process may keep the original.
+        """
+        from ..trace import _redact_sensitive
+
+        return type(self).model_validate(_redact_sensitive(self.model_dump(mode="json")))
+
 
 class VerifierAdapter(Protocol):
     async def verify(self, contract: TaskContract, trace: Any) -> VerificationResult: ...

@@ -69,6 +69,8 @@ class SkillInducer:
     ) -> SkillCandidate:
         # The candidate stores the trace, so it stores the scrubbed one; the hash must match what is on disk.
         trace = trace.scrubbed()
+        # Likewise the verification: it holds the raw URL, and it is written to the provenance and the envelope.
+        verification = verification.scrubbed()
         skill_id = _skill_id(contract, owner)
         staging_root = self.staging_root.resolve()
         target_dir = (self.staging_root / skill_id).resolve()
