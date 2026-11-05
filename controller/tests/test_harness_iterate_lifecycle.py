@@ -320,7 +320,7 @@ class RetentionTests(_Base):
         record = await self._run(service)
         _age(service.store.run_dir(record.id) / "run.json", 400)
         _age(service.store.run_dir(record.id), 400)
-        service.store.mark_active(record.id)
+        self.assertTrue(service.store.begin_run(record.id, None))
 
         self.assertEqual(service.store.prune(30), 0)
         self.assertTrue(service.store.run_dir(record.id).exists())

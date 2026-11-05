@@ -118,10 +118,6 @@ class HarnessRunStore:
             self._active[run_id] = owner
             return True
 
-    def mark_active(self, run_id: str, owner: str | None = None) -> None:
-        with self._active_lock:
-            self._active[run_id] = owner
-
     def release(self, run_id: str) -> None:
         with self._active_lock:
             self._active.pop(run_id, None)
