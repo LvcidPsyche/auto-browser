@@ -197,6 +197,9 @@ All notable changes to auto-browser are documented here.
   reverse-ssh sidecar file, not the whole file (bastion, user, pid, log path). A file that is not a JSON object is
   reported as unreadable, a `stale_after_seconds` that is not a positive finite number falls back to
   `REMOTE_ACCESS_STALE_AFTER_SECONDS` instead of raising, and a public URL that is not a string is ignored.
+- `POST /mesh/receive`, which takes no bearer token, now reads at most `MESH_MAX_BODY_BYTES` (new, default 1 MiB): a
+  body with no `Content-Length`, a larger one, or one that streams past the cap gets `413` before anything is parsed,
+  and an uninitialised mesh answers `503` before the body is read. A malformed envelope is `422` as before.
 
 ## [1.15.0] — 2026-11-05
 

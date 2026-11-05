@@ -11,6 +11,7 @@ MESH_ENABLED=true
 MESH_IDENTITY_DIR=/data/mesh/identity   # the node's Ed25519 key pair, created on first start
 MESH_PEERS_PATH=/data/mesh/peers.json   # who may call this node, and what they may ask for
 MESH_TIMESTAMP_WINDOW=30                # seconds an envelope's timestamp may differ from the clock
+MESH_MAX_BODY_BYTES=1048576             # largest /mesh/receive body in bytes; over it gets 413 unparsed
 ```
 
 `GET /mesh/identity` returns this node's `node_id` (the SHA-256 of its public key, hex) and
@@ -99,6 +100,11 @@ time, size and identity, and reads the file again when any of them has changed. 
   except for a file that was never there.
 
 ## What `/mesh/receive` checks
+
+Before any of that the body is read with a cap: `MESH_MAX_BODY_BYTES` (1 MiB by default). A request with no
+`Content-Length`, one that declares more, or one that sends more than the cap gets `413` and is not parsed;
+the route takes no bearer token, so this is what stops an unauthenticated caller from making the controller
+buffer an arbitrary body.
 
 In this order: the sender is in the peers file; the envelope's timestamp is inside
 `MESH_TIMESTAMP_WINDOW` (a non-finite timestamp is outside it); the envelope is addressed to this

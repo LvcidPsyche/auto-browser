@@ -106,6 +106,8 @@ class Settings(BaseSettings):
     mesh_identity_dir: str = Field("/data/mesh/identity", alias="MESH_IDENTITY_DIR")
     mesh_peers_path: str = Field("/data/mesh/peers.json", alias="MESH_PEERS_PATH")
     mesh_timestamp_window: float = Field(30.0, alias="MESH_TIMESTAMP_WINDOW")
+    # /mesh/receive skips the bearer token, so its body is capped before anything is parsed.
+    mesh_max_body_bytes: int = Field(1024 * 1024, alias="MESH_MAX_BODY_BYTES")
     memory_root: str = Field("/data/memory", alias="MEMORY_ROOT")
     memory_enabled: bool = Field(True, alias="MEMORY_ENABLED")
     ocr_enabled: bool = Field(True, alias="OCR_ENABLED")
