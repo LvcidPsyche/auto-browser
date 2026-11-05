@@ -378,6 +378,9 @@ All notable changes to auto-browser are documented here.
   action events now say `simulated: true`. They still meet `model_decisions` and `actions` evidence, by construction
   (the default contract requires `actions`, so a mock run could not converge otherwise); a mock-staged candidate is
   marked `simulated`.
+- **The controller no longer hangs at startup with more than 100 queued agent jobs.** It waited to put every
+  queued record on a queue that holds 100 before any worker existed, so record 101 blocked startup forever. The
+  workers now start first and a background task puts the records on the queue, oldest first; shutdown stops it.
 
 ### Changed
 

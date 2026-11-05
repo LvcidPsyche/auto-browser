@@ -284,6 +284,7 @@ class AgentJobQueue:
         self.worker_count = max(1, worker_count)
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
         self._workers: list[asyncio.Task] = []
+        self._requeue_task: asyncio.Task[None] | None = None
         self._started = False
         self.audit = audit_store
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
@@ -312,15 +313,27 @@ class AgentJobQueue:
         await self.store.startup()
         await self.store.mark_running_interrupted()
         queued = await self.store.list(status="queued")
-        for record in reversed(queued):
-            await self.queue.put(record.id)
         self._workers = [
             asyncio.create_task(self._worker_loop(index), name=f"agent-job-worker-{index}")
             for index in range(self.worker_count)
         ]
+        # The queue holds 100: with more records than that on disk, putting them here would wait for room
+        # that only a worker can make, so a task puts them (oldest first) while startup returns.
+        self._requeue_task = asyncio.create_task(
+            self._requeue([record.id for record in reversed(queued)]), name="agent-job-requeue"
+        )
         self._started = True
 
+    async def _requeue(self, job_ids: list[str]) -> None:
+        for job_id in job_ids:
+            await self.queue.put(job_id)
+
     async def shutdown(self) -> None:
+        if self._requeue_task is not None:
+            self._requeue_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._requeue_task
+            self._requeue_task = None
         for worker in self._workers:
             worker.cancel()
         for worker in self._workers:

@@ -537,3 +537,78 @@ class AgentJobQueueTests(unittest.IsolatedAsyncioTestCase):
         updated = await self.queue.get_job(record.id)
         self.assertEqual(updated["status"], "interrupted")
         self.assertTrue(updated["resumable"])
+
+
+class _InstantOrchestrator:
+    """A run that finishes at once and records the goals in the order it ran them."""
+
+    def __init__(self) -> None:
+        self.goals: list[str] = []
+
+    async def run(self, **kwargs):
+        self.goals.append(kwargs["goal"])
+        return AgentRunResult(
+            provider=kwargs["provider_name"],
+            model="test-model",
+            goal=kwargs["goal"],
+            workflow_profile=kwargs.get("workflow_profile", "fast"),
+            status="done",
+            steps=[],
+            final_session={"id": kwargs["session_id"], "status": "active"},
+        )
+
+
+class AgentJobQueueBacklogTests(unittest.IsolatedAsyncioTestCase):
+    """More queued records on disk than the queue holds must not stall startup (it blocked on record 101)."""
+
+    BACKLOG = 150
+
+    async def asyncSetUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.orchestrator = _InstantOrchestrator()
+        self.queue = AgentJobQueue(
+            orchestrator=self.orchestrator,
+            store_root=Path(self.tempdir.name),
+            session_accessible=every_session_usable,
+            worker_count=1,
+        )
+        await self.queue.store.startup()
+        for index in range(self.BACKLOG):
+            await self.queue.store.create(
+                session_id="session-backlog",
+                kind="agent_run",
+                request=AgentRunRequest(provider="openai", goal=f"goal-{index:03d}").model_dump(),
+                job_id=f"job-{index:03d}",
+            )
+
+    async def asyncTearDown(self) -> None:
+        await self.queue.shutdown()
+        self.tempdir.cleanup()
+
+    async def test_startup_returns_at_once_and_every_queued_record_runs_in_order(self) -> None:
+        expected = [record.request["goal"] for record in reversed(await self.queue.store.list(status="queued"))]
+        self.assertEqual(len(expected), self.BACKLOG)
+
+        await asyncio.wait_for(self.queue.startup(), timeout=5)
+        await asyncio.wait_for(self._all_done(), timeout=30)
+
+        self.assertEqual(self.orchestrator.goals, expected)
+        self.assertEqual(await self.queue.store.list(status="queued"), [])
+
+    async def test_shutdown_during_the_requeue_ends_promptly(self) -> None:
+        # Workers that never take a job keep the queue full, so the re-queue is still waiting for room.
+        self.queue._worker_loop = self._idle_worker  # type: ignore[method-assign]
+
+        await asyncio.wait_for(self.queue.startup(), timeout=5)
+        await asyncio.sleep(0.05)
+        self.assertTrue(self.queue.queue.full())
+
+        await asyncio.wait_for(self.queue.shutdown(), timeout=5)
+
+    @staticmethod
+    async def _idle_worker(_index: int) -> None:
+        await asyncio.sleep(60)
+
+    async def _all_done(self) -> None:
+        while len(self.orchestrator.goals) < self.BACKLOG or await self.queue.store.list(status="running"):
+            await asyncio.sleep(0.01)
