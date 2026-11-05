@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import shutil
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -98,15 +99,32 @@ class HarnessRunStore:
         self.staging_root = self.root / "skills" / "staging"
         self.runs_root.mkdir(parents=True, exist_ok=True)
         self.staging_root.mkdir(parents=True, exist_ok=True)
-        # Runs this process is driving, and when it began: the restart sweep touches neither.
-        self._active: set[str] = set()
+        # Runs this process is driving (ID to owner), and when it began: the restart sweep touches neither.
+        self._active: dict[str, str | None] = {}
+        self._active_lock = threading.Lock()
         self._started_at = time.time()
 
-    def mark_active(self, run_id: str) -> None:
-        self._active.add(run_id)
+    def begin_run(self, run_id: str, owner: str | None, *, max_owned: int = 0) -> bool:
+        """Mark a new run active, unless `owner` already has `max_owned` runs stored or starting (0: no cap).
+
+        The count and the mark are one step under the store's lock, and a run counts from here, before its
+        run.json is written, so two starts at once cannot both pass a cap that only one of them fits under.
+        """
+        with self._active_lock:
+            if max_owned > 0:
+                starting = {run for run, who in self._active.items() if who == owner}
+                if len(self._owned_runs(owner) | starting) >= max_owned:
+                    return False
+            self._active[run_id] = owner
+            return True
+
+    def mark_active(self, run_id: str, owner: str | None = None) -> None:
+        with self._active_lock:
+            self._active[run_id] = owner
 
     def release(self, run_id: str) -> None:
-        self._active.discard(run_id)
+        with self._active_lock:
+            self._active.pop(run_id, None)
 
     def mark_stale_running(self) -> int:
         """Flip every run an earlier process left `running` to `interrupted`; returns how many.
@@ -129,17 +147,17 @@ class HarnessRunStore:
             flipped += 1
         return flipped
 
-    def count_owned(self, owner: str | None) -> int:
-        """How many stored runs belong to `owner` (None counts the runs nobody owns)."""
-        count = 0
+    def _owned_runs(self, owner: str | None) -> set[str]:
+        """The IDs of the stored runs that belong to `owner` (None: the runs nobody owns)."""
+        owned: set[str] = set()
         for path in self.runs_root.glob("*/run.json"):
             try:
                 stored = json.loads(path.read_text(encoding="utf-8")).get("owner")
             except (OSError, ValueError):
                 continue
             if stored == owner:
-                count += 1
-        return count
+                owned.add(path.parent.name)
+        return owned
 
     def prune(self, max_age_days: float) -> int:
         """Remove run and staged-candidate directories untouched for `max_age_days`; returns how many.
@@ -249,28 +267,32 @@ class HarnessService:
         max_attempts: int | None = None,
     ) -> HarnessRunRecord:
         owner = verified_operator()
-        if self.max_runs_per_operator > 0 and self.store.count_owned(owner) >= self.max_runs_per_operator:
+        run_id = uuid.uuid4().hex[:12]
+        if not self.store.begin_run(run_id, owner, max_owned=self.max_runs_per_operator):
             raise ValueError(
                 f"harness run limit reached: {self.max_runs_per_operator} stored runs for this operator "
                 "(HARNESS_MAX_RUNS_PER_OPERATOR); old runs are removed after HARNESS_RETENTION_DAYS"
             )
-        run_id = uuid.uuid4().hex[:12]
-        run_dir = self.store.run_dir(run_id)
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "contract.json").write_text(contract.model_dump_json(indent=2), encoding="utf-8")
-        strategy_path = run_dir / "strategy.md"
-        strategy_path.write_text(_initial_strategy(contract), encoding="utf-8")
-        record = HarnessRunRecord(
-            id=run_id,
-            contract_id=contract.id,
-            contract_hash=contract.hash(),
-            status="running",
-            owner=owner,
-            strategy_path=str(strategy_path),
-            model_tiers=self.model_tiers,
-        )
-        self.store.save(record)
-        self.store.mark_active(run_id)
+        try:
+            run_dir = self.store.run_dir(run_id)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "contract.json").write_text(contract.model_dump_json(indent=2), encoding="utf-8")
+            strategy_path = run_dir / "strategy.md"
+            strategy_path.write_text(_initial_strategy(contract), encoding="utf-8")
+            record = HarnessRunRecord(
+                id=run_id,
+                contract_id=contract.id,
+                contract_hash=contract.hash(),
+                status="running",
+                owner=owner,
+                strategy_path=str(strategy_path),
+                model_tiers=self.model_tiers,
+            )
+            self.store.save(record)
+        except BaseException:
+            # No record was saved, so nothing reads "running": just give the place back.
+            self.store.release(run_id)
+            raise
         try:
             await self._drive(
                 record,

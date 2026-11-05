@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.audit import reset_current_operator, set_current_operator
+from app.config import Settings
 from app.harness import Budget, Postcondition, TaskContract
 from app.harness.iterate import HarnessRunRecord, HarnessService
 from app.harness.trace import TraceIntegrityError
@@ -323,6 +324,23 @@ class RetentionTests(_Base):
         for _ in range(3):
             await self._run(service)
         self.assertEqual(len(service.store.list()), 3)
+
+    def test_the_setting_defaults_to_no_cap_so_an_upgrade_refuses_no_one(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(Settings().harness_max_runs_per_operator, 0)
+
+    async def test_a_run_still_starting_counts_toward_the_cap(self) -> None:
+        # The count and the mark are one step under the store's lock: a start that holds its place but has not
+        # written run.json yet is counted, so two starts at once cannot both pass a cap of one.
+        service = HarnessService(self.root, max_runs_per_operator=1)
+        self.assertTrue(service.store.begin_run("0123456789ab", None, max_owned=1))
+
+        with self.assertRaisesRegex(ValueError, "HARNESS_MAX_RUNS_PER_OPERATOR"):
+            await self._run(service)
+
+        service.store.release("0123456789ab")
+        await self._run(service)
+        self.assertEqual(len(service.store.list()), 1)
 
 
 if __name__ == "__main__":

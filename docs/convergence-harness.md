@@ -49,7 +49,7 @@ Useful env knobs:
 | `HARNESS_VERIFIER_MODEL` | Model recorded for verifier cost provenance |
 | `HARNESS_EXECUTOR_MODEL` | Minimum executor tier recorded on staged skills |
 | `HARNESS_RETENTION_DAYS` | Default `30`. Run directories and staged candidates not touched for this many days are removed at startup and in each maintenance sweep (`CLEANUP_INTERVAL_SECONDS`); `0` keeps everything. Age is the file time of `run.json` or `candidate.json`; a run this process is driving is never removed |
-| `HARNESS_MAX_RUNS_PER_OPERATOR` | Default `200`. A new run is refused once the verified operator already has this many stored runs (runs with no verified operator share one count); `0` removes the cap |
+| `HARNESS_MAX_RUNS_PER_OPERATOR` | Default `0`, no cap: `HARNESS_RETENTION_DAYS` bounds the disk. Set it when several operators share one controller, so none of them can fill it: a new run is then refused once the verified operator already has this many runs stored or starting (runs with no verified operator share one count) |
 
 ## MCP Tools
 

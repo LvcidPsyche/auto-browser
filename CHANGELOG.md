@@ -118,8 +118,9 @@ All notable changes to auto-browser are documented here.
   read as before.
 - The convergence harness no longer grows without bound: `HARNESS_RETENTION_DAYS` (default 30, `0` keeps everything)
   removes run directories and staged candidates not touched for that long, at startup and in each maintenance sweep
-  (never a run the process is driving), and `HARNESS_MAX_RUNS_PER_OPERATOR` (default 200, `0` for no cap) refuses a
-  new run once the verified operator has that many stored; runs with no verified operator share one count.
+  (never a run the process is driving). `HARNESS_MAX_RUNS_PER_OPERATOR` (default `0`, no cap; set it when several
+  operators share one controller) refuses a new run once the verified operator has that many stored or starting;
+  runs with no verified operator share one count.
 - **Upgrade note:** with the new default, harness runs and staged skill candidates older than 30 days are deleted on
   the next start. Set `HARNESS_RETENTION_DAYS=0` to keep them.
 - The harness's `login_redirect` forbidden state now looks at where the browser is, not what the page says: a URL path
