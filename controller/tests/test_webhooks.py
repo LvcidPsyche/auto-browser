@@ -125,6 +125,50 @@ class WebhookTargetTests(unittest.IsolatedAsyncioTestCase):
         await self._send("http://n8n.internal:5678/hook", allow_private_targets=True)
         self.assertEqual(self.client.post.await_args.args[0], "http://10.0.0.5:5678/hook")
 
+    async def test_with_the_opt_in_loopback_private_and_lan_answers_are_posted_to(self) -> None:
+        for address in ("10.0.0.5", "172.16.0.9", "192.168.1.20", "127.0.0.1", "::1", "fd12:3456::1"):
+            with self.subTest(address=address):
+                self.client.post.reset_mock()
+                self._resolver(address)
+                await self._send("http://n8n.internal:5678/hook", allow_private_targets=True)
+                self.client.post.assert_awaited_once()
+        self.client.post.reset_mock()
+        self._resolver("127.0.0.1")
+        await self._send("http://localhost:5678/hook", allow_private_targets=True)
+        self.client.post.assert_awaited_once()
+
+    async def test_a_cloud_metadata_answer_is_refused_even_with_the_opt_in(self) -> None:
+        # The opt-in turned off every check (STORE-20); it opens loopback and private ranges, never cloud metadata.
+        for address in (
+            "169.254.169.254",
+            "169.254.0.1",
+            "fe80::1",
+            "fe80::1%eth0",
+            "fd00:ec2::254",
+            "::ffff:169.254.169.254",
+        ):
+            with self.subTest(address=address):
+                self.client.post.reset_mock()
+                self._resolver(address)
+                await self._send("http://hooks.internal/hook", allow_private_targets=True)
+                self.client.post.assert_not_awaited()
+
+    async def test_cloud_metadata_names_and_literals_are_refused_without_a_lookup(self) -> None:
+        resolver = self._resolver(_PUBLIC)
+        for url in (
+            "http://metadata/computeMetadata/v1/",
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "http://METADATA.Google.Internal./x",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[fd00:ec2::254]/latest/meta-data/",
+        ):
+            for allow_private_targets in (False, True):
+                with self.subTest(url=url, allow_private_targets=allow_private_targets):
+                    self.client.post.reset_mock()
+                    await self._send(url, allow_private_targets=allow_private_targets)
+                    self.client.post.assert_not_awaited()
+        resolver.assert_not_awaited()
+
     async def test_the_logs_carry_the_scheme_and_host_only(self) -> None:
         self._resolver(_PUBLIC)
         self.client.post = AsyncMock(return_value=Mock(status_code=500))

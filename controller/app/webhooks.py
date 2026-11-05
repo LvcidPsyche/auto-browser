@@ -36,20 +36,28 @@ _direct_client: httpx.AsyncClient | None = None
 _DISALLOWED_WEBHOOK_HOSTS = {
     "localhost",
     "localhost.localdomain",
-    "metadata.google.internal",
 }
+# Cloud metadata: refused even when APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS opens loopback and private targets.
+_METADATA_HOSTS = frozenset({"metadata", "metadata.google.internal"})
+_METADATA_NETWORKS = tuple(ipaddress.ip_network(net) for net in ("169.254.0.0/16", "fe80::/10", "fd00:ec2::254/128"))
 _RESOLVE_TIMEOUT_SECONDS = 5.0
 
 
-def _address_is_disallowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+def _address_is_disallowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, *, allow_private: bool) -> bool:
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
+    if any(ip in network for network in _METADATA_NETWORKS):
+        return True
+    if allow_private:
+        return False
     return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved
 
 
-def _is_disallowed_webhook_name(host: str) -> bool:
+def _is_disallowed_webhook_name(host: str, *, allow_private: bool) -> bool:
     normalized = host.lower().strip().rstrip(".")
-    return normalized in _DISALLOWED_WEBHOOK_HOSTS or normalized.endswith(".localhost")
+    if normalized in _METADATA_HOSTS:
+        return True
+    return not allow_private and (normalized in _DISALLOWED_WEBHOOK_HOSTS or normalized.endswith(".localhost"))
 
 
 def _loggable(webhook_url: str) -> str:
@@ -91,9 +99,10 @@ async def _checked_target(webhook_url: str, *, allow_private: bool) -> _Target |
     """Where to send the request, or None (after a warning) when the target is refused.
 
     The host is read as a browser reads it (numeric spellings of loopback are refused), resolved here, and every
-    answer must be a public address. With no proxy the request goes to the first answer (pinned_url), with the
-    original name kept in the Host header and the TLS server name, so a second lookup cannot return a different
-    address; dispatch_approval_event decides that.
+    answer must be a public address; `allow_private` admits any answer but cloud metadata (169.254.0.0/16, fe80::/10,
+    fd00:ec2::254, and the names metadata and metadata.google.internal, refused before any lookup). With no proxy the
+    request goes to the first answer (pinned_url), with the original name kept in the Host header and the TLS server
+    name, so a second lookup cannot return a different address; dispatch_approval_event decides that.
     """
     label = _loggable(webhook_url)
     try:
@@ -107,7 +116,7 @@ async def _checked_target(webhook_url: str, *, allow_private: bool) -> _Target |
         logger.warning("blocked disallowed approval webhook target: %s", label)
         return None
     host = parsed.hostname.rstrip(".")
-    if not allow_private and _is_disallowed_webhook_name(host):
+    if _is_disallowed_webhook_name(host, allow_private=allow_private):
         logger.warning("blocked disallowed approval webhook target: %s", label)
         return None
     try:
@@ -122,7 +131,9 @@ async def _checked_target(webhook_url: str, *, allow_private: bool) -> _Target |
         except (OSError, asyncio.TimeoutError) as exc:
             logger.warning("approval webhook host did not resolve: %s (%s)", label, type(exc).__name__)
             return None
-    if not addresses or (not allow_private and any(_address_is_disallowed(ipaddress.ip_address(a)) for a in addresses)):
+    if not addresses or any(
+        _address_is_disallowed(ipaddress.ip_address(a), allow_private=allow_private) for a in addresses
+    ):
         logger.warning("blocked disallowed approval webhook target: %s", label)
         return None
     if literal is not None:
