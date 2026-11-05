@@ -225,6 +225,15 @@ class StoredUrlTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual([url], _URL_PATTERN.findall(text))
 
+    def test_a_url_in_quotes_ends_before_a_closing_quote_followed_by_sentence_punctuation(self) -> None:
+        url = "https://example.com/a?b=1"
+        for text in (f"see '{url}'.", f"he said '{url}'! ok", f"is it '{url}'?", f"'{url}'. Next"):
+            with self.subTest(text=text):
+                self.assertEqual([url], _URL_PATTERN.findall(text))
+        # An apostrophe inside the URL is still part of it.
+        inside = "https://example.com/?q=o'neil&x=1"
+        self.assertEqual([inside], _URL_PATTERN.findall(f"look at {inside}"))
+
     def test_the_file_on_disk_holds_no_url_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             envelope = TraceEnvelope(

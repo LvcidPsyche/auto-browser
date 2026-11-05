@@ -36,9 +36,10 @@ _SENSITIVE_FLAG_KEYS = ("sensitive", "text_redacted")
 _SCREENSHOT_KEYS = ("screenshot_path", "screenshot_url")
 # A URL in text ends at whitespace, a double quote or an angle bracket, and a trailing run of `,;)]}` is punctuation
 # after it. An apostrophe is legal inside a URL (`?q=o'neil&token=...`), so it ends one only when it closes a quoted
-# string: when whitespace, `,;:)]}` or the end follows it.
+# string: when whitespace, `,;:)]}`, the end, or sentence punctuation (`.!?`) and then whitespace or the end follows it.
+# An apostrophe before a letter or a digit stays ambiguous and stays in the URL.
 _URL_PATTERN = re.compile(
-    r"""https?://(?:[^\s"'<>]|'(?![\s,;:)\]}]|\Z))*[^\s"'<>,;)\]}]""",
+    r"""https?://(?:[^\s"'<>]|'(?![\s,;:)\]}]|[.!?](?:\s|\Z)|\Z))*[^\s"'<>,;)\]}]""",
     re.IGNORECASE,
 )
 _URL_SCRUB_MAX_BYTES = 16384
