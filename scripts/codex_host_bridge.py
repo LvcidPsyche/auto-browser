@@ -293,6 +293,16 @@ class UnixHTTPServer(ThreadingMixIn, UnixStreamServer):
         super().__init__(socket_path, BridgeRequestHandler)
 
 
+class _HeaderDeadline:
+    """One request's header deadline: under its lock, the headers coming in and the deadline passing exclude each
+    other. A late timer of an earlier request on the same connection sees its own, settled, state."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.headers_in = False
+        self.late = False
+
+
 class BridgeRequestHandler(BaseHTTPRequestHandler):
     server_version = "AutoBrowserCodexHostBridge/0.1"
     protocol_version = "HTTP/1.1"
@@ -336,8 +346,10 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
     def handle_one_request(self) -> None:
         # The request line and headers get a total deadline, as the body does. Past it the connection is shut down,
         # which ends the blocked read; parse_request stops the timer once the headers are in.
-        self._headers_late = False
-        self._header_timer = threading.Timer(REQUEST_HEADER_DEADLINE_SECONDS, self._end_late_headers)
+        self._header_deadline = _HeaderDeadline()
+        self._header_timer = threading.Timer(
+            REQUEST_HEADER_DEADLINE_SECONDS, self._end_late_headers, args=(self._header_deadline,)
+        )
         self._header_timer.daemon = True
         self._header_timer.start()
         try:
@@ -350,11 +362,18 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
             parsed = super().parse_request()
         finally:
             self._header_timer.cancel()
+            # cancel() cannot stop a callback that has already started: which came first is settled here.
+            with self._header_deadline.lock:
+                self._header_deadline.headers_in = True
+                late = self._header_deadline.late
         # Headers cut short by the deadline are not a request.
-        return parsed and not self._headers_late
+        return parsed and not late
 
-    def _end_late_headers(self) -> None:
-        self._headers_late = True
+    def _end_late_headers(self, deadline: _HeaderDeadline) -> None:
+        with deadline.lock:
+            if deadline.headers_in:
+                return  # the headers made it: the timer fired as parse_request was stopping it
+            deadline.late = True
         self.close_connection = True
         try:
             self.connection.shutdown(socket.SHUT_RDWR)

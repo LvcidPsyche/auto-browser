@@ -23,7 +23,7 @@ import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "codex_host_bridge.py"
 
@@ -271,6 +271,42 @@ class BridgeLimitsTests(unittest.TestCase):
         busy = [item for item in outcomes if isinstance(item, bridge.BridgeError)]
         self.assertEqual([item.status_code for item in busy], [503])
         self.assertEqual(len([item for item in outcomes if isinstance(item, dict)]), 2)
+
+
+@unittest.skipIf(bridge is None, "scripts/ is not shipped in the controller image")
+class BridgeHeaderDeadlineRaceTests(unittest.TestCase):
+    """Timer.cancel() cannot stop a callback that is already running: the deadline firing just as the headers come
+    in must not shut down a request that parse_request has accepted."""
+
+    def test_a_deadline_that_fires_as_the_headers_complete_leaves_the_request_alone(self) -> None:
+        captured: list[tuple] = []
+
+        class _CapturedTimer:
+            def __init__(self, interval, function, args=None, kwargs=None) -> None:
+                captured.append((function, tuple(args or ()), dict(kwargs or {})))
+                self.daemon = False
+
+            def start(self) -> None:
+                return None
+
+            def cancel(self) -> None:
+                return None  # too late: the timer thread is past its check and runs the callback below
+
+        handler = object.__new__(bridge.BridgeRequestHandler)
+        handler.connection = Mock()
+        handler.close_connection = False
+
+        with (
+            patch.object(bridge.threading, "Timer", _CapturedTimer),
+            patch.object(bridge.BaseHTTPRequestHandler, "handle_one_request", lambda self: self.parse_request()),
+            patch.object(bridge.BaseHTTPRequestHandler, "parse_request", return_value=True),
+        ):
+            handler.handle_one_request()
+            function, args, kwargs = captured[0]
+            function(*args, **kwargs)
+
+        handler.connection.shutdown.assert_not_called()
+        self.assertFalse(handler.close_connection)
 
 
 class _RunningCodex(_FakeCodex):
