@@ -111,7 +111,9 @@ On a controller with a mesh identity, where candidates are signed, the registry 
 
 This gives future mesh replication a provenance format without widening the trust boundary in Stage 0.
 
-Signed candidates are verified immediately after signing. If the mesh envelope cannot be created or verified, staging fails closed instead of writing an ambiguous artifact.
+A candidate is built in a temporary directory beside its final one (`.tmp-*` under the staging directory) and renamed into place only after the files are written and signed. If the mesh envelope cannot be created, staging fails closed: the temporary directory is removed, nothing appears under the candidate's name, and the run is saved as `failed` with the reason instead of `converged`. Re-staging the same contract and owner replaces the earlier candidate directory whole.
+
+A run is saved as `cancelled` when its request is cancelled and `failed` if the harness itself crashes mid-run. At startup, before requests are served, every run a previous process left `running` is marked `interrupted`.
 
 ## Stage 0 Limits
 

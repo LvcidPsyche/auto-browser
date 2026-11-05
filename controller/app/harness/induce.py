@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -78,7 +81,34 @@ class SkillInducer:
             target_dir.relative_to(staging_root)
         except ValueError as exc:
             raise ValueError(f"staged skill path escapes staging root: {skill_id}") from exc
-        target_dir.mkdir(parents=True, exist_ok=True)
+        # Everything is built and signed in a sibling directory and renamed into place at the end, so a failure
+        # (the signer, a full disk) leaves no half-written candidate under the final name.
+        build_dir = staging_root / f".tmp-{uuid.uuid4().hex[:12]}"
+        build_dir.mkdir(parents=True)
+        try:
+            candidate = self._build(
+                contract, trace, verification, build_dir, target_dir, skill_id, attempts, cost_usd, model_tiers, owner
+            )
+            _move_into_place(build_dir, target_dir)
+        except BaseException:
+            shutil.rmtree(build_dir, ignore_errors=True)
+            raise
+        return candidate
+
+    def _build(
+        self,
+        contract: TaskContract,
+        trace: TraceEnvelope,
+        verification: VerificationResult,
+        build_dir: Path,
+        target_dir: Path,
+        skill_id: str,
+        attempts: int,
+        cost_usd: float,
+        model_tiers: dict[str, str] | None,
+        owner: str | None,
+    ) -> SkillCandidate:
+        """Write the candidate's files into `build_dir`, recording the paths they will have in `target_dir`."""
         contract_hash = contract.hash()
         trace_hash = trace.trace_hash
         candidate = SkillCandidate(
@@ -115,7 +145,7 @@ class SkillInducer:
         files_sha256: dict[str, str] = {}
         for name, content in rendered.items():
             body = content.encode("utf-8")
-            (target_dir / name).write_bytes(body)
+            (build_dir / name).write_bytes(body)
             candidate.files[name] = str(target_dir / name)
             files_sha256[name] = hashlib.sha256(body).hexdigest()
         provenance = {
@@ -172,16 +202,30 @@ class SkillInducer:
             "envelope.json": json.dumps(candidate.envelope, indent=2, sort_keys=True),
         }
         for name, content in files.items():
-            path = target_dir / name
-            path.write_text(content, encoding="utf-8")
-            candidate.files[name] = str(path)
-        (target_dir / "contract.json").write_text(contract.model_dump_json(indent=2), encoding="utf-8")
-        (target_dir / "trace.json").write_text(trace.model_dump_json(indent=2), encoding="utf-8")
+            (build_dir / name).write_text(content, encoding="utf-8")
+            candidate.files[name] = str(target_dir / name)
+        (build_dir / "contract.json").write_text(contract.model_dump_json(indent=2), encoding="utf-8")
+        (build_dir / "trace.json").write_text(trace.model_dump_json(indent=2), encoding="utf-8")
         candidate.files["contract.json"] = str(target_dir / "contract.json")
         candidate.files["trace.json"] = str(target_dir / "trace.json")
-        (target_dir / "candidate.json").write_text(candidate.model_dump_json(indent=2), encoding="utf-8")
+        (build_dir / "candidate.json").write_text(candidate.model_dump_json(indent=2), encoding="utf-8")
         candidate.files["candidate.json"] = str(target_dir / "candidate.json")
         return candidate
+
+
+def _move_into_place(build_dir: Path, target_dir: Path) -> None:
+    """Rename the finished directory over the target; a candidate staged before is set aside and restored on failure."""
+    if not target_dir.exists():
+        os.replace(build_dir, target_dir)
+        return
+    aside = build_dir.with_name(build_dir.name + ".old")
+    os.replace(target_dir, aside)
+    try:
+        os.replace(build_dir, target_dir)
+    except BaseException:
+        os.replace(aside, target_dir)
+        raise
+    shutil.rmtree(aside, ignore_errors=True)
 
 
 def _skill_id(contract: TaskContract, owner: str | None = None) -> str:

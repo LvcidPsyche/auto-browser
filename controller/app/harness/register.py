@@ -54,6 +54,9 @@ class SkillStagingRegistry:
         candidates: list[dict[str, Any]] = []
         seen: set[Path] = set()
         for listed in sorted(self.staging_root.glob("*/candidate.json")):
+            if listed.parent.name.startswith("."):
+                # A candidate still being built (see SkillInducer): not staged yet.
+                continue
             try:
                 path = self._contained(listed)
             except KeyError:

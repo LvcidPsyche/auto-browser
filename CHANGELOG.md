@@ -91,6 +91,9 @@ All notable changes to auto-browser are documented here.
 - A convergence run that is cancelled (or crashes) is no longer left `running` forever: it is saved as `cancelled`
   (or `failed`) with a note. At startup, before requests are served, every run an earlier process left `running` is
   marked `interrupted`; a run the current process is driving is never touched.
+- Staging a harness skill candidate is now atomic: it is built and signed in a `.tmp-*` directory beside the final one
+  and renamed into place, so a signer failure no longer leaves unsigned `SKILL.md`, `helper.py` and `test_skill.py`
+  files behind, and the run is saved as `failed` with the reason instead of staying `converged` with no candidate.
 
 ### Security
 

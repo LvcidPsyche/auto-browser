@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import tempfile
 import time
 import unittest
@@ -180,6 +181,44 @@ class CancelAndRestartTests(_Base):
 
         verifier.release.set()
         await task
+
+
+class StagingFailureTests(_Base):
+    def _staging_entries(self, service) -> list[str]:
+        return sorted(path.name for path in service.store.staging_root.iterdir())
+
+    async def test_a_signer_failure_fails_the_run_and_leaves_no_files(self) -> None:
+        def broken_signer(payload):
+            raise RuntimeError("key unavailable")
+
+        service = HarnessService(self.root, signer=broken_signer)
+
+        record = await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+
+        self.assertEqual(record.status, "failed")
+        self.assertIsNone(record.candidate)
+        self.assertEqual(record.decision.status, "failed")
+        self.assertIn("RuntimeError", record.decision.reason)
+        self.assertEqual(service.store.get(record.id).status, "failed")
+        self.assertEqual(self._staging_entries(service), [])
+
+    async def test_a_second_run_of_the_same_contract_replaces_the_staged_candidate(self) -> None:
+        service = HarnessService(self.root)
+
+        first = await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+        second = await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+
+        self.assertEqual(first.candidate.skill_id, second.candidate.skill_id)
+        self.assertEqual(self._staging_entries(service), [second.candidate.skill_id])
+        self.assertTrue(Path(second.candidate.files["candidate.json"]).is_file())
+
+    async def test_a_candidate_being_built_is_not_listed(self) -> None:
+        service = HarnessService(self.root)
+        record = await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+        staged = service.store.staging_root / record.candidate.skill_id
+        shutil.copytree(staged, service.store.staging_root / ".tmp-copy")
+
+        self.assertEqual([item["skill_id"] for item in service.list_candidates()], [record.candidate.skill_id])
 
 
 if __name__ == "__main__":

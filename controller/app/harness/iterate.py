@@ -314,14 +314,30 @@ class HarnessService:
                 break
 
         if record.status == "converged" and latest_trace is not None and results:
-            record.candidate = self.inducer.induce(
-                contract=contract,
-                trace=latest_trace,
-                verification=results[-1],
-                attempts=len(record.attempts),
-                model_tiers=self.model_tiers,
-                owner=record.owner,
-            )
+            try:
+                record.candidate = self.inducer.induce(
+                    contract=contract,
+                    trace=latest_trace,
+                    verification=results[-1],
+                    attempts=len(record.attempts),
+                    model_tiers=self.model_tiers,
+                    owner=record.owner,
+                )
+            except Exception as exc:
+                # The inducer cleans up after itself; the run must not stay "converged" with no candidate.
+                logger.exception("harness run %s: staging the skill candidate failed", run_id)
+                record.status = "failed"
+                record.decision = ConvergenceDecision(
+                    status="failed",
+                    converged=False,
+                    should_continue=False,
+                    reason=f"staging the skill candidate failed: {type(exc).__name__}",
+                    successful_attempts=record.decision.successful_attempts if record.decision else 0,
+                    total_attempts=len(record.attempts),
+                )
+                record.notes.append(f"Skill candidate staging failed: {type(exc).__name__}")
+                self.store.save(record)
+                return
             record.notes.append("Staged skill candidate emitted; promotion requires review.")
             self.store.save(record)
 
