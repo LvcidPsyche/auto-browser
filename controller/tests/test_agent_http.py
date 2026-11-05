@@ -31,6 +31,7 @@ for env_name, relative_path in {
 import app.main as main_module
 import app.routes.system as system_routes
 from app.models import AgentStepResult, ProviderInfo
+from app.witness import ReceiptList
 
 
 class _DeepHealthLocator:
@@ -935,14 +936,16 @@ class AgentHttpTests(unittest.TestCase):
 
     def test_session_witness_returns_receipts(self) -> None:
         list_witness = AsyncMock(
-            return_value=[
-                {
-                    "receipt_id": "rcpt-1",
-                    "status": "ok",
-                    "action": "click",
-                    "profile": "normal",
-                }
-            ]
+            return_value=ReceiptList(
+                [
+                    {
+                        "receipt_id": "rcpt-1",
+                        "status": "ok",
+                        "action": "click",
+                        "profile": "normal",
+                    }
+                ]
+            )
         )
 
         with patch.object(main_module.manager, "list_witness_receipts", list_witness):

@@ -747,3 +747,14 @@ async def test_the_documented_recovery_deleting_the_marker_and_restarting_anchor
     await manager.witness.startup()
 
     assert _verify(client).json()["valid"] is True
+
+
+async def test_the_listing_route_reports_a_bad_line_inside_its_window(manager, client) -> None:
+    await _record(manager, 3)
+    path = manager.witness._path(SCOPE)
+    first, rest = path.read_bytes().split(b"\n", 1)
+    path.write_bytes(first + b"\n{this is not json}\n" + rest)
+
+    body = client.get(f"/sessions/{SCOPE}/witness?limit=10").json()
+
+    assert (body["count"], body["unparseable_lines"]) == (3, 1)

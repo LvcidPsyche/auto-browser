@@ -35,7 +35,10 @@ ANCHORS_MIGRATED_MARKER = ".anchors-migrated"
 
 
 class ReceiptList(list):
-    """Receipts read from a chain file, with how many lines were skipped because they did not parse."""
+    """Receipts read from a chain file, with how many lines were skipped because they did not parse.
+
+    For a listing that is the lines in the listed window (the last `limit` lines), not the whole file: a page
+    holding a bad line has fewer than `limit` receipts. An export counts the whole chain."""
 
     unparseable_lines: int = 0
 
