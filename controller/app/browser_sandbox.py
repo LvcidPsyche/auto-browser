@@ -21,11 +21,22 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 import stat
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# The twin of redact_endpoints in scripts/assert_browser_sandbox.py and redactEndpoints in browser-node/sandbox.mjs:
+# the path of a Playwright websocket endpoint is that server's only secret, and controller logs end up in CI output.
+_ENDPOINT_PATH = re.compile(r"""(wss?://[^/\s"'<>]+)/[^\s"'<>]*""")
+
+
+def redact_endpoints(text: object) -> str:
+    """The text with every ws:// or wss:// endpoint reduced to scheme://host:port/<redacted>."""
+    return _ENDPOINT_PATH.sub(r"\1/<redacted>", str(text))
+
 
 BROWSER_SANDBOX_STATE_FILENAME = "browser-sandbox.json"
 STATE_MAX_BYTES = 16384
@@ -377,6 +388,21 @@ class _Line:
         return text
 
 
+def _without_endpoint_paths(status: dict[str, Any]) -> dict[str, Any]:
+    """A copy of the status whose states (the shared node's and each isolated container's) carry redacted endpoints."""
+
+    def redacted(state: Any) -> Any:
+        if isinstance(state, dict) and isinstance(state.get("endpoint"), str):
+            return {**state, "endpoint": redact_endpoints(state["endpoint"])}
+        return state
+
+    details = dict(status)
+    details["browser_node"] = redacted(status.get("browser_node"))
+    if isinstance(status.get("isolated"), dict):
+        details["isolated"] = {session_id: redacted(state) for session_id, state in status["isolated"].items()}
+    return details
+
+
 def browser_sandbox_check(status: dict[str, Any]):
     """The readiness check. Never silent about a browser without its sandbox: any such browser is a warning that
     names the browser, the cause and the detail its container wrote; `on` with isolation and no readable profile
@@ -384,7 +410,8 @@ def browser_sandbox_check(status: dict[str, Any]):
     from .readiness import ReadinessCheck  # readiness imports this module's caller, not this module
 
     name = "browser_sandbox"
-    details = dict(status)
+    # The details go out in the readiness response, and a state names the endpoint (path and all) of its run.
+    details = _without_endpoint_paths(status)
     if (
         status.get("setting") == "on"
         and status.get("isolation_mode") == "docker_ephemeral"

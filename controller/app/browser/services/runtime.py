@@ -9,7 +9,7 @@ from playwright.async_api import Browser
 
 from ...action_errors import SESSION_CLOSED_GATE_LOST, SessionNotFoundError
 from ...auth_policy import credentials_for
-from ...browser_sandbox import read_endpoint_file, refusal, snapshot_shared_state, verified_on
+from ...browser_sandbox import read_endpoint_file, redact_endpoints, refusal, snapshot_shared_state, verified_on
 from ...session_isolation import IsolatedBrowserRuntime
 from ...session_ownership import as_system
 from ...utils import spawn_background_task
@@ -73,7 +73,7 @@ class BrowserRuntimeService:
                 failure_context=(
                     "Unable to connect to browser node via Playwright server. "
                     f"Checked ws endpoint file {manager.settings.browser_ws_endpoint_file} "
-                    f"and direct endpoint {manager.settings.browser_ws_endpoint or '<not configured>'}."
+                    f"and direct endpoint {redact_endpoints(manager.settings.browser_ws_endpoint or '<not configured>')}."
                 ),
             )
             endpoint_used = connected.get("endpoint", "")
@@ -185,7 +185,7 @@ class BrowserRuntimeService:
                 logger.info(
                     "connected to browser node on attempt %s via playwright endpoint %s",
                     attempt,
-                    ws_target,
+                    redact_endpoints(ws_target),
                 )
                 # Playwright launched it (browser-node's launchServer): not an attach mode.
                 await manager.request_gates.attach(browser, attach_mode=False)

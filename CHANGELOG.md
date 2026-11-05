@@ -87,8 +87,10 @@ All notable changes to auto-browser are documented here.
   `scripts/check_sandbox_gate.py` (its mismatch and failure lines), two inline state prints in the sandbox steps and
   the `wrote <file>: <endpoint>` line that `browser-node/server.mjs` logs when it starts. Each now replaces the path
   with `<redacted>` (scheme, host and port stay), as does the `the sandbox check failed: ...` detail that
-  `browser-node/sandbox.mjs` writes into the state and the log when a connect error names the URL. The state file and
-  the endpoint file themselves still hold the path (the controller reads it there).
+  `browser-node/sandbox.mjs` writes into the state and the log when a connect error names the URL. The controller does
+  the same for what it prints itself: its `connected to browser node ...` log line, the connect failure message
+  (which names a configured `BROWSER_WS_ENDPOINT`) and the `endpoint` in the browser_sandbox readiness details. The
+  state file and the endpoint file themselves still hold the path (the controller reads it there).
 - **`/healthz/deep` now gives up on a browser that does not answer.** The probe waited on the browser connection with
   no limit, so a stuck browser node held the request open (and the controller's browser lock with it). That step is
   now bounded by the same 5 seconds as `/readyz`, and a timeout answers 503 with `deep_health_probe_timed_out`. The wait is
