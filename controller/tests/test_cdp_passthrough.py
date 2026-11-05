@@ -16,6 +16,8 @@ class _FakeCDPSession:
     async def send(self, method: str, params: dict | None = None) -> dict:
         payload = params or {}
         self.calls.append((method, payload))
+        if method.endswith(".enable"):
+            return {}
         response = self.responses[method]
         if isinstance(response, list):
             value = response.pop(0)
@@ -115,6 +117,29 @@ class CDPPassthroughTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(selector=selector):
                     literal = re.search(r"document\.querySelector\((.*)\);", expression).group(1)
                     self.assertEqual(json.loads(literal), selector)
+
+    async def test_dom_and_css_agents_are_enabled_before_their_calls(self) -> None:
+        # On real Chromium, DOM.getDocument and every CSS.* call fail until the agent is enabled
+        # (and CSS.enable itself needs DOM.enable first).
+        fake = _FakeCDPSession(
+            {
+                "DOM.getDocument": {"root": {"nodeId": 11}},
+                "DOM.querySelector": {"nodeId": 22},
+                "DOM.getAttributes": {"attributes": []},
+                "DOM.getBoxModel": {"model": {}},
+                "CSS.getComputedStyleForNode": {"computedStyle": []},
+                "Runtime.evaluate": {"result": {"value": []}},
+            }
+        )
+
+        await CDPPassthrough(fake).get_element_intelligence("#hero")
+
+        order = [method for method, _ in fake.calls]
+        self.assertIn("DOM.enable", order)
+        self.assertIn("CSS.enable", order)
+        self.assertLess(order.index("DOM.enable"), order.index("CSS.enable"))
+        self.assertLess(order.index("CSS.enable"), order.index("CSS.getComputedStyleForNode"))
+        self.assertLess(order.index("DOM.enable"), order.index("DOM.getDocument"))
 
     async def test_get_element_intelligence_returns_not_found_error(self) -> None:
         fake = _FakeCDPSession(

@@ -93,6 +93,10 @@ class CDPPassthrough:
         - Asset references (src, href, background-image URLs)
         """
         try:
+            # CSS.* calls fail until the agent is enabled, and CSS.enable needs DOM.enable first.
+            await self._cdp.send("DOM.enable")
+            await self._cdp.send("CSS.enable")
+
             # Get document node
             doc = await self._cdp.send("DOM.getDocument", {"depth": 1})
             doc_node_id = doc["root"]["nodeId"]

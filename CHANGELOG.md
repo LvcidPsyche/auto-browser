@@ -84,6 +84,8 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **Element intelligence now works on a real browser.** `get_element_intelligence` asked Chromium for computed styles without first enabling the DOM and CSS agents, so the style lookup failed there. It now enables both before it reads.
+
 - **A refused fork or create now says why.** With the default `MAX_SESSIONS=1`, forking a session (which counts as a new session) or creating a second one answered a bare `409 {"detail":"Conflict"}`. The 409 now carries the session-limit message, naming the limit and the live sessions. Other conflicts still answer "Conflict". Forking needs `MAX_SESSIONS` of at least 2; this is now stated in `docs/architecture.md`.
 
 - **Vision targeting now posts to the right Anthropic URL.** With the default `ANTHROPIC_BASE_URL` (which already ends in `/v1`) it called `/v1/v1/messages` and every vision lookup failed. It now uses the same `<base>/messages` form as the Claude adapter.
