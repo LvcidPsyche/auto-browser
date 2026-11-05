@@ -95,7 +95,8 @@ def _private_cli_home_candidates() -> Iterator[Path]:
 def _make_private_dir(path: Path) -> None:
     """Make ``path`` and any missing parent 0o700, then check it on POSIX: the directory must be real (not a
     symlink), this user's and 0o700, and no ancestor up to the first root-owned one may be writable by group or
-    others without the sticky bit (whoever can write one could put their own directory in this one's place)."""
+    others without the sticky bit (whoever can write one could put their own directory in this one's place) or be
+    owned by anyone but this user (its owner could swap what is inside it)."""
     if os.name == "nt":
         path.mkdir(parents=True, exist_ok=True)
         return
@@ -124,6 +125,13 @@ def _make_private_dir(path: Path) -> None:
             )
         if info.st_uid == 0:
             break
+        if info.st_uid != uid:
+            # Not writable, but theirs: they could swap the directories inside it, and the CLIs read config
+            # (CLAUDE.md, .env) from the parents of their working directory.
+            raise _Refused(
+                f"its ancestor {ancestor} is owned by uid {info.st_uid}, not by this user or root "
+                f"(mode {stat.S_IMODE(info.st_mode):04o})"
+            )
 
 
 def _private_cli_home() -> str:

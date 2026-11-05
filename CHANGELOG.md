@@ -135,7 +135,7 @@ All notable changes to auto-browser are documented here.
   no one else can write, otherwise `~/.cache/auto-browser/cli-home` (under `%LOCALAPPDATA%` on Windows), never the
   shared system temp dir. On Linux and macOS it, and any parent it needs, is created 0700 and checked on every use: a
   symlink, another owner or another mode, or a parent (up to the first root-owned one) that group or others can write
-  without the sticky bit, refuses that place and the next one is tried; a directory a cleaner removed is made again. It
+  without the sticky bit or that another user owns, refuses that place and the next one is tried; a directory a cleaner removed is made again. It
   holds empty `.env` and `.gemini/.env` files, which stop the Gemini CLI looking for a `.env` in its parents (the
   user's home is one). When no place can be used, the CLI call fails with an error that says to set `CLI_HOME` to a
   writable directory; the paths, owners and modes refused are in the server log only. The Codex CLI's per-call

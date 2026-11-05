@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -143,6 +144,84 @@ async def test_a_sticky_ancestor_others_can_write_is_accepted() -> None:
         shared.chmod(0o1777)  # as /tmp: others may add names to it, not replace this user's
 
         assert _adapter().effective_cli_home() == str(_home_cache(tmp))
+
+
+THIS_USER = 4242
+OTHER_USER = 4343
+
+
+@contextlib.contextmanager
+def _owners(tmp: str, owned_by: dict[str, int]):
+    """Run as THIS_USER on a tree whose directories under `tmp` belong to THIS_USER unless `owned_by` names another
+    owner for a relative path, and everything outside it to root. The real owner of a test directory is whoever runs
+    the suite (root in the controller image), so the owners are faked: os.stat and os.lstat report them and getuid
+    answers THIS_USER, which keeps the test meaningful as root and as an ordinary user."""
+    root = os.path.realpath(tmp)
+    real_stat, real_lstat = os.stat, os.lstat
+
+    def faked(real):
+        def call(path, *args, **kwargs):
+            info = real(path, *args, **kwargs)
+            location = os.path.abspath(os.fspath(path))
+            if location != root and not location.startswith(root + os.sep):
+                owner = 0
+            else:
+                owner = owned_by.get(os.path.relpath(location, root).replace(os.sep, "/"), THIS_USER)
+            return os.stat_result((*tuple(info)[:4], owner, *tuple(info)[5:10]))
+
+        return call
+
+    with (
+        patch("app.providers.base.os.getuid", return_value=THIS_USER),
+        patch("app.providers.base.os.stat", faked(real_stat)),
+        patch("app.providers.base.os.lstat", faked(real_lstat)),
+    ):
+        yield
+
+
+def _make_cache_tree(tmp: str) -> None:
+    cache = _home_cache(tmp).parent.parent
+    cache.mkdir(mode=0o755)
+    _home_cache(tmp).parent.mkdir(mode=0o755)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="owner and mode checks are POSIX")
+async def test_an_ancestor_another_user_owns_refuses_the_candidate(caplog: pytest.LogCaptureFixture) -> None:
+    # A .cache planted by someone else (0755, theirs): not writable by others, but they could swap the directories
+    # inside it, and the CLIs read config (CLAUDE.md, .env) from the parents of their working directory.
+    with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, _private_env(tmp), clear=True):
+        _make_cache_tree(tmp)
+
+        with (
+            _owners(tmp, {".cache": OTHER_USER}),
+            caplog.at_level(logging.WARNING, "app.providers.base"),
+            pytest.raises(RuntimeError) as caught,
+        ):
+            _adapter().effective_cli_home()
+
+        assert UNUSABLE in str(caught.value)
+        assert tmp not in str(caught.value)
+        assert re.search(re.escape(os.path.join(tmp, ".cache")), caplog.text)
+        assert f"owned by uid {OTHER_USER}" in caplog.text
+
+
+@pytest.mark.skipif(os.name != "posix", reason="owner and mode checks are POSIX")
+async def test_ancestors_this_user_owns_are_accepted_up_to_the_first_root_owned_one() -> None:
+    with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, _private_env(tmp), clear=True):
+        _make_cache_tree(tmp)
+
+        with _owners(tmp, {}):
+            assert _adapter().effective_cli_home() == str(_home_cache(tmp))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="owner and mode checks are POSIX")
+async def test_the_walk_stops_at_the_first_root_owned_ancestor() -> None:
+    # Root owns .cache here, so what is above it (another user's tmp) is not this directory's business.
+    with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, _private_env(tmp), clear=True):
+        _make_cache_tree(tmp)
+
+        with _owners(tmp, {".cache": 0, ".": OTHER_USER}):
+            assert _adapter().effective_cli_home() == str(_home_cache(tmp))
 
 
 async def test_a_private_directory_removed_between_two_calls_is_recreated() -> None:
