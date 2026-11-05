@@ -360,6 +360,15 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
         self._header_timer.start()
         try:
             super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            # The deadline shut the connection down under a request line or headers still coming in, so the stdlib's
+            # answer to what had arrived (a 400) had nowhere to go. A broken connection the deadline did not cause is
+            # not this handler's to hide.
+            with self._header_deadline.lock:
+                late = self._header_deadline.late
+            if not late:
+                raise
+            self.close_connection = True
         finally:
             self._header_timer.cancel()
 

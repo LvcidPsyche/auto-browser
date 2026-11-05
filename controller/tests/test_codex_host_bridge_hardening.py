@@ -121,6 +121,43 @@ def _raw_post(port: int, headers: str, body: bytes = b"", *, read_timeout: float
         return b"".join(chunks)
 
 
+class _ThreadingWithTimer:
+    """Stands in for the bridge module's `threading` name only: Timer is the given fake and the rest is the real
+    module, so no other module, and no other test's lingering thread, picks up the fake."""
+
+    def __init__(self, timer) -> None:
+        self.Timer = timer
+
+    def __getattr__(self, name: str):
+        return getattr(threading, name)
+
+
+class _ShutDownConnection:
+    """A handler's socket as the header deadline sees it: shutdown() is recorded."""
+
+    def __init__(self) -> None:
+        self.shut_down = False
+
+    def shutdown(self, how: int) -> None:
+        self.shut_down = True
+
+
+class _BrokenWriter:
+    """wfile on a socket that was shut down: a write is a broken pipe (or a reset), as on POSIX."""
+
+    def __init__(self, connection: _ShutDownConnection, error: type[OSError]) -> None:
+        self.connection = connection
+        self.error = error
+
+    def write(self, data: bytes) -> int:
+        if self.connection.shut_down:
+            raise self.error(32, "Broken pipe")
+        return len(data)
+
+    def flush(self) -> None:
+        return None
+
+
 @unittest.skipIf(bridge is None, "scripts/ is not shipped in the controller image")
 class BridgeErrorReplyTests(unittest.TestCase):
     def _serve(self, service) -> int:
@@ -307,6 +344,58 @@ class BridgeHeaderDeadlineRaceTests(unittest.TestCase):
 
         handler.connection.shutdown.assert_not_called()
         self.assertFalse(handler.close_connection)
+
+
+@unittest.skipIf(bridge is None, "scripts/ is not shipped in the controller image")
+class BridgeHeaderDeadlineFragmentTests(unittest.TestCase):
+    """The deadline shuts the connection down under a request line still coming in. The stdlib then answers what had
+    arrived with a 400, and that write fails: the deadline's doing, not an error to escape the handler."""
+
+    def _handle(self, line: bytes, *, deadline_passes: bool, client_gone: bool = False, error=BrokenPipeError):
+        captured: list[tuple] = []
+
+        class _CapturedTimer:
+            def __init__(self, interval, function, args=None, kwargs=None) -> None:
+                captured.append((function, tuple(args or ())))
+                self.daemon = False
+
+            def start(self) -> None:
+                return None
+
+            def cancel(self) -> None:
+                return None
+
+        class _StalledLine:
+            def readline(self, limit: int = -1) -> bytes:
+                if deadline_passes:
+                    function, args = captured[0]
+                    function(*args)  # the deadline passes while the line is still coming in
+                return line  # what had arrived when the shutdown ended the read
+
+        handler = object.__new__(bridge.BridgeRequestHandler)
+        connection = _ShutDownConnection()
+        connection.shut_down = client_gone
+        handler.connection = connection
+        handler.rfile = _StalledLine()
+        handler.wfile = _BrokenWriter(connection, error)
+        handler.close_connection = False
+        with patch.object(bridge, "threading", _ThreadingWithTimer(_CapturedTimer)), redirect_stderr(io.StringIO()):
+            handler.handle_one_request()
+        return handler, connection
+
+    def test_a_request_line_cut_off_by_the_deadline_ends_without_an_error(self) -> None:
+        for line in (b"POST /openai/dec", b"POST", b"POST /openai/decide HTTP/1."):
+            for error in (BrokenPipeError, ConnectionResetError):
+                with self.subTest(line=line, error=error.__name__):
+                    handler, connection = self._handle(line, deadline_passes=True, error=error)
+                    self.assertTrue(connection.shut_down)
+                    self.assertTrue(handler.close_connection)
+
+    def test_a_broken_pipe_the_deadline_did_not_cause_still_raises(self) -> None:
+        # The client went away while the bridge answered a complete, bad request line: not the deadline's doing.
+        for error in (BrokenPipeError, ConnectionResetError):
+            with self.subTest(error=error.__name__), self.assertRaises(error):
+                self._handle(b"POST /openai/decide\r\n", deadline_passes=False, client_gone=True, error=error)
 
 
 class _RunningCodex(_FakeCodex):
