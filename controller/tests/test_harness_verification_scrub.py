@@ -132,10 +132,17 @@ class VerificationScrubTests(unittest.IsolatedAsyncioTestCase):
             stored = json.loads((Path(tmp) / "runs" / record.id / "run.json").read_text(encoding="utf-8"))
             self.assertTrue(all(attempt["scrubbed"] is True for attempt in stored["attempts"]))
 
-            with patch.object(VerificationResult, "scrubbed", side_effect=AssertionError("scrubbed twice")):
-                service.get_status(record.id)
-                service.store.save(service.store.get(record.id))  # kept on save
-                service.list_runs()
+            before = service.get_status(record.id)["attempts"]
+            # A raising stand-in would be caught by the read path into the stub verification, so the test could not
+            # fail: a Mock that records its calls, and the verification compared with what it was.
+            with patch.object(VerificationResult, "scrubbed", autospec=True) as scrubbed:
+                with self.assertNoLogs("app.harness.iterate", level="WARNING"):
+                    after = service.get_status(record.id)["attempts"]
+                    service.store.save(service.store.get(record.id))  # kept on save
+                    service.list_runs()
+            scrubbed.assert_not_called()
+            self.assertEqual([a["verification"] for a in after], [a["verification"] for a in before])
+            self.assertNotIn("withheld", json.dumps(after))
             stored = json.loads((Path(tmp) / "runs" / record.id / "run.json").read_text(encoding="utf-8"))
             self.assertTrue(all(attempt["scrubbed"] is True for attempt in stored["attempts"]))
 
