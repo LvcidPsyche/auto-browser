@@ -6,6 +6,11 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- **The network log masks secret-bearing headers by name pattern, not only from a fixed list.** Any header whose
+  name has a word such as token, secret, password, auth, session, cookie, csrf, signature or key (split on `-` and
+  `_`), or contains token, secret, password or apikey, now logs as `[MASKED]`. Before, `X-GitHub-Token`,
+  `X-Vault-Token`, `X-Session-Id`, `Api-Key` and similar were stored in clear. `Keep-Alive`, `:authority`,
+  `Accept*` and `Content-*` are unchanged.
 - **`observe` no longer returns the OCR word list that screenshot redaction blacks out.** The `ocr` field carried
   `redaction_blocks` (every word with its box, including the emails and card numbers the screenshot hides) and the
   OCR text unscrubbed. `redaction_blocks` is gone from the result, and the OCR `text_excerpt` and block text now go
