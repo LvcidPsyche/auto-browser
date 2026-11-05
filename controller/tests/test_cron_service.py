@@ -308,6 +308,39 @@ class CronQuarantineWarningTests(unittest.IsolatedAsyncioTestCase):
                 await self._start_and_stop()
             self.assertTrue(any(str(quarantined) in line for line in logged.output), logged.output)
 
+    async def test_the_warning_follows_the_real_quarantine_and_says_how_to_silence_it(self) -> None:
+        self.store_path.write_text("{truncated", encoding="utf-8")
+        with self.assertRaises(RuntimeError), self.assertLogs("app.cron_service", level="ERROR"):
+            await self._start_and_stop()
+        quarantined = list(Path(self.tmp.name).glob("crons.corrupt-*.json"))
+        self.assertEqual(len(quarantined), 1)
+
+        with self.assertLogs("app.cron_service", level="WARNING") as logged:
+            await self._start_and_stop()
+
+        self.assertTrue(any(str(quarantined[0]) in line for line in logged.output), logged.output)
+        self.assertTrue(any("move or delete that file to silence this warning" in line for line in logged.output))
+
+    async def test_a_deployment_without_apscheduler_warns_too(self) -> None:
+        self.store_path.with_suffix(".corrupt-20261105T042259Z.json").write_text("{truncated", encoding="utf-8")
+
+        with patch("app.cron_service._APSCHEDULER_AVAILABLE", False):
+            with self.assertLogs("app.cron_service", level="WARNING"):
+                await CronService(self.store_path).startup()
+
+    async def test_glob_characters_in_the_store_name_match_literally(self) -> None:
+        self.store_path = Path(self.tmp.name) / "c[ab]ons.json"
+        mine = self.store_path.with_suffix(".corrupt-20261105T042259Z.json")
+        other = Path(self.tmp.name) / "caons.corrupt-20261105T042259Z.json"
+        mine.write_text("{truncated", encoding="utf-8")
+        other.write_text("{truncated", encoding="utf-8")
+
+        with self.assertLogs("app.cron_service", level="WARNING") as logged:
+            await self._start_and_stop()
+
+        self.assertTrue(any(str(mine) in line for line in logged.output), logged.output)
+        self.assertFalse(any(str(other) in line for line in logged.output), logged.output)
+
     async def test_no_warning_once_the_store_holds_jobs(self) -> None:
         self.store_path.with_suffix(".corrupt-20261105T042259Z.json").write_text("{truncated", encoding="utf-8")
         await CronService(self.store_path).create_job(name="new", goal="g")

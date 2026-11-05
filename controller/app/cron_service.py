@@ -34,6 +34,7 @@ If APScheduler is not available, cron scheduling is disabled but webhook trigger
 from __future__ import annotations
 
 import asyncio
+import glob
 import hmac
 import json
 import logging
@@ -88,11 +89,12 @@ class CronService:
 
     async def startup(self) -> None:
         """Start the scheduler and register all enabled cron jobs."""
+        # Before the scheduler check: it needs only the store, so a deployment without APScheduler is told too.
+        jobs = self._load()
+        self._warn_if_store_was_quarantined(jobs)
         if not _APSCHEDULER_AVAILABLE:
             return
         self._scheduler = AsyncIOScheduler()
-        jobs = self._load()
-        self._warn_if_store_was_quarantined(jobs)
         for job in jobs.values():
             if job.get("enabled") and job.get("schedule"):
                 self._register_job(job)
@@ -107,10 +109,10 @@ class CronService:
         """
         if jobs:
             return
-        for quarantined in sorted(self._store_path.parent.glob(f"{self._store_path.stem}.corrupt-*.json")):
+        for quarantined in sorted(self._store_path.parent.glob(f"{glob.escape(self._store_path.stem)}.corrupt-*.json")):
             logger.warning(
                 "cron store %s holds no jobs, and a corrupt store was set aside as %s; restore its jobs from "
-                "that file if they are still wanted",
+                "that file if they are still wanted, and move or delete that file to silence this warning",
                 self._store_path,
                 quarantined,
             )
