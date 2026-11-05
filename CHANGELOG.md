@@ -84,6 +84,8 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- **The Codespaces overlay now accepts the forwarded host name.** The controller refused requests to `<codespace>-8000.app.github.dev` with "Invalid host header", because the overlay kept the loopback-only host list. It now defaults `CONTROLLER_ALLOWED_HOSTS` to the loopback names plus `*.app.github.dev`. If you set `CONTROLLER_ALLOWED_HOSTS` in `.env`, include `*.app.github.dev` in it.
+
 - **`pip install auto-browser-langchain[crewai]` now installs `langchain-core`.** Recent CrewAI releases no longer depend on LangChain, so the CrewAI example failed at `AutoBrowserTool(...)` with an `ImportError` asking for the `langchain` extra. The `crewai` extra now includes it.
 
 - **The reverse-SSH sidecar now reports `inactive` when its tunnel ends.** The entrypoint ran under `set -e`, so an `autossh` that exited with an error (or was stopped) ended the script before the final status was written, and `reverse-ssh.json` kept saying `active` after the tunnel was gone. The exit status is unchanged.

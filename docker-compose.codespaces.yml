@@ -38,5 +38,9 @@ services:
       # token above; this makes the controller itself refuse too, so the guard
       # survives anyone copying these service definitions somewhere else.
       API_BIND_SCOPE: exposed
+      # The Codespaces forwarder sends the public <codespace>-8000.app.github.dev name as Host, which the
+      # base file's loopback-only list refuses with "Invalid host header". Setting CONTROLLER_ALLOWED_HOSTS in
+      # .env replaces this default, so keep *.app.github.dev in it there.
+      CONTROLLER_ALLOWED_HOSTS: ${CONTROLLER_ALLOWED_HOSTS:-localhost,127.0.0.1,::1,testserver,*.app.github.dev}
     ports: !override
       - "0.0.0.0:${API_PORT:-8000}:8000"
