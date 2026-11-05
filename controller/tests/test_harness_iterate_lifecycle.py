@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from app.harness import Budget, Postcondition, TaskContract
 from app.harness.iterate import HarnessRunRecord, HarnessService
+from app.harness.trace import TraceIntegrityError
 from app.harness.verifier.base import VerificationResult
 
 DONE = {"url": "https://example.com/done", "text": "done"}
@@ -219,6 +220,35 @@ class StagingFailureTests(_Base):
         shutil.copytree(staged, service.store.staging_root / ".tmp-copy")
 
         self.assertEqual([item["skill_id"] for item in service.list_candidates()], [record.candidate.skill_id])
+
+
+class TraceBindingTests(_Base):
+    def _edit_observation(self, record) -> None:
+        path = Path(record.attempts[0].trace_path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["final_observation"] = {"url": "https://example.com/forged", "text": "done"}
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+    async def test_get_trace_refuses_a_trace_edited_on_disk(self) -> None:
+        service = HarnessService(self.root)
+        record = await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+        self.assertEqual(service.get_trace(record.id)["final_observation"], DONE)
+
+        self._edit_observation(record)
+
+        with self.assertRaises(TraceIntegrityError):
+            service.get_trace(record.id)
+
+    async def test_a_run_recorded_without_a_trace_hash_skips_the_check(self) -> None:
+        service = HarnessService(self.root)
+        record = await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+        run_json = service.store.run_dir(record.id) / "run.json"
+        data = json.loads(run_json.read_text(encoding="utf-8"))
+        del data["attempts"][0]["trace_hash"]
+        run_json.write_text(json.dumps(data), encoding="utf-8")
+        self._edit_observation(record)
+
+        self.assertEqual(service.get_trace(record.id)["final_observation"]["url"], "https://example.com/forged")
 
 
 if __name__ == "__main__":

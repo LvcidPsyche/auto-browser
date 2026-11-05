@@ -100,6 +100,10 @@ All notable changes to auto-browser are documented here.
 - A `url_matches` condition whose pattern is nested too deeply or repeats too many times (`RecursionError` or
   `OverflowError` from `re.compile`) is now refused as an invalid regex like any other, instead of escaping the
   contract validator as an unhandled error.
+- `harness.get_trace` now refuses a stored attempt trace whose observation, network entries or extracted data were
+  edited on disk (`TraceIntegrityError`): each attempt records the trace's hash when it is written, and the read
+  compares it. The hash chain alone covered only the events. A run recorded before this release has no hash and is
+  read as before.
 
 ### Security
 

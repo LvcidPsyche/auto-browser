@@ -16,7 +16,7 @@ from .converge import ConvergenceDecision, ConvergenceDetector
 from .drift import SkillDriftMonitor
 from .induce import SkillCandidate, SkillInducer
 from .register import SkillStagingRegistry
-from .trace import TraceEnvelope, TraceRecorder
+from .trace import TraceEnvelope, TraceIntegrityError, TraceRecorder
 from .verifier.base import VerificationResult, VerifierAdapter
 from .verifier.programmatic import ProgrammaticVerifier
 
@@ -41,6 +41,9 @@ class HarnessAttempt(BaseModel):
     # has no marker (its verification is raw), so it is scrubbed when read; one this version wrote is not scrubbed
     # again, so a scrubber that fails later cannot drop the run from a listing.
     scrubbed: bool = False
+    # The hash of the trace as written to trace_path (the scrubbed copy), checked when the trace is read back so an
+    # edit to its observation or extracted data is caught. Empty for a run recorded before this field existed.
+    trace_hash: str = ""
 
     @model_validator(mode="after")
     def _scrub_verification(self, info: ValidationInfo) -> "HarnessAttempt":
@@ -301,6 +304,7 @@ class HarnessService:
                     index=attempt_index,
                     trace_path=str(trace_path),
                     verification=verification,
+                    trace_hash=trace.scrubbed().trace_hash,
                 )
             )
             decision = detector.decide(results)
@@ -395,7 +399,12 @@ class HarnessService:
             )
             status, reason = "failed", f"attempt {attempt_index} failed"
         record.attempts.append(
-            HarnessAttempt(index=attempt_index, trace_path=str(trace_path), verification=verification)
+            HarnessAttempt(
+                index=attempt_index,
+                trace_path=str(trace_path),
+                verification=verification,
+                trace_hash=trace.scrubbed().trace_hash,
+            )
         )
         record.decision = ConvergenceDecision(
             status=status,
@@ -432,7 +441,12 @@ class HarnessService:
         if selected_index < 1 or selected_index > len(record.attempts):
             raise KeyError(f"attempt {selected_index} not found for run: {run_id}")
         attempt = record.attempts[selected_index - 1]
-        return TraceEnvelope.read_json(attempt.trace_path).model_dump(mode="json")
+        trace = TraceEnvelope.read_json(attempt.trace_path)
+        if attempt.trace_hash and trace.trace_hash != attempt.trace_hash:
+            raise TraceIntegrityError(
+                f"trace for attempt {selected_index} of run {run_id} changed since it was written"
+            )
+        return trace.model_dump(mode="json")
 
     def list_candidates(self) -> list[dict[str, Any]]:
         return self.registry.list_candidates()
