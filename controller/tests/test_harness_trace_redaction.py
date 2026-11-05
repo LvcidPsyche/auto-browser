@@ -13,6 +13,8 @@ from app.harness.trace import TraceEnvelope, TraceRecorder
 
 SECRET_TEXT = "Sup3rS3cret-Passw0rd!"
 URL_TOKEN = "tok_live_ABC"
+# The local part of an encoded email in a query: only the URL scrubber catches it.
+PLAIN_TOKEN = "Zq81hdk3"
 EMAIL = "alice@example.com"
 
 
@@ -106,6 +108,46 @@ class TraceRedactionTests(unittest.TestCase):
             )
 
         self.assertNotIn("credential_free", candidate.envelope["metadata"])
+
+
+class StoredUrlTests(unittest.TestCase):
+    def _stored(self, **fields: object) -> TraceEnvelope:
+        return TraceEnvelope(contract_hash="h", **fields).scrubbed()
+
+    def test_an_upper_case_scheme_is_still_a_url(self) -> None:
+        stored = self._stored(final_observation={"url": f"HTTPS://x.test/cb?email={PLAIN_TOKEN}%40a.com"})
+
+        self.assertNotIn(PLAIN_TOKEN, json.dumps(stored.final_observation))
+
+    def test_a_url_inside_a_sentence_is_scrubbed_and_the_text_around_it_kept(self) -> None:
+        text = f"Redirected to https://x.test/cb?email={PLAIN_TOKEN}%40a.com after login"
+        stored = self._stored(final_observation={"text": text})
+
+        out = stored.final_observation["text"]
+        self.assertNotIn(PLAIN_TOKEN, out)
+        self.assertTrue(out.startswith("Redirected to https://x.test/cb"))
+        self.assertTrue(out.endswith("after login"))
+
+    def test_a_url_in_extracted_data_loses_its_token_but_other_text_is_kept(self) -> None:
+        stored = self._stored(
+            extracted_data={
+                "link": f"https://x.test/cb?email={PLAIN_TOKEN}%40a.com",
+                "note": f"mail {EMAIL} via https://x.test/cb?email={PLAIN_TOKEN}%40a.com",
+            }
+        )
+
+        dumped = json.dumps(stored.extracted_data)
+        self.assertNotIn(PLAIN_TOKEN, dumped)
+        self.assertIn(EMAIL, stored.extracted_data["note"])
+
+    def test_the_file_on_disk_holds_no_url_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            envelope = TraceEnvelope(
+                contract_hash="h", extracted_data={"link": f"https://x.test/?email={PLAIN_TOKEN}%40a.com"}
+            )
+            path = envelope.write_json(Path(tmp) / "trace.json")
+
+            self.assertNotIn(PLAIN_TOKEN, path.read_text(encoding="utf-8"))
 
 
 def _contract(**extra: object) -> TaskContract:

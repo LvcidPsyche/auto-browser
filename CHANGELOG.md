@@ -43,7 +43,8 @@ All notable changes to auto-browser are documented here.
   the final observation and network entries as they are stored (`trace.json` and the staged skill candidate), goes
   through the PII scrubber (URLs through the URL scrubber) when `PII_SCRUB_ENABLED` is on. The harness verifier
   still checks the original observation, so a forbidden email or a required `dom_contains` gives the same verdict
-  as before. `extracted_data`, the task's own output, is not text-scrubbed. A staged skill
+  as before. A URL is recognised in any letter case and anywhere in a string. `extracted_data`, the task's own
+  output, is not text-scrubbed, but a URL in it still has its query and fragment scrubbed. A staged skill
   candidate's signed metadata used to say `credential_free: true` for every candidate; nothing computed it, so the
   field is removed.
 - **Confidential sessions now keep restricted evidence for every action, not only for the session record.** The

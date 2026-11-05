@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import time
 import uuid
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -30,7 +32,7 @@ _REDACTED = "[REDACTED]"
 # The keys that hold what an action typed. They are redacted when the action is marked sensitive.
 _TYPED_TEXT_KEYS = frozenset({"text", "text_preview"})
 _SENSITIVE_FLAG_KEYS = ("sensitive", "text_redacted")
-_URL_SCHEMES = ("http://", "https://")
+_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 _URL_SCRUB_MAX_BYTES = 16384
 
 
@@ -120,7 +122,7 @@ class TraceEnvelope(BaseModel):
             update={
                 "final_observation": _redact_sensitive(self.final_observation),
                 "network_entries": _redact_sensitive(self.network_entries),
-                "extracted_data": _redact_sensitive(self.extracted_data, scrub=False),
+                "extracted_data": _redact_sensitive(self.extracted_data, strings=_scrub_urls_only),
             },
             deep=True,
         )
@@ -183,7 +185,7 @@ class TraceEnvelope(BaseModel):
                 "url": final_session.get("current_url") or final_observation.get("url"),
                 "title": final_session.get("title") or final_observation.get("title"),
             }
-        trace.final_observation = _redact_sensitive(final_observation, scrub=False)
+        trace.final_observation = _redact_sensitive(final_observation, strings=None)
         trace.metadata["source"] = "agent_result"
         return trace
 
@@ -232,10 +234,10 @@ class TraceRecorder:
             run_id=self.run_id,
             contract_hash=self.contract_hash,
             events=events,
-            final_observation=_redact_sensitive(final_observation or {}, scrub=False),
-            network_entries=_redact_sensitive(network_entries or [], scrub=False),
+            final_observation=_redact_sensitive(final_observation or {}, strings=None),
+            network_entries=_redact_sensitive(network_entries or [], strings=None),
             # The task's own output: its text is what the verifier checks, so only secret-named keys go.
-            extracted_data=_redact_sensitive(extracted_data or {}, scrub=False),
+            extracted_data=_redact_sensitive(extracted_data or {}, strings=None),
             metadata=metadata or {},
         )
         envelope.write_json(self.run_dir / "trace.json")
@@ -302,14 +304,36 @@ def _execution_redacted_the_text(execution: Any) -> bool:
 
 
 def _scrub_string(value: str) -> str:
-    scrubber = _pii_scrubber()
-    if value.startswith(_URL_SCHEMES):
-        return scrub_url(value, scrubber, _URL_SCRUB_MAX_BYTES)[0]
-    return scrubber.text(value).text
+    """URLs through the URL scrubber wherever they sit in the string, the rest through the text scrubber."""
+    return _map_urls(value, _scrub_url, _scrub_text)
 
 
-def _redact_sensitive(value: Any, *, scrub: bool = True) -> Any:
-    """Redact secret-named keys, typed text of sensitive actions, and (with `scrub`) PII in every string."""
+def _scrub_text(text: str) -> str:
+    return _pii_scrubber().text(text).text
+
+
+def _scrub_urls_only(value: str) -> str:
+    """The URL scrubber on URL-shaped parts of a string; every other character is kept."""
+    return _map_urls(value, _scrub_url, str)
+
+
+def _scrub_url(url: str) -> str:
+    return scrub_url(url, _pii_scrubber(), _URL_SCRUB_MAX_BYTES)[0]
+
+
+def _map_urls(value: str, on_url: Callable[[str], str], on_text: Callable[[str], str]) -> str:
+    parts: list[str] = []
+    position = 0
+    for match in _URL_PATTERN.finditer(value):
+        parts.append(on_text(value[position : match.start()]))
+        parts.append(on_url(match.group()))
+        position = match.end()
+    parts.append(on_text(value[position:]))
+    return "".join(parts)
+
+
+def _redact_sensitive(value: Any, *, strings: Callable[[str], str] | None = _scrub_string) -> Any:
+    """Redact secret-named keys, typed text of sensitive actions, and (with `strings`) rewrite every string."""
     if isinstance(value, dict):
         hide_typed_text = any(value.get(flag) for flag in _SENSITIVE_FLAG_KEYS)
         redacted: dict[str, Any] = {}
@@ -320,10 +344,10 @@ def _redact_sensitive(value: Any, *, scrub: bool = True) -> Any:
             elif hide_typed_text and key_text in _TYPED_TEXT_KEYS:
                 redacted[key] = _REDACTED
             else:
-                redacted[key] = _redact_sensitive(item, scrub=scrub)
+                redacted[key] = _redact_sensitive(item, strings=strings)
         return redacted
     if isinstance(value, (list, tuple)):
-        return [_redact_sensitive(item, scrub=scrub) for item in value]
-    if scrub and isinstance(value, str):
-        return _scrub_string(value)
+        return [_redact_sensitive(item, strings=strings) for item in value]
+    if strings is not None and isinstance(value, str):
+        return strings(value)
     return value
