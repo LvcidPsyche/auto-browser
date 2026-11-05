@@ -208,7 +208,10 @@ All notable changes to auto-browser are documented here.
 - `browser.cdp_attach` now logs, audits and returns the Chrome it attached to as `scheme://host:port` only. A CDP
   URL's userinfo, query and `/devtools/browser/<id>` path can be the credential for that Chrome; the attach itself
   still uses the full URL. The startup log line for `CDP_CONNECT_URL` shows it the same way, and a connect that fails
-  (at startup or in the tool) says why without the URL, which Playwright's error repeats whole in its call log.
+  (at startup or in the tool) says why without the URL, which Playwright's error repeats whole in its call log. A
+  `CDP_CONNECT_URL` in which a browser could read another host than that log shows (a backslash or a control
+  character in it, or a host written in a form a browser maps to another) now stops startup, as the tool's `cdp_url`
+  already was refused.
 - `.gitignore` now ignores everything under `data/` except each directory's `.gitkeep` (it listed directories one by
   one and missed `data/memory`, `data/mesh` with the node identity key, `data/harness`, the proxy and cron stores),
   and ignores `.env.*` except `.env.example`.

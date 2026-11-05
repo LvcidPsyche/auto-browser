@@ -16,6 +16,7 @@ from .auth_policy import (
 )
 from .config import Settings
 from .providers.base import BaseProviderAdapter
+from .url_safety import refuse_ambiguous_host
 
 
 @dataclass(slots=True)
@@ -209,10 +210,22 @@ def _validate_api_authentication(settings: Settings, report: RuntimePolicyReport
         )
 
 
+def _validate_cdp_connect_url(settings: Settings, report: RuntimePolicyReport) -> None:
+    """Playwright parses CDP_CONNECT_URL as a browser does and the startup log as urllib does: where they could read
+    different hosts, the log would name one and the controller connect to the other."""
+    if not settings.cdp_connect_url:
+        return
+    try:
+        refuse_ambiguous_host(settings.cdp_connect_url, field_name="CDP_CONNECT_URL")
+    except ValueError as exc:
+        report.errors.append(str(exc))
+
+
 def validate_runtime_policy(settings: Settings) -> RuntimePolicyReport:
     report = RuntimePolicyReport()
 
     _validate_api_authentication(settings, report)
+    _validate_cdp_connect_url(settings, report)
 
     if getattr(settings, "codex_allow_host_exec", False):
         report.warnings.append(

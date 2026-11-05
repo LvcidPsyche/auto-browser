@@ -393,5 +393,33 @@ class RuntimePolicyTests(unittest.TestCase):
         self.assertFalse(any("OPENAI_AUTH_MODE" in error for error in report.errors))
 
 
+class CdpConnectUrlPolicyTests(unittest.TestCase):
+    """A CDP_CONNECT_URL in which a browser could read another host stops startup: Playwright parses it as a browser
+    does and the startup log as urllib does, so the log would name one host and the controller connect to another."""
+
+    def test_a_cdp_connect_url_with_an_ambiguous_host_stops_startup(self) -> None:
+        for url in (
+            "ws://user:pw-5c1e@evil.example\\@good.example:9222/devtools/browser/id-77d2",
+            "http://evil.example\\@good.example:9222",
+            "ws://go\tod.example:9222/devtools/browser/id-77d2",
+            "http://0x7f.1:9222",
+        ):
+            for app_env in ("development", "production"):
+                with self.subTest(url=url, app_env=app_env):
+                    report = validate_runtime_policy(Settings(_env_file=None, APP_ENV=app_env, CDP_CONNECT_URL=url))
+
+                    errors = [error for error in report.errors if "CDP_CONNECT_URL" in error]
+                    self.assertEqual(len(errors), 1, report.errors)
+                    for part in ("pw-5c1e", "id-77d2", "user:"):
+                        self.assertNotIn(part, errors[0])
+
+    def test_a_plain_cdp_connect_url_passes(self) -> None:
+        settings = Settings(_env_file=None, CDP_CONNECT_URL="ws://user:pw@chrome.internal:9222/devtools/browser/abc")
+
+        report = validate_runtime_policy(settings)
+
+        self.assertFalse(any("CDP_CONNECT_URL" in error for error in report.errors), report.errors)
+
+
 if __name__ == "__main__":
     unittest.main()
