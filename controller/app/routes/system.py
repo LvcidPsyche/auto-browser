@@ -37,6 +37,19 @@ _DEEP_HEALTH_FALLBACK = """<!doctype html>
 </html>
 """
 _DEEP_HEALTH_TIMEOUT_MS = 5_000
+# Connects a probe stopped waiting for: held so they are not collected mid-connect.
+_UNFINISHED_CONNECTS: set[asyncio.Future[Any]] = set()
+
+
+def _let_finish_in_background(connect: "asyncio.Future[Any]") -> None:
+    _UNFINISHED_CONNECTS.add(connect)
+    connect.add_done_callback(_UNFINISHED_CONNECTS.discard)
+    connect.add_done_callback(_log_unfinished_connect)
+
+
+def _log_unfinished_connect(connect: "asyncio.Future[Any]") -> None:
+    if not connect.cancelled() and connect.exception() is not None:
+        logger.warning("browser connect that outlived a deep health probe failed: %s", connect.exception())
 
 
 async def run_deep_health_probe(manager: "BrowserManager") -> dict[str, Any]:
@@ -57,8 +70,17 @@ async def run_deep_health_probe(manager: "BrowserManager") -> dict[str, Any]:
         }
     )
 
-    # Bounded like /readyz: a hung ensure_browser() otherwise holds the browser lock and the request open.
-    browser = await asyncio.wait_for(manager.ensure_browser(), timeout=READYZ_TIMEOUT_SECONDS)
+    # Bounded like /readyz: a hung ensure_browser() otherwise holds the browser lock and the request open. The
+    # wait is bounded, the connect is not cancelled: cancelling it mid-connect leaked a half-acquired browser
+    # connection and its gate. It finishes in the background (a later probe finds the browser connected or waits
+    # on the same lock), and a failure after the probe gave up is logged.
+    connect = asyncio.ensure_future(manager.ensure_browser())
+    try:
+        browser = await asyncio.wait_for(asyncio.shield(connect), timeout=READYZ_TIMEOUT_SECONDS)
+    except BaseException:
+        if not connect.done():
+            _let_finish_in_background(connect)
+        raise
     context = await browser.new_context(viewport={"width": 640, "height": 360})
     try:
         page = await context.new_page()
