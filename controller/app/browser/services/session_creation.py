@@ -45,6 +45,10 @@ def is_session_id(name: str) -> bool:
     return _SESSION_ID_SHAPE.fullmatch(name) is not None
 
 
+class SessionLimitError(RuntimeError):
+    """create_session refused because MAX_SESSIONS live sessions already exist (a fork counts too)."""
+
+
 class SessionCreation:
     """BrowserSessionService's creation half (a mixin: ``self`` is the service)."""
 
@@ -306,7 +310,7 @@ class SessionCreation:
                     " This scaffold uses one visible desktop and one shared browser node by default, "
                     "so only one live workflow is allowed unless you switch to docker_ephemeral isolation."
                 )
-            raise RuntimeError(message)
+            raise SessionLimitError(message)
 
     def build_context_kwargs(
         self,

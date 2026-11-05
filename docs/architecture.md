@@ -115,7 +115,7 @@ Why:
 
 ### POC constraint
 
-The shared browser node defaults to **one active session** (`MAX_SESSIONS=1`). It exposes one X display and one noVNC surface, so human takeover is global to that desktop. Raise `MAX_SESSIONS` only when every session belongs to the same person; otherwise use the `docker_ephemeral` mode below, which gives each session its own browser node.
+The shared browser node defaults to **one active session** (`MAX_SESSIONS=1`). It exposes one X display and one noVNC surface, so human takeover is global to that desktop. Raise `MAX_SESSIONS` only when every session belongs to the same person; otherwise use the `docker_ephemeral` mode below, which gives each session its own browser node. Forking a session creates a new one, so it counts against the limit too: `POST /sessions/{id}/fork` needs `MAX_SESSIONS` of at least 2, and with the default it answers 409 with the session-limit message.
 
 Within that limitation, the controller now still scopes working state per session:
 - per-session artifact directory

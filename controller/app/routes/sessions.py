@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from ..action_errors import ErrorPageSourceError, RefusedPageError
+from ..browser.services.session_creation import SessionLimitError
 from ..browser.services.tabs import TabRefusedByAnotherTabError, TabUnjudgedError
 from ..models import (
     HTTP_URL_SCHEMES,
@@ -66,6 +67,8 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                     totp_secret=payload.totp_secret,
                     totp_hosts=payload.totp_hosts,
                 )
+            except SessionLimitError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from None
             except RuntimeError:
                 raise HTTPException(status_code=409, detail="Conflict") from None
             return manager.remote_access.with_takeover_password(created)
@@ -260,6 +263,8 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                 start_url = validate_url(start_url, field_name="start_url", allowed_schemes=HTTP_URL_SCHEMES)
             try:
                 return await manager.fork_session(session_id, name=name, start_url=start_url)
+            except SessionLimitError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from None
             except RuntimeError:
                 raise HTTPException(status_code=409, detail="Conflict") from None
             except ErrorPageSourceError as exc:
