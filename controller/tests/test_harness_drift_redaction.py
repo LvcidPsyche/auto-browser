@@ -74,5 +74,28 @@ class DriftOnRedactedTraceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(drift.verification.failed_postconditions)
 
 
+class DriftOnUrlContainsTests(unittest.IsolatedAsyncioTestCase):
+    async def _drift(self, expected: str, final_url: str) -> str:
+        contract = TaskContract(
+            id="drift-url",
+            goal="Open the page.",
+            postconditions=[Postcondition(kind="url_contains", value=expected)],
+            budget=Budget(max_attempts=1, max_steps=2),
+        )
+        observation = {"url": final_url, "text": "done", "accessibility_outline": {}}
+        with tempfile.TemporaryDirectory() as tmp:
+            service = HarnessService(tmp)
+            record = await service.start_convergence(contract, mock_final_observation=observation)
+            self.assertEqual(record.status, "converged")
+            drift = await service.drift_monitor.check_candidate(record.candidate.skill_id)
+            return drift.status
+
+    async def test_an_email_in_the_url_path_stays_healthy(self) -> None:
+        self.assertEqual(await self._drift(f"/u/{EMAIL}/settings", f"https://app.test/u/{EMAIL}/settings"), "healthy")
+
+    async def test_an_email_in_the_url_query_stays_healthy(self) -> None:
+        self.assertEqual(await self._drift(f"?email={EMAIL}", f"https://app.test/done?email={EMAIL}"), "healthy")
+
+
 if __name__ == "__main__":
     unittest.main()

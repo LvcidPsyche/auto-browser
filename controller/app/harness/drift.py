@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .contracts import TaskContract
 from .register import SkillStagingRegistry
-from .trace import TraceEnvelope, _scrub_string, _scrub_urls_only
+from .trace import TraceEnvelope, _scrub_string, _scrub_url, _scrub_urls_only
 from .verifier.base import VerificationResult, VerifierAdapter
 from .verifier.programmatic import ProgrammaticVerifier
 
@@ -98,8 +98,10 @@ class SkillDriftMonitor:
 
 
 # How the stored trace scrubs the field each kind of postcondition reads. `url_matches` is a regex, left alone.
+# `url_contains` is read against the stored URL, which only has its query and fragment rewritten, so a scheme-less
+# fragment of a URL goes through the URL scrubber and not the text one (which would also rewrite its path).
 _STORED_TEXT_SCRUBBERS = {
-    "url_contains": _scrub_string,
+    "url_contains": _scrub_url,
     "text_contains": _scrub_string,
     "dom_contains": _scrub_string,
     "network_response_shape": _scrub_string,
