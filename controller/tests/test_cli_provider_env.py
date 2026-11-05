@@ -48,6 +48,13 @@ class CliProviderEnvironmentTests(unittest.TestCase):
             self.assertEqual(env["NO_COLOR"], "1")
             self.assertEqual(env["CI"], "1")
 
+    def test_the_codex_automation_key_is_passed_to_the_codex_child_only(self):
+        codex = _env_for(OpenAIAdapter, CODEX_API_KEY="codex-key")
+        claude = _env_for(ClaudeAdapter, CODEX_API_KEY="codex-key")
+
+        self.assertEqual(codex["CODEX_API_KEY"], "codex-key")
+        self.assertFalse("CODEX_API_KEY" in claude, "the Claude child was given CODEX_API_KEY")
+
     def test_another_providers_key_is_not_passed(self):
         env = _env_for(ClaudeAdapter, OPENAI_API_KEY="sk-openai", ANTHROPIC_API_KEY="sk-ant")
         self.assertFalse("OPENAI_API_KEY" in env, "the Claude child was given OPENAI_API_KEY")

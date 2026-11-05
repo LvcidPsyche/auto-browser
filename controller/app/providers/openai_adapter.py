@@ -20,7 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
 
 class OpenAIAdapter(BaseProviderAdapter):
     provider = "openai"
-    cli_env_names = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME")
+    cli_env_names = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME", "CODEX_API_KEY")
 
     @property
     def supported_auth_modes(self) -> tuple[str, ...]:

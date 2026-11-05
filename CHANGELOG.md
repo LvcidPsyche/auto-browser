@@ -12,7 +12,7 @@ All notable changes to auto-browser are documented here.
 - **A provider CLI (`claude`, `codex`, `gemini`) now gets only a fixed set of environment variables.** If your CLI
   needs one that is not in the set, name it in the new `CLI_PROVIDER_ENV_PASSTHROUGH` setting (comma-separated
   variable names, empty by default). The set is the operating-system basics (`PATH`, `HOME`, `TEMP`, `LANG`, `LC_*`,
-  proxy and certificate variables) plus that provider's own key, endpoint and config-directory variables.
+  proxy and certificate variables) plus that provider's own key, endpoint and config-directory variables (for `codex`, that includes `CODEX_API_KEY`).
 
 ### Security
 
