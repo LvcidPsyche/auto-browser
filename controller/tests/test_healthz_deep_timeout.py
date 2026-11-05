@@ -81,6 +81,61 @@ class DeepHealthTimeoutTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outcome, ["connected"])
 
+    async def test_timed_out_probes_share_one_pending_connect(self) -> None:
+        # Each timed-out probe left its own connect queued behind the browser lock, one more per poll in an outage.
+        release = asyncio.Event()
+        connects: list[int] = []
+
+        async def ensure_browser() -> object:
+            connects.append(1)
+            await release.wait()  # as every connect queues on the browser lock until the browser answers
+            return _rendering_browser()
+
+        manager = SimpleNamespace(ensure_browser=ensure_browser, sessions={})
+        with mock.patch.object(system, "READYZ_TIMEOUT_SECONDS", TEST_TIMEOUT_SECONDS):
+            async with _client(manager) as client:
+                for _ in range(3):
+                    response = await asyncio.wait_for(client.get("/healthz/deep"), timeout=5)
+                    self.assertEqual(response.json()["error"], "deep_health_probe_timed_out")
+
+                self.assertEqual(len(connects), 1)
+                pending = list(system._PENDING_CONNECTS.values())
+                self.assertEqual(len(pending), 1)
+                release.set()
+                await asyncio.wait_for(asyncio.shield(pending[0]), timeout=5)
+                await asyncio.sleep(0)  # its done callbacks run
+                self.assertEqual(system._PENDING_CONNECTS, {})
+
+                response = await asyncio.wait_for(client.get("/healthz/deep"), timeout=5)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+        self.assertEqual(len(connects), 2)  # a finished connect is not reused: the next probe asks the manager
+
+
+def _rendering_browser() -> object:
+    locator = SimpleNamespace(
+        get_attribute=mock.AsyncMock(return_value="ready"), inner_text=mock.AsyncMock(return_value="Deep health ready")
+    )
+    page = SimpleNamespace(set_content=mock.AsyncMock(), locator=mock.Mock(return_value=locator))
+    context = SimpleNamespace(new_page=mock.AsyncMock(return_value=page), close=mock.AsyncMock())
+    return SimpleNamespace(new_context=mock.AsyncMock(return_value=context))
+
+
+def _client(manager: object) -> httpx.AsyncClient:
+    api = FastAPI()
+    api.include_router(
+        create_system_router(
+            settings=SimpleNamespace(environment_name="test"),
+            manager=manager,
+            metrics=None,
+            maintenance=None,
+            orchestrator=None,
+            version="x",
+        )
+    )
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=api), base_url="http://t")
+
 
 if __name__ == "__main__":
     unittest.main()

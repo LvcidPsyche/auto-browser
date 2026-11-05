@@ -37,11 +37,32 @@ _DEEP_HEALTH_FALLBACK = """<!doctype html>
 </html>
 """
 _DEEP_HEALTH_TIMEOUT_MS = 5_000
-# Connects a probe stopped waiting for: held so they are not collected mid-connect.
+# The connect a probe started, per manager (by id: the connect holds the manager, so the id is not reused while it
+# stands), until it finishes. A probe that finds one waits on it rather than starting another: each timed-out probe
+# otherwise left one more connect queued behind the same browser lock, one per poll through an outage.
+_PENDING_CONNECTS: dict[int, asyncio.Future[Any]] = {}
+# Connects a probe stopped waiting for: a failure then reaches no probe, and is logged.
 _UNFINISHED_CONNECTS: set[asyncio.Future[Any]] = set()
 
 
+def _shared_connect(manager: "BrowserManager") -> "asyncio.Future[Any]":
+    key = id(manager)
+    connect = _PENDING_CONNECTS.get(key)
+    if connect is None or connect.done():
+        connect = asyncio.ensure_future(manager.ensure_browser())
+        _PENDING_CONNECTS[key] = connect
+        connect.add_done_callback(lambda done: _forget_connect(key, done))
+    return connect
+
+
+def _forget_connect(key: int, connect: "asyncio.Future[Any]") -> None:
+    if _PENDING_CONNECTS.get(key) is connect:
+        del _PENDING_CONNECTS[key]
+
+
 def _let_finish_in_background(connect: "asyncio.Future[Any]") -> None:
+    if connect in _UNFINISHED_CONNECTS:
+        return  # another probe that gave up on it already said so
     _UNFINISHED_CONNECTS.add(connect)
     connect.add_done_callback(_UNFINISHED_CONNECTS.discard)
     connect.add_done_callback(_log_unfinished_connect)
@@ -72,9 +93,9 @@ async def run_deep_health_probe(manager: "BrowserManager") -> dict[str, Any]:
 
     # Bounded like /readyz: a hung ensure_browser() otherwise holds the browser lock and the request open. The
     # wait is bounded, the connect is not cancelled: cancelling it mid-connect leaked a half-acquired browser
-    # connection and its gate. It finishes in the background (a later probe finds the browser connected or waits
-    # on the same lock), and a failure after the probe gave up is logged.
-    connect = asyncio.ensure_future(manager.ensure_browser())
+    # connection and its gate. It finishes in the background (a later probe waits on that same connect, or once it
+    # has finished starts one that finds the browser connected), and a failure after the probe gave up is logged.
+    connect = _shared_connect(manager)
     try:
         browser = await asyncio.wait_for(asyncio.shield(connect), timeout=READYZ_TIMEOUT_SECONDS)
     except BaseException:

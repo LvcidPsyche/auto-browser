@@ -20,7 +20,8 @@ All notable changes to auto-browser are documented here.
   no limit, so a stuck browser node held the request open (and the controller's browser lock with it). That step is
   now bounded by the same 5 seconds as `/readyz`, and a timeout answers 503 with `deep_health_probe_timed_out`. The wait is
   bounded, not the connect: it is left to finish in the background rather than cancelled mid-connect, which leaked a
-  half-acquired browser connection.
+  half-acquired browser connection. While it runs, later probes wait on that same connect instead of each starting
+  another, so polling through an outage does not pile up connects behind the browser lock.
 - **An `approval_id` presented on an action that needs no approval no longer makes its Witness receipt say the action
   required one.** The receipt recorded the id with `required: true`, so a caller could make a receipt read as if the
   action had been approval-gated. The receipt still shows the id, as the record of what was presented, with no status;
