@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .contracts import TaskContract
 from .register import SkillStagingRegistry
-from .trace import TraceEnvelope
+from .trace import TraceEnvelope, _scrub_string, _scrub_urls_only
 from .verifier.base import VerificationResult, VerifierAdapter
 from .verifier.programmatic import ProgrammaticVerifier
 
@@ -67,7 +67,7 @@ class SkillDriftMonitor:
         if trace_hash != candidate.trace_hash:
             notes.append("trace hash differs from candidate provenance")
 
-        verification = await self.verifier.verify(contract, trace)
+        verification = await self.verifier.verify(_expecting_scrubbed_text(contract), trace)
         if verification.passed is True and not notes:
             status = "healthy"
         elif verification.passed is None and not notes:
@@ -95,6 +95,31 @@ class SkillDriftMonitor:
             if skill_id:
                 results.append(await self.check_candidate(skill_id))
         return results
+
+
+# How the stored trace scrubs the field each kind of postcondition reads. `url_matches` is a regex, left alone.
+_STORED_TEXT_SCRUBBERS = {
+    "url_contains": _scrub_string,
+    "text_contains": _scrub_string,
+    "dom_contains": _scrub_string,
+    "network_response_shape": _scrub_string,
+    "extracted_data_schema": _scrub_urls_only,
+}
+
+
+def _expecting_scrubbed_text(contract: TaskContract) -> TaskContract:
+    """The contract with its expected strings scrubbed the way the stored trace was.
+
+    The candidate keeps a scrubbed trace, so an email the live run matched is "[REDACTED]" there. Only the
+    copy handed to the verifier changes; the contract hash is taken from the original.
+    """
+    postconditions = [
+        item.model_copy(update={"value": _STORED_TEXT_SCRUBBERS[item.kind](item.value)})
+        if item.kind in _STORED_TEXT_SCRUBBERS
+        else item
+        for item in contract.postconditions
+    ]
+    return contract.model_copy(update={"postconditions": postconditions})
 
 
 def _artifact_path(candidate_dir: Path, name: str) -> Path:

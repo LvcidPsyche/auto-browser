@@ -140,6 +140,11 @@ All notable changes to auto-browser are documented here.
   itself was scrubbed. Verification results are now scrubbed with the trace's scrubber wherever they are stored; the
   run still verifies the original observation.
 
+- **A newly staged harness skill is no longer reported degraded at once.** A staged skill keeps a scrubbed trace, so a
+  required `dom_contains` or `text_contains` on an email that passed in the live run no longer matched when the drift
+  monitor checked the stored copy. The monitor now scrubs the expected strings the way the stored trace was scrubbed
+  before it verifies. A skill whose recorded page no longer holds the expected text still reports degraded.
+
 ### Changed
 
 - **The stdio bridge docs now say it handles one request at a time.** `docs/mcp-clients.md` explains that a slow tool call holds up the calls behind it, and where to change the 60-second per-call timeout. No behaviour changed.
