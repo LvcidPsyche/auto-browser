@@ -66,7 +66,9 @@ class BrowserRuntimeService:
 
             if manager.settings.cdp_connect_url:
                 self.shared_sandbox = None
-                logger.info("connecting to existing Chrome via CDP at %s", manager.settings.cdp_connect_url)
+                logger.info(
+                    "connecting to existing Chrome via CDP at %s", scrubbed_cdp_url(manager.settings.cdp_connect_url)
+                )
                 browser = await manager.playwright.chromium.connect_over_cdp(manager.settings.cdp_connect_url)
                 logger.info("CDP attach succeeded")
                 await manager.request_gates.attach(browser, attach_mode=True)

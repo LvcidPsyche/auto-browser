@@ -64,6 +64,18 @@ class CdpAttachScrubTests(unittest.IsolatedAsyncioTestCase):
         for leaked in ("hunter2", "abc-secret-id", "tok-secret", "user:"):
             self.assertNotIn(leaked, shown)
 
+    async def test_the_startup_connect_through_cdp_connect_url_logs_no_credentials(self) -> None:
+        self.manager.settings.cdp_connect_url = SECRET_URL
+
+        with self.assertLogs("app.browser.services.runtime", level="INFO") as captured:
+            await self.manager.ensure_browser()
+
+        self.connect.assert_awaited_once_with(SECRET_URL)
+        text = "\n".join(captured.output)
+        self.assertIn("ws://10.0.0.9:9222", text)
+        for leaked in ("hunter2", "abc-secret-id", "tok-secret", "user:"):
+            self.assertNotIn(leaked, text)
+
 
 if __name__ == "__main__":
     unittest.main()
