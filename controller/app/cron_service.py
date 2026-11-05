@@ -61,6 +61,10 @@ except ImportError:
     logger.info("APScheduler not installed — cron scheduling disabled. Install: pip install apscheduler")
 
 
+class CronJobDisabledError(RuntimeError):
+    """A disabled job was asked to run."""
+
+
 class CronService:
     """Manages cron jobs and webhook triggers for browser automation."""
 
@@ -305,6 +309,9 @@ class CronService:
         job_id = job["id"]
         if self.job_queue is None or self.manager is None:
             raise RuntimeError("CronService not fully initialized (no job_queue/manager)")
+        # The scheduler already drops a disabled job; a webhook or trigger_job must not run it either.
+        if not job.get("enabled", True):
+            raise CronJobDisabledError("job is disabled; enable it to run it")
 
         from .models import AGENT_RUN_MAX_STEPS, AgentRunRequest
 

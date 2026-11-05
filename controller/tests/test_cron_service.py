@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.audit import get_current_operator
-from app.cron_service import CronService
+from app.cron_service import CronJobDisabledError, CronService
 from app.models import OperatorIdentity
 from app.session_ownership import acting_as
 
@@ -94,6 +94,48 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
         stored = service._load()[created["id"]]
         self.assertEqual(stored["last_status"], "queued")
         self.assertEqual(stored["run_count"], 1)
+
+    async def _disabled_job(self, **create):
+        manager = MagicMock()
+        manager.create_session = AsyncMock(return_value={"id": "session-1"})
+        queue = MagicMock()
+        queue.enqueue_run = AsyncMock(return_value={"id": "agent-job-1"})
+        service = CronService(self.store_path, job_queue=queue, manager=manager)
+        job = await service.create_job(name="n", goal="g", schedule="0 9 * * *", webhook_enabled=True, **create)
+        await service.update_job(job["id"], {"enabled": False})
+        return service, job, manager
+
+    async def test_a_disabled_job_is_not_run_by_webhook_or_trigger_job(self) -> None:
+        service, job, manager = await self._disabled_job()
+
+        with self.assertRaisesRegex(CronJobDisabledError, "job is disabled; enable it to run it"):
+            await service.trigger_via_webhook(job["id"], job["webhook_key"])
+        with self.assertRaisesRegex(CronJobDisabledError, "job is disabled; enable it to run it"):
+            await service.trigger_job(job["id"])
+        manager.create_session.assert_not_awaited()
+
+        # A wrong key is still a permission error: a disabled job does not tell a stranger its state.
+        with self.assertRaises(PermissionError):
+            await service.trigger_via_webhook(job["id"], "wrong")
+
+        await service.update_job(job["id"], {"enabled": True})
+        self.assertTrue((await service.trigger_job(job["id"]))["triggered"])
+        manager.create_session.assert_awaited_once()
+
+    async def test_the_trigger_route_answers_409_for_a_disabled_job(self) -> None:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from app.routes.operations import create_operations_router
+
+        service, job, manager = await self._disabled_job()
+        app = FastAPI()
+        app.include_router(create_operations_router(manager=manager, proxy_store=None, cron_service=service))
+        response = TestClient(app, raise_server_exceptions=False).post(
+            f"/crons/{job['id']}/trigger", json={"webhook_key": job["webhook_key"]}
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("job is disabled", response.json()["detail"])
 
     async def test_scheduler_registration_and_store_error_paths(self) -> None:
         service = CronService(self.store_path)
