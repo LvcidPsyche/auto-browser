@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import traceback
 import unittest
 from types import SimpleNamespace
 
@@ -44,6 +45,13 @@ class FakeChromium:
 class FailingChromium:
     async def connect(self, endpoint: str) -> object:
         raise ConnectionRefusedError("refused")
+
+
+class NamingChromium:
+    """A connect failure as Playwright words it: the error text carries the endpoint, path and all."""
+
+    async def connect(self, endpoint: str) -> object:
+        raise ConnectionRefusedError(f"BrowserType.connect: connect ECONNREFUSED <ws connecting> {endpoint}")
 
 
 def _manager(direct_endpoint: str | None = None) -> SimpleNamespace:
@@ -89,6 +97,26 @@ class ControllerOutputRedactionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn(SECRET, str(raised.exception))
         self.assertIn("ws://browser-node:9223/<redacted>", str(raised.exception))
+
+    async def test_a_connect_failure_names_the_endpoint_without_its_path_in_the_log_and_the_traceback(self) -> None:
+        manager = _manager()
+        manager.playwright.chromium = NamingChromium()
+
+        async def factory() -> str:
+            return ENDPOINT
+
+        with self.assertLogs("app.browser.services.runtime", level=logging.WARNING) as logs:
+            with self.assertRaises(RuntimeError) as raised:
+                await BrowserRuntimeService(manager).connect_browser(
+                    factory, failure_context="browser node unreachable"
+                )
+
+        formatted = "".join(traceback.format_exception(raised.exception))
+        output = "\n".join(logs.output)
+        self.assertNotIn(SECRET, formatted)
+        self.assertNotIn(SECRET, output)
+        self.assertIn("browser node unreachable", formatted)
+        self.assertIn("ws://browser-node:9223/<redacted>", output)  # what failed is still logged, minus the path
 
     def test_readiness_details_do_not_carry_the_endpoint(self) -> None:
         state = {"sandbox": "on", "endpoint": ENDPOINT}

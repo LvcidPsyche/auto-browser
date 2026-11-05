@@ -193,7 +193,10 @@ class BrowserRuntimeService:
             except Exception as exc:  # pragma: no cover - depends on external service
                 last_error = exc
                 await asyncio.sleep(manager.settings.connect_retry_delay_seconds)
-        raise RuntimeError(failure_context) from last_error
+        # Not chained: Playwright's connect error names the endpoint with its path (the server's only secret), and
+        # /readyz, deep health and startup log the chain. The cause is logged here with the path redacted.
+        logger.warning("%s; last connect error: %s", failure_context, redact_endpoints(repr(last_error)))
+        raise RuntimeError(failure_context) from None
 
     async def resolve_browser_ws_endpoint(self) -> str:
         manager = self.manager
