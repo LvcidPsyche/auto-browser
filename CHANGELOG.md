@@ -46,10 +46,14 @@ All notable changes to auto-browser are documented here.
   vision before, because vision added `/v1` itself, and now answers 404; add the `/v1`. The curator, which ignored the
   setting, now sends its Claude calls to whatever the setting names.
 - **The repo's scripts read `.env` values literally.** `doctor.sh`, `compose_local.sh`, `bootstrap_cli_auth.sh` and the
-  smoke scripts do no `$VAR` or `${VAR}` expansion, so `DATA=${PWD}/data` stays that text (docker compose itself still
-  expands it when it reads `.env`). Backslash escapes work only inside double quotes (`\"`, `\\`, `\n` and `\r`); a
-  value with text after its closing quote, or with an unterminated quote (a multi-line value), is skipped with a
-  warning naming the line number. The scripts also refuse, with a warning naming the key, these `.env` keys, which
+  smoke scripts do no `$VAR` or `${VAR}` expansion, so `DATA=${PWD}/data` stays that text. Plain `docker compose`
+  expands `${PWD}` when it reads `.env`, but under `make up` (`compose_local.sh`) the scripts' literal value is
+  exported and wins, for every `${VAR}` in the compose files. Double-quoted values take the escapes of compose-go's
+  reader (`\"`, `\\`, `\$`, `\a`, `\b`, `\f`, `\n`, `\r`, `\t`, `\v` and `\0` plus three octal digits for an ASCII
+  character); a single-quoted value keeps its backslashes, except that `\'` is a quote. A value with text after its
+  closing quote, an escape bash cannot hold (a NUL or a byte above ASCII), or a quote that spans several lines (a
+  PEM; its lines are skipped up to the closing quote) is not exported, with one warning naming the line number, and
+  `docker compose` reads that key from `.env` itself. The scripts also refuse, with a warning naming the key, these `.env` keys, which
   change how the shell, the loader or the programs the scripts start behave: `BASH_ENV`, `ENV`, `BASH_FUNC_*`,
   `SHELLOPTS`, `BASHOPTS`, `IFS`, `PATH`, `PS4`, `PROMPT_COMMAND`, `CDPATH`, `GLOBIGNORE`, `POSIXLY_CORRECT`,
   `BASH_COMPAT`, `EXECIGNORE`, `FUNCNEST`, `TMOUT`, `LC_ALL`, `LC_CTYPE`, `HOME`, `PYTHON*`, `BROWSER`, `PERL5OPT`,

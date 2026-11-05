@@ -5,11 +5,13 @@
 # expanded. Blank lines and # comments are skipped, as is an `export ` prefix. Everything
 # after the first = is the value, kept intact. Quoting follows docker compose's .env
 # reader where that is safe:
-#   'single'  literal, no escapes
-#   "double"  literal except \" \\ \n and \r (any other backslash stays as written)
+#   'single'  literal; only a backslash before the quote is an escape (see __lre_parse_quoted)
+#   "double"  escapes as compose-go's expandEscapes: \" \\ \$ \a \b \f \n \r \t \v and \0 plus three octal
+#             digits (any other backslash stays as written)
 #   unquoted  ends at a whitespace-preceded # comment; `KEY=   # note` is empty
-# Text after a closing quote (other than a # comment), an unterminated quote and any line
-# that is not KEY=VALUE are skipped with a warning naming the line number, never its text.
+# Text after a closing quote (other than a # comment), a quote that spans several lines (the lines up to the
+# closing quote are skipped too), an escape bash cannot hold, and any line that is not KEY=VALUE are skipped
+# with a warning naming the line number, never its text.
 # A UTF-8 BOM before the first key is ignored. Keys that change how the shell or this
 # loader behaves are refused with a warning naming the key (see __lre_refused).
 #
@@ -47,10 +49,17 @@ __lre_refused() {
   esac
 }
 
-# Parses a quoted value. $1 is the text starting at the opening quote. Sets __lre_out to the
-# value; returns 1 for an unterminated quote or text after the closing one.
+# Parses a quoted value, escape for escape as docker compose's reader (compose-go dotenv/parser.go) does. $1 is
+# the text starting at the opening quote; it may hold newlines. Sets __lre_out to the value. Returns:
+#   0  a value, followed by nothing or a # comment
+#   1  text after the closing quote
+#   2  no closing quote
+#   3  an escape that bash cannot hold the way compose reads it (a NUL, or a byte above 0177)
+# In both kinds of quote a backslash before the quote character is that character, and a backslash pair is
+# \\ in double quotes and stays two backslashes in single quotes. Only double quotes expand: \a \b \f \n \r \t \v
+# \$ (a literal $), \" and \\, and \0 plus three octal digits. A backslash before any other character is kept.
 __lre_parse_quoted() {
-  local __lre_text="$1" __lre_quote="${1:0:1}" __lre_i __lre_c __lre_n __lre_tail
+  local __lre_text="$1" __lre_quote="${1:0:1}" __lre_i __lre_c __lre_n __lre_tail __lre_oct
   __lre_out=""
   for ((__lre_i = 1; __lre_i < ${#__lre_text}; __lre_i++)); do
     __lre_c="${__lre_text:__lre_i:1}"
@@ -60,19 +69,48 @@ __lre_parse_quoted() {
       [[ -z "$__lre_tail" || "$__lre_tail" == "#"* ]]
       return
     fi
-    if [[ "$__lre_quote" == '"' && "$__lre_c" == "\\" ]]; then
+    if [[ "$__lre_c" == "\\" ]]; then
       __lre_n="${__lre_text:__lre_i+1:1}"
-      case "$__lre_n" in
-        '"' | "\\") __lre_out+="$__lre_n"; ((__lre_i++)) ;;
-        n) __lre_out+=$'\n'; ((__lre_i++)) ;;
-        r) __lre_out+=$'\r'; ((__lre_i++)) ;;
-        *) __lre_out+="$__lre_c" ;;
-      esac
+      if [[ "$__lre_n" == "$__lre_quote" ]]; then
+        __lre_out+="$__lre_n"
+        ((__lre_i++))
+        continue
+      fi
+      if [[ "$__lre_n" == "\\" ]]; then
+        if [[ "$__lre_quote" == '"' ]]; then __lre_out+="\\"; else __lre_out+="\\\\"; fi
+        ((__lre_i++))
+        continue
+      fi
+      if [[ "$__lre_quote" == '"' ]]; then
+        case "$__lre_n" in
+          n) __lre_out+=$'\n'; ((__lre_i++)); continue ;;
+          r) __lre_out+=$'\r'; ((__lre_i++)); continue ;;
+          t) __lre_out+=$'\t'; ((__lre_i++)); continue ;;
+          a) __lre_out+=$'\a'; ((__lre_i++)); continue ;;
+          b) __lre_out+=$'\b'; ((__lre_i++)); continue ;;
+          f) __lre_out+=$'\f'; ((__lre_i++)); continue ;;
+          v) __lre_out+=$'\v'; ((__lre_i++)); continue ;;
+          '$') __lre_out+='$'; ((__lre_i++)); continue ;;
+          0)
+            __lre_oct="${__lre_text:__lre_i+2:3}"
+            case "$__lre_oct" in
+              000 | [23][0-7][0-7]) return 3 ;;
+              [01][0-7][0-7])
+                printf -v __lre_n '%b' "\\0${__lre_oct}"
+                __lre_out+="$__lre_n"
+                ((__lre_i += 4))
+                continue
+                ;;
+            esac
+            ;;
+        esac
+      fi
+      __lre_out+="\\"
       continue
     fi
     __lre_out+="$__lre_c"
   done
-  return 1
+  return 2
 }
 
 load_repo_env() {
@@ -82,7 +120,7 @@ load_repo_env() {
   fi
 
   local __lre_pair_re='^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$'
-  local __lre_line __lre_key __lre_raw __lre_value __lre_out __lre_number=0
+  local __lre_line __lre_key __lre_raw __lre_value __lre_out __lre_number=0 __lre_start __lre_rc __lre_next=""
   while IFS= read -r __lre_line || [[ -n "$__lre_line" ]]; do
     ((__lre_number++)) || true
     if ((__lre_number == 1)); then
@@ -101,8 +139,26 @@ load_repo_env() {
     __lre_raw="${BASH_REMATCH[2]}"
     __lre_value="${__lre_raw#"${__lre_raw%%[![:space:]]*}"}"
     if [[ "$__lre_value" == [\"\']* ]]; then
-      if ! __lre_parse_quoted "$__lre_value"; then
-        echo "load_repo_env: ${__lre_file}:${__lre_number}: unterminated quote or text after the closing quote, ignored" >&2
+      __lre_start=$__lre_number
+      __lre_rc=0
+      __lre_parse_quoted "$__lre_value" || __lre_rc=$?
+      # No closing quote on this line: a multi-line value (a PEM, say). Its lines are skipped up to the one that
+      # closes it, or the end of the file, so that base64 padding ("abc==") is never read as a KEY=VALUE line.
+      while ((__lre_rc == 2)) && IFS= read -r __lre_next || [[ -n "$__lre_next" ]]; do
+        ((__lre_number++)) || true
+        __lre_value+=$'\n'"${__lre_next%$'\r'}"
+        __lre_next=""
+        __lre_rc=0
+        __lre_parse_quoted "$__lre_value" || __lre_rc=$?
+      done
+      case "$__lre_rc" in
+        0) ;;
+        1) echo "load_repo_env: ${__lre_file}:${__lre_start}: text after the closing quote, ignored" >&2; continue ;;
+        2) echo "load_repo_env: ${__lre_file}:${__lre_start}: no closing quote before the end of the file, the rest is ignored" >&2; continue ;;
+        *) echo "load_repo_env: ${__lre_file}:${__lre_start}: the value has an escape the scripts cannot read as docker compose does, ignored" >&2; continue ;;
+      esac
+      if ((__lre_number > __lre_start)); then
+        echo "load_repo_env: ${__lre_file}:${__lre_start}: a quoted value over several lines (to line ${__lre_number}), ignored" >&2
         continue
       fi
       __lre_value="$__lre_out"

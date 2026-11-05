@@ -86,8 +86,8 @@ class LoadRepoEnvTests(unittest.TestCase):
         self.assertEqual(exported["D"], "a # b")
         self.assertEqual(exported["F"], '"nested"')
         self.assertEqual(exported["G"], "$HOME/x")
-        # Only \", \\, \n and \r are escapes; any other backslash stays as written.
-        self.assertEqual(exported["H"], "a\\tb")
+        # \t is an escape in double quotes, as in docker compose.
+        self.assertEqual(exported["H"], "a\tb")
 
     def test_double_quotes_handle_escaped_quote_backslash_and_newline(self) -> None:
         exported, _, stderr = self.load('ESC="a\\"b"\nBS="a\\\\b"\nNL="a\\nb"\nEND="x\\\\"\n')
@@ -116,6 +116,74 @@ class LoadRepoEnvTests(unittest.TestCase):
         self.assertIn(":2:", stderr)
         self.assertIn(":5:", stderr)
         self.assertNotIn("BEGIN", stderr)
+
+    def test_double_quote_escapes_match_compose_go(self) -> None:
+        # compose-go dotenv/parser.go: escapeSeqRegex = `\\(?:[abcfnrtv$"\\]|0\d{0,3})`, applied by expandEscapes.
+        # \$ is a literal $ (compose turns it into $$), \0 plus three octal digits is that character, and a backslash
+        # before any other character stays as written.
+        exported, _, stderr = self.load(
+            'T="a\\tb"\nA="a\\ab"\nB="a\\bb"\nF="a\\fb"\nV="a\\vb"\nD="a\\$b"\nO="a\\0101b"\nQ="a\\qb"\n'
+            'C="a\\cb"\nSHORT="a\\012b"\nBAD="a\\0789b"\nBIG="a\\0400b"\nSQ="a\\\'b"\n'
+        )
+
+        self.assertEqual(exported["T"], "a\tb")
+        self.assertEqual(exported["A"], "a\x07b")
+        self.assertEqual(exported["B"], "a\x08b")
+        self.assertEqual(exported["F"], "a\x0cb")
+        self.assertEqual(exported["V"], "a\x0bb")
+        self.assertEqual(exported["D"], "a$b")
+        self.assertEqual(exported["O"], "aAb")
+        self.assertEqual(exported["Q"], "a\\qb")
+        self.assertEqual(exported["C"], "a\\cb")
+        self.assertEqual(exported["SHORT"], "a\\012b")  # \0 needs three digits after it
+        self.assertEqual(exported["BAD"], "a\\0789b")  # 8 and 9 are not octal digits
+        self.assertEqual(exported["BIG"], "a\\0400b")  # above 255: Go's UnquoteChar refuses it
+        self.assertEqual(exported["SQ"], "a\\'b")
+        self.assertEqual(stderr, "")
+
+    def test_an_escape_the_loader_cannot_hold_is_skipped_with_a_warning(self) -> None:
+        # \0000 is a NUL and \0200 a byte above ASCII, which compose-go turns into a two-byte rune: bash cannot
+        # hold the first, and the second would differ, so docker compose reads these from .env itself.
+        exported, _, stderr = self.load('NUL="a\\0000b"\nHIGH="a\\0200b"\nOK=1\n')
+
+        self.assertNotIn("NUL", exported)
+        self.assertNotIn("HIGH", exported)
+        self.assertEqual(exported["OK"], "1")
+        self.assertIn(":1:", stderr)
+        self.assertIn(":2:", stderr)
+        self.assertIn("escape", stderr)
+
+    def test_single_quotes_keep_backslashes_but_an_escaped_quote_is_a_quote(self) -> None:
+        # compose-go applies the escaped-quote rule to both quote characters, and expands escapes only in double
+        # quotes, so a backslash pair stays a pair in single quotes.
+        exported, _, stderr = self.load("A='it\\'s'\nB='x\\\\y'\nC='a\\tb'\nD='x\\\\'\n")
+
+        self.assertEqual(exported["A"], "it's")
+        self.assertEqual(exported["B"], "x\\\\y")
+        self.assertEqual(exported["C"], "a\\tb")
+        self.assertEqual(exported["D"], "x\\\\")
+        self.assertEqual(stderr, "")
+
+    def test_the_lines_of_an_unterminated_quote_are_skipped_until_it_closes(self) -> None:
+        # A PEM's base64 padding is KEY=VALUE-shaped: it must not be exported as a key.
+        pem = 'PEM="-----BEGIN KEY-----\nMIIBabc\nAbCdEfGh12==\n-----END KEY-----"\nAFTER=1\n'
+        exported, _, stderr = self.load("BEFORE=0\n" + pem)
+
+        self.assertEqual((exported["BEFORE"], exported["AFTER"]), ("0", "1"))
+        self.assertNotIn("PEM", exported)
+        self.assertNotIn("AbCdEfGh12", exported)
+        self.assertEqual(stderr.count("load_repo_env"), 1, stderr)
+        self.assertIn(":2:", stderr)
+        self.assertNotIn("MIIB", stderr)
+
+    def test_a_quote_that_never_closes_skips_the_rest_of_the_file_with_one_warning(self) -> None:
+        exported, _, stderr = self.load("BEFORE=0\nPEM='-----BEGIN\nAbCdEfGh12==\nTAIL=1\n")
+
+        self.assertEqual(exported["BEFORE"], "0")
+        self.assertNotIn("AbCdEfGh12", exported)
+        self.assertNotIn("TAIL", exported)
+        self.assertEqual(stderr.count("load_repo_env"), 1, stderr)
+        self.assertIn(":2:", stderr)
 
     def test_comments_blanks_export_prefix_and_crlf(self) -> None:
         exported, _, _ = self.load(
