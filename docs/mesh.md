@@ -48,7 +48,14 @@ The file is a JSON object keyed by `node_id`; the key and the entry's own `node_
 ```
 
 - A peer can do only what a grant names. `tool:<name>` matches one tool and `tool:*` every tool;
-  with no matching grant a request is rejected.
+  with no matching grant a request is rejected. When several grants match, the most specific one
+  applies, whatever its position in the file: an exact capability beats a wildcard, a longer
+  wildcard prefix beats a shorter one, and equal specificity goes to the entry listed first. A
+  `tool:*` grant therefore cannot shadow a stricter `tool:browser.get_html` grant listed after it.
+- `url_allowlist` is checked at call time against the URL arguments of the request (`url`,
+  `start_url`, `urls` and `cdp_url`, at any depth). It does not constrain where the page then
+  redirects or navigates, or what a later call does, so it limits the first URL a peer can name,
+  not the sites a session ends up on.
 - `url_allowlist`, `require_approval`, `max_invocations_per_hour` (0 = unlimited) and
   `expires_at` (Unix time, 0 = never) are optional.
 - Use the `node_id` and `pubkey_b64` the peer's own `/mesh/identity` reports, exactly as it reports

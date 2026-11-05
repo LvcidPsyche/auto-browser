@@ -135,6 +135,10 @@ All notable changes to auto-browser are documented here.
 - A URL the harness trace scrubs out of quoted text now ends before the closing quote when `.`, `!` or `?` and then a
   space or the end follow it (`see 'https://site/a?token=...'.` lost its quote and full stop); an apostrophe inside
   a URL (`?q=o'neil`) is still part of it.
+- A mesh peer's most specific matching grant now applies, not the first one in `peers.json`: an exact capability beats
+  a wildcard, a longer wildcard prefix beats a shorter one, and ties go to the entry listed first. A broad `tool:*`
+  listed early no longer shadows a stricter grant for one tool listed later. `docs/mesh.md` also states that
+  `url_allowlist` covers the request's URL arguments only, not redirects or later navigation.
 
 ### Security
 
