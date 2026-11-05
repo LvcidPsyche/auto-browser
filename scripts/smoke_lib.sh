@@ -56,6 +56,9 @@ smoke_setup() {
   export ISOLATED_HOST_DATA_ROOT=
   export COMPOSE_PROJECT_NAME="${SMOKE_PROJECT}"
   # The controller names its session containers <prefix>-<id> and their networks <prefix>-<id>-net.
+  # Keep this prefix: <project>-session-<id>-net sorts before the controller's <project>_default ('-' < '_'), the
+  # order that used to move the controller's published port onto the session network, so the smoke is the
+  # regression test for joining session networks at gateway priority -1.
   SMOKE_SESSION_PREFIX="${SMOKE_PROJECT}-session"
   export ISOLATED_BROWSER_CONTAINER_PREFIX="${SMOKE_SESSION_PREFIX}"
 }
