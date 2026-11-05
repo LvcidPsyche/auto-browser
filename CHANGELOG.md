@@ -88,6 +88,8 @@ All notable changes to auto-browser are documented here.
 
 - **A proxy persona file that cannot be read is no longer overwritten.** An unreadable or corrupt file read as an empty set, so the next save or delete rewrote it and erased every other persona. Reads and saves now fail with an error that names the file and says to fix or move it, and the file is left as it was; a missing file still reads as empty. At startup the ownerless-persona warning logs the error and carries on.
 
+- **Two actions on one session no longer mix up their Witness context.** An action's risk category and approval id were parked on the session until its turn for the session lock, and the first action to finish cleared them, so an action that had been waiting could be receipted with no approval and no risk, or with another action's. Each action now carries its own context.
+
 ## [1.14.1] — 2026-11-04
 
 A patch release over 1.14.0. A session whose start page fails to load now gets a 400 the agent can act on instead

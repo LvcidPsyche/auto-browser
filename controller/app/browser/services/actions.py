@@ -31,6 +31,7 @@ from ..element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
 from ..element_world import READ
 from ..page_read import title_or_blank
 from .element_actions import FOCUS_CLICK_TIMEOUT_MS, JITTER_PX, ElementActions
+from .witness import action_witness_context
 
 try:  # pragma: no cover - optional until dependency is installed in runtime image
     import pyotp
@@ -425,7 +426,7 @@ class BrowserActionService:
         # the audit trail of what was presented, not a claim that anything approved it.
         held = held_action_approval()
         witnessed_id = approval_id or (approval.id if approval is not None else None) or held
-        session.pending_witness_context = {
+        witness_context = {
             "risk_category": decision.risk_category,
             "approval_id": witnessed_id,
             "approval_status": "approved" if witnessed_id else None,
@@ -433,15 +434,13 @@ class BrowserActionService:
             "approval_checked": approval is not None or held is not None,
             "sensitive_input": bool(getattr(decision, "sensitive", False)),
         }
-        try:
+        with action_witness_context(witness_context):
             # Uploads go through manager.upload, which checks and claims the
             # approval itself.
             if approval is None or decision.action == "upload":
                 return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
             async with held_for_execution(self.manager.approvals, approval.id, may_give_back=True):
                 return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
-        finally:
-            session.pending_witness_context = None
 
     def _refuse_a_host_off_the_list(self, decision: BrowserActionDecision) -> None:
         """Refuse a navigate whose URL ALLOWED_HOSTS refuses, before an approval for it is asked for or spent.

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 from ...audit import get_current_operator
@@ -18,6 +21,20 @@ if TYPE_CHECKING:
     from ...browser_manager import BrowserSession
 
 logger = logging.getLogger(__name__)
+
+# The witness context (risk, approval) of the action being dispatched, handed to the pipeline that records its
+# receipt. It belongs to the calling task, not to the session: two actions on one session overlap while one waits
+# for the session lock, and a field on the session let one's cleanup wipe the other's context.
+_ACTION_WITNESS_CONTEXT: ContextVar[dict[str, Any] | None] = ContextVar("action_witness_context", default=None)
+
+
+@contextmanager
+def action_witness_context(context: dict[str, Any]) -> Iterator[None]:
+    token = _ACTION_WITNESS_CONTEXT.set(context)
+    try:
+        yield
+    finally:
+        _ACTION_WITNESS_CONTEXT.reset(token)
 
 
 class BrowserWitnessService:
@@ -184,8 +201,8 @@ class BrowserWitnessService:
 
     @staticmethod
     def consume_context(session: "BrowserSession") -> dict[str, Any]:
-        payload = dict(session.pending_witness_context or {})
-        session.pending_witness_context = None
+        payload = dict(_ACTION_WITNESS_CONTEXT.get() or {})
+        _ACTION_WITNESS_CONTEXT.set(None)
         return payload
 
     def build_action_context(

@@ -152,7 +152,6 @@ class BrowserSession:
     # Headless/headed state — set to False to request headed mode on next fork
     headless: bool = True
     protection_mode: str = "normal"
-    pending_witness_context: dict[str, Any] | None = None
     witness_remote_state: WitnessRemoteState = field(default_factory=WitnessRemoteState)
     metadata: dict[str, Any] = field(default_factory=dict)
     # The token-verified operator who created it; None for an unowned session
