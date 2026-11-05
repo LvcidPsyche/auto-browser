@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from app.harness import Budget, Postcondition, TaskContract
 from app.harness.induce import SkillInducer
@@ -107,6 +108,33 @@ class DriftOnUrlContainsTests(unittest.IsolatedAsyncioTestCase):
         # The bare value is scrubbed to the same replacement the stored query holds, so it is checked as "some
         # redaction is present".
         self.assertEqual(await self._drift(EMAIL, f"https://app.test/done?email={EMAIL}"), "healthy")
+
+
+class DriftScrubberFailureTests(unittest.IsolatedAsyncioTestCase):
+    def test_a_scrubber_that_returns_nothing_leaves_the_expectation_as_written(self) -> None:
+        from app.harness.drift import _scrub_url_contains
+
+        with patch("app.harness.drift._scrub_url", return_value=""):
+            self.assertEqual(_scrub_url_contains("email=alice"), "email=alice")
+
+    async def test_a_scrubber_that_raises_makes_the_check_unverified_not_a_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = HarnessService(tmp)
+            contract = TaskContract(
+                id="drift-boom",
+                goal="Open the page.",
+                postconditions=[Postcondition(kind="url_contains", value="email=alice")],
+                budget=Budget(max_attempts=1, max_steps=2),
+            )
+            record = await service.start_convergence(
+                contract, mock_final_observation={"url": "https://app.test/?email=alice", "text": "done"}
+            )
+
+            with patch("app.harness.drift._scrub_url", side_effect=RuntimeError("scrubber bug")):
+                drift = await service.drift_monitor.check_candidate(record.candidate.skill_id)
+
+            self.assertEqual(drift.status, "unverified")
+            self.assertIn("RuntimeError", " ".join(drift.notes))
 
 
 if __name__ == "__main__":

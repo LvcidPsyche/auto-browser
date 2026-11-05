@@ -67,7 +67,20 @@ class SkillDriftMonitor:
         if trace_hash != candidate.trace_hash:
             notes.append("trace hash differs from candidate provenance")
 
-        verification = await self.verifier.verify(_expecting_scrubbed_text(contract), trace)
+        try:
+            expected = _expecting_scrubbed_text(contract)
+        except Exception as exc:
+            result = DriftCheckResult(
+                skill_id=skill_id,
+                status="unverified",
+                contract_hash=contract_hash,
+                trace_hash=trace_hash,
+                notes=[*notes, f"expected text could not be scrubbed: {type(exc).__name__}"],
+            )
+            _write_result(candidate_dir, result)
+            return result
+
+        verification = await self.verifier.verify(expected, trace)
         if verification.passed is True and not notes:
             status = "healthy"
         elif verification.passed is None and not notes:
@@ -108,7 +121,9 @@ def _scrub_url_contains(value: str) -> str:
     if "?" in value or "#" in value:
         return _scrub_url_and_path(value)
     if "=" in value:
-        return _scrub_url("?" + value)[1:]
+        scrubbed = _scrub_url("?" + value)[1:]
+        # A scrubber that returned nothing would turn the expectation into "" (which every URL contains): keep it.
+        return scrubbed or value
     return _scrub_text(value)
 
 
