@@ -157,10 +157,11 @@ class HarnessRunStore:
         owned: set[str] = set()
         for path in self.runs_root.glob("*/run.json"):
             try:
-                stored = json.loads(path.read_text(encoding="utf-8")).get("owner")
+                record = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            if stored == owner:
+            # A record that is not a JSON object ([] or null) belongs to no one; .get on it would end every start.
+            if isinstance(record, dict) and record.get("owner") == owner:
                 owned.add(path.parent.name)
         return owned
 

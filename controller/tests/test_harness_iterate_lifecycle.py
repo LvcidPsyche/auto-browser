@@ -381,6 +381,18 @@ class RetentionTests(_Base):
         await self._run(service)
         self.assertEqual(len(service.store.list()), 1)
 
+    async def test_a_run_record_that_is_not_a_json_object_does_not_block_new_runs(self) -> None:
+        # A run.json holding JSON that is not an object ([] or null) raised AttributeError out of the cap count,
+        # so every start failed until the file was removed.
+        service = HarnessService(self.root, max_runs_per_operator=1)
+        for run_id, text in (("aaaaaaaaaaaa", "[]"), ("bbbbbbbbbbbb", "null")):
+            (service.store.runs_root / run_id).mkdir(parents=True)
+            (service.store.runs_root / run_id / "run.json").write_text(text, encoding="utf-8")
+
+        record = await self._run(service)
+
+        self.assertTrue((service.store.run_dir(record.id) / "run.json").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()
