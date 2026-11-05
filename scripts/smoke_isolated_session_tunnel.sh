@@ -90,6 +90,8 @@ HOST_KEY="$("${COMPOSE[@]}" exec -T test-bastion sh -lc 'cat /etc/ssh/ssh_host_e
 chmod 644 "${SMOKE_KNOWN_HOSTS}"
 
 "${COMPOSE[@]}" build browser-node controller
+# The builds took minutes: look again before the controller starts and reaps every managed container.
+smoke_check_managed
 "${COMPOSE[@]}" up -d --no-recreate browser-node controller
 wait_for "controller readiness" "curl -fsS ${API_BASE_URL}/readyz" 120 2
 

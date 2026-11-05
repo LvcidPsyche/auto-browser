@@ -65,17 +65,9 @@ list() {
 case "$1 $2" in
   "ps -a") list "$state/containers.txt" ;;
   "network ls") list "$state/networks.txt" ;;
-  "ps --filter")
-    for f in "${filters[@]}"; do
-      case "$f" in
-        label=com.docker.compose.project.working_dir=*)
-          dir="${f#label=com.docker.compose.project.working_dir=}"
-          while IFS='|' read -r wd project name; do
-            [[ "$wd" == "$dir" ]] && echo "$project|$name"
-          done < "$state/stack.txt"
-          ;;
-      esac
-    done
+  "ps --format")
+    # `docker ps --format '{{dir label}}|{{project label}}|{{.Names}}'`: the rows are stored in that shape.
+    cat "$state/stack.txt"
     ;;
 esac
 exit 0
@@ -184,11 +176,60 @@ class SmokePreflightTests(_FakeDockerCase):
                 self.assertNotIn("other-checkout-1", result.stderr)
         self.assertEqual(self.removals(), [])
 
-    def test_the_smokes_own_project_does_not_block_a_rerun(self) -> None:
+    def test_a_stack_whose_directory_label_is_spelled_the_windows_way_is_still_found(self) -> None:
+        # Compose on Windows records the project directory with backslashes (C:\Users\me\repo), Git Bash says
+        # /c/Users/me/repo and pwd -W says C:/Users/me/repo: one directory, three spellings.
         root = _bash_path(self.root)
-        self.put("stack.txt", [f"{root}|auto-browser-smoke|auto-browser-smoke-controller-1"])
+        drive = re.sub(r"^/([a-z])/", lambda m: m.group(1).upper() + ":/", root)
+        spellings = {
+            "backslashes": drive.replace("/", "\\"),
+            "forward slashes": drive,
+            "lowercase drive": drive[:1].lower() + drive[1:],
+            "trailing slash": root + "/",
+            "backslash trailing": drive.replace("/", "\\") + "\\",
+        }
+        for label, spelling in spellings.items():
+            for mode in ("isolated", "shared"):
+                with self.subTest(spelling=label, mode=mode):
+                    self.put("stack.txt", [f"{spelling}|operator-project|operator-controller-1"])
+
+                    result = self.preflight(mode)
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("PREFLIGHT_OK", result.stdout)
+                    self.assertIn("operator-controller-1", result.stderr)
+
+    def test_a_stack_of_another_checkout_is_not_confused_with_this_one(self) -> None:
+        root = _bash_path(self.root)
+        self.put("stack.txt", [f"{root}-other|x|prefix-lookalike-1", f"{root}/sub|x|subdir-1", "|x|no-compose-dir"])
 
         self.assertEqual(self.preflight().returncode, 0)
+
+    def test_running_containers_of_the_smokes_own_project_are_refused_with_the_command_that_clears_them(self) -> None:
+        # Either a smoke is running (two at once would recreate each other's services and tear each other down),
+        # or a killed run left the stack up.
+        self.put("stack.txt", ["/elsewhere|auto-browser-smoke|auto-browser-smoke-controller-1"])
+
+        for mode in ("isolated", "shared"):
+            with self.subTest(mode=mode):
+                result = self.preflight(mode)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("PREFLIGHT_OK", result.stdout)
+                self.assertIn("auto-browser-smoke-controller-1", result.stderr)
+                self.assertIn("a smoke run is in progress, or a killed run left this behind", result.stderr)
+                self.assertIn("docker compose -p auto-browser-smoke down --remove-orphans", result.stderr)
+        self.assertEqual(self.removals(), [])
+
+    def test_check_managed_is_a_check_of_its_own_that_the_smokes_repeat_before_the_controller_starts(self) -> None:
+        self.assertEqual(self.bash("smoke_setup; smoke_check_managed; echo CHECK_OK").returncode, 0)
+        self.put("networks.txt", [f"operator-net|{LABEL},{MODE},{SESSION}"])
+
+        result = self.bash("smoke_setup; smoke_check_managed; echo CHECK_OK")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("CHECK_OK", result.stdout)
+        self.assertIn("docker network rm operator-net", result.stderr)
 
     def test_shared_mode_ignores_session_containers_but_not_a_dead_daemon(self) -> None:
         self.put("containers.txt", [f"operator-session-1|{LABEL},{MODE}"])
@@ -226,6 +267,64 @@ class SmokeSetupTests(_FakeDockerCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("project=ci-smoke compose=ci-smoke prefix=ci-smoke-session", result.stdout)
+
+    def test_the_smoke_controller_is_never_pointed_at_a_remote_docker_daemon(self) -> None:
+        # The smoke's controller reaps every managed container on the daemon it is given; preflight only looks at
+        # this script's own daemon.
+        (self.root / ".env").write_text(
+            "ISOLATED_DOCKER_HOST=tcp://remote:2375\nISOLATED_HOST_DATA_ROOT=/remote/data\n", encoding="utf-8"
+        )
+        for ambient in ("", "export ISOLATED_DOCKER_HOST=tcp://shell:2375;"):
+            with self.subTest(ambient=ambient):
+                result = self.bash(
+                    f"{ambient} smoke_setup; "
+                    "bash -c 'echo \"host=[${ISOLATED_DOCKER_HOST-unset}] root=[${ISOLATED_HOST_DATA_ROOT-unset}]\"'"
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("host=[] root=[]", result.stdout)
+
+    def test_ports_set_in_the_environment_win_over_the_ones_in_env(self) -> None:
+        # `API_PORT=8010 ./scripts/smoke_isolated_session.sh` is how the smoke runs beside another stack.
+        (self.root / ".env").write_text("API_PORT=8000\nNOVNC_PORT=6080\nOTHER=1\n", encoding="utf-8")
+        show = "bash -c 'echo \"api=[${API_PORT-unset}] novnc=[${NOVNC_PORT-unset}] other=[${OTHER-unset}]\"'"
+
+        ambient = self.bash(f"export API_PORT=8010 NOVNC_PORT=6090; smoke_setup; {show}")
+        one = self.bash(f"export API_PORT=8010; smoke_setup; {show}")
+        none = self.bash(f"smoke_setup; {show}")
+
+        self.assertIn("api=[8010] novnc=[6090] other=[1]", ambient.stdout)
+        self.assertIn("api=[8010] novnc=[6080] other=[1]", one.stdout)
+        self.assertIn("api=[8000] novnc=[6080] other=[1]", none.stdout)
+
+    def test_a_project_that_is_this_checkouts_own_default_is_refused(self) -> None:
+        # A plain `docker compose` here uses the folder's name as its project. A smoke in that project would
+        # take over, and finally tear down, the operator's stack; so would one in a folder named auto-browser-smoke.
+        own = self.root.name  # "repo", all lowercase letters
+        result = self.bash(f"export SMOKE_COMPOSE_PROJECT={own}; smoke_setup; echo SETUP_OK")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("SETUP_OK", result.stdout)
+        self.assertIn(f"'{own}'", result.stderr)
+        self.assertIn("SMOKE_COMPOSE_PROJECT", result.stderr)
+
+        named_like_the_default = self.temp / "Auto-Browser-Smoke"
+        named_like_the_default.mkdir()
+        script = f'ROOT_DIR="{_bash_path(named_like_the_default)}"; smoke_setup; echo SETUP_OK'
+        result = subprocess.run(
+            [
+                BASH,
+                "-c",
+                f'source "{_bash_path(SCRIPTS / "load_env.sh")}"; source "{_bash_path(SCRIPTS / "smoke_lib.sh")}"; {script}',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=_smoke_env(self.fake_bin),
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("auto-browser-smoke", result.stderr)
 
     def test_a_project_name_compose_would_reject_is_refused(self) -> None:
         result = self.setup_output("", ambient="export SMOKE_COMPOSE_PROJECT='x;touch y';")
@@ -348,6 +447,19 @@ class SmokeScriptsAreScopedTests(unittest.TestCase):
                     position = text.find(effect)
                     self.assertTrue(position == -1 or preflight < position, f"{effect.strip()} comes first")
                 self.assertEqual(text.count("trap cleanup EXIT"), 1)
+
+    def test_the_isolated_smokes_look_again_after_the_build_and_before_their_controller_starts(self) -> None:
+        # The controller reaps every managed container when it starts, and the image build before it takes minutes.
+        for name in ("smoke_isolated_session.sh", "smoke_isolated_session_tunnel.sh"):
+            with self.subTest(script=name):
+                text = (SCRIPTS / name).read_text(encoding="utf-8")
+                build = text.index('"${COMPOSE[@]}" build browser-node controller\n')
+                recheck = text.index("\nsmoke_check_managed\n")
+                start = re.search(r'^"\$\{COMPOSE\[@\]\}" up -d [^\n]*\bcontroller\b', text, flags=re.M)
+                self.assertIsNotNone(start, "no command starts the controller")
+                self.assertLess(build, recheck)
+                self.assertLess(recheck, start.start())
+                self.assertNotIn("--build", start.group(0), "the build must come before the check, not inside up")
 
     def test_every_smoke_cleans_up_through_smoke_cleanup_only(self) -> None:
         for script in SMOKE_RUNNERS:

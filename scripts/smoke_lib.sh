@@ -31,19 +31,76 @@ smoke_setup() {
     echo "SMOKE_COMPOSE_PROJECT must be lowercase letters, digits, - and _ (compose's rule for project names)." >&2
     exit 1
   fi
+  # The project a plain `docker compose` here would use: the folder's name, as compose normalizes it. A smoke in
+  # that project would take over, and finally `compose down`, the operator's own stack.
+  local default_project
+  default_project="$(basename "${ROOT_DIR}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
+  if [[ "$SMOKE_PROJECT" == "$default_project" ]]; then
+    echo "smoke: the compose project '${SMOKE_PROJECT}' is this checkout's own default project, so the smoke would run in (and tear down) your stack." >&2
+    echo "Choose another name with SMOKE_COMPOSE_PROJECT, or rename the checkout folder." >&2
+    exit 1
+  fi
+  # .env may set API_PORT and NOVNC_PORT, and a value in the environment must win over it: that is how the smoke runs
+  # beside a stack of another checkout.
+  local ambient_api_port ambient_novnc_port
+  local have_api_port="${API_PORT+set}" have_novnc_port="${NOVNC_PORT+set}"
+  ambient_api_port="${API_PORT-}"
+  ambient_novnc_port="${NOVNC_PORT-}"
   load_repo_env "${ROOT_DIR}/.env"
+  [[ -z "$have_api_port" ]] || export API_PORT="${ambient_api_port}"
+  [[ -z "$have_novnc_port" ]] || export NOVNC_PORT="${ambient_novnc_port}"
+  # The smoke's controller reaps every managed container on the daemon it is pointed at. docker-compose.isolation.yml
+  # passes these two through to it, and preflight only looks at this script's own daemon, so a value from .env would
+  # send the reaper to a daemon nobody checked: the controller uses its mounted local socket instead.
+  export ISOLATED_DOCKER_HOST=
+  export ISOLATED_HOST_DATA_ROOT=
   export COMPOSE_PROJECT_NAME="${SMOKE_PROJECT}"
   # The controller names its session containers <prefix>-<id> and their networks <prefix>-<id>-net.
   SMOKE_SESSION_PREFIX="${SMOKE_PROJECT}-session"
   export ISOLATED_BROWSER_CONTAINER_PREFIX="${SMOKE_SESSION_PREFIX}"
 }
 
+# Refuses (exit 1) when the daemon has auto-browser session containers or networks. The isolated smokes' controller
+# removes every one of them when it starts, so none may exist then: smoke_preflight runs this first, and the smokes
+# run it again right before the controller starts, after the image build, which takes minutes in which another
+# stack could create some. A window of seconds remains; the full fix is a label naming the controller that owns a
+# session, which the controller does not set.
+smoke_check_managed() {
+  local containers networks
+  containers="$(docker ps -a --filter "label=${SMOKE_MANAGED_LABEL}=true" --format '{{.Names}}')" || exit 1
+  networks="$(docker network ls --filter "label=${SMOKE_MANAGED_LABEL}=true" --format '{{.Name}}')" || exit 1
+  if [[ -n "$containers" || -n "$networks" ]]; then
+    echo "smoke preflight: this Docker daemon already has auto-browser session containers or networks:" >&2
+    [[ -z "$containers" ]] || sed 's/^/  container /' <<<"$containers" >&2
+    [[ -z "$networks" ]] || sed 's/^/  network   /' <<<"$networks" >&2
+    echo "The smoke's controller removes every one of them when it starts. If they belong to a live stack, stop the smoke;" >&2
+    echo "if they are leftovers (for example of a killed smoke run), remove them and run it again:" >&2
+    [[ -z "$containers" ]] || echo "  docker rm -f $(tr '\n' ' ' <<<"$containers")" >&2
+    [[ -z "$networks" ]] || echo "  docker network rm $(tr '\n' ' ' <<<"$networks")" >&2
+    exit 1
+  fi
+}
+
+# One spelling for a directory, so that compose's label (a Windows path with backslashes, C:\Users\me\repo, when
+# the stack was started by Docker Desktop's compose), Git Bash's /c/Users/me/repo and pwd -W's C:/Users/me/repo
+# compare equal: forward slashes, no trailing slash, and a lowercase drive letter written c:/...
+smoke_normalize_path() {
+  local path="${1//\\//}"
+  while [[ "$path" == */ && "$path" != "/" ]]; do path="${path%/}"; done
+  case "$path" in
+    [A-Za-z]:/* | [A-Za-z]:) path="$(printf '%s' "${path:0:1}" | tr '[:upper:]' '[:lower:]')${path:1}" ;;
+    /[A-Za-z]/* | /[A-Za-z]) path="$(printf '%s' "${path:1:1}" | tr '[:upper:]' '[:lower:]'):${path:2}" ;;
+  esac
+  printf '%s' "$path"
+}
+
 # Refuses (exit 1) unless the smoke can run without touching anything that is not its own.
 # Run it before any side effect: before the EXIT trap, any rm, or any compose call.
 #   isolated  the smoke's controller will reap every managed container and network on the
 #             daemon, so none may exist (shared mode skips this: it starts no isolated sessions)
-# Both modes need a reachable daemon, and no running stack of this checkout in another
-# project (it shares ./data with the smoke).
+# Both modes need a reachable daemon, no running stack of this checkout in another compose
+# project (it shares ./data with the smoke), and no running container in the smoke's own
+# project (a smoke is in progress, or a killed run left it).
 smoke_preflight() {
   local mode="${1:-isolated}"
   local listed
@@ -53,35 +110,44 @@ smoke_preflight() {
     exit 1
   fi
 
-  if [[ "$mode" == "isolated" ]]; then
-    local containers networks
-    containers="$(docker ps -a --filter "label=${SMOKE_MANAGED_LABEL}=true" --format '{{.Names}}')" || exit 1
-    networks="$(docker network ls --filter "label=${SMOKE_MANAGED_LABEL}=true" --format '{{.Name}}')" || exit 1
-    if [[ -n "$containers" || -n "$networks" ]]; then
-      echo "smoke preflight: this Docker daemon already has auto-browser session containers or networks:" >&2
-      [[ -z "$containers" ]] || sed 's/^/  container /' <<<"$containers" >&2
-      [[ -z "$networks" ]] || sed 's/^/  network   /' <<<"$networks" >&2
-      echo "The smoke's controller removes every one of them when it starts. If they belong to a live stack, stop the smoke;" >&2
-      echo "if they are leftovers (for example of a killed smoke run), remove them and run it again:" >&2
-      [[ -z "$containers" ]] || echo "  docker rm -f $(tr '\n' ' ' <<<"$containers")" >&2
-      [[ -z "$networks" ]] || echo "  docker network rm $(tr '\n' ' ' <<<"$networks")" >&2
-      exit 1
-    fi
-  fi
+  [[ "$mode" != "isolated" ]] || smoke_check_managed
 
-  local dir rows row project name others=""
-  for dir in "${ROOT_DIR}" "$(pwd -W 2>/dev/null || true)"; do
+  # Running containers with their compose project directory and project name. The label is listed rather than
+  # filtered on: a filter is an exact string match, and the spelling of the path differs between hosts.
+  local rows row dir project name candidate others="" own="" is_here
+  local -a candidates=()
+  rows="$(docker ps --format "{{.Label \"${SMOKE_COMPOSE_DIR_LABEL}\"}}|{{.Label \"${SMOKE_COMPOSE_PROJECT_LABEL}\"}}|{{.Names}}")" || exit 1
+  candidates+=("$(smoke_normalize_path "${ROOT_DIR}")")
+  candidates+=("$(smoke_normalize_path "$(cd "${ROOT_DIR}" && pwd -P)")")
+  candidates+=("$(smoke_normalize_path "$(cd "${ROOT_DIR}" && pwd -W 2>/dev/null || true)")")
+  if command -v cygpath >/dev/null 2>&1; then
+    candidates+=("$(smoke_normalize_path "$(cygpath -m "${ROOT_DIR}" 2>/dev/null || true)")")
+  fi
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    dir="${row%%|*}"
+    project="${row#*|}"
+    name="${project#*|}"
+    project="${project%%|*}"
+    if [[ "$project" == "$SMOKE_PROJECT" ]]; then
+      own+="  ${name}"$'\n'
+      continue
+    fi
     [[ -n "$dir" ]] || continue
-    rows="$(docker ps --filter "label=${SMOKE_COMPOSE_DIR_LABEL}=${dir}" \
-      --format "{{.Label \"${SMOKE_COMPOSE_PROJECT_LABEL}\"}}|{{.Names}}")" || exit 1
-    while IFS= read -r row; do
-      [[ -n "$row" ]] || continue
-      project="${row%%|*}"
-      name="${row#*|}"
-      [[ "$project" == "$SMOKE_PROJECT" ]] && continue
-      others+="  ${name} (compose project ${project})"$'\n'
-    done <<<"$rows"
-  done
+    dir="$(smoke_normalize_path "$dir")"
+    is_here=""
+    for candidate in "${candidates[@]}"; do
+      [[ -z "$candidate" || "$candidate" != "$dir" ]] || is_here=1
+    done
+    [[ -z "$is_here" ]] || others+="  ${name} (compose project ${project})"$'\n'
+  done <<<"$rows"
+  if [[ -n "$own" ]]; then
+    echo "smoke preflight: containers of the smoke's own compose project (${SMOKE_PROJECT}) are running:" >&2
+    printf '%s' "$own" >&2
+    echo "Either a smoke run is in progress, or a killed run left this behind: docker compose -p ${SMOKE_PROJECT} down --remove-orphans" >&2
+    echo "(run that only if no other smoke is running)." >&2
+    exit 1
+  fi
   if [[ -n "$others" ]]; then
     echo "smoke preflight: a stack from this checkout (${ROOT_DIR}) is running in another compose project:" >&2
     printf '%s' "$others" >&2

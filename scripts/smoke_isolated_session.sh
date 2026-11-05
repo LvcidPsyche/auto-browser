@@ -38,7 +38,10 @@ wait_for() {
 smoke_preflight isolated
 trap cleanup EXIT
 
-"${COMPOSE[@]}" up -d --build browser-node controller
+"${COMPOSE[@]}" build browser-node controller
+# The build took minutes: look again before the controller starts and reaps every managed container.
+smoke_check_managed
+"${COMPOSE[@]}" up -d browser-node controller
 wait_for "controller readiness" "curl -fsS ${API_BASE_URL}/readyz" 120 2
 
 SESSION_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions" -X POST -H 'content-type: application/json' -d '{"name":"isolated-smoke","start_url":"https://example.com"}')"
