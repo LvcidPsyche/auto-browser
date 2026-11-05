@@ -136,6 +136,9 @@ All notable changes to auto-browser are documented here.
   left as it was; a missing file still reads as empty. REST answers 503 and MCP returns the same fixed text, "the
   proxy persona file (PROXY_PERSONA_FILE) is unreadable; fix or move it. It was not changed."; the file's path and
   the cause are in the server log only. At startup the ownerless-persona warning logs the error and carries on.
+- **Saving or deleting a proxy persona no longer erases the others' hand edits.** A save rewrote the file from the
+  normalized view, so an entry the store ignores (a misspelled `server`) and any extra key on another entry were
+  dropped. Only the named persona is replaced or removed now; every other entry is written back as it was.
 
 - **Two actions on one session no longer mix up their Witness context.** An action's risk category and approval id were parked on the session until its turn for the session lock, and the first action to finish cleared them, so an action that had been waiting could be receipted with no approval and no risk, or with another action's. Each action now carries its own context.
 

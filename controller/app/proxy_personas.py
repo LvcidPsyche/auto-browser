@@ -104,7 +104,7 @@ class ProxyPersonaStore:
             normalized[name] = persona
         return normalized
 
-    def _save(self, data: dict[str, dict[str, Any]]) -> None:
+    def _save(self, data: dict[str, Any]) -> None:
         if self._path is None:
             raise RuntimeError("No PROXY_PERSONA_FILE configured — cannot save proxy personas")
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -113,6 +113,22 @@ class ProxyPersonaStore:
             json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True),
             mode=PRIVATE_FILE_MODE,
         )
+
+    def _raw_without(self, name: str) -> dict[str, Any]:
+        """The file's entries exactly as written, minus the one named *name*.
+
+        A save starts from this, not from the normalized view, so an entry the store ignores (a typo in
+        "server") and any extra key an operator added to another entry are written back untouched.
+        """
+        raw = self._read_object()
+        for raw_name in list(raw):
+            try:
+                normalized_name = self._normalize_persona(raw_name, raw[raw_name])[0]
+            except ValueError:
+                continue  # an entry the store ignores is never the one being replaced or removed
+            if normalized_name == name:
+                del raw[raw_name]
+        return raw
 
     @staticmethod
     def _normalize_persona(name: Any, persona: Any) -> tuple[str, dict[str, Any]]:
@@ -221,8 +237,9 @@ class ProxyPersonaStore:
         # An update never changes who owns a persona (nor claims an unowned one); a new
         # persona belongs to its creator when a named credential proved who that is.
         normalized_persona["owner"] = existing["owner"] if existing is not None else verified_operator()
-        data[normalized_name] = normalized_persona
-        self._save(data)
+        raw = self._raw_without(normalized_name)
+        raw[normalized_name] = normalized_persona
+        self._save(raw)
         return self._summary(normalized_name, normalized_persona)
 
     def delete_persona(self, name: str) -> bool:
@@ -230,8 +247,7 @@ class ProxyPersonaStore:
         data = self._load()
         if name not in data or not may_use(data[name].get("owner")):
             return False
-        del data[name]
-        self._save(data)
+        self._save(self._raw_without(name))
         return True
 
     def resolve_proxy(self, name: str) -> dict[str, Any]:

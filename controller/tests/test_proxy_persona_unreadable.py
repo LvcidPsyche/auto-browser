@@ -6,6 +6,7 @@ save wrote one persona over it and erased every other one.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from unittest.mock import patch
@@ -71,3 +72,31 @@ def test_the_startup_warning_reports_an_unusable_file_and_does_not_crash(tmp_pat
         warn_about_ownerless_personas(ProxyPersonaStore(path), named_tokens=True)
 
     assert any(str(path) in record.getMessage() for record in caplog.records)
+
+
+def _write(path: Path, content: dict) -> None:
+    path.write_text(json.dumps(content), encoding="utf-8")
+
+
+def test_saving_one_persona_keeps_an_invalid_entry_as_written(tmp_path: Path):
+    path = tmp_path / "personas.json"
+    broken = {"serber": "http://typo:1", "note": "fix me"}
+    _write(path, {"broken": broken, "not-an-object": 7})
+
+    ProxyPersonaStore(path).set_persona("z", server="http://z:1")
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["broken"] == broken
+    assert saved["not-an-object"] == 7
+    assert saved["z"]["server"] == "http://z:1"
+
+
+def test_deleting_one_persona_keeps_extra_keys_on_the_others(tmp_path: Path):
+    path = tmp_path / "personas.json"
+    _write(path, {"keep": {"server": "http://k:1", "region": "eu", "tags": ["a"]}, "gone": {"server": "http://g:1"}})
+
+    assert ProxyPersonaStore(path).delete_persona("gone") is True
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "keep": {"server": "http://k:1", "region": "eu", "tags": ["a"]}
+    }
