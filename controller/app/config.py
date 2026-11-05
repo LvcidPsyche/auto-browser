@@ -307,6 +307,8 @@ class Settings(BaseSettings):
     gemini_cli_path: str = Field("gemini", alias="GEMINI_CLI_PATH")
     gemini_cli_model: str | None = Field(None, alias="GEMINI_CLI_MODEL")
     cli_home: str | None = Field("/data/cli-home", alias="CLI_HOME")
+    # Extra environment variable names (comma-separated) handed to provider CLI children as-is.
+    cli_provider_env_passthrough: str = Field("", alias="CLI_PROVIDER_ENV_PASSTHROUGH")
 
     # OpenAI-compatible providers, all served by one generic adapter. Set the API key
     # (and, for openrouter/openai_compatible, a model) to enable each. base_url defaults
@@ -480,6 +482,10 @@ class Settings(BaseSettings):
         if value is None or (isinstance(value, str) and not value.strip()):
             return str(SECCOMP_PROFILE_PATH)
         return value
+
+    @property
+    def cli_provider_env_passthrough_names(self) -> list[str]:
+        return [item.strip() for item in self.cli_provider_env_passthrough.split(",") if item.strip()]
 
     @property
     def allowed_host_patterns(self) -> list[str]:

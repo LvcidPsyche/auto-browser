@@ -9,9 +9,17 @@ All notable changes to auto-browser are documented here.
 - **A misspelled `SESSION_ISOLATION_MODE` now stops the controller from starting.** It used to fall back to the shared
   browser without a word. Only `shared_browser_node` and `docker_ephemeral` are accepted; surrounding spaces and
   capital letters are forgiven, but `docker-ephemeral` or `dockerephemeral` are errors.
+- **A provider CLI (`claude`, `codex`, `gemini`) now gets only a fixed set of environment variables.** If your CLI
+  needs one that is not in the set, name it in the new `CLI_PROVIDER_ENV_PASSTHROUGH` setting (comma-separated
+  variable names, empty by default). The set is the operating-system basics (`PATH`, `HOME`, `TEMP`, `LANG`, `LC_*`,
+  proxy and certificate variables) plus that provider's own key, endpoint and config-directory variables.
 
 ### Security
 
+- **Provider CLI children no longer inherit the controller's whole environment.** `claude`, `codex` and `gemini`
+  ran with a copy of the controller's environment, so the bearer token, the Witness remote key, Stripe keys and every
+  other provider's API key were visible to them, and to anything a prompt-injected CLI could run. They now get an
+  allowlist (see the upgrade note).
 - **Harness traces no longer keep typed secrets or URL tokens, and induced skills no longer claim to be
   credential free.** A trace redacted only keys with secret-sounding names, so the text typed into a field marked
   sensitive (or found sensitive when the step ran), tokens in a URL query or fragment, and PII in free text all

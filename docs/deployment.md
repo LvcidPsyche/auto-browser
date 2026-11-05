@@ -416,6 +416,11 @@ CLI_HOME=/data/cli-home
 INSTALL_AGENT_CLIS=true
 ```
 
+A CLI child gets only the operating-system basics (`PATH`, `HOME`, proxy and certificate variables) and its own
+provider's variables (such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), never the controller's
+tokens or other keys. If a CLI needs another variable, name it in `CLI_PROVIDER_ENV_PASSTHROUGH`
+(comma-separated).
+
 `INSTALL_AGENT_CLIS=true` builds the three CLIs (and Node.js, about 750 MB) into
 the controller image, which leaves them out by default. Rebuild after setting it:
 `docker compose build controller`. When a `cli` provider's binary is missing,

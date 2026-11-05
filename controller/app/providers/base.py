@@ -32,6 +32,21 @@ MAX_RETRY_AFTER_SECONDS = 30.0
 
 DEFAULT_PROVIDER_AUTH_MODES = {"api", "cli"}
 
+# What a provider CLI child may inherit from the controller: what any program needs to run, and to reach
+# the network through a proxy. Everything else (the controller's own tokens, other providers' keys, Stripe
+# and so on) stays out; each adapter adds the few variables its own CLI reads, and
+# CLI_PROVIDER_ENV_PASSTHROUGH adds more.
+CLI_BASE_ENV_NAMES = frozenset(
+    {
+        "PATH", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT",
+        "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "LANG", "LANGUAGE", "TZ",
+        "TERM", "NO_COLOR", "CI", "USER", "LOGNAME", "SHELL",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+    }
+)  # fmt: skip
+CLI_BASE_ENV_PREFIXES = ("LC_",)
+
 
 @dataclass
 class ProviderDecision:
@@ -66,6 +81,8 @@ class ProviderAPIError(RuntimeError):
 
 class BaseProviderAdapter(ABC):
     provider: ProviderName
+    # Variables this provider's own CLI reads (its key, config directory, endpoint), passed to the child.
+    cli_env_names: tuple[str, ...] = ()
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -349,7 +366,13 @@ class BaseProviderAdapter(ABC):
         )
 
     def cli_environment(self) -> dict[str, str]:
-        env = os.environ.copy()
+        allowed = CLI_BASE_ENV_NAMES | {name.upper() for name in self.cli_env_names}
+        allowed |= {name.upper() for name in self.settings.cli_provider_env_passthrough_names}
+        env = {
+            name: value
+            for name, value in os.environ.items()
+            if name.upper() in allowed or name.upper().startswith(CLI_BASE_ENV_PREFIXES)
+        }
         if self.settings.cli_home:
             env["HOME"] = self.settings.cli_home
         env.setdefault("CI", "1")

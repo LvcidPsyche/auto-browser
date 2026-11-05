@@ -13,6 +13,13 @@ _MAX_TOKENS = 16_000
 
 class ClaudeAdapter(BaseProviderAdapter):
     provider = "claude"
+    cli_env_names = (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    )
 
     @property
     def default_model(self) -> str:
