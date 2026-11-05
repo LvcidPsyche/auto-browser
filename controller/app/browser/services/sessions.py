@@ -20,6 +20,7 @@ from ...action_errors import (
     ErrorPageSourceError,
     SessionNotFoundError,
 )
+from ...action_records import wait_for_pending_record
 from ...auth_policy import has_named_credentials
 from ...browser_scripts import apply_stealth, cap_title
 from ...models import SessionRecord, SessionStatus
@@ -200,6 +201,8 @@ class BrowserSessionService(SessionCreation):
                 # lock. Carrying on released the tunnel and runtime twice and
                 # wrote a second close to the audit log and witness chain.
                 raise SessionNotFoundError(session_id, status="closed")
+            # A cancelled action's record may still be finishing behind it: the close is recorded after it.
+            await wait_for_pending_record(session)
             try:
                 if session.tunnel is not None:
                     await self._teardown_step(

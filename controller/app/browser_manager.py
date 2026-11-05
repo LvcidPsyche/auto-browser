@@ -15,6 +15,7 @@ from playwright.async_api import Browser, BrowserContext, Page, Playwright, asyn
 from playwright.async_api import Error as PlaywrightError
 
 from .action_errors import RefusedPageError, SessionNotFoundError
+from .action_records import drain_unfinished_records
 from .actions import BrowserActionPipeline
 from .approvals import ApprovalStore
 from .artifacts import SessionArtifactService
@@ -125,6 +126,9 @@ class BrowserSession:
     shared_browser_process: bool = True
     max_live_sessions_per_browser_node: int = 1
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # The record (an action's or a takeover's) still being written, when a cancellation cut its writer short:
+    # what records next on the session waits for it (app.action_records).
+    pending_record: asyncio.Task[None] | None = None
     console_messages: list[dict[str, Any]] = field(default_factory=list)
     page_errors: list[str] = field(default_factory=list)
     request_failures: list[dict[str, Any]] = field(default_factory=list)
@@ -326,6 +330,9 @@ class BrowserManager:
 
     async def shutdown(self) -> None:
         logger.info("shutting down browser manager")
+        # Records still being written behind cancelled actions (the job queue's shutdown cancels its jobs) finish
+        # before the loop ends, which would cut them short; bounded, and what is left is logged.
+        await drain_unfinished_records()
         session_ids = list(self.sessions.keys())
         # Every operator's sessions close, not only those of whoever is current.
         with as_system():
