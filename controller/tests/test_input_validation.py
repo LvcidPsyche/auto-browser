@@ -248,12 +248,9 @@ class CronServiceProxyPersonaTests(unittest.IsolatedAsyncioTestCase):
             close_session=AsyncMock(),
             auth_profiles=SimpleNamespace(require_access=lambda *_args, **_kwargs: None),
         )
-        # on_finish is how the cron service hands back the session it created;
+        # The on_finish passed to enqueue_run is how the cron service hands back the session it created;
         # without it the run would leak a session slot (see test_runtime_lifecycle).
-        self.job_queue = SimpleNamespace(
-            enqueue_run=AsyncMock(return_value={"id": "job-1"}),
-            on_finish=lambda job_id, callback: None,
-        )
+        self.job_queue = SimpleNamespace(enqueue_run=AsyncMock(return_value={"id": "job-1"}))
         self.cron = CronService(
             Path(self.tempdir.name) / "crons.json",
             job_queue=self.job_queue,

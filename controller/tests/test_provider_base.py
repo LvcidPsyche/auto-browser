@@ -150,11 +150,11 @@ class ProviderDecisionParsingTests(unittest.TestCase):
             decision = self.adapter.parse_decision_file(path)
         self.assertEqual(decision.element_id, "from-file")
 
-    def test_find_decision_candidate_variants(self) -> None:
+    def test_decisions_in_variants(self) -> None:
         payload = json.loads(_decision_json("in-list"))
-        self.assertIsNotNone(BaseProviderAdapter._find_decision_candidate([{"noise": 1}, payload]))
-        self.assertIsNone(BaseProviderAdapter._find_decision_candidate({"nothing": "useful"}))
-        self.assertIsNone(BaseProviderAdapter._find_decision_candidate(["a", "b"]))
+        self.assertEqual(len(BaseProviderAdapter._decisions_in([{"noise": 1}, payload])), 1)
+        self.assertEqual(BaseProviderAdapter._decisions_in({"nothing": "useful"}), [])
+        self.assertEqual(BaseProviderAdapter._decisions_in(["a", "b"]), [])
 
     def test_parse_ladder_does_not_swallow_unexpected_errors(self) -> None:
         # A non-parse bug (not ValidationError/ValueError) must propagate rather

@@ -1,21 +1,39 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import unittest
+from unittest.mock import patch
 
+from app.browser_scripts import AB_ATTR_MAX, AB_HREF_MAX, AB_MAX_ATTRIBUTES, AB_TRUNCATED_MARK
 from app.cdp import passthrough as cdp_passthrough
 from app.cdp.passthrough import CDPPassthrough
 
 
 class _FakeCDPSession:
-    def __init__(self, responses: dict[str, object]) -> None:
+    def __init__(
+        self, responses: dict[str, object], *, fail: frozenset[str] = frozenset(), hang: frozenset[str] = frozenset()
+    ) -> None:
         self.responses = responses
+        self.fail = fail
+        self.hang = hang
+        self.gates: dict[str, asyncio.Event] = {}
+        self.reached: dict[str, asyncio.Event] = {}
         self.calls: list[tuple[str, dict]] = []
 
     async def send(self, method: str, params: dict | None = None) -> dict:
         payload = params or {}
         self.calls.append((method, payload))
+        if method in self.hang:
+            await asyncio.Event().wait()
+        if method in self.gates:
+            self.reached.setdefault(method, asyncio.Event()).set()
+            await self.gates[method].wait()
+        if method in self.fail:
+            raise RuntimeError(f"{method} failed: target closed")
+        if method.endswith((".enable", ".disable")):
+            return {}
         response = self.responses[method]
         if isinstance(response, list):
             value = response.pop(0)
@@ -89,6 +107,34 @@ class CDPPassthroughTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["event_listener_types"], ["click"])
         self.assertEqual(result["assets"], {"src": "https://cdn.example.com/hero.png"})
 
+    async def test_page_controlled_attributes_and_listener_names_are_capped(self) -> None:
+        huge = "x" * 1_000_000
+        pairs = ["data-big", huge, "href", "https://e.example/" + huge, "srcset", huge, huge, "v"]
+        for index in range(200):
+            pairs += [f"data-{index}", "v"]
+        responses = dict(self._READ_RESPONSES)
+        responses["DOM.getAttributes"] = {"attributes": pairs}
+        responses["Runtime.evaluate"] = [
+            {"result": {"value": [huge] + ["click"] * 200}},
+            {"result": {"value": {"src": "https://e.example/" + huge, "href": "plain"}}},
+        ]
+
+        result = await CDPPassthrough(_FakeCDPSession(responses)).get_element_intelligence("#hero")
+
+        attributes = result["attributes"]
+        self.assertEqual(len(attributes), AB_MAX_ATTRIBUTES)
+        self.assertEqual(len(attributes["data-big"]), AB_ATTR_MAX)
+        self.assertEqual(len(attributes["href"]), AB_HREF_MAX)
+        self.assertTrue(attributes["href"].endswith(AB_TRUNCATED_MARK))
+        self.assertEqual(len(attributes["srcset"]), AB_HREF_MAX)
+        self.assertTrue(all(len(name) <= AB_ATTR_MAX for name in attributes))
+        # The asset script runs in the page's own JS world, where a page can defeat its in-page cap.
+        self.assertEqual(len(result["assets"]["src"]), AB_HREF_MAX)
+        self.assertTrue(result["assets"]["src"].endswith(AB_TRUNCATED_MARK))
+        self.assertEqual(result["assets"]["href"], "plain")
+        self.assertEqual(len(result["event_listener_types"]), AB_MAX_ATTRIBUTES)
+        self.assertTrue(all(len(name) <= AB_ATTR_MAX for name in result["event_listener_types"]))
+
     async def test_selector_is_embedded_as_an_exact_js_string_literal(self) -> None:
         # repr() wrote "\U000e0001" for this tag character — not a JavaScript
         # escape — so the in-page query used a different selector. A JSON string
@@ -115,6 +161,142 @@ class CDPPassthroughTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(selector=selector):
                     literal = re.search(r"document\.querySelector\((.*)\);", expression).group(1)
                     self.assertEqual(json.loads(literal), selector)
+
+    async def test_dom_and_css_agents_are_enabled_before_their_calls(self) -> None:
+        # On real Chromium, CSS.* calls fail until CSS.enable has run, and CSS.enable needs DOM.enable first.
+        # (DOM.getDocument enables the DOM agent itself, so only the DOM.enable order is stricter than needed.)
+        fake = _FakeCDPSession(
+            {
+                "DOM.getDocument": {"root": {"nodeId": 11}},
+                "DOM.querySelector": {"nodeId": 22},
+                "DOM.getAttributes": {"attributes": []},
+                "DOM.getBoxModel": {"model": {}},
+                "CSS.getComputedStyleForNode": {"computedStyle": []},
+                "Runtime.evaluate": {"result": {"value": []}},
+            }
+        )
+
+        await CDPPassthrough(fake).get_element_intelligence("#hero")
+
+        order = [method for method, _ in fake.calls]
+        self.assertIn("DOM.enable", order)
+        self.assertIn("CSS.enable", order)
+        self.assertLess(order.index("DOM.enable"), order.index("CSS.enable"))
+        self.assertLess(order.index("CSS.enable"), order.index("CSS.getComputedStyleForNode"))
+        self.assertLess(order.index("DOM.enable"), order.index("DOM.getDocument"))
+
+    _READ_RESPONSES = {  # noqa: RUF012 - read only
+        "DOM.getDocument": {"root": {"nodeId": 11}},
+        "DOM.querySelector": {"nodeId": 22},
+        "DOM.getAttributes": {"attributes": []},
+        "DOM.getBoxModel": {"model": {}},
+        "CSS.getComputedStyleForNode": {"computedStyle": []},
+        "CSS.getMatchedStylesForNode": {"matchedCSSRules": []},
+        "Runtime.evaluate": {"result": {"value": []}},
+    }
+
+    async def test_the_agents_are_disabled_when_the_read_is_done(self) -> None:
+        # A CSS agent left on streams stylesheet events for the life of the cached passthrough.
+        fake = _FakeCDPSession(dict(self._READ_RESPONSES))
+
+        await CDPPassthrough(fake).get_element_intelligence("#hero")
+
+        order = [method for method, _ in fake.calls]
+        # Only the CSS agent goes off: DOM.disable would discard every node id the client holds, among them the
+        # node_id this very read returns.
+        self.assertEqual(order[-1], "CSS.disable")
+        self.assertNotIn("DOM.disable", order)
+        self.assertLess(order.index("CSS.getComputedStyleForNode"), order.index("CSS.disable"))
+
+    async def test_the_agents_are_disabled_when_the_read_fails_and_a_failed_disable_is_not_raised(self) -> None:
+        fake = _FakeCDPSession({"DOM.getDocument": RuntimeError("boom")}, fail=frozenset({"CSS.disable"}))
+
+        result = await CDPPassthrough(fake).get_element_intelligence("#hero")
+
+        self.assertEqual(result["error"], "cdp_element_intelligence_failed")
+        order = [method for method, _ in fake.calls]
+        self.assertEqual(order[-1], "CSS.disable")
+        self.assertNotIn("DOM.disable", order)
+
+    async def test_a_stalled_agent_enable_gives_up_and_still_cleans_up(self) -> None:
+        fake = _FakeCDPSession(dict(self._READ_RESPONSES), hang=frozenset({"CSS.enable"}))
+
+        with patch.object(cdp_passthrough, "CDP_AGENT_TIMEOUT_SECONDS", 0.05):
+            result = await asyncio.wait_for(CDPPassthrough(fake).get_element_intelligence("#hero"), timeout=5)
+
+        self.assertEqual(result["error"], "cdp_element_intelligence_failed")
+        self.assertIn("CSS.disable", [method for method, _ in fake.calls])
+
+    async def test_raw_css_commands_work_on_a_fresh_passthrough_and_switch_only_the_css_agent_off(self) -> None:
+        for method in ("CSS.getComputedStyleForNode", "CSS.getMatchedStylesForNode"):
+            fake = _FakeCDPSession(dict(self._READ_RESPONSES))
+
+            with self.subTest(method=method):
+                result = await CDPPassthrough(fake).raw_cdp_command(method, {"nodeId": 22})
+
+                self.assertNotIn("error", result)
+                self.assertEqual(
+                    [name for name, _ in fake.calls],
+                    ["DOM.enable", "CSS.enable", method, "CSS.disable"],
+                )
+
+    async def test_two_concurrent_reads_are_serialised_by_the_agents_lock(self) -> None:
+        fake = _FakeCDPSession(dict(self._READ_RESPONSES))
+        fake.gates["CSS.getComputedStyleForNode"] = asyncio.Event()
+        passthrough = CDPPassthrough(fake)
+
+        first = asyncio.create_task(passthrough.get_element_intelligence("#a"))
+        await asyncio.wait_for(self._reached(fake, "CSS.getComputedStyleForNode"), timeout=5)
+        second = asyncio.create_task(passthrough.get_element_intelligence("#b"))
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+        # The second read must not have switched the agents on (or off) under the first.
+        self.assertEqual([name for name, _ in fake.calls].count("DOM.enable"), 1)
+        self.assertNotIn("CSS.disable", [name for name, _ in fake.calls])
+
+        fake.gates["CSS.getComputedStyleForNode"].set()
+        await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+
+        order = [name for name, _ in fake.calls]
+        self.assertEqual(order.count("DOM.enable"), 2)
+        self.assertLess(order.index("CSS.disable"), len(order) - order[::-1].index("DOM.enable") - 1)
+
+    @staticmethod
+    async def _reached(fake: _FakeCDPSession, method: str) -> None:
+        while method not in fake.reached:
+            await asyncio.sleep(0)
+        await fake.reached[method].wait()
+
+    async def test_a_cancelled_read_does_not_wait_for_the_disable_and_still_switches_the_css_agent_off(self) -> None:
+        fake = _FakeCDPSession(dict(self._READ_RESPONSES), hang=frozenset({"CSS.getComputedStyleForNode"}))
+        passthrough = CDPPassthrough(fake)
+        fake.gates["CSS.disable"] = asyncio.Event()  # the disable would hang the cancellation if it were awaited
+
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(passthrough.get_element_intelligence("#hero"), timeout=0.1)
+
+        await asyncio.wait_for(self._reached(fake, "CSS.disable"), timeout=5)
+        self.assertEqual(len(passthrough._background_tasks), 1)
+        # The lock stays held until the background disable is done, so a next read cannot be switched off under.
+        self.assertTrue(passthrough._agents_lock.locked())
+        fake.gates["CSS.disable"].set()
+        await asyncio.wait_for(asyncio.gather(*passthrough._background_tasks), timeout=5)
+        self.assertFalse(passthrough._agents_lock.locked())
+        self.assertNotIn("DOM.disable", [name for name, _ in fake.calls])
+
+    async def test_other_raw_commands_do_not_touch_the_agents(self) -> None:
+        fake = _FakeCDPSession(dict(self._READ_RESPONSES))
+
+        await CDPPassthrough(fake).raw_cdp_command("DOM.getDocument", {"depth": 1})
+
+        self.assertEqual([name for name, _ in fake.calls], ["DOM.getDocument"])
+
+    async def test_the_agent_switches_are_not_reachable_through_the_allowlist(self) -> None:
+        for blocked in ("DOM.enable", "CSS.enable", "CSS.disable", "DOM.disable"):
+            with self.subTest(method=blocked):
+                with self.assertRaisesRegex(ValueError, "not in the allowed list"):
+                    await CDPPassthrough(_FakeCDPSession({})).raw_cdp_command(blocked)
 
     async def test_get_element_intelligence_returns_not_found_error(self) -> None:
         fake = _FakeCDPSession(

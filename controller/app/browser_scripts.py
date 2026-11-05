@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable, Mapping
+from typing import Any
+
 # Injected before every page load via add_init_script().
 # Removes automation signals, mocks realistic browser properties.
 # add_init_script runs the source as written, so this is an invoked function
@@ -112,6 +116,164 @@ STEALTH_INIT_SCRIPT = r"""
 })();
 """
 
+# Page-controlled strings are bounded where a script reads them: an attribute-like value (name, id, type, role,
+# class, form method) like a label, a URL longer, a title in between. A cut URL ends in AB_TRUNCATED_MARK, still within
+# its cap, so no consumer mistakes it for the real address. Injected into every script that returns page strings
+# (``/*__AB_CAP__*/`` or through _ELEMENT_NAMING_JS), and into the scripts in tool_gateway and cdp.
+AB_ATTR_MAX = 120
+AB_HREF_MAX = 2000
+AB_TITLE_MAX = 200
+# The visible text of a found element, and the text that matched a find_elements query (a regex can match a whole node).
+AB_TEXT_MAX = 200
+AB_MATCH_MAX = 500
+# The attributes a find_elements result sends only so the Python side can decide whether a value is a secret (they
+# never reach the caller). Read past the display cap, or a long name could push `password` out of the check; one
+# longer still is flagged `truncated`, and its value is withheld because the check did not see all of it.
+AB_FIELD_ATTR_MAX = 1024
+# How many attributes (and inline event handler names) one element read returns.
+AB_MAX_ATTRIBUTES = 50
+AB_TRUNCATED_MARK = chr(0x2026) + "[truncated]"
+
+AB_CAP_JS = (
+    f"""
+  const AB_ATTR_MAX = {AB_ATTR_MAX};
+  const AB_HREF_MAX = {AB_HREF_MAX};
+  const AB_TITLE_MAX = {AB_TITLE_MAX};
+  const AB_TEXT_MAX = {AB_TEXT_MAX};
+  const AB_MATCH_MAX = {AB_MATCH_MAX};
+  const AB_TRUNCATED_MARK = {json.dumps(AB_TRUNCATED_MARK)};
+"""
+    + r"""
+  // UTF-16 units: a cut that lands inside a surrogate pair backs off one unit, so no lone surrogate is left.
+  function abSlice(value, end) {
+    const cut = value.slice(0, end);
+    const last = cut.charCodeAt(cut.length - 1);
+    return last >= 0xD800 && last <= 0xDBFF ? cut.slice(0, -1) : cut;
+  }
+  function abCap(value, max) {
+    return typeof value === 'string' && value.length > max ? abSlice(value, max) : value;
+  }
+  function abCapUrl(value, max = AB_HREF_MAX) {
+    if (typeof value !== 'string' || value.length <= max) return value;
+    return abSlice(value, max - AB_TRUNCATED_MARK.length) + AB_TRUNCATED_MARK;
+  }
+  // A list of words (class) is cut between words when it can be.
+  function abCapWords(value, max) {
+    const cut = abCap(value, max);
+    if (typeof value !== 'string' || cut === value || /\s/.test(value.charAt(cut.length))) return cut;
+    const space = cut.search(/\s\S*$/);
+    return space > 0 ? cut.slice(0, space) : cut;
+  }
+"""
+)
+
+
+def cap_text(value: Any, max_len: int) -> Any:
+    """The Python side of abCap, for a string a script did not cap (page.title()) or one a hostile page could have."""
+    return value[:max_len] if isinstance(value, str) else value
+
+
+def cap_title(value: Any) -> Any:
+    return cap_text(value, AB_TITLE_MAX)
+
+
+def cap_url(value: Any, max_len: int = AB_HREF_MAX) -> Any:
+    """The Python side of abCapUrl: a cut URL still ends in the marker, within its cap."""
+    if not isinstance(value, str) or len(value) <= max_len:
+        return value
+    return value[: max_len - len(AB_TRUNCATED_MARK)] + AB_TRUNCATED_MARK
+
+
+def cap_words(value: str, max_len: int) -> str:
+    """The Python side of abCapWords: cut between words when the value has any before the cut."""
+    if len(value) <= max_len or value[max_len].isspace():
+        return value[:max_len]
+    cut = value[:max_len]
+    space = max((i for i, char in enumerate(cut) if char.isspace()), default=0)
+    return cut[:space] if space > 0 else cut
+
+
+# The caps of each string a find_elements result carries; any other string is held to the URL cap.
+_FOUND_FIELD_CAPS = {
+    "tag": AB_ATTR_MAX,
+    "text": AB_TEXT_MAX,
+    "match": AB_MATCH_MAX,
+    "value": AB_ATTR_MAX,
+    "id": AB_ATTR_MAX,
+}
+_FOUND_FLAGGED_FIELDS = ("value", "id", "class")
+
+
+def _cap_found_strings(value: Any, caps: dict[str, int]) -> Any:
+    """Every string in `value`, recursively, cut to the cap of its key (the URL cap, with the marker, if it has none)."""
+    if isinstance(value, str):
+        return cap_url(value)
+    if isinstance(value, list):
+        return [_cap_found_strings(item, caps) for item in value]
+    if not isinstance(value, dict):
+        return value
+    capped: dict[str, Any] = {}
+    for key, item in value.items():
+        cap = caps.get(key)
+        if not isinstance(item, str):
+            capped[key] = _cap_found_strings(item, caps)
+        elif key == "class":
+            capped[key] = cap_words(item, AB_ATTR_MAX)
+        else:
+            capped[key] = cap_text(item, cap) if cap is not None else cap_url(item)
+        if key in _FOUND_FLAGGED_FIELDS and isinstance(item, str) and capped[key] != item:
+            capped[f"{key}_truncated"] = True
+    return capped
+
+
+def _cap_field(field: Any) -> dict[str, Any] | None:
+    """The attributes the secret check reads, each held to AB_FIELD_ATTR_MAX; a cut sets `truncated`."""
+    if not isinstance(field, dict):
+        return None
+    capped: dict[str, Any] = {}
+    for key, item in field.items():
+        capped[key] = cap_text(item, AB_FIELD_ATTR_MAX)
+        if capped[key] != item:
+            capped["truncated"] = True
+    return capped
+
+
+def cap_found_elements(elements: Any, context: int, is_secret_field: Callable[[Mapping[str, Any]], bool]) -> Any:
+    """What find_elements returns, made safe again on the Python side.
+
+    The scripts cap their strings, but they run in the page's own JS world, where a page can replace
+    String.prototype.slice and get a megabyte through; so every string is cut again here. A field's `value` is
+    withheld (null, `value_redacted: true`) when `is_secret_field` says its attributes (sent by the script as `field`,
+    which is removed) name a password, a one-time code and the like, or when one was too long to read whole; the type
+    action does not echo such values either.
+    """
+    caps = {**_FOUND_FIELD_CAPS, "context_text": AB_MATCH_MAX + 2 * context}
+    if not isinstance(elements, list):
+        return _cap_found_strings(elements, caps)
+    shown = []
+    for raw in elements:
+        # `field` is the check's input, not output: it is held to its own bound, not the display caps.
+        field = _cap_field(raw.get("field")) if isinstance(raw, dict) else None
+        element = _cap_found_strings(
+            {k: v for k, v in raw.items() if k != "field"} if isinstance(raw, dict) else raw, caps
+        )
+        if isinstance(element, dict):
+            if (
+                field is not None
+                and element.get("value")
+                and (field.get("truncated") is True or is_secret_field(field))
+            ):
+                element["value"] = None
+                element["value_redacted"] = True
+                element.pop("value_truncated", None)
+        shown.append(element)
+    return shown
+
+
+def with_ab_cap(source: str) -> str:
+    return source.replace("/*__AB_CAP__*/", AB_CAP_JS)
+
+
 # Shared by the observation scripts below, which inject it at the top of their
 # function body (``/*__ELEMENT_NAMING__*/``) so all three name elements the same
 # way. It follows the order of the accessible-name computation that matters in
@@ -127,7 +289,9 @@ STEALTH_INIT_SCRIPT = r"""
 # submit/button/reset inputs are the one exception: that value is visible text.
 # The same holds for contenteditable editors and textbox-like ARIA widgets,
 # whose text content is what was typed into them.
-_ELEMENT_NAMING_JS = r"""
+_ELEMENT_NAMING_JS = (
+    AB_CAP_JS
+    + r"""
   function abClean(value) {
     return String(value || '').replace(/\s+/g, ' ').trim();
   }
@@ -189,7 +353,7 @@ _ELEMENT_NAMING_JS = r"""
   }
 
   function abRole(el) {
-    const explicit = abClean(el.getAttribute('role')).split(' ')[0];
+    const explicit = abCap(abClean(el.getAttribute('role')).split(' ')[0], AB_ATTR_MAX);
     if (explicit) return explicit;
     const tag = el.tagName.toLowerCase();
     const type = (el.getAttribute('type') || 'text').toLowerCase();
@@ -226,12 +390,13 @@ _ELEMENT_NAMING_JS = r"""
     return {
       tag: el.tagName.toLowerCase(),
       element_id: elementIds ? elementIds.idOf(el) : null,
-      name: el.getAttribute('name'),
-      id: el.id || null,
-      label: abName(el).slice(0, 120)
+      name: abCap(el.getAttribute('name'), AB_ATTR_MAX),
+      id: abCap(el.id || null, AB_ATTR_MAX),
+      label: abSlice(abName(el), 120)
     };
   }
 """
+)
 
 
 def _with_element_naming(source: str) -> str:
@@ -283,12 +448,12 @@ INTERACTABLES_SCRIPT = _with_element_naming(
       element_id: elementId,
       selector_hint: elementId ? `[data-operator-id="${elementId}"]` : null,
       tag: el.tagName.toLowerCase(),
-      type: el.getAttribute('type'),
+      type: abCap(el.getAttribute('type'), AB_ATTR_MAX),
       role: abRole(el),
-      label: abName(el).slice(0, 160),
+      label: abSlice(abName(el), 160),
       checked: abChecked(el),
       disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
-      href: el.href || null,
+      href: abCapUrl(el.href || null),
       bbox: {
         x: Math.round(rect.x),
         y: Math.round(rect.y),
@@ -336,7 +501,7 @@ PAGE_SUMMARY_SCRIPT = _with_element_naming(
 (textLimit, elementIds) => {
 /*__ELEMENT_NAMING__*/
   const squash = (value, maxLength = textLimit) =>
-    String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
+    abSlice(String(value || '').replace(/\s+/g, ' ').trim(), maxLength);
 
 /*__READABLE_TEXT__*/
 
@@ -351,15 +516,15 @@ PAGE_SUMMARY_SCRIPT = _with_element_naming(
   const forms = Array.from(document.forms)
     .slice(0, 3)
     .map((form) => ({
-      action: form.getAttribute('action') || null,
-      method: (form.getAttribute('method') || 'get').toLowerCase(),
+      action: abCapUrl(form.getAttribute('action') || null),
+      method: abCap((form.getAttribute('method') || 'get').toLowerCase(), AB_ATTR_MAX),
       fields: Array.from(form.querySelectorAll('input, textarea, select, button'))
         .slice(0, 8)
         .map((field) => ({
           tag: field.tagName.toLowerCase(),
-          type: field.getAttribute('type') || null,
-          name: field.getAttribute('name') || null,
-          label: abName(field).slice(0, 80),
+          type: abCap(field.getAttribute('type') || null, AB_ATTR_MAX),
+          name: abCap(field.getAttribute('name') || null, AB_ATTR_MAX),
+          label: abSlice(abName(field), 80),
           disabled: Boolean(field.disabled || field.getAttribute('aria-disabled') === 'true')
         }))
     }));
@@ -367,9 +532,9 @@ PAGE_SUMMARY_SCRIPT = _with_element_naming(
   // The title and focused element ride along so an observation costs one
   // evaluate round trip instead of three (page.title() reads document.title).
   return {
-    title: document.title,
+    title: abCap(document.title, AB_TITLE_MAX),
     active_element: abActiveElement(),
-    text_excerpt: readable(document.body?.innerText).slice(0, textLimit),
+    text_excerpt: abSlice(readable(document.body?.innerText), textLimit),
     dom_outline: {
       headings,
       forms,
@@ -386,8 +551,10 @@ PAGE_SUMMARY_SCRIPT = _with_element_naming(
 ).replace("/*__READABLE_TEXT__*/", _READABLE_TEXT_JS)
 
 # Feed/profile extraction helpers
-EXTRACT_POSTS_SCRIPT = r"""
+EXTRACT_POSTS_SCRIPT = with_ab_cap(
+    r"""
 (limit) => {
+/*__AB_CAP__*/
   const candidates = [];
   const seen = new Set();
   const els = document.querySelectorAll(
@@ -402,8 +569,8 @@ EXTRACT_POSTS_SCRIPT = r"""
     const rect = el.getBoundingClientRect();
     if (rect.width === 0) continue;
     const links = [...el.querySelectorAll('a[href]')]
-      .map(a => a.href).filter(h => h && !h.startsWith('javascript'));
-    const imgs = [...el.querySelectorAll('img[src]')].map(i => i.src).slice(0, 3);
+      .map(a => a.href).filter(h => h && !h.startsWith('javascript')).map(h => abCapUrl(h));
+    const imgs = [...el.querySelectorAll('img[src]')].map(i => abCapUrl(i.src)).slice(0, 3);
     candidates.push({
       text: text.slice(0, 600),
       links: links.slice(0, 5),
@@ -416,9 +583,12 @@ EXTRACT_POSTS_SCRIPT = r"""
   return candidates;
 }
 """
+)
 
-EXTRACT_PROFILE_SCRIPT = r"""
+EXTRACT_PROFILE_SCRIPT = with_ab_cap(
+    r"""
 () => {
+/*__AB_CAP__*/
   function first(selectors) {
     for (const s of selectors) {
       const el = document.querySelector(s);
@@ -438,20 +608,148 @@ EXTRACT_PROFILE_SCRIPT = r"""
     return null;
   }
   return {
-    page_title: document.title,
-    url: window.location.href,
+    page_title: abCap(document.title, AB_TITLE_MAX),
+    url: abCapUrl(window.location.href),
     username: first(['[data-testid="UserName"]', '.username', 'h1', '[class*="username"]']),
     display_name: first(['[data-testid="UserName"] span', '[class*="display-name"]', '[class*="displayName"]']),
     bio: first(['[data-testid="UserDescription"]', '[class*="bio"]', '[class*="about"]', '[class*="description"]']),
     followers: findCount('follower'),
     following: findCount('following'),
     post_count: findCount('post') || findCount('tweet') || findCount('video'),
-    avatar_url: document.querySelector(
+    avatar_url: abCapUrl(document.querySelector(
       'img[src*="profile_image"], img[src*="avatar"], img[class*="avatar"], img[class*="profile"]'
-    )?.src || null,
+    )?.src || null),
   };
 }
 """
+)
+
+# The fields both find_elements modes return for an element. A value, id or class that was cut says so
+# (`<field>_truncated: true`), because a client reads a value back to check what it typed and builds selectors from id
+# and class. `field` carries what the Python side needs to decide whether the value is a secret (see
+# cap_found_elements); it never reaches the caller.
+_FIND_FIELDS_JS = r"""
+  function abFoundFields(el) {
+    const out = {};
+    const raw = {
+      value: el.value || null,
+      id: el.id || null,
+      class: (typeof el.className === 'string' ? el.className : el.getAttribute('class')) || null,
+    };
+    for (const key of ['value', 'id', 'class']) {
+      out[key] = key === 'class' ? abCapWords(raw[key], AB_ATTR_MAX) : abCap(raw[key], AB_ATTR_MAX);
+      if (typeof raw[key] === 'string' && out[key] !== raw[key]) out[key + '_truncated'] = true;
+    }
+    out.href = abCapUrl(el.href || null);
+    if (out.value) {
+      out.field = {};
+      for (const name of ['type', 'name', 'id', 'autocomplete', 'placeholder', 'aria-label']) {
+        const attr = el.getAttribute(name) || '';
+        out.field[name] = abCap(attr, AB_FIELD_ATTR_MAX);
+        if (out.field[name] !== attr) out.field.truncated = true;
+      }
+    }
+    return out;
+  }
+""".replace("AB_FIELD_ATTR_MAX", str(AB_FIELD_ATTR_MAX))
+
+
+def _with_find_fields(source: str) -> str:
+    return with_ab_cap(source).replace("/*__FIND_FIELDS__*/", _FIND_FIELDS_JS)
+
+
+# find_elements: text search and selector modes. Each returns page-controlled strings, so each is capped.
+FIND_ELEMENTS_TEXT_SCRIPT = _with_find_fields(
+    r"""([query, isRegex, context, limit]) => {
+/*__AB_CAP__*/
+/*__FIND_FIELDS__*/
+    let matcher = null;
+    if (isRegex) {
+        try {
+            matcher = new RegExp(query, 'gi');
+        } catch (e) {
+            return {__invalid_regex: String((e && e.message) || e)};
+        }
+    }
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    const results = [];
+    let node;
+    while ((node = walker.nextNode()) && results.length < limit) {
+        const text = node.textContent || '';
+        if (!text.trim()) continue;
+        let matchIndex = -1;
+        let matchText = '';
+        if (isRegex) {
+            matcher.lastIndex = 0;
+            const m = matcher.exec(text);
+            if (m) { matchIndex = m.index; matchText = m[0]; }
+        } else {
+            const idx = text.toLowerCase().indexOf(query.toLowerCase());
+            if (idx !== -1) { matchIndex = idx; matchText = text.substr(idx, query.length); }
+        }
+        if (matchIndex === -1) continue;
+        const el = node.parentElement;
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        // A regex can match a whole text node: the match is cut, and the context is `context` on each side of it.
+        const shownMatch = abCap(matchText, AB_MATCH_MAX);
+        // The window is cut by units: step off a low surrogate at its start and back off a high one at its end.
+        let start = Math.max(0, matchIndex - context);
+        if (text.charCodeAt(start) >= 0xDC00 && text.charCodeAt(start) <= 0xDFFF) start++;
+        let end = Math.min(text.length, matchIndex + shownMatch.length + context);
+        if (text.charCodeAt(end - 1) >= 0xD800 && text.charCodeAt(end - 1) <= 0xDBFF) end--;
+        results.push({
+            tag: el.tagName.toLowerCase(),
+            text: abCap(text.trim(), AB_TEXT_MAX),
+            match: shownMatch,
+            context_text: text.substring(start, end).trim(),
+            ...abFoundFields(el),
+            visible: r.width > 0 && r.height > 0,
+            x: Math.round(r.x), y: Math.round(r.y),
+            width: Math.round(r.width), height: Math.round(r.height),
+        });
+    }
+    return results;
+}
+"""
+)
+
+FIND_ELEMENTS_SELECTOR_SCRIPT = _with_find_fields(
+    r"""([selector, limit]) => {
+/*__AB_CAP__*/
+/*__FIND_FIELDS__*/
+    const els = [...document.querySelectorAll(selector)].slice(0, limit);
+    return els.map(el => {
+        const r = el.getBoundingClientRect();
+        return {
+            tag: el.tagName.toLowerCase(),
+            text: abCap(el.innerText, AB_TEXT_MAX) || '',
+            ...abFoundFields(el),
+            visible: r.width > 0 && r.height > 0,
+            x: Math.round(r.x), y: Math.round(r.y),
+            width: Math.round(r.width), height: Math.round(r.height),
+        };
+    });
+}
+"""
+)
+
+# CDP element intelligence: the asset references of one element. ``__SELECTOR__`` is replaced by a JS string literal.
+ELEMENT_ASSETS_SCRIPT = with_ab_cap(
+    r"""
+(function() {
+/*__AB_CAP__*/
+    const el = document.querySelector(__SELECTOR__);
+    if (!el) return {};
+    return {
+        src: abCapUrl(el.src || null),
+        href: abCapUrl(el.href || null),
+        currentSrc: abCapUrl(el.currentSrc || null),
+        backgroundImage: abCapUrl(window.getComputedStyle(el).backgroundImage)
+    };
+})()
+"""
+)
 
 SMOOTH_SCROLL_SCRIPT = r"""
 (deltaY) => {

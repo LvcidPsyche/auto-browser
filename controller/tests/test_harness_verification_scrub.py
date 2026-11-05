@@ -1,0 +1,181 @@
+"""Verification results copy raw observation values (the URL), so they are scrubbed wherever they are stored."""
+
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from app.harness import Budget, Postcondition, TaskContract
+from app.harness.drift import DriftCheckResult
+from app.harness.iterate import HarnessService
+from app.harness.verifier.base import VerificationResult
+
+URL_TOKEN = "tok_live_ABC"
+TOKEN_URL = f"https://example.com/done?access_token={URL_TOKEN}"
+
+
+def _contract() -> TaskContract:
+    return TaskContract(
+        id="verification-scrub",
+        goal="Open the page.",
+        postconditions=[Postcondition(kind="url_contains", value="example.com/done")],
+        budget=Budget(max_attempts=1, max_steps=2),
+    )
+
+
+class VerificationScrubTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_url_token_in_the_verification_details_reaches_no_stored_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            record = await HarnessService(tmp).start_convergence(
+                _contract(), mock_final_observation={"url": TOKEN_URL, "text": "done"}
+            )
+            await HarnessService(tmp).check_all_drifts()
+
+            self.assertEqual(record.status, "converged")
+            stored = [path for path in Path(tmp).rglob("*") if path.is_file()]
+            names = {path.name for path in stored}
+            for expected in ("run.json", "candidate.json", "envelope.json", "provenance.json", "drift.json"):
+                self.assertIn(expected, names)
+            for path in stored:
+                self.assertNotIn(URL_TOKEN.encode(), path.read_bytes(), f"{path.name} holds the token")
+
+    async def test_a_failing_verifier_result_with_a_token_does_not_reach_strategy_md(self) -> None:
+        class LeakyVerifier:
+            async def verify(self, contract, trace) -> VerificationResult:
+                return VerificationResult(
+                    passed=False,
+                    confidence=1.0,
+                    failed_postconditions=[f"expected the page, saw {TOKEN_URL}"],
+                    missing_evidence=[TOKEN_URL],
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            record = await HarnessService(tmp, verifier=LeakyVerifier()).start_convergence(
+                _contract(), mock_final_observation={"url": TOKEN_URL, "text": "done"}
+            )
+
+            strategy = Path(record.strategy_path).read_bytes()
+            self.assertIn(b"expected the page", strategy)
+            for path in Path(tmp).rglob("*"):
+                if path.is_file():
+                    self.assertNotIn(URL_TOKEN.encode(), path.read_bytes(), f"{path.name} holds the token")
+            self.assertNotIn(URL_TOKEN, record.model_dump_json())
+
+    def test_the_drift_result_scrubs_a_raw_verification_itself(self) -> None:
+        raw = VerificationResult(passed=True, confidence=1.0, details={"url": TOKEN_URL})
+
+        result = DriftCheckResult(skill_id="s", status="healthy", verification=raw)
+
+        self.assertNotIn(URL_TOKEN, result.model_dump_json())
+
+    async def test_the_drift_result_notes_carry_the_verifiers_notes_scrubbed(self) -> None:
+        class NotingVerifier:
+            async def verify(self, contract, trace) -> VerificationResult:
+                return VerificationResult(passed=True, confidence=1.0, notes=f"checked {TOKEN_URL}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = HarnessService(tmp, verifier=NotingVerifier())
+            record = await service.start_convergence(_contract(), mock_final_observation={"url": TOKEN_URL})
+
+            drift = await service.check_drift(record.candidate.skill_id)
+
+            self.assertTrue(any(note.startswith("checked https://example.com/done") for note in drift["notes"]))
+            self.assertNotIn(URL_TOKEN, json.dumps(drift))
+            stored = Path(service.registry.candidate_dir(record.candidate.skill_id)) / "drift.json"
+            self.assertNotIn(URL_TOKEN.encode(), stored.read_bytes())
+
+    async def test_a_stored_run_is_read_back_without_scrubbing_it_again(self) -> None:
+        # Scrubbed once, when its attempt was made: a scrubber that fails later does not drop the run from the list.
+        with tempfile.TemporaryDirectory() as tmp:
+            service = HarnessService(tmp)
+            record = await service.start_convergence(_contract(), mock_final_observation={"url": TOKEN_URL})
+
+            with patch.object(VerificationResult, "scrubbed", side_effect=ValueError("unknown PII_SCRUB_PATTERNS")):
+                listed = service.list_runs()
+                status = service.get_status(record.id)
+
+            self.assertEqual([run["id"] for run in listed], [record.id])
+            self.assertEqual(status["attempts"], listed[0]["attempts"])
+            self.assertNotIn(URL_TOKEN, json.dumps(listed))
+
+    @staticmethod
+    def _make_legacy(tmp: str, run_id: str) -> None:
+        """What a 1.14.x run.json holds: no marker on an attempt, and the verifier's raw URL."""
+        path = Path(tmp) / "runs" / run_id / "run.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for attempt in data["attempts"]:
+            attempt.pop("scrubbed", None)
+            attempt["verification"]["details"] = {"url": TOKEN_URL}
+        path.write_text(json.dumps(data), encoding="utf-8")
+        assert URL_TOKEN in path.read_text(encoding="utf-8")
+
+    async def test_a_legacy_run_without_the_marker_is_scrubbed_when_it_is_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = HarnessService(tmp)
+            record = await service.start_convergence(_contract(), mock_final_observation={"url": TOKEN_URL})
+            self._make_legacy(tmp, record.id)
+
+            status = HarnessService(tmp).get_status(record.id)
+            listed = HarnessService(tmp).list_runs()
+
+            self.assertNotIn(URL_TOKEN, json.dumps(status))
+            self.assertNotIn(URL_TOKEN, json.dumps(listed))
+            self.assertEqual([run["id"] for run in listed], [record.id])
+
+    async def test_a_run_this_version_wrote_carries_the_marker_and_is_not_scrubbed_again(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = HarnessService(tmp)
+            record = await service.start_convergence(_contract(), mock_final_observation={"url": TOKEN_URL})
+            stored = json.loads((Path(tmp) / "runs" / record.id / "run.json").read_text(encoding="utf-8"))
+            self.assertTrue(all(attempt["scrubbed"] is True for attempt in stored["attempts"]))
+
+            before = service.get_status(record.id)["attempts"]
+            # A raising stand-in would be caught by the read path into the stub verification, so the test could not
+            # fail: a Mock that records its calls, and the verification compared with what it was.
+            with patch.object(VerificationResult, "scrubbed", autospec=True) as scrubbed:
+                with self.assertNoLogs("app.harness.iterate", level="WARNING"):
+                    after = service.get_status(record.id)["attempts"]
+                    service.store.save(service.store.get(record.id))  # kept on save
+                    service.list_runs()
+            scrubbed.assert_not_called()
+            self.assertEqual([a["verification"] for a in after], [a["verification"] for a in before])
+            self.assertNotIn("withheld", json.dumps(after))
+            stored = json.loads((Path(tmp) / "runs" / record.id / "run.json").read_text(encoding="utf-8"))
+            self.assertTrue(all(attempt["scrubbed"] is True for attempt in stored["attempts"]))
+
+    async def test_a_scrubber_that_fails_on_a_legacy_run_keeps_the_run_with_a_stub_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = HarnessService(tmp)
+            record = await service.start_convergence(_contract(), mock_final_observation={"url": TOKEN_URL})
+            self._make_legacy(tmp, record.id)
+
+            with patch.object(VerificationResult, "scrubbed", side_effect=ValueError("unknown PII_SCRUB_PATTERNS")):
+                with self.assertLogs("app.harness.iterate", level="WARNING") as logs:
+                    listed = service.list_runs()
+                    status = service.get_status(record.id)
+
+            self.assertEqual([run["id"] for run in listed], [record.id])
+            self.assertNotIn(URL_TOKEN, json.dumps(listed) + json.dumps(status))
+            stub = status["attempts"][0]["verification"]
+            self.assertEqual(stub["passed"], True)
+            self.assertIn("withheld", stub["notes"])
+            self.assertTrue(any("withheld" in line for line in logs.output))
+            self.assertNotIn(URL_TOKEN, " ".join(logs.output))
+
+    def test_scrubbed_keeps_the_verdict_and_drops_the_token(self) -> None:
+        result = VerificationResult(
+            passed=True,
+            confidence=1.0,
+            satisfied_postconditions=["postcondition[0]:url_contains:example.com/done"],
+            details={"url": TOKEN_URL, "evidence": ["trace"]},
+        )
+
+        scrubbed = result.scrubbed()
+
+        self.assertIs(scrubbed.passed, True)
+        self.assertEqual(scrubbed.satisfied_postconditions, result.satisfied_postconditions)
+        self.assertNotIn(URL_TOKEN, scrubbed.model_dump_json())
+        self.assertIn(URL_TOKEN, result.model_dump_json())  # the original is untouched

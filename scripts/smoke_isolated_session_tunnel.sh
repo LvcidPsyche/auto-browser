@@ -5,7 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 source "${ROOT_DIR}/scripts/load_env.sh"
-load_repo_env "${ROOT_DIR}/.env"
+source "${ROOT_DIR}/scripts/smoke_lib.sh"
+# This run's own compose project and session-container prefix (see smoke_lib.sh).
+smoke_setup
 
 SSH_DIR="${ROOT_DIR}/data/ssh"
 TUNNEL_DIR="${ROOT_DIR}/data/tunnels"
@@ -32,14 +34,10 @@ export ISOLATED_TUNNEL_PUBLIC_HOST=test-bastion
 export ISOLATED_TUNNEL_PUBLIC_SCHEME=http
 export ISOLATED_TAKEOVER_HOST=127.0.0.1
 
-COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.isolation.yml -f docker-compose.smoke.yml)
+COMPOSE=(docker compose -p "${SMOKE_PROJECT}" -f docker-compose.yml -f docker-compose.isolation.yml -f docker-compose.smoke.yml)
 
 cleanup() {
-  docker ps -aq --filter label=auto-browser.managed=true | xargs -r docker rm -f >/dev/null 2>&1 || true
-  "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
-  # Only after compose down: the controller must be gone, or it still holds
-  # an endpoint on each session network.
-  docker network ls -q --filter label=auto-browser.managed=true | xargs -r docker network rm >/dev/null 2>&1 || true
+  smoke_cleanup
 }
 
 wait_for() {
@@ -58,6 +56,7 @@ wait_for() {
   return 1
 }
 
+smoke_preflight isolated
 trap cleanup EXIT
 
 mkdir -p "${SSH_DIR}" "${TUNNEL_DIR}/sessions"
@@ -91,11 +90,13 @@ HOST_KEY="$("${COMPOSE[@]}" exec -T test-bastion sh -lc 'cat /etc/ssh/ssh_host_e
 chmod 644 "${SMOKE_KNOWN_HOSTS}"
 
 "${COMPOSE[@]}" build browser-node controller
+# The builds took minutes: look again before the controller starts and reaps every managed container.
+smoke_check_managed
 "${COMPOSE[@]}" up -d --no-recreate browser-node controller
 wait_for "controller readiness" "curl -fsS ${API_BASE_URL}/readyz" 120 2
 
 SESSION_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions" -X POST -H 'content-type: application/json' -d '{"name":"isolated-tunnel-smoke","start_url":"https://example.com"}')"
-read -r SESSION_ID CONTAINER_NAME REMOTE_PORT REMOTE_URL <<<"$(python3 - <<'PY' "${SESSION_JSON}"
+read -r SESSION_ID CONTAINER_NAME REMOTE_PORT REMOTE_URL <<<"$(python3 -I - <<'PY' "${SESSION_JSON}"
 import json
 import sys
 
@@ -125,7 +126,7 @@ wait_for \
   2
 
 OBSERVE_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}/observe")"
-python3 - <<'PY' "${OBSERVE_JSON}" "${REMOTE_URL}"
+python3 -I - <<'PY' "${OBSERVE_JSON}" "${REMOTE_URL}"
 import json
 import sys
 
@@ -142,7 +143,7 @@ print("isolated tunnel observe ok")
 PY
 
 REMOTE_ACCESS_JSON="$(bearer_curl -fsS "${API_BASE_URL}/remote-access?session_id=${SESSION_ID}")"
-python3 - <<'PY' "${REMOTE_ACCESS_JSON}" "${REMOTE_URL}"
+python3 -I - <<'PY' "${REMOTE_ACCESS_JSON}" "${REMOTE_URL}"
 import json
 import sys
 
@@ -155,7 +156,7 @@ print("isolated tunnel remote-access endpoint ok")
 PY
 
 CLOSE_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}" -X DELETE)"
-python3 - <<'PY' "${CLOSE_JSON}"
+python3 -I - <<'PY' "${CLOSE_JSON}"
 import json
 import sys
 

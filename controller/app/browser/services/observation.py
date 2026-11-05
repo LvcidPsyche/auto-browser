@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from ... import events as _events
 from ...action_errors import SCREENSHOT_WITHHELD, BrowserActionError
-from ...browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT
+from ...browser_scripts import INTERACTABLES_SCRIPT, PAGE_SUMMARY_SCRIPT, cap_title
+from ...pii_scrub import pii_words
 from ..aria_outline import outline_from_aria_snapshot, unavailable_outline
 from ..page_read import bounded, start_read
 
@@ -35,6 +37,12 @@ async def _gather_settled(*aws: Any) -> list[Any]:
         if isinstance(result, BaseException):
             raise result
     return results
+
+
+def _word_key(block: dict[str, Any]) -> tuple[Any, ...]:
+    """What identifies one OCR word: its text and its box."""
+    box = block.get("bbox") or {}
+    return block.get("text"), box.get("x"), box.get("y"), box.get("width"), box.get("height")
 
 
 def _scrub_disclosure(screenshot: dict[str, Any]) -> dict[str, Any]:
@@ -131,7 +139,7 @@ class BrowserObservationService:
             screenshot = None
             try:
                 screenshot = await self._capture_screenshot_redacted(session, SHARE_FRAME_LABEL)
-                title = await bounded(session.page.title())
+                title = cap_title(await bounded(session.page.title()))
             except Exception:
                 read.refuse_raised(screenshot and screenshot["path"])
                 raise
@@ -212,7 +220,7 @@ class BrowserObservationService:
 
         if preset == "fast":
             screenshot = await self._capture_screenshot_redacted(session, screenshot_label)
-            title = await bounded(session.page.title())
+            title = cap_title(await bounded(session.page.title()))
             tabs = await self.manager.tabs.summaries(session)
             return {
                 "session": await self.manager._session_summary(session),
@@ -287,7 +295,7 @@ class BrowserObservationService:
             "text_excerpt": summary["text_excerpt"],
             "dom_outline": summary["dom_outline"],
             "accessibility_outline": summary["accessibility_outline"],
-            "ocr": ocr,
+            "ocr": await asyncio.to_thread(self._ocr_for_caller, ocr),
             "interactables": interactables,
             "screenshot_path": screenshot["path"],
             "screenshot_url": screenshot["url"],
@@ -301,6 +309,34 @@ class BrowserObservationService:
             "remote_access": self.manager.remote_access.session_info(session),
             "preset": preset,
         }
+
+    def _ocr_for_caller(self, ocr: dict[str, Any] | None) -> dict[str, Any] | None:
+        """The OCR result as observe returns it.
+
+        `redaction_blocks` is the screenshot redaction's own input: every word with its box, including the
+        words that redaction blacks out, so the caller never gets it. The text the caller does get goes
+        through the PII scrubber, since the pixels it came from are redacted too.
+        """
+        if not ocr:
+            return ocr
+        returned = {key: value for key, value in ocr.items() if key != "redaction_blocks"}
+        scrubber = self.manager.pii_scrubber
+        if not scrubber.enabled:
+            return returned
+        if returned.get("text_excerpt"):
+            returned["text_excerpt"] = scrubber.text(returned["text_excerpt"]).text
+        # The same words the screenshot redaction blacks out, found on whole lines: a card number OCR'd as four
+        # blocks is no PII word by word. The returned blocks have no line key, so they are matched by box.
+        redacted = {
+            _word_key(word) for word, *_ in pii_words(ocr.get("redaction_blocks") or [], scrubber.enabled_patterns)
+        }
+        returned["blocks"] = [
+            {**block, "text": scrubber.replacement}
+            if _word_key(block) in redacted
+            else {**block, "text": scrubber.text(block["text"]).text}
+            for block in returned.get("blocks", [])
+        ]
+        return returned
 
     async def _extract_ocr_if_needed(
         self,
@@ -343,6 +379,21 @@ class BrowserObservationService:
             ocr = await self.manager.ocr.extract_from_image(screenshot["path"])
             await self._scrub_screenshot_if_needed(session, screenshot, ocr)
         return screenshot
+
+    async def redacted_copy(self, session: "BrowserSession", screenshot: dict[str, str], label: str) -> dict[str, str]:
+        """A PII-redacted copy of a screenshot already on disk, for reading it without trusting how it was taken.
+
+        The original may be raw (PII_SCRUB_ACTION_SCREENSHOTS=false, or an earlier OCR failure). It is left
+        alone; the copy goes through the same OCR, redaction, strict-mode refusal and disclosure as a fresh
+        capture. With screenshot scrubbing off, or the file gone, the screenshot is returned as it is.
+        """
+        if not self.manager.pii_scrubber.screenshot_enabled or not Path(screenshot["path"]).is_file():
+            return screenshot
+        copy = self.manager.artifacts.screenshot_target(session, label)
+        await asyncio.to_thread(shutil.copyfile, screenshot["path"], copy["path"])
+        ocr = await self.manager.ocr.extract_from_image(copy["path"])
+        await self._scrub_screenshot_if_needed(session, copy, ocr)
+        return copy
 
     async def light_snapshot(self, session: "BrowserSession", *, label: str) -> dict[str, Any]:
         read = start_read(self.manager, session)

@@ -9,6 +9,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from .browser_sandbox import SECCOMP_PROFILE_PATH
 from .stealth.fingerprint import CHROME_UA_POOL
 
+# The one place the Anthropic API base is written. It ends in /v1: every caller appends "/messages".
+ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com/v1"
+
 # USER_AGENT_POOL separates its entries with "|" or newlines. Not commas: every Chrome UA contains
 # "(KHTML, like Gecko)", so a comma split handed contexts half a UA.
 USER_AGENT_POOL_SEPARATOR = "|"
@@ -109,7 +112,9 @@ class Settings(BaseSettings):
     mcp_tool_profile: str = Field("curated", alias="MCP_TOOL_PROFILE")
     mcp_tool_packs: str = Field("", alias="MCP_TOOL_PACKS")
     metrics_enabled: bool = Field(True, alias="METRICS_ENABLED")
-    session_isolation_mode: str = Field("shared_browser_node", alias="SESSION_ISOLATION_MODE")
+    session_isolation_mode: Literal["shared_browser_node", "docker_ephemeral"] = Field(
+        "shared_browser_node", alias="SESSION_ISOLATION_MODE"
+    )
     isolated_browser_image: str = Field(
         "auto-browser-browser-node:latest",
         alias="ISOLATED_BROWSER_IMAGE",
@@ -267,6 +272,9 @@ class Settings(BaseSettings):
     cleanup_on_startup: bool = Field(True, alias="CLEANUP_ON_STARTUP")
     cleanup_interval_seconds: float = Field(3600.0, alias="CLEANUP_INTERVAL_SECONDS")
     artifact_retention_hours: float = Field(168.0, alias="ARTIFACT_RETENTION_HOURS")
+    # A page starts these downloads, not the operator: past either cap the file is not kept.
+    download_max_bytes: int = Field(268435456, alias="DOWNLOAD_MAX_BYTES")
+    downloads_max_per_session: int = Field(100, alias="DOWNLOADS_MAX_PER_SESSION")
     upload_retention_hours: float = Field(168.0, alias="UPLOAD_RETENTION_HOURS")
     auth_retention_hours: float = Field(168.0, alias="AUTH_RETENTION_HOURS")
 
@@ -287,7 +295,7 @@ class Settings(BaseSettings):
     codex_allow_host_exec: bool = Field(False, alias="CODEX_BRIDGE_ALLOW_HOST_EXEC")
 
     anthropic_api_key: str | None = Field(None, alias="ANTHROPIC_API_KEY")
-    anthropic_base_url: str = Field("https://api.anthropic.com/v1", alias="ANTHROPIC_BASE_URL")
+    anthropic_base_url: str = Field(ANTHROPIC_DEFAULT_BASE_URL, alias="ANTHROPIC_BASE_URL")
     anthropic_version: str = Field("2023-06-01", alias="ANTHROPIC_VERSION")
     claude_model: str = Field("claude-sonnet-4-6", alias="CLAUDE_MODEL")
     vision_model: str = Field("claude-haiku-4-5-20251001", alias="VISION_MODEL")
@@ -305,6 +313,8 @@ class Settings(BaseSettings):
     gemini_cli_path: str = Field("gemini", alias="GEMINI_CLI_PATH")
     gemini_cli_model: str | None = Field(None, alias="GEMINI_CLI_MODEL")
     cli_home: str | None = Field("/data/cli-home", alias="CLI_HOME")
+    # Extra environment variable names (comma-separated) handed to provider CLI children as-is.
+    cli_provider_env_passthrough: str = Field("", alias="CLI_PROVIDER_ENV_PASSTHROUGH")
 
     # OpenAI-compatible providers, all served by one generic adapter. Set the API key
     # (and, for openrouter/openai_compatible, a model) to enable each. base_url defaults
@@ -454,6 +464,14 @@ class Settings(BaseSettings):
             return value.strip() or None
         return value
 
+    @field_validator("session_isolation_mode", mode="before")
+    @classmethod
+    def _isolation_mode_trimmed_and_lowercased(cls, value: object) -> object:
+        # An unknown value used to mean the shared browser, silently: it is now refused at startup.
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
     @field_validator("browser_sandbox", mode="before")
     @classmethod
     def _browser_sandbox_like_browser_node(cls, value: object) -> object:
@@ -470,6 +488,10 @@ class Settings(BaseSettings):
         if value is None or (isinstance(value, str) and not value.strip()):
             return str(SECCOMP_PROFILE_PATH)
         return value
+
+    @property
+    def cli_provider_env_passthrough_names(self) -> list[str]:
+        return [item.strip() for item in self.cli_provider_env_passthrough.split(",") if item.strip()]
 
     @property
     def allowed_host_patterns(self) -> list[str]:

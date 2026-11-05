@@ -24,6 +24,7 @@ import app.main as main_module
 from app.browser.page_provenance import PageProvenance
 from app.browser.services import observation as observation_module
 from app.browser.services.observation import SHARE_FRAME_KEEP_SECONDS, SHARE_FRAME_LABEL, BrowserObservationService
+from app.browser_scripts import AB_TITLE_MAX
 from app.routes._utils import OFF_LIST_PAGE_DETAIL
 
 
@@ -103,6 +104,14 @@ class ShareSnapshotTests(unittest.IsolatedAsyncioTestCase):
         manager._session_summary.assert_not_awaited()
         manager.ocr.extract_from_image.assert_not_awaited()
         self.assertFalse(self.session.lock.locked())
+
+    async def test_a_megabyte_title_is_capped(self) -> None:
+        self.session.page.title = AsyncMock(return_value="T" * 1_000_000)
+        manager = _manager(self.session)
+
+        result = await BrowserObservationService(manager=manager).share_snapshot("session-1")
+
+        self.assertEqual(len(result["title"]), AB_TITLE_MAX)
 
     async def test_the_frame_is_redacted_when_screenshot_scrubbing_is_on(self) -> None:
         manager = _manager(self.session, scrubbing=True)

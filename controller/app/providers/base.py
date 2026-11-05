@@ -4,6 +4,7 @@ import asyncio
 import base64
 import email.utils
 import json
+import logging
 import mimetypes
 import os
 import socket
@@ -13,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from shutil import which
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 from pydantic import ValidationError
@@ -22,15 +23,141 @@ from ..config import Settings
 from ..models import BROWSER_ACTION_SCHEMA, BrowserActionDecision, ProviderName
 from ..result_shaping import compact_session
 
+logger = logging.getLogger(__name__)
+
 # Parse strategies fall through on malformed input only. model_validate* raise
-# ValidationError; json.loads / raw_decode raise JSONDecodeError (a ValueError).
+# ValidationError; json.loads / raw_decode raise JSONDecodeError (a ValueError),
+# or RecursionError on brackets nested too deep to decode.
 # Narrowing to these lets a real bug (AttributeError, TypeError, ...) surface
 # instead of being silently swallowed as a parse miss.
-_PARSE_ERRORS = (ValidationError, ValueError)
+_PARSE_ERRORS = (ValidationError, ValueError, RecursionError)
 # Longest a provider's Retry-After may hold one retry.
 MAX_RETRY_AFTER_SECONDS = 30.0
 
 DEFAULT_PROVIDER_AUTH_MODES = {"api", "cli"}
+
+# What a provider CLI child may inherit from the controller: what any program needs to run, and to reach
+# the network through a proxy. Everything else (the controller's own tokens, other providers' keys, Stripe
+# and so on) stays out; each adapter adds the few variables its own CLI reads, and
+# CLI_PROVIDER_ENV_PASSTHROUGH adds more.
+CLI_BASE_ENV_NAMES = frozenset(
+    {
+        "PATH", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT",
+        "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "LANG", "LANGUAGE", "TZ",
+        "TERM", "NO_COLOR", "CI", "USER", "LOGNAME", "SHELL",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+    }
+)  # fmt: skip
+CLI_BASE_ENV_PREFIXES = ("LC_",)
+# Each CLI_HOME that could not be created, warned about once.
+_UNUSABLE_CLI_HOMES: set[str] = set()
+
+
+# The one error a caller gets when no private CLI home can be used. It names no server path (it can reach agent
+# step results and MCP answers); the paths, owners and modes refused are in the log.
+PRIVATE_CLI_HOME_ERROR = (
+    "provider CLIs have no usable private working directory (see the controller log for why); "
+    "set CLI_HOME to a writable directory"
+)
+# Empty files in the private CLI home. The Gemini CLI loads the first .env it finds in its working directory, then
+# its parents, then the user's home: these hold nothing and stop that search before a parent's (the user's home
+# is now an ancestor).
+_ENV_SENTINELS = (".env", ".gemini/.env")
+
+
+class _Refused(Exception):
+    """A private CLI home candidate that cannot be used, and why (with its path, owner and mode, for the log)."""
+
+
+def _private_cli_home_candidates() -> Iterator[Path]:
+    """Where this user's private CLI home may live, best first. Never the shared system temp dir: the CLIs read
+    config from the parents of their working directory too, and anyone can create a file in /tmp.
+
+    On Windows a per-user directory under %LOCALAPPDATA%. On POSIX $XDG_RUNTIME_DIR/auto-browser-cli when that is
+    an absolute path to a directory this user owns that no one else can write, then ~/.cache/auto-browser/cli-home.
+    """
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        yield Path(base) / "auto-browser" / "cli-home"
+        return
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or ""
+    if os.path.isabs(runtime):  # a relative value would resolve against the controller's working directory
+        try:
+            info = os.lstat(runtime)
+        except OSError:
+            info = None
+        if info is not None and stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o022:
+            yield Path(runtime) / "auto-browser-cli"
+    yield Path.home() / ".cache" / "auto-browser" / "cli-home"
+
+
+def _make_private_dir(path: Path) -> None:
+    """Make ``path`` and any missing parent 0o700, then check it on POSIX: the directory must be real (not a
+    symlink), this user's and 0o700, and no ancestor up to the first root-owned one may be writable by group or
+    others without the sticky bit (whoever can write one could put their own directory in this one's place) or be
+    owned by anyone but this user (its owner could swap what is inside it)."""
+    if os.name == "nt":
+        path.mkdir(parents=True, exist_ok=True)
+        return
+    for directory in [*reversed(path.parents), path]:
+        if not os.path.lexists(directory):
+            try:
+                os.mkdir(directory, 0o700)
+            except FileExistsError:
+                pass
+            else:
+                os.chmod(directory, 0o700)  # the umask may have removed bits from the mkdir mode
+    uid = os.getuid()
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o700:
+        kind = "a symlink" if stat.S_ISLNK(info.st_mode) else "a directory" if stat.S_ISDIR(info.st_mode) else "a file"
+        raise _Refused(
+            f"it must be a real directory owned by uid {uid} with mode 0700; found {kind}, mode "
+            f"{stat.S_IMODE(info.st_mode):04o}, owner {info.st_uid}"
+        )
+    for ancestor in Path(os.path.realpath(path)).parents:
+        info = os.stat(ancestor)
+        if info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
+            raise _Refused(
+                f"its ancestor {ancestor} is writable by group or others without the sticky bit "
+                f"(mode {stat.S_IMODE(info.st_mode):04o}, owner {info.st_uid})"
+            )
+        if info.st_uid == 0:
+            break
+        if info.st_uid != uid:
+            # Not writable, but theirs: they could swap the directories inside it, and the CLIs read config
+            # (CLAUDE.md, .env) from the parents of their working directory.
+            raise _Refused(
+                f"its ancestor {ancestor} is owned by uid {info.st_uid}, not by this user or root "
+                f"(mode {stat.S_IMODE(info.st_mode):04o})"
+            )
+
+
+def _private_cli_home() -> str:
+    """The CLI home when CLI_HOME is unset or cannot be created: the first candidate that can be made and passes
+    its checks, made and checked on every call (a temp or cache cleaner may remove it, and another user may put
+    something in its place), with its empty .env sentinels. When none can be used (no home, a home that cannot
+    hold it, every candidate refused), one RuntimeError that says to set CLI_HOME, with the reasons in the log."""
+    reasons: list[str] = []
+    try:
+        for path in _private_cli_home_candidates():
+            try:
+                _make_private_dir(path)
+                for name in _ENV_SENTINELS:
+                    sentinel = path / name
+                    sentinel.parent.mkdir(mode=0o700, exist_ok=True)
+                    sentinel.touch(mode=0o600, exist_ok=True)
+            except (_Refused, OSError) as exc:
+                why = str(exc) if isinstance(exc, _Refused) else f"{type(exc).__name__}: {exc}"
+                logger.warning("the private CLI home %s cannot be used: %s", path, why)
+                reasons.append(f"{path}: {why}")
+                continue
+            return str(path)
+    except (OSError, RuntimeError) as exc:  # Path.home() with no HOME and no passwd entry, for one
+        reasons.append(f"{type(exc).__name__}: {exc}")
+    logger.error("no private CLI home can be used: %s", "; ".join(reasons) or "no candidate")
+    raise RuntimeError(PRIVATE_CLI_HOME_ERROR)
 
 
 @dataclass
@@ -66,6 +193,8 @@ class ProviderAPIError(RuntimeError):
 
 class BaseProviderAdapter(ABC):
     provider: ProviderName
+    # Variables this provider's own CLI reads (its key, config directory, endpoint), passed to the child.
+    cli_env_names: tuple[str, ...] = ()
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -349,12 +478,53 @@ class BaseProviderAdapter(ABC):
         )
 
     def cli_environment(self) -> dict[str, str]:
-        env = os.environ.copy()
-        if self.settings.cli_home:
-            env["HOME"] = self.settings.cli_home
+        allowed = CLI_BASE_ENV_NAMES | {name.upper() for name in self.cli_env_names}
+        allowed |= {name.upper() for name in self.settings.cli_provider_env_passthrough_names}
+        env = {
+            name: value
+            for name, value in os.environ.items()
+            if name.upper() in allowed or name.upper().startswith(CLI_BASE_ENV_PREFIXES)
+        }
+        if (self.settings.cli_home or "").strip():
+            env["HOME"] = self.effective_cli_home()
         env.setdefault("CI", "1")
         env.setdefault("NO_COLOR", "1")
         return env
+
+    def effective_cli_home(self) -> str:
+        """The one CLI home a provider CLI child gets: its working directory, and its HOME when CLI_HOME is set.
+
+        Never the controller's checkout: the Gemini CLI loads a .env from its working directory and parents into its
+        environment, so a child started there re-reads the secrets `cli_environment` withheld. CLI_HOME when it
+        exists or can be created; otherwise (unset, or a host run with no writable /data) this user's private
+        directory (_private_cli_home). That one lies under the user's home, so the home is among its parents, but
+        empty .env sentinels in it stop the Gemini CLI's search before a parent's .env. When neither can be used, a
+        RuntimeError (PRIVATE_CLI_HOME_ERROR) that says to set CLI_HOME.
+        """
+        cli_home = (self.settings.cli_home or "").strip()
+        if not cli_home:
+            return _private_cli_home()
+        try:
+            Path(cli_home).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            first = cli_home not in _UNUSABLE_CLI_HOMES
+            _UNUSABLE_CLI_HOMES.add(cli_home)
+            try:
+                fallback = _private_cli_home()
+            except RuntimeError:
+                if first:
+                    logger.warning("CLI_HOME %s cannot be created (%s), and no private CLI home either", cli_home, exc)
+                raise
+            if first:
+                logger.warning(
+                    "CLI_HOME %s cannot be created (%s); provider CLI children start in, and get as HOME, %s, which "
+                    "holds no CLI sign-in. CLI mode needs CLI_HOME set to a writable directory on host runs.",
+                    cli_home,
+                    exc,
+                    fallback,
+                )
+            return fallback
+        return cli_home
 
     @staticmethod
     def cli_binary_exists(path: str | None) -> bool:
@@ -462,7 +632,7 @@ class BaseProviderAdapter(ABC):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env or self.cli_environment(),
-            cwd=cwd,
+            cwd=cwd or self.effective_cli_home(),
         )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -506,50 +676,65 @@ class BaseProviderAdapter(ABC):
         except _PARSE_ERRORS:
             pass
 
+        # The prompt asks for exactly one decision. A reply that holds two different ones (fenced, bare, or both in
+        # one wrapper) is ambiguous, and choosing between them by position lets JSON quoted from the page choose, so
+        # it fails as an unparseable reply does. The same decision repeated (the model said it twice) is one decision.
+        decisions: list[BrowserActionDecision] = []
         try:
-            payload = json.loads(text)
+            decisions += self._decisions_in(json.loads(text))
         except _PARSE_ERRORS:
-            payload = None
+            pass
+        decisions += self._decisions_in_text(text)
+        distinct: list[BrowserActionDecision] = []
+        for decision in decisions:
+            if decision not in distinct:
+                distinct.append(decision)
+        if len(distinct) == 1:
+            return distinct[0]
 
-        if payload is not None:
-            decision = self._find_decision_candidate(payload)
-            if decision is not None:
-                return decision
+        ambiguity = f": its reply holds {len(distinct)} different decisions" if distinct else ""
+        raise RuntimeError(f"{self.provider} CLI did not return a valid BrowserActionDecision JSON object{ambiguity}")
 
+    @classmethod
+    def _decisions_in_text(cls, text: str) -> list[BrowserActionDecision]:
+        """Every decision-shaped JSON object in `text`, fenced or not. An object that holds a decision is read whole."""
         decoder = json.JSONDecoder()
-        for index, char in enumerate(text):
-            if char != "{":
-                continue
+        found: list[BrowserActionDecision] = []
+        index = text.find("{")
+        while index != -1:
             try:
-                candidate, _ = decoder.raw_decode(text[index:])
+                # From `index` in place, with an absolute end: no copy of the rest of the text at every brace.
+                candidate, end = decoder.raw_decode(text, index)
             except _PARSE_ERRORS:
+                index = text.find("{", index + 1)
                 continue
-            decision = self._find_decision_candidate(candidate)
-            if decision is not None:
-                return decision
-
-        raise RuntimeError(f"{self.provider} CLI did not return a valid BrowserActionDecision JSON object")
+            decisions = cls._decisions_in(candidate)
+            if not decisions:
+                index = text.find("{", index + 1)
+                continue
+            found += decisions
+            index = text.find("{", end)
+        return found
 
     def parse_decision_file(self, path: Path) -> BrowserActionDecision:
         return self.parse_decision_text(path.read_text(encoding="utf-8"))
 
     @staticmethod
-    def _find_decision_candidate(payload: Any) -> BrowserActionDecision | None:
-        if isinstance(payload, dict):
-            try:
-                return BrowserActionDecision.model_validate(payload)
-            except _PARSE_ERRORS:
-                pass
-            for value in payload.values():
-                decision = BaseProviderAdapter._find_decision_candidate(value)
-                if decision is not None:
-                    return decision
-        elif isinstance(payload, list):
-            for item in payload:
-                decision = BaseProviderAdapter._find_decision_candidate(item)
-                if decision is not None:
-                    return decision
-        return None
+    def _decisions_in(payload: Any) -> list[BrowserActionDecision]:
+        """Every decision in one JSON value: the value itself, or each one it holds. Walked with a stack rather than
+        recursion, so a deeply nested value cannot raise RecursionError."""
+        found: list[BrowserActionDecision] = []
+        stack = [payload]
+        while stack:
+            value = stack.pop()
+            if isinstance(value, dict):
+                try:
+                    found.append(BrowserActionDecision.model_validate(value))
+                except _PARSE_ERRORS:
+                    stack.extend(value.values())
+            elif isinstance(value, list):
+                stack.extend(value)
+        return found
 
     @staticmethod
     def _safe_json(response: httpx.Response) -> dict[str, Any] | None:

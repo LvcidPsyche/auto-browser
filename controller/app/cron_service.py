@@ -34,6 +34,7 @@ If APScheduler is not available, cron scheduling is disabled but webhook trigger
 from __future__ import annotations
 
 import asyncio
+import glob
 import hmac
 import json
 import logging
@@ -61,6 +62,25 @@ except ImportError:
     logger.info("APScheduler not installed — cron scheduling disabled. Install: pip install apscheduler")
 
 
+class CronJobDisabledError(RuntimeError):
+    """A disabled job was asked to run."""
+
+
+# Fixed and path-free, because callers (MCP above all) show it as it is; the path and the cause are logged.
+CRON_STORE_UNREADABLE = (
+    "the cron store (CRON_STORE_PATH) is unreadable; cron jobs are not loaded until it is fixed. The server log has "
+    "the cause and where the file is."
+)
+
+
+class CronStoreUnreadableError(RuntimeError):
+    """The cron store could not be used; the text is the fixed CRON_STORE_UNREADABLE (REST answers it as 503)."""
+
+    def __init__(self, *_args: object) -> None:
+        # *_args: copy and pickle rebuild an exception from its args, which hold the fixed text.
+        super().__init__(CRON_STORE_UNREADABLE)
+
+
 class CronService:
     """Manages cron jobs and webhook triggers for browser automation."""
 
@@ -84,15 +104,33 @@ class CronService:
 
     async def startup(self) -> None:
         """Start the scheduler and register all enabled cron jobs."""
+        # Before the scheduler check: it needs only the store, so a deployment without APScheduler is told too.
+        jobs = self._load()
+        self._warn_if_store_was_quarantined(jobs)
         if not _APSCHEDULER_AVAILABLE:
             return
         self._scheduler = AsyncIOScheduler()
-        jobs = self._load()
         for job in jobs.values():
             if job.get("enabled") and job.get("schedule"):
                 self._register_job(job)
         self._scheduler.start()
         logger.info("cron service started with %d jobs", len(jobs))
+
+    def _warn_if_store_was_quarantined(self, jobs: dict[str, Any]) -> None:
+        """Say at every start that an empty store follows a quarantined one.
+
+        _load raises once, when it moves a corrupt store aside; the next start finds no file and reads an empty
+        store with no sign that the jobs are in the quarantined file.
+        """
+        if jobs:
+            return
+        for quarantined in sorted(self._store_path.parent.glob(f"{glob.escape(self._store_path.stem)}.corrupt-*.json")):
+            logger.warning(
+                "cron store %s holds no jobs, and a corrupt store was set aside as %s; restore its jobs from "
+                "that file if they are still wanted, and move or delete that file to silence this warning",
+                self._store_path,
+                quarantined,
+            )
 
     async def shutdown(self) -> None:
         """Stop the scheduler."""
@@ -305,6 +343,9 @@ class CronService:
         job_id = job["id"]
         if self.job_queue is None or self.manager is None:
             raise RuntimeError("CronService not fully initialized (no job_queue/manager)")
+        # The scheduler already drops a disabled job; a webhook or trigger_job must not run it either.
+        if not job.get("enabled", True):
+            raise CronJobDisabledError("job is disabled; enable it to run it")
 
         from .models import AGENT_RUN_MAX_STEPS, AgentRunRequest
 
@@ -352,25 +393,25 @@ class CronService:
         session_id = session_result["id"]
         self._active_runs[job_id] = session_id
 
-        try:
-            with acting_as(owner):
-                queued = await self.job_queue.enqueue_run(session_id, run_request)
-        except Exception:
-            # Enqueue can reject (queue at capacity). The session exists but
-            # nothing will ever run in it, so release it here rather than
-            # stranding it until restart.
-            await self._release_run(job_id, session_id)
-            raise
-
         # This session exists only to host this job, and nothing else will ever
         # close it. Before this, the first cron fire consumed a session slot
         # permanently — with MAX_SESSIONS defaulting to 1, every later fire and
         # every manual create_session then failed "Session limit reached", and
         # under docker_ephemeral each fire also leaked a browser container.
-        self.job_queue.on_finish(
-            queued["id"],
-            lambda: self._release_run(job_id, session_id),
-        )
+        # The callback goes in with the job: a worker can finish it before enqueue_run returns.
+        try:
+            with acting_as(owner):
+                queued = await self.job_queue.enqueue_run(
+                    session_id,
+                    run_request,
+                    on_finish=lambda: self._release_run(job_id, session_id),
+                )
+        except BaseException:
+            # Enqueue can reject (queue at capacity), and the trigger can be cancelled while it waits. The
+            # session exists but nothing will ever run in it, so release it here rather than stranding it
+            # (and the job's slot) until restart. A job the queue already accepted is withdrawn by the queue.
+            await self._release_run(job_id, session_id)
+            raise
 
         # Update run metadata
         async with self._lock:
@@ -392,10 +433,16 @@ class CronService:
         """Close the session a cron run was given, and clear the in-flight mark.
 
         Called from the job queue's finish callback on completion, failure and
-        cancellation alike. The mark is cleared even if the close fails —
-        otherwise one stuck close would block that cron job forever.
+        cancellation alike, and by the trigger when queuing fails or is cancelled.
+        A cancelled trigger can do both: withdrawing a running job fires the
+        callback, then its own cleanup runs. Only the call that still finds this
+        run in the slot acts, so the session is closed once and a slot a newer
+        trigger took in between is left alone. The mark is cleared even if the
+        close fails — otherwise one stuck close would block that cron job forever.
         """
-        self._active_runs.pop(job_id, None)
+        if self._active_runs.get(job_id) != session_id:
+            return
+        del self._active_runs[job_id]
         if self.manager is None:
             return
         try:
@@ -411,27 +458,45 @@ class CronService:
             )
 
     def _load(self) -> dict[str, Any]:
-        if not self._store_path.exists():
-            return {}
+        # The read itself decides whether there is a store: Path.exists() raises a permission error as itself
+        # (EACCES on Python 3.11 and 3.12), outside the handling below.
         try:
-            return json.loads(self._store_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            # Do NOT return {} here. That looked harmless but was destructive:
-            # the next _save() persisted the empty dict over the damaged file,
-            # permanently erasing every cron job the operator had defined. A
-            # fallback that hides a bug is worse than the bug.
-            quarantine = self._store_path.with_suffix(f".corrupt-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json")
-            try:
-                self._store_path.replace(quarantine)
-                logger.error(
-                    "cron store %s is unreadable (%s); moved to %s. Cron jobs are not loaded until this is resolved.",
-                    self._store_path,
-                    exc,
-                    quarantine,
-                )
-            except Exception:
-                logger.exception("cron store %s is unreadable and could not be quarantined", self._store_path)
-            raise RuntimeError(f"cron store {self._store_path} is unreadable: {exc}") from exc
+            data = json.loads(self._store_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except OSError as exc:
+            # Possibly passing (a sharing violation, a brief permission fault): a good, hand-edited store is
+            # never moved aside for one. It stays where it is, and reads fail until it can be read.
+            logger.error("cron store %s could not be read (%s); it was left where it is", self._store_path, exc)
+            raise CronStoreUnreadableError from exc
+        except (ValueError, RecursionError) as exc:  # json.JSONDecodeError, UnicodeDecodeError: the file is corrupt
+            self._quarantine(exc)
+            raise CronStoreUnreadableError from exc
+        if not isinstance(data, dict):
+            # It parses, but every caller would fail on it later (a list has no .values()).
+            self._quarantine(f"it holds a JSON {type(data).__name__}, not an object")
+            raise CronStoreUnreadableError
+        return data
+
+    def _quarantine(self, cause: object) -> None:
+        """Move a corrupt store aside, so that no save can write over the jobs in it.
+
+        Do NOT answer {} instead. That looked harmless but was destructive: the next
+        _save() persisted the empty dict over the damaged file, permanently erasing
+        every cron job the operator had defined. A fallback that hides a bug is worse
+        than the bug.
+        """
+        quarantine = self._store_path.with_suffix(f".corrupt-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json")
+        try:
+            self._store_path.replace(quarantine)
+            logger.error(
+                "cron store %s is unreadable (%s); moved to %s. Cron jobs are not loaded until this is resolved.",
+                self._store_path,
+                cause,
+                quarantine,
+            )
+        except Exception:
+            logger.exception("cron store %s is unreadable (%s) and could not be quarantined", self._store_path, cause)
 
     def _save(self, data: dict[str, Any]) -> None:
         self._store_path.parent.mkdir(parents=True, exist_ok=True)

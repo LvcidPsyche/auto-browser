@@ -51,6 +51,9 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--isolated", action="store_true")
     parser.add_argument("--log-must-say", default=None)
     args = parser.parse_args(argv[1:])
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from assert_browser_sandbox import problems, redact_endpoints
+
     data = Path(args.data)
     token = (data / "api-token").read_text(encoding="utf-8").strip()
     base = f"http://127.0.0.1:{args.api_port}"
@@ -64,18 +67,17 @@ def main(argv: list[str]) -> int:
     status, body = call("POST", f"{base}/sessions", token, {"name": "sandbox-gate", "start_url": "https://example.com"})
     print(f"create session: HTTP {status}")
     if status != args.expect:
-        print(f"FAIL: expected HTTP {args.expect}, got {status}: {json.dumps(body)[:300]}")
+        print(f"FAIL: expected HTTP {args.expect}, got {status}: {redact_endpoints(json.dumps(body))[:300]}")
         return 1
     if args.expect == 200 and args.isolated:
         state_file = data / "browser-sessions" / body["id"] / "profile" / "browser-sandbox.json"
         state = json.loads(state_file.read_text(encoding="utf-8"))
         close_status, _ = call("DELETE", f"{base}/sessions/{body['id']}", token)
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from assert_browser_sandbox import problems
-
         found = problems(state, require_proc=True)
         if found or close_status != 200:
-            print(f"FAIL: the isolated container's state: {found or 'fine'}; close: HTTP {close_status}")
+            print(
+                f"FAIL: the isolated container's state: {redact_endpoints(found or 'fine')}; close: HTTP {close_status}"
+            )
             return 1
         print("OK: the isolated session's container ran with a verified sandbox (/proc evidence)")
         return 0
@@ -87,7 +89,10 @@ def main(argv: list[str]) -> int:
         state = json.loads((data / "browser-profile" / "browser-sandbox.json").read_text(encoding="utf-8"))
         endpoint = (data / "browser-profile" / "browser-ws-endpoint.txt").read_text(encoding="utf-8").strip()
         if state.get("endpoint") != endpoint:
-            print(f"FAIL: the state names {state.get('endpoint')!r}, the endpoint file holds {endpoint!r}")
+            print(
+                f"FAIL: the state names {redact_endpoints(state.get('endpoint'))!r}, "
+                f"the endpoint file holds {redact_endpoints(endpoint)!r}"
+            )
             return 1
         print("OK: the session ran on a verified browser-node, and the state names the endpoint the controller used")
     else:

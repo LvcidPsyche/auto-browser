@@ -341,33 +341,27 @@ def scrub_screenshot(
     all_hits: list[dict[str, Any]] = []
     boxes_to_redact: list[tuple[int, int, int, int]] = []
 
-    for words in _ocr_lines(ocr_blocks):
-        text, word_spans = _join_words(words)
-        for start, end, pattern in find_pii_spans(text, enabled_patterns):
-            matched = text[start:end]
-            for word, (word_start, word_end) in zip(words, word_spans):
-                if word_start >= end or word_end <= start:
-                    continue
-                box = _word_box(word)
-                if box is None:
-                    # A degenerate box redacts nothing. Refuse to report success
-                    # for it — that is how redaction once stayed a silent no-op.
-                    logger.warning(
-                        "pii_scrub: OCR block matched %s but carries no usable geometry; cannot redact pixels",
-                        pattern,
-                    )
-                    continue
-                x, y, w, h = box
-                boxes_to_redact.append((x, y, x + w, y + h))
-                all_hits.append(
-                    {
-                        "pattern": pattern,
-                        "offset": start,
-                        "length": len(matched),
-                        "preview": matched[:6] + "…" if len(matched) > 6 else "…",
-                        "bbox": {"x": x, "y": y, "width": w, "height": h},
-                    }
-                )
+    for word, pattern, start, matched in pii_words(ocr_blocks, enabled_patterns):
+        box = _word_box(word)
+        if box is None:
+            # A degenerate box redacts nothing. Refuse to report success
+            # for it — that is how redaction once stayed a silent no-op.
+            logger.warning(
+                "pii_scrub: OCR block matched %s but carries no usable geometry; cannot redact pixels",
+                pattern,
+            )
+            continue
+        x, y, w, h = box
+        boxes_to_redact.append((x, y, x + w, y + h))
+        all_hits.append(
+            {
+                "pattern": pattern,
+                "offset": start,
+                "length": len(matched),
+                "preview": matched[:6] + "…" if len(matched) > 6 else "…",
+                "bbox": {"x": x, "y": y, "width": w, "height": h},
+            }
+        )
 
     if not boxes_to_redact:
         return image_bytes, []
@@ -387,6 +381,25 @@ def scrub_screenshot(
         # successful redaction to the caller. Let it decide what to report.
         logger.warning("screenshot PII redaction failed: %s", exc)
         raise
+
+
+def pii_words(
+    ocr_blocks: list[dict[str, Any]], enabled_patterns: set[str] | None = None
+) -> list[tuple[dict[str, Any], str, int, str]]:
+    """Every OCR word a PII match touches, as (word block, pattern, match offset, matched text).
+
+    Words are joined into the line OCR found them on, so a match that spans words (a card number in
+    groups, "(555) 123-4567") touches each of its words. Pixel redaction and the OCR text observe
+    returns both decide from this, so they cannot disagree about what is PII.
+    """
+    found: list[tuple[dict[str, Any], str, int, str]] = []
+    for words in _ocr_lines(ocr_blocks):
+        text, word_spans = _join_words(words)
+        for start, end, pattern in find_pii_spans(text, enabled_patterns):
+            for word, (word_start, word_end) in zip(words, word_spans):
+                if word_start < end and word_end > start:
+                    found.append((word, pattern, start, text[start:end]))
+    return found
 
 
 def _ocr_lines(blocks: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:

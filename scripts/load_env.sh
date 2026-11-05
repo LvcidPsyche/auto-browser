@@ -1,20 +1,188 @@
 #!/usr/bin/env bash
 
+# Reads KEY=VALUE lines from a .env file and exports them. The file is parsed, never
+# sourced: a value like $(cmd) or `cmd` is kept as text and not run, and nothing is
+# expanded. Blank lines and # comments are skipped, as is an `export ` prefix. Everything
+# after the first = is the value, kept intact. Quoting follows docker compose's .env
+# reader where that is safe:
+#   'single'  literal; only a backslash before the quote is an escape (see __lre_parse_quoted)
+#   "double"  escapes as compose-go's expandEscapes: \" \\ \$ \a \b \f \n \r \t \v (any other backslash stays as
+#             written; a value holding \0 is skipped by choice, so compose reads that key itself)
+#   unquoted  ends at a whitespace-preceded # comment; `KEY=   # note` is empty
+# Text after a closing quote (other than a # comment), a quote that spans several lines (the lines up to the
+# closing quote are skipped too), a double-quoted \0 (skipped by choice: compose reads that key itself), and any
+# line that is not KEY=VALUE are skipped with a warning naming the line number, never its text.
+# A UTF-8 BOM before the first key is ignored. Keys that change how the shell or this
+# loader behaves are refused with a warning naming the key (see __lre_refused).
+#
+# Locals use a __lre_ prefix so a .env key cannot overwrite the parser's own state.
+
+# Whether a .env key is on the fixed denylist: shell startup, expansion and behaviour hooks, the dynamic
+# loader, the interpreters' startup hooks (PYTHON*, PERL5*, NODE_OPTIONS, BROWSER, which webbrowser.open() runs),
+# HOME (which login shells read profiles from), and the smoke scripts' own names. SMOKE_* is not refused as a
+# whole: doctor.sh reads SMOKE_URL, SMOKE_PROVIDER and SMOKE_GOAL from .env.
+__lre_denied_name() {
+  case "$1" in
+    BASH_ENV | ENV | BASH_FUNC_* | SHELLOPTS | BASHOPTS | IFS | PATH | PS4 | PROMPT_COMMAND | CDPATH | GLOBIGNORE) return 0 ;;
+    POSIXLY_CORRECT | BASH_COMPAT | EXECIGNORE | FUNCNEST | TMOUT | LC_ALL | LC_CTYPE | HOME) return 0 ;;
+    PYTHON* | BROWSER | PERL5OPT | PERL5LIB | NODE_OPTIONS) return 0 ;;
+    LD_* | DYLD_* | COMSPEC | PATHEXT) return 0 ;;
+    SMOKE_PROJECT | SMOKE_COMPOSE_* | SMOKE_SESSION_* | SMOKE_*_LABEL | ROOT_DIR | COMPOSE | __lre_*) return 0 ;;
+  esac
+  return 1
+}
+
+# Whether a .env key must not be exported: a denylisted name, or a variable the calling script (or bash itself)
+# set and did not export, which is the script's own. On Git Bash and Cygwin the denylist ignores case, because
+# Windows reads environment names case-insensitively (`Path=` would reach a child as PATH).
+__lre_refused() {
+  __lre_denied_name "$1" && return 0
+  # No fork for the common key: a subshell costs about 130 ms on Git Bash, and a copied .env.example has 176 keys.
+  case "${OSTYPE:-}" in
+    msys* | cygwin*)
+      if [[ "$1" == *[a-z]* ]]; then
+        local __lre_nocase=0 __lre_hit=1
+        shopt -q nocasematch && __lre_nocase=1
+        shopt -s nocasematch
+        __lre_denied_name "$1" && __lre_hit=0
+        ((__lre_nocase)) || shopt -u nocasematch
+        ((__lre_hit)) || return 0
+      fi
+      ;;
+  esac
+  # `${!1+set}` (not `[[ -v ]]`, which needs bash 4.2) is empty for a name that is not set.
+  [[ -n "${!1+set}" ]] || return 1
+  local __lre_decl
+  __lre_decl="$(declare -p "$1" 2>/dev/null)" || return 1
+  case "$__lre_decl" in
+    "declare -x"* | "declare -"[a-zA-Z]x*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# Parses a quoted value, escape for escape as docker compose's reader (compose-go dotenv/parser.go) does. $1 is
+# the text starting at the opening quote; it may hold newlines. Sets __lre_out to the value. Returns:
+#   0  a value, followed by nothing or a # comment
+#   1  text after the closing quote
+#   2  no closing quote
+# It also sets __lre_bad_escape to 1 (and to 0 first) when a double-quoted value holds a \0, which compose-go reads in
+# a way not worth copying (it rewrites \0 to a backslash first and returns that text when the octal then fails to
+# decode, so "a\012b" is a\12b there); the caller skips such a value.
+# In both kinds of quote a backslash before the quote character is that character, and a backslash pair is
+# \\ in double quotes and stays two backslashes in single quotes. Only double quotes expand: \a \b \f \n \r \t \v
+# \$ (a literal $), \" and \\. A backslash before any other character is kept.
+__lre_parse_quoted() {
+  local __lre_text="$1" __lre_quote="${1:0:1}" __lre_i __lre_c __lre_n __lre_tail
+  __lre_out=""
+  __lre_bad_escape=0
+  for ((__lre_i = 1; __lre_i < ${#__lre_text}; __lre_i++)); do
+    __lre_c="${__lre_text:__lre_i:1}"
+    if [[ "$__lre_c" == "$__lre_quote" ]]; then
+      __lre_tail="${__lre_text:__lre_i+1}"
+      __lre_tail="${__lre_tail#"${__lre_tail%%[![:space:]]*}"}"
+      [[ -z "$__lre_tail" || "$__lre_tail" == "#"* ]]
+      return
+    fi
+    if [[ "$__lre_c" == "\\" ]]; then
+      __lre_n="${__lre_text:__lre_i+1:1}"
+      if [[ "$__lre_n" == "$__lre_quote" ]]; then
+        __lre_out+="$__lre_n"
+        ((__lre_i++))
+        continue
+      fi
+      if [[ "$__lre_n" == "\\" ]]; then
+        if [[ "$__lre_quote" == '"' ]]; then __lre_out+="\\"; else __lre_out+="\\\\"; fi
+        ((__lre_i++))
+        continue
+      fi
+      if [[ "$__lre_quote" == '"' ]]; then
+        case "$__lre_n" in
+          n) __lre_out+=$'\n'; ((__lre_i++)); continue ;;
+          r) __lre_out+=$'\r'; ((__lre_i++)); continue ;;
+          t) __lre_out+=$'\t'; ((__lre_i++)); continue ;;
+          a) __lre_out+=$'\a'; ((__lre_i++)); continue ;;
+          b) __lre_out+=$'\b'; ((__lre_i++)); continue ;;
+          f) __lre_out+=$'\f'; ((__lre_i++)); continue ;;
+          v) __lre_out+=$'\v'; ((__lre_i++)); continue ;;
+          '$') __lre_out+='$'; ((__lre_i++)); continue ;;
+          # compose-go rewrites \0 before decoding and returns the rewritten text when decoding fails, so which
+          # \0 forms decode is not worth guessing: every one is left to compose. The scan goes on to the closing
+          # quote, so the caller skips the whole value, however many lines it spans.
+          0) __lre_bad_escape=1 ;;
+        esac
+      fi
+      __lre_out+="\\"
+      continue
+    fi
+    __lre_out+="$__lre_c"
+  done
+  return 2
+}
+
 load_repo_env() {
-  local env_file="${1:-.env}"
-  if [[ ! -f "$env_file" ]]; then
+  local __lre_file="${1:-.env}"
+  if [[ ! -f "$__lre_file" ]]; then
     return 0
   fi
 
-  local previous_allexport
-  previous_allexport="$(set -o | awk '$1 == "allexport" { print $2 }')"
-  set -a
-  # Trusted repo-local config file. Supports quoted values and embedded spaces.
-  # shellcheck disable=SC1090
-  source "$env_file"
-  if [[ "$previous_allexport" != "on" ]]; then
-    set +a
-  fi
+  local __lre_pair_re='^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$'
+  local __lre_line __lre_key __lre_raw __lre_value __lre_out __lre_number=0 __lre_start __lre_rc __lre_next=""
+  local __lre_bad_escape=0
+  while IFS= read -r __lre_line || [[ -n "$__lre_line" ]]; do
+    ((__lre_number++)) || true
+    if ((__lre_number == 1)); then
+      __lre_line="${__lre_line#$'\xEF\xBB\xBF'}"
+    fi
+    __lre_line="${__lre_line%$'\r'}"
+    __lre_line="${__lre_line#"${__lre_line%%[![:space:]]*}"}"
+    [[ -z "$__lre_line" || "$__lre_line" == "#"* ]] && continue
+    __lre_line="${__lre_line#export[[:space:]]}"
+    __lre_line="${__lre_line#"${__lre_line%%[![:space:]]*}"}"
+    if [[ ! "$__lre_line" =~ $__lre_pair_re ]]; then
+      echo "load_repo_env: ${__lre_file}:${__lre_number}: not a KEY=VALUE line, ignored" >&2
+      continue
+    fi
+    __lre_key="${BASH_REMATCH[1]}"
+    __lre_raw="${BASH_REMATCH[2]}"
+    __lre_value="${__lre_raw#"${__lre_raw%%[![:space:]]*}"}"
+    if [[ "$__lre_value" == [\"\']* ]]; then
+      __lre_start=$__lre_number
+      __lre_rc=0
+      __lre_parse_quoted "$__lre_value" || __lre_rc=$?
+      # No closing quote on this line: a multi-line value (a PEM, say). Its lines are skipped up to the one that
+      # closes it, or the end of the file, so that base64 padding ("abc==") is never read as a KEY=VALUE line.
+      while ((__lre_rc == 2)) && IFS= read -r __lre_next || [[ -n "$__lre_next" ]]; do
+        ((__lre_number++)) || true
+        __lre_value+=$'\n'"${__lre_next%$'\r'}"
+        __lre_next=""
+        __lre_rc=0
+        __lre_parse_quoted "$__lre_value" || __lre_rc=$?
+      done
+      # A value with a \0 is skipped whole, only once its closing quote is found (or the file ends).
+      if ((__lre_rc == 0 && __lre_bad_escape)); then __lre_rc=3; fi
+      case "$__lre_rc" in
+        0) ;;
+        1) echo "load_repo_env: ${__lre_file}:${__lre_start}: text after the closing quote, ignored" >&2; continue ;;
+        2) echo "load_repo_env: ${__lre_file}:${__lre_start}: no closing quote before the end of the file, the rest is ignored" >&2; continue ;;
+        *) echo "load_repo_env: ${__lre_file}:${__lre_start}: the value has an escape the scripts cannot read as docker compose does, ignored" >&2; continue ;;
+      esac
+      if ((__lre_number > __lre_start)); then
+        echo "load_repo_env: ${__lre_file}:${__lre_start}: a quoted value over several lines (to line ${__lre_number}), ignored" >&2
+        continue
+      fi
+      __lre_value="$__lre_out"
+    elif [[ "$__lre_raw" != "$__lre_value" && "$__lre_value" == "#"* ]]; then
+      __lre_value=""
+    else
+      __lre_value="${__lre_value%%[[:space:]]\#*}"
+      __lre_value="${__lre_value%"${__lre_value##*[![:space:]]}"}"
+    fi
+    if __lre_refused "$__lre_key"; then
+      echo "load_repo_env: ${__lre_file}:${__lre_number}: ${__lre_key} is not loaded from .env (it changes how the shell or the scripts behave), ignored" >&2
+      continue
+    fi
+    export "$__lre_key=$__lre_value"
+  done < "$__lre_file"
 }
 
 resolve_repo_host_path() {

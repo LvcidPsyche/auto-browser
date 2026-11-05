@@ -118,6 +118,7 @@ class FakeDownload:
         self.suggested_filename = suggested_filename
         self.url = url
         self._content = content
+        self.delete = AsyncMock()
 
     async def save_as(self, path: str) -> None:
         Path(path).write_text(self._content, encoding="utf-8")

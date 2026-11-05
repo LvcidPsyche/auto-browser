@@ -565,7 +565,7 @@ async def test_an_upload_whose_totp_fill_fails_afterwards_is_reported_not_raised
 
 
 CHALLENGE_ON_UPLOAD = """<title>uploads</title>
-<input id="file" type="file" aria-label="Attachment" onchange="document.title='Solve the captcha'">
+<input id="file" type="file" aria-label="Attachment" onchange="document.title='Just a moment...'">
 """
 
 

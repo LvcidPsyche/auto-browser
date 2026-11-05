@@ -51,14 +51,13 @@ class _FakeJobQueue:
         self.enqueued: list[str] = []
         self.fail_enqueue = False
 
-    async def enqueue_run(self, session_id: str, payload) -> dict:
+    async def enqueue_run(self, session_id: str, payload, *, on_finish=None) -> dict:
         if self.fail_enqueue:
             raise RuntimeError("Job queue is at capacity. Try again later.")
         self.enqueued.append(session_id)
-        return {"id": f"job-for-{session_id}"}
-
-    def on_finish(self, job_id: str, callback) -> None:
-        self.callbacks[job_id] = callback
+        job_id = f"job-for-{session_id}"
+        self.callbacks[job_id] = on_finish
+        return {"id": job_id}
 
     async def finish(self, job_id: str) -> None:
         await self.callbacks[job_id]()

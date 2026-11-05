@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -9,17 +10,35 @@ from playwright.async_api import Error as PlaywrightError
 
 from .artifacts import SessionArtifactService
 from .network_inspector import url_origin
-from .utils import utc_now
+from .utils import spawn_background_task, utc_now
 
 logger = logging.getLogger(__name__)
 
 # Name attempts before `_reserve` gives up. It runs on the event loop.
 _RESERVE_ATTEMPTS = 20
+DEFAULT_DOWNLOAD_MAX_BYTES = 256 * 1024 * 1024
+DEFAULT_DOWNLOADS_MAX_PER_SESSION = 100
+
+
+def _loop_is_running() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
 
 
 class DownloadCaptureService:
-    def __init__(self, artifacts: SessionArtifactService) -> None:
+    def __init__(
+        self,
+        artifacts: SessionArtifactService,
+        *,
+        max_bytes: int = DEFAULT_DOWNLOAD_MAX_BYTES,
+        max_per_session: int = DEFAULT_DOWNLOADS_MAX_PER_SESSION,
+    ) -> None:
         self.artifacts = artifacts
+        self.max_bytes = max_bytes
+        self.max_per_session = max_per_session
 
     async def capture(self, session: Any, download: Any) -> dict[str, Any]:
         suggested = Path(str(getattr(download, "suggested_filename", "") or "")).name
@@ -27,29 +46,65 @@ class DownloadCaptureService:
             # The site picks this name. "." or ".." named the downloads
             # directory or its parent, and the save failed.
             suggested = f"download-{uuid4().hex}"
-        destination = self._reserve(session.artifact_dir / "downloads", suggested)
+        downloads_dir = session.artifact_dir / "downloads"
+        # Counted from the files on disk (the in-memory list is capped), with no await before the name is
+        # reserved, so concurrent downloads cannot all pass the check.
+        if self._saved_count(downloads_dir) >= self.max_per_session:
+            return await self.refuse(
+                session,
+                download,
+                f"session already holds {self.max_per_session} downloads (DOWNLOADS_MAX_PER_SESSION)",
+            )
+        destination = self._reserve(downloads_dir, suggested)
 
         failure: str | None = None
-        status = "completed"
         try:
             await download.save_as(str(destination))
             if hasattr(download, "failure"):
                 failure = await download.failure()
         except Exception:
             failure = "download_save_failed"
-            status = "failed"
+        except BaseException as exc:
+            # Whatever ended the save, the reserved name would count toward the cap for good.
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError as unlink_error:
+                # A save cancelled while Playwright was still opening the file in its own thread: on Windows the
+                # open handle refuses the delete. The exception that ended the save is what goes on.
+                logger.warning(
+                    "could not delete the partial download %s of session %s: %s",
+                    destination.name,
+                    session.id,
+                    unlink_error,
+                )
+            if isinstance(exc, asyncio.CancelledError) and _loop_is_running():
+                # Cancelled mid-save: the browser's copy would stay until its context closes. That delete goes on
+                # in the background (it waits for the download to finish), so the cancellation is neither held
+                # up nor swallowed. Not for a coroutine closed at teardown, which has no loop to run it on.
+                spawn_background_task(self._discard(download))
+            raise
 
-        if failure:
-            status = "failed"
+        oversized = not failure and destination.stat().st_size > self.max_bytes
+        if failure or oversized:
+            # A partial or empty file is no download, and a reserved name would count toward the cap.
+            destination.unlink(missing_ok=True)
+        if oversized:
+            return await self.refuse(
+                session,
+                download,
+                f"download is larger than {self.max_bytes} bytes (DOWNLOAD_MAX_BYTES) and was deleted",
+                cancel=False,
+            )
+        await self._discard(download)
 
         record = {
             "id": uuid4().hex[:12],
             "timestamp": utc_now(),
-            "status": status,
-            "filename": destination.name,
+            "status": "failed" if failure else "completed",
+            "filename": None if failure else destination.name,
             "suggested_filename": suggested,
-            "path": str(destination),
-            "url": f"/artifacts/{session.id}/downloads/{destination.name}",
+            "path": None if failure else str(destination),
+            "url": None if failure else f"/artifacts/{session.id}/downloads/{destination.name}",
             "source_url": getattr(download, "url", None),
             "failure": failure,
         }
@@ -81,6 +136,45 @@ class DownloadCaptureService:
         self._bounded_append(session.downloads, record, limit=100)
         await self.artifacts.append_jsonl(session.artifact_dir / "downloads.jsonl", record)
         return record
+
+    async def refuse(self, session: Any, download: Any, reason: str, *, cancel: bool = True) -> dict[str, Any]:
+        """Record a download the caps turned away, with nothing kept."""
+        if cancel:
+            try:
+                await download.cancel()
+            except PlaywrightError as exc:
+                logger.debug("could not cancel a refused download for session %s: %s", session.id, exc)
+        await self._discard(download)
+        record = {
+            "id": uuid4().hex[:12],
+            "timestamp": utc_now(),
+            "status": "refused",
+            "filename": None,
+            "suggested_filename": None,
+            "path": None,
+            "url": None,
+            "source_url": url_origin(str(getattr(download, "url", "") or "")),
+            "failure": reason,
+        }
+        self._bounded_append(session.downloads, record, limit=100)
+        await self.artifacts.append_jsonl(session.artifact_dir / "downloads.jsonl", record)
+        return record
+
+    @staticmethod
+    async def _discard(download: Any) -> None:
+        """Delete the browser's own copy of a download, which it keeps until its context closes.
+
+        Only the controller's copy (if any) is kept; the browser's would otherwise hold every download
+        a page started, refused ones included.
+        """
+        try:
+            await download.delete()
+        except PlaywrightError as exc:
+            logger.debug("could not delete the browser's copy of a download: %s", exc)
+
+    @staticmethod
+    def _saved_count(directory: Path) -> int:
+        return sum(1 for _ in directory.iterdir()) if directory.is_dir() else 0
 
     @staticmethod
     def _reserve(directory: Path, filename: str) -> Path:

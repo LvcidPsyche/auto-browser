@@ -14,6 +14,7 @@ from .models import (
     AgentJobRecord,
     AgentJobStatus,
     AgentRunRequest,
+    AgentRunResult,
     AgentStepRequest,
     AgentStepResult,
     OperatorIdentity,
@@ -22,6 +23,10 @@ from .session_ownership import acting_as
 from .utils import PRIVATE_FILE_MODE, atomic_write_text, record_path, utc_now
 
 logger = logging.getLogger(__name__)
+
+
+class _AlreadyFinished(ValueError):
+    """AgentJobQueue._withdraw found nothing to take back: the job has already finished."""
 
 
 class AgentJobStore:
@@ -53,11 +58,12 @@ class AgentJobStore:
         request: dict,
         operator=None,
         parent_job_id: str | None = None,
+        job_id: str | None = None,
     ) -> AgentJobRecord:
         async with self._lock:
             now = utc_now()
             record = AgentJobRecord(
-                id=uuid4().hex[:12],
+                id=job_id or uuid4().hex[:12],
                 session_id=session_id,
                 kind=kind,  # type: ignore[arg-type]
                 status="queued",
@@ -67,7 +73,19 @@ class AgentJobStore:
                 parent_job_id=parent_job_id,
                 operator=operator,
             )
-            await asyncio.to_thread(self._write_sync, record)
+            write = asyncio.ensure_future(asyncio.to_thread(self._write_sync, record))
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                # A thread cannot be stopped, so the record may still land: keep the lock until it has, however
+                # often this call is cancelled meanwhile, so a caller handling the cancellation
+                # (AgentJobQueue._enqueue) finds the record under the lock.
+                while not write.done():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.wait([write])
+                if not write.cancelled() and write.exception() is not None:
+                    logger.error("agent job %s could not be written: %s", record.id, write.exception())
+                raise
             return record
 
     async def update(self, record: AgentJobRecord) -> None:
@@ -101,6 +119,10 @@ class AgentJobStore:
     async def request_cancel(self, job_id: str) -> tuple[AgentJobRecord, bool]:
         async with self._lock:
             return await asyncio.to_thread(self._request_cancel_sync, job_id)
+
+    async def interrupt_queued(self, job_id: str) -> tuple[AgentJobRecord, bool]:
+        async with self._lock:
+            return await asyncio.to_thread(self._interrupt_queued_sync, job_id)
 
     async def discard(self, job_id: str) -> tuple[AgentJobRecord, bool]:
         async with self._lock:
@@ -212,6 +234,16 @@ class AgentJobStore:
             return record, False
         raise ValueError("Only queued or running jobs can be cancelled")
 
+    def _interrupt_queued_sync(self, job_id: str) -> tuple[AgentJobRecord, bool]:
+        record = self._get_sync(job_id)
+        if record.status != "queued":
+            return record, False
+        record.status = "interrupted"
+        record.error = "agent_job_interrupted"
+        record.updated_at = utc_now()
+        self._write_sync(record)
+        return record, True
+
     def _discard_sync(self, job_id: str) -> tuple[AgentJobRecord, bool]:
         record = self._get_sync(job_id)
         if record.status in {"running", "cancelling"}:
@@ -252,20 +284,19 @@ class AgentJobQueue:
         self.worker_count = max(1, worker_count)
         self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)
         self._workers: list[asyncio.Task] = []
+        self._requeue_task: asyncio.Task[None] | None = None
         self._started = False
         self.audit = audit_store
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._cancellation_reasons: dict[str, str] = {}
+        # Jobs done running whose task is still in its finish callback: _withdraw must not cancel those.
+        self._finishing: set[str] = set()
         # job_id -> coroutine function invoked once the job reaches a terminal
         # state, whatever that state is. Used by callers that created a session
         # solely to run this job and must close it afterwards (see CronService).
         # Deliberately in-memory: if the controller restarts, the browser
         # sessions these callbacks would close are gone with it.
         self._on_finish: dict[str, Callable[[], Awaitable[None]]] = {}
-
-    def on_finish(self, job_id: str, callback: Callable[[], Awaitable[None]]) -> None:
-        """Register a callback to run when `job_id` reaches a terminal state."""
-        self._on_finish[job_id] = callback
 
     async def _run_finish_callback(self, job_id: str) -> None:
         callback = self._on_finish.pop(job_id, None)
@@ -282,15 +313,32 @@ class AgentJobQueue:
         await self.store.startup()
         await self.store.mark_running_interrupted()
         queued = await self.store.list(status="queued")
-        for record in reversed(queued):
-            await self.queue.put(record.id)
         self._workers = [
             asyncio.create_task(self._worker_loop(index), name=f"agent-job-worker-{index}")
             for index in range(self.worker_count)
         ]
+        # The queue holds 100: with more records than that on disk, putting them here would wait for room
+        # that only a worker can make, so a task puts them (oldest first) while startup returns.
+        self._requeue_task = asyncio.create_task(
+            self._requeue([record.id for record in reversed(queued)]), name="agent-job-requeue"
+        )
         self._started = True
 
+    async def _requeue(self, job_ids: list[str]) -> None:
+        for job_id in job_ids:
+            await self.queue.put(job_id)
+
     async def shutdown(self) -> None:
+        if self._requeue_task is not None:
+            self._requeue_task.cancel()
+            try:
+                await self._requeue_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                # The workers still have to be stopped below.
+                logger.exception("the agent job re-queue failed")
+            self._requeue_task = None
         for worker in self._workers:
             worker.cancel()
         for worker in self._workers:
@@ -324,8 +372,21 @@ class AgentJobQueue:
     async def enqueue_step(self, session_id: str, payload: AgentStepRequest) -> dict:
         return await self._enqueue(session_id, "agent_step", payload)
 
-    async def enqueue_run(self, session_id: str, payload: AgentRunRequest) -> dict:
-        return await self._enqueue(session_id, "agent_run", payload)
+    async def enqueue_run(
+        self,
+        session_id: str,
+        payload: AgentRunRequest,
+        *,
+        on_finish: Callable[[], Awaitable[None]] | None = None,
+    ) -> dict:
+        """Queue a run. `on_finish` runs once the job reaches a terminal state, whatever that state is.
+
+        It is registered before the job is visible to a worker, so a job that finishes at once still calls
+        it. A caller that passes one owns the session the job runs in and closes it there: if the enqueue
+        is cancelled after the job exists, the job is withdrawn too (recorded as interrupted), so none is
+        left on a closed session.
+        """
+        return await self._enqueue(session_id, "agent_run", payload, on_finish=on_finish)
 
     async def resume_job(self, job_id: str, *, max_steps: int | None = None) -> dict:
         source = await self._accessible(job_id)
@@ -361,28 +422,50 @@ class AgentJobQueue:
     async def cancel_job(self, job_id: str) -> dict:
         await self._accessible(job_id)
         record, changed = await self.store.request_cancel(job_id)
+        task = self._running_tasks.get(job_id) if record.status == "cancelling" else None
+        if task is not None:
+            # Before anything is audited: the record already says cancelling, and an audit that fails (a full
+            # disk) used to raise here and leave the job running.
+            self._cancellation_reasons[job_id] = "user"
+            task.cancel()
         if changed:
-            await self._audit("agent_job_cancel_requested", record.status, record)
+            await self._audit_quietly("agent_job_cancel_requested", record.status, record)
         if record.status == "cancelled":
             if changed:
-                await self._audit("agent_job_cancelled", "cancelled", record)
+                await self._audit_quietly("agent_job_cancelled", "cancelled", record)
             return self._public_record(record)
 
-        task = self._running_tasks.get(job_id)
         if task is None:
             record = await self.store.finish_cancelled(job_id, user_cancelled=False)
-            await self._audit("agent_job_interrupted", "interrupted", record)
+            await self._audit_quietly("agent_job_interrupted", "interrupted", record)
             return self._public_record(record)
 
-        self._cancellation_reasons[job_id] = "user"
-        task.cancel()
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=5)
-        except asyncio.CancelledError:
-            pass
-        except asyncio.TimeoutError:
-            return self._public_record(await self.store.get(job_id))
+        # The worker records how the job ended. Neither its cancellation nor an error of its own is raised over this
+        # cancel, and a cancellation of this call is not swallowed (wait_for(shield(task)) did both).
+        await asyncio.wait([task], timeout=5)
         return self._public_record(await self.store.get(job_id))
+
+    async def _withdraw(self, job_id: str) -> None:
+        """Take back a job whose caller gave up on it while queuing it (a cron trigger cancelled mid-enqueue).
+
+        Nobody asked to cancel it, so it is recorded as a restart or a shutdown records the jobs it stops,
+        interrupted, not as an operator's cancel: a queued job is marked before a worker can start it, and a
+        running one is stopped the way shutdown stops it. Raises _AlreadyFinished for a job that already finished.
+        """
+        record, changed = await self.store.interrupt_queued(job_id)
+        if changed:
+            await self._audit_quietly("agent_job_interrupted", "interrupted", record)
+            return
+        task = self._running_tasks.get(job_id)
+        # The task of a finished job may still be running its finish callback (closing its session): cancelled, the
+        # close never happened, and nothing else would close the session. Its record can still say running when the
+        # write of its end failed, so the in-memory mark counts as much as the record.
+        if task is None or job_id in self._finishing or record.status not in {"running", "cancelling"}:
+            raise _AlreadyFinished(f"agent job {job_id} has already finished")
+        # Any reason but "user" makes the worker record an interruption; an operator's cancel under way keeps its own.
+        self._cancellation_reasons.setdefault(job_id, "withdrawn")
+        task.cancel()
+        await asyncio.wait([task], timeout=5)
 
     async def _enqueue(
         self,
@@ -391,22 +474,53 @@ class AgentJobQueue:
         payload: AgentStepRequest | AgentRunRequest,
         *,
         parent_job_id: str | None = None,
+        on_finish: Callable[[], Awaitable[None]] | None = None,
     ) -> dict:
-        record = await self.store.create(
-            session_id=session_id,
-            kind=kind,
-            request=payload.model_dump(),
-            operator=get_current_operator(),
-            parent_job_id=parent_job_id,
-        )
+        # Made here, so a cancellation during the write still knows which record it left behind.
+        job_id = uuid4().hex[:12]
+        try:
+            record = await self.store.create(
+                session_id=session_id,
+                kind=kind,
+                request=payload.model_dump(),
+                operator=get_current_operator(),
+                parent_job_id=parent_job_id,
+                job_id=job_id,
+            )
+        except asyncio.CancelledError:
+            # The record may have landed queued, and nothing would put it on the queue now: the next startup
+            # would run it after its caller gave up on it (a cron trigger has closed its session by then).
+            try:
+                await self._withdraw(job_id)
+            except KeyError:
+                pass  # cancelled before the write began: there is no record
+            except Exception:
+                logger.exception("agent job %s was left queued after its create was cancelled", job_id)
+            raise
+        if on_finish is not None:
+            self._on_finish[record.id] = on_finish
         try:
             self.queue.put_nowait(record.id)
         except asyncio.QueueFull:
+            self._on_finish.pop(record.id, None)
             record.status = "failed"
             record.error = "Job queue is full (max 100 queued jobs)"
             await self.store.update(record)
             raise RuntimeError("Job queue is at capacity. Try again later.")
-        await self._audit("agent_job_enqueued", "queued", record)
+        try:
+            await self._audit("agent_job_enqueued", "queued", record)
+        except BaseException:
+            if on_finish is not None:
+                # The caller is about to close the session this job runs in: take the job back first.
+                try:
+                    await self._withdraw(record.id)
+                except _AlreadyFinished:
+                    pass  # there is nothing to take back
+                except Exception:
+                    logger.exception("agent job %s could not be withdrawn before its session closes", record.id)
+                finally:
+                    self._on_finish.pop(record.id, None)
+            raise
         return self._public_record(record)
 
     async def _worker_loop(self, worker_index: int) -> None:
@@ -425,11 +539,17 @@ class AgentJobQueue:
                         with contextlib.suppress(asyncio.CancelledError):
                             await task
                     raise
-            except Exception as exc:  # pragma: no cover - defensive logging
+            except Exception as exc:
                 logger.exception("agent job worker %s crashed on %s: %s", worker_index, job_id, exc)
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    # Told to stop, and the job failed as it stopped (its record could not be written): stop anyway,
+                    # or this worker goes on serving the queue and shutdown waits for it forever.
+                    raise asyncio.CancelledError from exc
             finally:
                 self._running_tasks.pop(job_id, None)
                 self._cancellation_reasons.pop(job_id, None)
+                self._finishing.discard(job_id)
                 self.queue.task_done()
 
     async def _process_job(self, job_id: str) -> None:
@@ -441,6 +561,7 @@ class AgentJobQueue:
         finally:
             # Runs on success, failure, and cancellation alike. Whoever created a
             # session purely to host this job gets it back here or not at all.
+            self._finishing.add(job_id)
             await self._run_finish_callback(job_id)
 
     async def _queued_by(self, job_id: str) -> OperatorIdentity | None:
@@ -456,7 +577,13 @@ class AgentJobQueue:
             # still needs releasing. _process_job's finally does that.
             return
 
-        await self._audit("agent_job_started", "running", record)
+        try:
+            await self._audit("agent_job_started", "running", record)
+        except asyncio.CancelledError:
+            # Stopped as it started: recorded as a stop during the run is, or the record stays "running" or
+            # "cancelling" until the next restart.
+            await self._record_stop(job_id)
+            raise
 
         try:
             if record.kind == "agent_step":
@@ -492,12 +619,16 @@ class AgentJobQueue:
                     workflow_profile=request.workflow_profile,
                     on_step=checkpoint_step,
                 )
-            record = await self.store.finish(record.id, status="completed", result=result.model_dump(), error=None)
+            # A run or step that ended in "error" did not complete: record it failed, with the reason it gave.
+            failed = result.status == "error"
+            record = await self.store.finish(
+                record.id,
+                status="failed" if failed else "completed",
+                result=result.model_dump(),
+                error=self._reported_error(result) if failed else None,
+            )
         except asyncio.CancelledError:
-            user_cancelled = self._cancellation_reasons.get(job_id) == "user"
-            record = await self.store.finish_cancelled(job_id, user_cancelled=user_cancelled)
-            event_type = "agent_job_cancelled" if user_cancelled else "agent_job_interrupted"
-            await self._audit(event_type, record.status, record)
+            await self._record_stop(job_id)
             raise
         except Exception as exc:
             # Previously a bare `except Exception` that recorded the constant
@@ -513,6 +644,22 @@ class AgentJobQueue:
                 error=detail[:500],
             )
         await self._audit("agent_job_finished", record.status, record)
+
+    async def _record_stop(self, job_id: str) -> None:
+        """Record a job that was stopped: cancelled by its operator, or interrupted (a shutdown, a withdrawal)."""
+        user_cancelled = self._cancellation_reasons.get(job_id) == "user"
+        record = await self.store.finish_cancelled(job_id, user_cancelled=user_cancelled)
+        event_type = "agent_job_cancelled" if user_cancelled else "agent_job_interrupted"
+        # Quietly: the job has stopped and its record says so; an error raised here would take the place of the
+        # CancelledError the caller re-raises.
+        await self._audit_quietly(event_type, record.status, record)
+
+    async def _audit_quietly(self, event_type: str, status: str, record: AgentJobRecord) -> None:
+        """Audit a cancellation or interruption that has already taken effect: a failure is logged, never raised."""
+        try:
+            await self._audit(event_type, status, record)
+        except Exception:
+            logger.exception("agent job %s: the %s audit event could not be written", record.id, event_type)
 
     async def _audit(self, event_type: str, status: str, record: AgentJobRecord) -> None:
         if self.audit is None:
@@ -533,6 +680,13 @@ class AgentJobQueue:
         payload["checkpoint_count"] = len(record.checkpoints)
         payload["resumable"] = cls._is_resumable(record)
         return payload
+
+    @classmethod
+    def _reported_error(cls, result: AgentStepResult | AgentRunResult) -> str:
+        """Why a step or run reported "error": the error of the step that did (the last such one for a run)."""
+        steps = [result] if isinstance(result, AgentStepResult) else result.steps
+        reasons = [step.error for step in steps if step.status == "error" and step.error]
+        return cls._truncate(reasons[-1] if reasons else "the agent reported an error without a reason", 500) or ""
 
     @staticmethod
     def _is_resumable(record: AgentJobRecord) -> bool:

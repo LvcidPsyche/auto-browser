@@ -187,8 +187,9 @@ terminate() {
 
 trap terminate INT TERM
 
-wait "${AUTOSSH_PID}"
-AUTOSSH_STATUS=$?
+# Under `set -e` a bare wait on a failed tunnel would end the script before the final status is written.
+AUTOSSH_STATUS=0
+wait "${AUTOSSH_PID}" || AUTOSSH_STATUS=$?
 kill "${HEARTBEAT_PID}" >/dev/null 2>&1 || true
 wait "${HEARTBEAT_PID}" >/dev/null 2>&1 || true
 write_metadata "inactive"

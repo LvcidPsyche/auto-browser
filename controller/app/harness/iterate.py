@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from ..session_ownership import may_use, verified_operator
 from .contracts import TaskContract
@@ -21,6 +21,9 @@ from .verifier.programmatic import ProgrammaticVerifier
 
 logger = logging.getLogger(__name__)
 
+# Validation context key for a run record read back from run.json.
+_STORED_RECORD = "stored_record"
+
 
 class HarnessAttempt(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -29,6 +32,33 @@ class HarnessAttempt(BaseModel):
     trace_path: str
     verification: VerificationResult
     created_at: float = Field(default_factory=time.time)
+    # Set once the verification has been scrubbed, and kept when the run is saved. A run.json written by 1.14.x
+    # has no marker (its verification is raw), so it is scrubbed when read; one this version wrote is not scrubbed
+    # again, so a scrubber that fails later cannot drop the run from a listing.
+    scrubbed: bool = False
+
+    @model_validator(mode="after")
+    def _scrub_verification(self, info: ValidationInfo) -> "HarnessAttempt":
+        if self.scrubbed:
+            return self
+        stored = bool(info.context and info.context.get(_STORED_RECORD))
+        try:
+            self.verification = self.verification.scrubbed()
+        except Exception as exc:
+            if not stored:
+                raise
+            # A record that is already on disk: keep the run, with the verdict and nothing else of its result.
+            logger.warning(
+                "harness attempt %s: its stored verification was withheld (%s)", self.index, type(exc).__name__
+            )
+            self.verification = VerificationResult(
+                passed=self.verification.passed,
+                confidence=self.verification.confidence,
+                notes="verification withheld: it could not be scrubbed",
+                backend="harness",
+            )
+        self.scrubbed = True
+        return self
 
 
 class HarnessRunRecord(BaseModel):
@@ -74,7 +104,7 @@ class HarnessRunStore:
         path = self.run_dir(run_id) / "run.json"
         if not path.exists():
             raise KeyError(run_id)
-        return HarnessRunRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        return _read_record(path)
 
     def list(
         self,
@@ -86,7 +116,7 @@ class HarnessRunStore:
         records: list[HarnessRunRecord] = []
         for path in sorted(self.runs_root.glob("*/run.json"), key=lambda item: item.stat().st_mtime, reverse=True):
             try:
-                record = HarnessRunRecord.model_validate_json(path.read_text(encoding="utf-8"))
+                record = _read_record(path)
             except Exception as exc:
                 logger.debug("skipping unreadable harness run record %s: %s", path, exc)
                 continue
@@ -98,6 +128,10 @@ class HarnessRunStore:
             if len(records) >= limit:
                 break
         return records
+
+
+def _read_record(path: Path) -> HarnessRunRecord:
+    return HarnessRunRecord.model_validate_json(path.read_text(encoding="utf-8"), context={_STORED_RECORD: True})
 
 
 class HarnessService:
@@ -238,7 +272,8 @@ class HarnessService:
             record.decision = decision
             record.status = decision.status
             if verification.passed is not True:
-                _append_reflexion(strategy_path, verification, attempt_index)
+                # strategy.md is a stored file: the attempt's scrubbed copy, not the verifier's raw result.
+                _append_reflexion(strategy_path, record.attempts[-1].verification, attempt_index)
             self.store.save(record)
             if not decision.should_continue:
                 break
@@ -319,7 +354,9 @@ class HarnessService:
             contract_hash=contract.hash(),
             nest_run_dir=False,
         )
-        recorder.append("model_decision", {"strategy": "initial" if attempt_index == 1 else "reflexion"})
+        # The mock attempt's decision and action are made up, not a model's or a browser's: they say so.
+        strategy = "initial" if attempt_index == 1 else "reflexion"
+        recorder.append("model_decision", {"strategy": strategy, "simulated": True})
         if orchestrator is not None and session_id:
             result = await orchestrator.run(
                 session_id=session_id,
@@ -337,7 +374,7 @@ class HarnessService:
             return trace
 
         final_observation = mock_final_observation or contract.metadata.get("mock_final_observation") or {}
-        recorder.append("action", {"action": "mock_attempt", "goal": contract.goal}, step_idx=1)
+        recorder.append("action", {"action": "mock_attempt", "goal": contract.goal, "simulated": True}, step_idx=1)
         recorder.append("screenshot", {"available": False, "reason": "mock_mode"}, step_idx=1)
         return recorder.finalize(
             final_observation=final_observation,

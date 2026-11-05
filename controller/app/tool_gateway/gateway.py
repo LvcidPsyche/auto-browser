@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import datetime
+import decimal
 import difflib
+import enum
 import hashlib
 import json
 import logging
+import math
 import re
 import time
-from pathlib import Path
+import uuid
+from pathlib import Path, PurePath
 from typing import Any, get_args
 
 from playwright.async_api import Error as PlaywrightError
@@ -21,9 +26,16 @@ from ..approvals import CONTROLLER_SCOPE, ApprovalRequiredError, given_back_note
 from ..browser.element_ids import refuse_selector_hint
 from ..browser.page_read import MOVED_DETAIL, bounded, locked_read, start_read
 from ..browser.request_gate import block_summary
+from ..browser.services.actions import BrowserActionService
 from ..browser.services.diagnostics import checked_screenshot
 from ..browser_sandbox import browser_sandbox_status
-from ..browser_scripts import PAGE_TEXT_SCRIPT
+from ..browser_scripts import (
+    FIND_ELEMENTS_SELECTOR_SCRIPT,
+    FIND_ELEMENTS_TEXT_SCRIPT,
+    PAGE_TEXT_SCRIPT,
+    cap_found_elements,
+)
+from ..cron_service import CronJobDisabledError
 from ..models import (
     ActionName,
     ApprovalOrigin,
@@ -36,6 +48,7 @@ from ..models import (
 from ..readiness import run_readiness_checks
 from ..result_shaping import inline_screenshot_path, shape_mcp_result
 from ..run_as import controller_user_status
+from ..session_ownership import verified_operator
 from ..tool_inputs import (
     EVAL_JS_DEFAULT_TIMEOUT_MS,
     AgentJobIdInput,
@@ -181,6 +194,55 @@ def _read_inline_image(path: Path) -> bytes | None:
 _ACTION_NAMES = frozenset(get_args(ActionName))
 
 
+# Types strict JSON has no form for that a result may still carry, sent as their text.
+_SENT_AS_TEXT = (datetime.date, datetime.time, PurePath, uuid.UUID, decimal.Decimal)
+
+
+def _json_safe(value: Any) -> Any:
+    """``value`` with only what strict JSON can hold: NaN and the infinities become null, a tuple or set a list,
+    an Enum its value, and a known type (_SENT_AS_TEXT) its text.
+
+    Any other object raises TypeError rather than going out as its ``str()``: a repr is not a result anyone shaped,
+    and can hold what model_dump would have left out (a BrowserSession's holds its totp_secret).
+    """
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {_json_key(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, enum.Enum):
+        return _json_safe(value.value)
+    if isinstance(value, _SENT_AS_TEXT):
+        return str(value)
+    raise TypeError(f"a {type(value).__name__} is not sent in a tool result")
+
+
+def _json_key(key: Any) -> str:
+    """A dict key as json.dumps spells it (``1``, ``true``, ``null``), or a known type's text; any other refused."""
+    if isinstance(key, str):
+        return key
+    if key is None or isinstance(key, (bool, int, float)):
+        return json.dumps(key)
+    if isinstance(key, _SENT_AS_TEXT):
+        return str(key)
+    raise TypeError(f"a {type(key).__name__} key is not sent in a tool result")
+
+
+def _json_safe_detail(detail: dict[str, Any]) -> dict[str, Any]:
+    """An error's detail as strictly as a result (_json_safe), less any entry that cannot be: an error answer
+    still goes out, with what it can say."""
+    safe: dict[str, Any] = {}
+    for key, value in detail.items():
+        try:
+            safe[_json_key(key)] = _json_safe(value)
+        except (TypeError, ValueError, RecursionError) as exc:
+            logger.warning("left %r out of an error's detail: %s", key, exc)
+    return safe
+
+
 def _error_text(err: dict[str, Any]) -> str:
     # Pydantic prefixes a validator's own message with "Value error, ", which
     # reads as noise to the agent that has to fix the call.
@@ -212,6 +274,9 @@ class McpToolGateway:
         self.vision_targeter = vision_targeter
         self.harness_service = harness_service
         self.metrics = metrics
+        # Serializes creating the implicit session: two session-less calls at once each saw no live session and
+        # each created one. Keyed by the owner a create records (verified_operator), which is whose listing shows it.
+        self._implicit_session_locks: dict[str | None, asyncio.Lock] = {}
         self._registry = ToolRegistry(
             tool_profile=tool_profile,
             tool_packs=tool_packs,
@@ -338,29 +403,27 @@ class McpToolGateway:
                 ):
                     result = await spec.handler(arguments)
             result = shape_mcp_result(spec.name, result, detail=getattr(arguments, "detail", "compact"))
+            try:
+                result = _json_safe(result)
+                text = json.dumps(result, ensure_ascii=False, allow_nan=False)
+            except (TypeError, ValueError, RecursionError):
+                # The handler has run: say so, rather than "Tool execution failed", which reads as nothing done.
+                logger.exception("tool %s: result could not be encoded", payload.name)
+                return self._error_response(
+                    f"{payload.name} ran, but its result could not be encoded. Observe the page before acting again."
+                )
             # The JSON stays the first block: clients (and the LangChain
             # adapter) read content[0].text as the result.
-            content: list[McpToolCallContent | McpImageContent] = [
-                McpToolCallContent(text=json.dumps(result, ensure_ascii=False))
-            ]
+            content: list[McpToolCallContent | McpImageContent] = [McpToolCallContent(text=text)]
             image = await self._inline_image(spec.name, result)
             if image is not None:
                 content.append(image)
             return McpToolCallResponse(content=content, structuredContent=result, isError=False)
         except ApprovalRequiredError as exc:
-            detail = exc.payload
-            return McpToolCallResponse(
-                content=[McpToolCallContent(text=json.dumps(detail, ensure_ascii=False))],
-                structuredContent=detail,
-                isError=True,
-            )
+            return self._detail_response(exc.payload)
         except BrowserActionError as exc:
-            detail = exc.payload
-            return McpToolCallResponse(
-                content=[McpToolCallContent(text=json.dumps(detail, ensure_ascii=False))],
-                structuredContent=detail,
-                isError=True,
-            )
+            # Its details carry snapshots read from the page, which can hold a NaN.
+            return self._detail_response(exc.payload)
         except ValidationError as exc:
             # Invalid tool arguments — report the field errors so the calling
             # agent can fix its call, instead of "Tool execution failed".
@@ -382,6 +445,10 @@ class McpToolGateway:
                 },
                 exc,
             )
+        except CronJobDisabledError as exc:
+            # The agent can enable the job, or stop triggering it; a code tells it which refusal this is.
+            message = str(exc.args[0]) if exc.args else "job is disabled"
+            return self._refusal_response(message, {"error": message, "code": "cron_job_disabled"}, exc)
         except (ValueError, KeyError, RuntimeError) as exc:
             # Handlers raise these with operator-facing messages ("Provide
             # source_selector or source_x/source_y", "Memory profile not found").
@@ -484,7 +551,17 @@ class McpToolGateway:
             structured = {**structured, **notes}
             message = f"{message} ({notes['approval_given_back']['message']})"
         return McpToolCallResponse(
-            content=[McpToolCallContent(text=message)], structuredContent=structured, isError=True
+            content=[McpToolCallContent(text=message)], structuredContent=_json_safe_detail(structured), isError=True
+        )
+
+    @staticmethod
+    def _detail_response(detail: dict[str, Any]) -> McpToolCallResponse:
+        """An error answer whose text is its detail as JSON, encoded as strictly as a result."""
+        structured = _json_safe_detail(detail)
+        return McpToolCallResponse(
+            content=[McpToolCallContent(text=json.dumps(structured, ensure_ascii=False, allow_nan=False))],
+            structuredContent=structured,
+            isError=True,
         )
 
     @staticmethod
@@ -510,13 +587,22 @@ class McpToolGateway:
         # was reported "ambiguous" — with MAX_SESSIONS=1, every create → close →
         # create cycle broke the convenience for good. Only a live session can
         # be acted on, so only live sessions are candidates.
-        sessions = [item for item in await self.manager.list_sessions() if item.get("live") is True]
+        sessions = await self._live_sessions()
+        if not sessions and spec.name in IMPLICIT_SESSION_CREATE_TOOLS:
+            # Only a create is serialized, and only among the callers it would leave a session to (one owner):
+            # listed again under the lock, since a call that held it may have created one meanwhile. The key is the
+            # token-verified operator; every caller without a token shares the None key. A token operator and an
+            # unauthenticated caller therefore hold different locks and can each create a session when both see
+            # none live. The token operator sees both sessions (its own and the unowned one), so its next
+            # session-less call then answers ambiguous_session; the unauthenticated caller sees only the unowned one.
+            async with self._implicit_session_locks.setdefault(verified_operator(), asyncio.Lock()):
+                sessions = await self._live_sessions()
+                if not sessions:
+                    created = await self.manager.create_session()
+                    return arguments.model_copy(update={"session_id": created["id"]})
         if len(sessions) == 1:
             return arguments.model_copy(update={"session_id": sessions[0]["id"]})
         if not sessions:
-            if spec.name in IMPLICIT_SESSION_CREATE_TOOLS:
-                created = await self.manager.create_session()
-                return arguments.model_copy(update={"session_id": created["id"]})
             raise BrowserActionError(
                 f"{spec.name} needs a session and none are live{self._no_session_hint()}",
                 code="no_session",
@@ -528,6 +614,10 @@ class McpToolGateway:
             code="ambiguous_session",
             action=spec.name,
         )
+
+    async def _live_sessions(self) -> list[dict[str, Any]]:
+        """The calling operator's live sessions (list_sessions shows each caller its own and unowned ones)."""
+        return [item for item in await self.manager.list_sessions() if item.get("live") is True]
 
     def _no_session_hint(self) -> str:
         """How to get a session, naming only tools this controller serves (lean has no create_session)."""
@@ -1007,53 +1097,7 @@ class McpToolGateway:
     async def _find_elements_read(self, session: Any, payload: FindElementsInput) -> dict[str, Any]:
         if payload.query is not None:
             evaluate = session.page.evaluate(
-                """([query, isRegex, context, limit]) => {
-                    let matcher = null;
-                    if (isRegex) {
-                        try {
-                            matcher = new RegExp(query, 'gi');
-                        } catch (e) {
-                            return {__invalid_regex: String((e && e.message) || e)};
-                        }
-                    }
-                    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
-                    const results = [];
-                    let node;
-                    while ((node = walker.nextNode()) && results.length < limit) {
-                        const text = node.textContent || '';
-                        if (!text.trim()) continue;
-                        let matchIndex = -1;
-                        let matchText = '';
-                        if (isRegex) {
-                            matcher.lastIndex = 0;
-                            const m = matcher.exec(text);
-                            if (m) { matchIndex = m.index; matchText = m[0]; }
-                        } else {
-                            const idx = text.toLowerCase().indexOf(query.toLowerCase());
-                            if (idx !== -1) { matchIndex = idx; matchText = text.substr(idx, query.length); }
-                        }
-                        if (matchIndex === -1) continue;
-                        const el = node.parentElement;
-                        if (!el) continue;
-                        const r = el.getBoundingClientRect();
-                        const start = Math.max(0, matchIndex - context);
-                        const end = Math.min(text.length, matchIndex + matchText.length + context);
-                        results.push({
-                            tag: el.tagName.toLowerCase(),
-                            text: text.trim().substring(0, 200),
-                            match: matchText,
-                            context_text: text.substring(start, end).trim(),
-                            value: el.value || null,
-                            href: el.href || null,
-                            id: el.id || null,
-                            class: (typeof el.className === 'string' ? el.className : el.getAttribute('class')) || null,
-                            visible: r.width > 0 && r.height > 0,
-                            x: Math.round(r.x), y: Math.round(r.y),
-                            width: Math.round(r.width), height: Math.round(r.height),
-                        });
-                    }
-                    return results;
-                }""",
+                FIND_ELEMENTS_TEXT_SCRIPT,
                 [payload.query, payload.regex, payload.context, payload.limit],
             )
             try:
@@ -1072,30 +1116,16 @@ class McpToolGateway:
                     code="invalid_regex",
                     action="find_elements",
                 )
+            elements = cap_found_elements(elements, payload.context, BrowserActionService.is_sensitive_field)
             return {"session_id": payload.session_id, "query": payload.query, "elements": elements}
 
         elements = await bounded(
             session.page.evaluate(
-                """([selector, limit]) => {
-                const els = [...document.querySelectorAll(selector)].slice(0, limit);
-                return els.map(el => {
-                    const r = el.getBoundingClientRect();
-                    return {
-                        tag: el.tagName.toLowerCase(),
-                        text: el.innerText?.substring(0, 200) || '',
-                        value: el.value || null,
-                        href: el.href || null,
-                        id: el.id || null,
-                        class: (typeof el.className === 'string' ? el.className : el.getAttribute('class')) || null,
-                        visible: r.width > 0 && r.height > 0,
-                        x: Math.round(r.x), y: Math.round(r.y),
-                        width: Math.round(r.width), height: Math.round(r.height),
-                    };
-                });
-            }""",
+                FIND_ELEMENTS_SELECTOR_SCRIPT,
                 [payload.selector, payload.limit],
             )
         )
+        elements = cap_found_elements(elements, 0, BrowserActionService.is_sensitive_field)
         return {"session_id": payload.session_id, "selector": payload.selector, "elements": elements}
 
     async def _drag_drop(self, payload: DragDropInput) -> dict[str, Any]:

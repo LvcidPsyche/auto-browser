@@ -200,7 +200,9 @@ export async function launchWithSandboxPolicy({
         const verifyMs = Math.max(0, Math.min(attemptTimeoutMs, deadline - Date.now()));
         verdict = await withinTimeout(Promise.resolve().then(() => verify(server)), verifyMs);
       } catch (error) {
-        verdict = { ok: false, detail: `the sandbox check failed: ${String(error?.message ?? error).split("\n")[0]}` };
+        // The first line of a failed connect can carry the endpoint URL, whose path is the server's only secret.
+        const reason = redactEndpoints(String(error?.message ?? error).split("\n")[0]);
+        verdict = { ok: false, detail: `the sandbox check failed: ${reason}` };
       }
       if (verdict.ok) {
         return {
@@ -428,4 +430,11 @@ export async function writeState(path, state) {
   const tmp = `${path}.tmp`;
   await writeFile(tmp, `${JSON.stringify(state)}\n`, "utf-8");
   await rename(tmp, path);
+}
+
+// The Playwright server's endpoint (ws://<host>:<port>/<path>) is its only secret: the path is the credential. Text that
+// is printed (a report, a log line, an error that echoes the URL) goes through this first, which keeps scheme, host and
+// port, so the line still says where it pointed.
+export function redactEndpoints(text) {
+  return String(text).replace(/(wss?:\/\/[^/\s"'<>]+)\/[^\s"'<>]*/g, "$1/<redacted>");
 }

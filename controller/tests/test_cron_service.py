@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.audit import get_current_operator
-from app.cron_service import CronService
+from app.cron_service import CronJobDisabledError, CronService
 from app.models import OperatorIdentity
 from app.session_ownership import acting_as
 
@@ -94,6 +94,48 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
         stored = service._load()[created["id"]]
         self.assertEqual(stored["last_status"], "queued")
         self.assertEqual(stored["run_count"], 1)
+
+    async def _disabled_job(self, **create):
+        manager = MagicMock()
+        manager.create_session = AsyncMock(return_value={"id": "session-1"})
+        queue = MagicMock()
+        queue.enqueue_run = AsyncMock(return_value={"id": "agent-job-1"})
+        service = CronService(self.store_path, job_queue=queue, manager=manager)
+        job = await service.create_job(name="n", goal="g", schedule="0 9 * * *", webhook_enabled=True, **create)
+        await service.update_job(job["id"], {"enabled": False})
+        return service, job, manager
+
+    async def test_a_disabled_job_is_not_run_by_webhook_or_trigger_job(self) -> None:
+        service, job, manager = await self._disabled_job()
+
+        with self.assertRaisesRegex(CronJobDisabledError, "job is disabled; enable it to run it"):
+            await service.trigger_via_webhook(job["id"], job["webhook_key"])
+        with self.assertRaisesRegex(CronJobDisabledError, "job is disabled; enable it to run it"):
+            await service.trigger_job(job["id"])
+        manager.create_session.assert_not_awaited()
+
+        # A wrong key is still a permission error: a disabled job does not tell a stranger its state.
+        with self.assertRaises(PermissionError):
+            await service.trigger_via_webhook(job["id"], "wrong")
+
+        await service.update_job(job["id"], {"enabled": True})
+        self.assertTrue((await service.trigger_job(job["id"]))["triggered"])
+        manager.create_session.assert_awaited_once()
+
+    async def test_the_trigger_route_answers_409_for_a_disabled_job(self) -> None:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from app.routes.operations import create_operations_router
+
+        service, job, manager = await self._disabled_job()
+        app = FastAPI()
+        app.include_router(create_operations_router(manager=manager, proxy_store=None, cron_service=service))
+        response = TestClient(app, raise_server_exceptions=False).post(
+            f"/crons/{job['id']}/trigger", json={"webhook_key": job["webhook_key"]}
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("job is disabled", response.json()["detail"])
 
     async def test_scheduler_registration_and_store_error_paths(self) -> None:
         service = CronService(self.store_path)
@@ -215,6 +257,101 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(service._active_runs, {})
 
+    async def test_cancel_during_enqueue_frees_the_slot_and_closes_the_session(self) -> None:
+        started = asyncio.Event()
+
+        async def hang_in_enqueue(*_args, **_kwargs):
+            started.set()
+            await asyncio.sleep(30)
+
+        manager = MagicMock()
+        manager.create_session = AsyncMock(return_value={"id": "session-1"})
+        manager.close_session = AsyncMock()
+        queue = MagicMock()
+        queue.enqueue_run = AsyncMock(side_effect=hang_in_enqueue)
+        service = CronService(self.store_path, job_queue=queue, manager=manager)
+        created = await service.create_job(name="cancelled", goal="run", webhook_enabled=True)
+
+        task = asyncio.create_task(service.trigger_job(created["id"]))
+        await started.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(service._active_runs, {})
+        manager.close_session.assert_awaited_once_with("session-1")
+        queue.enqueue_run = AsyncMock(return_value={"id": "agent-job-1"})
+        self.assertTrue((await service.trigger_job(created["id"]))["triggered"])
+
+
+class CronQuarantineWarningTests(unittest.IsolatedAsyncioTestCase):
+    """After a corrupt store is set aside, every later start says so while the store is empty."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store_path = Path(self.tmp.name) / "crons.json"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    async def _start_and_stop(self) -> None:
+        service = CronService(self.store_path)
+        await service.startup()
+        await service.shutdown()
+
+    async def test_each_start_warns_while_a_quarantine_file_exists_and_the_store_is_empty(self) -> None:
+        quarantined = self.store_path.with_suffix(".corrupt-20261105T042259Z.json")
+        quarantined.write_text("{truncated", encoding="utf-8")
+
+        for _ in range(2):
+            with self.assertLogs("app.cron_service", level="WARNING") as logged:
+                await self._start_and_stop()
+            self.assertTrue(any(str(quarantined) in line for line in logged.output), logged.output)
+
+    async def test_the_warning_follows_the_real_quarantine_and_says_how_to_silence_it(self) -> None:
+        self.store_path.write_text("{truncated", encoding="utf-8")
+        with self.assertRaises(RuntimeError), self.assertLogs("app.cron_service", level="ERROR"):
+            await self._start_and_stop()
+        quarantined = list(Path(self.tmp.name).glob("crons.corrupt-*.json"))
+        self.assertEqual(len(quarantined), 1)
+
+        with self.assertLogs("app.cron_service", level="WARNING") as logged:
+            await self._start_and_stop()
+
+        self.assertTrue(any(str(quarantined[0]) in line for line in logged.output), logged.output)
+        self.assertTrue(any("move or delete that file to silence this warning" in line for line in logged.output))
+
+    async def test_a_deployment_without_apscheduler_warns_too(self) -> None:
+        self.store_path.with_suffix(".corrupt-20261105T042259Z.json").write_text("{truncated", encoding="utf-8")
+
+        with patch("app.cron_service._APSCHEDULER_AVAILABLE", False):
+            with self.assertLogs("app.cron_service", level="WARNING"):
+                await CronService(self.store_path).startup()
+
+    async def test_glob_characters_in_the_store_name_match_literally(self) -> None:
+        self.store_path = Path(self.tmp.name) / "c[ab]ons.json"
+        mine = self.store_path.with_suffix(".corrupt-20261105T042259Z.json")
+        other = Path(self.tmp.name) / "caons.corrupt-20261105T042259Z.json"
+        mine.write_text("{truncated", encoding="utf-8")
+        other.write_text("{truncated", encoding="utf-8")
+
+        with self.assertLogs("app.cron_service", level="WARNING") as logged:
+            await self._start_and_stop()
+
+        self.assertTrue(any(str(mine) in line for line in logged.output), logged.output)
+        self.assertFalse(any(str(other) in line for line in logged.output), logged.output)
+
+    async def test_no_warning_once_the_store_holds_jobs(self) -> None:
+        self.store_path.with_suffix(".corrupt-20261105T042259Z.json").write_text("{truncated", encoding="utf-8")
+        await CronService(self.store_path).create_job(name="new", goal="g")
+
+        with self.assertNoLogs("app.cron_service", level="WARNING"):
+            await self._start_and_stop()
+
+    async def test_no_warning_without_a_quarantine_file(self) -> None:
+        with self.assertNoLogs("app.cron_service", level="WARNING"):
+            await self._start_and_stop()
+
 
 class CronTriggerIdentityTests(unittest.IsolatedAsyncioTestCase):
     """A job fires as the operator who owns it, and an unowned job fires as nobody.
@@ -233,7 +370,7 @@ class CronTriggerIdentityTests(unittest.IsolatedAsyncioTestCase):
             self.seen["session"] = _who()
             return {"id": "session-1"}
 
-        async def enqueue_run(_session_id, _request):
+        async def enqueue_run(_session_id, _request, **_kwargs):
             self.seen["agent_job"] = _who()
             return {"id": "agent-job-1"}
 

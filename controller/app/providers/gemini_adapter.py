@@ -8,6 +8,15 @@ from .base import BaseProviderAdapter, ProviderDecision
 
 class GeminiAdapter(BaseProviderAdapter):
     provider = "gemini"
+    cli_env_names = (
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_LOCATION",
+        "GOOGLE_GENAI_USE_VERTEXAI",
+        "GEMINI_CLI_HOME",
+    )
 
     @property
     def default_model(self) -> str:

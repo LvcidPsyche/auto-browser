@@ -3,11 +3,11 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .contracts import TaskContract
 from .register import SkillStagingRegistry
-from .trace import TraceEnvelope
+from .trace import TraceEnvelope, _scrub_string, _scrub_text, _scrub_url, _scrub_url_and_path, _scrub_urls_only
 from .verifier.base import VerificationResult, VerifierAdapter
 from .verifier.programmatic import ProgrammaticVerifier
 
@@ -22,6 +22,12 @@ class DriftCheckResult(BaseModel):
     trace_hash: str = ""
     verification: VerificationResult | None = None
     notes: list[str] = Field(default_factory=list)
+
+    @field_validator("verification")
+    @classmethod
+    def _scrub_verification(cls, value: VerificationResult | None) -> VerificationResult | None:
+        # The result is written to drift.json; the verifier's result holds the URL it saw.
+        return value.scrubbed() if value is not None else None
 
 
 class SkillDriftMonitor:
@@ -61,7 +67,7 @@ class SkillDriftMonitor:
         if trace_hash != candidate.trace_hash:
             notes.append("trace hash differs from candidate provenance")
 
-        verification = await self.verifier.verify(contract, trace)
+        verification = await self.verifier.verify(_expecting_scrubbed_text(contract), trace)
         if verification.passed is True and not notes:
             status = "healthy"
         elif verification.passed is None and not notes:
@@ -69,7 +75,8 @@ class SkillDriftMonitor:
         else:
             status = "degraded"
         if verification.notes:
-            notes.append(verification.notes)
+            # drift.json and the drift responses hold the notes: the scrubbed copy, as for `verification`.
+            notes.append(_scrub_string(verification.notes))
 
         result = DriftCheckResult(
             skill_id=skill_id,
@@ -89,6 +96,45 @@ class SkillDriftMonitor:
             if skill_id:
                 results.append(await self.check_candidate(skill_id))
         return results
+
+
+def _scrub_url_contains(value: str) -> str:
+    """A `url_contains` value scrubbed the way the part of the stored URL it should match was.
+
+    The stored URL has its query and fragment rewritten and its host and path read as text. A value with a `?` or `#`
+    is a URL or its tail, and goes through both; one with neither but an `=` (`email=...`, `&email=...`) is a piece of
+    a query, and is scrubbed as one; anything else (a path, bare text) is scrubbed as text, as the stored path was.
+    """
+    if "?" in value or "#" in value:
+        return _scrub_url_and_path(value)
+    if "=" in value:
+        return _scrub_url("?" + value)[1:]
+    return _scrub_text(value)
+
+
+# How the stored trace scrubs the field each kind of postcondition reads. `url_matches` is a regex, left alone.
+_STORED_TEXT_SCRUBBERS = {
+    "url_contains": _scrub_url_contains,
+    "text_contains": _scrub_string,
+    "dom_contains": _scrub_string,
+    "network_response_shape": _scrub_string,
+    "extracted_data_schema": _scrub_urls_only,
+}
+
+
+def _expecting_scrubbed_text(contract: TaskContract) -> TaskContract:
+    """The contract with its expected strings scrubbed the way the stored trace was.
+
+    The candidate keeps a scrubbed trace, so an email the live run matched is "[REDACTED]" there. Only the
+    copy handed to the verifier changes; the contract hash is taken from the original.
+    """
+    postconditions = [
+        item.model_copy(update={"value": _STORED_TEXT_SCRUBBERS[item.kind](item.value)})
+        if item.kind in _STORED_TEXT_SCRUBBERS
+        else item
+        for item in contract.postconditions
+    ]
+    return contract.model_copy(update={"postconditions": postconditions})
 
 
 def _artifact_path(candidate_dir: Path, name: str) -> Path:

@@ -100,7 +100,7 @@ async def test_a_session_driven_through_the_pipeline_exports_a_script_that_repla
 
         await manager.navigate(session_id, f"{origin}/shop")
         await manager.click(session_id, selector="#add")
-        await manager.type(session_id, text="a@b.co", selector="#email")
+        await manager.type(session_id, text="hello world", selector="#email")
         await manager.type(session_id, text="hunter2", selector="#pw")
         await manager.press(session_id, "Tab")
         await manager.select_option(session_id, selector="#size", value="large")
@@ -123,7 +123,7 @@ async def test_a_session_driven_through_the_pipeline_exports_a_script_that_repla
         f"page.goto('{origin}/shop')",
         "page.locator('#add').first.click()",
         "page.locator('#email').first.clear()",
-        "page.locator('#email').first.fill('a@b.co')",
+        "page.locator('#email').first.fill('hello world')",
         "page.locator('#pw').first.clear()",
         "page.locator('#pw').first.fill('<REDACTED>')  # text was marked sensitive and redacted",
         "page.keyboard.press('Tab')",

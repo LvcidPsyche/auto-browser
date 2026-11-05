@@ -334,3 +334,12 @@ async def test_control_a_resave_puts_the_state_in_place_before_the_metadata(serv
         await saved(service, "NEW-LOGIN")
 
     assert order[:2] == ["state", "profile"]
+
+
+def test_resolving_a_state_path_never_creates_the_profile_folder(service) -> None:
+    """Only a save makes a profile's folder (state_base_path(create=True)); asking where a state would be does not."""
+    directory = Path(service.manager.settings.auth_root) / "profiles" / PROFILE
+
+    service.resolve_state_path(PROFILE, must_exist=False)
+
+    assert not directory.exists()

@@ -20,6 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
 
 class OpenAIAdapter(BaseProviderAdapter):
     provider = "openai"
+    cli_env_names = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME", "CODEX_API_KEY")
 
     @property
     def supported_auth_modes(self) -> tuple[str, ...]:
@@ -185,7 +186,8 @@ class OpenAIAdapter(BaseProviderAdapter):
             previous_steps=previous_steps,
             include_schema=False,
         )
-        with tempfile.TemporaryDirectory() as tempdir:
+        # Under the CLI home, not the shared system temp dir, whose other users could plant config in a parent.
+        with tempfile.TemporaryDirectory(dir=self.effective_cli_home()) as tempdir:
             temp_root = Path(tempdir)
             schema_path = temp_root / "browser_action_schema.json"
             output_path = temp_root / "decision.json"

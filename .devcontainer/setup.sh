@@ -21,6 +21,9 @@ if [[ -n "${CODESPACE_NAME:-}" ]]; then
   if [[ -n "${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}" ]] && ! grep -q '^NOVNC_ALLOWED_HOSTS=.' .env; then
     printf 'NOVNC_ALLOWED_HOSTS=%s-6080.%s\n' "$CODESPACE_NAME" "$GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN" >> .env
   fi
+  # A CONTROLLER_ALLOWED_HOSTS already in .env needs the forwarded name added. postStartCommand runs this too, for a
+  # .env copied in after the container was created.
+  bash "$(dirname "${BASH_SOURCE[0]}")/allow-forwarded-host.sh"
 fi
 
 echo "Pulling Docker images..."

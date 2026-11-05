@@ -1,6 +1,12 @@
 // node --test browser-node/  (CI runs it; locally: inside the browser-node image, see scripts in REPORT)
 import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   classifyFailure,
@@ -12,6 +18,7 @@ import {
   makeVerify,
   verifyServer,
   parseSetting,
+  redactEndpoints,
   verifySandbox,
 } from "./sandbox.mjs";
 
@@ -544,4 +551,98 @@ test("a verification that hangs ends with the phase, not after its own longer bo
   });
   assert.equal(state.sandbox, "off");
   assert.ok(Date.now() - started < BUDGET.phaseBudgetMs + 60, `took ${Date.now() - started} ms`);
+});
+
+const SECRET_PATH = "0123456789abcdef0123456789abcdef";
+
+test("redactEndpoints keeps a websocket endpoint's host and port and drops its path", () => {
+  const state = JSON.stringify({ sandbox: "on", endpoint: `ws://browser-node:9223/${SECRET_PATH}` });
+  const out = redactEndpoints(`state: ${state}; retry ws://127.0.0.1:9223/${SECRET_PATH}?x=1 now`);
+  assert.ok(!out.includes(SECRET_PATH), out);
+  assert.ok(out.includes("ws://browser-node:9223/<redacted>"), out);
+  assert.ok(out.includes("ws://127.0.0.1:9223/<redacted>"), out);
+  const failure = `browserType.connect: WebSocket error: wss://h.example:443/${SECRET_PATH} 502`;
+  assert.equal(redactEndpoints(failure), "browserType.connect: WebSocket error: wss://h.example:443/<redacted> 502");
+  assert.equal(redactEndpoints("no endpoint here"), "no endpoint here");
+});
+
+test("sandbox-report prints the state file and its errors without the Playwright connect path", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sandbox-report-"));
+  try {
+    const endpointFile = join(dir, "browser-ws-endpoint.txt");
+    writeFileSync(endpointFile, `ws://127.0.0.1:1/${SECRET_PATH}\n`);
+    writeFileSync(
+      join(dir, "browser-sandbox.json"),
+      JSON.stringify({ sandbox: "on", setting: "on", endpoint: `ws://browser-node:9223/${SECRET_PATH}` }),
+    );
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL("./sandbox-report.mjs", import.meta.url)), "t"], {
+      env: { PATH: process.env.PATH, BROWSER_WS_ENDPOINT_FILE: endpointFile },
+      encoding: "utf-8",
+      timeout: 60000,
+    });
+    const output = `${result.stdout}${result.stderr}`;
+    assert.equal(result.status, 0, output);
+    assert.ok(!output.includes(SECRET_PATH), output);
+    assert.match(output, /state file: .*"sandbox":"on"/);
+    assert.ok(output.includes("ws://browser-node:9223/<redacted>"), output);
+    assert.match(output, /live check failed/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sandbox-report redacts the connect path in an error whose first line carries it", async () => {
+  // A server that refuses the websocket upgrade: Playwright's first error line then names the URL it dialled.
+  const refuser = createServer((request, response) => response.writeHead(404).end());
+  refuser.on("upgrade", (request, socket) => socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"));
+  await new Promise((resolve) => refuser.listen(0, "127.0.0.1", resolve));
+  const dir = mkdtempSync(join(tmpdir(), "sandbox-report-"));
+  try {
+    const endpointFile = join(dir, "browser-ws-endpoint.txt");
+    writeFileSync(endpointFile, `ws://127.0.0.1:${refuser.address().port}/${SECRET_PATH}\n`);
+    const child = spawn(process.execPath, [fileURLToPath(new URL("./sandbox-report.mjs", import.meta.url)), "t"], {
+      env: { PATH: process.env.PATH, BROWSER_WS_ENDPOINT_FILE: endpointFile },
+    });
+    let output = "";
+    child.stdout.on("data", (chunk) => (output += chunk));
+    child.stderr.on("data", (chunk) => (output += chunk));
+    const status = await new Promise((resolve) => child.on("close", resolve));
+    assert.equal(status, 0, output);
+    // The line must really carry a URL, or this test would pass with the redaction removed.
+    assert.match(output, /live check failed: .*ws:\/\/127\.0\.0\.1:\d+\/<redacted>/, output);
+    assert.ok(!output.includes(SECRET_PATH), output);
+  } finally {
+    refuser.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a verification that fails with the connect URL in its message keeps the path out of the state and the log", async () => {
+  const h = harness();
+  h.verify = async () => {
+    throw new Error(`browserType.connect: WebSocket error: ws://browser-node:9223/${SECRET_PATH} 502 Bad Gateway`);
+  };
+  await assert.rejects(launchWithSandboxPolicy({ setting: "on", profile: "auto-browser", ...h, ...BUDGET }), (error) => {
+    assert.ok(error instanceof SandboxRefusedError);
+    assert.ok(!JSON.stringify(error.state).includes(SECRET_PATH), JSON.stringify(error.state));
+    assert.ok(!error.message.includes(SECRET_PATH), error.message);
+    assert.ok(error.state.detail.includes("ws://browser-node:9223/<redacted>"), error.state.detail);
+    return true;
+  });
+  assert.ok(!h.warnings.join("\n").includes(SECRET_PATH), h.warnings.join("\n"));
+});
+
+test("server.mjs prints the endpoint it publishes only through redactEndpoints", () => {
+  const source = readFileSync(new URL("./server.mjs", import.meta.url), "utf-8");
+  const printing = source.split("\n").filter((line) => /console\.(log|error|warn|info)\(/.test(line));
+  assert.ok(
+    printing.some((line) => line.includes("wrote ")),
+    "the startup line is gone",
+  );
+  for (const line of printing) {
+    if (line.includes("advertisedEndpoint") || line.includes("wsEndpoint")) {
+      assert.ok(line.includes("redactEndpoints("), line);
+    }
+  }
+  assert.match(source, /^\s*redactEndpoints,$/m);
 });

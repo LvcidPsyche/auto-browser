@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from playwright.async_api import Error as PlaywrightError
+
 from app.artifacts import SessionArtifactService
 from app.downloads import _RESERVE_ATTEMPTS, DownloadCaptureService
 
@@ -18,6 +20,7 @@ class FakeDownload:
         self.suggested_filename = filename
         self.url = url
         self._failure = failure
+        self.delete = mock.AsyncMock()
 
     async def save_as(self, path: str) -> None:
         Path(path).write_text("downloaded", encoding="utf-8")
@@ -56,13 +59,14 @@ class DownloadCaptureServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(first["filename"], "report.csv")
             self.assertTrue(Path(first["path"]).is_file())
             self.assertEqual(second["status"], "failed")
-            self.assertNotEqual(first["filename"], second["filename"])
+            self.assertEqual((second["filename"], second["path"], second["url"]), (None, None, None))
+            self.assertEqual(second["suggested_filename"], "report.csv")
             self.assertEqual(len(session.downloads), 2)
 
             records = [
                 json.loads(line) for line in (artifact_dir / "downloads.jsonl").read_text(encoding="utf-8").splitlines()
             ]
-            self.assertEqual([record["filename"] for record in records], [first["filename"], second["filename"]])
+            self.assertEqual([record["filename"] for record in records], [first["filename"], None])
 
     async def test_concurrent_same_name_downloads_keep_both_files(self) -> None:
         class SlowDownload(FakeDownload):
@@ -104,6 +108,240 @@ class DownloadCaptureServiceTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(record["status"], "completed")
                     self.assertEqual(Path(record["path"]).parent, artifact_dir / "downloads")
                     self.assertTrue(record["filename"].startswith("download-"))
+
+
+class DownloadCapTests(unittest.IsolatedAsyncioTestCase):
+    def _session(self, tempdir: str):
+        artifacts = SessionArtifactService(tempdir)
+        artifact_dir = artifacts.prepare_session_dir("session-1")
+        return artifacts, SimpleNamespace(id="session-1", artifact_dir=artifact_dir, downloads=[])
+
+    async def test_a_download_over_the_size_cap_is_deleted_and_recorded_as_refused(self) -> None:
+        class Big(FakeDownload):
+            async def save_as(self, path: str) -> None:
+                Path(path).write_bytes(b"x" * 50)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            service = DownloadCaptureService(artifacts, max_bytes=10)
+
+            record = await service.capture(session, Big("big.bin"))
+            small = await service.capture(session, FakeDownload("small.txt"))
+
+            self.assertEqual(record["status"], "refused")
+            self.assertIn("DOWNLOAD_MAX_BYTES", record["failure"])
+            self.assertEqual((record["path"], record["filename"], record["url"]), (None, None, None))
+            self.assertEqual(small["status"], "completed")
+            kept = sorted(path.name for path in (session.artifact_dir / "downloads").iterdir())
+            self.assertEqual(kept, ["small.txt"])
+
+    async def test_the_count_cap_stops_the_next_download_before_it_is_saved(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            service = DownloadCaptureService(artifacts, max_per_session=3)
+            for index in range(3):
+                record = await service.capture(session, FakeDownload(f"f{index}.txt"))
+                self.assertEqual(record["status"], "completed")
+
+            extra = FakeDownload("f3.txt")
+            extra.cancel = mock.AsyncMock()
+            extra.save_as = mock.AsyncMock()
+            record = await service.capture(session, extra)
+
+            self.assertEqual(record["status"], "refused")
+            self.assertIn("DOWNLOADS_MAX_PER_SESSION", record["failure"])
+            extra.cancel.assert_awaited_once_with()
+            extra.save_as.assert_not_awaited()
+            self.assertEqual(len(list((session.artifact_dir / "downloads").iterdir())), 3)
+
+
+class DownloadCleanupTests(unittest.IsolatedAsyncioTestCase):
+    """The browser keeps its own copy of a download until its context closes; none may outlive the capture."""
+
+    def _session(self, tempdir: str):
+        artifacts = SessionArtifactService(tempdir)
+        artifact_dir = artifacts.prepare_session_dir("session-1")
+        return artifacts, SimpleNamespace(id="session-1", artifact_dir=artifact_dir, downloads=[])
+
+    @staticmethod
+    def _files(session) -> list[str]:
+        directory = session.artifact_dir / "downloads"
+        return sorted(path.name for path in directory.iterdir()) if directory.is_dir() else []
+
+    async def test_the_browsers_copy_is_deleted_after_a_kept_download(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            download = FakeDownload("ok.txt")
+
+            record = await DownloadCaptureService(artifacts).capture(session, download)
+
+            self.assertEqual(record["status"], "completed")
+            download.delete.assert_awaited_once_with()
+
+    async def test_the_browsers_copy_is_deleted_after_an_oversized_download(self) -> None:
+        class Big(FakeDownload):
+            async def save_as(self, path: str) -> None:
+                Path(path).write_bytes(b"x" * 50)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            download = Big("big.bin")
+
+            record = await DownloadCaptureService(artifacts, max_bytes=10).capture(session, download)
+
+            self.assertEqual(record["status"], "refused")
+            download.delete.assert_awaited_once_with()
+            self.assertEqual(self._files(session), [])
+
+    async def test_the_browsers_copy_is_deleted_after_a_failed_download(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            download = FakeDownload("bad.txt", failure="network")
+
+            record = await DownloadCaptureService(artifacts).capture(session, download)
+
+            self.assertEqual(record["status"], "failed")
+            download.delete.assert_awaited_once_with()
+            self.assertEqual(self._files(session), [])
+
+    async def test_the_browsers_copy_is_deleted_after_a_download_the_count_cap_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            service = DownloadCaptureService(artifacts, max_per_session=1)
+            await service.capture(session, FakeDownload("one.txt"))
+            extra = FakeDownload("two.txt")
+            extra.cancel = mock.AsyncMock()
+
+            record = await service.capture(session, extra)
+
+            self.assertEqual(record["status"], "refused")
+            extra.delete.assert_awaited_once_with()
+
+    async def test_a_browser_that_cannot_delete_does_not_fail_the_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            download = FakeDownload("ok.txt")
+            download.delete = mock.AsyncMock(side_effect=PlaywrightError("Target closed"))
+
+            record = await DownloadCaptureService(artifacts).capture(session, download)
+
+            self.assertEqual(record["status"], "completed")
+
+    async def test_an_interrupted_save_leaves_no_file_and_a_retry_is_counted_once(self) -> None:
+        class Interrupted(FakeDownload):
+            async def save_as(self, path: str) -> None:
+                Path(path).write_text("half", encoding="utf-8")
+                raise PlaywrightError("connection reset")
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            service = DownloadCaptureService(artifacts, max_per_session=1)
+
+            failed = await service.capture(session, Interrupted("report.csv"))
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(self._files(session), [])
+
+            retry = await service.capture(session, FakeDownload("report.csv"))
+            self.assertEqual(retry["status"], "completed")
+            self.assertEqual(self._files(session), ["report.csv"])
+
+    async def test_a_save_cancelled_midway_still_deletes_the_browsers_copy_and_stays_cancelled(self) -> None:
+        saving, delete_started, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        delete_finished: list[int] = []
+
+        class Hanging(FakeDownload):
+            async def save_as(self, path: str) -> None:
+                saving.set()
+                await asyncio.sleep(30)
+
+        async def blocked_delete() -> None:
+            delete_started.set()
+            await release.wait()  # Playwright's delete() waits for the download to finish
+            delete_finished.append(1)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            download = Hanging("report.csv")
+            download.delete = mock.AsyncMock(side_effect=blocked_delete)
+            task = asyncio.create_task(DownloadCaptureService(artifacts).capture(session, download))
+            await asyncio.wait_for(saving.wait(), 5)
+
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)  # finishes while the browser-side delete is still blocked
+            await asyncio.wait_for(delete_started.wait(), 5)
+            self.assertEqual(delete_finished, [])
+            self.assertEqual(self._files(session), [])
+
+            release.set()
+            for _ in range(50):
+                if delete_finished:
+                    break
+                await asyncio.sleep(0.01)
+
+            self.assertEqual(delete_finished, [1])
+            download.delete.assert_awaited_once_with()
+
+    async def test_a_partial_file_that_cannot_be_deleted_does_not_replace_the_cancellation(self) -> None:
+        # On Windows, a save cancelled while Playwright still opened the file in its thread leaves the handle open.
+        saving = asyncio.Event()
+
+        class Hanging(FakeDownload):
+            async def save_as(self, path: str) -> None:
+                Path(path).write_text("partial", encoding="utf-8")
+                saving.set()
+                await asyncio.sleep(30)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            download = Hanging("report.csv")
+            task = asyncio.create_task(DownloadCaptureService(artifacts).capture(session, download))
+            await asyncio.wait_for(saving.wait(), 5)
+
+            with (
+                mock.patch.object(Path, "unlink", side_effect=PermissionError("the file is in use")),
+                self.assertLogs("app.downloads", "WARNING"),
+            ):
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 5)
+            for _ in range(50):  # the browser's copy is still deleted, in the background
+                if download.delete.await_count:
+                    break
+                await asyncio.sleep(0.01)
+
+            download.delete.assert_awaited_once_with()
+
+    def test_a_save_closed_with_no_running_loop_removes_the_file_and_schedules_nothing(self) -> None:
+        class Suspend:
+            def __await__(self):
+                yield
+
+        class Hanging(FakeDownload):
+            async def save_as(self, path: str) -> None:
+                Path(path).write_text("partial", encoding="utf-8")
+                await Suspend()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            download = Hanging("report.csv")
+            coroutine = DownloadCaptureService(artifacts).capture(session, download)
+            coroutine.send(None)  # suspended inside save_as, with the partial file on disk
+            self.assertEqual(self._files(session), ["report.csv"])
+
+            with mock.patch("app.downloads.spawn_background_task") as spawn:
+                coroutine.close()  # GeneratorExit, as when a pending capture is collected at teardown
+
+            self.assertEqual(self._files(session), [])
+            spawn.assert_not_called()
+
+    async def test_a_failure_reported_after_a_complete_save_removes_the_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+
+            await DownloadCaptureService(artifacts).capture(session, FakeDownload("x.txt", failure="canceled"))
+
+            self.assertEqual(self._files(session), [])
 
 
 class ReserveBoundTests(unittest.TestCase):

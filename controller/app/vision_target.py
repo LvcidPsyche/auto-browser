@@ -24,6 +24,8 @@ from typing import Any
 
 import httpx
 
+from .config import ANTHROPIC_DEFAULT_BASE_URL
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
@@ -53,7 +55,7 @@ class VisionTargeter:
         self,
         *,
         api_key: str | None = None,
-        base_url: str = "https://api.anthropic.com",
+        base_url: str = ANTHROPIC_DEFAULT_BASE_URL,
         model: str = _DEFAULT_MODEL,
         timeout_seconds: float = 30.0,
     ):
@@ -126,7 +128,7 @@ class VisionTargeter:
 
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             response = await client.post(
-                f"{self.base_url}/v1/messages",
+                f"{self.base_url}/messages",
                 headers=headers,
                 json=payload,
             )
@@ -177,6 +179,6 @@ class VisionTargeter:
             return None
         return cls(
             api_key=api_key,
-            base_url=getattr(settings, "anthropic_base_url", "https://api.anthropic.com"),
+            base_url=getattr(settings, "anthropic_base_url", ANTHROPIC_DEFAULT_BASE_URL),
             model=getattr(settings, "vision_model", None) or _DEFAULT_MODEL,
         )

@@ -88,6 +88,64 @@ class ProgrammaticVerifierTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.missing_evidence, [])
 
+    async def test_the_page_text_an_observation_carries_in_text_excerpt_is_searched(self) -> None:
+        # A real observation (observation.py) keeps the page text in `text_excerpt`, not `text`.
+        observation = {
+            "url": "https://example.com/inbox",
+            "title": "Inbox",
+            "active_element": {},
+            "text_excerpt": "Welcome back. Your payment failed.",
+            "dom_outline": [],
+            "interactables": [],
+        }
+        trace = {"final_observation": observation, "evidence": ["trace"]}
+
+        def contract(*, postcondition: str = "", forbidden: str = "", kind: str = "text_contains") -> TaskContract:
+            return TaskContract(
+                id="task-excerpt",
+                goal="read the page text",
+                postconditions=[Postcondition(kind=kind, value=postcondition or "example.com")]
+                if postcondition
+                else [Postcondition(kind="url_contains", value="example.com")],
+                forbidden_states=[ForbiddenState(kind="text_contains", value=forbidden)] if forbidden else [],
+                evidence_required=[EvidenceRequirement(kind="trace")],
+            )
+
+        forbidden = await ProgrammaticVerifier().verify(contract(forbidden="payment failed"), trace)
+        required = await ProgrammaticVerifier().verify(contract(postcondition="Welcome back"), trace)
+        in_dom = await ProgrammaticVerifier().verify(contract(postcondition="Welcome back", kind="dom_contains"), trace)
+        absent = await ProgrammaticVerifier().verify(contract(postcondition="Order confirmed"), trace)
+
+        self.assertFalse(forbidden.passed)
+        self.assertTrue(required.passed)
+        self.assertTrue(in_dom.passed)
+        self.assertFalse(absent.passed)
+
+    async def test_a_contract_of_only_optional_postconditions_needs_one_satisfied(self) -> None:
+        contract = TaskContract(
+            id="task-verify-optional",
+            goal="only optional checks",
+            postconditions=[
+                Postcondition(kind="text_contains", value="Order confirmed", required=False),
+                Postcondition(kind="url_contains", value="/checkout", required=False),
+            ],
+            evidence_required=[EvidenceRequirement(kind="trace")],
+        )
+        nothing_there = {"final_observation": {"url": "https://example.com/", "text": "Welcome"}, "evidence": ["trace"]}
+        one_there = {
+            "final_observation": {"url": "https://example.com/checkout", "text": "Welcome"},
+            "evidence": ["trace"],
+        }
+
+        failing = await ProgrammaticVerifier().verify(contract, nothing_there)
+        passing = await ProgrammaticVerifier().verify(contract, one_there)
+
+        self.assertFalse(failing.passed)
+        self.assertEqual(failing.confidence, 0.0)
+        self.assertIn("optional", failing.notes)
+        self.assertTrue(passing.passed)
+        self.assertEqual(passing.satisfied_postconditions, ["postcondition[1]:url_contains:/checkout"])
+
     async def test_programmatic_dom_condition_and_url_matches(self) -> None:
         contract = TaskContract(
             id="task-verify-2",

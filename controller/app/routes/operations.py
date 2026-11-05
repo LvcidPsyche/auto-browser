@@ -7,9 +7,10 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import ValidationError
 
 from ..approvals import ServerStateRefusal
+from ..cron_service import CronJobDisabledError
 from ..models import ApprovalDecisionRequest
 from ..tool_inputs import CreateCronJobInput, CreateProxyPersonaInput, TriggerCronJobInput
-from ._utils import typed_route_errors
+from ._utils import cron_store_errors, persona_file_errors, typed_route_errors
 
 logger = logging.getLogger(__name__)
 
@@ -94,18 +95,20 @@ def create_operations_router(
 
     @router.get("/proxy-personas")
     async def list_proxy_personas() -> list[Any]:
-        return proxy_store.list_personas()
+        with persona_file_errors():
+            return proxy_store.list_personas()
 
     @router.post("/proxy-personas")
     async def set_proxy_persona(payload: CreateProxyPersonaInput) -> dict[str, Any]:
         try:
-            return proxy_store.set_persona(
-                payload.name,
-                server=payload.server,
-                username=payload.username,
-                password=payload.password,
-                description=payload.description,
-            )
+            with persona_file_errors():
+                return proxy_store.set_persona(
+                    payload.name,
+                    server=payload.server,
+                    username=payload.username,
+                    password=payload.password,
+                    description=payload.description,
+                )
         except PermissionError:
             raise HTTPException(status_code=409, detail="Conflict") from None
         except (ValueError, RuntimeError):
@@ -113,49 +116,55 @@ def create_operations_router(
 
     @router.get("/proxy-personas/{name}")
     async def get_proxy_persona(name: str) -> dict[str, Any]:
-        try:
-            return proxy_store.get_persona(name)
-        except KeyError:
-            raise HTTPException(status_code=404, detail="Not found") from None
+        with persona_file_errors():
+            try:
+                return proxy_store.get_persona(name)
+            except KeyError:
+                raise HTTPException(status_code=404, detail="Not found") from None
 
     @router.delete("/proxy-personas/{name}")
     async def delete_proxy_persona(name: str) -> dict[str, Any]:
-        deleted = proxy_store.delete_persona(name)
+        with persona_file_errors():
+            deleted = proxy_store.delete_persona(name)
         if not deleted:
             raise HTTPException(status_code=404, detail=f"Proxy persona not found: {name!r}")
         return {"deleted": True, "name": name}
 
     @router.get("/crons")
     async def list_cron_jobs() -> list[Any]:
-        return await cron_service.list_jobs()
+        with cron_store_errors():
+            return await cron_service.list_jobs()
 
     @router.post("/crons")
     async def create_cron_job(payload: CreateCronJobInput) -> dict[str, Any]:
         try:
-            return await cron_service.create_job(
-                name=payload.name,
-                goal=payload.goal,
-                provider=payload.provider,
-                schedule=payload.schedule,
-                start_url=payload.start_url,
-                auth_profile=payload.auth_profile,
-                proxy_persona=payload.proxy_persona,
-                max_steps=payload.max_steps,
-                enabled=payload.enabled,
-                webhook_enabled=payload.webhook_enabled,
-                # REST callers are operators: the profile the body names, fast by default.
-                workflow_profile=payload.workflow_profile,
-            )
+            with cron_store_errors():
+                return await cron_service.create_job(
+                    name=payload.name,
+                    goal=payload.goal,
+                    provider=payload.provider,
+                    schedule=payload.schedule,
+                    start_url=payload.start_url,
+                    auth_profile=payload.auth_profile,
+                    proxy_persona=payload.proxy_persona,
+                    max_steps=payload.max_steps,
+                    enabled=payload.enabled,
+                    webhook_enabled=payload.webhook_enabled,
+                    # REST callers are operators: the profile the body names, fast by default.
+                    workflow_profile=payload.workflow_profile,
+                )
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="Invalid request") from None
 
     @router.get("/crons/{job_id}")
     async def get_cron_job(job_id: str) -> dict[str, Any]:
-        return await cron_service.get_job(job_id)
+        with cron_store_errors():
+            return await cron_service.get_job(job_id)
 
     @router.delete("/crons/{job_id}")
     async def delete_cron_job(job_id: str) -> dict[str, Any]:
-        deleted = await cron_service.delete_job(job_id)
+        with cron_store_errors():
+            deleted = await cron_service.delete_job(job_id)
         if not deleted:
             raise HTTPException(status_code=404, detail=f"Cron job not found: {job_id}")
         return {"deleted": True, "job_id": job_id}
@@ -169,11 +178,15 @@ def create_operations_router(
             # The path names the job; a job_id in the body must not redirect the
             # trigger to a different one.
             payload = TriggerCronJobInput.model_validate({**body, "job_id": job_id})
-            return await cron_service.trigger_via_webhook(payload.job_id, payload.webhook_key or "")
+            # The run's session reads the job's proxy persona.
+            with cron_store_errors(), persona_file_errors():
+                return await cron_service.trigger_via_webhook(payload.job_id, payload.webhook_key or "")
         except KeyError:
             raise HTTPException(status_code=404, detail="Not found") from None
         except PermissionError:
             raise HTTPException(status_code=403, detail="Not permitted") from None
+        except CronJobDisabledError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
         except (ValidationError, ValueError):
             raise HTTPException(status_code=400, detail="Invalid request") from None
 

@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { chromium } from "playwright";
 
-import { realProc, verifySandbox } from "./sandbox.mjs";
+import { realProc, redactEndpoints, verifySandbox } from "./sandbox.mjs";
 
 const endpointFile = process.env.BROWSER_WS_ENDPOINT_FILE || "/data/profile/browser-ws-endpoint.txt";
 const stateFile = process.env.BROWSER_SANDBOX_STATE_FILE || join(dirname(endpointFile), "browser-sandbox.json");
@@ -18,7 +18,8 @@ try {
 } catch {
   // An image older than 1.14.0, or a server that has not started.
 }
-console.log(`[${label}] state file: ${state}`);
+// The state names the Playwright endpoint, whose path is the server's only secret, and CI logs are public.
+console.log(`[${label}] state file: ${redactEndpoints(state)}`);
 
 function mainBrowserPid() {
   const chromes = [];
@@ -52,10 +53,10 @@ try {
       .filter(Boolean);
     console.log(`[${label}] chrome://sandbox: ${rows.join(" | ")}`);
   } catch (error) {
-    console.log(`[${label}] chrome://sandbox not reachable: ${String(error).split("\n")[0]}`);
+    console.log(`[${label}] chrome://sandbox not reachable: ${redactEndpoints(String(error).split("\n")[0])}`);
   }
 } catch (error) {
-  console.log(`[${label}] live check failed: ${String(error).split("\n")[0]}`);
+  console.log(`[${label}] live check failed: ${redactEndpoints(String(error).split("\n")[0])}`);
 } finally {
   await client?.close().catch(() => {});
 }

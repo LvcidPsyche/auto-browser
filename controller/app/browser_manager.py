@@ -15,6 +15,7 @@ from playwright.async_api import Browser, BrowserContext, Page, Playwright, asyn
 from playwright.async_api import Error as PlaywrightError
 
 from .action_errors import RefusedPageError, SessionNotFoundError
+from .action_records import drain_unfinished_records
 from .actions import BrowserActionPipeline
 from .approvals import ApprovalStore
 from .artifacts import SessionArtifactService
@@ -62,6 +63,7 @@ from .session_tunnel import IsolatedSessionTunnel, IsolatedSessionTunnelBroker
 from .url_safety import browser_equivalent_url
 from .utils import spawn_background_task
 from .witness import (
+    ReceiptList,
     WitnessActionContext,
     WitnessApproval,
     WitnessPolicyEngine,
@@ -124,6 +126,9 @@ class BrowserSession:
     shared_browser_process: bool = True
     max_live_sessions_per_browser_node: int = 1
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # The record (an action's or a takeover's) still being written, when a cancellation cut its writer short:
+    # what records next on the session waits for it (app.action_records).
+    pending_record: asyncio.Task[None] | None = None
     console_messages: list[dict[str, Any]] = field(default_factory=list)
     page_errors: list[str] = field(default_factory=list)
     request_failures: list[dict[str, Any]] = field(default_factory=list)
@@ -152,7 +157,6 @@ class BrowserSession:
     # Headless/headed state — set to False to request headed mode on next fork
     headless: bool = True
     protection_mode: str = "normal"
-    pending_witness_context: dict[str, Any] | None = None
     witness_remote_state: WitnessRemoteState = field(default_factory=WitnessRemoteState)
     metadata: dict[str, Any] = field(default_factory=dict)
     # The token-verified operator who created it; None for an unowned session
@@ -251,7 +255,11 @@ class BrowserManager:
             rejection_receipt=self.approval_service.rejection_receipt,
         )
         self.artifacts = SessionArtifactService(self.settings.artifact_root)
-        self.download_capture = DownloadCaptureService(self.artifacts)
+        self.download_capture = DownloadCaptureService(
+            self.artifacts,
+            max_bytes=self.settings.download_max_bytes,
+            max_per_session=self.settings.downloads_max_per_session,
+        )
         self.session_store = DurableSessionStore(
             file_root=self.settings.session_store_root,
             redis_url=self.settings.redis_url,
@@ -322,6 +330,9 @@ class BrowserManager:
 
     async def shutdown(self) -> None:
         logger.info("shutting down browser manager")
+        # Records still being written behind cancelled actions (the job queue's shutdown cancels its jobs) finish
+        # before the loop ends, which would cut them short; bounded, and what is left is logged.
+        await drain_unfinished_records()
         session_ids = list(self.sessions.keys())
         # Every operator's sessions close, not only those of whoever is current.
         with as_system():
@@ -1092,9 +1103,11 @@ class BrowserManager:
         )
         return [item.model_dump() for item in events]
 
-    async def list_witness_receipts(self, session_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+    async def list_witness_receipts(self, session_id: str, *, limit: int = 100) -> ReceiptList:
         receipts = await self.witness.list(session_id, limit=limit)
-        return [item.model_dump() for item in receipts]
+        listing = ReceiptList(item.model_dump() for item in receipts)
+        listing.unparseable_lines = receipts.unparseable_lines
+        return listing
 
     async def verify_witness_chain(self, session_id: str) -> dict[str, Any]:
         # A hash chain only proves internal consistency — anyone holding the file

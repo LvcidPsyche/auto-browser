@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from playwright.async_api import Error as PlaywrightError
 
 from ...action_errors import BrowserActionError, SessionNotFoundError
+from ...browser_scripts import cap_title
 from ..page_provenance import CLOSED_PAGE_GRACE_SECONDS
 from ..request_gate import block_summary, navigation_blocked_error, stopped_by_gate
 from ..request_gates import CHROME_ERROR_SCHEME
@@ -276,7 +277,7 @@ class BrowserTabService:
             return ""
         try:
             # Bounded: the list is read under the session lock, and a tab stuck in a script never answers.
-            return await asyncio.wait_for(page.title(), timeout=TAB_TITLE_TIMEOUT_SECONDS)
+            return cap_title(await asyncio.wait_for(page.title(), timeout=TAB_TITLE_TIMEOUT_SECONDS))
         except Exception:
             return ""
 

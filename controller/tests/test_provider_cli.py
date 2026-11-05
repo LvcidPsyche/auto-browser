@@ -93,6 +93,8 @@ class ProviderCLITests(unittest.IsolatedAsyncioTestCase):
             OPENAI_AUTH_MODE="cli",
             OPENAI_CLI_PATH="codex",
             OPENAI_CLI_MODEL="gpt-5-codex",
+            # Its own: the per-call directory is made under the CLI home, not under the real home.
+            CLI_HOME=str(Path(self.tempdir.name) / "cli-home"),
         )
         adapter = OpenAIAdapter(settings)
 

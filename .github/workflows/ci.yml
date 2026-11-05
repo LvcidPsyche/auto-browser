@@ -45,6 +45,9 @@ jobs:
         run: python scripts/fixture_eval.py
 
   host-tests:
+    # A fixed name: the include value below would otherwise make the 3.11 check "host-tests (3.11, true)", and
+    # branch protection requires "host-tests (3.11)".
+    name: host-tests (${{ matrix.python-version }})
     timeout-minutes: 45
     needs: lint
     runs-on: ubuntu-latest
@@ -52,6 +55,10 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.14"]
+        include:
+          # The one leg that installs Chromium and requires it: both steps below read this flag.
+          - python-version: "3.11"
+            real_browser: true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7.1.0
@@ -63,9 +70,13 @@ jobs:
       # dashboard) skip when no browser is installed, and until now none was, so
       # they never ran in CI. One leg is enough: they test the page, not Python.
       - name: Install Chromium for the real-browser tests
-        if: matrix.python-version == '3.11'
+        if: matrix.real_browser
         run: python -m playwright install --with-deps chromium
       - name: Run controller tests on host Python
+        # The leg that installed Chromium must run its tests: with this set, a missing
+        # browser fails the run instead of skipping the real-browser tests.
+        env:
+          AUTO_BROWSER_REQUIRE_CHROMIUM: ${{ matrix.real_browser && '1' || '' }}
         run: |
           cd controller
           python -m pytest tests/ \
@@ -144,7 +155,8 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
         working-directory: browser-node
       - name: Test browser-node's sandbox policy (BROWSER_SANDBOX)
-        # Node's built-in runner; sandbox.mjs imports only node: modules.
+        # Node's built-in runner. sandbox.mjs imports only node: modules, but the report tests run sandbox-report.mjs,
+        # which imports playwright: they need the `npm ci` above (without node_modules they fail, not skip).
         run: node --test sandbox.test.mjs
         working-directory: browser-node
 
@@ -327,6 +339,15 @@ jobs:
           python3 scripts/check_vnc_exposure.py "$container" "$novnc_port" \
             ${VNC_PASSWORD:+--expect-password}
 
+      - name: Stop the doctor stack
+        # The isolated smoke runs in its own compose project (auto-browser-smoke) and refuses to start beside a
+        # running stack of this checkout in another project: both share ./data, and the smoke's controller resets
+        # files there. The doctor and download steps above left the default project running, so take it down
+        # first (the checkout folder's name is whatever the runner makes it, so no project name is assumed). The
+        # sandbox steps below bring the default stack up again with `docker compose up --force-recreate`, which
+        # does not need the stack to be running; ./data and the built images survive `down`.
+        run: docker compose down --remove-orphans
+
       - name: Run isolated session smoke test
         run: DOCTOR_BUILD=1 API_PORT=8010 ./scripts/smoke_isolated_session.sh
 
@@ -358,6 +379,8 @@ jobs:
           BROWSER_SANDBOX=on BROWSER_SECCOMP_PROFILE=builtin docker compose up -d --force-recreate --no-deps browser-node || true
           python3 - <<'PY'
           import json, pathlib, sys, time
+          sys.path.insert(0, "scripts")
+          from assert_browser_sandbox import redact_endpoints
           # The container restarts (restart: unless-stopped) and rewrites the file each time: poll for the refusal.
           state_file = pathlib.Path("data/browser-profile/browser-sandbox.json")
           state = None
@@ -369,9 +392,10 @@ jobs:
               if state and state.get("sandbox") == "refused":
                   break
               time.sleep(1)
-          print(state)
+          # The state names the Playwright endpoint, whose path is the server's only secret: never print it raw.
+          print(redact_endpoints(json.dumps(state)))
           if not state or state.get("sandbox") != "refused" or state.get("setting") != "on":
-              sys.exit(f"expected a refusal under on without the profile, got {state}")
+              sys.exit(f"expected a refusal under on without the profile, got {redact_endpoints(json.dumps(state))}")
           if pathlib.Path("data/browser-profile/browser-ws-endpoint.txt").exists():
               sys.exit("a refused browser-node left an endpoint file")
           print("OK: refused, no endpoint")
@@ -391,7 +415,7 @@ jobs:
             sleep 2
           done
           [ -s data/browser-profile/browser-ws-endpoint.txt ] || { echo "browser-node published no endpoint under auto" >&2; exit 1; }
-          python3 -c 'import json,sys; s=json.load(open("data/browser-profile/browser-sandbox.json")); print(s); sys.exit(s.get("sandbox") != "off")'
+          python3 -c 'import json,sys; sys.path.insert(0,"scripts"); from assert_browser_sandbox import redact_endpoints; s=json.load(open("data/browser-profile/browser-sandbox.json")); print(redact_endpoints(json.dumps(s))); sys.exit(s.get("sandbox") != "off")'
           api_port="$(docker compose port controller 8000 | awk -F: 'NF {print $NF}' | tail -n1)"
           python3 scripts/check_sandbox_gate.py --expect 409 --api-port "$api_port" \
             --log-must-say "BROWSER_SANDBOX=on, but the shared browser-node reports off"

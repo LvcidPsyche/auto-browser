@@ -29,7 +29,9 @@ classifiers = [
 
 [project.optional-dependencies]
 langchain = ["langchain-core>=0.2"]
-crewai = ["crewai>=0.28"]
+# The example builds a langchain-core BaseTool, and current crewai no longer depends on langchain. Pulled through
+# the langchain extra so the version constraint keeps one home.
+crewai = ["auto-browser-langchain[langchain]", "crewai>=0.28"]
 # dev pulls the langchain extra rather than naming langchain-core again, so the
 # version constraint has exactly one home. Floated deliberately: this package's
 # whole job is to sit on top of langchain-core, so testing against whatever is

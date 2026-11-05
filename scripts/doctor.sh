@@ -27,7 +27,7 @@ EOF
 
 ensure_local_socket_access() {
   local status=0
-  if python3 - <<'PY'
+  if python3 -I - <<'PY'
 import errno
 import socket
 
@@ -58,7 +58,7 @@ PY
 
 port_is_free() {
   local status=0
-  if python3 - "$1" <<'PY'
+  if python3 -I - "$1" <<'PY'
 import errno
 import socket
 import sys
@@ -139,7 +139,7 @@ wait_for_http() {
 }
 
 unix_http_healthcheck() {
-  python3 - "$1" <<'PY'
+  python3 -I - "$1" <<'PY'
 import socket
 import sys
 

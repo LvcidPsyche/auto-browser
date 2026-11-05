@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import glob
 import os
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
 
@@ -54,4 +55,28 @@ def chromium_executable() -> str | None:
     return None
 
 
-requires_chromium = pytest.mark.skipif(chromium_executable() is None, reason="no local Chromium binary")
+class ChromiumRequiredError(RuntimeError):
+    """AUTO_BROWSER_REQUIRE_CHROMIUM is set and there is no Chromium to drive."""
+
+
+def chromium_required(environ: Mapping[str, str]) -> bool:
+    """Whether the run must have a Chromium (AUTO_BROWSER_REQUIRE_CHROMIUM=1/true/yes)."""
+    return environ.get("AUTO_BROWSER_REQUIRE_CHROMIUM", "").strip().lower() in {"1", "true", "yes"}
+
+
+def requires_chromium_mark(executable: str | None, *, required: bool):
+    """The skip mark for the real-browser tests.
+
+    A missing Chromium skips them, unless the run says it must have one: a CI leg that
+    installs Chromium sets AUTO_BROWSER_REQUIRE_CHROMIUM, and then a missing browser raises
+    here, at collection, so the run fails instead of going green on skipped tests.
+    """
+    if executable is None and required:
+        raise ChromiumRequiredError(
+            "AUTO_BROWSER_REQUIRE_CHROMIUM is set but no Chromium was found (the real-browser tests would "
+            "skip); install one with `python -m playwright install chromium` or set AUTO_BROWSER_TEST_CHROMIUM"
+        )
+    return pytest.mark.skipif(executable is None, reason="no local Chromium binary")
+
+
+requires_chromium = requires_chromium_mark(chromium_executable(), required=chromium_required(os.environ))

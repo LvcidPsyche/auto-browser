@@ -67,6 +67,10 @@ class SkillInducer:
         model_tiers: dict[str, str] | None = None,
         owner: str | None = None,
     ) -> SkillCandidate:
+        # The candidate stores the trace, so it stores the scrubbed one; the hash must match what is on disk.
+        trace = trace.scrubbed()
+        # Likewise the verification: it holds the raw URL, and it is written to the provenance and the envelope.
+        verification = verification.scrubbed()
         skill_id = _skill_id(contract, owner)
         staging_root = self.staging_root.resolve()
         target_dir = (self.staging_root / skill_id).resolve()
@@ -149,7 +153,6 @@ class SkillInducer:
                 "cost_usd": cost_usd,
                 "model_tiers": candidate.model_tiers,
                 "validated_executor_model": candidate.model_tiers.get("executor", ""),
-                "credential_free": True,
                 "simulated": candidate.simulated,
                 # Signed, so stripping the owner from a stored candidate is
                 # caught by the registry the way any other edit is.

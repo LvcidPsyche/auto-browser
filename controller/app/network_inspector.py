@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import logging
+import re
 from collections import deque
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -449,12 +450,46 @@ _SENSITIVE_HEADER_NAMES = frozenset(
     }
 )
 
+# A header named with one of these words is masked too, since no list of names keeps up with the headers
+# services invent (X-GitHub-Token, X-Vault-Token). A word is a segment of the name split on `-` and `_`;
+# token, secret, password and apikey are also masked inside a longer word, as in X-AccessToken.
+_SENSITIVE_HEADER_WORDS = frozenset(
+    {
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "auth",
+        "authorization",
+        "session",
+        "sessionid",
+        "cookie",
+        "csrf",
+        "xsrf",
+        "credential",
+        "credentials",
+        "signature",
+        "apikey",
+        "key",
+    }
+)
+_SENSITIVE_HEADER_SUBSTRINGS = ("token", "secret", "password", "apikey")
+_HEADER_WORD_SPLIT = re.compile(r"[-_]")
+
 # Headers whose value is a URL, and can carry its query string's secrets.
 _URL_HEADER_NAMES = frozenset({"referer", "location"})
 
 
 _QUERY_TOO_LONG = "[QUERY TOO LONG]"
 _FRAGMENT_TOO_LONG = "[FRAGMENT TOO LONG]"
+
+
+def _is_sensitive_header(lowered: str) -> bool:
+    if lowered in _SENSITIVE_HEADER_NAMES:
+        return True
+    if any(part in lowered for part in _SENSITIVE_HEADER_SUBSTRINGS):
+        return True
+    return not _SENSITIVE_HEADER_WORDS.isdisjoint(_HEADER_WORD_SPLIT.split(lowered))
 
 
 def _mask_sensitive_headers(
@@ -469,7 +504,7 @@ def _mask_sensitive_headers(
     redacted = False
     for name, value in headers.items():
         lowered = name.lower()
-        if lowered in _SENSITIVE_HEADER_NAMES:
+        if _is_sensitive_header(lowered):
             masked[name] = "[MASKED]"
         elif lowered in _URL_HEADER_NAMES:
             masked[name], hit = scrub_url(value, scrubber, max_bytes)

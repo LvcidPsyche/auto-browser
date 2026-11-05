@@ -18,6 +18,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+from app.browser.services.session_creation import SessionLimitError
 from app.config import Settings
 from app.session_ownership import acting_as
 from tests.test_auth_state_ownership import ALICE, StateContext, build_manager
@@ -93,4 +94,16 @@ class ForkStateFileTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.fork_session(self.source_id)
 
         self.assertEqual(seen, [True], "the state must exist while the new session loads it")
+        self.assertEqual(self.fork_files(), [])
+
+    async def test_a_fork_refused_on_the_session_limit_writes_no_state_file(self) -> None:
+        # The source session already fills MAX_SESSIONS=1: create_session would refuse, so the cookies are never exported.
+        self.manager.settings.max_sessions = 1
+        exported = AsyncMock()
+        self.manager.auth_state.write_storage_state = exported  # type: ignore[method-assign]
+
+        with acting_as(ALICE), self.assertRaises(SessionLimitError):
+            await self.manager.fork_session(self.source_id)
+
+        exported.assert_not_awaited()
         self.assertEqual(self.fork_files(), [])

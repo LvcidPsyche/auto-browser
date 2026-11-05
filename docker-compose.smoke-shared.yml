@@ -1,0 +1,10 @@
+# Added by scripts/smoke_reverse_ssh.sh only. The controller reads every key of .env through env_file, and the
+# smoke's own `export ISOLATED_DOCKER_HOST=` does not override that, so an .env that selects docker_ephemeral
+# would start this smoke's controller against that daemon and reap its managed containers, a daemon the smoke's
+# preflight never looked at. The tunnel smoke needs docker_ephemeral and does not use this file.
+services:
+  controller:
+    environment:
+      SESSION_ISOLATION_MODE: shared_browser_node
+      ISOLATED_DOCKER_HOST: ""
+      ISOLATED_HOST_DATA_ROOT: ""

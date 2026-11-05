@@ -188,6 +188,16 @@ controller has written it. Working from a repo checkout without uv? Point
 instead; that wrapper reads its own checkout's `data/api-token`, so it needs no
 token setting.
 
+The bridge handles one request at a time: it reads a line, waits for the
+controller's answer, writes it, and only then reads the next, so a slow tool
+call (such as a long page load) holds up everything behind it, and a
+cancellation the client sends meanwhile is read only after the slow call
+returns. Each request to the controller times out after 60 seconds without an
+answer by default; change that with `--timeout-seconds` or
+`AUTO_BROWSER_HTTP_TIMEOUT_SECONDS`. Both the PyPI package and
+`scripts/mcp_stdio_bridge.py` behave this way. A client that needs parallel
+calls should connect over HTTP instead.
+
 Bridges older than the one that added `--token-file` ignore
 `AUTO_BROWSER_TOKEN_FILE`, and a 401 from one does not mention it. Use
 `"args": ["auto-browser-mcp@latest"]`, or set `AUTO_BROWSER_BEARER_TOKEN` to the

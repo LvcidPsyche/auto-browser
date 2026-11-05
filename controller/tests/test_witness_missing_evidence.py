@@ -659,10 +659,11 @@ async def test_listing_does_not_hide_a_terminated_bad_record_followed_by_blanks(
     path = manager.witness._path(SCOPE)
     path.write_bytes(path.read_bytes() + b"{}\n ")
 
-    with pytest.raises(ValueError):  # the way export and the other readers treat it
-        await manager.witness.list(SCOPE, limit=10)
-    with pytest.raises(ValueError):
-        await manager.witness.export_bundle(SCOPE)
+    # A bad record is skipped and counted by list and export; verify still fails on it.
+    listing = await manager.witness.list(SCOPE, limit=10)
+    assert (len(listing), listing.unparseable_lines) == (2, 1)
+    bundle = await manager.witness.export_bundle(SCOPE)
+    assert (bundle["receipt_count"], bundle["unparseable_lines"], bundle["chain_valid_at_export"]) == (2, 1, False)
 
 
 async def test_listing_still_drops_an_unterminated_fragment_that_is_not_a_receipt(manager) -> None:
@@ -715,10 +716,8 @@ async def test_bytes_that_are_not_utf8_do_not_verify_even_where_replacement_woul
     assert body["valid"] is False, body
     assert "not parseable" in body["reason"]
     assert body["signatures"]["valid"] is False
-    with pytest.raises(ValueError):
-        await manager.witness.list(SCOPE, limit=10)
-    with pytest.raises(ValueError):
-        await manager.witness.export_bundle(SCOPE)
+    assert (await manager.witness.list(SCOPE, limit=10)).unparseable_lines == 1
+    assert (await manager.witness.export_bundle(SCOPE))["unparseable_lines"] == 1
 
 
 async def test_a_chain_missing_a_middle_receipt_still_fails_after_an_append(manager, client) -> None:
@@ -748,3 +747,26 @@ async def test_the_documented_recovery_deleting_the_marker_and_restarting_anchor
     await manager.witness.startup()
 
     assert _verify(client).json()["valid"] is True
+
+
+async def test_the_listing_route_reports_a_bad_line_inside_its_window(manager, client) -> None:
+    await _record(manager, 3)
+    path = manager.witness._path(SCOPE)
+    first, rest = path.read_bytes().split(b"\n", 1)
+    path.write_bytes(first + b"\n{this is not json}\n" + rest)
+
+    body = client.get(f"/sessions/{SCOPE}/witness?limit=10").json()
+
+    assert (body["count"], body["unparseable_lines"]) == (3, 1)
+
+
+async def test_the_listing_route_counts_only_the_listed_window(manager, client) -> None:
+    await _record(manager, 3)
+    path = manager.witness._path(SCOPE)
+    first, rest = path.read_bytes().split(b"\n", 1)
+    path.write_bytes(first + b"\n{this is not json}\n" + rest)
+
+    body = client.get(f"/sessions/{SCOPE}/witness?limit=2").json()
+
+    # The bad line is older than the last two lines, so the listing neither shows nor counts it.
+    assert (body["count"], body["unparseable_lines"]) == (2, 0)

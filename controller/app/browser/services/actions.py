@@ -31,6 +31,7 @@ from ..element_scripts import ELEMENT_HAS_FOCUS_SCRIPT
 from ..element_world import READ
 from ..page_read import title_or_blank
 from .element_actions import FOCUS_CLICK_TIMEOUT_MS, JITTER_PX, ElementActions
+from .witness import action_witness_context
 
 try:  # pragma: no cover - optional until dependency is installed in runtime image
     import pyotp
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     from playwright.async_api import Page
 
     from ...browser_manager import BrowserSession
+    from ...pii_scrub import PiiScrubber
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +72,17 @@ _RECEIVES_POINTER_SCRIPT = """(el, [x, y]) => {
   }
   return false;
 }"""
+
+# Total time type_text_human_like may spend typing, keystrokes and pauses together. Longer text is typed faster, not
+# longer: 5000 characters at the default delays would hold the session lock for about 11 minutes. Past the budget the
+# rest goes in as plain text (insert_text), its newlines and tabs pressed as keys.
+HUMAN_TYPING_BUDGET_SECONDS = 20.0
+# The least a keystroke or the final insert is given once the budget is spent, before it counts as hung. The worst
+# case is about 24 s, not 22: a keystroke started just before the deadline may take this long past it, and the rest
+# of the text is then bounded by max(deadline, now) + this.
+HUMAN_TYPING_STEP_FLOOR_SECONDS = 2.0
+_CONTROL_KEYS = {"\n": "Enter", "\r": "Enter", "\t": "Tab"}
+_CONTROL_KEY_PATTERN = re.compile("([" + "".join(_CONTROL_KEYS) + "])")
 
 # Where the TOTP autofill looks for a one-time-code field, most specific first.
 # Every candidate must still pass is_one_time_code_field.
@@ -293,6 +306,7 @@ class BrowserActionService:
             clear_first=clear_first,
             sensitive=sensitive,
             preview_chars=80,
+            scrubber=self.manager.pii_scrubber,
         )
 
         async def operation() -> None:
@@ -419,23 +433,25 @@ class BrowserActionService:
         )
         # The receipt names the approval the action runs under: this call's own, or
         # the one an outer layer holds for it (a governed call's governed_approval_id).
-        witnessed_id = approval_id or (approval.id if approval is not None else None) or held_action_approval()
-        session.pending_witness_context = {
+        # An id the caller presented on an action that needs no approval is shown (status None, required False):
+        # the audit trail of what was presented, not a claim that anything approved it.
+        held = held_action_approval()
+        witnessed_id = approval_id or (approval.id if approval is not None else None) or held
+        witness_context = {
             "risk_category": decision.risk_category,
             "approval_id": witnessed_id,
             "approval_status": "approved" if witnessed_id else None,
-            "runtime_requires_approval": approval is not None or approval_id is not None,
+            "runtime_requires_approval": approval is not None,
+            "approval_checked": approval is not None or held is not None,
             "sensitive_input": bool(getattr(decision, "sensitive", False)),
         }
-        try:
+        with action_witness_context(witness_context):
             # Uploads go through manager.upload, which checks and claims the
             # approval itself.
             if approval is None or decision.action == "upload":
                 return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
             async with held_for_execution(self.manager.approvals, approval.id, may_give_back=True):
                 return await self._dispatch_recorded(session_id, decision, approval_id=approval_id)
-        finally:
-            session.pending_witness_context = None
 
     def _refuse_a_host_off_the_list(self, decision: BrowserActionDecision) -> None:
         """Refuse a navigate whose URL ALLOWED_HOSTS refuses, before an approval for it is asked for or spent.
@@ -745,12 +761,15 @@ class BrowserActionService:
         clear_first: bool,
         sensitive: bool,
         preview_chars: int,
+        scrubber: PiiScrubber | None = None,
     ) -> dict[str, Any]:
         payload = {**target, "clear_first": clear_first}
         if sensitive:
             payload["text_redacted"] = True
         else:
-            payload["text_preview"] = text[:preview_chars]
+            # Scrubbed whole, then cut: a secret that straddles the limit would survive the other way round.
+            preview = scrubber.text(text).text if scrubber is not None else text
+            payload["text_preview"] = preview[:preview_chars]
         return payload
 
     async def locator_is_sensitive_input(self, locator: Any) -> bool:
@@ -921,15 +940,68 @@ class BrowserActionService:
             return False
 
     async def type_text_human_like(self, page: "Page", text: str) -> None:
-        for index, char in enumerate(text):
-            await page.keyboard.type(char)
+        delays_ms: list[int] = []
+        for index in range(len(text)):
             delay_ms = random.randint(
                 self.manager.settings.human_typing_min_delay_ms,
                 self.manager.settings.human_typing_max_delay_ms,
             )
             if index > 0 and index % random.randint(6, 12) == 0:
                 delay_ms += random.randint(180, 600)
-            await asyncio.sleep(delay_ms / 1000)
+            delays_ms.append(delay_ms)
+        # Scale every delay down together when the pauses alone would overrun the budget. Each keystroke is a round
+        # trip to a browser node, outside the pauses, so the deadline is what bounds the total: once it passes, the
+        # rest is inserted in one call (one message however long it is, but with no key events, which is fine after
+        # the human-like pacing has already run its course).
+        scale = min(1.0, HUMAN_TYPING_BUDGET_SECONDS * 1000 / max(sum(delays_ms), 1))
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + HUMAN_TYPING_BUDGET_SECONDS
+        for index, (char, delay_ms) in enumerate(zip(text, delays_ms)):
+            if loop.time() >= deadline:
+                await self._insert_rest(page, text[index:], deadline)
+                return
+            timeout = max(deadline - loop.time(), HUMAN_TYPING_STEP_FLOOR_SECONDS)
+            await self._typing_step(page.keyboard.type(char), timeout)
+            await asyncio.sleep(min(delay_ms * scale / 1000, max(deadline - loop.time(), 0)))
+
+    async def _insert_rest(self, page: "Page", rest: str, deadline: float) -> None:
+        """The text past the deadline: inserted as plain text, but newline and tab are still pressed as keys.
+
+        insert_text of a newline into an <input> drops it, so a long text ending in one would not submit the form
+        as the same text typed in time does (keyboard.type presses Enter and Tab for them).
+        """
+        # One cutoff for every remaining step: a floor per step would let a text with many newlines run far past it.
+        loop = asyncio.get_running_loop()
+        cutoff = max(deadline, loop.time()) + HUMAN_TYPING_STEP_FLOOR_SECONDS
+        for part in _CONTROL_KEY_PATTERN.split(rest):
+            if not part:
+                continue
+            left = cutoff - loop.time()
+            if left <= 0:
+                raise self._typing_timeout()
+            if part in _CONTROL_KEYS:
+                await self._typing_step(page.keyboard.press(_CONTROL_KEYS[part]), left)
+            else:
+                await self._typing_step(page.keyboard.insert_text(part), left)
+
+    @staticmethod
+    def _typing_timeout() -> BrowserActionError:
+        return BrowserActionError(
+            "Typing stopped: the page did not acknowledge a keystroke in time. Part of the text may have been "
+            "entered; check the field before typing again.",
+            code="typing_timeout",
+            action="type",
+            status_code=504,
+            retryable=True,
+        )
+
+    @classmethod
+    async def _typing_step(cls, step: Any, timeout: float) -> None:
+        """One keystroke or the insert, bounded: a page that never acknowledges input would hold the session lock."""
+        try:
+            await asyncio.wait_for(step, timeout)
+        except TimeoutError:
+            raise cls._typing_timeout() from None
 
     async def _find_one_time_code_field(self, page: "Page") -> tuple[Any, str] | None:
         for selector in _ONE_TIME_CODE_FIELD_SELECTORS:

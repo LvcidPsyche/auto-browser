@@ -53,6 +53,44 @@ from .utils import PRIVATE_FILE_MODE, atomic_write_text
 logger = logging.getLogger(__name__)
 
 
+PROXY_PERSONA_FILE_UNREADABLE = (
+    "the proxy persona file (PROXY_PERSONA_FILE) is unreadable; fix or move it. It was not changed."
+)
+
+
+class ProxyPersonaFileError(RuntimeError):
+    """The persona file exists but cannot be read or parsed.
+
+    The store refuses and leaves the file where it is, rather than moving it aside as the cron store does: a
+    transient read error (a sharing violation, a brief permission fault) must never displace a good, hand-edited file.
+
+    The message is fixed and path-free, because callers (REST and MCP) show it as it is. The path and the
+    cause are logged at ERROR where the file is read. Copy and pickle rebuild an exception from its args (the
+    message), so the constructor takes and ignores them.
+    """
+
+    def __init__(self, *_args: object) -> None:
+        super().__init__(PROXY_PERSONA_FILE_UNREADABLE)
+
+
+PROXY_PERSONA_DUPLICATE_ENTRIES = (
+    "the proxy persona file (PROXY_PERSONA_FILE) holds more than one entry for this name (their keys differ only in "
+    "surrounding spaces); remove all but one by hand. It was not changed."
+)
+
+
+class ProxyPersonaDuplicateError(ValueError):
+    """More than one entry in the persona file normalizes to the name a save or delete is for.
+
+    Only a hand edit makes this ("a " beside "a"); the store never writes one. Which entry a save or delete
+    means cannot be told, so both are refused. The message is fixed and path-free, as ProxyPersonaFileError's
+    is; the raw keys and the path are logged where the file is read.
+    """
+
+    def __init__(self, *_args: object) -> None:
+        super().__init__(PROXY_PERSONA_DUPLICATE_ENTRIES)
+
+
 class ProxyPersonaStore:
     """Read/write proxy personas from a JSON config file."""
 
@@ -60,17 +98,24 @@ class ProxyPersonaStore:
         self._path = Path(file_path) if file_path else None
 
     def _read_object(self) -> dict[str, Any]:
-        """The file's top-level object as written; {} when there is no file or it is unusable."""
-        if self._path is None or not self._path.exists():
+        """The file's top-level object as written; {} only when there is no file.
+
+        A file that exists but cannot be read or parsed raises: answering {} let the next save write
+        one persona over it and erase the rest. Existence is not checked first: Path.exists() raises a
+        permission error as itself (EACCES on Python 3.11 and 3.12), outside the handling below.
+        """
+        if self._path is None:
             return {}
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
         except Exception as exc:
-            logger.warning("failed to load proxy persona file %s: %s", self._path, exc)
-            return {}
+            logger.error("failed to load proxy persona file %s: %s", self._path, exc)
+            raise ProxyPersonaFileError() from exc
         if not isinstance(data, dict):
-            logger.warning("proxy persona file is not a JSON object: %s", self._path)
-            return {}
+            logger.error("proxy persona file is not a JSON object: %s", self._path)
+            raise ProxyPersonaFileError()
         return data
 
     def _load(self) -> dict[str, dict[str, Any]]:
@@ -84,15 +129,47 @@ class ProxyPersonaStore:
             normalized[name] = persona
         return normalized
 
-    def _save(self, data: dict[str, dict[str, Any]]) -> None:
+    def _save(self, data: dict[str, Any]) -> None:
         if self._path is None:
             raise RuntimeError("No PROXY_PERSONA_FILE configured — cannot save proxy personas")
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(
-            self._path,
-            json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True),
-            mode=PRIVATE_FILE_MODE,
-        )
+        # In the file's own order, not sorted: _load takes the last of two entries for one name, so sorting
+        # on save let a save of any persona change which one wins.
+        atomic_write_text(self._path, json.dumps(data, indent=2, ensure_ascii=False), mode=PRIVATE_FILE_MODE)
+
+    def _raw_entries(self, name: str) -> tuple[dict[str, Any], str | None]:
+        """The file's entries exactly as written, and the key of the one named *name* (None if none).
+
+        A save starts from this, not from the normalized view, so an entry the store ignores (a typo in
+        "server") and any extra key an operator added to another entry are written back untouched. A name
+        that more than one entry normalizes to (a hand edit: "a " beside "a") is refused: which one is meant
+        cannot be told, and removing them all would drop one another operator may own.
+        """
+        raw = self._read_object()
+        keys = []
+        for raw_name in raw:
+            try:
+                normalized_name = self._normalize_persona(raw_name, raw[raw_name])[0]
+            except ValueError:
+                continue  # an entry the store ignores is never the one being replaced or removed
+            if normalized_name == name:
+                keys.append(raw_name)
+        if len(keys) > 1:
+            logger.error(
+                "proxy persona file %s holds %d entries for %r: %r; remove all but one",
+                self._path,
+                len(keys),
+                name,
+                keys,
+            )
+            raise ProxyPersonaDuplicateError()
+        return raw, (keys[0] if keys else None)
+
+    @staticmethod
+    def _owner_of(entry: Any) -> str | None:
+        """An entry's "owner" as the store reads it: blank or missing is no owner."""
+        owner = entry.get("owner") if isinstance(entry, dict) else None
+        return None if owner is None else str(owner).strip() or None
 
     @staticmethod
     def _normalize_persona(name: Any, persona: Any) -> tuple[str, dict[str, Any]]:
@@ -114,15 +191,13 @@ class ProxyPersonaStore:
             password = None
         description_raw = persona.get("description", "")
         description = str(description_raw).strip() if description_raw is not None else ""
-        owner_raw = persona.get("owner")
-        owner = None if owner_raw is None else str(owner_raw).strip() or None
 
         return normalized_name, {
             "server": server,
             "username": username,
             "password": password,
             "description": description,
-            "owner": owner,
+            "owner": ProxyPersonaStore._owner_of(persona),
         }
 
     # ── Public API ──────────────────────────────────────────────────────────
@@ -201,8 +276,23 @@ class ProxyPersonaStore:
         # An update never changes who owns a persona (nor claims an unowned one); a new
         # persona belongs to its creator when a named credential proved who that is.
         normalized_persona["owner"] = existing["owner"] if existing is not None else verified_operator()
-        data[normalized_name] = normalized_persona
-        self._save(data)
+        raw, key = self._raw_entries(normalized_name)
+        # An entry under this exact key other than the one found is one the store ignores (a typo in "server");
+        # the save would overwrite it, so it is refused as a valid entry would be when another operator owns it.
+        if key != normalized_name and normalized_name in raw and not may_use(self._owner_of(raw[normalized_name])):
+            raise PermissionError(f"proxy persona {normalized_name!r} belongs to another operator")
+        # An update keeps its entry's place in the file and any key an operator added to it by hand; the store's
+        # own fields are laid over it.
+        entry = {**(raw[key] if key is not None else {}), **normalized_persona}
+        place = key if key is not None else normalized_name
+        saved: dict[str, Any] = {}
+        for raw_name, value in raw.items():
+            if raw_name == place:
+                saved[normalized_name] = entry
+            elif raw_name != normalized_name:  # an ignored entry under the name itself is overwritten
+                saved[raw_name] = value
+        saved.setdefault(normalized_name, entry)  # a new persona goes last
+        self._save(saved)
         return self._summary(normalized_name, normalized_persona)
 
     def delete_persona(self, name: str) -> bool:
@@ -210,8 +300,10 @@ class ProxyPersonaStore:
         data = self._load()
         if name not in data or not may_use(data[name].get("owner")):
             return False
-        del data[name]
-        self._save(data)
+        raw, key = self._raw_entries(name)
+        if key is not None:
+            del raw[key]
+        self._save(raw)
         return True
 
     def resolve_proxy(self, name: str) -> dict[str, Any]:
@@ -237,7 +329,10 @@ def warn_about_ownerless_personas(store: ProxyPersonaStore, *, named_tokens: boo
     """
     if not named_tokens:
         return
-    names = store.ownerless_names()
+    try:
+        names = store.ownerless_names()
+    except ProxyPersonaFileError:
+        return  # already logged at error level by the read; the file is left alone
     if not names:
         return
     one = len(names) == 1

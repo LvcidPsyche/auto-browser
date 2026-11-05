@@ -7,6 +7,7 @@ import {
   diagnose,
   launchWithSandboxPolicy,
   parseSetting,
+  redactEndpoints,
   SandboxRefusedError,
   makeVerify,
   writeState,
@@ -116,7 +117,7 @@ await mkdir(dirname(endpointFile), { recursive: true });
 const tmpFile = `${endpointFile}.tmp`;
 await writeFile(tmpFile, advertisedEndpoint, "utf-8");
 await rename(tmpFile, endpointFile);
-console.log(`wrote ${endpointFile}: ${advertisedEndpoint}`);
+console.log(`wrote ${endpointFile}: ${redactEndpoints(advertisedEndpoint)}`);
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, async () => {

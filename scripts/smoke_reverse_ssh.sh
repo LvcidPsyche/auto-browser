@@ -5,9 +5,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 source "${ROOT_DIR}/scripts/load_env.sh"
-load_repo_env "${ROOT_DIR}/.env"
+source "${ROOT_DIR}/scripts/smoke_lib.sh"
+# This run's own compose project and session-container prefix (see smoke_lib.sh).
+smoke_setup
 
-COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.smoke.yml --profile reverse-ssh)
+COMPOSE=(docker compose -p "${SMOKE_PROJECT}" -f docker-compose.yml -f docker-compose.smoke.yml -f docker-compose.smoke-shared.yml --profile reverse-ssh)
 API_PORT_VALUE="${API_PORT:-8000}"
 API_BASE_URL="http://127.0.0.1:${API_PORT_VALUE}"
 SSH_DIR="${ROOT_DIR}/data/ssh"
@@ -19,7 +21,7 @@ SMOKE_KNOWN_HOSTS="${SSH_DIR}/smoke_known_hosts"
 REMOTE_INFO="${TUNNEL_DIR}/reverse-ssh.json"
 
 cleanup() {
-  "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
+  smoke_cleanup
 }
 
 wait_for() {
@@ -38,6 +40,7 @@ wait_for() {
   return 1
 }
 
+smoke_preflight shared
 trap cleanup EXIT
 
 mkdir -p "${SSH_DIR}" "${TUNNEL_DIR}"
@@ -87,7 +90,7 @@ wait_for \
   2
 
 REMOTE_ACCESS_JSON="$(bearer_curl -fsS "${API_BASE_URL}/remote-access")"
-python3 - <<'PY' "${REMOTE_ACCESS_JSON}"
+python3 -I - <<'PY' "${REMOTE_ACCESS_JSON}"
 import json
 import sys
 
@@ -100,7 +103,7 @@ print("remote-access endpoint ok")
 PY
 
 SESSION_JSON="$(bastion_curl "-fsS http://127.0.0.1:18000/sessions -X POST -H 'content-type: application/json' -d '{\"name\":\"smoke\",\"start_url\":\"https://example.com\"}'")"
-SESSION_ID="$(python3 - <<'PY' "${SESSION_JSON}"
+SESSION_ID="$(python3 -I - <<'PY' "${SESSION_JSON}"
 import json
 import sys
 print(json.loads(sys.argv[1])["id"])
@@ -108,7 +111,7 @@ PY
 )"
 
 OBSERVE_JSON="$(bastion_curl "-fsS http://127.0.0.1:18000/sessions/${SESSION_ID}/observe")"
-python3 - <<'PY' "${OBSERVE_JSON}"
+python3 -I - <<'PY' "${OBSERVE_JSON}"
 import json
 import sys
 

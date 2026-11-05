@@ -36,6 +36,7 @@ from app.browser_sandbox import (
 )
 
 REPO = Path(__file__).resolve().parents[2]
+SECRET_PATH = "0123456789abcdef0123456789abcdef"
 EVIDENCE = {
     "renderers": 1,
     "renderer_userns_differs": True,
@@ -138,6 +139,7 @@ def _load_gate_script():
 class _Api(BaseHTTPRequestHandler):
     status = 200
     delete_status = 200
+    error_detail = "x"
 
     def log_message(self, *args) -> None:
         return None
@@ -161,7 +163,7 @@ class _Api(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # /sessions
         self._drain()
-        self._send(type(self).status, {"id": "s1"} if type(self).status == 200 else {"detail": "x"})
+        self._send(type(self).status, {"id": "s1"} if type(self).status == 200 else {"detail": type(self).error_detail})
 
     def do_DELETE(self) -> None:
         self._drain()
@@ -180,14 +182,20 @@ class GateScriptTests(unittest.TestCase):
 
     def _run(self, status: int, *args: str, delete_status: int = 200, env: dict | None = None) -> int:
         handler = type("Api", (_Api,), {"status": status, "delete_status": delete_status})
+        return self._run_with(handler, *args, env=env)
+
+    def _run_with(self, handler: type, *args: str, env: dict | None = None) -> int:
         server = HTTPServer(("127.0.0.1", 0), handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         argv = ["x", "--api-port", str(server.server_address[1]), "--data", str(self.data), *args]
-        with redirect_stdout(io.StringIO()), patch.dict(os.environ, env or {}):
-            return self.module.main(argv)
+        printed = io.StringIO()
+        with redirect_stdout(printed), patch.dict(os.environ, env or {}):
+            code = self.module.main(argv)
+        self.output = printed.getvalue()
+        return code
 
     def _files(self, state_endpoint: str, file_endpoint: str) -> None:
         profile = self.data / "browser-profile"
@@ -199,6 +207,40 @@ class GateScriptTests(unittest.TestCase):
         self.assertEqual(self._run(200, "--expect", "200"), 0)
         self._files("ws://a/1", "ws://a/2")
         self.assertEqual(self._run(200, "--expect", "200"), 1)
+
+    def test_a_mismatch_names_the_endpoints_without_their_path(self) -> None:
+        self._files(f"ws://browser-node:9223/{SECRET_PATH}", f"ws://browser-node:9223/{SECRET_PATH}-older")
+
+        self.assertEqual(self._run(200, "--expect", "200"), 1)
+
+        self.assertIn("FAIL: the state names", self.output)
+        self.assertNotIn(SECRET_PATH, self.output)
+        self.assertEqual(self.output.count("ws://browser-node:9223/<redacted>"), 2, self.output)
+
+    def test_an_isolated_failure_prints_the_containers_detail_without_the_connect_path(self) -> None:
+        state = self.data / "browser-sessions" / "s1" / "profile" / "browser-sandbox.json"
+        state.parent.mkdir(parents=True)
+        detail = f"the sandbox check failed: WebSocket error: ws://browser-node:9223/{SECRET_PATH} 502"
+        state.write_text(
+            json.dumps({"setting": "on", "sandbox": "refused", "cause": "not_verified", "detail": detail}),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(self._run(200, "--expect", "200", "--isolated"), 1)
+
+        self.assertIn("FAIL: the isolated container's state", self.output)
+        self.assertNotIn(SECRET_PATH, self.output)
+        self.assertIn("ws://browser-node:9223/<redacted>", self.output)
+
+    def test_an_unexpected_status_prints_the_body_without_the_connect_path(self) -> None:
+        detail = f"connect to ws://browser-node:9223/{SECRET_PATH} failed"
+        handler = type("Api", (_Api,), {"status": 500, "error_detail": detail})
+
+        self.assertEqual(self._run_with(handler, "--expect", "409"), 1)
+
+        self.assertIn("got 500", self.output)
+        self.assertNotIn(SECRET_PATH, self.output)
+        self.assertIn("ws://browser-node:9223/<redacted>", self.output)
 
     def test_isolated_needs_the_containers_own_verified_state(self) -> None:
         state = self.data / "browser-sessions" / "s1" / "profile" / "browser-sandbox.json"
@@ -314,6 +356,85 @@ class BrowserNodeWiringTests(unittest.TestCase):
             result = subprocess.run([BASH, "-c", script], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(endpoint.exists() or state.exists())
+
+
+@unittest.skipUnless((REPO / "scripts" / "assert_browser_sandbox.py").is_file(), "scripts/ is not in the image")
+class EndpointRedactionTests(unittest.TestCase):
+    """The Playwright connect path is browser-node's only secret, and CI logs are public: nothing CI runs prints it."""
+
+    def setUp(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "assert_browser_sandbox_under_test", REPO / "scripts" / "assert_browser_sandbox.py"
+        )
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+
+    def test_redact_endpoints_is_the_twin_of_the_node_helper(self) -> None:
+        redact = self.module.redact_endpoints
+        state = json.dumps({"sandbox": "on", "endpoint": f"ws://browser-node:9223/{SECRET_PATH}"})
+        out = redact(f"state: {state}; retry ws://127.0.0.1:9223/{SECRET_PATH}?x=1 now")
+
+        self.assertNotIn(SECRET_PATH, out)
+        self.assertIn("ws://browser-node:9223/<redacted>", out)
+        self.assertIn("ws://127.0.0.1:9223/<redacted>", out)
+        failure = f"browserType.connect: WebSocket error: wss://h.example:443/{SECRET_PATH} 502"
+        self.assertEqual(redact(failure), "browserType.connect: WebSocket error: wss://h.example:443/<redacted> 502")
+        self.assertEqual(redact("no endpoint here"), "no endpoint here")
+        self.assertEqual(redact(None), "None")
+
+    def test_the_assertion_prints_the_state_and_its_failures_without_the_connect_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            state = Path(tempdir) / "browser-sandbox.json"
+            detail = f"the sandbox check failed: WebSocket error: ws://browser-node:9223/{SECRET_PATH} 502"
+            state.write_text(
+                json.dumps(
+                    {
+                        "setting": "on",
+                        "sandbox": "refused",
+                        "cause": "not_verified",
+                        "detail": detail,
+                        "endpoint": f"ws://browser-node:9223/{SECRET_PATH}",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            printed = io.StringIO()
+            with redirect_stdout(printed):
+                code = self.module.main(["assert_browser_sandbox.py", str(state), "--require-proc"])
+
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL: sandbox is 'refused'", printed.getvalue())
+        self.assertNotIn(SECRET_PATH, printed.getvalue())
+        self.assertGreaterEqual(printed.getvalue().count("ws://browser-node:9223/<redacted>"), 2)
+
+
+CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
+
+
+@unittest.skipUnless(CI_WORKFLOW.is_file(), ".github/workflows/ci.yml is not in the controller image")
+class CiSandboxStepsRedactionTests(unittest.TestCase):
+    def test_no_ci_step_prints_the_state_file_raw(self) -> None:
+        ci = CI_WORKFLOW.read_text(encoding="utf-8")
+        job = ci[ci.index("  compose-smoke:") :]
+
+        self.assertNotRegex(job, r"print\(\s*(s|state)\s*\)")
+        self.assertNotIn("got {state}", job)
+        # Each inline snippet that reads the state file imports the redaction.
+        for snippet in (
+            'python3 -c \'import json,sys; sys.path.insert(0,"scripts"); from assert_browser_sandbox import',
+        ):
+            self.assertIn(snippet, job)
+        poll = job[job.index("BROWSER_SANDBOX=on BROWSER_SECCOMP_PROFILE=builtin docker compose up") :]
+        self.assertIn("from assert_browser_sandbox import redact_endpoints", poll[: poll.index("PY\n")])
+        self.assertIn("print(redact_endpoints(json.dumps(state)))", poll)
+
+    def test_the_ci_comment_says_the_node_tests_need_npm_ci(self) -> None:
+        ci = CI_WORKFLOW.read_text(encoding="utf-8")
+        step = ci[ci.index("Test browser-node's sandbox policy") :]
+        step = step[: step.index("working-directory: browser-node")]
+
+        self.assertIn("npm ci", step)
+        self.assertNotIn("imports only node: modules.\n", step)
 
 
 if __name__ == "__main__":

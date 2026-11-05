@@ -98,3 +98,24 @@ def test_the_file_is_replaced_by_a_rename_and_nothing_is_left_behind(tmp_path: P
     assert source != INFO_NAME  # the content was written elsewhere first...
     assert os.path.dirname(source) == os.path.dirname(destination)  # ...on the same filesystem
     assert sorted(p.name for p in tmp_path.iterdir()) == ["moves.log", INFO_NAME]
+
+
+def test_a_failed_tunnel_still_writes_inactive_and_keeps_its_exit_status(tmp_path: Path) -> None:
+    # The entrypoint runs under `set -eu`, where a bare `wait` on a child that failed ends the script
+    # before the final "inactive" write. Run the entrypoint's real closing section against a child that exits 3.
+    source = ENTRYPOINT.read_text(encoding="utf-8")
+    closing = source[source.index("terminate() {") :]
+    prelude = "sh -c 'exit 3' &\nAUTOSSH_PID=$!\nsleep 30 >/dev/null 2>&1 &\nHEARTBEAT_PID=$!\n"
+    # The tunnel was up: the file already says "active", so a missed final write shows as a stale "active".
+    active = 'write_metadata "active"\n'
+    result = subprocess.run(
+        [SH, "-eu"],
+        input=f"{prelude}{shell_functions()}\n{active}{closing}",
+        cwd=tmp_path,
+        env={**os.environ, **BASE_ENV},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 3, result.stderr
+    assert json.loads((tmp_path / INFO_NAME).read_text(encoding="utf-8"))["status"] == "inactive"

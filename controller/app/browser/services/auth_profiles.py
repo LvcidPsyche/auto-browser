@@ -802,7 +802,8 @@ class BrowserAuthProfileService:
         return self.dir(profile_name, create=create) / "state.json"
 
     def resolve_state_path(self, profile_name: str, *, must_exist: bool) -> Path:
-        base_path = self.state_base_path(profile_name, create=not must_exist)
+        # Never creates the profile folder: only a save does (state_base_path(create=True)).
+        base_path = self.state_base_path(profile_name, create=False)
         candidates = [base_path.with_name(f"{base_path.name}.enc"), base_path]
         existing = [candidate for candidate in candidates if candidate.exists()]
         if existing:

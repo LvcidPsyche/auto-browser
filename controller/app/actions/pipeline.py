@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from ..action_errors import (
     NavigationStoppedError,
     SessionNotFoundError,
 )
+from ..action_records import wait_for_pending_record, write_record
 from ..approvals import ApprovalRefusal, effect_started, held_status, refused_before_effect
 from ..browser.request_gate import UNATTRIBUTED_STOP, block_summary, stopped_by_gate
 from ..utils import spawn_background_task, utc_now
@@ -100,6 +102,17 @@ class ActionWitnessState:
     escape_url: str | None = None
     # Whether this run's operation began; until then a block has nothing of the action's to roll back.
     operation_started: bool = False
+    # Whether the action's change certainly happened (_execute returned, or the change was made before a later
+    # step failed): what interrupts the run after it interrupted only the reading of the page.
+    ran: bool = False
+    # Whether the action's terminal record has begun to be written: nothing records the action again.
+    recorded: bool = False
+    # How far the success path got after the change: "reading" while the page is read, "observed" once that has
+    # returned (what is left is recording it). Words what an interruption after the change was interrupting.
+    after_phase: str = ""
+    # A policy block's error and code, from the moment its handling starts: a block whose handling is cut short
+    # before its record still records the refusal.
+    policy_block: tuple[str, str] | None = None
 
 
 class BrowserActionPipeline:
@@ -110,7 +123,7 @@ class BrowserActionPipeline:
             # Raised before the operation began its change (a page off the list, a
             # witness that is not ready, a policy block): nothing ran, so the layer
             # holding the approval gives it back for a retry. Once the change has
-            # begun, nothing is recorded and the approval stays spent.
+            # begun, the approval stays spent (an unexpected error or a cancellation is recorded by _run).
             refused_before_effect(exc)
             raise
 
@@ -129,53 +142,131 @@ class BrowserActionPipeline:
             # action would count as that tab's choice: the action waits out the grace (bounded), before its
             # snapshot and before its effect is marked, so a cancellation meanwhile gives an approval back.
             await context.manager._wait_out_closed_page_grace(context.session)
+            # A cancelled action's record may still be finishing (its writes outlive the session lock): this action
+            # starts after it, so the two actions' lines, audit entries and receipts land in order.
+            await wait_for_pending_record(context.session)
             witness_state = await self._prepare(context)
             try:
-                await self._execute(context, witness_state)
-            except PermissionError as exc:
-                # The approval guard says what became of the approval; anything else is a policy block.
-                url = context.manager._shown_url(context.session.page)
-                if isinstance(exc, ApprovalRefusal):
-                    message, code, status_code = str(exc), exc.code, 409
-                elif isinstance(exc, NavigationStoppedError):
-                    # Stopped before it was sent (the pre-request gate): its text and url name only the refused
-                    # origin, as for a start URL or a new tab; not the page the action went back to.
-                    message, code, status_code, url = str(exc), BROWSER_ACTION_BLOCKED, 403, exc.origin
-                else:
-                    message, code, status_code = "Action blocked by policy", BROWSER_ACTION_BLOCKED, 403
-                # On the holds now, not once the block's snapshot and trail are written: an operator's
-                # approve meanwhile is told the action was refused, not that it may start. The error
-                # raised below replaces it as the refusal (run).
-                refused_before_effect(exc)
-                failed = await self._handle_policy_block(context, witness_state, error=message, code=code)
-                raise BrowserActionError(
-                    message,
-                    code=code,
-                    action=context.action_name,
-                    status_code=status_code,
-                    retryable=False,
-                    url=url,
-                    details={"snapshot": failed},
-                ) from exc
-            except BrowserActionError as exc:
-                if exc.retryable and context.change_made():
-                    return await self._record_after_change(context, witness_state, exc.message)
-                await self._handle_browser_action_error(context, witness_state, exc)
+                return await self._execute_and_record(context, witness_state)
+            except (Exception, asyncio.CancelledError) as exc:
+                # Whatever ended it (an unexpected error, or a cancellation, in the operation, in a known failure's
+                # handling or in the reading of the page after it), an action that began and has no record yet
+                # gets one, then the error (or the cancellation) goes on.
+                if not witness_state.recorded:
+                    await self._record_interrupted(context, witness_state, exc)
                 raise
-            except PlaywrightError as exc:
-                if context.change_made():
-                    return await self._record_after_change(context, witness_state, exc.message)
-                failed = await self._handle_playwright_error(context, witness_state)
-                raise BrowserActionError(
-                    "Action failed. Refresh observation and retry.",
-                    code="browser_action_failed",
-                    action=context.action_name,
-                    status_code=400,
-                    retryable=True,
-                    url=context.manager._shown_url(context.session.page),
-                    details={"snapshot": failed},
-                ) from exc
-            return await self._record_success(context, witness_state)
+
+    async def _execute_and_record(self, context: ActionRunContext, witness_state: ActionWitnessState) -> dict[str, Any]:
+        try:
+            await self._execute(context, witness_state)
+        except PermissionError as exc:
+            # The approval guard says what became of the approval; anything else is a policy block.
+            url = context.manager._shown_url(context.session.page)
+            if isinstance(exc, ApprovalRefusal):
+                message, code, status_code = str(exc), exc.code, 409
+            elif isinstance(exc, NavigationStoppedError):
+                # Stopped before it was sent (the pre-request gate): its text and url name only the refused
+                # origin, as for a start URL or a new tab; not the page the action went back to.
+                message, code, status_code, url = str(exc), BROWSER_ACTION_BLOCKED, 403, exc.origin
+            else:
+                message, code, status_code = "Action blocked by policy", BROWSER_ACTION_BLOCKED, 403
+            # On the holds now, not once the block's snapshot and trail are written: an operator's
+            # approve meanwhile is told the action was refused, not that it may start. The error
+            # raised below replaces it as the refusal (run).
+            refused_before_effect(exc)
+            witness_state.policy_block = (message, code)
+            failed = await self._handle_policy_block(context, witness_state, error=message, code=code)
+            raise BrowserActionError(
+                message,
+                code=code,
+                action=context.action_name,
+                status_code=status_code,
+                retryable=False,
+                url=url,
+                details={"snapshot": failed},
+            ) from exc
+        except BrowserActionError as exc:
+            if exc.retryable and context.change_made():
+                return await self._record_after_change(context, witness_state, exc.message)
+            await self._handle_browser_action_error(context, witness_state, exc)
+            raise
+        except PlaywrightError as exc:
+            if context.change_made():
+                return await self._record_after_change(context, witness_state, exc.message)
+            failed = await self._handle_playwright_error(context, witness_state)
+            raise BrowserActionError(
+                "Action failed. Refresh observation and retry.",
+                code="browser_action_failed",
+                action=context.action_name,
+                status_code=400,
+                retryable=True,
+                url=context.manager._shown_url(context.session.page),
+                details={"snapshot": failed},
+            ) from exc
+        witness_state.ran = True
+        return await self._record_success(context, witness_state)
+
+    async def _record_interrupted(
+        self, context: ActionRunContext, witness_state: ActionWitnessState, exc: BaseException
+    ) -> None:
+        """Audit entry and receipt for an action that began and ended in an unexpected error or a cancellation
+        before its record was written; and the `blocked` record of a policy block before the action began whose
+        handling was cut short.
+
+        Only the error's type goes into the record (its text can hold page content or a path), and the page is
+        not read: a cancelled action's page may be the thing that hung. A record that cannot be written is
+        logged, never raised over the error being reported. A cancellation while the record is written wins over
+        an error being reported (that error is logged here, and its type is in the record), so a cancelled job
+        ends cancelled; one that lands while a cancellation is being recorded is absorbed, and the first goes on.
+        """
+        began = witness_state.ran or witness_state.operation_started or context.began()
+        if not began and witness_state.policy_block is None:
+            return  # Nothing of the action ran; the approval holder gives its approval back.
+        how = "was cancelled" if isinstance(exc, asyncio.CancelledError) else f"ended in {type(exc).__name__}"
+        code: str | None = None
+        if not began:
+            # Refused before the action began, then its handling (the rollback, the snapshot) was cut short: the
+            # refusal is recorded as it would have been, without reading the page.
+            status = "blocked"
+            error, code = witness_state.policy_block
+        elif witness_state.ran:
+            interrupted = "reading the page after it" if witness_state.after_phase == "reading" else "recording it"
+            status, error = "error", f"the action ran; {interrupted} {how}. Observe the page before acting again."
+        else:
+            status = "error"
+            error = f"outcome unknown: the action began and {how}. Observe the page before acting again."
+        try:
+            await self._record_terminal_event(
+                context,
+                witness_state,
+                status=status,
+                after={"url": context.manager._shown_url(context.session.page)},
+                error=error,
+                code=code,
+            )
+        except asyncio.CancelledError:
+            # The writes finish in the background either way (_write_record shields them).
+            if not isinstance(exc, asyncio.CancelledError):
+                logger.warning(
+                    "%s in session %s was cancelled while its error was recorded; the cancellation goes on, the "
+                    "record finishes behind it",
+                    context.action_name,
+                    context.session.id,
+                    exc_info=exc,
+                )
+                raise
+            logger.warning(
+                "cancelled again while recording the interrupted %s in session %s; the record finishes behind it",
+                context.action_name,
+                context.session.id,
+            )
+        except Exception:
+            logger.warning(
+                "could not record the interrupted %s in session %s",
+                context.action_name,
+                context.session.id,
+                exc_info=True,
+            )
 
     async def _prepare(self, context: ActionRunContext) -> ActionWitnessState:
         manager = context.manager
@@ -405,43 +496,56 @@ class BrowserActionPipeline:
         """Record how the action ended; ``code`` is a blocked action's refusal code (approval_rejected, ...)."""
         manager = context.manager
         session = context.session
-        await manager._append_jsonl(
-            session.artifact_dir / "actions.jsonl",
-            {
-                "timestamp": utc_now(),
-                "action": context.action_name,
-                "status": status,
-                "target": context.target,
-                "before": witness_state.before,
-                "after": after,
-                "error": error,
-            },
-        )
-        await manager.audit.append(
-            event_type="browser_action",
-            status=status,
-            action=context.action_name,
-            session_id=session.id,
-            details={"target": context.target, "error": error, **({"code": code} if code else {})},
-        )
-        await manager._record_witness_receipt(
-            session,
-            event_type="browser_action",
-            status=status,
-            action=context.action_name,
-            action_class=witness_state.action_class,
-            risk_category=witness_state.witness_context.get("risk_category"),
-            target=context.target,
-            outcome=witness_state.outcome,
-            before=witness_state.before,
-            after=after,
-            approval=self._approval(
-                context,
-                witness_state,
-                status=self._approval_outcome(context, witness_state),
-            ),
-            metadata={"error": error},
-        )
+        approval = self._approval(context, witness_state, status=self._approval_outcome(context, witness_state))
+
+        async def writes() -> None:
+            await manager._append_jsonl(
+                session.artifact_dir / "actions.jsonl",
+                {
+                    "timestamp": utc_now(),
+                    "action": context.action_name,
+                    "status": status,
+                    "target": context.target,
+                    "before": witness_state.before,
+                    "after": after,
+                    "error": error,
+                },
+            )
+            await manager.audit.append(
+                event_type="browser_action",
+                status=status,
+                action=context.action_name,
+                session_id=session.id,
+                details={"target": context.target, "error": error, **({"code": code} if code else {})},
+            )
+            await manager._record_witness_receipt(
+                session,
+                event_type="browser_action",
+                status=status,
+                action=context.action_name,
+                action_class=witness_state.action_class,
+                risk_category=witness_state.witness_context.get("risk_category"),
+                target=context.target,
+                outcome=witness_state.outcome,
+                before=witness_state.before,
+                after=after,
+                approval=approval,
+                metadata={"error": error},
+            )
+
+        await self._write_record(session, witness_state, writes)
+
+    @staticmethod
+    async def _write_record(
+        session: Any, witness_state: ActionWitnessState, writes: Callable[[], Awaitable[None]]
+    ) -> None:
+        """Run a record's writes (actions.jsonl, the audit entry, the receipt) as one unit a cancellation does not
+        cut short, so a cancelled action never leaves one or two of them; the session's next action, its close and
+        a takeover wait for them (app.action_records). The callers read the approval's status first, while the
+        execution still holds the approval.
+        """
+        witness_state.recorded = True
+        await write_record(session, writes)
 
     async def _record_after_change(
         self,
@@ -462,6 +566,7 @@ class BrowserActionPipeline:
             f"The change was made, then a step after it failed: {error.splitlines()[0][:300]}. Observe the page "
             "before acting again, and do not repeat the action: that would make the change twice."
         )
+        witness_state.ran = True
         return await self._record_success(context, witness_state)
 
     async def _record_success(
@@ -471,7 +576,9 @@ class BrowserActionPipeline:
     ) -> dict[str, Any]:
         manager = context.manager
         session = context.session
+        witness_state.after_phase = "reading"
         after = await self._after_observation(context)
+        witness_state.after_phase = "observed"
         session.last_action = context.action_name
         verification = manager._action_verification(context.action_name, context.target, witness_state.before, after)
         action_class = manager._action_class(context.action_name)
@@ -484,32 +591,33 @@ class BrowserActionPipeline:
             "after": after,
             "verification": verification,
         }
-        await manager._append_jsonl(session.artifact_dir / "actions.jsonl", payload)
-        await manager.audit.append(
-            event_type="browser_action",
-            status="ok",
-            action=context.action_name,
-            session_id=session.id,
-            details={"target": context.target, "verification": verification},
-        )
-        await manager._record_witness_receipt(
-            session,
-            event_type="browser_action",
-            status="ok",
-            action=context.action_name,
-            action_class=witness_state.action_class,
-            risk_category=witness_state.witness_context.get("risk_category"),
-            target=context.target,
-            outcome=witness_state.outcome,
-            before=witness_state.before,
-            after=after,
-            verification=verification,
-            approval=self._approval(
-                context,
-                witness_state,
-                status=self._approval_outcome(context, witness_state),
-            ),
-        )
+        approval = self._approval(context, witness_state, status=self._approval_outcome(context, witness_state))
+
+        async def writes() -> None:
+            await manager._append_jsonl(session.artifact_dir / "actions.jsonl", payload)
+            await manager.audit.append(
+                event_type="browser_action",
+                status="ok",
+                action=context.action_name,
+                session_id=session.id,
+                details={"target": context.target, "verification": verification},
+            )
+            await manager._record_witness_receipt(
+                session,
+                event_type="browser_action",
+                status="ok",
+                action=context.action_name,
+                action_class=witness_state.action_class,
+                risk_category=witness_state.witness_context.get("risk_category"),
+                target=context.target,
+                outcome=witness_state.outcome,
+                before=witness_state.before,
+                after=after,
+                verification=verification,
+                approval=approval,
+            )
+
+        await self._write_record(session, witness_state, writes)
         await manager._persist_session(session, status="active")
         _events.emit_action(session.id, context.action_name, "ok", {"url": manager._shown_url(session.page)})
         return {
@@ -612,7 +720,12 @@ class BrowserActionPipeline:
         return WitnessApproval(
             required=bool(
                 witness_state.outcome.require_approval
-                or witness_state.witness_context.get("approval_id")
+                # An id the caller only presented, on an action that needs none, is shown but does not make
+                # the action approval-gated.
+                or (
+                    witness_state.witness_context.get("approval_id")
+                    and witness_state.witness_context.get("approval_checked", True)
+                )
                 or context.target.get("approval_id")
             ),
             approval_id=approval_id,
