@@ -67,6 +67,10 @@ All notable changes to auto-browser are documented here.
   unreachable bastion) now fails the provision at once with that message instead of retrying every port in
   `ISOLATED_TUNNEL_REMOTE_PORT_START`..`END`, each after a full `ISOLATED_TUNNEL_STARTUP_GRACE_SECONDS`; "remote port
   forwarding failed" and "address already in use" still move on to the next port.
+- With `ISOLATED_TUNNEL_ENABLED=true`, an isolated session's noVNC now also admits the tunnel's public host
+  (`ISOLATED_TUNNEL_PUBLIC_HOST`, else `ISOLATED_TUNNEL_HOST`) as a page host: its `NOVNC_ALLOWED_HOSTS` held only
+  `ISOLATED_TAKEOVER_HOST`, so the takeover URL a session hands out through its tunnel was refused by noVNC's own
+  Origin/Host guard.
 
 ### Security
 

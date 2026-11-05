@@ -738,8 +738,13 @@ class DockerBrowserNodeProvisioner:
         environment["VNC_PASSWORD"] = vnc_password
         # noVNC in the container only accepts its own page on a loopback name or
         # a listed host (a DNS-rebinding guard), and the takeover URL for this
-        # container uses ISOLATED_TAKEOVER_HOST.
-        environment["NOVNC_ALLOWED_HOSTS"] = self.settings.isolated_takeover_host
+        # container uses ISOLATED_TAKEOVER_HOST, or the tunnel's public host once the session has a tunnel.
+        allowed_hosts = [self.settings.isolated_takeover_host]
+        if self.settings.isolated_tunnel_enabled:
+            tunnel_host = self.settings.isolated_tunnel_public_host or self.settings.isolated_tunnel_host
+            if tunnel_host and tunnel_host not in allowed_hosts:
+                allowed_hosts.append(tunnel_host)
+        environment["NOVNC_ALLOWED_HOSTS"] = " ".join(allowed_hosts)
 
         container = client.containers.run(
             self.settings.isolated_browser_image,
