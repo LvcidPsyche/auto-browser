@@ -140,6 +140,8 @@ All notable changes to auto-browser are documented here.
 
 - **CI now fails when the real-Chromium tests cannot run.** The tests that drive a real Chromium skip when none is installed, so the CI leg that installs one could lose it and stay green. Setting `AUTO_BROWSER_REQUIRE_CHROMIUM=1` makes a missing Chromium fail the test run instead of skipping, and the Python 3.11 host-test leg sets it. A developer without Chromium is unaffected: unset, the tests still skip.
 
+- **More tests for Witness's session policy and receipt redaction.** `evaluate_session` is now tested for each protection profile, and `redact_target` for each redacted key in standard and restricted mode. No behaviour changed.
+
 ## [1.14.1] — 2026-11-04
 
 A patch release over 1.14.0. A session whose start page fails to load now gets a 400 the agent can act on instead
