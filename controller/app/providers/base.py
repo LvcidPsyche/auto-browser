@@ -386,9 +386,15 @@ class BaseProviderAdapter(ABC):
         The Gemini CLI loads a .env from its working directory and parents into its environment, so a child
         started in the controller's checkout re-reads the secrets `cli_environment` withheld.
         """
+        fallback = Path(tempfile.gettempdir()) / "auto-browser-cli-cwd"
         cli_home = (self.settings.cli_home or "").strip()
-        folder = Path(cli_home) if cli_home else Path(tempfile.gettempdir()) / "auto-browser-cli-cwd"
-        folder.mkdir(parents=True, exist_ok=True)
+        folder = Path(cli_home) if cli_home else fallback
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # A host run has no writable /data; CLI mode still needs a clean directory to start in.
+            folder = fallback
+            folder.mkdir(parents=True, exist_ok=True)
         return str(folder)
 
     @staticmethod

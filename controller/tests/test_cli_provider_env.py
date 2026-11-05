@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from app.config import Settings
@@ -75,6 +77,20 @@ class CliProviderEnvironmentTests(unittest.TestCase):
         self.assertEqual(env["MY_CLI_PROXY"], "proxy.example:3128")
         self.assertEqual(env["OTHER_VAR"], "v")
         self.assertFalse("NOT_LISTED" in env, "a variable outside the allowlist reached the child")
+
+    def test_unwritable_cli_home_falls_back_to_the_temp_folder(self):
+        real_mkdir = Path.mkdir
+
+        def mkdir(path, *args, **kwargs):
+            if "no-such-cli-home" in str(path):
+                raise PermissionError("read-only")
+            return real_mkdir(path, *args, **kwargs)
+
+        with patch.dict(os.environ, {"CLI_HOME": "/no-such-cli-home/x"}, clear=True):
+            adapter = ClaudeAdapter(Settings(_env_file=None))
+            with patch.object(Path, "mkdir", mkdir):
+                folder = adapter.cli_working_directory()
+        self.assertEqual(Path(folder), Path(tempfile.gettempdir()) / "auto-browser-cli-cwd")
 
 
 if __name__ == "__main__":

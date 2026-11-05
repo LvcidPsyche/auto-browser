@@ -82,6 +82,10 @@ All notable changes to auto-browser are documented here.
   failure), so a redacted copy of it is made and compared instead, and `a_url` points at that copy. When OCR is unavailable or redaction fails, the result carries the same `screenshot_pii_scrub` notice as
   `observe`, and strict mode withholds the shot.
 
+### Fixed
+
+- **Provider CLI mode no longer fails on a host without a writable `/data`.** The working directory for a provider CLI child is created under `CLI_HOME` (default `/data/cli-home`), and the failed `mkdir` stopped CLI mode. It now falls back to a folder under the system temp directory.
+
 ## [1.14.1] — 2026-11-04
 
 A patch release over 1.14.0. A session whose start page fails to load now gets a 400 the agent can act on instead
