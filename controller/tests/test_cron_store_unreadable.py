@@ -15,7 +15,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from app.cron_service import CRON_STORE_UNREADABLE, CronService
+from app.cron_service import CRON_STORE_UNREADABLE, CronService, CronStoreUnreadableError
 from app.models import McpToolCallRequest
 from app.tool_gateway import McpToolGateway
 
@@ -45,7 +45,7 @@ def _assert_fixed(text: str, store_path: Path) -> None:
 def test_a_corrupt_store_is_set_aside_and_refused_with_the_fixed_text(store_path: Path, content: bytes, caplog):
     store_path.write_bytes(content)
 
-    with caplog.at_level(logging.ERROR, logger="app.cron_service"), pytest.raises(RuntimeError) as caught:
+    with caplog.at_level(logging.ERROR, logger="app.cron_service"), pytest.raises(CronStoreUnreadableError) as caught:
         CronService(store_path)._load()
 
     _assert_fixed(str(caught.value), store_path)
@@ -74,7 +74,10 @@ def test_a_store_that_cannot_be_read_is_refused_and_left_where_it_is(store_path:
         return real_read_text(self, *args, **kwargs)
 
     with patch.object(Path, "stat", stat), patch.object(Path, "read_text", read_text):
-        with caplog.at_level(logging.ERROR, logger="app.cron_service"), pytest.raises(RuntimeError) as caught:
+        with (
+            caplog.at_level(logging.ERROR, logger="app.cron_service"),
+            pytest.raises(CronStoreUnreadableError) as caught,
+        ):
             CronService(store_path)._load()
 
     _assert_fixed(str(caught.value), store_path)

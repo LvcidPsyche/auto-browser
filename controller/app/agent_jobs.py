@@ -331,8 +331,13 @@ class AgentJobQueue:
     async def shutdown(self) -> None:
         if self._requeue_task is not None:
             self._requeue_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await self._requeue_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                # The workers still have to be stopped below.
+                logger.exception("the agent job re-queue failed")
             self._requeue_task = None
         for worker in self._workers:
             worker.cancel()

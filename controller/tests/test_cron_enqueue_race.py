@@ -330,9 +330,12 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
             store_root=self.queue.store.root,
             session_accessible=every_session_usable,
         )
+        # Startup hands the re-queue to a background task, so the queue's size says nothing yet: pin the ids it hands over.
+        restarted._requeue = AsyncMock()  # type: ignore[method-assign]
         await restarted.startup()
         self.addAsyncCleanup(restarted.shutdown)
-        self.assertEqual(restarted.queue.qsize(), 0, "startup put the abandoned job back on the queue")
+        await restarted._requeue_task
+        restarted._requeue.assert_awaited_once_with([])
 
     async def test_the_finish_callback_is_dropped_even_when_the_withdrawal_is_cancelled(self) -> None:
         self.queue._withdraw = AsyncMock(side_effect=asyncio.CancelledError())

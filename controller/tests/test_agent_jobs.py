@@ -603,7 +603,26 @@ class AgentJobQueueBacklogTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         self.assertTrue(self.queue.queue.full())
 
+        requeue = self.queue._requeue_task
         await asyncio.wait_for(self.queue.shutdown(), timeout=5)
+
+        self.assertIsNotNone(requeue)
+        self.assertTrue(requeue.cancelled())
+        self.assertIsNone(self.queue._requeue_task)
+
+    async def test_a_failed_requeue_is_logged_and_shutdown_still_stops_the_workers(self) -> None:
+        self.queue._worker_loop = self._idle_worker  # type: ignore[method-assign]
+        self.queue._requeue = AsyncMock(side_effect=RuntimeError("queue broke"))  # type: ignore[method-assign]
+        await self.queue.startup()
+        workers = list(self.queue._workers)
+        await asyncio.wait([self.queue._requeue_task], timeout=5)
+
+        with self.assertLogs("app.agent_jobs", level="ERROR") as logs:
+            await asyncio.wait_for(self.queue.shutdown(), timeout=5)
+
+        self.assertIn("queue broke", "\n".join(logs.output))
+        self.assertTrue(all(worker.cancelled() for worker in workers))
+        self.assertIsNone(self.queue._requeue_task)
 
     @staticmethod
     async def _idle_worker(_index: int) -> None:

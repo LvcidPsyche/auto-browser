@@ -76,7 +76,8 @@ CRON_STORE_UNREADABLE = (
 class CronStoreUnreadableError(RuntimeError):
     """The cron store could not be used; the text is the fixed CRON_STORE_UNREADABLE (REST answers it as 503)."""
 
-    def __init__(self) -> None:
+    def __init__(self, *_args: object) -> None:
+        # *_args: copy and pickle rebuild an exception from its args, which hold the fixed text.
         super().__init__(CRON_STORE_UNREADABLE)
 
 

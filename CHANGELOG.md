@@ -52,6 +52,10 @@ All notable changes to auto-browser are documented here.
   `browser.create_session` and `browser.trigger_cron_job` return the same text. Before this release a
   corrupt file read as an empty set, so the list answered `[]` and a persona session create answered 404; a client
   that handled those should handle the 503. The file's path and the cause are in the server log.
+- **The REST cron routes now answer 503 for a cron store that cannot be used.** A store that cannot be read or is
+  corrupt, or that holds JSON other than an object, made `GET /crons`, `POST /crons`, `GET /crons/{job_id}`,
+  `DELETE /crons/{job_id}` and `POST /crons/{job_id}/trigger` answer 500; they now answer 503 with a fixed detail that
+  names `CRON_STORE_PATH` and not the path, as the persona-file note above says for its routes.
 - **Fewer pages count as bot challenges (`captcha_detected`).** An agent or runbook that relied on that code for any of
   these will now see the action succeed: a page whose title or text only says "access denied", "security check",
   "unusual activity", "suspicious activity", "bot detected" or "captcha" (Akamai's "Access Denied" block page
