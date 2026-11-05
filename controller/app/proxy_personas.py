@@ -53,6 +53,10 @@ from .utils import PRIVATE_FILE_MODE, atomic_write_text
 logger = logging.getLogger(__name__)
 
 
+class ProxyPersonaFileError(RuntimeError):
+    """The persona file exists but cannot be read or parsed."""
+
+
 class ProxyPersonaStore:
     """Read/write proxy personas from a JSON config file."""
 
@@ -60,18 +64,25 @@ class ProxyPersonaStore:
         self._path = Path(file_path) if file_path else None
 
     def _read_object(self) -> dict[str, Any]:
-        """The file's top-level object as written; {} when there is no file or it is unusable."""
+        """The file's top-level object as written; {} only when there is no file.
+
+        A file that exists but cannot be read or parsed raises: answering {} let the next save write
+        one persona over it and erase the rest.
+        """
         if self._path is None or not self._path.exists():
             return {}
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
         except Exception as exc:
-            logger.warning("failed to load proxy persona file %s: %s", self._path, exc)
-            return {}
+            logger.error("failed to load proxy persona file %s: %s", self._path, exc)
+            raise ProxyPersonaFileError(self._unusable_message(exc)) from exc
         if not isinstance(data, dict):
-            logger.warning("proxy persona file is not a JSON object: %s", self._path)
-            return {}
+            logger.error("proxy persona file is not a JSON object: %s", self._path)
+            raise ProxyPersonaFileError(self._unusable_message("it is not a JSON object"))
         return data
+
+    def _unusable_message(self, reason: object) -> str:
+        return f"proxy persona file {self._path} is unreadable ({reason}); fix or move it. It was not changed."
 
     def _load(self) -> dict[str, dict[str, Any]]:
         normalized: dict[str, dict[str, Any]] = {}
@@ -237,7 +248,10 @@ def warn_about_ownerless_personas(store: ProxyPersonaStore, *, named_tokens: boo
     """
     if not named_tokens:
         return
-    names = store.ownerless_names()
+    try:
+        names = store.ownerless_names()
+    except ProxyPersonaFileError:
+        return  # already logged at error level by the read; the file is left alone
     if not names:
         return
     one = len(names) == 1

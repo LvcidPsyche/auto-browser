@@ -19,7 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_module
-from app.proxy_personas import ProxyPersonaStore, warn_about_ownerless_personas
+from app.proxy_personas import ProxyPersonaFileError, ProxyPersonaStore, warn_about_ownerless_personas
 from app.startup import extensions
 
 SERVER = "http://p.example:1"
@@ -111,10 +111,11 @@ def test_the_empty_owner_report_skips_entries_the_store_ignores(path) -> None:
     assert ProxyPersonaStore(path).blank_owner_names() == ["ok"]
 
 
-def test_the_empty_owner_report_is_empty_without_a_readable_file(path) -> None:
+def test_the_empty_owner_report_is_empty_without_a_file_and_raises_for_an_unreadable_one(path) -> None:
     assert ProxyPersonaStore(path).blank_owner_names() == []
     path.write_text("{not json", "utf-8")
-    assert ProxyPersonaStore(path).blank_owner_names() == []
+    with pytest.raises(ProxyPersonaFileError):
+        ProxyPersonaStore(path).blank_owner_names()
     assert ProxyPersonaStore(None).blank_owner_names() == []
 
 
