@@ -30,7 +30,10 @@ _SENSITIVE_KEY_FRAGMENTS = (
 _REDACTED = "[REDACTED]"
 # The keys that hold what an action typed or chose (`value` and `label`, for select_option) and who it signed in as.
 # They are redacted when the action is marked sensitive.
-_TYPED_TEXT_KEYS = frozenset({"text", "text_preview", "value", "label", "username"})
+# Beside a sensitive flag, `text` and `text_preview` are hidden in any dict; `value`, `label` and `username` only in an
+# action's own payload, because a site's own row can carry a "sensitive" key and those are its data.
+_TYPED_TEXT_KEYS = frozenset({"text", "text_preview"})
+_ACTION_TYPED_TEXT_KEYS = _TYPED_TEXT_KEYS | {"value", "label", "username"}
 _SENSITIVE_FLAG_KEYS = ("sensitive", "text_redacted")
 # The keys of an agent step's observation that point at its screenshot.
 _SCREENSHOT_KEYS = ("screenshot_path", "screenshot_url")
@@ -432,18 +435,20 @@ def _redact_sensitive(
 ) -> Any:
     """Redact secret-named keys and (with `strings`) rewrite every string.
 
-    With `decision` (an event payload: the agent's decision and its action), the typed text of a dict flagged
-    sensitive is hidden too. Page data (an observation, extracted data) is not: a "sensitive" key a site's own
-    data carries must not blank its neighbours.
+    The typed text of a dict flagged sensitive is hidden too: its `text` and `text_preview` anywhere, and with
+    `decision` (an event payload: the agent's decision and its action) its `value`, `label` and `username` as well.
+    In page data (an observation, extracted data) those three stay: a "sensitive" key a site's own data carries
+    must not blank its neighbours.
     """
     if isinstance(value, dict):
-        hide_typed_text = decision and any(value.get(flag) for flag in _SENSITIVE_FLAG_KEYS)
+        flagged = any(value.get(flag) for flag in _SENSITIVE_FLAG_KEYS)
+        typed_keys = _ACTION_TYPED_TEXT_KEYS if decision else _TYPED_TEXT_KEYS
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key).lower()
             if any(fragment in key_text for fragment in _SENSITIVE_KEY_FRAGMENTS):
                 redacted[key] = _REDACTED
-            elif hide_typed_text and key_text in _TYPED_TEXT_KEYS:
+            elif flagged and key_text in typed_keys:
                 redacted[key] = _REDACTED
             else:
                 redacted[key] = _redact_sensitive(item, strings=strings, decision=decision)

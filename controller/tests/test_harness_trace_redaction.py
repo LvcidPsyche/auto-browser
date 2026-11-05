@@ -46,6 +46,21 @@ class PageDataKeepsItsValuesTests(unittest.TestCase):
         self.assertEqual(stored.extracted_data["row"]["label"], "Plan")
         self.assertEqual(stored.extracted_data["row"]["username"], "team-admin")
 
+    def test_typed_text_beside_a_sensitive_flag_in_page_data_is_still_hidden(self) -> None:
+        # Only `value`, `label` and `username` moved to action payloads: `text` and `text_preview` in a dict that
+        # carries a sensitive flag stay hidden wherever the dict is, as they were before.
+        typed = "ordinary typed words"
+        for flag in ("sensitive", "text_redacted"):
+            row = {"text": typed, "text_preview": typed, "value": "Pro", flag: True}
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as tmp:
+                recorder = TraceRecorder(tmp, run_id="r1", contract_hash="h")
+                trace = recorder.finalize(final_observation={"rows": [row]}, extracted_data={"row": row})
+
+                stored = trace.scrubbed()
+                self.assertNotIn(typed, json.dumps(stored.model_dump(mode="json")))
+                self.assertEqual(stored.final_observation["rows"][0]["value"], "Pro")
+                self.assertEqual(stored.extracted_data["row"]["value"], "Pro")
+
     def test_an_agent_result_final_observation_keeps_page_data(self) -> None:
         result = {"steps": [{"status": "ok", "observation": {"url": "https://example.com/", "rows": [self.ROW]}}]}
 
