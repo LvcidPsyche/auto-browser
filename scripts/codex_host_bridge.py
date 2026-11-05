@@ -275,19 +275,27 @@ class CodexBridgeService:
         return process.returncode, stdout, stderr
 
     def kill_in_flight(self) -> int:
-        """Kill every codex run still going (its whole process group on POSIX), for bridge shutdown; returns how many.
+        """Kill every codex run still going (its whole process group on POSIX), for bridge shutdown; returns how many
+        it signalled.
 
         Codex leads its own session, so it does not get the terminal's SIGINT when the bridge is stopped by hand, and
         the handler threads that wait on it are daemon threads: without this it would run on, orphaned. From here on
         the service starts no codex: a decision that gets that far is refused with 503.
+
+        Each run is polled just before its signal, and one already reaped is skipped: its pid may belong to another
+        process by then. That narrows the race with the handler thread's communicate() to the moment between the poll
+        and the signal; it does not close it.
         """
         with self._in_flight_lock:
             self._stopping = True  # no codex starts after this sweep
-            # A run communicate() has already reaped is left alone: its pid may belong to someone else by now.
-            running = [(process, grouped) for process, grouped in self._in_flight.items() if process.returncode is None]
-        for process, grouped in running:
+            in_flight = list(self._in_flight.items())
+        signalled = 0
+        for process, grouped in in_flight:
+            if process.poll() is not None:
+                continue  # reaped since the list was taken (or by this poll)
             _kill_process_tree(process, grouped)
-        return len(running)
+            signalled += 1
+        return signalled
 
 
 def _kill_process_tree(process: subprocess.Popen, grouped: bool) -> None:

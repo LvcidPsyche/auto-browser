@@ -471,9 +471,41 @@ class _RunningCodex(_FakeCodex):
         return output
 
 
+class _ReapableRun:
+    """A codex run the sweep finds in flight. reap() is the handler thread's communicate() collecting its exit."""
+
+    def __init__(self) -> None:
+        self.returncode = None
+        self.pid = 0
+
+    def reap(self) -> None:
+        self.returncode = 0
+
+    def poll(self):
+        return self.returncode
+
+
 @unittest.skipIf(bridge is None, "scripts/ is not shipped in the controller image")
 class BridgeShutdownTests(unittest.TestCase):
     """HARN-45: codex runs in its own session, so stopping a hand-run bridge (Ctrl+C) left it running, orphaned."""
+
+    def test_a_run_reaped_after_the_sweep_took_its_list_is_not_killed(self) -> None:
+        # The sweep lists the runs under the lock and kills them after releasing it, so communicate() can reap one in
+        # between, and its pid is then free for the system to reuse.
+        service = bridge.CodexBridgeService(codex_path="codex")
+        first, second = _ReapableRun(), _ReapableRun()
+        service._in_flight.update({first: True, second: True})
+        killed: list[object] = []
+
+        def kill(process, grouped) -> None:
+            killed.append(process)
+            second.reap()  # its communicate() returns while the first run is being killed
+
+        with patch.object(bridge, "_kill_process_tree", side_effect=kill):
+            stopped = service.kill_in_flight()
+
+        self.assertEqual(killed, [first])
+        self.assertEqual(stopped, 1)
 
     def test_the_codex_runs_in_flight_can_be_killed(self) -> None:
         _FakeCodex.stderr_text = b""
