@@ -238,6 +238,35 @@ class SessionNetworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ISOLATED_BROWSER_CONTAINER_PREFIX", warnings[0])
         self.assertEqual(len(client.api.connect_bodies), 2)
 
+    async def test_an_old_daemon_still_warns_when_the_controller_is_on_a_leftover_session_network(self) -> None:
+        # A restart-policy restart leaves the controller on the session networks it had joined, and the cached
+        # container's attrs still list them: they sort lowest, but they are not the controller's own network.
+        provisioner, client = self.provisioner(ISOLATED_BROWSER_CONTAINER_PREFIX="aaa-session")
+        client.api_version = "1.47"
+        networks = client.containers.get("controller-id").attrs["NetworkSettings"]["Networks"]
+        networks["aaa-session-0000old-net"] = {}
+
+        with self.assertLogs("app.session_isolation", level=logging.WARNING) as logs:
+            await provisioner.provision("b")
+
+        warnings = [line for line in logs.output if "GwPriority" in line]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("auto-browser_default", warnings[0])
+        self.assertNotIn("aaa-session-0000old-net", warnings[0])
+
+    async def test_a_daemon_whose_version_cannot_be_read_still_gets_a_session_joined_with_the_priority(self) -> None:
+        # The version only decides whether to warn: reading it must never fail the session.
+        provisioner, client = self.provisioner()
+
+        def unreadable() -> dict:
+            raise RuntimeError("version endpoint unavailable")
+
+        client.version = unreadable
+
+        await provisioner.provision("s1")
+
+        self.assertEqual(client.api.connect_bodies[-1]["EndpointConfig"], {"GwPriority": -1})
+
     async def test_an_old_daemon_does_not_warn_when_the_session_network_sorts_after_the_controllers(self) -> None:
         provisioner, client = self.provisioner()
         client.api_version = "1.47"

@@ -571,18 +571,28 @@ class DockerBrowserNodeProvisioner:
     def _gw_priority_supported(self, client) -> bool:
         """Whether the daemon, and the API version this client speaks, honour GwPriority (read once)."""
         if self._gw_priority_ok is None:
-            versions = [str(client.version()["ApiVersion"])]
-            pinned = getattr(client.api, "_version", None)
-            if isinstance(pinned, str):
-                versions.append(pinned)
-            self._gw_priority_ok = all(_api_version(v) >= GW_PRIORITY_MIN_API_VERSION for v in versions)
+            try:
+                versions = [str(client.version()["ApiVersion"])]
+                pinned = getattr(client.api, "_version", None)
+                if isinstance(pinned, str):
+                    versions.append(pinned)
+                self._gw_priority_ok = all(_api_version(v) >= GW_PRIORITY_MIN_API_VERSION for v in versions)
+            except Exception as exc:
+                # The answer only decides whether to warn; GwPriority is sent either way, so a version that cannot
+                # be read never fails a session. Assumed supported, which drops only the warning.
+                logger.debug("could not read the Docker API version (%s); assuming GwPriority is honoured", exc)
+                self._gw_priority_ok = True
         return self._gw_priority_ok
 
     def _warn_gateway_hazard(self, session_network_name: str) -> None:
         """One WARNING per controller start when a session network sorts ahead of every network the controller is on."""
         if self._gw_hazard_warned:
             return
-        own = sorted(((self._controller_container.attrs.get("NetworkSettings") or {}).get("Networks") or {}))
+        # The controller's own networks only: after a restart-policy restart the cached attrs still list the session
+        # networks it had joined, which sort lowest in exactly this hazard and would hide it.
+        session_prefix = f"{self.settings.isolated_browser_container_prefix}-"
+        attached = (self._controller_container.attrs.get("NetworkSettings") or {}).get("Networks") or {}
+        own = sorted(name for name in attached if not (name.startswith(session_prefix) and name.endswith("-net")))
         if not own or session_network_name >= own[0]:
             return
         self._gw_hazard_warned = True
