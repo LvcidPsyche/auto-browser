@@ -42,6 +42,7 @@ from ..models import (
 from ..readiness import run_readiness_checks
 from ..result_shaping import inline_screenshot_path, shape_mcp_result
 from ..run_as import controller_user_status
+from ..session_ownership import verified_operator
 from ..tool_inputs import (
     EVAL_JS_DEFAULT_TIMEOUT_MS,
     AgentJobIdInput,
@@ -267,9 +268,9 @@ class McpToolGateway:
         self.vision_targeter = vision_targeter
         self.harness_service = harness_service
         self.metrics = metrics
-        # Serializes finding or creating the implicit session: two session-less calls at once each saw no live
-        # session and each created one.
-        self._implicit_session_lock = asyncio.Lock()
+        # Serializes creating the implicit session: two session-less calls at once each saw no live session and
+        # each created one. Keyed by the owner a create records (verified_operator), which is whose listing shows it.
+        self._implicit_session_locks: dict[str | None, asyncio.Lock] = {}
         self._registry = ToolRegistry(
             tool_profile=tool_profile,
             tool_packs=tool_packs,
@@ -580,11 +581,15 @@ class McpToolGateway:
         # was reported "ambiguous" — with MAX_SESSIONS=1, every create → close →
         # create cycle broke the convenience for good. Only a live session can
         # be acted on, so only live sessions are candidates.
-        async with self._implicit_session_lock:
-            sessions = [item for item in await self.manager.list_sessions() if item.get("live") is True]
-            if not sessions and spec.name in IMPLICIT_SESSION_CREATE_TOOLS:
-                created = await self.manager.create_session()
-                return arguments.model_copy(update={"session_id": created["id"]})
+        sessions = await self._live_sessions()
+        if not sessions and spec.name in IMPLICIT_SESSION_CREATE_TOOLS:
+            # Only a create is serialized, and only among the callers it would leave a session to (one owner):
+            # listed again under the lock, since a call that held it may have created one meanwhile.
+            async with self._implicit_session_locks.setdefault(verified_operator(), asyncio.Lock()):
+                sessions = await self._live_sessions()
+                if not sessions:
+                    created = await self.manager.create_session()
+                    return arguments.model_copy(update={"session_id": created["id"]})
         if len(sessions) == 1:
             return arguments.model_copy(update={"session_id": sessions[0]["id"]})
         if not sessions:
@@ -599,6 +604,10 @@ class McpToolGateway:
             code="ambiguous_session",
             action=spec.name,
         )
+
+    async def _live_sessions(self) -> list[dict[str, Any]]:
+        """The calling operator's live sessions (list_sessions shows each caller its own and unowned ones)."""
+        return [item for item in await self.manager.list_sessions() if item.get("live") is True]
 
     def _no_session_hint(self) -> str:
         """How to get a session, naming only tools this controller serves (lean has no create_session)."""
