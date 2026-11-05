@@ -133,8 +133,8 @@ class ProxyPersonaStore:
         # on save let a save of any persona change which one wins.
         atomic_write_text(self._path, json.dumps(data, indent=2, ensure_ascii=False), mode=PRIVATE_FILE_MODE)
 
-    def _raw_without(self, name: str) -> dict[str, Any]:
-        """The file's entries exactly as written, minus the one named *name*.
+    def _raw_entries(self, name: str) -> tuple[dict[str, Any], str | None]:
+        """The file's entries exactly as written, and the key of the one named *name* (None if none).
 
         A save starts from this, not from the normalized view, so an entry the store ignores (a typo in
         "server") and any extra key an operator added to another entry are written back untouched. A name
@@ -159,9 +159,7 @@ class ProxyPersonaStore:
                 keys,
             )
             raise ProxyPersonaDuplicateError()
-        for raw_name in keys:
-            del raw[raw_name]
-        return raw
+        return raw, (keys[0] if keys else None)
 
     @staticmethod
     def _owner_of(entry: Any) -> str | None:
@@ -274,13 +272,23 @@ class ProxyPersonaStore:
         # An update never changes who owns a persona (nor claims an unowned one); a new
         # persona belongs to its creator when a named credential proved who that is.
         normalized_persona["owner"] = existing["owner"] if existing is not None else verified_operator()
-        raw = self._raw_without(normalized_name)
-        # Still under this exact key only if the store ignores it (a typo in "server"); the save would
-        # overwrite it, so it is refused as a valid entry would be when another operator owns it.
-        if normalized_name in raw and not may_use(self._owner_of(raw[normalized_name])):
+        raw, key = self._raw_entries(normalized_name)
+        # An entry under this exact key other than the one found is one the store ignores (a typo in "server");
+        # the save would overwrite it, so it is refused as a valid entry would be when another operator owns it.
+        if key != normalized_name and normalized_name in raw and not may_use(self._owner_of(raw[normalized_name])):
             raise PermissionError(f"proxy persona {normalized_name!r} belongs to another operator")
-        raw[normalized_name] = normalized_persona
-        self._save(raw)
+        # An update keeps its entry's place in the file and any key an operator added to it by hand; the store's
+        # own fields are laid over it.
+        entry = {**(raw[key] if key is not None else {}), **normalized_persona}
+        place = key if key is not None else normalized_name
+        saved: dict[str, Any] = {}
+        for raw_name, value in raw.items():
+            if raw_name == place:
+                saved[normalized_name] = entry
+            elif raw_name != normalized_name:  # an ignored entry under the name itself is overwritten
+                saved[raw_name] = value
+        saved.setdefault(normalized_name, entry)  # a new persona goes last
+        self._save(saved)
         return self._summary(normalized_name, normalized_persona)
 
     def delete_persona(self, name: str) -> bool:
@@ -288,7 +296,10 @@ class ProxyPersonaStore:
         data = self._load()
         if name not in data or not may_use(data[name].get("owner")):
             return False
-        self._save(self._raw_without(name))
+        raw, key = self._raw_entries(name)
+        if key is not None:
+            del raw[key]
+        self._save(raw)
         return True
 
     def resolve_proxy(self, name: str) -> dict[str, Any]:

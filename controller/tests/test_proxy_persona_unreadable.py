@@ -91,6 +91,50 @@ def test_saving_one_persona_keeps_an_invalid_entry_as_written(tmp_path: Path):
     assert saved["z"]["server"] == "http://z:1"
 
 
+@pytest.mark.parametrize("raw_name", ["a", " a "])
+def test_updating_a_persona_keeps_the_keys_added_to_it_by_hand(tmp_path: Path, raw_name: str):
+    path = tmp_path / "personas.json"
+    _write(path, {raw_name: {"server": "http://a:1", "region": "eu", "tags": ["x"]}})
+
+    ProxyPersonaStore(path).set_persona("a", server="http://a:2", description="moved")
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "a": {
+            "server": "http://a:2",
+            "region": "eu",
+            "tags": ["x"],
+            "username": None,
+            "password": None,
+            "description": "moved",
+            "owner": None,
+        }
+    }
+
+
+F, L = {"server": "http://f:1"}, {"server": "http://l:1"}
+
+
+@pytest.mark.parametrize(
+    ("content", "order"),
+    [
+        ({"first": F, "a": {"server": "http://a:1"}, "last": L}, ["first", "a", "last"]),
+        ({"first": F, " a ": {"server": "http://a:1"}, "last": L}, ["first", "a", "last"]),
+        ({"first": F, "a": {"serber": "http://typo:1"}, "last": L}, ["first", "a", "last"]),
+        ({" a ": {"server": "http://a:1"}, "b": F, "a": {"serber": "http://typo:1"}}, ["a", "b"]),
+    ],
+)
+def test_saving_a_persona_keeps_its_place_in_the_file(tmp_path: Path, content: dict, order: list[str]):
+    # An update removed the entry and added it back, so each save of a persona moved it to the end of the file.
+    path = tmp_path / "personas.json"
+    _write(path, content)
+
+    ProxyPersonaStore(path).set_persona("a", server="http://a:2")
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert list(saved) == order
+    assert saved["a"]["server"] == "http://a:2"
+
+
 def test_deleting_one_persona_keeps_extra_keys_on_the_others(tmp_path: Path):
     path = tmp_path / "personas.json"
     _write(path, {"keep": {"server": "http://k:1", "region": "eu", "tags": ["a"]}, "gone": {"server": "http://g:1"}})
