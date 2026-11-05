@@ -160,6 +160,7 @@ class TraceEnvelope(BaseModel):
         trace = cls(run_id=run_id or uuid.uuid4().hex[:12], contract_hash=contract_hash)
         previous_hash = ""
         final_observation: dict[str, Any] = {}
+        previous_observation: dict[str, Any] = {}
         for index, step in enumerate(result.get("steps") or [], start=1):
             if isinstance(step, BaseModel):
                 step = step.model_dump()
@@ -169,8 +170,11 @@ class TraceEnvelope(BaseModel):
                 # The controller found the field sensitive at run time, whatever the agent marked.
                 decision = {**decision, "sensitive": True}
             observation = step.get("observation") or {}
-            if observation:
+            # A step that carries the previous step's observation unchanged (the loop-guard takeover) saw nothing
+            # newer, and must not replace the page that step's action left.
+            if observation and observation != previous_observation:
                 final_observation = observation
+            previous_observation = observation
             # The page the action left behind is newer than the observation made before it; a later step's own
             # observation replaces it in turn. Read from the step's execution as it came, not the sensitive-flagged copy.
             after_page = _page_after(step.get("execution"))

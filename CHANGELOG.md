@@ -324,7 +324,8 @@ All notable changes to auto-browser are documented here.
 - **A harness trace of a live run now ends on the page the last action left, not the page before it.** The final
   observation was the observation each step made before acting, so a run that ended on an action was verified against
   the page it started that action on. It is now the action's `after` (a full observation) whenever that was read; a
-  later step's own observation still replaces it. When the page after the action could not be read (the action's
+  later step's own observation still replaces it (a loop-guard takeover step, which only repeats the previous step's
+  observation, does not). When the page after the action could not be read (the action's
   `after` holds an `observation_error` or `snapshot_error`), the earlier observation is kept with the session's
   final `url` and `title`, so its other fields, the page text among them, are from before the action.
 - **The harness verifier now searches the page text a real observation carries.** It looked for `text_contains`,

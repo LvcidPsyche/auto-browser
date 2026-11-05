@@ -218,6 +218,28 @@ class FinalObservationTests(unittest.TestCase):
 
         self.assertEqual(final["text_excerpt"], "Later page")
 
+    def test_a_loop_guard_takeover_reusing_the_last_observation_keeps_the_page_after_the_last_action(self) -> None:
+        # The orchestrator appends the takeover with observation=<the previous step's pre-action page>.
+        takeover = {
+            "status": "takeover",
+            "observation": dict(self.BEFORE),
+            "decision": {"action": "request_human_takeover"},
+            "execution": {"message": "A human is needed"},
+        }
+        final = self._final({"status": "ok", "observation": self.BEFORE, "execution": {"after": self.AFTER}}, takeover)
+
+        self.assertEqual(final["text_excerpt"], "Order confirmed")
+        self.assertEqual(final["url"], "https://x.test/done")
+
+    def test_a_takeover_with_its_own_observation_still_replaces_the_earlier_after(self) -> None:
+        own = {"url": "https://x.test/captcha", "text_excerpt": "Prove you are human"}
+        final = self._final(
+            {"status": "ok", "observation": self.BEFORE, "execution": {"after": self.AFTER}},
+            {"status": "takeover", "observation": own, "execution": {"message": "A human is needed"}},
+        )
+
+        self.assertEqual(final["text_excerpt"], "Prove you are human")
+
     def test_an_after_that_could_not_be_observed_leaves_the_page_before_the_action(self) -> None:
         for name, after in {
             "observation_error": {"url": "https://x.test/done", "observation_error": "page changed"},
