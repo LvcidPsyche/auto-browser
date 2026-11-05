@@ -45,7 +45,8 @@ class _Orchestrator:
             goal=kwargs["goal"],
             workflow_profile="fast",
             status=self.status,
-            steps=[_step(kwargs, self.status, self._error())],
+            # A step never reports max_steps_reached: that is the run running out of steps after acting.
+            steps=[_step(kwargs, "acted" if self.status == "max_steps_reached" else self.status, self._error())],
             final_session={"id": kwargs["session_id"]},
         )
 
@@ -83,7 +84,15 @@ class AgentJobErrorStatusTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(stored["result"]["status"], "error")
 
     async def test_other_outcomes_stay_completed(self) -> None:
-        for kind, status in (("run", "done"), ("run", "takeover"), ("run", "approval_required"), ("step", "done")):
+        outcomes = (
+            ("run", "done"),
+            ("run", "takeover"),
+            ("run", "approval_required"),
+            ("run", "max_steps_reached"),
+            ("step", "done"),
+            ("step", "acted"),
+        )
+        for kind, status in outcomes:
             with self.subTest(kind=kind, status=status):
                 stored = await self._finished(status, kind)
                 self.assertEqual(stored["status"], "completed")
