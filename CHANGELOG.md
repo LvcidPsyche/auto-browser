@@ -66,7 +66,15 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
-- **The sandbox report no longer prints the Playwright connect path.** `browser-node/sandbox-report.mjs` printed the whole `browser-sandbox.json`, which holds the browser-node endpoint `ws://<host>:9223/<path>`, and that path is the Playwright server's only secret. The compose smoke printed it for each browser, and CI's sandbox step printed it into the public CI log. The report now replaces the path with `<redacted>` (host and port stay), in its error lines too. `browser-node/server.mjs` still logs the endpoint when it starts.
+- **The Playwright connect path is no longer printed by the sandbox report or by CI.** The browser-node endpoint
+  `ws://<host>:9223/<path>` is in `browser-sandbox.json`, and that path is the Playwright server's only secret. The
+  compose smoke printed the whole file for each browser, and CI printed the state and the browser-node log into the
+  public CI log: `sandbox-report.mjs`, `scripts/assert_browser_sandbox.py` (its state line and its failure lines),
+  `scripts/check_sandbox_gate.py` (its mismatch and failure lines), two inline state prints in the sandbox steps and
+  the `wrote <file>: <endpoint>` line that `browser-node/server.mjs` logs when it starts. Each now replaces the path
+  with `<redacted>` (scheme, host and port stay), as does the `the sandbox check failed: ...` detail that
+  `browser-node/sandbox.mjs` writes into the state and the log when a connect error names the URL. The state file and
+  the endpoint file themselves still hold the path (the controller reads it there).
 - **`/healthz/deep` now gives up on a browser that does not answer.** The probe waited on the browser connection with
   no limit, so a stuck browser node held the request open (and the controller's browser lock with it). That step is
   now bounded by the same 5 seconds as `/readyz`, and a timeout answers 503 with `deep_health_probe_timed_out`. The wait is

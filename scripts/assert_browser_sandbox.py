@@ -14,8 +14,17 @@ usage: assert_browser_sandbox.py <path to browser-sandbox.json> [--require-proc]
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
+
+# The twin of redactEndpoints in browser-node/sandbox.mjs: the path of a Playwright websocket endpoint is that
+# server's only secret, and CI logs are public, so whatever prints a state, a detail or a mismatch goes through this.
+ENDPOINT_PATH = re.compile(r"""(wss?://[^/\s"'<>]+)/[^\s"'<>]*""")
+
+
+def redact_endpoints(text: object) -> str:
+    return ENDPOINT_PATH.sub(r"\1/<redacted>", str(text))
 
 
 def problems(state: object, *, require_proc: bool = False) -> list[str]:
@@ -59,10 +68,10 @@ def main(argv: list[str]) -> int:
     except (OSError, ValueError) as exc:
         print(f"FAIL: could not read {path}: {exc}")
         return 1
-    print(f"{path}: {json.dumps(state)}")
+    print(f"{path}: {redact_endpoints(json.dumps(state))}")
     found = problems(state, require_proc="--require-proc" in argv)
     for problem in found:
-        print(f"FAIL: {problem}")
+        print(f"FAIL: {redact_endpoints(problem)}")
     if not found:
         print("OK: Chromium's sandbox engaged and was verified")
     return 1 if found else 0

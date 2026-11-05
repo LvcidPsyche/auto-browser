@@ -200,7 +200,9 @@ export async function launchWithSandboxPolicy({
         const verifyMs = Math.max(0, Math.min(attemptTimeoutMs, deadline - Date.now()));
         verdict = await withinTimeout(Promise.resolve().then(() => verify(server)), verifyMs);
       } catch (error) {
-        verdict = { ok: false, detail: `the sandbox check failed: ${String(error?.message ?? error).split("\n")[0]}` };
+        // The first line of a failed connect can carry the endpoint URL, whose path is the server's only secret.
+        const reason = redactEndpoints(String(error?.message ?? error).split("\n")[0]);
+        verdict = { ok: false, detail: `the sandbox check failed: ${reason}` };
       }
       if (verdict.ok) {
         return {
