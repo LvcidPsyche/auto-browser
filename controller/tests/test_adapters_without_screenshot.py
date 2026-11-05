@@ -179,16 +179,21 @@ class HostBridgeWithoutScreenshotTests(unittest.TestCase):
         self.module = codex_host_bridge
 
     def _run(self, payload: dict[str, Any]) -> list[str]:
-        """Run handle_openai_decide with codex mocked; return the command it built."""
+        """Run handle_openai_decide with codex faked at subprocess.Popen (the bridge's launcher); return its command."""
         service = self.module.CodexBridgeService(codex_path="codex")
         seen: list[list[str]] = []
 
-        def fake_run(command, **kwargs):
-            seen.append(command)
-            Path(command[command.index("--output-last-message") + 1]).write_text("{}", encoding="utf-8")
-            return type("R", (), {"returncode": 0, "stdout": b"", "stderr": b""})()
+        class FakeCodex:
+            returncode = 0
 
-        with patch.object(self.module.subprocess, "run", side_effect=fake_run):
+            def __init__(self, command, **kwargs) -> None:
+                seen.append(command)
+                Path(command[command.index("--output-last-message") + 1]).write_text("{}", encoding="utf-8")
+
+            def communicate(self, input=None, timeout=None):
+                return b"", b""
+
+        with patch.object(self.module.subprocess, "Popen", FakeCodex):
             service.handle_openai_decide(payload)
         return seen[0]
 
