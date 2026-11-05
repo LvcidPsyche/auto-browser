@@ -150,6 +150,25 @@ class StoredUrlTests(unittest.TestCase):
             self.assertNotIn(PLAIN_TOKEN, path.read_text(encoding="utf-8"))
 
 
+class ScrubberFollowsSettingsTests(unittest.TestCase):
+    def test_the_trace_scrubber_is_rebuilt_when_the_settings_change(self) -> None:
+        from unittest.mock import patch
+
+        from app.config import Settings
+
+        def scrubbed_with(settings: Settings) -> str:
+            with patch("app.harness.trace.get_settings", return_value=settings):
+                return (
+                    TraceEnvelope(contract_hash="h", final_observation={"text": EMAIL})
+                    .scrubbed()
+                    .final_observation["text"]
+                )
+
+        self.assertNotIn(EMAIL, scrubbed_with(Settings(PII_SCRUB_ENABLED=True)))
+        self.assertEqual(scrubbed_with(Settings(PII_SCRUB_ENABLED=False)), EMAIL)
+        self.assertNotIn(EMAIL, scrubbed_with(Settings(PII_SCRUB_ENABLED=True)))
+
+
 def _contract(**extra: object) -> TaskContract:
     return TaskContract(
         id="pii-verdict",

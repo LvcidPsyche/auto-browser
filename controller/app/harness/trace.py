@@ -7,7 +7,6 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Callable
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -293,9 +292,16 @@ class TraceRecorder:
         return connect_sqlite(self.db_path, timeout=10)
 
 
-@lru_cache(maxsize=1)
+_scrubber_for: tuple[object, PiiScrubber] | None = None
+
+
 def _pii_scrubber() -> PiiScrubber:
-    return PiiScrubber.from_settings(get_settings())
+    """The scrubber for the current settings, rebuilt whenever `get_settings()` returns a different object."""
+    global _scrubber_for
+    settings = get_settings()
+    if _scrubber_for is None or _scrubber_for[0] is not settings:
+        _scrubber_for = (settings, PiiScrubber.from_settings(settings))
+    return _scrubber_for[1]
 
 
 def _execution_redacted_the_text(execution: Any) -> bool:
