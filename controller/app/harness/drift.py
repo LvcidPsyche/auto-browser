@@ -153,12 +153,18 @@ def _expecting_scrubbed_text(contract: TaskContract) -> TaskContract:
 
 
 def _scrubbed_or_as_written(item: Postcondition) -> str:
-    """The value scrubbed, or as written if a non-empty value scrubbed to nothing.
+    """The value scrubbed, or as written when the scrub failed.
 
-    "" is in every page, so it would pass the check whatever the page shows. A failed scrubber gives it: scrub_url
-    catches the PII scrubber's error and returns the value's path, which is "" for a `?...` or `#...` value.
+    A failed URL scrub leaves an expectation that passes whatever the page shows: scrub_url catches the PII
+    scrubber's error and returns the value's path, "" for a `?...` or `#...` value and "/" for `/?...`. So a
+    non-empty value that scrubs to nothing, or a `url_contains` value whose `?` or `#` the scrub lost (a scrub that
+    works keeps both), is kept as written.
     """
-    return _STORED_TEXT_SCRUBBERS[item.kind](item.value) or item.value
+    scrubbed = _STORED_TEXT_SCRUBBERS[item.kind](item.value)
+    lost_its_query = item.kind == "url_contains" and any(
+        mark in item.value and mark not in scrubbed for mark in ("?", "#")
+    )
+    return item.value if not scrubbed or lost_its_query else scrubbed
 
 
 def _artifact_path(candidate_dir: Path, name: str) -> Path:

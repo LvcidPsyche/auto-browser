@@ -163,6 +163,33 @@ class DriftScrubberFailureTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertNotEqual(drift.status, "healthy", drift.notes)
 
+    async def test_a_url_scrubber_that_fails_on_a_path_with_a_query_or_fragment_never_matches_every_page(self) -> None:
+        # The same failure on `/?...` or `/#...` hands back "/", which every URL also contains: a scrub that lost the
+        # value's query or fragment is a failed one, and the value is kept as written.
+        from app.pii_scrub import PiiScrubber
+
+        for expected, final_url in (
+            (f"/?email={EMAIL}", f"https://app.test/?email={EMAIL}"),
+            (f"/#email={EMAIL}", f"https://app.test/#email={EMAIL}"),
+        ):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as tmp:
+                service = HarnessService(tmp)
+                contract = TaskContract(
+                    id="drift-url-scrubber-path",
+                    goal="Open the page.",
+                    postconditions=[Postcondition(kind="url_contains", value=expected)],
+                    budget=Budget(max_attempts=1, max_steps=2),
+                )
+                record = await service.start_convergence(
+                    contract, mock_final_observation={"url": final_url, "text": "done"}
+                )
+                self.assertEqual(record.status, "converged")
+
+                with patch.object(PiiScrubber, "url", side_effect=RuntimeError("scrubber bug")):
+                    drift = await service.drift_monitor.check_candidate(record.candidate.skill_id)
+
+                self.assertNotEqual(drift.status, "healthy", drift.notes)
+
 
 if __name__ == "__main__":
     unittest.main()
