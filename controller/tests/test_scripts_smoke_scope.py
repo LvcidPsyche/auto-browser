@@ -397,5 +397,65 @@ class CiSmokeStepTests(unittest.TestCase):
         self.assertLess(down, smoke)
 
 
+REPO = SCRIPTS.parent
+REMOVAL = re.compile(r"\bdocker\s+(?:(?:container|network|system)\s+)?(?:rm|prune)\b|\bxargs\b[^\n|]*\brm\b")
+MANAGED = re.compile(r"auto-browser\.managed|SMOKE_MANAGED_LABEL|managed=true")
+SMOKE_CLEANUP = re.compile(r"^smoke_cleanup\(\) \{\n.*?^\}\n", flags=re.M | re.S)
+
+
+def removes_by_the_managed_label(text: str, *, allow_smoke_cleanup: bool = False) -> bool:
+    """Whether a script, Makefile or workflow both names the managed label and removes containers or networks.
+
+    Comments and echo lines (a message that tells the operator which docker rm to run) do not count. In
+    scripts/smoke_lib.sh the body of smoke_cleanup, which removes by name prefix as well as by label, is the one
+    place that may do both.
+    """
+    if allow_smoke_cleanup:
+        text = SMOKE_CLEANUP.sub("", text)
+    code = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#") and not re.search(r"\becho\b", line)
+    )
+    return bool(MANAGED.search(code) and REMOVAL.search(code))
+
+
+class ManagedLabelRemovalGuardTests(unittest.TestCase):
+    def test_the_detector_sees_the_ways_a_script_could_remove_by_the_label(self) -> None:
+        pipeline = "docker ps -aq --filter label=auto-browser.managed=true | xargs docker rm -f\n"
+        loop = (
+            'F=label=auto-browser.managed=true\nfor id in $(docker ps -aq --filter "$F"); do docker rm -f "$id"; done\n'
+        )
+        network = "docker network ls -q --filter label=auto-browser.managed=true | xargs -r docker network rm\n"
+        prune = "docker container prune --filter label=auto-browser.managed=true -f\n"
+        bare_xargs = "docker ps -aq --filter label=auto-browser.managed=true | xargs rm\n"
+        for text in (pipeline, loop, network, prune, bare_xargs):
+            with self.subTest(text=text):
+                self.assertTrue(removes_by_the_managed_label(text))
+        self.assertFalse(removes_by_the_managed_label("docker compose down --remove-orphans\ndocker rm -f one\n"))
+        self.assertFalse(removes_by_the_managed_label("# docker rm -f x  auto-browser.managed\n"))
+
+    def test_the_allowance_covers_only_the_body_of_smoke_cleanup(self) -> None:
+        inside = 'smoke_cleanup() {\n  docker rm -f "$n"\n  docker ps --filter label=auto-browser.managed=true\n}\n'
+        self.assertFalse(removes_by_the_managed_label(inside, allow_smoke_cleanup=True))
+        self.assertTrue(removes_by_the_managed_label(inside))
+        outside = (
+            inside + 'other() {\n  docker ps -aq --filter label=auto-browser.managed=true\n  docker rm -f "$n"\n}\n'
+        )
+        self.assertTrue(removes_by_the_managed_label(outside, allow_smoke_cleanup=True))
+
+    @unittest.skipUnless(SMOKE_RUNNERS, "scripts/ is not available here")
+    def test_nothing_in_the_repo_removes_by_the_managed_label_outside_smoke_cleanup(self) -> None:
+        files = [*sorted(SCRIPTS.glob("*.sh")), *sorted((REPO / ".github" / "workflows").glob("*.yml"))]
+        if (REPO / "Makefile").is_file():
+            files.append(REPO / "Makefile")
+        self.assertIn(SCRIPTS / "smoke_lib.sh", files)
+        for path in files:
+            with self.subTest(path=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertFalse(
+                    removes_by_the_managed_label(text, allow_smoke_cleanup=path.name == "smoke_lib.sh"),
+                    f"{path.name} removes containers or networks by auto-browser.managed",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
