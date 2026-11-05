@@ -20,7 +20,13 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from pydantic import BaseModel, ValidationError
 
-from ..action_errors import BrowserActionError, SessionNotFoundError
+from ..action_errors import (
+    BROWSER_UNREACHABLE,
+    BROWSER_UNREACHABLE_DETAIL,
+    BrowserActionError,
+    BrowserUnreachableError,
+    SessionNotFoundError,
+)
 from ..approval_display import shown_code_points
 from ..approvals import CONTROLLER_SCOPE, ApprovalRequiredError, given_back_notes, held_for_execution
 from ..browser.element_ids import refuse_selector_hint
@@ -449,6 +455,11 @@ class McpToolGateway:
             # The agent can enable the job, or stop triggering it; a code tells it which refusal this is.
             message = str(exc.args[0]) if exc.args else "job is disabled"
             return self._refusal_response(message, {"error": message, "code": "cron_job_disabled"}, exc)
+        except BrowserUnreachableError as exc:
+            # Its message names the endpoint and Playwright's reason: the log has them (runtime.py), the caller not.
+            return self._refusal_response(
+                BROWSER_UNREACHABLE_DETAIL, {"error": BROWSER_UNREACHABLE_DETAIL, "code": BROWSER_UNREACHABLE}, exc
+            )
         except (ValueError, KeyError, RuntimeError) as exc:
             # Handlers raise these with operator-facing messages ("Provide
             # source_selector or source_x/source_y", "Memory profile not found").

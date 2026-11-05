@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 from playwright.async_api import Browser
 
-from ...action_errors import SESSION_CLOSED_GATE_LOST, SessionNotFoundError
+from ...action_errors import SESSION_CLOSED_GATE_LOST, BrowserUnreachableError, SessionNotFoundError
 from ...auth_policy import credentials_for
 from ...browser_sandbox import read_endpoint_file, redact_endpoints, refusal, snapshot_shared_state, verified_on
 from ...session_isolation import IsolatedBrowserRuntime
@@ -48,7 +48,7 @@ async def _connect_over_cdp(playwright: Any, cdp_url: str) -> Browser:
 
     Playwright's error repeats the whole CDP URL (userinfo, the /devtools/browser/<id> path) in its call log, and
     /readyz, deep health and the startup log show what this raises: its first line is kept, any URL in it reduced to
-    scheme://host:port, and the error is not chained.
+    scheme://host:port, and the error is not chained. A route or an MCP call answers it 503 with a fixed text.
     """
     try:
         return await playwright.chromium.connect_over_cdp(cdp_url)
@@ -57,7 +57,7 @@ async def _connect_over_cdp(playwright: Any, cdp_url: str) -> Browser:
         reason = _URL_IN_TEXT.sub(lambda match: scrubbed_cdp_url(match.group()), first_line)
         message = f"could not connect to Chrome over CDP at {scrubbed_cdp_url(cdp_url)}: {reason}"
         logger.warning("%s", message)
-        raise RuntimeError(message) from None
+        raise BrowserUnreachableError(message) from None
 
 
 class BrowserRuntimeService:

@@ -23,7 +23,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_module
-from app.action_errors import BrowserActionError, SessionNotFoundError
+from app.action_errors import BrowserActionError, BrowserUnreachableError, SessionNotFoundError
 from app.approvals import ApprovalRequiredError
 from app.browser_manager import BrowserManager
 from app.config import Settings
@@ -239,6 +239,20 @@ def test_value_error_is_400_without_its_message(client: TestClient, route: Route
         response = _call(client, route)
     assert response.status_code == 400, response.text
     assert response.json() == {"detail": "Invalid request"}
+
+
+# The routes whose manager call can reach ensure_browser. Under CDP_CONNECT_URL a failed connect raises
+# BrowserUnreachableError, which is not a RuntimeError, so their "Conflict" for one does not answer it.
+BROWSER_ROUTES = [route for route in ALL_ROUTES if route.method in ("create_session", "fork_session")]
+
+
+@pytest.mark.parametrize("route", BROWSER_ROUTES, ids=lambda r: r.id)
+def test_an_unreachable_browser_is_503_with_a_fixed_detail(client: TestClient, route: Route) -> None:
+    reason = "could not connect to Chrome over CDP at ws://10.0.0.9:9222: WebSocket error: connect ECONNREFUSED"
+    with _raising(route, BrowserUnreachableError(reason)):
+        response = _call(client, route)
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": "the browser could not be reached"}
 
 
 @pytest.mark.parametrize("route", ALL_ROUTES, ids=lambda r: r.id)

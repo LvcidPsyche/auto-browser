@@ -7,7 +7,7 @@ from logging import Logger
 
 from fastapi import HTTPException, Request
 
-from ..action_errors import BrowserActionError
+from ..action_errors import BROWSER_UNREACHABLE_DETAIL, BrowserActionError, BrowserUnreachableError
 from ..approvals import CONTROLLER_SCOPE
 from ..browser.page_provenance import CLOSED_PAGE_GRACE_SECONDS
 from ..browser.services.tabs import REFUSED_BY_ANOTHER_TAB_MESSAGE, REFUSED_TAB_MESSAGE, UNJUDGED_TAB_MESSAGE
@@ -98,8 +98,8 @@ def typed_route_errors(logger: Logger, message: str, *args: object) -> Iterator[
     - ``HTTPException`` (``ApprovalRequiredError`` included), ``BrowserActionError``
       and ``KeyError`` (``SessionNotFoundError`` included) pass through to the
       app handlers, which keep their status, ``code`` and payload.
-    - ``PermissionError`` -> 403, ``ValueError`` -> 400, ``FileNotFoundError`` -> 404.
-      The texts are fixed: the exceptions' own messages can carry hosts and paths.
+    - ``PermissionError`` -> 403, ``ValueError`` -> 400, ``FileNotFoundError`` -> 404,
+      ``BrowserUnreachableError`` -> 503. The texts are fixed: the exceptions' own messages can carry hosts and paths.
     - Anything else is logged with *message* and answers 500 "Internal error".
 
     A route that maps an error differently on purpose (a 409 for a refused
@@ -116,5 +116,7 @@ def typed_route_errors(logger: Logger, message: str, *args: object) -> Iterator[
         raise HTTPException(status_code=400, detail="Invalid request") from None
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Not found") from None
+    except BrowserUnreachableError:
+        raise HTTPException(status_code=503, detail=BROWSER_UNREACHABLE_DETAIL) from None
     except Exception:
         raise internal_error(logger, message, *args) from None

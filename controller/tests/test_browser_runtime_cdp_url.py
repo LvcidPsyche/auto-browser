@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from app.action_errors import BrowserUnreachableError
 from app.browser.services.runtime import scrubbed_cdp_url
 from app.browser_manager import BrowserManager
 from tests.test_browser_manager_create_session import _settings
@@ -87,12 +88,15 @@ class CdpAttachScrubTests(unittest.IsolatedAsyncioTestCase):
 
         for name, attach in (
             ("startup", self.manager.ensure_browser),
+            ("create_session", self.manager.create_session),
             ("cdp_attach", lambda: self.manager.cdp_attach(SECRET_URL)),
         ):
             with self.subTest(path=name), self.assertLogs("app.browser.services.runtime", level="INFO") as captured:
-                with self.assertRaises(RuntimeError) as raised:
+                with self.assertRaises(BrowserUnreachableError) as raised:
                     await attach()
 
+                # Not a RuntimeError: the session routes answer one with 409 "Conflict".
+                self.assertNotIsInstance(raised.exception, RuntimeError)
                 shown = "\n".join(captured.output) + str(raised.exception)
                 self.assertIn("ECONNREFUSED", str(raised.exception))
                 self.assertIn("ws://10.0.0.9:9222", str(raised.exception))
