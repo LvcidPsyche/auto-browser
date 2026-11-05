@@ -103,6 +103,11 @@ class DriftOnUrlContainsTests(unittest.IsolatedAsyncioTestCase):
                 final_url = f"https://app.test/done?next=1&email={EMAIL}"
                 self.assertEqual(await self._drift(expected, final_url), "healthy")
 
+    async def test_a_bare_email_that_stood_in_the_query_stays_healthy(self) -> None:
+        # The bare value is scrubbed to the same replacement the stored query holds, so it is checked as "some
+        # redaction is present".
+        self.assertEqual(await self._drift(EMAIL, f"https://app.test/done?email={EMAIL}"), "healthy")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -343,14 +343,11 @@ All notable changes to auto-browser are documented here.
   before it verifies. A `url_contains` value with a `?` or `#` goes through the URL scrubber for its query and
   fragment and the text scrubber for its host and path, as the stored URL was; one with neither but an `=`
   (`email=...`, `&email=...`) is scrubbed as a piece of a query; a path or bare text is scrubbed as text, as the stored
-  path was. A skill whose recorded page
-  no longer holds the expected text still reports degraded. Limits: a text expectation (`text_contains`,
-  `dom_contains`) that is wholly PII is scrubbed to the bare replacement, so it is checked as "some redaction is
-  present" in the stored text; a `url_contains` that is a bare email (no `=`) which stood in the final URL's query
-  cannot be matched, because the stored query was scrubbed and the bare value is not, so that skill reports degraded
-  (write it as `email=...`); and the stored copy is compared under the scrub settings in force now, so changing
-  `PII_SCRUB_*` after staging can still report a fresh skill degraded.
-
+  path was. A skill whose recorded page no longer holds the expected text still reports degraded. Limits: a text
+  expectation (`text_contains`, `dom_contains`) or a `url_contains` that is wholly PII (a bare email) is scrubbed to
+  the bare replacement, so it is checked as "some redaction is present" in the stored text or URL; and the stored copy
+  is compared under the scrub settings in force now, so changing `PII_SCRUB_*` after staging can still report a fresh
+  skill degraded.
 - **A live harness run now records its model decisions, and a mock run no longer counts as having screenshots.** The
   trace of a live agent run had no `model_decision` events, so a contract that required `model_decisions` evidence
   passed on a mock attempt and always failed on a live one. Each step with a decision now adds one, before its action
