@@ -178,6 +178,10 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- **On a host shared with other users,** keep `./data` closed to them: mode 0700, or 0750 with a group only the
+  operators are in. browser-node's endpoint file there (`./data/browser-profile/browser-ws-endpoint.txt`) holds the
+  `ws://` URL that connects to the shared browser, and it cannot be private to one uid, since browser-node writes it
+  and the controller, another uid, reads it. docs/deployment.md has the details.
 - `bearer_curl` (scripts/load_env.sh), `doctor.sh`'s API calls and the reverse-SSH smoke's bastion curl now run `curl
   -q`, so a `.curlrc` cannot add a proxy or header to a request that carries the token, and the scripts' `.env` loader
   also refuses `CURL_HOME`, `XDG_CONFIG_HOME`, `PERL5*`, `PERLLIB`, `LANG`, `LC_*` and the proxy variables

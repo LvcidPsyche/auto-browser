@@ -259,6 +259,13 @@ only uid that can read them there (root's chown cannot work on such a mount), an
 user is treated like a root-owned one and handed to uid 10002. To keep the files yours, chown `./data` to another uid,
 or start the controller as `user: "10002:10002"` and give yourself access through a group.
 
+**A host shared with other users:** browser-node's endpoint file, `./data/browser-profile/browser-ws-endpoint.txt`,
+is readable by any host user who can enter `./data`, and its `ws://` URL is what connecting to the shared browser
+takes. It cannot be private to one uid: browser-node (uid 10001) writes it and the controller, another uid, reads it.
+On such a host, keep `./data` closed to other users: owned by the user the controller runs as (above), with mode
+0700, or 0750 with a group only the operators are in. browser-node, the per-session browser containers and the
+reverse-ssh sidecar are unaffected: they mount the subdirectories they use directly.
+
 `CONTROLLER_RUN_AS=root` restores the root controller of earlier releases. It is not recommended, and the
 `controller_user` readiness check warns while it is set; that check also reports the uid in use and why.
 
