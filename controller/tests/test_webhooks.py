@@ -7,6 +7,7 @@ The old check read an IP literal only: 0x7f.1 and 2130706433 passed it, and a na
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import unittest
@@ -351,6 +352,28 @@ class WebhookWireTests(unittest.IsolatedAsyncioTestCase):
 
         self.resolver.assert_awaited()
         self.assertEqual(wire.connects, [])
+
+    async def test_no_log_line_carries_the_webhook_url_at_the_controllers_default_level(self) -> None:
+        # httpx logs each request's whole URL at INFO, userinfo, path and query included (checked against httpx 0.28),
+        # and the controller logs at INFO by default: a webhook's path and query are often its secret.
+        import app.main  # noqa: F401  (the controller's logging setup)
+
+        lines: list[str] = []
+
+        class _Recorder(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                lines.append(record.getMessage())
+
+        recorder = _Recorder()
+        root = logging.getLogger()
+        self.addCleanup(root.setLevel, root.level)
+        root.setLevel(logging.INFO)
+        root.addHandler(recorder)
+        self.addCleanup(root.removeHandler, recorder)
+
+        await self._dispatch({}, {_PUBLIC: [_OK]}, _PUBLIC)
+
+        self.assertEqual([line for line in lines if "/approval" in line or "x=1" in line], [])
 
     async def test_a_proxy_httpx_cannot_use_is_logged_by_type_and_never_raised(self) -> None:
         # Without socksio, httpx raises while it builds a client for a socks5:// proxy; with it, the fake socket

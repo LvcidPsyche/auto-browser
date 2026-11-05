@@ -211,7 +211,9 @@ All notable changes to auto-browser are documented here.
   the TLS server name, so a second lookup cannot return a different one. When a proxy from the environment applies to
   the URL (`HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY`, less `NO_PROXY`), the answers are still checked, but the
   request goes by name through the proxy, which then owns resolution. Logs carry only `scheme://host`, never the path,
-  query or credentials. A name that does not resolve is not posted to.
+  query or credentials: httpx's own INFO line for each request, which named the whole URL, is no longer logged (the
+  controller sets the `httpx` logger to WARNING, or to `LOG_LEVEL` if higher). A name that does not resolve is not
+  posted to.
 - A harness `run_id` must now look like the ids the harness generates (letters, digits, `.`, `_`, `-`; no leading
   dot), at the tool boundary and again in the run store, so an id cannot name a directory outside the harness runs
   root.

@@ -29,6 +29,9 @@ from .version import __version__ as _VERSION
 
 _log_level = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(level=_log_level)
+# httpx logs every request's whole URL at INFO, userinfo, path and query included: an approval webhook's URL is often
+# its credential, and a provider's can carry one. Its warnings and errors still come through.
+logging.getLogger("httpx").setLevel(max(_log_level, logging.WARNING))
 logger = logging.getLogger(__name__)
 
 
