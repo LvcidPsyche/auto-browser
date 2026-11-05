@@ -11,6 +11,10 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- `provider_model` on the agent step and run requests, and the model the Codex host bridge passes to `codex --model`,
+  must now match one pattern (letters, digits, `.`, `_`, `:`, `/`, `-`; 1 to 128 characters; starting with a letter or
+  digit; no `..`). The bridge answers 400 otherwise, so a model can no longer be read as a CLI flag. The Gemini adapter
+  also URL-quotes the model it puts in the request path.
 - The mesh and witness private key is now created with mode 0600 from the first byte (`O_EXCL`, no write-then-chmod
   window) in an identity directory created at 0700, and loading a key that is readable by group or others logs a
   warning on POSIX.

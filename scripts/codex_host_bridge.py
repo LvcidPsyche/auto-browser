@@ -6,6 +6,7 @@ import base64
 import json
 import mimetypes
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -43,6 +44,16 @@ def build_sandbox_flags(*, allow_host_exec: bool, sandbox_mode: str) -> list[str
     if mode not in SANDBOX_MODES:
         raise SystemExit(f"CODEX_SANDBOX_MODE must be one of {', '.join(SANDBOX_MODES)} (got {mode!r})")
     return ["-s", mode]
+
+
+# Same pattern as MODEL_NAME_PATTERN in controller/app/models.py (this script ships without the controller; a test
+# keeps the two equal). The leading alphanumeric keeps a model from being read as a codex flag.
+MODEL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+_MODEL_NAME_RE = re.compile(MODEL_NAME_PATTERN)
+
+
+def model_name_is_valid(model: str) -> bool:
+    return bool(_MODEL_NAME_RE.fullmatch(model)) and ".." not in model
 
 
 CONFIG_OVERRIDES = (
@@ -97,6 +108,8 @@ class CodexBridgeService:
             raise BridgeError("screenshot must be an object", status_code=400)
 
         model = str(payload.get("model") or self.default_model or "").strip() or None
+        if model is not None and not model_name_is_valid(model):
+            raise BridgeError("model must match " + MODEL_NAME_PATTERN + " and not contain '..'", status_code=400)
         image_bytes: bytes | None = None
         suffix = ".png"
         if screenshot is not None:

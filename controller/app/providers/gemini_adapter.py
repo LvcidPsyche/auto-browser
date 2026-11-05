@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 from ..models import BrowserActionDecision
 from .base import BaseProviderAdapter, ProviderDecision
@@ -101,7 +102,7 @@ class GeminiAdapter(BaseProviderAdapter):
             },
         }
         response = await self._post_json(
-            url=f"{self.settings.gemini_base_url.rstrip('/')}/models/{model}:generateContent",
+            url=f"{self.settings.gemini_base_url.rstrip('/')}/models/{quote(model, safe='/:')}:generateContent",
             headers={
                 "x-goog-api-key": self.settings.gemini_api_key or "",
                 "content-type": "application/json",
