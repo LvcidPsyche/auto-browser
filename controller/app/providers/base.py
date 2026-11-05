@@ -26,10 +26,11 @@ from ..result_shaping import compact_session
 logger = logging.getLogger(__name__)
 
 # Parse strategies fall through on malformed input only. model_validate* raise
-# ValidationError; json.loads / raw_decode raise JSONDecodeError (a ValueError).
+# ValidationError; json.loads / raw_decode raise JSONDecodeError (a ValueError),
+# or RecursionError on brackets nested too deep to decode.
 # Narrowing to these lets a real bug (AttributeError, TypeError, ...) surface
 # instead of being silently swallowed as a parse miss.
-_PARSE_ERRORS = (ValidationError, ValueError)
+_PARSE_ERRORS = (ValidationError, ValueError, RecursionError)
 # Longest a provider's Retry-After may hold one retry.
 MAX_RETRY_AFTER_SECONDS = 30.0
 
@@ -608,29 +609,30 @@ class BaseProviderAdapter(ABC):
         except _PARSE_ERRORS:
             pass
 
+        # The prompt asks for exactly one decision. A reply that holds two different ones (fenced, bare, or both in
+        # one wrapper) is ambiguous, and choosing between them by position lets JSON quoted from the page choose, so
+        # it fails as an unparseable reply does. The same decision repeated (the model said it twice) is one decision.
+        decisions: list[BrowserActionDecision] = []
         try:
-            payload = json.loads(text)
+            decisions += self._decisions_in(json.loads(text))
         except _PARSE_ERRORS:
-            payload = None
+            pass
+        decisions += self._decisions_in_text(text)
+        distinct: list[BrowserActionDecision] = []
+        for decision in decisions:
+            if decision not in distinct:
+                distinct.append(decision)
+        if len(distinct) == 1:
+            return distinct[0]
 
-        if payload is not None:
-            decision = self._find_decision_candidate(payload)
-            if decision is not None:
-                return decision
-
-        # The model's own decision comes last; JSON it quoted from the page comes earlier. So the decision-shaped
-        # object that comes last in the text wins, fenced or not: the scan sees the JSON inside a fence as well.
-        decision = self._last_decision_in(text)
-        if decision is not None:
-            return decision
-
-        raise RuntimeError(f"{self.provider} CLI did not return a valid BrowserActionDecision JSON object")
+        ambiguity = f": its reply holds {len(distinct)} different decisions" if distinct else ""
+        raise RuntimeError(f"{self.provider} CLI did not return a valid BrowserActionDecision JSON object{ambiguity}")
 
     @classmethod
-    def _last_decision_in(cls, text: str) -> BrowserActionDecision | None:
-        """The last decision-shaped JSON object in `text`. An object that holds a decision is read whole."""
+    def _decisions_in_text(cls, text: str) -> list[BrowserActionDecision]:
+        """Every decision-shaped JSON object in `text`, fenced or not. An object that holds a decision is read whole."""
         decoder = json.JSONDecoder()
-        found: BrowserActionDecision | None = None
+        found: list[BrowserActionDecision] = []
         index = text.find("{")
         while index != -1:
             try:
@@ -639,11 +641,11 @@ class BaseProviderAdapter(ABC):
             except _PARSE_ERRORS:
                 index = text.find("{", index + 1)
                 continue
-            decision = cls._find_decision_candidate(candidate)
-            if decision is None:
+            decisions = cls._decisions_in(candidate)
+            if not decisions:
                 index = text.find("{", index + 1)
                 continue
-            found = decision
+            found += decisions
             index = text.find("{", end)
         return found
 
@@ -651,24 +653,21 @@ class BaseProviderAdapter(ABC):
         return self.parse_decision_text(path.read_text(encoding="utf-8"))
 
     @staticmethod
-    def _find_decision_candidate(payload: Any) -> BrowserActionDecision | None:
-        """The decision in one JSON value: the value itself, or else the last one it holds in document order, as
-        in a whole reply (`{"page_said": {...}, "decision": {...}}` is the model's `decision`)."""
-        if isinstance(payload, dict):
-            try:
-                return BrowserActionDecision.model_validate(payload)
-            except _PARSE_ERRORS:
-                pass
-            for value in reversed(payload.values()):
-                decision = BaseProviderAdapter._find_decision_candidate(value)
-                if decision is not None:
-                    return decision
-        elif isinstance(payload, list):
-            for item in reversed(payload):
-                decision = BaseProviderAdapter._find_decision_candidate(item)
-                if decision is not None:
-                    return decision
-        return None
+    def _decisions_in(payload: Any) -> list[BrowserActionDecision]:
+        """Every decision in one JSON value: the value itself, or each one it holds. Walked with a stack rather than
+        recursion, so a deeply nested value cannot raise RecursionError."""
+        found: list[BrowserActionDecision] = []
+        stack = [payload]
+        while stack:
+            value = stack.pop()
+            if isinstance(value, dict):
+                try:
+                    found.append(BrowserActionDecision.model_validate(value))
+                except _PARSE_ERRORS:
+                    stack.extend(value.values())
+            elif isinstance(value, list):
+                stack.extend(value)
+        return found
 
     @staticmethod
     def _safe_json(response: httpx.Response) -> dict[str, Any] | None:
