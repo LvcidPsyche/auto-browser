@@ -33,12 +33,13 @@ def test_a_plain_word_is_unchanged() -> None:
 
 
 def test_a_secret_straddling_the_preview_limit_is_caught() -> None:
-    text = "x" * (PREVIEW_CHARS - 4) + " " + SSN + " tail"
+    # The cut falls inside the number: cut first, and "123-4" no longer looks like an SSN and leaks.
+    text = "x" * (PREVIEW_CHARS - 6) + " " + SSN + " tail"
 
     preview = _preview(text, PiiScrubber())
 
-    assert "123-" not in preview
-    assert SSN not in preview
+    assert "123" not in preview
+    assert preview.endswith(" [REDA")
 
 
 def test_scrubbing_off_leaves_the_preview_as_typed() -> None:
