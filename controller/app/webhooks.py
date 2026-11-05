@@ -40,16 +40,33 @@ _DISALLOWED_WEBHOOK_HOSTS = {
 # Cloud metadata: refused even when APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS opens loopback and private targets.
 _METADATA_HOSTS = frozenset({"metadata", "metadata.google.internal"})
 _METADATA_NETWORKS = tuple(ipaddress.ip_network(net) for net in ("169.254.0.0/16", "fe80::/10", "fd00:ec2::254/128"))
+# IPv6 prefixes whose last 32 bits are an IPv4 address: translated (::ffff:0:a.b.c.d), compatible (::a.b.c.d) and
+# NAT64's well-known prefix (64:ff9b::a.b.c.d). Mapped (::ffff:a.b.c.d) and 6to4 (2002::/16) have stdlib properties.
+_IPV4_SUFFIX_NETWORKS = tuple(ipaddress.ip_network(net) for net in ("::ffff:0:0:0/96", "::/96", "64:ff9b::/96"))
 _RESOLVE_TIMEOUT_SECONDS = 5.0
 
 
+def _embedded_ipv4(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
+    """The IPv4 address an IPv6 address spells, if it spells one."""
+    if not isinstance(ip, ipaddress.IPv6Address):
+        return None
+    if ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    if ip.sixtofour is not None:
+        return ip.sixtofour
+    if any(ip in network for network in _IPV4_SUFFIX_NETWORKS):
+        return ipaddress.IPv4Address(ip.packed[-4:])
+    return None
+
+
 def _address_is_disallowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, *, allow_private: bool) -> bool:
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-    if any(ip in network for network in _METADATA_NETWORKS):
+    embedded = _embedded_ipv4(ip)
+    if any(address in network for address in (ip, embedded) if address is not None for network in _METADATA_NETWORKS):
         return True
     if allow_private:
         return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
     return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved
 
 

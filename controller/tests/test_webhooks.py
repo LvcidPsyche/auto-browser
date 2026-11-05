@@ -155,6 +155,27 @@ class WebhookTargetTests(unittest.IsolatedAsyncioTestCase):
                 await self._send("http://hooks.internal/hook", allow_private_targets=True)
                 self.client.post.assert_not_awaited()
 
+    async def test_cloud_metadata_spelled_inside_an_ipv6_address_is_refused_too(self) -> None:
+        # Only the mapped form (::ffff:a.b.c.d) was unwrapped: with the opt-in on, the translated, compatible, NAT64
+        # and 6to4 spellings of 169.254.169.254 passed the always-refused check.
+        for address in (
+            "::ffff:0:169.254.169.254",
+            "::169.254.169.254",
+            "64:ff9b::169.254.169.254",
+            "2002:a9fe:a9fe::1",
+        ):
+            for allow_private_targets in (True, False):
+                with self.subTest(address=address, allow_private_targets=allow_private_targets):
+                    self.client.post.reset_mock()
+                    self._resolver(address)
+                    await self._send("http://hooks.internal/hook", allow_private_targets=allow_private_targets)
+                    self.client.post.assert_not_awaited()
+
+    async def test_with_the_opt_in_a_private_address_spelled_inside_ipv6_is_still_allowed(self) -> None:
+        self._resolver("64:ff9b::10.0.0.5")
+        await self._send("http://n8n.internal:5678/hook", allow_private_targets=True)
+        self.client.post.assert_awaited_once()
+
     async def test_cloud_metadata_names_and_literals_are_refused_without_a_lookup(self) -> None:
         resolver = self._resolver(_PUBLIC)
         for url in (

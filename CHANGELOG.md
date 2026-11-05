@@ -10,7 +10,8 @@ All notable changes to auto-browser are documented here.
   address) was reachable by name before and is now refused. Set the new `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS=true`
   to allow it. The flag lifts the name and address checks, so loopback (`localhost`, `127.0.0.1`) and every private
   range are allowed too; cloud metadata stays refused whatever it says: `169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`
-  and the names `metadata` and `metadata.google.internal`.
+  and the names `metadata` and `metadata.google.internal`, and an IPv6 address that spells a metadata address
+  (mapped, translated, compatible, NAT64 `64:ff9b::` or 6to4).
 - **Upgrade note:** `provider_model` must now match the model-name pattern (see Security), so an id with any other
   character, such as a Vertex-style `claude-x@20240620`, is refused with a 422. An agent job saved before the upgrade
   with such a model fails when it runs and cannot be resumed.
