@@ -16,6 +16,10 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- **A made-up `approval_id` no longer appears in an action's Witness receipt.** On an action that needs no approval
+  the id was never looked at, yet the receipt recorded it with `required: true`, so a caller could make a receipt
+  point at an approval that was not there. The receipt now names an approval only when one was checked or held for
+  the action; otherwise it reads as if no id had been sent.
 - **A disabled cron job can no longer be run through its webhook or `trigger_cron_job`.** The scheduler skipped a
   disabled job, but both manual paths started it anyway. They now refuse with "job is disabled; enable it to run
   it" (HTTP 409 on the webhook route). A wrong webhook key is still answered 403, so a disabled job does not tell a
