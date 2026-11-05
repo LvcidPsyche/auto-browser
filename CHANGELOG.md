@@ -4,6 +4,12 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **A misspelled `SESSION_ISOLATION_MODE` now stops the controller from starting.** It used to fall back to the shared
+  browser without a word. Only `shared_browser_node` and `docker_ephemeral` are accepted; surrounding spaces and
+  capital letters are forgiven, but `docker-ephemeral` or `dockerephemeral` are errors.
+
 ### Security
 
 - **Harness traces no longer keep typed secrets or URL tokens, and induced skills no longer claim to be

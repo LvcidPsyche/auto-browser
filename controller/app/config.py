@@ -109,7 +109,9 @@ class Settings(BaseSettings):
     mcp_tool_profile: str = Field("curated", alias="MCP_TOOL_PROFILE")
     mcp_tool_packs: str = Field("", alias="MCP_TOOL_PACKS")
     metrics_enabled: bool = Field(True, alias="METRICS_ENABLED")
-    session_isolation_mode: str = Field("shared_browser_node", alias="SESSION_ISOLATION_MODE")
+    session_isolation_mode: Literal["shared_browser_node", "docker_ephemeral"] = Field(
+        "shared_browser_node", alias="SESSION_ISOLATION_MODE"
+    )
     isolated_browser_image: str = Field(
         "auto-browser-browser-node:latest",
         alias="ISOLATED_BROWSER_IMAGE",
@@ -452,6 +454,14 @@ class Settings(BaseSettings):
         # whitespace satisfied (40 spaces even cleared the 32-character floor); it is unset now.
         if isinstance(value, str):
             return value.strip() or None
+        return value
+
+    @field_validator("session_isolation_mode", mode="before")
+    @classmethod
+    def _isolation_mode_trimmed_and_lowercased(cls, value: object) -> object:
+        # An unknown value used to mean the shared browser, silently: it is now refused at startup.
+        if isinstance(value, str):
+            return value.strip().lower()
         return value
 
     @field_validator("browser_sandbox", mode="before")
