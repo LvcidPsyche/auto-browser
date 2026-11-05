@@ -1,4 +1,4 @@
-"""An approval id nobody checked must not appear in the receipt as the action's approval."""
+"""An approval id presented on an action that needs none is shown, but never as an approval the action required."""
 
 from __future__ import annotations
 
@@ -62,12 +62,13 @@ class UncheckedApprovalIdTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(receipts), 1)
             return receipts[0]
 
-    async def test_a_bogus_approval_id_on_a_no_approval_action_leaves_no_trace_in_the_receipt(self) -> None:
+    async def test_a_presented_id_on_a_no_approval_action_is_shown_with_no_status_and_not_required(self) -> None:
         plain = await self._receipt_for()
         bogus = await self._receipt_for(approval_id="apr_BOGUS_deadbeef")
 
-        self.assertEqual(plain["approval"], bogus["approval"])
-        self.assertIsNone(bogus["approval"]["approval_id"])
+        self.assertEqual(plain["approval"]["approval_id"], None)
+        self.assertEqual(bogus["approval"]["approval_id"], "apr_BOGUS_deadbeef")
+        self.assertIsNone(bogus["approval"]["status"])
         self.assertFalse(bogus["approval"]["required"])
 
 

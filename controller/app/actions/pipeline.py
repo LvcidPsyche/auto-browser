@@ -612,7 +612,12 @@ class BrowserActionPipeline:
         return WitnessApproval(
             required=bool(
                 witness_state.outcome.require_approval
-                or witness_state.witness_context.get("approval_id")
+                # An id the caller only presented, on an action that needs none, is shown but does not make
+                # the action approval-gated.
+                or (
+                    witness_state.witness_context.get("approval_id")
+                    and witness_state.witness_context.get("approval_checked", True)
+                )
                 or context.target.get("approval_id")
             ),
             approval_id=approval_id,

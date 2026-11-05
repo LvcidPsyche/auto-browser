@@ -19,10 +19,10 @@ All notable changes to auto-browser are documented here.
 - **`/healthz/deep` now gives up on a browser that does not answer.** The probe waited on the browser connection with
   no limit, so a stuck browser node held the request open (and the controller's browser lock with it). That step is
   now bounded by the same 5 seconds as `/readyz`, and a timeout answers 503 with `deep_health_probe_timed_out`.
-- **A made-up `approval_id` no longer appears in an action's Witness receipt.** On an action that needs no approval
-  the id was never looked at, yet the receipt recorded it with `required: true`, so a caller could make a receipt
-  point at an approval that was not there. The receipt now names an approval only when one was checked or held for
-  the action; otherwise it reads as if no id had been sent.
+- **An `approval_id` presented on an action that needs no approval no longer makes its Witness receipt say the action
+  required one.** The receipt recorded the id with `required: true`, so a caller could make a receipt read as if the
+  action had been approval-gated. The receipt still shows the id, as the record of what was presented, with no status;
+  `required` is now true only for an action that needed an approval or ran under one.
 - **A disabled cron job can no longer be run through its webhook or `trigger_cron_job`.** The scheduler skipped a
   disabled job, but both manual paths started it anyway. They now refuse with "job is disabled; enable it to run
   it" (HTTP 409 on the webhook route). A wrong webhook key is still answered 403, so a disabled job does not tell a

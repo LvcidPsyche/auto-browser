@@ -421,13 +421,16 @@ class BrowserActionService:
         )
         # The receipt names the approval the action runs under: this call's own, or
         # the one an outer layer holds for it (a governed call's governed_approval_id).
-        # An approval_id on an action that needs none was never looked at, so it is not named here.
-        witnessed_id = (approval.id if approval is not None else None) or held_action_approval()
+        # An id the caller presented on an action that needs no approval is shown (status None, required False):
+        # the audit trail of what was presented, not a claim that anything approved it.
+        held = held_action_approval()
+        witnessed_id = approval_id or (approval.id if approval is not None else None) or held
         session.pending_witness_context = {
             "risk_category": decision.risk_category,
             "approval_id": witnessed_id,
             "approval_status": "approved" if witnessed_id else None,
             "runtime_requires_approval": approval is not None,
+            "approval_checked": approval is not None or held is not None,
             "sensitive_input": bool(getattr(decision, "sensitive", False)),
         }
         try:

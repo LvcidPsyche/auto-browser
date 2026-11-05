@@ -721,7 +721,7 @@ class ReceiptStatusTests(SpendBase):
             await self.manager.execute_decision(SESSION, self.PLAIN, approval_id=approval_id)
         return (await self.receipt())["approval"]
 
-    async def test_an_id_nothing_claimed_is_not_named_in_the_receipt(self) -> None:
+    async def test_an_id_nothing_claimed_has_no_status_in_the_receipt(self) -> None:
         decision, spent = await self.approved_click()
         await self.manager.execute_decision(SESSION, decision, approval_id=spent)
         rejected = await self.manager.approvals.create_or_reuse_pending(
@@ -732,10 +732,7 @@ class ReceiptStatusTests(SpendBase):
             for fails in (False, True):
                 with self.subTest(approval=name, fails=fails):
                     approval = await self.run_plain(approval_id, fails=fails)
-                    # The action needs no approval, so the caller's id was never checked: not named at all.
-                    self.assertEqual(
-                        (approval["approval_id"], approval["status"], approval["required"]), (None, None, False)
-                    )
+                    self.assertEqual((approval["approval_id"], approval["status"]), (approval_id, None))
 
     async def test_a_give_back_is_audited(self) -> None:
         decision, approval_id = await self.approved_click()
