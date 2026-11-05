@@ -98,6 +98,8 @@ All notable changes to auto-browser are documented here.
 
 - **An agent run or step that ends in an error is now recorded as a failed job.** The job queue recorded every job as `completed` whatever the run returned, so a run that ended in `error` looked successful in the job list. The job is now `failed` with the error the run reported; runs that end in `done`, `takeover`, `approval_required` or `max_steps_reached` stay `completed`, and a failed run can still be resumed.
 
+- **A provider CLI's decision is now the last one in its reply, not the first.** The parser took the first decision-shaped JSON object anywhere in the text, so JSON the model quoted from the page (for example a click on `#delete-account`) beat the decision the model then gave. It now takes the last ```json block that holds a decision, or with no such block the last decision-shaped object in the text.
+
 ## [1.14.1] — 2026-11-04
 
 A patch release over 1.14.0. A session whose start page fails to load now gets a 400 the agent can act on instead

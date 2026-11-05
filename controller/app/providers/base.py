@@ -6,6 +6,7 @@ import email.utils
 import json
 import mimetypes
 import os
+import re
 import socket
 import stat
 import tempfile
@@ -28,6 +29,7 @@ from ..result_shaping import compact_session
 # Narrowing to these lets a real bug (AttributeError, TypeError, ...) surface
 # instead of being silently swallowed as a parse miss.
 _PARSE_ERRORS = (ValidationError, ValueError)
+_FENCED_JSON_BLOCK = re.compile(r"```json[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 # Longest a provider's Retry-After may hold one retry.
 MAX_RETRY_AFTER_SECONDS = 30.0
 
@@ -557,19 +559,37 @@ class BaseProviderAdapter(ABC):
             if decision is not None:
                 return decision
 
-        decoder = json.JSONDecoder()
-        for index, char in enumerate(text):
-            if char != "{":
-                continue
-            try:
-                candidate, _ = decoder.raw_decode(text[index:])
-            except _PARSE_ERRORS:
-                continue
-            decision = self._find_decision_candidate(candidate)
+        # The model's own decision comes last; JSON it quoted from the page comes earlier. So the last ```json
+        # block that is a decision wins, and with no such block the last decision-shaped object in the text.
+        for block in reversed(_FENCED_JSON_BLOCK.findall(text)):
+            decision = self._last_decision_in(block.strip())
             if decision is not None:
                 return decision
+        decision = self._last_decision_in(text)
+        if decision is not None:
+            return decision
 
         raise RuntimeError(f"{self.provider} CLI did not return a valid BrowserActionDecision JSON object")
+
+    @classmethod
+    def _last_decision_in(cls, text: str) -> BrowserActionDecision | None:
+        """The last decision-shaped JSON object in `text`. An object that holds a decision is read whole."""
+        decoder = json.JSONDecoder()
+        found: BrowserActionDecision | None = None
+        index = text.find("{")
+        while index != -1:
+            try:
+                candidate, length = decoder.raw_decode(text[index:])
+            except _PARSE_ERRORS:
+                index = text.find("{", index + 1)
+                continue
+            decision = cls._find_decision_candidate(candidate)
+            if decision is None:
+                index = text.find("{", index + 1)
+                continue
+            found = decision
+            index = text.find("{", index + length)
+        return found
 
     def parse_decision_file(self, path: Path) -> BrowserActionDecision:
         return self.parse_decision_text(path.read_text(encoding="utf-8"))
