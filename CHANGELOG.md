@@ -137,7 +137,7 @@ All notable changes to auto-browser are documented here.
 
 - **Harness traces of a live agent run now record its screenshots.** The trace built from an agent result held only `action` events, so a run that took screenshots never met a `screenshots` evidence requirement. Each step that has a screenshot now adds a `screenshot` event (the same event type the mock attempt records) before its action, because the screenshot is the page the agent saw before it acted.
 
-- **The Codespaces overlay now accepts the forwarded host name.** The controller refused requests to `<codespace>-8000.app.github.dev` with "Invalid host header", because the overlay kept the loopback-only host list. It now defaults `CONTROLLER_ALLOWED_HOSTS` to the loopback names plus `*.app.github.dev`. If you set `CONTROLLER_ALLOWED_HOSTS` in `.env`, include `*.app.github.dev` in it.
+- **The Codespaces overlay now accepts the forwarded host name.** The forwarder is expected to send `<codespace>-8000.app.github.dev` as Host (not yet observed in a Codespace), and the overlay's loopback-only host list would refuse it with "Invalid host header". It now defaults `CONTROLLER_ALLOWED_HOSTS` to the loopback names plus `*.app.github.dev`, and `.devcontainer/setup.sh` appends the exact forwarded name to a `CONTROLLER_ALLOWED_HOSTS` that `.env` already sets (for example one copied from `.env.example`). If you set it by hand, include `*.app.github.dev` in it.
 
 - **`pip install auto-browser-langchain[crewai]` now installs `langchain-core`.** Recent CrewAI releases no longer depend on LangChain, so the CrewAI example failed at `AutoBrowserTool(...)` with an `ImportError` asking for the `langchain` extra. The `crewai` extra now includes it.
 

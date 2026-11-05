@@ -21,6 +21,24 @@ if [[ -n "${CODESPACE_NAME:-}" ]]; then
   if [[ -n "${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}" ]] && ! grep -q '^NOVNC_ALLOWED_HOSTS=.' .env; then
     printf 'NOVNC_ALLOWED_HOSTS=%s-6080.%s\n' "$CODESPACE_NAME" "$GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN" >> .env
   fi
+  # A CONTROLLER_ALLOWED_HOSTS in .env (the one in .env.example is loopback only) replaces the overlay's wildcard
+  # default, so the forwarded name is added to it. An unset or empty one is left to that default.
+  controller_host="${CODESPACE_NAME}-8000.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-app.github.dev}"
+  hosts_tmp="$(mktemp)"
+  if awk -v host="$controller_host" '
+    /^CONTROLLER_ALLOWED_HOSTS=./ {
+      n = split(substr($0, index($0, "=") + 1), names, ",")
+      present = 0
+      for (i = 1; i <= n; i++) if (names[i] == host) present = 1
+      if (!present) { $0 = $0 "," host; changed = 1 }
+    }
+    { print }
+    END { exit changed ? 0 : 3 }
+  ' .env > "$hosts_tmp"; then
+    cat "$hosts_tmp" > .env
+    echo "Added this Codespace's forwarded host to CONTROLLER_ALLOWED_HOSTS in .env."
+  fi
+  rm -f "$hosts_tmp"
 fi
 
 echo "Pulling Docker images..."
