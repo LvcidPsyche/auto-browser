@@ -563,6 +563,24 @@ class ContainerPathUnderDataTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(verdicts.get(path), "allowed" if path in self.ALLOWED else "refused")
 
+    def test_bootstrap_checks_cli_home_before_it_uses_it(self) -> None:
+        # The function passing proves nothing if bootstrap stops calling it, or calls it after resolving and creating
+        # the host directory: the guard's own call site must be what a revert turns red.
+        lines = (SCRIPTS / "bootstrap_cli_auth.sh").read_text(encoding="utf-8").splitlines()
+        assigned = next(i for i, line in enumerate(lines) if line.startswith("container_cli_home="))
+        guard = lines.index('if ! container_path_under_data "$container_cli_home"; then')
+        guard_end = lines.index("fi", guard)
+
+        self.assertLess(assigned, guard)
+        self.assertIn("exit 1", [line.strip() for line in lines[guard:guard_end]])
+        uses = [
+            i
+            for i, line in enumerate(lines)
+            if "container_cli_home" in line and i != assigned and not guard <= i <= guard_end
+        ]
+        self.assertTrue(uses)
+        self.assertTrue(all(i > guard_end for i in uses), [lines[i] for i in uses if i < guard])
+
 
 if __name__ == "__main__":
     unittest.main()
