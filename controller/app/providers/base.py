@@ -6,7 +6,6 @@ import email.utils
 import json
 import mimetypes
 import os
-import re
 import socket
 import stat
 import tempfile
@@ -29,7 +28,6 @@ from ..result_shaping import compact_session
 # Narrowing to these lets a real bug (AttributeError, TypeError, ...) surface
 # instead of being silently swallowed as a parse miss.
 _PARSE_ERRORS = (ValidationError, ValueError)
-_FENCED_JSON_BLOCK = re.compile(r"```json[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 # Longest a provider's Retry-After may hold one retry.
 MAX_RETRY_AFTER_SECONDS = 30.0
 
@@ -559,12 +557,8 @@ class BaseProviderAdapter(ABC):
             if decision is not None:
                 return decision
 
-        # The model's own decision comes last; JSON it quoted from the page comes earlier. So the last ```json
-        # block that is a decision wins, and with no such block the last decision-shaped object in the text.
-        for block in reversed(_FENCED_JSON_BLOCK.findall(text)):
-            decision = self._last_decision_in(block.strip())
-            if decision is not None:
-                return decision
+        # The model's own decision comes last; JSON it quoted from the page comes earlier. So the decision-shaped
+        # object that comes last in the text wins, fenced or not: the scan sees the JSON inside a fence as well.
         decision = self._last_decision_in(text)
         if decision is not None:
             return decision
@@ -579,7 +573,8 @@ class BaseProviderAdapter(ABC):
         index = text.find("{")
         while index != -1:
             try:
-                candidate, length = decoder.raw_decode(text[index:])
+                # From `index` in place, with an absolute end: no copy of the rest of the text at every brace.
+                candidate, end = decoder.raw_decode(text, index)
             except _PARSE_ERRORS:
                 index = text.find("{", index + 1)
                 continue
@@ -588,7 +583,7 @@ class BaseProviderAdapter(ABC):
                 index = text.find("{", index + 1)
                 continue
             found = decision
-            index = text.find("{", index + length)
+            index = text.find("{", end)
         return found
 
     def parse_decision_file(self, path: Path) -> BrowserActionDecision:
@@ -596,17 +591,19 @@ class BaseProviderAdapter(ABC):
 
     @staticmethod
     def _find_decision_candidate(payload: Any) -> BrowserActionDecision | None:
+        """The decision in one JSON value: the value itself, or else the last one it holds in document order, as
+        in a whole reply (`{"page_said": {...}, "decision": {...}}` is the model's `decision`)."""
         if isinstance(payload, dict):
             try:
                 return BrowserActionDecision.model_validate(payload)
             except _PARSE_ERRORS:
                 pass
-            for value in payload.values():
+            for value in reversed(payload.values()):
                 decision = BaseProviderAdapter._find_decision_candidate(value)
                 if decision is not None:
                     return decision
         elif isinstance(payload, list):
-            for item in payload:
+            for item in reversed(payload):
                 decision = BaseProviderAdapter._find_decision_candidate(item)
                 if decision is not None:
                     return decision

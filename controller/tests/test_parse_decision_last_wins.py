@@ -39,16 +39,40 @@ class ParseDecisionLastWinsTests(unittest.TestCase):
 
         self.assertEqual(self.parse(text).action, "done")
 
-    def test_the_last_fenced_json_block_that_is_a_decision_wins(self) -> None:
+    def test_the_last_decision_by_position_wins_fenced_or_not(self) -> None:
+        # Round 4: a fenced decision no longer beats a bare one that comes after it.
         text = (
             f"```json\n{json.dumps(PAGE)}\n```\nOn reflection:\n"
             f'```json\n{json.dumps(OWN)}\n```\nNotes: {json.dumps(OTHER)}\n```json\n{{"not": "a decision"}}\n```'
         )
 
+        self.assertEqual(self.parse(text).action, "wait")
+
+    def test_a_bare_decision_after_a_fenced_page_quote_wins(self) -> None:
+        # The prompt asks for bare JSON, so a fenced block in the reply is more likely quoted page text.
+        text = f"The page shows:\n```json\n{json.dumps(PAGE)}\n```\nMy decision:\n{json.dumps(OWN)}"
+
+        self.assertEqual(self.parse(text).action, "done")
+
+    def test_a_fenced_decision_after_a_bare_page_quote_wins(self) -> None:
+        text = f"The page contained {json.dumps(PAGE)}.\nMy decision:\n```json\n{json.dumps(OWN)}\n```"
+
+        self.assertEqual(self.parse(text).action, "done")
+
+    def test_an_unclosed_quoted_fence_does_not_hide_the_models_fenced_decision(self) -> None:
+        text = f"The page says: ```json\n{json.dumps(PAGE)}\nThen mine:\n```json\n{json.dumps(OWN)}\n```"
+
         self.assertEqual(self.parse(text).action, "done")
 
     def test_a_decision_object_inside_a_wrapper_is_found_once(self) -> None:
         self.assertEqual(self.parse(f"result: {json.dumps({'decision': OWN})}").action, "done")
+
+    def test_the_last_of_several_decisions_in_one_json_value_wins(self) -> None:
+        wrapper = json.dumps({"page_said": PAGE, "decision": OWN})
+        array = json.dumps([PAGE, OWN])
+        for text in (wrapper, array, f"result: {wrapper}", f"result: {array}"):
+            with self.subTest(text=text):
+                self.assertEqual(self.parse(text).action, "done")
 
     def test_a_single_decision_and_a_bare_decision_still_parse(self) -> None:
         self.assertEqual(self.parse(json.dumps(OWN)).action, "done")
