@@ -289,7 +289,7 @@ def test_tampered_ciphertext_is_rejected(tmp_path: Path) -> None:
     """A corrupted envelope must raise, not silently yield empty auth state."""
     import json
 
-    from cryptography.fernet import InvalidToken
+    from app.auth_state import AUTH_STATE_UNREADABLE, AuthStateDecryptError
 
     manager, key = _auth_manager(tmp_path, require_encryption=False)
     path = _write_envelope(tmp_path / "state.json.enc", key)
@@ -298,8 +298,10 @@ def test_tampered_ciphertext_is_rejected(tmp_path: Path) -> None:
     body["ciphertext"] = body["ciphertext"][:-6] + "AAAAAA"
     path.write_text(json.dumps(body), encoding="utf-8")
 
-    with pytest.raises(InvalidToken):
+    # STORE-21/22: every unreadable envelope raises the one fixed, path-free error (no fernet InvalidToken).
+    with pytest.raises(AuthStateDecryptError) as raised:
         manager.prepare_for_context(path)
+    assert str(raised.value) == AUTH_STATE_UNREADABLE
 
 
 # ── Credential movement leaves a record ────────────────────────────────────
