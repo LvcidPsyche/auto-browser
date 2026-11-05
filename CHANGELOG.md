@@ -27,11 +27,14 @@ All notable changes to auto-browser are documented here.
 - **Harness runs and staged skills written by earlier versions may still hold a URL token on disk, and return it.**
   Under `HARNESS_ROOT` (default `/data/harness`), `runs/<id>/run.json`, `runs/<id>/strategy.md` and a staged skill's
   `candidate.json`, `envelope.json`, `provenance.json` and `drift.json` could carry the token from the final URL, and
-  older `trace.json` files were not text-scrubbed. The files are not rewritten, and what is read back from them is not
-  scrubbed again (a record is scrubbed once, when it is written), so for such a run `harness.get_status`,
-  `harness.list_runs` and `harness.graduate` (its `run.json`: the attempts' verification and the staged candidate)
-  and `harness.get_trace` (its `trace.json`), and for such a skill `harness.list_candidates` and
-  `harness.get_candidate` (the candidate's envelope), can still return the token. The next drift check rewrites
+  older `trace.json` files were not text-scrubbed. The files are not rewritten. An attempt in `run.json` now carries
+  `scrubbed: true` once its verification is scrubbed: an attempt without it (written by an earlier version) is scrubbed
+  when read, so `harness.get_status`, `harness.list_runs` and `harness.graduate` no longer return the token from its
+  verification (a scrubber that fails on such a record leaves the run listed, with only the verdict kept and a
+  warning in the log). What is read back from the other files is not scrubbed again, so for such a run the staged
+  candidate that `run.json` holds and `harness.get_trace` (its `trace.json`), and for such a skill
+  `harness.list_candidates` and `harness.get_candidate` (the candidate's envelope), can still return the token. A
+  `run.json` written by this version has the new `scrubbed` field, which an earlier version does not read. The next drift check rewrites
   `drift.json`. Delete those runs and staged skills where that matters; running the task again stages a clean copy (a
   staged skill's files cannot be edited, as they are covered by its signed envelope). A skill staged before this
   release with a PII expectation (an email in `text_contains`, `dom_contains` or `url_contains`) may now report

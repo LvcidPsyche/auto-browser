@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from ..session_ownership import may_use, verified_operator
 from .contracts import TaskContract
@@ -21,7 +21,7 @@ from .verifier.programmatic import ProgrammaticVerifier
 
 logger = logging.getLogger(__name__)
 
-# Validation context key for a run record read back from run.json, which was scrubbed before it was written.
+# Validation context key for a run record read back from run.json.
 _STORED_RECORD = "stored_record"
 
 
@@ -32,16 +32,33 @@ class HarnessAttempt(BaseModel):
     trace_path: str
     verification: VerificationResult
     created_at: float = Field(default_factory=time.time)
+    # Set once the verification has been scrubbed, and kept when the run is saved. A run.json written by 1.14.x
+    # has no marker (its verification is raw), so it is scrubbed when read; one this version wrote is not scrubbed
+    # again, so a scrubber that fails later cannot drop the run from a listing.
+    scrubbed: bool = False
 
-    @field_validator("verification")
-    @classmethod
-    def _scrub_verification(cls, value: VerificationResult, info: ValidationInfo) -> VerificationResult:
-        # The record is written to run.json; the verifier's result holds the raw URL. Scrubbed once, when the
-        # attempt is made: a record read back from run.json is taken as it was stored, so a scrubber that fails
-        # later cannot drop the run from a listing.
-        if info.context and info.context.get(_STORED_RECORD):
-            return value
-        return value.scrubbed()
+    @model_validator(mode="after")
+    def _scrub_verification(self, info: ValidationInfo) -> "HarnessAttempt":
+        if self.scrubbed:
+            return self
+        stored = bool(info.context and info.context.get(_STORED_RECORD))
+        try:
+            self.verification = self.verification.scrubbed()
+        except Exception as exc:
+            if not stored:
+                raise
+            # A record that is already on disk: keep the run, with the verdict and nothing else of its result.
+            logger.warning(
+                "harness attempt %s: its stored verification was withheld (%s)", self.index, type(exc).__name__
+            )
+            self.verification = VerificationResult(
+                passed=self.verification.passed,
+                confidence=self.verification.confidence,
+                notes="verification withheld: it could not be scrubbed",
+                backend="harness",
+            )
+        self.scrubbed = True
+        return self
 
 
 class HarnessRunRecord(BaseModel):
