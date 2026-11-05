@@ -418,10 +418,16 @@ class CronService:
         """Close the session a cron run was given, and clear the in-flight mark.
 
         Called from the job queue's finish callback on completion, failure and
-        cancellation alike. The mark is cleared even if the close fails —
-        otherwise one stuck close would block that cron job forever.
+        cancellation alike, and by the trigger when queuing fails or is cancelled.
+        A cancelled trigger can do both: withdrawing a running job fires the
+        callback, then its own cleanup runs. Only the call that still finds this
+        run in the slot acts, so the session is closed once and a slot a newer
+        trigger took in between is left alone. The mark is cleared even if the
+        close fails — otherwise one stuck close would block that cron job forever.
         """
-        self._active_runs.pop(job_id, None)
+        if self._active_runs.get(job_id) != session_id:
+            return
+        del self._active_runs[job_id]
         if self.manager is None:
             return
         try:

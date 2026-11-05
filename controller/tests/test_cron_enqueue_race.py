@@ -20,6 +20,12 @@ from tests.test_agent_jobs import FakeOrchestrator, every_session_usable
 TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
 
 
+async def _until(condition, *, timeout: float = 5.0) -> None:
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(0.01)
+
+
 class _HoldingAudit:
     """An audit store whose `agent_job_enqueued` write waits for `release` (or for the job to finish)."""
 
@@ -83,4 +89,44 @@ class CronEnqueueRaceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["triggered"])
         self.assertEqual(self.cron._active_runs, {}, "the finished job's cron slot is stranded")
+        self.manager.close_session.assert_awaited_once_with("session-1")
+
+    async def test_a_cancelled_trigger_whose_job_a_worker_holds_releases_the_run_once(self) -> None:
+        # Withdrawing the running job fires its finish callback, which releases the run; the trigger's own
+        # cleanup then runs too. It must not close the session again, nor free a slot a newer trigger took.
+        running = asyncio.Event()
+
+        class Blocking:
+            async def run(self, **_kwargs):
+                running.set()
+                await asyncio.Event().wait()
+
+        self.queue.orchestrator = Blocking()
+        await self.queue.startup()
+        self.addAsyncCleanup(self.queue.shutdown)
+        job_id = self.job["id"]
+        self.manager.create_session.side_effect = [{"id": "session-1"}, {"id": "session-2"}]
+        newer: list[asyncio.Task] = []
+
+        async def close_session(session_id: str) -> None:
+            if session_id == "session-1" and not newer:
+                # A newer trigger takes the slot as soon as this run has given it up.
+                newer.append(asyncio.create_task(self.cron.trigger_job(job_id)))
+                await _until(lambda: self.cron._active_runs.get(job_id) == "session-2")
+
+        async def finish_newer() -> None:
+            self.audit.release.set()
+            for task in newer:
+                await asyncio.wait_for(task, timeout=5)
+
+        self.addAsyncCleanup(finish_newer)
+        self.manager.close_session.side_effect = close_session
+
+        first = asyncio.create_task(self.cron.trigger_job(job_id))
+        await asyncio.wait_for(running.wait(), timeout=5)  # a worker holds the job
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+
+        self.assertEqual(self.cron._active_runs, {job_id: "session-2"}, "the newer trigger's slot was freed")
         self.manager.close_session.assert_awaited_once_with("session-1")
