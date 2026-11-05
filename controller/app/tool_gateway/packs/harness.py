@@ -68,14 +68,20 @@ def register(registry, gateway):
         ),
         ToolSpec(
             name="harness.check_drift",
-            description="Re-run verifier checks for one staged skill candidate and write drift.json.",
+            description=(
+                "Re-verify one staged skill candidate's stored contract, trace and hashes with the verifier and "
+                "write drift.json. It replays nothing and never touches the site, so it cannot detect a site change."
+            ),
             input_model=HarnessSkillIdInput,
             handler=gateway._harness_check_drift,
             pack="harness",
         ),
         ToolSpec(
             name="harness.check_all_drifts",
-            description="Run drift checks for all staged skill candidates.",
+            description=(
+                "Run check_drift for all staged skill candidates: a re-verification of what was stored, "
+                "not a check of the live site."
+            ),
             input_model=EmptyInput,
             handler=gateway._harness_check_all_drifts,
             pack="harness",

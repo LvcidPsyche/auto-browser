@@ -18,6 +18,8 @@ All notable changes to auto-browser are documented here.
   ignored.
 - The "daemon ignores GwPriority" startup warning now also covers a client that speaks an API version below 1.48, and
   says its check compares network names only, so the gateway move it describes can also happen where it stays silent.
+- `harness.check_drift` and `harness.check_all_drifts` now say what they do: they re-verify a staged candidate's stored
+  contract and trace and cannot detect a site change. `docs/convergence-harness.md` says the same.
 
 ### Fixed
 

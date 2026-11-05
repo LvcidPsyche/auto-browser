@@ -65,6 +65,8 @@ The full MCP profile exposes the harness itself:
 
 `harness.graduate` returns the staged candidate metadata only. It does not promote or register the skill into production automatically.
 
+`harness.check_drift` and `harness.check_all_drifts` re-verify a staged candidate's stored contract and stored trace (and the hashes recorded for them) with the verifier and write `drift.json`. They run no browser and make no request to the site, so they cannot see that a site has changed since the candidate was staged; they catch a stored candidate that no longer verifies (an edited file, a changed verifier). To find out whether the skill still works on the live site, run a new convergence run.
+
 For live browser sessions, call `harness.start_convergence` with `workflow_profile=governed` and a valid approval. Mock-only harness runs can be used for local deterministic smoke tests without attaching to a live session.
 
 Minimal MCP call:
