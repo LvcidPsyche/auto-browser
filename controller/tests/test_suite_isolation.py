@@ -17,7 +17,6 @@ READ_ONLY_DEFAULTS = {
     "isolated_tunnel_key_path",
     "isolated_tunnel_known_hosts_path",
     "openai_host_bridge_socket",
-    "cli_home",
 }
 
 

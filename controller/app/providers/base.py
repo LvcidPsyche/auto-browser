@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import email.utils
+import functools
 import json
+import logging
 import mimetypes
 import os
 import socket
@@ -22,6 +24,8 @@ from pydantic import ValidationError
 from ..config import Settings
 from ..models import BROWSER_ACTION_SCHEMA, BrowserActionDecision, ProviderName
 from ..result_shaping import compact_session
+
+logger = logging.getLogger(__name__)
 
 # Parse strategies fall through on malformed input only. model_validate* raise
 # ValidationError; json.loads / raw_decode raise JSONDecodeError (a ValueError).
@@ -47,6 +51,16 @@ CLI_BASE_ENV_NAMES = frozenset(
     }
 )  # fmt: skip
 CLI_BASE_ENV_PREFIXES = ("LC_",)
+# Each CLI_HOME that could not be created, warned about once.
+_UNUSABLE_CLI_HOMES: set[str] = set()
+
+
+@functools.cache
+def _private_cli_home() -> str:
+    """The CLI home when CLI_HOME is unset or cannot be created: made once per process, by mkdtemp, so only this
+    user can enter it (0o700). A shared, predictable temp path could be made first by another local user, with a
+    .env or CLI settings in it for the child to load."""
+    return tempfile.mkdtemp(prefix="auto-browser-cli-")
 
 
 @dataclass
@@ -374,28 +388,38 @@ class BaseProviderAdapter(ABC):
             for name, value in os.environ.items()
             if name.upper() in allowed or name.upper().startswith(CLI_BASE_ENV_PREFIXES)
         }
-        if self.settings.cli_home:
-            env["HOME"] = self.settings.cli_home
+        if (self.settings.cli_home or "").strip():
+            env["HOME"] = self.effective_cli_home()
         env.setdefault("CI", "1")
         env.setdefault("NO_COLOR", "1")
         return env
 
-    def cli_working_directory(self) -> str:
-        """Where a provider CLI child starts: a directory with no .env and no checkout among its parents.
+    def effective_cli_home(self) -> str:
+        """The one CLI home a provider CLI child gets: its working directory, and its HOME when CLI_HOME is set.
 
-        The Gemini CLI loads a .env from its working directory and parents into its environment, so a child
-        started in the controller's checkout re-reads the secrets `cli_environment` withheld.
+        A directory with no .env and no checkout among its parents: the Gemini CLI loads a .env from its working
+        directory and parents into its environment, so a child started in the controller's checkout re-reads the
+        secrets `cli_environment` withheld. CLI_HOME when it exists or can be created; otherwise (unset, or a host
+        run with no writable /data) a private directory of this process's (_private_cli_home).
         """
-        fallback = Path(tempfile.gettempdir()) / "auto-browser-cli-cwd"
         cli_home = (self.settings.cli_home or "").strip()
-        folder = Path(cli_home) if cli_home else fallback
+        if not cli_home:
+            return _private_cli_home()
         try:
-            folder.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            # A host run has no writable /data; CLI mode still needs a clean directory to start in.
-            folder = fallback
-            folder.mkdir(parents=True, exist_ok=True)
-        return str(folder)
+            Path(cli_home).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            fallback = _private_cli_home()
+            if cli_home not in _UNUSABLE_CLI_HOMES:
+                _UNUSABLE_CLI_HOMES.add(cli_home)
+                logger.warning(
+                    "CLI_HOME %s cannot be created (%s); provider CLI children start in, and get as HOME, %s, which "
+                    "holds no CLI sign-in. CLI mode needs CLI_HOME set to a writable directory on host runs.",
+                    cli_home,
+                    exc,
+                    fallback,
+                )
+            return fallback
+        return cli_home
 
     @staticmethod
     def cli_binary_exists(path: str | None) -> bool:
@@ -503,7 +527,7 @@ class BaseProviderAdapter(ABC):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env or self.cli_environment(),
-            cwd=cwd or self.cli_working_directory(),
+            cwd=cwd or self.effective_cli_home(),
         )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(

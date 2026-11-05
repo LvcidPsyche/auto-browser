@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -62,9 +64,17 @@ class CliProviderEnvironmentTests(unittest.TestCase):
         self.assertFalse("OPENAI_API_KEY" in env, "the Claude child was given OPENAI_API_KEY")
 
     def test_cli_home_still_sets_home(self):
-        with patch.dict(os.environ, {"CLI_HOME": "/data/cli-home"}, clear=True):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = str(Path(tmp) / "cli-home")
+            with patch.dict(os.environ, {"CLI_HOME": home}, clear=True):
+                env = ClaudeAdapter(Settings(_env_file=None)).cli_environment()
+        self.assertEqual(env["HOME"], home)
+
+    def test_without_a_cli_home_home_is_left_to_the_cli_environment(self):
+        # CLI_HOME unset delegates auth state to the CLI's own environment (describe_cli_readiness says so).
+        with patch.dict(os.environ, {"CLI_HOME": "", "HOME": "/home/operator"}, clear=True):
             env = ClaudeAdapter(Settings(_env_file=None)).cli_environment()
-        self.assertEqual(env["HOME"], "/data/cli-home")
+        self.assertEqual(env["HOME"], "/home/operator")
 
     def test_passthrough_names_are_passed_as_is(self):
         env = _env_for(
@@ -78,19 +88,35 @@ class CliProviderEnvironmentTests(unittest.TestCase):
         self.assertEqual(env["OTHER_VAR"], "v")
         self.assertFalse("NOT_LISTED" in env, "a variable outside the allowlist reached the child")
 
-    def test_unwritable_cli_home_falls_back_to_the_temp_folder(self):
+    def test_an_unwritable_cli_home_falls_back_to_one_private_directory_for_cwd_and_home(self):
         real_mkdir = Path.mkdir
+        configured = f"/no-such-cli-home/{uuid.uuid4().hex}"  # warned about once per process: a fresh one
 
         def mkdir(path, *args, **kwargs):
             if "no-such-cli-home" in str(path):
                 raise PermissionError("read-only")
             return real_mkdir(path, *args, **kwargs)
 
-        with patch.dict(os.environ, {"CLI_HOME": "/no-such-cli-home/x"}, clear=True):
+        with patch.dict(os.environ, {"CLI_HOME": configured}, clear=True):
             adapter = ClaudeAdapter(Settings(_env_file=None))
-            with patch.object(Path, "mkdir", mkdir):
-                folder = adapter.cli_working_directory()
-        self.assertEqual(Path(folder), Path(tempfile.gettempdir()) / "auto-browser-cli-cwd")
+            with patch.object(Path, "mkdir", mkdir), self.assertLogs("app.providers.base", "WARNING") as logs:
+                folder = adapter.effective_cli_home()
+                env = adapter.cli_environment()
+                again = adapter.effective_cli_home()
+
+        fallback = Path(folder)
+        self.assertEqual((env["HOME"], again), (folder, folder))
+        self.assertEqual(fallback.parent, Path(tempfile.gettempdir()))
+        self.assertTrue(fallback.name.startswith("auto-browser-cli-"))
+        self.assertNotEqual(fallback.name, "auto-browser-cli-cwd")  # the shared, predictable folder
+        self.assertTrue(fallback.is_dir())
+        if os.name == "posix":
+            self.assertEqual(stat.S_IMODE(fallback.stat().st_mode), 0o700)
+        self.assertEqual(len(logs.records), 1)
+        message = logs.records[0].getMessage()
+        self.assertIn(configured, message)
+        self.assertIn(folder, message)
+        self.assertIn("CLI_HOME set to a writable directory", message)
 
 
 if __name__ == "__main__":

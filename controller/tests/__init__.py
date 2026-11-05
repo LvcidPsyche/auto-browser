@@ -74,6 +74,7 @@ for _name, _relative in {
     "REMOTE_ACCESS_INFO_PATH": "tunnels/reverse-ssh.json",
     "ISOLATED_TUNNEL_INFO_ROOT": "tunnels/sessions",
     "API_TOKEN_FILE": "api-token",
+    "CLI_HOME": "cli-home",
 }.items():
     os.environ[_name] = os.path.join(_DATA_ROOT, _relative)
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import stat
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +45,10 @@ async def test_without_a_cli_home_the_child_starts_in_an_empty_directory_under_t
     assert folder.is_dir()
     assert folder.parent == Path(tempfile.gettempdir())
     assert not (folder / ".env").exists()
+    # Private to this process's user, not a shared, predictable name another local user could create first.
+    assert folder.name.startswith("auto-browser-cli-") and folder.name != "auto-browser-cli-cwd"
+    if os.name == "posix":
+        assert stat.S_IMODE(folder.stat().st_mode) == 0o700
 
 
 async def test_a_caller_given_cwd_is_kept() -> None:
