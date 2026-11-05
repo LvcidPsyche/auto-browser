@@ -389,15 +389,28 @@ class BridgeHeaderDeadlineRaceTests(unittest.TestCase):
             def cancel(self) -> None:
                 return None  # too late: the timer thread is past its check and runs the callback below
 
-        handler = object.__new__(bridge.BridgeRequestHandler)
+        class _StdlibStandIn(bridge.BaseHTTPRequestHandler):
+            """Sits between BridgeRequestHandler and the stdlib in _Handler's MRO, so the bridge's super() calls
+            reach these for that class alone: no other handler in the process sees them."""
+
+            def handle_one_request(self) -> None:
+                self.parse_request()
+
+            def parse_request(self) -> bool:
+                return True
+
+        class _Handler(bridge.BridgeRequestHandler, _StdlibStandIn):
+            pass
+
+        handler = object.__new__(_Handler)
         handler.connection = Mock()
         handler.close_connection = False
+        real_timer, real_parse = threading.Timer, bridge.BaseHTTPRequestHandler.parse_request
 
-        with (
-            patch.object(bridge.threading, "Timer", _CapturedTimer),
-            patch.object(bridge.BaseHTTPRequestHandler, "handle_one_request", lambda self: self.parse_request()),
-            patch.object(bridge.BaseHTTPRequestHandler, "parse_request", return_value=True),
-        ):
+        with patch.object(bridge, "threading", _ThreadingWithTimer(_CapturedTimer)):
+            # A handler thread another test left running looks these up: it must see the real ones.
+            self.assertIs(threading.Timer, real_timer)
+            self.assertIs(bridge.BaseHTTPRequestHandler.parse_request, real_parse)
             handler.handle_one_request()
             function, args, kwargs = captured[0]
             function(*args, **kwargs)
