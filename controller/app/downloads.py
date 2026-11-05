@@ -66,7 +66,17 @@ class DownloadCaptureService:
             failure = "download_save_failed"
         except BaseException as exc:
             # Whatever ended the save, the reserved name would count toward the cap for good.
-            destination.unlink(missing_ok=True)
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError as unlink_error:
+                # A save cancelled while Playwright was still opening the file in its own thread: on Windows the
+                # open handle refuses the delete. The exception that ended the save is what goes on.
+                logger.warning(
+                    "could not delete the partial download %s of session %s: %s",
+                    destination.name,
+                    session.id,
+                    unlink_error,
+                )
             if isinstance(exc, asyncio.CancelledError) and _loop_is_running():
                 # Cancelled mid-save: the browser's copy would stay until its context closes. That delete goes on
                 # in the background (it waits for the download to finish), so the cancellation is neither held

@@ -593,7 +593,8 @@ class McpToolGateway:
             # listed again under the lock, since a call that held it may have created one meanwhile. The key is the
             # token-verified operator; every caller without a token shares the None key. A token operator and an
             # unauthenticated caller therefore hold different locks and can each create a session when both see
-            # none live: the second then sees two (its own and the unowned one) and is told ambiguous_session.
+            # none live. The token operator sees both sessions (its own and the unowned one), so its next
+            # session-less call then answers ambiguous_session; the unauthenticated caller sees only the unowned one.
             async with self._implicit_session_locks.setdefault(verified_operator(), asyncio.Lock()):
                 sessions = await self._live_sessions()
                 if not sessions:

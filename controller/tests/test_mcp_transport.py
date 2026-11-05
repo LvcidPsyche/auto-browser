@@ -618,5 +618,41 @@ class McpSessionCapTests(unittest.TestCase):
         self.assertIn("None-9", self.transport._sessions)
 
 
+class McpResourceEncodingTests(unittest.IsolatedAsyncioTestCase):
+    """A resource read is encoded as strictly as a tool result: strict JSON, and never an object's repr."""
+
+    URIS = ("browser://sessions", "browser://audit/events", "browser://s1/console", "browser://s1/network")
+
+    def _transport(self, value: object) -> McpHttpTransport:
+        manager = SimpleNamespace(
+            list_sessions=AsyncMock(return_value=[{"id": "s1", "score": value}]),
+            list_audit_events=AsyncMock(return_value=[{"event_type": "x", "n": value}]),
+            get_console_messages=AsyncMock(return_value={"items": [{"text": "t", "at": value}]}),
+            get_network_log=AsyncMock(return_value={"entries": [{"url": "u", "timing": value}]}),
+        )
+        return McpHttpTransport(
+            tool_gateway=SimpleNamespace(list_tools=lambda: []),
+            server_name="auto-browser",
+            server_version="0",
+            manager=manager,
+        )
+
+    async def test_a_nan_or_an_infinity_in_a_resource_is_sent_as_null(self) -> None:
+        for value in (float("nan"), float("inf"), float("-inf")):
+            transport = self._transport(value)
+            for uri in self.URIS:
+                with self.subTest(uri=uri, value=value):
+                    resource = await transport._read_resource(uri)
+
+                    parsed = json.loads(resource["text"], parse_constant=lambda name: self.fail(f"{uri} sent {name}"))
+                    self.assertIn(None, [*parsed[0].values()])
+
+    async def test_a_resource_that_cannot_be_encoded_is_not_served_and_is_logged(self) -> None:
+        transport = self._transport(object())
+        for uri in self.URIS:
+            with self.subTest(uri=uri), self.assertLogs("app.mcp_transport", "WARNING"):
+                self.assertIsNone(await transport._read_resource(uri))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -282,6 +282,36 @@ class DownloadCleanupTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(delete_finished, [1])
             download.delete.assert_awaited_once_with()
 
+    async def test_a_partial_file_that_cannot_be_deleted_does_not_replace_the_cancellation(self) -> None:
+        # On Windows, a save cancelled while Playwright still opened the file in its thread leaves the handle open.
+        saving = asyncio.Event()
+
+        class Hanging(FakeDownload):
+            async def save_as(self, path: str) -> None:
+                Path(path).write_text("partial", encoding="utf-8")
+                saving.set()
+                await asyncio.sleep(30)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            artifacts, session = self._session(tempdir)
+            download = Hanging("report.csv")
+            task = asyncio.create_task(DownloadCaptureService(artifacts).capture(session, download))
+            await asyncio.wait_for(saving.wait(), 5)
+
+            with (
+                mock.patch.object(Path, "unlink", side_effect=PermissionError("the file is in use")),
+                self.assertLogs("app.downloads", "WARNING"),
+            ):
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 5)
+            for _ in range(50):  # the browser's copy is still deleted, in the background
+                if download.delete.await_count:
+                    break
+                await asyncio.sleep(0.01)
+
+            download.delete.assert_awaited_once_with()
+
     def test_a_save_closed_with_no_running_loop_removes_the_file_and_schedules_nothing(self) -> None:
         class Suspend:
             def __await__(self):

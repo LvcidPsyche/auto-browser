@@ -20,6 +20,7 @@ from .browser.page_read import bounded, locked_read
 from .mcp_instructions import server_instructions
 from .models import McpToolCallRequest, OperatorIdentity
 from .session_ownership import ANONYMOUS, acting_as, may_use, verified_operator
+from .tool_gateway.gateway import _json_safe
 from .utils import PRIVATE_FILE_MODE, atomic_write_text, utc_now
 
 JSONRPC_VERSION = "2.0"
@@ -344,20 +345,12 @@ class McpHttpTransport:
             if self.manager is None:
                 return {"uri": uri, "mimeType": "application/json", "text": "[]"}
             sessions = await self.manager.list_sessions()
-            return {
-                "uri": uri,
-                "mimeType": "application/json",
-                "text": json.dumps(sessions, ensure_ascii=False),
-            }
+            return _json_resource(uri, sessions)
         if uri == "browser://audit/events":
             if self.manager is None or not callable(getattr(self.manager, "list_audit_events", None)):
                 return None
             events = await self.manager.list_audit_events(limit=100)
-            return {
-                "uri": uri,
-                "mimeType": "application/json",
-                "text": json.dumps(events, ensure_ascii=False),
-            }
+            return _json_resource(uri, events)
 
         # Parse browser://{session_id}/{resource}
         if not uri.startswith("browser://"):
@@ -390,19 +383,11 @@ class McpHttpTransport:
 
             if resource == "console":
                 result = await self.manager.get_console_messages(session_id, limit=50)
-                return {
-                    "uri": uri,
-                    "mimeType": "application/json",
-                    "text": json.dumps(result.get("items", []), ensure_ascii=False),
-                }
+                return _json_resource(uri, result.get("items", []))
 
             if resource == "network":
                 result = await self.manager.get_network_log(session_id, limit=100)
-                return {
-                    "uri": uri,
-                    "mimeType": "application/json",
-                    "text": json.dumps(result.get("entries", []), ensure_ascii=False),
-                }
+                return _json_resource(uri, result.get("entries", []))
 
         except Exception as exc:
             logger.debug("resource read error for %s: %s", uri, exc)
@@ -810,3 +795,15 @@ class McpHttpTransport:
 
 def _least_recently_used(sessions: Iterable[McpSession]) -> list[McpSession]:
     return sorted(sessions, key=lambda item: (item.last_used_at or item.created_at or "", item.id))
+
+
+def _json_resource(uri: str, payload: Any) -> dict[str, Any] | None:
+    """A JSON resource, encoded as strictly as a tool result: a NaN or an infinity (a console or network entry can
+    carry one) is null, not the bare NaN strict parsers reject, and an object is refused rather than sent as its
+    repr. One that cannot be encoded is not served (an unknown resource), and the reason is logged."""
+    try:
+        text = json.dumps(_json_safe(payload), ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError, RecursionError) as exc:
+        logger.warning("MCP resource %s could not be encoded as JSON: %s", uri, exc)
+        return None
+    return {"uri": uri, "mimeType": "application/json", "text": text}

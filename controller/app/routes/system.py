@@ -70,7 +70,21 @@ def _let_finish_in_background(connect: "asyncio.Future[Any]") -> None:
 
 def _log_unfinished_connect(connect: "asyncio.Future[Any]") -> None:
     if not connect.cancelled() and connect.exception() is not None:
-        logger.warning("browser connect that outlived a deep health probe failed: %s", connect.exception())
+        logger.warning("browser connect that outlived a health or readiness probe failed: %s", connect.exception())
+
+
+async def _wait_for_browser(manager: "BrowserManager") -> Any:
+    """The browser, waited for at most READYZ_TIMEOUT_SECONDS. The wait is bounded, the connect is not cancelled:
+    cancelling it mid-connect leaked a half-acquired browser connection and its gate. It is the connect every probe
+    shares (_shared_connect), so polling through an outage queues one connect, not one per probe; it finishes in
+    the background, and a failure after the probes gave up on it is logged."""
+    connect = _shared_connect(manager)
+    try:
+        return await asyncio.wait_for(asyncio.shield(connect), timeout=READYZ_TIMEOUT_SECONDS)
+    except BaseException:
+        if not connect.done():
+            _let_finish_in_background(connect)
+        raise
 
 
 async def run_deep_health_probe(manager: "BrowserManager") -> dict[str, Any]:
@@ -91,17 +105,8 @@ async def run_deep_health_probe(manager: "BrowserManager") -> dict[str, Any]:
         }
     )
 
-    # Bounded like /readyz: a hung ensure_browser() otherwise holds the browser lock and the request open. The
-    # wait is bounded, the connect is not cancelled: cancelling it mid-connect leaked a half-acquired browser
-    # connection and its gate. It finishes in the background (a later probe waits on that same connect, or once it
-    # has finished starts one that finds the browser connected), and a failure after the probe gave up is logged.
-    connect = _shared_connect(manager)
-    try:
-        browser = await asyncio.wait_for(asyncio.shield(connect), timeout=READYZ_TIMEOUT_SECONDS)
-    except BaseException:
-        if not connect.done():
-            _let_finish_in_background(connect)
-        raise
+    # Bounded like /readyz: a hung ensure_browser() otherwise holds the browser lock and the request open.
+    browser = await _wait_for_browser(manager)
     context = await browser.new_context(viewport={"width": 640, "height": 360})
     try:
         page = await context.new_page()
@@ -185,9 +190,10 @@ def create_system_router(
             # browser lock*, so with browser-node down this probe used to hang
             # for a minute or more and every concurrent readyz and every
             # create_session queued behind it — the API looked dead instead of
-            # reporting "not ready". A readiness probe must answer promptly;
-            # cancelling releases the lock via its async context manager.
-            await asyncio.wait_for(manager.ensure_browser(), timeout=READYZ_TIMEOUT_SECONDS)
+            # reporting "not ready". A readiness probe must answer promptly; it
+            # stops waiting, and leaves the shared connect to finish (see
+            # _wait_for_browser), rather than cancel it mid-connect.
+            await _wait_for_browser(manager)
             return {"status": "ready", "environment": settings.environment_name}
         except TimeoutError:
             logger.warning("readiness check timed out after %ss", READYZ_TIMEOUT_SECONDS)
