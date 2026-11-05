@@ -758,3 +758,15 @@ async def test_the_listing_route_reports_a_bad_line_inside_its_window(manager, c
     body = client.get(f"/sessions/{SCOPE}/witness?limit=10").json()
 
     assert (body["count"], body["unparseable_lines"]) == (3, 1)
+
+
+async def test_the_listing_route_counts_only_the_listed_window(manager, client) -> None:
+    await _record(manager, 3)
+    path = manager.witness._path(SCOPE)
+    first, rest = path.read_bytes().split(b"\n", 1)
+    path.write_bytes(first + b"\n{this is not json}\n" + rest)
+
+    body = client.get(f"/sessions/{SCOPE}/witness?limit=2").json()
+
+    # The bad line is older than the last two lines, so the listing neither shows nor counts it.
+    assert (body["count"], body["unparseable_lines"]) == (2, 0)

@@ -157,6 +157,7 @@ class TraceEnvelope(BaseModel):
             if isinstance(step, BaseModel):
                 step = step.model_dump()
             decision = step.get("decision") or {}
+            had_decision = bool(decision)  # before the sensitive flag below, which is not a decision
             if _execution_redacted_the_text(step.get("execution")):
                 # The controller found the field sensitive at run time, whatever the agent marked.
                 decision = {**decision, "sensitive": True}
@@ -170,7 +171,7 @@ class TraceEnvelope(BaseModel):
             screenshot = {key: observation[key] for key in _SCREENSHOT_KEYS if observation.get(key)}
             if screenshot:
                 payloads.append(("screenshot", screenshot))
-            if decision:
+            if had_decision:
                 payloads.append(("model_decision", {"decision": decision}))
             payloads.append(
                 (

@@ -27,6 +27,10 @@ def _agent_result(**step: object) -> dict:
     return {"steps": [{"status": "ok", **step}]}
 
 
+def _event(trace: TraceEnvelope, event_type: str):
+    return next(event for event in trace.events if event.event_type == event_type)
+
+
 class TraceRedactionTests(unittest.TestCase):
     def test_typed_text_of_a_sensitive_action_is_redacted(self) -> None:
         trace = TraceEnvelope.from_agent_result(
@@ -38,7 +42,7 @@ class TraceRedactionTests(unittest.TestCase):
         )
 
         self.assertNotIn(SECRET_TEXT, _trace_text(trace))
-        self.assertEqual(trace.events[0].payload["decision"]["selector"], "#pw")
+        self.assertEqual(_event(trace, "action").payload["decision"]["selector"], "#pw")
 
     def test_typed_text_is_redacted_when_the_field_was_found_sensitive_at_run_time(self) -> None:
         # The agent did not mark the step sensitive; the controller saw a password field and said so.
@@ -58,7 +62,16 @@ class TraceRedactionTests(unittest.TestCase):
             result=_agent_result(decision={"action": "type", "selector": "#q", "text": "blue shoes"}),
         )
 
-        self.assertEqual(trace.events[0].payload["decision"]["text"], "blue shoes")
+        self.assertEqual(_event(trace, "action").payload["decision"]["text"], "blue shoes")
+        self.assertEqual(_event(trace, "model_decision").payload["decision"]["text"], "blue shoes")
+
+    def test_a_step_with_no_decision_emits_no_model_decision_even_if_execution_redacted_text(self) -> None:
+        trace = TraceEnvelope.from_agent_result(
+            contract_hash="h",
+            result=_agent_result(execution={"target": {"selector": "#pw", "text_redacted": True}}),
+        )
+
+        self.assertEqual([event.event_type for event in trace.events], ["action"])
 
     def test_url_tokens_are_scrubbed_from_the_observation_and_the_final_observation(self) -> None:
         url = f"https://app.example.com/cb?access_token={URL_TOKEN}#id_token={URL_TOKEN}"

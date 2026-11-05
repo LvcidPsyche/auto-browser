@@ -166,7 +166,9 @@ All notable changes to auto-browser are documented here.
   passed on a mock attempt and always failed on a live one. Each step with a decision now adds one, before its action
   and redacted like the action. The other way round, the mock attempt's screenshot event (`available: false`) met a
   required `screenshots` kind with no image; a screenshot event now counts only when it carries a `screenshot_path` or
-  `screenshot_url` and is not marked unavailable.
+  `screenshot_url` and is not marked unavailable. So a mock run (`--mock-final-url`, `mock_final_observation`) of a
+  contract that requires `screenshots` evidence now fails with `missing_evidence`, and a drift check of an existing
+  mock-staged candidate whose contract requires screenshots now reports it degraded.
 
 ### Changed
 
