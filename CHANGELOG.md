@@ -51,6 +51,9 @@ All notable changes to auto-browser are documented here.
 - A late background write of a session's record can no longer put a closed session back to active: the active write is
   skipped when the session is no longer registered (checked before and after the summary is built), and the session
   store refuses to overwrite a stored `closed` record with an `active` one.
+- A `create_session` that fails no longer leaves its artifact, auth and upload directories behind or an `active` record
+  in the session store: the directories are made only after every check that can refuse the request, removed again by
+  the rollback, and a record the create had already written is marked `closed` (reason `create_failed`).
 
 ### Security
 

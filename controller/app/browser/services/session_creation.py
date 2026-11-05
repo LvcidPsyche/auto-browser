@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -82,7 +83,6 @@ class SessionCreation:
         self.manager._check_session_limit()
 
         session_id = new_session_id()
-        artifact_dir, auth_dir, upload_dir = self.prepare_dirs(session_id)
         source_path: Path | None = None
 
         if proxy_persona:
@@ -130,6 +130,9 @@ class SessionCreation:
         try:
             from ...browser_manager import BrowserSession
 
+            # After every check that can refuse the request, and inside the try: whatever fails from here on
+            # removes them again (cleanup_failed).
+            artifact_dir, auth_dir, upload_dir = self.prepare_dirs(session_id)
             browser, runtime = await self.manager._acquire_session_browser(session_id)
             # Before the first context: no session runs on a browser without its pre-request gate.
             gate = await self.manager.request_gates.require(browser)
@@ -385,3 +388,25 @@ class SessionCreation:
                 await self.manager.runtime_provisioner.release(runtime)
             except Exception as exc:
                 logger.warning("failed to release isolated runtime during create_session rollback: %s", exc)
+        await self._forget_failed_session_state(session, session_id)
+
+    async def _forget_failed_session_state(self, session: "BrowserSession | None", session_id: str) -> None:
+        """Remove the directories a failed create made, and close the record it persisted, if it got that far."""
+        for directory in (
+            self.manager.artifacts.artifact_root / session_id,
+            self.auth_root(session_id),
+            self.upload_root(session_id),
+        ):
+            shutil.rmtree(directory, ignore_errors=True)
+            if directory.exists():
+                logger.warning("create_session rollback could not remove %s", directory)
+        if session is None:
+            return  # no record is written before the session object exists
+        try:
+            await self.manager.session_store.get(session_id)
+        except KeyError:
+            return
+        except Exception as exc:
+            logger.warning("could not read the record of failed session %s: %s", session_id, exc)
+            return
+        await self._persist_closed_without_summary(session, "create_failed")
