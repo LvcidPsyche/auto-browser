@@ -87,7 +87,7 @@ class Settings(BaseSettings):
         alias="SESSION_STORE_REDIS_PREFIX",
     )
     agent_job_worker_count: int = Field(1, alias="AGENT_JOB_WORKER_COUNT")
-    auth_state_encryption_key: str | None = Field(None, alias="AUTH_STATE_ENCRYPTION_KEY")
+    auth_state_encryption_key: str | None = Field(None, alias="AUTH_STATE_ENCRYPTION_KEY", repr=False)
     require_auth_state_encryption: bool = Field(False, alias="REQUIRE_AUTH_STATE_ENCRYPTION")
     auth_state_max_age_hours: float = Field(72.0, alias="AUTH_STATE_MAX_AGE_HOURS")
     harness_root: str = Field("/data/harness", alias="HARNESS_ROOT")
@@ -249,7 +249,7 @@ class Settings(BaseSettings):
         alias="WITNESS_PROTECTION_MODE_DEFAULT",
     )
     witness_remote_url: str | None = Field(None, alias="WITNESS_REMOTE_URL")
-    witness_remote_api_key: str | None = Field(None, alias="WITNESS_REMOTE_API_KEY")
+    witness_remote_api_key: str | None = Field(None, alias="WITNESS_REMOTE_API_KEY", repr=False)
     witness_remote_tenant_id: str | None = Field(None, alias="WITNESS_REMOTE_TENANT_ID")
     witness_remote_timeout_seconds: float = Field(0.75, alias="WITNESS_REMOTE_TIMEOUT_SECONDS")
     witness_remote_verify_tls: bool = Field(True, alias="WITNESS_REMOTE_VERIFY_TLS")
@@ -278,7 +278,7 @@ class Settings(BaseSettings):
     upload_retention_hours: float = Field(168.0, alias="UPLOAD_RETENTION_HOURS")
     auth_retention_hours: float = Field(168.0, alias="AUTH_RETENTION_HOURS")
 
-    openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
+    openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY", repr=False)
     openai_base_url: str = Field("https://api.openai.com/v1", alias="OPENAI_BASE_URL")
     openai_model: str = Field("gpt-6.1-sol", alias="OPENAI_MODEL")
     openai_auth_mode: str = Field("api", alias="OPENAI_AUTH_MODE")
@@ -294,7 +294,7 @@ class Settings(BaseSettings):
     codex_sandbox_mode: str = Field("read-only", alias="CODEX_SANDBOX_MODE")
     codex_allow_host_exec: bool = Field(False, alias="CODEX_BRIDGE_ALLOW_HOST_EXEC")
 
-    anthropic_api_key: str | None = Field(None, alias="ANTHROPIC_API_KEY")
+    anthropic_api_key: str | None = Field(None, alias="ANTHROPIC_API_KEY", repr=False)
     anthropic_base_url: str = Field(ANTHROPIC_DEFAULT_BASE_URL, alias="ANTHROPIC_BASE_URL")
     anthropic_version: str = Field("2023-06-01", alias="ANTHROPIC_VERSION")
     claude_model: str = Field("claude-sonnet-4-6", alias="CLAUDE_MODEL")
@@ -303,7 +303,7 @@ class Settings(BaseSettings):
     claude_cli_path: str = Field("claude", alias="CLAUDE_CLI_PATH")
     claude_cli_model: str | None = Field(None, alias="CLAUDE_CLI_MODEL")
 
-    gemini_api_key: str | None = Field(None, alias="GEMINI_API_KEY")
+    gemini_api_key: str | None = Field(None, alias="GEMINI_API_KEY", repr=False)
     gemini_base_url: str = Field(
         "https://generativelanguage.googleapis.com/v1beta",
         alias="GEMINI_BASE_URL",
@@ -319,23 +319,23 @@ class Settings(BaseSettings):
     # OpenAI-compatible providers, all served by one generic adapter. Set the API key
     # (and, for openrouter/openai_compatible, a model) to enable each. base_url defaults
     # are stable; model defaults are current-but-overridable.
-    openrouter_api_key: str | None = Field(None, alias="OPENROUTER_API_KEY")
+    openrouter_api_key: str | None = Field(None, alias="OPENROUTER_API_KEY", repr=False)
     openrouter_base_url: str = Field("https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL")
     openrouter_model: str = Field("", alias="OPENROUTER_MODEL")
 
-    xai_api_key: str | None = Field(None, alias="XAI_API_KEY")
+    xai_api_key: str | None = Field(None, alias="XAI_API_KEY", repr=False)
     xai_base_url: str = Field("https://api.x.ai/v1", alias="XAI_BASE_URL")
     xai_model: str = Field("grok-4", alias="XAI_MODEL")
 
-    deepseek_api_key: str | None = Field(None, alias="DEEPSEEK_API_KEY")
+    deepseek_api_key: str | None = Field(None, alias="DEEPSEEK_API_KEY", repr=False)
     deepseek_base_url: str = Field("https://api.deepseek.com/v1", alias="DEEPSEEK_BASE_URL")
     deepseek_model: str = Field("deepseek-chat", alias="DEEPSEEK_MODEL")
 
-    minimax_api_key: str | None = Field(None, alias="MINIMAX_API_KEY")
+    minimax_api_key: str | None = Field(None, alias="MINIMAX_API_KEY", repr=False)
     minimax_base_url: str = Field("https://api.minimax.io/v1", alias="MINIMAX_BASE_URL")
     minimax_model: str = Field("MiniMax-M3", alias="MINIMAX_MODEL")
 
-    openai_compatible_api_key: str | None = Field(None, alias="OPENAI_COMPATIBLE_API_KEY")
+    openai_compatible_api_key: str | None = Field(None, alias="OPENAI_COMPATIBLE_API_KEY", repr=False)
     openai_compatible_base_url: str = Field("", alias="OPENAI_COMPATIBLE_BASE_URL")
     openai_compatible_model: str = Field("", alias="OPENAI_COMPATIBLE_MODEL")
 
@@ -359,7 +359,7 @@ class Settings(BaseSettings):
 
     # Approval webhooks — notified when approvals are created or decided
     approval_webhook_url: str | None = Field(None, alias="APPROVAL_WEBHOOK_URL")
-    approval_webhook_secret: str | None = Field(None, alias="APPROVAL_WEBHOOK_SECRET")
+    approval_webhook_secret: str | None = Field(None, alias="APPROVAL_WEBHOOK_SECRET", repr=False)
 
     # Perception presets — default mode for /observe
     # text: no screenshot, no OCR — accessibility tree + text extraction only
@@ -380,7 +380,7 @@ class Settings(BaseSettings):
     # Proxy (session-level override supported in CreateSessionRequest)
     default_proxy_server: str | None = Field(None, alias="DEFAULT_PROXY_SERVER")
     default_proxy_username: str | None = Field(None, alias="DEFAULT_PROXY_USERNAME")
-    default_proxy_password: str | None = Field(None, alias="DEFAULT_PROXY_PASSWORD")
+    default_proxy_password: str | None = Field(None, alias="DEFAULT_PROXY_PASSWORD", repr=False)
 
     # Proxy personas — path to JSON file mapping name → {server, username, password}
     proxy_persona_file: str | None = Field(None, alias="PROXY_PERSONA_FILE")
@@ -431,7 +431,7 @@ class Settings(BaseSettings):
     cron_max_jobs: int = Field(50, alias="CRON_MAX_JOBS")
 
     # Shared session links
-    share_token_secret: str | None = Field(None, alias="SHARE_TOKEN_SECRET")
+    share_token_secret: str | None = Field(None, alias="SHARE_TOKEN_SECRET", repr=False)
     share_token_ttl_minutes: int = Field(60, alias="SHARE_TOKEN_TTL_MINUTES")
 
     model_config = SettingsConfigDict(

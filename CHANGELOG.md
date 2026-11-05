@@ -4,6 +4,12 @@ All notable changes to auto-browser are documented here.
 
 ## [Unreleased]
 
+### Security
+
+- Every secret `Settings` field (the auth-state encryption key, the witness remote key, every provider API key, the
+  approval webhook secret, the default proxy password, the share-link secret) is now left out of `repr()`, so a logged
+  `Settings` object no longer carries it.
+
 ## [1.15.0] — 2026-11-05
 
 A security and correctness release over 1.14.1, from an internal review of the whole controller and of this release's
