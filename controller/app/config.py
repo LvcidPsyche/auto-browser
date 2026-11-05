@@ -97,6 +97,11 @@ class Settings(BaseSettings):
     harness_explorer_model: str = Field("", alias="HARNESS_EXPLORER_MODEL")
     harness_verifier_model: str = Field("", alias="HARNESS_VERIFIER_MODEL")
     harness_executor_model: str = Field("", alias="HARNESS_EXECUTOR_MODEL")
+    # Mesh: signed delegation between auto-browser nodes (docs/mesh.md). Off by default.
+    mesh_enabled: bool = Field(False, alias="MESH_ENABLED")
+    mesh_identity_dir: str = Field("/data/mesh/identity", alias="MESH_IDENTITY_DIR")
+    mesh_peers_path: str = Field("/data/mesh/peers.json", alias="MESH_PEERS_PATH")
+    mesh_timestamp_window: float = Field(30.0, alias="MESH_TIMESTAMP_WINDOW")
     memory_root: str = Field("/data/memory", alias="MEMORY_ROOT")
     memory_enabled: bool = Field(True, alias="MEMORY_ENABLED")
     ocr_enabled: bool = Field(True, alias="OCR_ENABLED")
@@ -425,6 +430,8 @@ class Settings(BaseSettings):
     # Post-session skill review by an LLM. Off unless asked for: it calls a paid
     # model on every session close.
     curator_enabled: bool = Field(False, alias="CURATOR_ENABLED")
+    curator_provider: str = Field("claude", alias="CURATOR_PROVIDER")
+    curator_model: str | None = Field(None, alias="CURATOR_MODEL")
 
     # Cron / webhook triggers
     cron_store_path: str = Field("/data/crons/crons.json", alias="CRON_STORE_PATH")

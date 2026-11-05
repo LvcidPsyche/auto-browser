@@ -6,6 +6,10 @@ All notable changes to auto-browser are documented here.
 
 ### Changed
 
+- `MESH_ENABLED`, `MESH_IDENTITY_DIR`, `MESH_PEERS_PATH`, `MESH_TIMESTAMP_WINDOW`, `CURATOR_PROVIDER` and `CURATOR_MODEL`
+  are now `Settings` fields, read from the controller's settings rather than from `os.environ` at startup. The names
+  and defaults are unchanged; `MESH_ENABLED` now takes any boolean spelling pydantic accepts (not only `true`), and an
+  unparseable `MESH_TIMESTAMP_WINDOW` stops startup. The harness settings lost their redundant environment fallbacks.
 - `TYPING_DELAY_MS` is removed from the settings, `.env.example` and `docker-compose.yml`: nothing ever read it (typing
   pacing is `HUMAN_TYPING_MIN_DELAY_MS` and `HUMAN_TYPING_MAX_DELAY_MS`). An old env file that still sets it is
   ignored.

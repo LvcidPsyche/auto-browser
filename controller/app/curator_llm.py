@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 import httpx
 
-from .config import get_settings
+from .config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +77,11 @@ class CuratorLLMAdapter:
         Build an adapter from env config. Returns None when no API key is
         available for the requested provider (graceful degraded mode).
         """
-        provider = os.environ.get("CURATOR_PROVIDER", "claude").lower().strip()
-        model = os.environ.get("CURATOR_MODEL") or None
+        # With no settings handed in, read a fresh one (not the cached get_settings(): it would not see the
+        # environment as it is now).
+        configured = settings if settings is not None else Settings(_env_file=None)
+        provider = configured.curator_provider.lower().strip()
+        model = configured.curator_model or None
         try:
             adapter = cls(provider, model=model, settings=settings)
         except ValueError as exc:

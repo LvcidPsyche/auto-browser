@@ -255,9 +255,14 @@ class CuratorOptInTests(unittest.TestCase):
 
         from app.startup.extensions import _init_curator
 
-        settings = Settings(_env_file=None, CURATOR_ENABLED=True, OPENAI_BASE_URL="https://proxy.example/v1")
+        settings = Settings(
+            _env_file=None,
+            CURATOR_ENABLED=True,
+            CURATOR_PROVIDER="openai",
+            OPENAI_BASE_URL="https://proxy.example/v1",
+        )
         app = SimpleNamespace(state=SimpleNamespace(settings=settings))
-        env = {"CURATOR_PROVIDER": "openai", "OPENAI_API_KEY": "key"}
+        env = {"OPENAI_API_KEY": "key"}
         with (
             patch.dict(os.environ, env, clear=True),
             patch("app.curator_llm.get_settings", side_effect=AssertionError("cached settings were read")),
