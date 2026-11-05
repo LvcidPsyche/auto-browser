@@ -9,6 +9,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from .browser_sandbox import SECCOMP_PROFILE_PATH
 from .stealth.fingerprint import CHROME_UA_POOL
 
+# The one place the Anthropic API base is written. It ends in /v1: every caller appends "/messages".
+ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com/v1"
+
 # USER_AGENT_POOL separates its entries with "|" or newlines. Not commas: every Chrome UA contains
 # "(KHTML, like Gecko)", so a comma split handed contexts half a UA.
 USER_AGENT_POOL_SEPARATOR = "|"
@@ -292,7 +295,7 @@ class Settings(BaseSettings):
     codex_allow_host_exec: bool = Field(False, alias="CODEX_BRIDGE_ALLOW_HOST_EXEC")
 
     anthropic_api_key: str | None = Field(None, alias="ANTHROPIC_API_KEY")
-    anthropic_base_url: str = Field("https://api.anthropic.com/v1", alias="ANTHROPIC_BASE_URL")
+    anthropic_base_url: str = Field(ANTHROPIC_DEFAULT_BASE_URL, alias="ANTHROPIC_BASE_URL")
     anthropic_version: str = Field("2023-06-01", alias="ANTHROPIC_VERSION")
     claude_model: str = Field("claude-sonnet-4-6", alias="CLAUDE_MODEL")
     vision_model: str = Field("claude-haiku-4-5-20251001", alias="VISION_MODEL")

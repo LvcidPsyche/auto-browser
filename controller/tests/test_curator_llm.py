@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.config import Settings
@@ -72,6 +73,23 @@ class CuratorLLMAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(headers["x-api-key"], "anthropic-key")
         self.assertEqual(body["system"], "be concise")
         self.assertEqual(body["messages"][0]["content"], "summarize this")
+
+    async def test_claude_requests_follow_anthropic_base_url(self) -> None:
+        # A gateway or proxy for Anthropic traffic (logging, data governance) must see the curator's calls too.
+        fake_client = _FakeAsyncClient(_FakeResponse({"content": [{"type": "text", "text": "ok"}]}))
+        adapter = CuratorLLMAdapter("claude", model="claude-test")
+
+        with (
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "anthropic-key"}, clear=True),
+            patch("app.curator_llm.httpx.AsyncClient", return_value=fake_client),
+            patch(
+                "app.curator_llm.get_settings",
+                return_value=SimpleNamespace(anthropic_base_url="https://proxy.example/v1/"),
+            ),
+        ):
+            await adapter.complete("hello")
+
+        self.assertEqual(fake_client.calls[0][0], "https://proxy.example/v1/messages")
 
     async def test_complete_builds_openai_request_and_extracts_text(self) -> None:
         fake_client = _FakeAsyncClient(_FakeResponse({"choices": [{"message": {"content": "openai-output"}}]}))

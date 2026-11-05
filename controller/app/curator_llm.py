@@ -21,10 +21,11 @@ from typing import Any, Optional
 
 import httpx
 
+from .config import get_settings
+
 logger = logging.getLogger(__name__)
 
 
-_CLAUDE_URL = "https://api.anthropic.com/v1/messages"
 _OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 _GEMINI_URL_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
@@ -154,7 +155,7 @@ class CuratorLLMAdapter:
         }
         if system:
             body["system"] = system
-        return _CLAUDE_URL, headers, body
+        return f"{get_settings().anthropic_base_url.rstrip('/')}/messages", headers, body
 
     def _build_openai(self, prompt: str, system: Optional[str]) -> tuple[str, dict, dict]:
         headers = {

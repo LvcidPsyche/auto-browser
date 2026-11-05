@@ -41,6 +41,10 @@ All notable changes to auto-browser are documented here.
   provider frame that is not visible; a provider's own docs or marketing pages (`developers.google.com/recaptcha/docs`,
   `www.hcaptcha.com`); and a title that merely contains "just a moment". A challenge frame the page keeps hidden until
   it needs it is not seen until it is shown. Cloudflare's block page and DataDome's frame still count.
+- **`ANTHROPIC_BASE_URL` must end in `/v1`, as the Claude adapter already required.** Vision targeting and the curator
+  now follow it with `/messages` appended. A proxy base without `/v1` (for example `https://proxy.example`) worked for
+  vision before, because vision added `/v1` itself, and now answers 404; add the `/v1`. The curator, which ignored the
+  setting, now sends its Claude calls to whatever the setting names.
 
 ### Security
 
@@ -161,7 +165,7 @@ All notable changes to auto-browser are documented here.
 
 - **A refused fork or create now says why.** With the default `MAX_SESSIONS=1`, forking a session (which counts as a new session) or creating a second one answered a bare `409 {"detail":"Conflict"}`. The 409 now carries the session-limit message, naming the limit and the live sessions. Other conflicts still answer "Conflict". Forking needs `MAX_SESSIONS` of at least 2; this is now stated in `docs/architecture.md` and in the `browser.fork_session` tool description. A refused fork now checks the limit first, so it no longer writes the source session's cookies to disk (and deletes them) on the way to the refusal. Shadow browse stays outside the limit, and says so.
 
-- **Vision targeting now posts to the right Anthropic URL.** With the default `ANTHROPIC_BASE_URL` (which already ends in `/v1`) it called `/v1/v1/messages` and every vision lookup failed. It now uses the same `<base>/messages` form as the Claude adapter.
+- **Vision targeting now posts to the right Anthropic URL.** With the default `ANTHROPIC_BASE_URL` (which already ends in `/v1`) it called `/v1/v1/messages` and every vision lookup failed. It now uses the same `<base>/messages` form as the Claude adapter. The curator's Claude calls (`CURATOR_PROVIDER=claude`) went straight to `https://api.anthropic.com/v1/messages` whatever `ANTHROPIC_BASE_URL` said; they now follow it too, so a gateway or proxy you route Anthropic traffic through sees them.
 
 - **A proxy persona file that cannot be read is no longer overwritten.** An unreadable or corrupt file read as an
   empty set, so the next save rewrote it and erased every other persona. Reads and saves now fail, and the file is
