@@ -362,10 +362,10 @@ class CronService:
         try:
             with acting_as(owner):
                 queued = await self.job_queue.enqueue_run(session_id, run_request)
-        except Exception:
-            # Enqueue can reject (queue at capacity). The session exists but
-            # nothing will ever run in it, so release it here rather than
-            # stranding it until restart.
+        except BaseException:
+            # Enqueue can reject (queue at capacity), and the trigger can be cancelled while it waits. The
+            # session exists but nothing will ever run in it, so release it here rather than stranding it
+            # (and the job's slot) until restart.
             await self._release_run(job_id, session_id)
             raise
 

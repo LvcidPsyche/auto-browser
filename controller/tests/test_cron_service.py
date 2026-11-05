@@ -257,6 +257,32 @@ class CronServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(service._active_runs, {})
 
+    async def test_cancel_during_enqueue_frees_the_slot_and_closes_the_session(self) -> None:
+        started = asyncio.Event()
+
+        async def hang_in_enqueue(*_args, **_kwargs):
+            started.set()
+            await asyncio.sleep(30)
+
+        manager = MagicMock()
+        manager.create_session = AsyncMock(return_value={"id": "session-1"})
+        manager.close_session = AsyncMock()
+        queue = MagicMock()
+        queue.enqueue_run = AsyncMock(side_effect=hang_in_enqueue)
+        service = CronService(self.store_path, job_queue=queue, manager=manager)
+        created = await service.create_job(name="cancelled", goal="run", webhook_enabled=True)
+
+        task = asyncio.create_task(service.trigger_job(created["id"]))
+        await started.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(service._active_runs, {})
+        manager.close_session.assert_awaited_once_with("session-1")
+        queue.enqueue_run = AsyncMock(return_value={"id": "agent-job-1"})
+        self.assertTrue((await service.trigger_job(created["id"]))["triggered"])
+
 
 class CronTriggerIdentityTests(unittest.IsolatedAsyncioTestCase):
     """A job fires as the operator who owns it, and an unowned job fires as nobody.
