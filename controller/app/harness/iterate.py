@@ -380,9 +380,10 @@ class HarnessService:
             nest_run_dir=False,
         )
         # The mock attempt's decision and action are made up, not a model's or a browser's: they say so.
+        live = orchestrator is not None and bool(session_id)
         strategy = "initial" if attempt_index == 1 else "reflexion"
-        recorder.append("model_decision", {"strategy": strategy, "simulated": True})
-        if orchestrator is not None and session_id:
+        recorder.append("model_decision", {"strategy": strategy, "simulated": not live})
+        if live:
             result = await orchestrator.run(
                 session_id=session_id,
                 provider_name=provider,

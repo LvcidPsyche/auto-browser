@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -71,6 +72,33 @@ class TimeoutClassificationTests(_Base):
 
         self.assertEqual(record.status, "over_budget")
         self.assertEqual(record.decision.reason, "max_wall_seconds budget exhausted")
+
+
+class _Orchestrator:
+    async def run(self, **kwargs):
+        return {"steps": [], "status": "done"}
+
+
+class SimulatedTagTests(_Base):
+    def _first_event(self, record) -> dict:
+        trace_dir = Path(record.attempts[0].trace_path).parent
+        return json.loads((trace_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()[0])
+
+    async def test_a_mock_attempt_is_tagged_simulated(self) -> None:
+        service = HarnessService(self.root)
+
+        record = await service.start_convergence(_contract(max_attempts=1), mock_final_observation=DONE)
+
+        self.assertIs(self._first_event(record)["payload"]["simulated"], True)
+
+    async def test_an_orchestrated_attempt_is_not_tagged_simulated(self) -> None:
+        service = HarnessService(self.root)
+
+        record = await service.start_convergence(
+            _contract(max_attempts=1), orchestrator=_Orchestrator(), session_id="sess-1"
+        )
+
+        self.assertIs(self._first_event(record)["payload"]["simulated"], False)
 
 
 if __name__ == "__main__":
