@@ -66,6 +66,13 @@ class CronJobDisabledError(RuntimeError):
     """A disabled job was asked to run."""
 
 
+# Fixed and path-free, because callers (MCP above all) show it as it is; the path and the cause are logged.
+CRON_STORE_UNREADABLE = (
+    "the cron store (CRON_STORE_PATH) is unreadable; cron jobs are not loaded until it is fixed. The server log has "
+    "the cause and where the file is."
+)
+
+
 class CronService:
     """Manages cron jobs and webhook triggers for browser automation."""
 
@@ -443,27 +450,45 @@ class CronService:
             )
 
     def _load(self) -> dict[str, Any]:
-        if not self._store_path.exists():
-            return {}
+        # The read itself decides whether there is a store: Path.exists() raises a permission error as itself
+        # (EACCES on Python 3.11 and 3.12), outside the handling below.
         try:
-            return json.loads(self._store_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            # Do NOT return {} here. That looked harmless but was destructive:
-            # the next _save() persisted the empty dict over the damaged file,
-            # permanently erasing every cron job the operator had defined. A
-            # fallback that hides a bug is worse than the bug.
-            quarantine = self._store_path.with_suffix(f".corrupt-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json")
-            try:
-                self._store_path.replace(quarantine)
-                logger.error(
-                    "cron store %s is unreadable (%s); moved to %s. Cron jobs are not loaded until this is resolved.",
-                    self._store_path,
-                    exc,
-                    quarantine,
-                )
-            except Exception:
-                logger.exception("cron store %s is unreadable and could not be quarantined", self._store_path)
-            raise RuntimeError(f"cron store {self._store_path} is unreadable: {exc}") from exc
+            data = json.loads(self._store_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except OSError as exc:
+            # Possibly passing (a sharing violation, a brief permission fault): a good, hand-edited store is
+            # never moved aside for one. It stays where it is, and reads fail until it can be read.
+            logger.error("cron store %s could not be read (%s); it was left where it is", self._store_path, exc)
+            raise RuntimeError(CRON_STORE_UNREADABLE) from exc
+        except (ValueError, RecursionError) as exc:  # json.JSONDecodeError, UnicodeDecodeError: the file is corrupt
+            self._quarantine(exc)
+            raise RuntimeError(CRON_STORE_UNREADABLE) from exc
+        if not isinstance(data, dict):
+            # It parses, but every caller would fail on it later (a list has no .values()).
+            self._quarantine(f"it holds a JSON {type(data).__name__}, not an object")
+            raise RuntimeError(CRON_STORE_UNREADABLE)
+        return data
+
+    def _quarantine(self, cause: object) -> None:
+        """Move a corrupt store aside, so that no save can write over the jobs in it.
+
+        Do NOT answer {} instead. That looked harmless but was destructive: the next
+        _save() persisted the empty dict over the damaged file, permanently erasing
+        every cron job the operator had defined. A fallback that hides a bug is worse
+        than the bug.
+        """
+        quarantine = self._store_path.with_suffix(f".corrupt-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json")
+        try:
+            self._store_path.replace(quarantine)
+            logger.error(
+                "cron store %s is unreadable (%s); moved to %s. Cron jobs are not loaded until this is resolved.",
+                self._store_path,
+                cause,
+                quarantine,
+            )
+        except Exception:
+            logger.exception("cron store %s is unreadable (%s) and could not be quarantined", self._store_path, cause)
 
     def _save(self, data: dict[str, Any]) -> None:
         self._store_path.parent.mkdir(parents=True, exist_ok=True)
