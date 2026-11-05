@@ -42,6 +42,15 @@ REQUEST_HEADER_DEADLINE_SECONDS = 30.0
 MAX_CONCURRENT_DECISIONS = 2
 # Seconds a request waits for one of those slots before it is answered 503.
 DECISION_SLOT_WAIT_SECONDS = 2.0
+# Connections served at once. Each holds a handler thread, and a timer thread while its headers come in; a connection
+# past this is answered 503 and closed at once.
+MAX_CONNECTIONS = 32
+_BUSY_BODY = b'{"error": "too many connections"}'
+_BUSY_REPLY = (
+    b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n"
+    + b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(_BUSY_BODY)
+    + _BUSY_BODY
+)
 
 
 def build_sandbox_flags(*, allow_host_exec: bool, sandbox_mode: str) -> list[str]:
@@ -296,7 +305,35 @@ class UnixHTTPServer(ThreadingMixIn, UnixStreamServer):
 
     def __init__(self, socket_path: str, service: CodexBridgeService):
         self.service = service
+        self._connection_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         super().__init__(socket_path, BridgeRequestHandler)
+
+    def process_request(self, request: socket.socket, client_address: Any) -> None:
+        if not self._connection_slots.acquire(blocking=False):
+            _answer_busy(request)
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._connection_slots.release()  # no handler thread started, so none will release it
+            raise
+
+    def process_request_thread(self, request: socket.socket, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
+
+
+def _answer_busy(request: socket.socket) -> None:
+    """The 503 for a connection past the cap, sent without waiting: the serving thread must not block on a client
+    that does not read. One that cannot take it gets the close alone."""
+    try:
+        request.setblocking(False)
+        request.send(_BUSY_REPLY)
+    except OSError:
+        pass
 
 
 class _HeaderDeadline:

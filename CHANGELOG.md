@@ -176,10 +176,11 @@ All notable changes to auto-browser are documented here.
 - The Codex host bridge reads a request body within 60 seconds in total (a client trickling a byte every 29 s used
   to hold a handler thread indefinitely; it now gets 408) and the request line and headers within 30 seconds in total
   (past that it closes the connection; a request line cut off that way no longer ends in a broken-pipe traceback),
-  runs at most two Codex decisions at once (a third waits 2 s, then gets 503), and on a Codex timeout kills Codex's
-  whole process group, not only the direct child. Stopping the bridge (Ctrl+C or SIGTERM) kills the Codex runs still
-  in flight the same way; Codex runs in its own session, so it no longer gets the terminal's Ctrl+C and used to run
-  on, orphaned.
+  runs at most two Codex decisions at once (a third waits 2 s, then gets 503), serves at most 32 connections at once
+  (one more is answered 503 and closed at once; each held a thread, with no limit), and on a Codex timeout kills
+  Codex's whole process group, not only the direct child. Stopping the bridge (Ctrl+C or SIGTERM) kills the Codex
+  runs still in flight the same way; Codex runs in its own session, so it no longer gets the terminal's Ctrl+C and
+  used to run on, orphaned.
 - The Codex host bridge answers a request body that is not UTF-8 with 400 and a fixed message instead of a 500
   carrying the exception text, answers any other unexpected error with a fixed `internal error` and logs the detail on
   the bridge side, and no longer returns Codex's stderr to the controller on success (it logs it instead; the

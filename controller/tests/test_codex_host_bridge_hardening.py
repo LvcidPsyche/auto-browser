@@ -311,6 +311,66 @@ class BridgeLimitsTests(unittest.TestCase):
 
 
 @unittest.skipIf(bridge is None, "scripts/ is not shipped in the controller image")
+class BridgeConnectionCapTests(unittest.TestCase):
+    """Each connection holds a handler thread, and a timer thread while its headers come in. Past the cap a new
+    connection is answered 503 and closed at once instead of starting more."""
+
+    def _server(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        if bridge.UnixHTTPServer.address_family == socket.AF_INET:  # loaded with TCPServer in place: no AF_UNIX here
+            address = ("127.0.0.1", 0)
+        else:
+            address = str(Path(tmp.name) / "bridge.sock")
+        server = bridge.UnixHTTPServer(address, _Service())
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server
+
+    def _connect(self, server, *, timeout: float = 5.0) -> socket.socket:
+        client = socket.socket(server.address_family, socket.SOCK_STREAM)
+        client.settimeout(timeout)
+        client.connect(server.server_address)
+        self.addCleanup(client.close)  # before the server's cleanups run: its close waits for the handlers
+        return client
+
+    @staticmethod
+    def _read_to_end(client: socket.socket) -> bytes:
+        chunks: list[bytes] = []
+        try:
+            while data := client.recv(4096):
+                chunks.append(data)
+        except ConnectionResetError:
+            pass  # a refused client that had already sent its request can see a reset after the reply
+        return b"".join(chunks)
+
+    def test_a_connection_past_the_cap_is_answered_503_and_a_freed_slot_is_used_again(self) -> None:
+        with patch.object(bridge, "MAX_CONNECTIONS", 2, create=True):
+            server = self._server()
+        held = [self._connect(server) for _ in range(2)]  # two handlers wait on request lines that never come
+
+        reply = self._read_to_end(self._connect(server, timeout=2.0))
+
+        self.assertTrue(reply.startswith(b"HTTP/1.1 503 "), reply[:80])
+        self.assertIn(b"Connection: close", reply)
+
+        held[0].close()  # its handler finishes and gives its slot back
+        deadline = time.monotonic() + 5.0
+        while True:
+            client = self._connect(server)
+            client.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            reply = self._read_to_end(client)
+            if reply.startswith(b"HTTP/1.1 200 ") or time.monotonic() > deadline:
+                break
+            time.sleep(0.05)
+        self.assertTrue(reply.startswith(b"HTTP/1.1 200 "), reply[:80])
+
+    def test_the_cap_is_a_named_constant(self) -> None:
+        self.assertEqual(bridge.MAX_CONNECTIONS, 32)
+
+
+@unittest.skipIf(bridge is None, "scripts/ is not shipped in the controller image")
 class BridgeHeaderDeadlineRaceTests(unittest.TestCase):
     """Timer.cancel() cannot stop a callback that is already running: the deadline firing just as the headers come
     in must not shut down a request that parse_request has accepted."""
