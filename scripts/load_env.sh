@@ -7,11 +7,11 @@
 # reader where that is safe:
 #   'single'  literal; only a backslash before the quote is an escape (see __lre_parse_quoted)
 #   "double"  escapes as compose-go's expandEscapes: \" \\ \$ \a \b \f \n \r \t \v (any other backslash stays as
-#             written; a value holding \0 is skipped, see __lre_parse_quoted)
+#             written; a value holding \0 is skipped by choice, so compose reads that key itself)
 #   unquoted  ends at a whitespace-preceded # comment; `KEY=   # note` is empty
 # Text after a closing quote (other than a # comment), a quote that spans several lines (the lines up to the
-# closing quote are skipped too), an escape bash cannot hold, and any line that is not KEY=VALUE are skipped
-# with a warning naming the line number, never its text.
+# closing quote are skipped too), a double-quoted \0 (skipped by choice: compose reads that key itself), and any
+# line that is not KEY=VALUE are skipped with a warning naming the line number, never its text.
 # A UTF-8 BOM before the first key is ignored. Keys that change how the shell or this
 # loader behaves are refused with a warning naming the key (see __lre_refused).
 #
@@ -65,14 +65,16 @@ __lre_refused() {
 #   0  a value, followed by nothing or a # comment
 #   1  text after the closing quote
 #   2  no closing quote
-#   3  a double-quoted \0, which compose-go reads in a way not worth copying (it rewrites \0 to a backslash first
-#      and returns that text when the octal then fails to decode, so "a\012b" is a\12b there)
+# It also sets __lre_bad_escape to 1 (and to 0 first) when a double-quoted value holds a \0, which compose-go reads in
+# a way not worth copying (it rewrites \0 to a backslash first and returns that text when the octal then fails to
+# decode, so "a\012b" is a\12b there); the caller skips such a value.
 # In both kinds of quote a backslash before the quote character is that character, and a backslash pair is
 # \\ in double quotes and stays two backslashes in single quotes. Only double quotes expand: \a \b \f \n \r \t \v
 # \$ (a literal $), \" and \\. A backslash before any other character is kept.
 __lre_parse_quoted() {
   local __lre_text="$1" __lre_quote="${1:0:1}" __lre_i __lre_c __lre_n __lre_tail
   __lre_out=""
+  __lre_bad_escape=0
   for ((__lre_i = 1; __lre_i < ${#__lre_text}; __lre_i++)); do
     __lre_c="${__lre_text:__lre_i:1}"
     if [[ "$__lre_c" == "$__lre_quote" ]]; then
@@ -104,8 +106,9 @@ __lre_parse_quoted() {
           v) __lre_out+=$'\v'; ((__lre_i++)); continue ;;
           '$') __lre_out+='$'; ((__lre_i++)); continue ;;
           # compose-go rewrites \0 before decoding and returns the rewritten text when decoding fails, so which
-          # \0 forms decode is not worth guessing: every one is left to compose.
-          0) return 3 ;;
+          # \0 forms decode is not worth guessing: every one is left to compose. The scan goes on to the closing
+          # quote, so the caller skips the whole value, however many lines it spans.
+          0) __lre_bad_escape=1 ;;
         esac
       fi
       __lre_out+="\\"
@@ -124,6 +127,7 @@ load_repo_env() {
 
   local __lre_pair_re='^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$'
   local __lre_line __lre_key __lre_raw __lre_value __lre_out __lre_number=0 __lre_start __lre_rc __lre_next=""
+  local __lre_bad_escape=0
   while IFS= read -r __lre_line || [[ -n "$__lre_line" ]]; do
     ((__lre_number++)) || true
     if ((__lre_number == 1)); then
@@ -154,6 +158,8 @@ load_repo_env() {
         __lre_rc=0
         __lre_parse_quoted "$__lre_value" || __lre_rc=$?
       done
+      # A value with a \0 is skipped whole, only once its closing quote is found (or the file ends).
+      if ((__lre_rc == 0 && __lre_bad_escape)); then __lre_rc=3; fi
       case "$__lre_rc" in
         0) ;;
         1) echo "load_repo_env: ${__lre_file}:${__lre_start}: text after the closing quote, ignored" >&2; continue ;;

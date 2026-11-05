@@ -140,7 +140,7 @@ class LoadRepoEnvTests(unittest.TestCase):
         # compose-go replaces `\0` with a backslash before decoding and returns that text when decoding fails, so
         # "a\012b" is a\12b there. The loader does not guess which cases decode: it leaves every \0 to compose.
         exported, _, stderr = self.load(
-            'OCT="a\\0101b"\nSHORT="a\\012b"\nBAD="a\\0789b"\nBIG="a\\0400b"\nBARE="pa\\0ss"\nSQ=\'a\\0b\'\nOK=1\n'
+            'OCT="a\\0101b"\nSHORT="a\\012b"\nBAD="a\\0789b"\nBIG="a\\0400b"\nBARE="zq_secret\\0zq"\nSQ=\'a\\0b\'\nOK=1\n'
         )
 
         for key in ("OCT", "SHORT", "BAD", "BIG", "BARE"):
@@ -149,7 +149,26 @@ class LoadRepoEnvTests(unittest.TestCase):
         self.assertEqual(exported["OK"], "1")
         for line in (":1:", ":2:", ":3:", ":4:", ":5:"):
             self.assertIn(line, stderr)
-        self.assertNotIn("pa", stderr)
+        self.assertNotIn("zq_secret", stderr)  # the value, never a short probe, which would match the temp path
+
+    def test_a_skipped_multi_line_value_does_not_leak_its_later_lines_as_keys(self) -> None:
+        # The \0 is met before the closing quote, which is two lines down: the value is skipped to that quote, so
+        # its middle line is not read as MAX_SESSIONS=5000.
+        exported, _, stderr = self.load('BAD="\\0000\nMAX_SESSIONS=5000\n"\nOK=1\n')
+
+        self.assertNotIn("BAD", exported)
+        self.assertNotIn("MAX_SESSIONS", exported)
+        self.assertEqual(exported["OK"], "1")
+        self.assertEqual(stderr.count("load_repo_env:"), 1, stderr)
+        self.assertIn(":1:", stderr)
+        self.assertIn("escape", stderr)
+
+    def test_a_skipped_value_with_no_closing_quote_swallows_the_rest_with_one_warning(self) -> None:
+        exported, _, stderr = self.load('BAD="a\\0b\nMAX_SESSIONS=5000\nOK=1\n')
+
+        self.assertEqual(exported, {})
+        self.assertEqual(stderr.count("load_repo_env:"), 1, stderr)
+        self.assertIn("no closing quote", stderr)
 
     def test_an_escape_the_loader_cannot_hold_is_skipped_with_a_warning(self) -> None:
         # \0000 is a NUL and \0200 a byte above ASCII, which compose-go turns into a two-byte rune: bash cannot
