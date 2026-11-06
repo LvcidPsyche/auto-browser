@@ -271,6 +271,24 @@ class AgentEvalProxyTests(unittest.TestCase):
         self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
         self.assertEqual(self.controller.seen, [])  # type: ignore[attr-defined]
 
+    def test_w15_4_a_port_outside_0_to_65535_is_refused(self) -> None:
+        # The socket layer wrapped these: on Windows getaddrinfo connects 99999 to 34463, 65536 to 0 and -1 to 65535,
+        # so the Authorization header could go to another local port than the one written.
+        for base_url in (
+            "http://127.0.0.1:99999",
+            "http://127.0.0.1:65536",
+            "http://127.0.0.1:-1",
+            "http://[::1]:99999",
+            "http://controller.invalid:99999",
+        ):
+            with self.subTest(base_url=base_url):
+                self.proxy.seen.clear()  # type: ignore[attr-defined]
+                result = self._post_raw(base_url)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("app.mcp_stdio.InvalidControllerURL: its port is outside 0 to 65535", result.stderr)
+                self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
+                self.assertEqual(self.controller.seen, [])  # type: ignore[attr-defined]
+
     def test_w11_1_a_loopback_userinfo_before_a_remote_host_still_goes_through_the_proxy(self) -> None:
         # 127.0.0.1 is the userinfo here; the host is controller.invalid all three ways, so the proxy is used.
         self.assertEqual(self._post("http://127.0.0.1@controller.invalid:8000"), {"id": "s1"})

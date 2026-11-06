@@ -515,6 +515,26 @@ def test_w15_3_a_base_url_that_is_not_http_or_https_with_a_host_is_refused(
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://127.0.0.1:99999/mcp",
+        "http://127.0.0.1:65536/mcp",
+        "http://127.0.0.1:-1/mcp",
+        "http://[::1]:99999/mcp",
+        "http://controller.invalid:99999/mcp",
+    ],
+)
+def test_w15_4_a_port_outside_0_to_65535_is_refused(recording_proxy, base_url: str) -> None:
+    # http.client reads these ports as written and the socket layer wraps them: on Windows getaddrinfo connects
+    # 99999 to 34463, 65536 to 0 and -1 to 65535, so the token went to another local port than the one written.
+    message = _bridge_error_through_the_bridge(base_url, recording_proxy)
+
+    assert INVALID in message
+    assert "its port is outside 0 to 65535" in message
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
 def test_w14_1_a_proxys_error_detail_never_shows_the_urls_query(recording_proxy) -> None:
     # A proxy's JSON 502 whose detail echoes the URL reached the agent whole through the HTTP error message.
     recording_proxy.answer = (  # type: ignore[attr-defined]
