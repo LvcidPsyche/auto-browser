@@ -369,7 +369,8 @@ class RetentionTests(_Base):
                     HarnessService(self.root).store.recover_interrupted_staging()
 
                 self.assertTrue(aside.exists())
-                self.assertFalse((self.root / "escape").exists())
+                # Where '../escape' would land: beside the staging root, not under the harness root.
+                self.assertFalse((service.store.staging_root.parent / "escape").exists())
 
     async def test_a_converged_run_left_without_its_candidate_is_marked_failed(self) -> None:
         service = HarnessService(self.root)
@@ -383,6 +384,46 @@ class RetentionTests(_Base):
         stored = restarted.store.get(record.id)
         self.assertEqual(stored.status, "failed")
         self.assertTrue(any("staging was interrupted" in note for note in stored.notes), stored.notes)
+
+    async def test_cb3_4_startup_restores_an_aged_aside_before_the_prune(self) -> None:
+        # _init_harness calls recover_interrupted_staging, then prune; nothing pinned either. The order is not
+        # visible in what prune keeps (an aside and its restored candidate age alike), so the calls are recorded.
+        from types import SimpleNamespace
+
+        from app.harness.iterate import HarnessRunStore
+        from app.startup.extensions import _init_harness
+
+        service = HarnessService(self.root)
+        record = await self._run(service)
+        skill_id = record.candidate.skill_id
+        staging = service.store.staging_root
+        aside = staging / ".tmp-0123456789ab.old"
+        os.replace(staging / skill_id, aside)
+        _age(aside / "candidate.json", 10)
+        _age(aside, 10)
+        calls: list[str] = []
+        real_recover, real_prune = HarnessRunStore.recover_interrupted_staging, HarnessRunStore.prune
+
+        def recover(store):
+            calls.append("recover")
+            return real_recover(store)
+
+        def prune(store, days):
+            calls.append(f"prune({days:g})")
+            return real_prune(store, days)
+
+        settings = Settings(_env_file=None, HARNESS_ROOT=str(self.root), HARNESS_RETENTION_DAYS=30)
+        app = SimpleNamespace(state=SimpleNamespace(settings=settings, mesh_identity=None, tool_gateway=None))
+        with (
+            patch.object(HarnessRunStore, "recover_interrupted_staging", recover),
+            patch.object(HarnessRunStore, "prune", prune),
+        ):
+            _init_harness(app)
+
+        self.assertIsNotNone(app.state.harness_service)
+        self.assertEqual(calls, ["recover", "prune(30)"])
+        self.assertEqual(sorted(path.name for path in staging.iterdir()), [skill_id])
+        self.assertEqual(app.state.harness_service.get_candidate(skill_id)["skill_id"], skill_id)
 
     async def test_prune_leaves_a_run_this_process_is_driving(self) -> None:
         service = HarnessService(self.root)
