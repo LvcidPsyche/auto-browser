@@ -142,7 +142,7 @@ def test_w9_5_a_loopback_address_written_another_way_never_goes_through_the_prox
     assert proxy.seen == []
 
 
-@pytest.mark.parametrize("host", ["local­host", "LOCALHOST"])
+@pytest.mark.parametrize("host", ["local" + chr(0xAD) + "host", "LOCALHOST"])
 def test_w13_4_a_name_is_compared_as_the_socket_layer_resolves_it(host: str) -> None:
     # The bridges' rule (W12-1): the idna codec drops the soft hyphen and lowercases, as getaddrinfo does.
     from auto_browser_langchain.auth import _is_loopback_host

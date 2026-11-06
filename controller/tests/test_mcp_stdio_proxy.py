@@ -2,7 +2,8 @@
 
 urllib bypasses a proxy for localhost only when no_proxy names it, so with http_proxy set and no NO_PROXY the
 bridge's Authorization header went to the proxy. A loopback host is now reached directly; any other host still
-goes through the environment's proxy.
+goes through the environment's proxy; and a host one reading finds local but that would be connected to as another
+name, or that cannot be read, is refused with nothing sent.
 
 The bridge runs in a child process whose environment names the proxy from the start, as an operator's shell would:
 urllib reads the proxy variables when an opener is built, which for the old module-level opener was at import.
@@ -19,6 +20,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -310,7 +312,29 @@ def test_w13_2_a_host_local_one_way_but_connected_to_as_another_is_refused(recor
     assert controller.seen == []  # type: ignore[attr-defined]
 
 
-@pytest.mark.parametrize("authority", ["%5b127.0.0.1%5d:{port}", "x%5b@127.0.0.1:{port}", "controller.invalid:abc"])
+def _urlsplit_refuses_a_bracketed_ipv4() -> bool:
+    """Whether urlsplit raises ValueError for a bracketed IPv4 host, as it does from Python 3.11.4 (W14-2)."""
+    try:
+        urlsplit("//[127.0.0.1]")
+    except ValueError:
+        return True
+    return False
+
+
+@pytest.mark.parametrize(
+    "authority",
+    [
+        pytest.param(
+            "%5b127.0.0.1%5d:{port}",
+            marks=pytest.mark.skipif(
+                not _urlsplit_refuses_a_bracketed_ipv4(),
+                reason="this Python's urlsplit does not refuse a bracketed IPv4 host (it does from 3.11.4)",
+            ),
+        ),
+        "x%5b@127.0.0.1:{port}",
+        "controller.invalid:abc",
+    ],
+)
 def test_w12_3_a_malformed_authority_is_refused_as_an_invalid_controller_url(recording_proxy, authority: str) -> None:
     # One reading's parse error (urlsplit's ValueError for the first two, http.client's InvalidURL for the port)
     # was reported as an unexpected bridge failure; it is a configuration error, and nothing is sent anywhere.
@@ -330,10 +354,13 @@ def test_w12_3_a_malformed_authority_is_refused_as_an_invalid_controller_url(rec
     assert controller.seen == []  # type: ignore[attr-defined]
 
 
-def _closed_port() -> int:
+@pytest.fixture
+def closed_port():
+    """A port held bound but not listening until the test ends, so no other process takes it and a connect is
+    refused (W14-3)."""
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+        yield probe.getsockname()[1]
 
 
 @pytest.mark.parametrize(
@@ -353,10 +380,13 @@ def _closed_port() -> int:
         ("alice:sentinel@controller.invalid/mcp", "controller.invalid"),
     ],
 )
-def test_w13_1_an_answer_never_shows_the_urls_userinfo_or_query(recording_proxy, base_url: str, host: str) -> None:
+def test_w13_1_an_answer_never_shows_the_urls_userinfo_or_query(
+    recording_proxy, closed_port: int, base_url: str, host: str
+) -> None:
     # The answer goes to the agent: it named the base URL whole, and http.client's InvalidURL text for a userinfo
-    # without a port ("nonnumeric port: 'sentinel@controller.invalid'") carried the password.
-    message = _bridge_error_through_the_bridge(base_url.format(port=_closed_port()), recording_proxy)
+    # without a port ("nonnumeric port: 'sentinel@controller.invalid'") carried the password. The port stays bound,
+    # not listening, until the answer is read (W14-3).
+    message = _bridge_error_through_the_bridge(base_url.format(port=closed_port), recording_proxy)
 
     assert "sentinel" not in message
     assert host in message

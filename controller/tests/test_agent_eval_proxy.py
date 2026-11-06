@@ -2,7 +2,8 @@
 
 urllib bypasses a proxy for localhost only when no_proxy names it, so with http_proxy set and no NO_PROXY
 `scripts/agent_eval.py --execute` sent its Authorization header to the proxy. A loopback base URL is now reached
-directly; any other host still goes through the environment's proxy.
+directly; any other host still goes through the environment's proxy; and a host one reading finds local but that
+would be connected to as another name, or that cannot be read, is refused with nothing sent.
 
 The client runs in a child process whose environment names the proxy from the start, as an operator's shell would:
 urllib.request.urlopen builds its opener, and reads the proxy variables, once per process.
@@ -19,6 +20,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
 MARKER = "m" * 43
 _IMPORT_ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +65,15 @@ def _serve(host: str = "127.0.0.1") -> ThreadingHTTPServer:
     server.seen = []  # type: ignore[attr-defined]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
+
+
+def _urlsplit_refuses_a_bracketed_ipv4() -> bool:
+    """Whether urlsplit raises ValueError for a bracketed IPv4 host, as it does from Python 3.11.4 (W14-2)."""
+    try:
+        urlsplit("//[127.0.0.1]")
+    except ValueError:
+        return True
+    return False
 
 
 class AgentEvalProxyTests(unittest.TestCase):
@@ -228,6 +239,8 @@ class AgentEvalProxyTests(unittest.TestCase):
         port = self.controller.server_port
         for authority in (f"%5b127.0.0.1%5d:{port}", f"x%5b@127.0.0.1:{port}", "controller.invalid:abc"):
             with self.subTest(authority=authority):
+                if authority.startswith("%5b") and not _urlsplit_refuses_a_bracketed_ipv4():
+                    self.skipTest("this Python's urlsplit does not refuse a bracketed IPv4 host (it does from 3.11.4)")
                 result = self._post_raw(f"http://{authority}")
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("app.mcp_stdio.InvalidControllerURL", result.stderr)
