@@ -318,7 +318,11 @@ class ApprovalArgumentsTests(SpendBase):
                 approval = await self.manager.approvals.get(approval_id)
                 client = Mock()
                 client.post = AsyncMock(return_value=Mock(status_code=200))
-                with patch.object(webhooks, "get_client", return_value=client):
+                # A bare Mock client made _env_proxy_applies True by accident (its transports are Mocks that differ).
+                with (
+                    patch.object(webhooks, "get_client", return_value=client),
+                    patch.object(webhooks, "_env_proxy_applies", Mock(return_value=False)),
+                ):
                     await webhooks.dispatch_approval_event(approval, webhook_url="https://hooks.example.com/approval")
 
                 text = (await self.get(None, f"/approvals/{approval_id}/arguments")).json()["arguments"]
@@ -344,7 +348,10 @@ class ApprovalArgumentsTests(SpendBase):
         client = Mock()
         client.post = AsyncMock(return_value=Mock(status_code=200))
 
-        with patch.object(webhooks, "get_client", return_value=client):
+        with (
+            patch.object(webhooks, "get_client", return_value=client),
+            patch.object(webhooks, "_env_proxy_applies", Mock(return_value=False)),
+        ):
             await webhooks.dispatch_approval_event(approval, webhook_url="https://hooks.example.com/approval")
 
         body = json.loads(client.post.await_args.kwargs["content"])

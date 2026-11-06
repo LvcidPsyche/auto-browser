@@ -11,9 +11,11 @@ import logging
 import os
 import socket
 import unittest
+import urllib.request
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpcore
+from httpx import _utils as httpx_utils
 
 from app import webhooks
 from app.models import ApprovalRecord, BrowserActionDecision
@@ -325,6 +327,9 @@ class WebhookWireTests(unittest.IsolatedAsyncioTestCase):
         kept = {name: value for name, value in os.environ.items() if not name.lower().endswith("_proxy")}
         with (
             patch.dict(os.environ, {**kept, **env}, clear=True),
+            # The environment only: on Windows and macOS getproxies() also reads the system proxy, which would
+            # reroute these requests (httpx reads it through httpx._utils).
+            patch.object(httpx_utils, "getproxies", urllib.request.getproxies_environment),
             patch.object(httpcore.AnyIOBackend, "connect_tcp", wire.connect_tcp),
             patch.object(webhooks, "_resolve_host", self.resolver),
             patch.object(webhooks.logger, "warning") as self.warnings,
