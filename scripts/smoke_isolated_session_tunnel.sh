@@ -134,10 +134,10 @@ payload = json.loads(sys.argv[1])
 remote_url = sys.argv[2]
 assert payload["remote_access"]["status"] == "active", payload
 assert payload["remote_access"]["session_tunnel"]["active"] is True, payload
-# The create response's URL carries the session's noVNC password in its
-# fragment; an observation (it reaches the model) carries the URL without it.
-assert "#password=" in remote_url, remote_url
-assert payload["takeover_url"] == remote_url.split("#", 1)[0], payload
+# NAV-14: neither the create response nor an observation (both reach the model) carries the session's noVNC
+# password; the person gets the full link from GET /sessions/{id}/takeover-link, checked below.
+assert "#password=" not in remote_url, "the create response carries the noVNC password"
+assert payload["takeover_url"] == remote_url, payload
 assert "#password=" not in json.dumps(payload), "observe carries the noVNC password"
 print("isolated tunnel observe ok")
 PY
@@ -151,8 +151,32 @@ payload = json.loads(sys.argv[1])
 remote_url = sys.argv[2]
 assert payload["status"] == "active", payload
 assert payload["session_tunnel"]["active"] is True, payload
+assert "#password=" not in json.dumps(payload), "remote-access carries the noVNC password"
 assert payload["takeover_url"] == remote_url, payload
 print("isolated tunnel remote-access endpoint ok")
+PY
+
+# The person's path (NAV-14): the tunnel's public URL plus the session's noVNC password, with Cache-Control: no-store.
+# The response goes to Python through the environment, never argv, and is not printed.
+TAKEOVER_LINK_RESPONSE="$(bearer_curl -fsS -i "${API_BASE_URL}/sessions/${SESSION_ID}/takeover-link")"
+TAKEOVER_LINK_RESPONSE="${TAKEOVER_LINK_RESPONSE}" python3 -I - <<'PY' "${REMOTE_URL}" "${SESSION_ID}"
+import json
+import os
+import re
+import sys
+
+remote_url, session_id = sys.argv[1], sys.argv[2]
+head, _, body = os.environ["TAKEOVER_LINK_RESPONSE"].replace("\r\n", "\n").partition("\n\n")
+headers = {
+    name.strip().lower(): value.strip()
+    for name, _, value in (line.partition(":") for line in head.splitlines()[1:])
+}
+assert headers.get("cache-control") == "no-store", f"takeover-link Cache-Control: {headers.get('cache-control')!r}"
+link = json.loads(body)
+assert link.get("session_id") == session_id, "takeover-link names another session"
+pattern = re.escape(remote_url) + r"#password=[A-Za-z0-9]{8}"
+assert re.fullmatch(pattern, str(link.get("takeover_url", ""))), "takeover-link is not the tunnel's password link"
+print("isolated tunnel takeover-link endpoint ok (the full link, no-store; not printed)")
 PY
 
 CLOSE_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}" -X DELETE)"
