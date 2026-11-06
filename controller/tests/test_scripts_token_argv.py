@@ -23,6 +23,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -481,6 +482,9 @@ class SmokeDownloadNoProxyTests(unittest.TestCase):
                 with (
                     patch.dict(os.environ, _proxy_environment(proxy_url), clear=True),
                     patch.object(module, "API", f"http://127.0.0.1:{target.server_address[1]}"),
+                    # urlopen caches the opener it first builds, with the proxies of that moment: one an earlier
+                    # test left would let a reverted urlopen pass here without the proxy above (W5-10).
+                    patch.object(urllib.request, "_opener", None),
                 ):
                     status, _ = module.api("GET", "/sessions")
             finally:
