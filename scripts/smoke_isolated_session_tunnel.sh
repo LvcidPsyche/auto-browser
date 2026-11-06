@@ -105,7 +105,7 @@ assert payload["isolation"]["mode"] == "docker_ephemeral", payload
 assert payload["remote_access"]["status"] == "active", payload
 assert payload["remote_access"]["session_tunnel"]["active"] is True, payload
 # The note says where the person opens the full link.
-assert "scripts/takeover_link.sh" in str(payload["remote_access"].get("takeover_note", "")), payload
+assert "from the dashboard" in str(payload["remote_access"].get("takeover_note", "")), payload
 print(
     payload["id"],
     payload["isolation"]["runtime"]["container_name"],

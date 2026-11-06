@@ -62,7 +62,7 @@ assert "#password=" not in json.dumps(payload), "the create response carries the
 assert payload["takeover_url"] == expected_takeover, payload
 assert payload["remote_access"]["takeover_url"] == payload["takeover_url"], payload
 # The note says where the person opens the full link.
-assert "scripts/takeover_link.sh" in str(payload["remote_access"].get("takeover_note", "")), payload
+assert "from the dashboard" in str(payload["remote_access"].get("takeover_note", "")), payload
 # Its own network (per_session, the default), not the compose network.
 assert runtime["network"] == f"{runtime['container_name']}-net", payload
 print(payload["id"], runtime["container_name"], runtime["novnc_port"], runtime["network"])

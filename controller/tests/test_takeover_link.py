@@ -125,8 +125,13 @@ class NoPasswordInAgentResultsTests(_Isolated):
 
         result = await self.manager.request_human_takeover(session_id, "log in")
 
-        self.assertIn("scripts/takeover_link.sh", result["takeover_note"])
-        self.assertIn("dashboard", result["remote_access"]["takeover_note"])
+        # W2-26: the note names no runnable script, only the operator's path.
+        note = (
+            "This link has no noVNC password. The operator opens the full link from the dashboard; otherwise noVNC "
+            "asks for the password."
+        )
+        self.assertEqual(result["takeover_note"], note)
+        self.assertEqual(result["remote_access"]["takeover_note"], note)
         self.assertNotIn("#password=", result["takeover_url"])
 
     async def test_no_rest_response_carries_the_password(self) -> None:

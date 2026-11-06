@@ -151,8 +151,8 @@ def ensure_takeover_token(settings: Any) -> None:
             logger.warning(
                 "Generated a takeover token and saved it to %s (%s; with the shipped compose it is "
                 "./data/takeover-token on the host; sha256 fingerprint %s). GET /sessions/{session_id}/takeover-link "
-                "demands it in the X-Takeover-Token header; the dashboard asks for it once per tab and "
-                "scripts/takeover_link.sh reads it. Never give it to an agent.",
+                "demands it in the X-Takeover-Token header; the dashboard asks for it when it first opens an isolated "
+                "session's noVNC in a tab, and scripts/takeover_link.sh reads it. Never give it to an agent.",
                 path,
                 _permissions_note(),
                 _fingerprint(token),

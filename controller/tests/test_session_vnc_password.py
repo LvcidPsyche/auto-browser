@@ -273,7 +273,7 @@ class RouteWiringTests(unittest.TestCase):
     def test_the_agent_facing_note_names_no_token(self) -> None:
         from app.browser.services.remote_access import TAKEOVER_NOTE
 
-        for needle in ("TAKEOVER_TOKEN", "takeover-token", "takeover token", "X-Takeover-Token"):
+        for needle in ("TAKEOVER_TOKEN", "takeover-token", "takeover token", "X-Takeover-Token", "scripts/", ".sh"):
             self.assertNotIn(needle, TAKEOVER_NOTE)
 
 

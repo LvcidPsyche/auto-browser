@@ -334,12 +334,12 @@ What per-session networks do not change:
   isolated session's noVNC has **its own random VNC password**, generated when the
   container starts; the operator's `VNC_PASSWORD` is no longer handed to isolated
   containers, where any of them could read it.
-- **The model never sees the password.** No MCP tool result carries it, and no response
+- **No agent-facing result carries the password.** No MCP tool result carries it, and no response
   of a route the agent-facing packages (the Python client, the MCP package, the LangChain
   integration) call: `create_session`, `get_session`, `get_remote_access`,
   `request_human_takeover`, observations, action results and `list_sessions` give the
   `takeover_url` without it, and an isolated session's `remote_access` block and takeover
-  result add a `takeover_note` saying where the full link is. The person taking over opens
+  result add a `takeover_note` saying the operator opens the full link from the dashboard. The person taking over opens
   it from the dashboard ("Open noVNC") or prints it with `scripts/takeover_link.sh
   <session_id>`; both read `GET /sessions/{session_id}/takeover-link` (`Cache-Control:
   no-store`, audited as `takeover_link_viewed` without the URL), which no MCP tool and no
@@ -352,9 +352,14 @@ What per-session networks do not change:
   write one (its startup log says why). The dashboard asks for it on the first "Open
   noVNC" of an isolated session in a tab, before it opens the noVNC window, and again
   on the click after a 403 (a shared browser-node session's link needs no token);
-  `scripts/takeover_link.sh` reads it from `TAKEOVER_TOKEN` or `data/takeover-token`. An
-  agent that can read files on the controller's host can still read
-  `data/takeover-token` (or the session container's own copy of the password). That link carries
+  `scripts/takeover_link.sh` reads it from `TAKEOVER_TOKEN` or `data/takeover-token`. The
+  takeover token stops agents without file access to the controller's host, and only those:
+  under compose `./data` belongs to the host user, so an agent running as that user on the
+  host (a local MCP setup) can read `data/takeover-token`, and so can the controller's own
+  `cli` providers, which run as the controller's uid (see the known limit under the CLI
+  providers); so can anything that reads the session container's own copy of the password.
+  Open the dashboard and the takeover link in a browser no agent drives: such an agent can
+  read the dashboard's sessionStorage, where the tokens are kept. That link carries
   the password in its fragment, `#password=…`, so noVNC connects without asking; a
   browser never sends the fragment to a server, so it stays out of access logs, but
   treat the link like the API token. Opened without it, noVNC asks for the password.

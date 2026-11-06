@@ -312,8 +312,11 @@ All notable changes to auto-browser are documented here.
   shorter than 32 characters, outside printable ASCII (a space included: a header could not carry it) or equal to an
   API credential refuses startup, as does a `TAKEOVER_TOKEN_FILE` inside `ARTIFACT_ROOT` or `UPLOAD_ROOT`; spaces and
   tabs around the presented header are not part of the token. A token file that cannot be read or written, or holds an
-  unusable token, logs a warning and the endpoint answers 503. An agent that can read files on the controller's host
-  can still read `data/takeover-token` (or the session container's own copy of the password). The shared browser-node
+  unusable token, logs a warning and the endpoint answers 503. The takeover token stops only agents without file
+  access to the controller's host: one running as the host user that owns `./data` (a local MCP setup) can read
+  `data/takeover-token`, and so can the controller's own `cli` providers, which run as its uid (or anything that reads
+  the session container's own copy of the password). Open the dashboard and the link in a browser no agent drives:
+  such an agent can read the dashboard's sessionStorage. The `takeover_note` names no script. The shared browser-node
   keeps the operator's `VNC_PASSWORD` and a password-free link.
 - **On a host shared with other users,** keep `./data` closed to them: mode 0700, or 0750 with a group only the
   operators are in. browser-node's endpoint file there (`./data/browser-profile/browser-ws-endpoint.txt`) holds the

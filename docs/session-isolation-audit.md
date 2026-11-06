@@ -46,8 +46,9 @@ bridge network that only it and the controller join. What it still reaches:
   VNC password, and the operator's `VNC_PASSWORD` is no longer handed to isolated containers, where code
   in any of them could read it and use it on the others. The password reaches a human only through the
   fragment of the link `GET /sessions/{session_id}/takeover-link` returns (the dashboard and
-  `scripts/takeover_link.sh` read it; no MCP tool does, so the model never sees it), which makes that link
-  a secret. Measured on Docker
+  `scripts/takeover_link.sh` read it; no MCP tool does, and the endpoint demands the takeover token, which
+  agents are not given, beside the bearer token they hold), which makes that link a secret. An agent with
+  file access to the controller's host can read the takeover token in `data/takeover-token`. Measured on Docker
   Desktop. CI's compose-smoke runs the same probes on a Linux daemon (`scripts/smoke_isolated_session.sh`):
   B's 9223 and name stay out of reach, and B's noVNC offers only VNC authentication. VNC authentication is
   a DES challenge-response, so someone who can watch the takeover connection can try the 8-character

@@ -17,10 +17,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # What an agent-facing result says about an isolated session's takeover: its takeover_url has no noVNC password,
-# which only the human-only paths return (NAV-14).
+# which only the human-only paths return (NAV-14). It names no runnable script (W2-26): an agent that runs commands
+# would be told how to fetch the password link.
 TAKEOVER_NOTE = (
-    "This link has no noVNC password. The operator opens the full link from the dashboard or with "
-    "scripts/takeover_link.sh <session_id>; otherwise noVNC asks for the password."
+    "This link has no noVNC password. The operator opens the full link from the dashboard; otherwise noVNC asks for "
+    "the password."
 )
 
 # The fields of the reverse-ssh sidecar file that global_info passes on in its "tunnel" block.
