@@ -172,16 +172,13 @@ class AgentEvalProxyTests(unittest.TestCase):
                 self.assertEqual(controller.seen, [("/sessions", f"Bearer {MARKER}")])  # type: ignore[attr-defined]
 
     def test_w11_1_a_host_any_reading_finds_local_never_goes_through_the_proxy(self) -> None:
-        # Each is local by one reading of the host (the one http.client connects to, urllib's decoded host, or the
-        # URL as written, which a proxy reads). The direct attempt may fail (nothing listens on ::1 at this port, a
-        # host without IPv6 has no ::1, and the others name hosts no resolver finds); a failure is urllib's URLError.
+        # Each is local as the host http.client connects to. The direct attempt may fail (nothing listens on ::1 at
+        # this port, and a host without IPv6 has no ::1); a failure is urllib's URLError. W13-2 refuses the W11-1
+        # authorities whose connect host is not local.
         for authority in (
             "::1",
             "%3a%3a1",
             "::ffff:127.0.0.1",
-            "127.0.0.2%23.bad",
-            "user:pass@127.0.0.1",
-            "x%2f@127.0.0.1",
             # W12-1: the socket layer's idna codec maps these (a soft hyphen, a masculine ordinal) to localhost.
             "local%C2%ADhost",
             "l%C2%BAcalhost",
@@ -192,16 +189,32 @@ class AgentEvalProxyTests(unittest.TestCase):
                 result = self._post_raw(f"http://{authority}:{self.controller.server_port}")
                 self._assert_the_direct_attempt_was_made(result)
 
-    def test_w12_2_an_unbracketed_ipv6_loopback_without_a_port_never_goes_through_the_proxy(self) -> None:
-        # http.client splits the port at the last colon (host ":"), and urlsplit reads no host, so every reading was
-        # remote; urllib's decoded host as a whole is ::1 or ::, and the direct attempt to ":" fails with URLError.
-        for base_url in ("http://::1", "http://::", "http://%3a%3a1"):
+    def test_w13_2_a_host_local_one_way_but_connected_to_as_another_is_refused(self) -> None:
+        # W12-2's portless IPv6 forms (http.client connects to ":" or "::ffff:7f00"), a userinfo before a portless
+        # ::1 (which hid it from every reading, so the token went to the proxy), and the W11-1 authorities connected
+        # to as 127.0.0.2#.bad, user:pass@127.0.0.1 and x/@127.0.0.1: the direct attempt went to a name the
+        # resolver is asked for. Nothing is sent anywhere.
+        port = self.controller.server_port
+        for base_url in (
+            "http://::1",
+            "http://::",
+            "http://%3a%3a1",
+            "http://::ffff:7f00:1",
+            "http://user@::1",
+            "http://user:pass@::1",
+            "http://user@%3a%3a1",
+            f"http://127.0.0.2%23.bad:{port}",
+            f"http://user:pass@127.0.0.1:{port}",
+            f"http://x%2f@127.0.0.1:{port}",
+        ):
             with self.subTest(base_url=base_url):
                 self.proxy.seen.clear()  # type: ignore[attr-defined]
                 result = self._post_raw(base_url)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("urllib.error.URLError", result.stderr)
+                self.assertIn("app.mcp_stdio.InvalidControllerURL", result.stderr)
+                self.assertIn("reads as a local host", result.stderr)
                 self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
+                self.assertEqual(self.controller.seen, [])  # type: ignore[attr-defined]
 
     def test_w12_3_a_malformed_authority_is_refused_as_an_invalid_url(self) -> None:
         # One reading's parse error (urlsplit's ValueError for the first two, http.client's InvalidURL for the port)

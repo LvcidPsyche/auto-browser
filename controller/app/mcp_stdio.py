@@ -117,15 +117,18 @@ def _numeric_address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address
 
 
 def _goes_direct(request: Request) -> bool:
-    """Whether the request goes past any environment proxy: any of four readings of its host is loopback (W11-1).
+    """Whether the request goes past any environment proxy: the host http.client connects to is local (W13-2).
 
-    The readings: (1) the host http.client connects to, which reads an unbracketed ::1:8000 as ::1; (2) the host of
+    One fail-closed rule over four readings of the host. Direct only when (1) the host http.client connects to,
+    which reads an unbracketed ::1:8000 as ::1, is local: going direct sends the request to that host and no other.
+    When it is not, but another reading is, the request is refused with InvalidControllerURL: (2) the host of
     urllib's percent-decoded ``request.host`` read as a URL authority (W9-5: %31%32%37.0.0.2 is 127.0.0.2), which
     drops a userinfo http.client keeps in its host; (3) the host of the URL as written, which a proxy reads, so a
-    percent-encoded / ? or # in a userinfo (x%2f@127.0.0.1) cannot hide a loopback host from this rule; (4) urllib's
-    decoded ``request.host`` as a whole (W12-2), so an unbracketed ::1 or :: without a port, which http.client reads
-    as host ":" and urlsplit as no host, is local (a host:port form is no address and is left to the others). Going
-    direct only ever sends the request to the host named or fails; a host remote all four ways still uses the proxy.
+    percent-encoded / ? or # in a userinfo (x%2f@127.0.0.1) cannot hide a loopback host; (4) urllib's decoded
+    ``request.host`` as a whole after its last @ (W12-2), so an unbracketed ::1 or :: without a port, which
+    http.client reads as host ":" and urlsplit as no host, is found local, also behind a userinfo (user@::1). Such a
+    host would be connected to as another name (127.0.0.2#.bad, x/@127.0.0.1, ":") that the resolver is asked for,
+    and a proxy would get the token, so it goes nowhere. A host no reading finds local uses the proxy.
     Constructing the HTTPConnection parses and does not connect; its InvalidURL (a non-numeric port), and a
     reading urlsplit cannot parse (%5b127.0.0.1%5d, x%5b@127.0.0.1) and its ValueError (W12-3), raise
     InvalidControllerURL (W13-1), so a malformed authority is refused before any opener is chosen and the request
@@ -135,15 +138,24 @@ def _goes_direct(request: Request) -> bool:
     if request.host is None:
         return False
     try:
-        readings = (
-            HTTPConnection(request.host).host,
+        connected = HTTPConnection(request.host).host
+        others = (
             urlsplit("//" + request.host).hostname,
             urlsplit(request.full_url).hostname,
-            request.host,
+            request.host.rpartition("@")[2],
         )
     except (InvalidURL, ValueError) as exc:
         raise InvalidControllerURL(str(exc)) from exc
-    return any(_is_loopback_host(host) for host in readings)
+    if _is_loopback_host(connected):
+        return True
+    if any(_is_loopback_host(host) for host in others):
+        # Never the host or its userinfo: the message reaches the agent through the bridges' answer.
+        raise InvalidControllerURL(
+            "the host reads as a local host one way and as another host the way it would be connected to "
+            "(a userinfo, an IPv6 address without brackets, or an encoded delimiter); name a local controller "
+            "plainly, as http://127.0.0.1:PORT or http://[::1]:PORT"
+        )
+    return False
 
 
 # Module-level, as urllib's own urlopen was, so tests can patch it.
@@ -152,7 +164,8 @@ def urlopen(request: Request, *args: Any, **kwargs: Any) -> Any:
 
     urllib skips a proxy for localhost only when no_proxy names it, so with http_proxy set the bridge's
     Authorization header for a local controller went to the proxy. Any other host still uses the proxy the
-    environment names, read for each request. ``_goes_direct`` decides, from four readings of the host.
+    environment names, read for each request. ``_goes_direct`` decides, from the host http.client connects to, and
+    refuses a host another reading finds local.
     """
     if _goes_direct(request):
         return _DIRECT.open(request, *args, **kwargs)

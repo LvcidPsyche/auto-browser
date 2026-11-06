@@ -233,9 +233,6 @@ def test_w11_1_an_unbracketed_ipv6_loopback_is_reached_directly_past_an_environm
         "::1",
         "%3a%3a1",
         "::ffff:127.0.0.1",
-        "127.0.0.2%23.bad",
-        "user:pass@127.0.0.1",
-        "x%2f@127.0.0.1",
         # W12-1: the socket layer's idna codec maps these (a soft hyphen, a masculine ordinal) to localhost.
         "local%C2%ADhost",
         "l%C2%BAcalhost",
@@ -244,9 +241,9 @@ def test_w11_1_an_unbracketed_ipv6_loopback_is_reached_directly_past_an_environm
 def test_w11_1_a_host_any_reading_finds_local_never_goes_through_the_environment_proxy(
     recording_proxy, authority: str
 ) -> None:
-    # Each is local by one reading of the host (the one http.client connects to, urllib's decoded host, or the URL
-    # as written, which a proxy reads) and was, or could be, sent to the proxy. The direct attempt may fail (nothing
-    # listens on ::1 at the controller's port, and a host without IPv6 has no ::1 at all).
+    # Each is local as the host http.client connects to and was, or could be, sent to the proxy by another reading.
+    # The direct attempt may fail (nothing listens on ::1 at the controller's port, and a host without IPv6 has no
+    # ::1 at all). W13-2 refuses the W11-1 authorities whose connect host is not local.
     controller = _serve()
     try:
         reply = _reply_through_the_bridge(f"http://{authority}:{controller.server_port}/mcp", recording_proxy)
@@ -261,17 +258,40 @@ def test_w11_1_a_host_any_reading_finds_local_never_goes_through_the_environment
         assert controller.seen == [("/mcp", f"Bearer {MARKER}")]  # type: ignore[attr-defined]
 
 
-@pytest.mark.parametrize("base_url", ["http://::1/mcp", "http://::/mcp", "http://%3a%3a1/mcp"])
-def test_w12_2_an_unbracketed_ipv6_loopback_without_a_port_never_goes_through_the_environment_proxy(
-    recording_proxy, base_url: str
-) -> None:
-    # http.client splits the port at the last colon (host ":"), and urlsplit reads no host, so every reading was
-    # remote and the token went to the proxy; urllib's decoded host as a whole is ::1 or ::, and the direct attempt
-    # to ":" fails.
-    message = _bridge_error_through_the_bridge(base_url, recording_proxy)
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        # W12-2: http.client splits the port at the last colon (host ":", or "::ffff:7f00" for IPv4-mapped
+        # 127.0.0.1), and urlsplit reads no host; urllib's decoded host as a whole is local.
+        "http://::1/mcp",
+        "http://::/mcp",
+        "http://%3a%3a1/mcp",
+        "http://::ffff:7f00:1/mcp",
+        # A userinfo hid a portless IPv6 loopback from every reading, so these went to the proxy.
+        "http://user@::1/mcp",
+        "http://user:pass@::1/mcp",
+        "http://user@%3a%3a1/mcp",
+        # W11-1: local to urllib's decoded host or the URL as written, but connected to as 127.0.0.2#.bad,
+        # user:pass@127.0.0.1 and x/@127.0.0.1.
+        "http://127.0.0.2%23.bad:{port}/mcp",
+        "http://user:pass@127.0.0.1:{port}/mcp",
+        "http://x%2f@127.0.0.1:{port}/mcp",
+    ],
+)
+def test_w13_2_a_host_local_one_way_but_connected_to_as_another_is_refused(recording_proxy, base_url: str) -> None:
+    # The direct attempt went to a name the resolver is asked for, and whoever answered got the token; a proxy
+    # would be no better. Nothing is sent anywhere.
+    controller = _serve()
+    try:
+        message = _bridge_error_through_the_bridge(base_url.format(port=controller.server_port), recording_proxy)
+    finally:
+        controller.shutdown()
+        controller.server_close()
 
-    assert UNREACHABLE in message
+    assert INVALID in message
+    assert "reads as a local host" in message
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
+    assert controller.seen == []  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("authority", ["%5b127.0.0.1%5d:{port}", "x%5b@127.0.0.1:{port}", "controller.invalid:abc"])

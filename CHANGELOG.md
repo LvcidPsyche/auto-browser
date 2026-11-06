@@ -603,19 +603,20 @@ All notable changes to auto-browser are documented here.
   parser (`getaddrinfo` with `AI_NUMERICHOST`, which never queries DNS) reads the host as, so `127.2`, `2130706434`
   and `0x7f000002` count as `127.0.0.2`, as they do for the socket layer, and a name is compared as the socket layer
   resolves it, after the `idna` encoding `getaddrinfo` applies and lowercased (`local%C2%ADhost`, with a soft hyphen,
-  is `localhost` to the bridges); the bridges and `scripts/agent_eval.py` go direct when any of four readings of the
-  host is local: the host http.client connects to (an unbracketed `::1:8000` is `::1`), the host urllib has
-  percent-decoded (`%31%32%37.0.0.2` is `127.0.0.2`), the host of the URL as written, which a proxy reads
-  (`x%2f@127.0.0.1` is `127.0.0.1`), and urllib's decoded host as a whole (an unbracketed `::1` without a port, which
-  http.client reads as host `:`, is `::1`); a host one of the readings cannot parse (`%5b127.0.0.1%5d`), or a port
-  http.client cannot read as a number, is refused as an invalid controller URL before any opener is chosen, and the
-  request is sent nowhere. Any other host, a `*.localhost` name included, still goes through the proxy the
-  environment names. `scripts/check_sandbox_gate.py`, which only talks to `127.0.0.1`, never uses a proxy. The
-  bridges' answers name the controller URL without its userinfo, query or fragment and drop any `user:password@` text
-  from the error they show; 1.15.0's echoed them. `scripts/agent_eval.py --execute`, `scripts/check_sandbox_gate.py`
-  and `scripts/smoke_download.py` now also refuse redirects, as the bridges do, direct or proxied: urllib's default
-  handler copied the `Authorization` header onto a redirect to any origin, and a 3xx is now reported as the HTTP error
-  each script already reports.
+  is `localhost` to the bridges); the bridges and `scripts/agent_eval.py` go direct when the host http.client connects
+  to is local (an unbracketed `::1:8000` is `::1`, and urllib percent-decodes `%31%32%37.0.0.2` to `127.0.0.2`). They
+  refuse the base URL as an invalid controller URL, before any opener is chosen and with the request sent nowhere,
+  when another reading finds a local host http.client would not connect to (urllib's decoded host read as an
+  authority, which finds `127.0.0.2` in `127.0.0.2%23.bad`; the host of the URL as written, which a proxy reads,
+  `127.0.0.1` in `x%2f@127.0.0.1`; or urllib's decoded host after its last `@`, `::1` in an unbracketed `::1` without
+  a port, which http.client reads as host `:`, and in `user@::1`), when a reading cannot parse the host
+  (`x%5b@127.0.0.1`), or when a port is not a number. Any other host, a `*.localhost` name included, still goes
+  through the proxy the environment names. `scripts/check_sandbox_gate.py`, which only talks to `127.0.0.1`, never
+  uses a proxy. The bridges' answers name the controller URL without its userinfo, query or fragment and drop any
+  `user:password@` text from the error they show; 1.15.0's echoed them. `scripts/agent_eval.py --execute`,
+  `scripts/check_sandbox_gate.py` and `scripts/smoke_download.py` now also refuse redirects, as the bridges do, direct
+  or proxied: urllib's default handler copied the `Authorization` header onto a redirect to any origin, and a 3xx is
+  now reported as the HTTP error each script already reports.
 
 ## [1.15.0] — 2026-11-05
 
