@@ -291,59 +291,86 @@ loopback_noproxy() {
   printf '%s' "${hosts}${inherited:+,${inherited}}"
 }
 
+# The host of a base URL as curl reads its authority: the scheme stripped, the authority cut at the first /, ? or #,
+# the userinfo dropped up to the last @, then a bracketed host up to ] (printed with its brackets), else the host up
+# to the port's colon. Nothing is decoded: base_url_plain_host refuses a host curl would decode or normalise.
+base_url_host() {
+  local rest="${1#*://}"
+  rest="${rest%%[/?#]*}"
+  rest="${rest##*@}"
+  if [[ "$rest" == \[* ]]; then
+    rest="${rest#\[}"
+    printf '[%s]' "${rest%%\]*}"
+  else
+    printf '%s' "${rest%%:*}"
+  fi
+}
+
 # The host of a base URL when it is a loopback address (localhost, anything in 127.0.0.0/8, ::1), IPv6 unbracketed
 # as --noproxy takes it; nothing otherwise.
 base_url_loopback_host() {
-  local rest="${1#*://}"
-  rest="${rest%%/*}"
-  rest="${rest##*@}"
   local host
-  if [[ "$rest" == \[* ]]; then
-    host="${rest#\[}"
-    host="${host%%\]*}"
-  else
-    host="${rest%%:*}"
-  fi
+  host="$(base_url_host "$1")"
+  host="${host#\[}"
+  host="${host%\]}"
   host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
   if [[ "$host" == "localhost" || "$host" == "::1" || "$host" =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
     printf '%s' "$host"
   fi
 }
 
-# Fails, with a message, when the scripts' base URL host (API_BASE_URL, else AUTO_BROWSER_BASE_URL) reads as an IPv4
-# address written another way than four dotted decimals: one to four dot-separated parts, each all decimal digits or
-# 0x and hex digits, that are not four decimal numbers from 0 to 255 without leading zeros (127.2, 0x7f.0.0.2,
-# 2130706434, 0177.0.0.1). curl and the resolver read those as addresses, but --noproxy names hosts exactly, so such
-# a loopback controller was reached through an environment proxy with the tokens. A name (cafe.bad) is not refused.
+# Fails, with a message, when the scripts' base URL host (API_BASE_URL, else AUTO_BROWSER_BASE_URL) is not a plain
+# host name or address. curl normalises a host before it matches --noproxy, so a spelling of another loopback
+# address (127.2 is 127.0.0.2) missed the scripts' list and that controller was reached through an environment proxy
+# with the tokens, while a spelling of 127.0.0.1 itself was normalised to it. Refused:
+# - an unbracketed host holding anything but ASCII letters, digits, . and - (curl decodes %31 to 1), or ending in .;
+# - an IPv4 address written another way than four dotted decimals: one to four dot-separated parts, each all decimal
+#   digits or 0x and at least one hex digit, that are not four decimal numbers from 0 to 255 without leading zeros
+#   (127.2, 0x7f.0.0.2, 2130706434, 0177.0.0.1); a name (cafe.bad, 0x) is not refused;
+# - a bracketed host holding anything but hex digits and :, or whose first group is empty or all zeros, other than
+#   exactly ::1: every IPv4-mapped and IPv4-compatible form ([::ffff:127.0.0.2]) is in ::/96, while a global IPv6
+#   literal ([2001:db8::5]) passes.
 refuse_other_ipv4_spelling() {
-  local rest="${API_BASE_URL:-${AUTO_BROWSER_BASE_URL:-}}"
-  rest="${rest#*://}"
-  rest="${rest%%/*}"
-  rest="${rest##*@}"
-  [[ "$rest" == \[* ]] && return 0
-  local host="${rest%%:*}"
+  local host
+  host="$(base_url_host "${API_BASE_URL:-${AUTO_BROWSER_BASE_URL:-}}")"
   [[ -n "$host" ]] || return 0
-  local -a parts
-  IFS=. read -r -a parts <<< "$host"
-  [[ "$host" == *. || ${#parts[@]} -lt 1 || ${#parts[@]} -gt 4 ]] && return 0
-  local part decimal=1
-  for part in "${parts[@]}"; do
-    if [[ "$part" =~ ^[0-9]+$ ]]; then
-      if [[ ! "$part" =~ ^(0|[1-9][0-9]{0,2})$ ]] || (( 10#$part > 255 )); then
-        decimal=0
+  local plain=1
+  if [[ "$host" == \[* ]]; then
+    local inner="${host#\[}"
+    inner="${inner%\]}"
+    if [[ "$inner" != "::1" ]]; then
+      if [[ "$inner" =~ [^0123456789abcdefABCDEF:] || "$inner" == ::* || "$inner" =~ ^0+: ]]; then
+        plain=0
       fi
-    elif [[ "$part" =~ ^0[xX][0-9a-fA-F]*$ ]]; then
-      decimal=0
-    else
-      return 0
     fi
-  done
-  if (( decimal == 1 && ${#parts[@]} == 4 )); then
-    return 0
+  elif [[ "$host" =~ [^0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-] || "$host" == *. ]]; then
+    plain=0
+  else
+    local -a parts
+    IFS=. read -r -a parts <<< "$host"
+    if (( ${#parts[@]} >= 1 && ${#parts[@]} <= 4 )); then
+      local part decimal=1 address=1
+      for part in "${parts[@]}"; do
+        if [[ "$part" =~ ^[0-9]+$ ]]; then
+          if [[ ! "$part" =~ ^(0|[1-9][0-9]{0,2})$ ]] || (( 10#$part > 255 )); then
+            decimal=0
+          fi
+        elif [[ "$part" =~ ^0[xX][0-9a-fA-F]+$ ]]; then
+          decimal=0
+        else
+          address=0
+          break
+        fi
+      done
+      if (( address == 1 && ! (decimal == 1 && ${#parts[@]} == 4) )); then
+        plain=0
+      fi
+    fi
   fi
-  echo "The controller address ${host} is an IPv4 address written another way, which the scripts cannot keep" \
-    "away from a proxy: write the controller address in AUTO_BROWSER_BASE_URL (or API_BASE_URL) as four decimal" \
-    "numbers, such as 127.0.0.2" >&2
+  (( plain == 1 )) && return 0
+  echo "The controller address ${host} is not a plain host name or address, which the scripts cannot keep away" \
+    "from a proxy: write the controller address in AUTO_BROWSER_BASE_URL (or API_BASE_URL) as a plain host name" \
+    "or address, such as 127.0.0.2" >&2
   return 1
 }
 

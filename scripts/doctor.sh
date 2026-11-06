@@ -172,9 +172,10 @@ fi
 # The ${a[@]+...} form keeps an empty array legal under `set -u` in bash < 4.4 (macOS).
 # The token reaches curl as a config on stdin (curl_auth_config in load_env.sh),
 # never in argv, where every local user could read it. --noproxy as bearer_curl
-# has it: a proxy in the environment would otherwise receive the token.
+# has it: a proxy in the environment would otherwise receive the token. No base URL
+# check (refuse_other_ipv4_spelling): doctor only requests http://127.0.0.1:${API_PORT},
+# which the --noproxy list always names.
 api_curl() {
-  refuse_other_ipv4_spelling || return 1
   local args=(${OPERATOR_ID_ARGS[@]+"${OPERATOR_ID_ARGS[@]}"})
   curl_auth_config | curl -q --noproxy "$(loopback_noproxy)" --config - ${args[@]+"${args[@]}"} "$@"
 }
