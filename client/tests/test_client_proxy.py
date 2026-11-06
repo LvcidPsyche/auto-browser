@@ -9,6 +9,7 @@ httpx reads the proxy variables when a client is built, so setting them in-proce
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import socket
 import threading
@@ -45,16 +46,23 @@ def _serve() -> ThreadingHTTPServer:
 
 @pytest.fixture
 def servers(monkeypatch):
-    proxy, controller = _serve(), _serve()
-    proxy_url = f"http://127.0.0.1:{proxy.server_port}"
-    for name in ("NO_PROXY", "no_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("HTTP_PROXY", proxy_url)
-    monkeypatch.setenv("http_proxy", proxy_url)
-    yield proxy, controller
-    for server in (proxy, controller):
-        server.shutdown()
-        server.server_close()
+    # Each server's close registered as it starts (W12-7, W13-3): a second bind that fails leaves no listener behind.
+    with contextlib.ExitStack() as stack:
+        proxy = _serve()
+        stack.callback(_stop, proxy)
+        controller = _serve()
+        stack.callback(_stop, controller)
+        proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+        for name in ("NO_PROXY", "no_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("HTTP_PROXY", proxy_url)
+        monkeypatch.setenv("http_proxy", proxy_url)
+        yield proxy, controller
+
+
+def _stop(server: ThreadingHTTPServer) -> None:
+    server.shutdown()
+    server.server_close()
 
 
 def _loopback(controller: ThreadingHTTPServer) -> str:
