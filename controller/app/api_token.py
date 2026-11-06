@@ -82,6 +82,7 @@ def ensure_api_credential(settings: Any) -> None:
         return
 
     token = _generate_token_file(path)
+    _warn_if_the_mode_was_not_kept(path, "API_TOKEN_FILE")
     settings.api_bearer_token = token
     logger.warning(
         "No API credential was configured, so the controller generated a bearer token and saved it to %s "
@@ -151,6 +152,7 @@ def ensure_takeover_token(settings: Any) -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(path, token + "\n", mode=PRIVATE_FILE_MODE)
             _match_parent_owner(path)
+            _warn_if_the_mode_was_not_kept(path, "TAKEOVER_TOKEN_FILE")
             logger.warning(
                 "Generated a takeover token and saved it to %s (%s; with the shipped compose it is "
                 "./data/takeover-token on the host; sha256 fingerprint %s). GET /sessions/{session_id}/takeover-link "
@@ -370,6 +372,26 @@ def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
         )
         return
     logger.warning("%s %s was readable beyond its owner (mode %o); changed it to 0600", name, path, mode)
+
+
+def _warn_if_the_mode_was_not_kept(path: Path, name: str) -> None:
+    """After generating a token file 0600, warn when its filesystem did not keep that mode (W7-4), as
+    _restrict_mode does for an existing file (W5-4): a Windows drive under Docker Desktop reports every file
+    readable beyond its owner. The token is still used. POSIX only; never raises."""
+    if os.name == "nt":
+        return
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        return
+    if mode & _GROUP_OR_OTHER_BITS:
+        logger.warning(
+            "%s %s was written with mode 0600 but its filesystem did not keep 0600 (mode %o), so it stays readable "
+            "beyond its owner where that filesystem enforces modes. Restrict it where it is mounted.",
+            name,
+            path,
+            mode,
+        )
 
 
 def _warn_about_an_open_link_target(path: Path, name: str) -> None:

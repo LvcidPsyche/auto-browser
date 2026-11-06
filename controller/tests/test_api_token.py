@@ -431,6 +431,42 @@ def test_w5_4_a_filesystem_that_ignores_chmod_is_warned_about_and_the_token_stil
     assert settings.takeover_token == marker
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes: Windows applies the folder's ACL")
+@pytest.mark.parametrize("which", ["API_TOKEN_FILE", "TAKEOVER_TOKEN_FILE"])
+def test_w7_4_a_generated_token_file_whose_filesystem_kept_no_mode_is_warned_about(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, which: str
+):
+    # The generation paths wrote 0600 and logged "mode 0600" without checking it held: on a Windows drive under
+    # Docker Desktop the first start claimed 0600 and warned nothing; only the second start warned.
+    from app.api_token import ensure_takeover_token
+
+    api_path, takeover_path = tmp_path / "api-token", tmp_path / "takeover-token"
+    settings = make_settings(api_path, TAKEOVER_TOKEN_FILE=str(takeover_path))
+    path = api_path if which == "API_TOKEN_FILE" else takeover_path
+    # The other file is already there (0600), so only `which` is generated.
+    other, value = (takeover_path, "w7-4-marker-" + "m" * 32) if which == "API_TOKEN_FILE" else (api_path, STRONG_TOKEN)
+    other.write_text(value + "\n", encoding="utf-8")
+    other.chmod(0o600)
+    real_write = api_token.atomic_write_text
+
+    def write_on_a_filesystem_that_keeps_no_mode(target, text, **kwargs):
+        real_write(target, text, **kwargs)
+        os.chmod(target, 0o666)  # noqa: S103 - what such a filesystem reports for every file
+
+    with (
+        patch.object(api_token, "atomic_write_text", write_on_a_filesystem_that_keeps_no_mode),
+        caplog.at_level(logging.INFO, logger=LOGGER),
+    ):
+        ensure_api_credential(settings)
+        ensure_takeover_token(settings)
+
+    warned = [record.getMessage() for record in caplog.records if "did not keep" in record.getMessage()]
+    assert len(warned) == 1, caplog.text
+    assert which in warned[0] and str(path) in warned[0] and "666" in warned[0]
+    assert settings.api_bearer_token
+    assert settings.takeover_token
+
+
 def _posix_stand_in(**functions) -> SimpleNamespace:
     """An os module stand-in for the POSIX branch, so it runs on a Windows test host too."""
     return SimpleNamespace(name="posix", O_RDONLY=0, O_NOFOLLOW=0o400000, **functions)
