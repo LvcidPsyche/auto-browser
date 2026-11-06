@@ -366,13 +366,16 @@ class RetentionTests(_Base):
         restage = threading.Thread(target=service.inducer.place, args=(build, target))
 
         def paused_rmtree(path, *args, **kwargs):
-            if Path(path) == target and not restage.is_alive() and restage.ident is None:
+            # Resolved (W10-12): the record's path is resolved, while prune walks the staging root as configured,
+            # which differs under a symlinked or 8.3-form temp directory (C:/Users/RUNNER~1 on a Windows runner).
+            if Path(path).resolve() == target.resolve() and not restage.is_alive() and restage.ident is None:
                 restage.start()
                 restage.join(0.5)  # the replace runs now unless prune holds the staging lock
             return real_rmtree(path, *args, **kwargs)
 
         with patch.object(iterate.shutil, "rmtree", paused_rmtree):
             service.store.prune(30)
+        self.assertIsNotNone(restage.ident, f"prune never removed the aged candidate at {target}")
         restage.join(10)
 
         self.assertFalse(restage.is_alive())
