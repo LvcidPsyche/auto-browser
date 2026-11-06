@@ -6,6 +6,9 @@ All notable changes to auto-browser are documented here.
 
 ### Changed
 
+- **Upgrade note:** an agent that handed a person the takeover link of an isolated (`docker_ephemeral`) session now
+  hands over a link without the noVNC password. The person opens the full link from the dashboard ("Open noVNC") or
+  prints it with `scripts/takeover_link.sh <session_id>`; a link opened without the password makes noVNC ask for it.
 - **Upgrade note:** an approval webhook whose host is a private name (a service on the compose network, a LAN
   address) was reachable by name before and is now refused, as is one at a shared address (`100.64.0.0/10`, such as
   a Tailscale node): every address that is not global is. Set the new `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS=true`
@@ -213,6 +216,15 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- The model no longer receives an isolated session's noVNC password. `create_session`, `get_session`,
+  `get_remote_access` and `request_human_takeover` (REST and MCP) carried it in the takeover URL's fragment, which
+  over MCP reached the calling model, and with a session tunnel up the URL was the public one. No REST or MCP result
+  an agent gets carries it now; an isolated session's `remote_access` block and takeover result carry a fixed
+  `takeover_note` instead. The full link comes from the new `GET /sessions/{session_id}/takeover-link` (bearer token,
+  404 for an unknown or closed session, `Cache-Control: no-store`, each read audited as `takeover_link_viewed`
+  without the URL or the password), which the dashboard and the new `scripts/takeover_link.sh` read and no MCP tool,
+  the Python client, the MCP package or the LangChain integration calls. The shared browser-node keeps the
+  operator's `VNC_PASSWORD` and a password-free link.
 - **On a host shared with other users,** keep `./data` closed to them: mode 0700, or 0750 with a group only the
   operators are in. browser-node's endpoint file there (`./data/browser-profile/browser-ws-endpoint.txt`) holds the
   `ws://` URL that connects to the shared browser, and it cannot be private to one uid, since browser-node writes it

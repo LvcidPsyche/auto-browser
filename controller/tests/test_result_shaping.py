@@ -238,8 +238,6 @@ class GatewayShapingTests(unittest.IsolatedAsyncioTestCase):
             ),
             require_governed_approval=AsyncMock(return_value=None),
             settings=SimpleNamespace(force_governed_approvals=False),
-            # The handoff view (#password= for isolated sessions): these sessions have none.
-            remote_access=SimpleNamespace(with_takeover_password=lambda payload: payload),
         )
         self.gateway = McpToolGateway(
             manager=self.manager,

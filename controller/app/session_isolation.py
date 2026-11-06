@@ -141,7 +141,8 @@ class IsolatedBrowserRuntime:
     # which release removes. A shared network is never removed.
     network_owned: bool = False
     # This session's noVNC password. Never logged, stored or put in takeover_url
-    # itself: only the human-handoff responses carry it (takeover_url_with_password).
+    # itself: only the human-only takeover link carries it (takeover_url_with_password, for
+    # GET /sessions/{id}/takeover-link), never a result the model gets.
     vnc_password: str = field(default="", repr=False)
     # What the container's server.mjs wrote to browser-sandbox.json: Chromium sandboxed or not, and why.
     sandbox: dict[str, Any] | None = None

@@ -16,6 +16,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# What an agent-facing result says about an isolated session's takeover: its takeover_url has no noVNC password,
+# which only the human-only paths return (NAV-14).
+TAKEOVER_NOTE = (
+    "This link has no noVNC password. The operator opens the full link from the dashboard or with "
+    "scripts/takeover_link.sh <session_id>; otherwise noVNC asks for the password."
+)
+
 # The fields of the reverse-ssh sidecar file that global_info passes on in its "tunnel" block.
 _TUNNEL_FIELDS_SHOWN = ("status", "updated_at", "public_takeover_url", "public_api_url", "stale_after_seconds")
 
@@ -181,6 +188,7 @@ class BrowserRemoteAccessService:
                 "active": active,
                 "status": status,
                 "warning": warning,
+                "takeover_note": TAKEOVER_NOTE,
             }
         )
         if session.runtime is not None:
@@ -191,43 +199,21 @@ class BrowserRemoteAccessService:
             }
         return payload
 
-    def with_takeover_password(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """A copy of a human-handoff response whose takeover URLs carry the noVNC password.
+    def takeover_link(self, session: "BrowserSession") -> dict[str, Any]:
+        """The full takeover link a person opens: an isolated session's carries its noVNC password in the fragment.
 
-        Only the responses a person opens the desktop from get it: the session
-        record from create_session and get_session, get_remote_access, and
-        request_human_takeover (REST and MCP). Over MCP those results reach the
-        calling model, which is how an agent hands a person the link; that is
-        accepted, since the URL opens a loopback port. Everything else stays
-        password-free: observations, action results, lists, the stored session
-        records, the tunnel metadata file, the audit trail and logs.
-        Accepts a session summary, a remote-access payload or a takeover
-        result; anything else, or a session without its own password, is
-        returned unchanged.
+        Only GET /sessions/{session_id}/takeover-link returns it (the dashboard and scripts/takeover_link.sh read
+        it); no MCP tool and no other REST response does, since those reach the model. A shared browser-node
+        session's link is the plain URL: its desktop takes the operator's VNC_PASSWORD.
         """
-        if not isinstance(payload, dict):
-            return payload
-        session_dict = payload.get("session") if isinstance(payload.get("session"), dict) else None
-        session_id = payload.get("id") or payload.get("session_id") or (session_dict or {}).get("id")
-        session = self.manager.sessions.get(session_id) if isinstance(session_id, str) else None
-        password = getattr(getattr(session, "runtime", None), "vnc_password", "") if session is not None else ""
-        if not password or session.isolation_mode != "docker_ephemeral":
-            return payload
-        # Imported here: session_isolation imports the docker SDK lazily.
-        from ...session_isolation import takeover_url_with_password
+        url = self.current_takeover_url(session)
+        password = getattr(session.runtime, "vnc_password", "") if session.runtime is not None else ""
+        if password and session.isolation_mode == "docker_ephemeral":
+            # Imported here: session_isolation imports the docker SDK lazily.
+            from ...session_isolation import takeover_url_with_password
 
-        def with_password(view: dict[str, Any]) -> dict[str, Any]:
-            view = dict(view)
-            if isinstance(view.get("takeover_url"), str):
-                view["takeover_url"] = takeover_url_with_password(view["takeover_url"], password)
-            if isinstance(view.get("remote_access"), dict):
-                view["remote_access"] = with_password(view["remote_access"])
-            return view
-
-        result = with_password(payload)
-        if session_dict is not None:
-            result["session"] = with_password(session_dict)
-        return result
+            url = takeover_url_with_password(url, password)
+        return {"session_id": session.id, "takeover_url": url}
 
     def current_takeover_url(self, session: "BrowserSession | None" = None) -> str:
         if session is not None and session.isolation_mode == "docker_ephemeral":

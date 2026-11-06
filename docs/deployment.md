@@ -330,17 +330,20 @@ What per-session networks do not change:
   isolated session's noVNC has **its own random VNC password**, generated when the
   container starts; the operator's `VNC_PASSWORD` is no longer handed to isolated
   containers, where any of them could read it.
-- **The takeover URL is a secret.** The `takeover_url` in the handoff responses (the
-  session from `create_session` and `get_session`, `get_remote_access`, and
-  `request_human_takeover`, over REST and MCP) carries the session's password in its
-  fragment, `#password=…`, so noVNC connects without asking. A browser never sends the
-  fragment to a server, so it stays out of access logs, but treat the URL like the API
-  token. Over MCP those results reach the calling model, which is how an agent hands you
-  the link, and an MCP client may keep them in its transcript. Observations, action
-  results, `list_sessions`, the stored session records, the
-  tunnel metadata file and the audit trail carry the URL without it; opened from there,
-  noVNC asks for the password. noVNC remembers a password it was given in that origin's
-  browser storage, which is harmless: each session has its own random port and password.
+- **The model never sees the password.** No REST or MCP result an agent gets carries it:
+  `create_session`, `get_session`, `get_remote_access`, `request_human_takeover`,
+  observations, action results and `list_sessions` give the `takeover_url` without it,
+  and an isolated session's `remote_access` block and takeover result add a
+  `takeover_note` saying where the full link is. The person taking over opens it from
+  the dashboard ("Open noVNC") or prints it with `scripts/takeover_link.sh <session_id>`;
+  both read `GET /sessions/{session_id}/takeover-link` (bearer token, `Cache-Control:
+  no-store`, audited as `takeover_link_viewed` without the URL), which no MCP tool, the
+  Python client, the MCP package or the LangChain integration calls. That link carries
+  the password in its fragment, `#password=…`, so noVNC connects without asking; a
+  browser never sends the fragment to a server, so it stays out of access logs, but
+  treat the link like the API token. Opened without it, noVNC asks for the password.
+  noVNC remembers a password it was given in that origin's browser storage, which is
+  harmless: each session has its own random port and password.
 - **The shared browser-node's noVNC is reachable from session containers too,** the same
   way. Only the operator's `VNC_PASSWORD` guards it, so set it with `docker_ephemeral`;
   the readiness check warns while it is unset.
