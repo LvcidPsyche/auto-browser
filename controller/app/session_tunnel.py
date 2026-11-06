@@ -514,7 +514,7 @@ class IsolatedSessionTunnelBroker:
             # bracketed in the spec (_ssh_address).
             raise RuntimeError(
                 "ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS must be a bare host name or IP address, with no port or spaces "
-                "(for example 127.0.0.1, ::1 or [::1]; 0.0.0.0 for every interface, with "
+                "(for example 127.0.0.1, ::1 or [::1]; `*` for every interface (0.0.0.0 for IPv4 only), with "
                 f"ISOLATED_TUNNEL_ACCESS_MODE=unsafe-public); got {configured!r}"
             )
         if not _is_bare_loopback(bind_address) and (self.settings.isolated_tunnel_access_mode != "unsafe-public"):

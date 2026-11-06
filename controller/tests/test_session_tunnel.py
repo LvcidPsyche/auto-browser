@@ -386,6 +386,30 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             args = broker._autossh_args(tunnel)
             self.assertEqual(args[args.index("-R") + 1], "127.0.0.1:16181:[::1]:6080")
 
+    async def test_w4_20_star_binds_every_interface_under_unsafe_public_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(
+                Path(tempdir), ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS="*", ISOLATED_TUNNEL_ACCESS_MODE="unsafe-public"
+            )
+            tunnel = broker._build_tunnel("session-1", remote_port=16181, local_host="127.0.0.1", local_port=6080)
+            args = broker._autossh_args(tunnel)
+            self.assertEqual(args[args.index("-R") + 1], "*:16181:127.0.0.1:6080")
+        with tempfile.TemporaryDirectory() as tempdir:
+            with self.assertRaisesRegex(RuntimeError, "non-local remote bind"):
+                await self._started_broker(Path(tempdir), ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS="*")
+
+    async def test_w4_20_the_bad_bind_address_error_recommends_star_for_every_interface(self) -> None:
+        # It recommended 0.0.0.0 "for every interface", which binds IPv4 only.
+        with tempfile.TemporaryDirectory() as tempdir:
+            with self.assertRaises(RuntimeError) as raised:
+                await self._started_broker(
+                    Path(tempdir), ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS="", ISOLATED_TUNNEL_ACCESS_MODE="unsafe-public"
+                )
+        self.assertIn(
+            "`*` for every interface (0.0.0.0 for IPv4 only), with ISOLATED_TUNNEL_ACCESS_MODE=unsafe-public",
+            str(raised.exception),
+        )
+
     async def test_b_fix_11_a_bare_public_bind_address_still_needs_unsafe_public(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             with self.assertRaisesRegex(RuntimeError, "non-local remote bind"):
