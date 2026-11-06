@@ -41,7 +41,16 @@ _DISALLOWED_WEBHOOK_HOSTS = {
 _METADATA_HOSTS = frozenset({"metadata", "metadata.google.internal"})
 _METADATA_NETWORKS = tuple(
     ipaddress.ip_network(net)
-    for net in ("169.254.0.0/16", "100.100.100.200/32", "fe80::/10", "fd00:ec2::254/128")  # .200: Alibaba Cloud
+    # 100.100.100.200: Alibaba Cloud; fd00:ec2::254: AWS; fd20:ce::254: GCP (IPv6-only instances);
+    # fd00:c1::a9fe:a9fe: OCI (cloud-init's Oracle datasource).
+    for net in (
+        "169.254.0.0/16",
+        "100.100.100.200/32",
+        "fe80::/10",
+        "fd00:ec2::254/128",
+        "fd20:ce::254/128",
+        "fd00:c1::a9fe:a9fe/128",
+    )
 )
 # How an IPv6 address spells an IPv4 one. Mapped (::ffff:a.b.c.d), 6to4 (2002::/16) and Teredo (2001::/32, the
 # client's address) have stdlib properties. Translated (::ffff:0:a.b.c.d), compatible (::a.b.c.d) and NAT64's

@@ -31,14 +31,14 @@ All notable changes to auto-browser are documented here.
   node): every address that is not global is. Set the new `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS=true` to allow it.
   The flag lifts the name and address checks, so loopback (`localhost`, `127.0.0.1`) and every private range are
   allowed too; cloud metadata stays refused whatever it says: `169.254.0.0/16`, `100.100.100.200`, `fe80::/10`,
-  `fd00:ec2::254` and the names `metadata` and `metadata.google.internal`, and an IPv6 address that spells a metadata
-  address: mapped, translated, compatible, NAT64's well-known `64:ff9b::/96`, the local-use `64:ff9b:1::/48` read at
-  every RFC 6052 position (`/32` to `/96`), 6to4, Teredo (the client's address) or an ISATAP interface id (`0:5efe` or
-  `200:5efe`, then the IPv4 address) after any prefix. Without the flag such an address is refused, too, when the IPv4
-  address it spells is not global. A network-specific NAT64 prefix (one an operator chose elsewhere) cannot be
-  recognised. Behind a proxy (`HTTPS_PROXY` and the like) the controller must still be able to resolve the webhook
-  host itself: it checks the addresses before it posts by name through the proxy, and a name it cannot resolve is not
-  posted to.
+  `fd00:ec2::254`, `fd20:ce::254` (GCP), `fd00:c1::a9fe:a9fe` (OCI) and the names `metadata` and
+  `metadata.google.internal`, and an IPv6 address that spells a metadata address: mapped, translated, compatible,
+  NAT64's well-known `64:ff9b::/96`, the local-use `64:ff9b:1::/48` read at every RFC 6052 position (`/32` to `/96`),
+  6to4, Teredo (the client's address) or an ISATAP interface id (`0:5efe` or `200:5efe`, then the IPv4 address) after
+  any prefix. Without the flag such an address is refused, too, when the IPv4 address it spells is not global. A
+  network-specific NAT64 prefix (one an operator chose elsewhere) cannot be recognised. Behind a proxy (`HTTPS_PROXY`
+  and the like) the controller must still be able to resolve the webhook host itself: it checks the addresses before
+  it posts by name through the proxy, and a name it cannot resolve is not posted to.
 - `MESH_ENABLED`, `MESH_IDENTITY_DIR`, `MESH_PEERS_PATH`, `MESH_TIMESTAMP_WINDOW`, `CURATOR_PROVIDER` and
   `CURATOR_MODEL` are now `Settings` fields, read from the controller's settings rather than from `os.environ` at
   startup. The names and defaults are unchanged; `MESH_ENABLED` now takes any boolean spelling pydantic accepts (not

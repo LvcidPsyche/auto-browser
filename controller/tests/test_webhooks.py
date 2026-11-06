@@ -203,6 +203,22 @@ class WebhookTargetTests(unittest.IsolatedAsyncioTestCase):
                     await self._send("http://hooks.internal/hook", allow_private_targets=allow_private_targets)
                     self.client.post.assert_not_awaited()
 
+    async def test_w2_33_gcp_and_oci_ipv6_metadata_addresses_are_refused_with_the_opt_in_on_and_off(self) -> None:
+        # GCP's IPv6-only instances query fd20:ce::254; cloud-init's Oracle datasource uses fd00:c1::a9fe:a9fe. Both
+        # are private (fc00::/7), so they passed with the opt-in on.
+        for address in ("fd20:ce::254", "fd00:c1::a9fe:a9fe"):
+            for allow_private_targets in (True, False):
+                with self.subTest(address=address, allow_private_targets=allow_private_targets):
+                    self.client.post.reset_mock()
+                    self._resolver(address)
+                    await self._send("http://hooks.internal/hook", allow_private_targets=allow_private_targets)
+                    self.client.post.assert_not_awaited()
+        # Single addresses: a neighbour in the same /64 is an ordinary private address, allowed with the opt-in.
+        self.client.post.reset_mock()
+        self._resolver("fd20:ce::253")
+        await self._send("http://hooks.internal/hook", allow_private_targets=True)
+        self.client.post.assert_awaited_once()
+
     async def test_w2_32_an_isatap_private_address_is_refused_without_the_opt_in_and_allowed_with_it(self) -> None:
         for allow_private_targets, posted in ((False, False), (True, True)):
             with self.subTest(allow_private_targets=allow_private_targets):
