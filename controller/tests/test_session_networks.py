@@ -271,12 +271,21 @@ class SessionNetworkTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.api.connect_bodies[-1]["EndpointConfig"], {"GwPriority": -1})
 
-    async def test_an_old_daemon_does_not_warn_when_the_session_network_sorts_after_the_controllers(self) -> None:
+    async def test_an_old_daemon_warns_once_even_when_the_session_network_sorts_after_the_controllers(self) -> None:
+        # B-fix-10 (D8-4): the name check is not the whole of Docker's choice (the published port can move anyway),
+        # so an old daemon gets the warning once at the first isolated provision, without the order problem.
         provisioner, client = self.provisioner()
         client.api_version = "1.47"
 
-        with self.assertNoLogs("app.session_isolation", level=logging.WARNING):
+        with self.assertLogs("app.session_isolation", level=logging.WARNING) as logs:
             await provisioner.provision("s1")
+            await provisioner.provision("s2")
+
+        warnings = [line for line in logs.output if "GwPriority" in line]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("GwPriority is not honoured", warnings[0])
+        self.assertNotIn("sorts before", warnings[0])
+        self.assertIn("Docker Engine 28", warnings[0])
 
     async def test_a_current_daemon_does_not_warn_whatever_the_names(self) -> None:
         provisioner, client = self.provisioner(ISOLATED_BROWSER_CONTAINER_PREFIX="aaa-session")

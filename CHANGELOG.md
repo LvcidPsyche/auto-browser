@@ -30,9 +30,10 @@ All notable changes to auto-browser are documented here.
 - httpx's per-request `HTTP Request:` INFO lines are no longer logged, at any `LOG_LEVEL` and for every client (the
   approval webhook, the providers, the curator): each named its URL whole, userinfo, path and query included. httpx's
   warnings and errors still are.
-- The GwPriority warning, logged at an isolated session's provision (not at startup) and now starting "GwPriority is
-  not honoured", also covers a client that speaks an API version below 1.48, and says its check compares network
-  names only, so the gateway move it describes can also happen where it stays silent.
+- The GwPriority warning, now starting "GwPriority is not honoured", is logged once at the first isolated provision on
+  a daemon without GwPriority support (not at startup), whatever the network names: its check compares names only,
+  and the gateway and the published port can move anyway. When the session network's name sorts before the
+  controller's, it also names that order problem. It also covers a client that speaks an API version below 1.48.
 - `harness.check_drift` and `harness.check_all_drifts` now say what they do: they re-verify a staged candidate's
   stored contract and trace and cannot detect a site change. `docs/convergence-harness.md` says the same.
 - Known limit: the `takeover` step the agent loop guard appends to an agent run carries the previous step's

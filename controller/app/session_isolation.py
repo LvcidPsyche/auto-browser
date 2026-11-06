@@ -594,18 +594,32 @@ class DockerBrowserNodeProvisioner:
             return self._gw_priority_ok
 
     def _warn_gateway_hazard(self, session_network_name: str) -> None:
-        """One WARNING per controller start when a session network sorts ahead of every network the controller is on."""
+        """One WARNING per controller start, at the first isolated provision on a daemon without GwPriority.
+
+        Whatever the names: Docker also weighs a network's other properties, so the gateway (and the published
+        port) can move even when the session network sorts after the controller's. When it sorts first, the
+        warning names that order problem and how to avoid it.
+        """
         with self._gw_lock:
             if self._gw_hazard_warned:
                 return
+            self._gw_hazard_warned = True
             # The controller's own networks only: after a restart-policy restart the cached attrs still list the
             # session networks it had joined, which sort lowest in exactly this hazard and would hide it.
             session_prefix = f"{self.settings.isolated_browser_container_prefix}-"
             attached = (self._controller_container.attrs.get("NetworkSettings") or {}).get("Networks") or {}
             own = sorted(name for name in attached if not (name.startswith(session_prefix) and name.endswith("-net")))
-            if not own or session_network_name >= own[0]:
-                return
-            self._gw_hazard_warned = True
+        if not own or session_network_name >= own[0]:
+            logger.warning(
+                "GwPriority is not honoured (the Docker daemon's API, or the API version this client speaks, is "
+                "below 1.48), so the controller joins session network %s without it. Its name does not sort before "
+                "the controller's own networks, but this check compares network names only, and Docker also weighs "
+                "a network's other properties: the controller's default gateway, and its published ports, can still "
+                "move to a session network, which cuts the request that creates a session. Use Docker Engine 28 or "
+                "later.",
+                session_network_name,
+            )
+            return
         logger.warning(
             "GwPriority is not honoured (the Docker daemon's API, or the API version this client speaks, is below "
             "1.48), so the controller joins session network %s without it, and that name sorts before %s, a "
