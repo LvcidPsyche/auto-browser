@@ -30,8 +30,9 @@ All notable changes to auto-browser are documented here.
 - httpx's per-request `HTTP Request:` INFO lines are no longer logged, at any `LOG_LEVEL` and for every client (the
   approval webhook, the providers, the curator): each named its URL whole, userinfo, path and query included. httpx's
   warnings and errors still are.
-- The "daemon ignores GwPriority" startup warning now also covers a client that speaks an API version below 1.48, and
-  says its check compares network names only, so the gateway move it describes can also happen where it stays silent.
+- The GwPriority warning, logged at an isolated session's provision (not at startup) and now starting "GwPriority is
+  not honoured", also covers a client that speaks an API version below 1.48, and says its check compares network
+  names only, so the gateway move it describes can also happen where it stays silent.
 - `harness.check_drift` and `harness.check_all_drifts` now say what they do: they re-verify a staged candidate's
   stored contract and trace and cannot detect a site change. `docs/convergence-harness.md` says the same.
 - Known limit: the `takeover` step the agent loop guard appends to an agent run carries the previous step's
@@ -113,8 +114,8 @@ All notable changes to auto-browser are documented here.
   receipt say partial), and the session's profile and downloads directories are kept, with a warning naming them,
   instead of being deleted under a container that may still be running. A rollback that releases after a failed
   provision or connect logs a failed release and raises the original error.
-- Two isolated sessions created at once now read the Docker daemon's API version once and log the "daemon ignores
-  GwPriority" warning once; both were unsynchronised across the provisioning threads.
+- Two isolated sessions created at once now read the Docker daemon's API version once and log the "GwPriority is not
+  honoured" warning once; both were unsynchronised across the provisioning threads.
 - When the active tab closes (`browser.close_tab`, or the page closing itself), the session no longer moves to a tab
   that `ALLOWED_HOSTS` refuses while an allowed one is left: it takes the nearest allowed tab, and only when every
   remaining tab is refused does the old choice stand.
