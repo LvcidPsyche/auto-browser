@@ -130,6 +130,15 @@ class AgentEvalProxyTests(unittest.TestCase):
         self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
         self.assertEqual(self.controller.seen, [("/sessions", f"Bearer {MARKER}")])  # type: ignore[attr-defined]
 
+    def test_w10_4_a_percent_encoded_loopback_host_is_reached_directly(self) -> None:
+        # urllib connects to the host it has percent-decoded (127.0.0.1); judged as written it read as remote, and
+        # the Authorization header went to the proxy.
+        base_url = f"http://%31%32%37.0.0.1:{self.controller.server_port}"
+        self.assertEqual(self._post(base_url), {"id": "s1"})
+
+        self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
+        self.assertEqual(self.controller.seen, [("/sessions", f"Bearer {MARKER}")])  # type: ignore[attr-defined]
+
     def test_a_bind_all_or_trailing_dot_host_never_goes_through_the_proxy(self) -> None:
         # The direct request may fail where nothing answers on that address (0.0.0.0 on Windows, :: on a host
         # without IPv6); the assertion is what the proxy saw, which holds everywhere.

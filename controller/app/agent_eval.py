@@ -360,8 +360,10 @@ class ControllerEvalClient:
         # only when no_proxy names it, so the Authorization header went to the proxy. Any other host still uses the
         # proxy the environment names. The bridge's rule decides, not auth_policy.is_loopback_host, whose meaning
         # feeds auth decisions (W8-3). Redirects are refused on both branches, as the bridge refuses them (W9-6):
-        # urllib's default handler copied the Authorization header onto a redirect to any origin.
-        if _is_loopback_host(urlsplit(request.full_url).hostname):
+        # urllib's default handler copied the Authorization header onto a redirect to any origin. The host judged is
+        # the one urllib connects to, request.host, which it has percent-decoded (%31%32%37.0.0.1 is 127.0.0.1), read
+        # as the bridges read it (W10-4); a host-less request (None) falls through to urllib's own error.
+        if _is_loopback_host(urlsplit("//" + (request.host or "")).hostname):
             urlopen = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects).open
         else:
             urlopen = urllib.request.build_opener(_NoRedirects).open

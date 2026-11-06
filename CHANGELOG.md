@@ -537,8 +537,8 @@ All notable changes to auto-browser are documented here.
   counting as the IPv4 address it maps, is reached directly (the httpx clients get a transport of their own, which
   still reads `SSL_CERT_FILE` and `SSL_CERT_DIR`). The address is the IP literal, or what the platform's numeric
   parser (`getaddrinfo` with `AI_NUMERICHOST`, which never queries DNS) reads the host as, so `127.2`, `2130706434`
-  and `0x7f000002` count as `127.0.0.2`, as they do for the socket layer; the bridges judge the host urllib connects
-  to, which it has percent-decoded (`%31%32%37.0.0.2` is `127.0.0.2`). Any other host, a `*.localhost` name
+  and `0x7f000002` count as `127.0.0.2`, as they do for the socket layer; the bridges and `scripts/agent_eval.py`
+  judge the host urllib connects to, which it has percent-decoded (`%31%32%37.0.0.2` is `127.0.0.2`). Any other host, a `*.localhost` name
   included, still goes through the proxy the environment names. `scripts/check_sandbox_gate.py`, which only talks to
   `127.0.0.1`, never uses a proxy. `scripts/agent_eval.py --execute` and `scripts/check_sandbox_gate.py` now also
   refuse redirects, as the bridges do, direct or proxied: urllib's default handler copied the `Authorization` header
