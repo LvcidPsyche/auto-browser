@@ -478,24 +478,28 @@ All notable changes to auto-browser are documented here.
   create, a NUL byte) is logged and skipped.
 - `browser.cdp_attach` now logs, audits and returns the Chrome it attached to as `scheme://host:port` only. A CDP
   URL's userinfo, query and `/devtools/browser/<id>` path can be the credential for that Chrome; the attach itself
-  still uses the full URL. The startup log line for `CDP_CONNECT_URL` shows it the same way. Why a connect failed is
-  in the controller's log and the startup error, without the URL, which Playwright's error repeats whole in its call
-  log; the caller of the tool or a route gets the fixed text below, not the reason. A request that meets a browser
-  that cannot be reached (Chrome over CDP, the shared browser-node, or an isolated session's own browser) at
-  `POST /sessions`, a fork or `POST /crons/{job_id}/trigger` answers 503 with the fixed detail "the browser could not
-  be reached" instead of a 500 (CDP, or any browser at the cron trigger) or a 409 Conflict (a browser-node at
-  `POST /sessions` or a fork), and an MCP call (`browser.cdp_attach`, a
-  session it creates) answers the same text with the code `browser_unreachable`. A `CDP_CONNECT_URL` in which a
-  browser could read another host than that log shows (a backslash or a control character in it, or a host written in
-  a form a browser maps to another) now stops startup, as the tool's `cdp_url` already was refused. Whitespace around
+  still uses the full URL. The startup log line for `CDP_CONNECT_URL` shows it the same way. Why a connect failed (the
+  first line of Playwright's error) is in the controller's log and the startup error, with the Chrome shown as
+  `scheme://host:port` and any URL in that line cut the same way, never the full URL, which Playwright's error repeats
+  whole in its call log; the caller of the tool or a route gets the fixed text below, not the reason. A request that
+  meets a browser that cannot be reached (Chrome over CDP, the shared browser-node, or an isolated session's own
+  browser) at `POST /sessions`, a fork or `POST /crons/{job_id}/trigger` answers 503 with the fixed detail "the
+  browser could not be reached" instead of a 500 (CDP, or any browser at the cron trigger) or a 409 Conflict (a
+  browser-node at `POST /sessions` or a fork), and an MCP call (`browser.cdp_attach`, a session it creates) answers
+  the same text with the code `browser_unreachable`. A `CDP_CONNECT_URL` in which a browser could read another host
+  than that log shows (a backslash or a control character, U+0000 to U+001F, anywhere in it, or a host written in a
+  form a browser maps to another) now stops startup, as the tool's `cdp_url` already was refused. Whitespace around
   `CDP_CONNECT_URL` (any surrounding whitespace, Unicode spaces too, such as a trailing CR or LF from a quoted `.env`
-  value or the process environment) is stripped first, so it does not stop startup, and a value of only whitespace
-  now counts as unset, as an empty one does.
-- `.gitignore` now ignores everything under `data/` except each directory's `.gitkeep` (it listed directories one by
-  one and missed `data/memory`, `data/mesh` with the node identity key, `data/harness`, the proxy and cron stores),
-  and ignores `.env.*` except `.env.example`.
-- The approval webhook target is now checked after DNS: the host is read as a browser reads it (`2130706433`, `0x7f.1`
-  and `127.1` are refused), resolved, and refused when any answer is not a global address (loopback, private,
+  value or the process environment) is stripped first, so it does not stop startup, and a value of only whitespace now
+  counts as unset, as an empty one does.
+- `.gitignore` now ignores everything under `data/` except the `.gitkeep` in each directory directly under it (it
+  listed directories one by one and missed `data/memory`, `data/mesh` with the node identity key, `data/harness`, the
+  proxy and cron stores), and ignores `.env.*` except `.env.example`.
+- The approval webhook target is now checked after DNS: a host a browser would read as another one is refused whatever
+  address it spells, even with `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS` on (an IPv4 address not written as a dotted
+  quad, such as `2130706433`, `0x7f.1`, `127.1` or `0x08080808`; a percent-encoded or UTS 46-remapped name; a
+  backslash or a control character, U+0000 to U+001F); the host is then resolved, and refused when any answer is
+  not a global address (loopback, private,
   link-local, unspecified, multicast, reserved and the shared `100.64.0.0/10` space among them); the request is then
   sent to the addresses that were checked, in the resolver's order and moving to the next only when one cannot be
   connected to, with the name kept as the `Host` header and the TLS server name, so a second lookup cannot return a
@@ -512,9 +516,9 @@ All notable changes to auto-browser are documented here.
   address). That check fails closed: a local-use NAT64 target whose address another RFC 6052 layout than the
   operator's reads as `169.254.x.x` is refused even with the opt-in (behind a prefix such as `64:ff9b:1:a9fe::/64`,
   every address).
-- A harness `run_id` must now look like the ids the harness generates (letters, digits, `.`, `_`, `-`; no leading
-  dot), at the tool boundary and again in the run store, so an id cannot name a directory outside the harness runs
-  root.
+- A harness `run_id` must now look like the ids the harness generates (1 to 120 letters, digits, `.`, `_` or `-`,
+  starting with a letter or digit), at the tool boundary and again in the run store, so an id cannot name a directory
+  outside the harness runs root.
 - `provider_model` on the agent step and run requests, and the model the Codex host bridge passes to `codex --model`,
   must now match one pattern (letters, digits, `.`, `_`, `:`, `/`, `@`, `-`; 1 to 128 characters; starting with a
   letter or digit; no `..`), which a Vertex-style id such as `claude-3-5-sonnet@20240620` passes. The bridge answers
@@ -535,13 +539,15 @@ All notable changes to auto-browser are documented here.
   or query: `APPROVAL_WEBHOOK_URL`, `REDIS_URL`, `CDP_CONNECT_URL`, `BROWSER_WS_ENDPOINT`, `DEFAULT_PROXY_SERVER`,
   `TAKEOVER_URL`, `WITNESS_REMOTE_URL` and every provider's `*_BASE_URL`.
 - `browser.enable_shadow_browse` is now refused under `SESSION_ISOLATION_MODE=docker_ephemeral`: its headed Chromium
-  runs in the controller's own process tree, outside the per-session container isolation. It stays exempt from
-  `MAX_SESSIONS`.
+  runs in the controller's own process tree, outside the per-session container isolation. It is still started without
+  the `MAX_SESSIONS` check, but an open shadow session counts toward the limit, so it takes a slot from later creates
+  and forks.
 - A session tunnel's metadata (`<session>.json`) and autossh log (`<session>.log`) under `ISOLATED_TUNNEL_INFO_ROOT`
   are now deleted when it is released, and when its provision gives up (autossh did not start, exited early, was
   cancelled, or no port was left; also when the first metadata write or the log open fails, or the error-status write
-  does, which is then logged while the original error is raised, on an early exit autossh's own message); they named
-  the bastion, its user and the key path. The tunnel block in `remote_access.session_tunnel` (a session's
+  does, which is then logged while the original error is raised, on an early exit autossh's own message); the metadata
+  named the bastion and its user, and the log (whose tail the metadata's `error` also carried) holds autossh's and
+  ssh's own messages, which can name the key path. The tunnel block in `remote_access.session_tunnel` (a session's
   `remote_access` in its summary) no longer carries `ssh_host`, `ssh_port`, `ssh_user`, `info_path` or `log_path`, and
   its `error` is a short code (`autossh_exited`, `autossh_start_failed`, `provision_cancelled`, `provision_failed`)
   instead of autossh's stderr, which is logged by the controller.
@@ -550,15 +556,15 @@ All notable changes to auto-browser are documented here.
   session, without `takeover_url` or `remote_access`. The tool's own result still carries them, as before.
 - The `tunnel` block of the remote-access report (`GET /remote-access`, a session's `remote_access.shared_tunnel`) now
   carries only `status`, `updated_at`, `public_takeover_url`, `public_api_url` and `stale_after_seconds` from the
-  reverse-ssh sidecar file, not the whole file (bastion, user, pid, log path). A file that is not a JSON object is
-  reported as unreadable, a `stale_after_seconds` that is not a positive finite number (one too large for a float
-  included) falls back to `REMOTE_ACCESS_STALE_AFTER_SECONDS` instead of raising, an `updated_at` that cannot be read
-  or converted to UTC (`0001-01-01T00:00:00+01:00`) falls back to the file's modification time, and a public URL that
-  is not a string is ignored. The `tunnel` block passes the file's fields only as validated: the `stale_after_seconds`
-  in use, `updated_at` only when it reads as a timestamp (then in UTC), and `status` and a public URL only when they
-  are a non-empty string, so a `status` or `updated_at` that is NaN, a list or an object is now left out of the block
-  (before, `GET /remote-access` and `browser.get_remote_access` passed a list or object on as it was and wrote a NaN
-  as `null`; neither answered a 500).
+  reverse-ssh sidecar file, not the whole file (the bastion, its port and user, the access mode, the bind address and
+  the remote ports). A file that is not a JSON object is reported as unreadable, a `stale_after_seconds` that is not a
+  positive finite number (one too large for a float included) falls back to `REMOTE_ACCESS_STALE_AFTER_SECONDS`
+  instead of raising, an `updated_at` that cannot be read or converted to UTC (`0001-01-01T00:00:00+01:00`) falls back
+  to the file's modification time, and a public URL that is not a string is ignored. The `tunnel` block passes the
+  file's fields only as validated: the `stale_after_seconds` in use, `updated_at` only when it reads as a timestamp
+  (then in UTC), and `status` and a public URL only when they are a non-empty string, so a `status` or `updated_at`
+  that is NaN, a list or an object is now left out of the block (before, `GET /remote-access` and
+  `browser.get_remote_access` passed a list or object on as it was and wrote a NaN as `null`; neither answered a 500).
 - `POST /mesh/receive`, which takes no bearer token, now reads at most `MESH_MAX_BODY_BYTES` (new, default 1 MiB): a
   body with no `Content-Length` (however small: a peer must send one, and the `413` says so), a larger one, or one
   that streams past the cap gets `413` before anything is parsed, and an uninitialised mesh answers `503` before the
