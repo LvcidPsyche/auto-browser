@@ -130,7 +130,8 @@ All notable changes to auto-browser are documented here.
   different sessions do not wait for each other.
 - A `create_session` that fails no longer leaves its artifact, auth and upload directories behind or an `active`
   record in the session store: the directories are made only after every check that can refuse the request, removed
-  again by the rollback, and a record the create had already written is marked `closed` (reason `create_failed`).
+  again by the rollback (in a worker thread, so a large tree does not stall other requests), and a record the create
+  had already written is marked `closed` (reason `create_failed`).
 - A shadow browse that fails or is cancelled after its Chromium started no longer leaves that browser running, the
   shadow's artifact, auth and upload directories on disk, or an `active` record in the session store (a record
   already written is marked `closed` with reason `create_failed`, as a failed `create_session`'s is): the rollback

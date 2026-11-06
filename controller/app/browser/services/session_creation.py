@@ -7,6 +7,7 @@ A mixin of BrowserSessionService (sessions.py), which holds what creation shares
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import shutil
@@ -405,7 +406,8 @@ class SessionCreation:
 
     async def _forget_failed_session_state(self, session: "BrowserSession | None", session_id: str) -> None:
         """Remove the directories a failed create made, and close the record it persisted, if it got that far."""
-        self.remove_session_dirs(session_id)
+        # In a worker thread: rmtree of a large profile or artifact tree would stall every request on the loop.
+        await asyncio.to_thread(self.remove_session_dirs, session_id)
         if session is None:
             return  # no record is written before the session object exists
         try:

@@ -52,6 +52,27 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.leftovers(), [])
 
+    async def test_w4_23_the_rollback_removes_the_directories_in_a_worker_thread(self) -> None:
+        # shutil.rmtree ran on the event loop, so rolling back a session with large directories stalled every request.
+        import asyncio
+
+        from app.browser.services import session_creation
+
+        self.manager._acquire_session_browser = AsyncMock(side_effect=RuntimeError("no browser"))  # type: ignore[method-assign]
+        real_to_thread = asyncio.to_thread
+        offloaded: list[str] = []
+
+        async def to_thread(function, /, *args, **kwargs):
+            offloaded.append(getattr(function, "__name__", repr(function)))
+            return await real_to_thread(function, *args, **kwargs)
+
+        with patch.object(session_creation.asyncio, "to_thread", to_thread, create=True):
+            with self.assertRaises(RuntimeError):
+                await self.manager.create_session()
+
+        self.assertIn("remove_session_dirs", offloaded)
+        self.assertEqual(self.leftovers(), [])
+
     async def test_a_failure_after_the_first_record_leaves_no_active_record(self) -> None:
         self.manager.witness_bridge.record_session_receipt = AsyncMock(side_effect=RuntimeError("witness down"))  # type: ignore[method-assign]
 
