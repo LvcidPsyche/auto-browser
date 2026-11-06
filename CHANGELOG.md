@@ -164,7 +164,9 @@ All notable changes to auto-browser are documented here.
   behind, and the run is saved as `failed` with the reason instead of staying `converged` with no candidate.
   Re-staging over an earlier candidate takes two renames (the old one aside, the new one in); a kill between them, or
   during a build, is settled at the next start, before the prune: the earlier candidate is renamed back when nothing
-  replaced it, unplaced builds are removed, and a run left `converged` with no candidate is marked `failed`.
+  replaced it, unplaced builds are removed, and a run left `converged` with no candidate gets the candidate staged
+  for its contract and last attempt's trace (a kill after the build was in place, before the run was saved), or is
+  marked `failed` when none matches.
 - A staged skill's `SKILL.md` renders the contract's goal, precondition and postcondition values and the verifier
   notes as single-line code spans (with a fence longer than any backtick run inside), so a goal holding a heading,
   HTML, a link or a code fence can no longer change the document a reviewer reads before promotion.

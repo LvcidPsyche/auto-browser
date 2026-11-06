@@ -375,6 +375,7 @@ class RetentionTests(_Base):
     async def test_a_converged_run_left_without_its_candidate_is_marked_failed(self) -> None:
         service = HarnessService(self.root)
         record = await self._run(service)
+        shutil.rmtree(service.store.staging_root / record.candidate.skill_id)  # killed before the build was in place
         record.candidate = None
         service.store.save(record)
 
@@ -383,7 +384,46 @@ class RetentionTests(_Base):
 
         stored = restarted.store.get(record.id)
         self.assertEqual(stored.status, "failed")
-        self.assertTrue(any("staging was interrupted" in note for note in stored.notes), stored.notes)
+        self.assertIsNone(stored.candidate)
+        self.assertTrue(any("no skill candidate" in note for note in stored.notes), stored.notes)
+        self.assertFalse(any("was interrupted" in note for note in stored.notes), stored.notes)
+
+    async def test_cb3_5_a_candidate_staged_before_the_kill_is_attached_to_its_converged_run(self) -> None:
+        # A kill after the build was in place, before run.json was saved: the run read converged with no candidate,
+        # and recovery marked it failed although its candidate was staged.
+        service = HarnessService(self.root)
+        record = await self._run(service)
+        staged = record.candidate
+        record.candidate = None
+        service.store.save(record)
+
+        restarted = HarnessService(self.root)
+        restarted.store.recover_interrupted_staging()
+
+        stored = restarted.store.get(record.id)
+        self.assertEqual(stored.status, "converged")
+        self.assertIsNotNone(stored.candidate)
+        self.assertEqual(stored.candidate.skill_id, staged.skill_id)
+        self.assertEqual(stored.candidate.trace_hash, staged.trace_hash)
+
+    async def test_cb3_5_a_staged_candidate_of_another_trace_is_not_attached(self) -> None:
+        service = HarnessService(self.root)
+        record = await self._run(service)
+        candidate_path = service.store.staging_root / record.candidate.skill_id / "candidate.json"
+        data = json.loads(candidate_path.read_text(encoding="utf-8"))
+        data["trace_hash"] = "0" * 64  # a later run of the same contract replaced it
+        candidate_path.write_text(json.dumps(data), encoding="utf-8")
+        trace_path = service.store.staging_root / record.candidate.skill_id / "trace.json"
+        trace_path.unlink()
+        record.candidate = None
+        service.store.save(record)
+
+        restarted = HarnessService(self.root)
+        restarted.store.recover_interrupted_staging()
+
+        stored = restarted.store.get(record.id)
+        self.assertEqual(stored.status, "failed")
+        self.assertIsNone(stored.candidate)
 
     async def test_cb3_4_startup_restores_an_aged_aside_before_the_prune(self) -> None:
         # _init_harness calls recover_interrupted_staging, then prune; nothing pinned either. The order is not

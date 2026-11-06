@@ -18,7 +18,7 @@ from ..session_ownership import may_use, verified_operator
 from .contracts import RUN_ID_PATTERN, TaskContract
 from .converge import ConvergenceDecision, ConvergenceDetector
 from .drift import SkillDriftMonitor
-from .induce import SkillCandidate, SkillInducer
+from .induce import SkillCandidate, SkillInducer, skill_id_for
 from .register import SkillStagingRegistry
 from .trace import TraceEnvelope, TraceIntegrityError, TraceRecorder
 from .verifier.base import VerificationResult, VerifierAdapter
@@ -157,7 +157,8 @@ class HarnessRunStore:
         the aside. An aside whose candidate.json names a plain skill id is renamed back when that id is missing and
         removed when it is there; one that names no such id is left, with a warning. Every other `.tmp-*` entry is a
         build that was never placed, and is removed. A `converged` run with no candidate (the process died while
-        staging it) is marked `failed`. Nothing here raises: what cannot be done is logged.
+        staging it) gets the candidate staged for its contract and last attempt's trace, when one is there, and is
+        marked `failed` otherwise. Nothing here raises: what cannot be done is logged.
         """
         changed = 0
         try:
@@ -194,16 +195,32 @@ class HarnessRunStore:
                 continue
             if record.status != "converged" or record.candidate is not None or record.id in self._active:
                 continue
+            staged = self._staged_candidate_of(record)
+            if staged is not None:
+                # Killed after the build was in place, before run.json was saved with it (CB3-5).
+                record.candidate = staged
+                record.notes.append("Staged skill candidate recorded at startup: the last process staged it.")
+                try:
+                    self.save(record)
+                except (OSError, ValueError) as exc:
+                    logger.warning("could not record harness run %s's staged candidate: %s", record.id, exc)
+                    continue
+                logger.warning("harness staging recovery recorded run %s's staged candidate", record.id)
+                changed += 1
+                continue
             record.status = "failed"
             record.decision = ConvergenceDecision(
                 status="failed",
                 converged=False,
                 should_continue=False,
-                reason="staging the skill candidate was interrupted",
+                reason="no skill candidate was recorded for this run",
                 successful_attempts=record.decision.successful_attempts if record.decision else 0,
                 total_attempts=len(record.attempts),
             )
-            record.notes.append("Skill candidate staging was interrupted by a controller restart.")
+            record.notes.append(
+                "The run converged, but no skill candidate is recorded for it and none staged matches its last "
+                "attempt: the controller stopped before the candidate was recorded."
+            )
             try:
                 self.save(record)
             except (OSError, ValueError) as exc:
@@ -211,6 +228,28 @@ class HarnessRunStore:
                 continue
             changed += 1
         return changed
+
+    def _staged_candidate_of(self, record: HarnessRunRecord) -> SkillCandidate | None:
+        """The candidate staged for `record`: its contract and owner, and the trace of its last attempt."""
+        expected = record.attempts[-1].trace_hash if record.attempts else ""
+        if not expected:
+            return None
+        directory = self.staging_root / skill_id_for(record.contract_id, record.contract_hash, record.owner)
+        try:
+            candidate = SkillCandidate.model_validate_json((directory / "candidate.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if candidate.contract_hash != record.contract_hash or candidate.owner != record.owner:
+            return None
+        if candidate.trace_hash == expected:
+            return candidate
+        # The candidate hashes the trace the verifier saw; the attempt, the scrubbed copy it stored.
+        try:
+            staged_trace = TraceEnvelope.model_validate_json((directory / "trace.json").read_text(encoding="utf-8"))
+            scrubbed_hash = staged_trace.scrubbed().trace_hash
+        except Exception:  # an unreadable or unscrubbable trace matches nothing
+            return None
+        return candidate if staged_trace.trace_hash == candidate.trace_hash and scrubbed_hash == expected else None
 
     def _aside_skill_id(self, aside: Path) -> str | None:
         """The skill id an aside's candidate.json names, when it is one plain name that stays inside the root."""

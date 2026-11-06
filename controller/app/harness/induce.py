@@ -229,12 +229,17 @@ def _move_into_place(build_dir: Path, target_dir: Path) -> None:
 
 
 def _skill_id(contract: TaskContract, owner: str | None = None) -> str:
+    return skill_id_for(contract.id, contract.hash(), owner)
+
+
+def skill_id_for(contract_id: str, contract_hash: str, owner: str | None = None) -> str:
+    """The staged candidate's id for a contract (its id and hash, as a run record keeps them) and owner."""
     # The id is derived from the contract alone, so two operators staging the
     # same contract would write into one directory and the later run would take
     # over the earlier operator's candidate. An owned candidate's id therefore
     # also depends on its owner; an unowned one keeps the id it always had.
-    digest = hashlib.sha256(f"{contract.hash()}:{owner}".encode()).hexdigest() if owner else contract.hash()
-    return _slug(contract.id, suffix=digest[:12])
+    digest = hashlib.sha256(f"{contract_hash}:{owner}".encode()).hexdigest() if owner else contract_hash
+    return _slug(contract_id, suffix=digest[:12])
 
 
 def _slug(value: str, *, suffix: str | None = None) -> str:
