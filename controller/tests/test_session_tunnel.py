@@ -729,6 +729,32 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(tunnel.process.terminated)
             self._assert_torn_down(broker, tunnel, handle)
 
+    async def test_w11_3_a_failed_log_close_still_removes_the_files(self) -> None:
+        """A close() that raised (a flush on a full disk) left the handle set and skipped _remove_files, and the
+        tunnel had already left _tunnels, so nothing found it again."""
+
+        class FailingClose:
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+                raise OSError("no space left on device")
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            tunnel = await self._a_registered_tunnel(broker, FakeProcess())
+            tunnel.stderr_handle.close()
+            failing = FailingClose()
+            tunnel.stderr_handle = failing
+
+            with self.assertLogs("app.session_tunnel", "WARNING") as logs:
+                await asyncio.wait_for(broker.release(tunnel), timeout=10)
+
+            self._assert_torn_down(broker, tunnel, failing)
+            self.assertTrue(
+                any("session-1" in line and "no space left on device" in line for line in logs.output), logs.output
+            )
+
     async def test_failed_metadata_write_does_not_leak_the_log_handle(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             broker = await self._started_broker(Path(tempdir))

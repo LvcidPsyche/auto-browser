@@ -337,10 +337,15 @@ class IsolatedSessionTunnelBroker:
         tunnel.error = None
         self._allocated_ports.discard(tunnel.remote_port)
         self._tunnels.pop(tunnel.session_id, None)
-        if tunnel.stderr_handle is not None:
-            tunnel.stderr_handle.close()
+        # The tunnel has left _tunnels, so nothing finds it again: a close that fails (a flush on a full disk) is
+        # logged, and the handle is cleared and both files removed whatever it did (W11-3, as B3-3's give-up does).
+        try:
+            self._close_stderr(tunnel)
+        except OSError as exc:
+            logger.warning("could not close the log of session %s's tunnel: %s", tunnel.session_id, exc)
+        finally:
             tunnel.stderr_handle = None
-        self._remove_files(tunnel.session_id, tunnel.info_path, tunnel.log_path)
+            self._remove_files(tunnel.session_id, tunnel.info_path, tunnel.log_path)
 
     def _remove_files(self, session_id: str, *paths: Path) -> None:
         """Delete a tunnel's metadata and log: released, or given up on by provision().

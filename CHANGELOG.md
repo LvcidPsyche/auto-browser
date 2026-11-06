@@ -165,7 +165,8 @@ All notable changes to auto-browser are documented here.
   the process id and finishes the teardown: an autossh that never exited (stuck in uninterruptible I/O) held the close
   or the rollback for ever. An autossh already gone when it is terminated or killed (it exited while the first wait
   timed out, so `kill()` raised `ProcessLookupError`) no longer stops the teardown before it frees the remote port,
-  forgets the tunnel, closes its log and removes its files.
+  forgets the tunnel, closes its log and removes its files, and a log close that fails (a flush on a full disk) is
+  logged with the session id while both files are still removed.
 - A shadow browse that fails or is cancelled after its Chromium started no longer leaves that browser running, the
   shadow's artifact, auth and upload directories on disk, or an `active` record in the session store (a record
   already written is marked `closed` with reason `create_failed`, as a failed `create_session`'s is): the rollback
