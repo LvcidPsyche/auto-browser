@@ -38,10 +38,21 @@ class _Recording(BaseHTTPRequestHandler):
         # Read the body first: on Windows a socket closed with unread data resets.
         self.rfile.read(int(self.headers.get("Content-Length") or 0))
         self.server.seen.append((self.path, self.headers.get("Authorization")))  # type: ignore[attr-defined]
+        redirect_to = self.server.redirect_to  # type: ignore[attr-defined]
+        if redirect_to:
+            # Once: a followed redirect comes back as a second request, which is answered and recorded.
+            self.server.redirect_to = None  # type: ignore[attr-defined]
+            self.send_response(302)
+            self.send_header("Location", redirect_to)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(b'{"jsonrpc": "2.0", "id": 1, "result": {}}')
+
+    do_GET = do_POST  # noqa: N815 - a followed 302 turns the POST into a GET
 
     def log_message(self, *_: object) -> None:
         return
@@ -54,6 +65,7 @@ class _V6Server(ThreadingHTTPServer):
 def _serve(host: str = "127.0.0.1") -> ThreadingHTTPServer:
     server = (_V6Server if ":" in host else ThreadingHTTPServer)((host, 0), _Recording)
     server.seen = []  # type: ignore[attr-defined]
+    server.redirect_to = None  # type: ignore[attr-defined]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -85,6 +97,7 @@ def recording_proxy():
         yield proxy
     finally:
         proxy.shutdown()
+        proxy.server_close()
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "[::1]"])
@@ -97,6 +110,7 @@ def test_a_loopback_controller_is_reached_directly_past_an_environment_proxy(rec
         status = _post_through_the_bridge(f"http://{host}:{controller.server_port}/mcp", recording_proxy)
     finally:
         controller.shutdown()
+        controller.server_close()
 
     assert status == 200
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
@@ -112,6 +126,7 @@ def test_a_bind_all_or_trailing_dot_host_never_goes_through_the_environment_prox
         _post_through_the_bridge(f"http://{host}:{controller.server_port}/mcp", recording_proxy, check=False)
     finally:
         controller.shutdown()
+        controller.server_close()
 
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
 
@@ -121,4 +136,15 @@ def test_a_non_loopback_controller_still_goes_through_the_environment_proxy(reco
     status = _post_through_the_bridge("http://controller.invalid/mcp", recording_proxy)
 
     assert status == 200
+    assert recording_proxy.seen == [("http://controller.invalid/mcp", f"Bearer {MARKER}")]  # type: ignore[attr-defined]
+
+
+def test_a_redirect_on_the_proxied_branch_is_not_followed(recording_proxy) -> None:
+    # A followed redirect would carry the token to another host; the redirect tests use a loopback base URL, which
+    # goes direct, so this is the one that covers the proxied opener (W8-4).
+    recording_proxy.redirect_to = "http://elsewhere.invalid/mcp"  # type: ignore[attr-defined]
+
+    status = _post_through_the_bridge("http://controller.invalid/mcp", recording_proxy)
+
+    assert status == 302
     assert recording_proxy.seen == [("http://controller.invalid/mcp", f"Bearer {MARKER}")]  # type: ignore[attr-defined]
