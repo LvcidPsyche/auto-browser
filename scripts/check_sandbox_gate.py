@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Check the controller's BROWSER_SANDBOX=on gate against a real browser-node (CI's compose-smoke).
 
-usage: check_sandbox_gate.py --expect 200|409 [--isolated] [--log-must-say TEXT] [--api-port N] [--data DIR]
+usage: check_sandbox_gate.py --expect 200|409|503 [--isolated] [--log-must-say TEXT] [--api-port N] [--data DIR]
 
 --expect 200: a session is created, then closed. Shared mode: the shared browser-node's state names exactly the
               endpoint file's content (the run the controller connected to). --isolated (docker_ephemeral): the
               session container's own state is a verified on with /proc evidence (assert_browser_sandbox.py's rules).
---expect 409: session creation is refused by the gate (a browser-node that is not a verified "on"), or by a failed
-              connect to a browser-node that refused to start. --log-must-say: and the controller's log (docker
-              compose logs controller) says so.
+--expect 409: session creation is refused by the gate (a browser-node that is not a verified "on").
+--expect 503: session creation fails because the controller cannot reach the browser-node (one that refused to
+              start publishes no endpoint).
+--log-must-say (with 409 or 503): and the controller's log (docker compose logs controller) says so.
 
 The token is read from DIR/api-token and never printed.
 """
@@ -45,7 +46,7 @@ def call(method: str, url: str, token: str, body: dict | None = None) -> tuple[i
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--expect", type=int, choices=(200, 409), required=True)
+    parser.add_argument("--expect", type=int, choices=(200, 409, 503), required=True)
     parser.add_argument("--api-port", type=int, default=8000)
     parser.add_argument("--data", default="data")
     parser.add_argument("--isolated", action="store_true")
