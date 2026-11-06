@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from app.harness import TaskContract
-from app.harness.verifier.uv import UniversalVerifierAdapter
+from app.harness.verifier.uv import _STDERR_KEEP_BYTES, UniversalVerifierAdapter, _read_capped
 
 CONTRACT = TaskContract(
     id="uv-cap",
@@ -46,6 +46,24 @@ class UvOutputCapTests(unittest.IsolatedAsyncioTestCase):
         result, _ = await self._verify("import sys; sys.stderr.write('e' * 3_000_000); " + VALID)
 
         self.assertIs(result.passed, True)
+
+    async def test_the_start_of_a_large_stderr_reaches_the_failure_notes(self) -> None:
+        # R-11: a first read that crossed the 4 KiB cap was dropped whole, so the notes lost the traceback's start.
+        result, _ = await self._verify(
+            "import os, sys; os.write(2, b'Traceback-start: ' + b'E' * 5000); sys.exit(3)",
+        )
+
+        self.assertIn("code 3", result.notes)
+        self.assertIn("Traceback-start", result.notes)
+
+    async def test_a_chunk_that_crosses_the_cap_keeps_the_part_that_fits(self) -> None:
+        stream = asyncio.StreamReader()
+        stream.feed_data(b"x" * 5000)
+        stream.feed_eof()
+
+        kept = await _read_capped(stream, _STDERR_KEEP_BYTES, strict=False)
+
+        self.assertEqual(len(kept), 4096)
 
     async def test_a_normal_answer_is_unchanged(self) -> None:
         result, _ = await self._verify(VALID)

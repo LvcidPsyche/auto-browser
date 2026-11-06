@@ -158,7 +158,8 @@ All notable changes to auto-browser are documented here.
   heuristics with known false hits: a page-code flag such as `captcha_enabled`, and an API path such as
   `/payments/1/authorize` (read as a login page).
 - The harness's `HARNESS_UV_COMMAND` verifier reads its stdout with a 1 MiB cap (it used to buffer all of it): a
-  command that writes more is killed and the verification is `unverified`. The docs now say the command receives the
+  command that writes more is killed and the verification is `unverified`. Its stderr keeps the first 4 KiB, even
+  when one read crosses that, so a failure's notes still start with the command's own message. The docs now say the command receives the
   full contract and the unscrubbed trace on stdin.
 - A drift check whose expected-text scrubber fails keeps the expectation as written: a failing URL scrubber hands
   back the value's path, the empty string for a `url_contains` value that starts with `?` or `#` and `/` for one

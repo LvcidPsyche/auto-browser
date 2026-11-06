@@ -20,14 +20,20 @@ class _OutputTooLarge(Exception):
 
 
 async def _read_capped(stream: asyncio.StreamReader, limit: int, *, strict: bool) -> bytes:
-    """Read the stream to its end, keeping at most `limit` bytes; past it, `strict` raises and otherwise discards."""
+    """Read the stream to its end, keeping at most `limit` bytes; past it, `strict` raises and otherwise discards.
+
+    Not strict, the part of the chunk that crosses the limit that still fits is kept, so the start always is.
+    """
     chunks: list[bytes] = []
     total = 0
     while chunk := await stream.read(_READ_CHUNK_BYTES):
+        room = limit - total
         total += len(chunk)
         if total > limit:
             if strict:
                 raise _OutputTooLarge
+            if room > 0:
+                chunks.append(chunk[:room])
             continue
         chunks.append(chunk)
     return b"".join(chunks)
