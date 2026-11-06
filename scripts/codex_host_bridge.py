@@ -196,7 +196,13 @@ def _hold_socket_lock(socket_path: Path) -> None:
     except ImportError:
         return
     lock_path = socket_path.with_name(socket_path.name + ".lock")
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as exc:
+        # EACCES for another uid's 0600 lock file, ELOOP for a symlink there.
+        raise SocketPathError(
+            f"cannot open the lock file {lock_path} ({exc.strerror or exc}); remove it or pass another --socket-path"
+        ) from None
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -226,15 +232,23 @@ def _socket_identity(path: Path) -> tuple[int, int] | None:
 
 
 def _socket_is_listening(path: Path) -> bool:
-    """True when a connection to the socket at `path` is accepted; a refused one means a stale socket."""
+    """True when a connection to the socket at `path` is accepted, or times out on a full backlog; a refused or
+    missing one means a stale socket. Any other failure (EACCES: another uid's 0600 socket) says nothing about a
+    listener, so it is SocketPathError.
+    """
     probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         probe.settimeout(2.0)
         probe.connect(str(path))
     except (ConnectionRefusedError, FileNotFoundError):
         return False
-    except OSError:
-        return True  # it answered somehow (a full backlog times out): not ours to remove
+    except (TimeoutError, BlockingIOError):
+        return True  # a full backlog: something listens there, so it is not ours to remove
+    except OSError as exc:
+        raise SocketPathError(
+            f"cannot tell whether a bridge is listening on {path} ({exc.strerror or exc}); "
+            "remove it or pass another --socket-path"
+        ) from None
     finally:
         probe.close()
     return True

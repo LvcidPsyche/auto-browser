@@ -96,6 +96,39 @@ class PrepareSocketPathTests(unittest.TestCase):
         self.addCleanup(probe.close)
         probe.connect(str(target))  # still the first listener's
 
+    def _stale_socket(self) -> Path:
+        target = self.root / "codex.sock"
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(str(target))
+        stale.close()
+        return target
+
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX") and os.name == "posix", "needs AF_UNIX")
+    def test_w6_5_a_socket_it_may_not_connect_to_stops_startup_without_claiming_a_listener(self) -> None:
+        # EACCES (another uid's 0600 socket) was refused as "another bridge is listening", a listener never seen.
+        target = self._stale_socket()
+        refused = PermissionError(13, "Permission denied")
+        with patch.object(bridge.socket.socket, "connect", side_effect=refused):
+            with self.assertRaises(bridge.SocketPathError) as caught:
+                bridge.prepare_socket_path(str(target))
+        message = str(caught.exception)
+        self.assertIn(f"cannot tell whether a bridge is listening on {target.resolve()}", message)
+        self.assertIn("Permission denied", message)
+        self.assertIn("remove it or pass another --socket-path", message)
+        self.assertTrue(target.exists())
+
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX") and os.name == "posix", "needs AF_UNIX")
+    def test_w6_5_a_timeout_or_a_full_backlog_still_means_a_listener(self) -> None:
+        for answer in (TimeoutError("timed out"), BlockingIOError(11, "Resource temporarily unavailable")):
+            with self.subTest(type(answer).__name__):
+                target = self._stale_socket()
+                with patch.object(bridge.socket.socket, "connect", side_effect=answer):
+                    with self.assertRaises(bridge.SocketPathError) as caught:
+                        bridge.prepare_socket_path(str(target))
+                self.assertIn("another bridge is listening", str(caught.exception))
+                self.assertTrue(target.exists())
+                target.unlink()
+
     @unittest.skipUnless(os.name == "posix", "needs symlinks")
     def test_a_symlink_at_the_path_is_refused_and_its_target_kept(self) -> None:
         real = self.root / "real.txt"
@@ -135,6 +168,30 @@ class BridgeSocketLockTests(unittest.TestCase):
             bridge.prepare_socket_path(str(target))
         self.assertIn(f"another bridge is running on {target.resolve()}", str(caught.exception))
         self.assertTrue(target.exists())
+
+    def test_w6_5_a_lock_file_that_cannot_be_opened_stops_startup_naming_it(self) -> None:
+        # The bare OSError (ELOOP for a symlink, EACCES for another uid's 0600 lock file) escaped as a traceback.
+        target = self.root / "codex.sock"
+        lock_path = Path(str(target.resolve()) + ".lock")
+        lock_path.symlink_to(self.root / "elsewhere")
+        with self.assertRaises(bridge.SocketPathError) as caught:
+            bridge.prepare_socket_path(str(target))
+        self.assertIn(str(lock_path), str(caught.exception))
+        self.assertFalse((self.root / "elsewhere").exists())
+
+        lock_path.unlink()
+        real_open = os.open
+
+        def refuse_the_lock(path, *args, **kwargs):
+            if Path(path) == lock_path:
+                raise PermissionError(13, "Permission denied")
+            return real_open(path, *args, **kwargs)
+
+        with patch.object(bridge.os, "open", refuse_the_lock):
+            with self.assertRaises(bridge.SocketPathError) as caught:
+                bridge.prepare_socket_path(str(target))
+        self.assertIn(str(lock_path), str(caught.exception))
+        self.assertIn("Permission denied", str(caught.exception))
 
     def test_the_lock_is_taken_beside_the_socket_at_0600_and_kept(self) -> None:
         target = self.root / "codex.sock"
