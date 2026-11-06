@@ -272,8 +272,9 @@ bearer_curl() {
 
 # The takeover token, the person's second secret that GET /sessions/{session_id}/takeover-link demands:
 # TAKEOVER_TOKEN when set, else the token the compose controller saved in /data/takeover-token
-# (<repo>/data/takeover-token on the host). Not TAKEOVER_TOKEN_FILE, for the reason api_token gives. Prints
-# nothing when there is none.
+# (<repo>/data/takeover-token on the host). Not TAKEOVER_TOKEN_FILE: docker-compose.yml pins the controller's to
+# /data/takeover-token (and passes TAKEOVER_TOKEN from the shell or .env), so a different TAKEOVER_TOKEN_FILE in
+# .env or the shell names some other controller's file. Prints nothing when there is none.
 takeover_token() {
   if [[ -n "${TAKEOVER_TOKEN:-}" ]]; then
     printf '%s' "${TAKEOVER_TOKEN}"
