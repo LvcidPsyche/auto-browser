@@ -177,7 +177,7 @@ class SessionDirCleanupTests(unittest.IsolatedAsyncioTestCase):
         )
         kept = [line for line in logs.output if "Keeping" in line]
         self.assertEqual(len(kept), 1, logs.output)
-        self.assertIn(str(self._session_dir("s8")), kept[0])
+        self.assertIn(str(self._session_dir("s8").resolve()), kept[0])  # resolved, as the warning is (an 8.3 temp)
 
     @unittest.skipUnless(_can_symlink(), "symlinks need privileges on this host")
     async def test_a_symlinked_session_dir_is_never_followed(self) -> None:
