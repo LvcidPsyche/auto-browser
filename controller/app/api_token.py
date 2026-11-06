@@ -168,8 +168,8 @@ def ensure_takeover_token(settings: Any) -> None:
                 _restrict_mode(path, name="TAKEOVER_TOKEN_FILE")
             except _ModeCheckOpenError as exc:
                 logger.warning(
-                    "No takeover token: TAKEOVER_TOKEN_FILE %s could not be opened for its mode check (%s). Make it a "
-                    "file the controller's user can read, or set TAKEOVER_TOKEN; "
+                    "No takeover token: TAKEOVER_TOKEN_FILE %s could not be opened or read for its mode check (%s). "
+                    "Make it a file the controller's user can read, or set TAKEOVER_TOKEN; "
                     "GET /sessions/{session_id}/takeover-link answers 503 until then and a restart.",
                     path,
                     exc,
@@ -351,7 +351,7 @@ def _generate_token_file(path: Path) -> str:
 
 
 class _ModeCheckOpenError(OSError):
-    """_restrict_mode could not open the file for its mode check (other than through a symlink)."""
+    """_restrict_mode could not open the file (other than through a symlink) or read its mode for its mode check."""
 
 
 def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
@@ -377,7 +377,13 @@ def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
             raise
         raise _ModeCheckOpenError(exc.errno, exc.strerror, exc.filename) from exc
     try:
-        mode = stat.S_IMODE(os.fstat(fd).st_mode)
+        try:
+            mode = stat.S_IMODE(os.fstat(fd).st_mode)
+        except OSError as exc:
+            # No mode was read (W10-9): handled as the open failure above is.
+            if name != "TAKEOVER_TOKEN_FILE":
+                raise
+            raise _ModeCheckOpenError(exc.errno, exc.strerror, exc.filename) from exc
         if not mode & _GROUP_OR_OTHER_BITS:
             return
         os.fchmod(fd, PRIVATE_FILE_MODE)

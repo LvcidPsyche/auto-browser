@@ -188,8 +188,68 @@ def test_w8_6_a_file_that_cannot_be_opened_for_its_mode_check_says_so_and_the_li
     ):
         ensure_takeover_token(settings)
     assert settings.takeover_token is None
-    assert f"TAKEOVER_TOKEN_FILE {path} could not be opened for its mode check" in caplog.text
+    assert f"TAKEOVER_TOKEN_FILE {path} could not be opened or read for its mode check" in caplog.text
     assert "Permission denied" in caplog.text
+    assert "mode could not be tightened" not in caplog.text
+    assert SENTINEL not in caplog.text
+
+    app = FastAPI()
+    app.include_router(create_sessions_router(manager=Mock(settings=settings)))
+    with TestClient(app) as client:
+        response = client.get("/sessions/abc123/takeover-link", headers={"X-Takeover-Token": SENTINEL})
+    assert response.status_code == 503, response.text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the mode check is POSIX only: Windows applies the folder's ACL")
+def test_w10_9_a_file_whose_mode_cannot_be_read_says_so_and_the_link_is_503(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # An fstat that failed on the opened file reached the caller's generic branch, whose message says the file "is
+    # readable beyond its owner and its mode could not be tightened", though no mode was read.
+    import errno
+    from unittest.mock import Mock, patch
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app import api_token
+    from app.routes.sessions import create_sessions_router
+
+    path = tmp_path / "takeover-token"
+    path.write_text(SENTINEL + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    settings = make_settings(tmp_path)
+    real_open, real_close, real_fstat = os.open, os.close, os.fstat
+    checked: set[int] = set()
+    closed: set[int] = set()
+
+    def recording_open(file, flags, *args, **kwargs):
+        fd = real_open(file, flags, *args, **kwargs)
+        if flags & os.O_NOFOLLOW:
+            checked.add(fd)
+        return fd
+
+    def recording_close(fd):
+        if fd in checked:
+            closed.add(fd)
+        return real_close(fd)
+
+    def fstat_failing_the_mode_check(fd, *args, **kwargs):
+        if fd in checked:
+            raise OSError(errno.EIO, "Input/output error")
+        return real_fstat(fd, *args, **kwargs)
+
+    with (
+        patch.object(api_token.os, "open", side_effect=recording_open),
+        patch.object(api_token.os, "close", side_effect=recording_close),
+        patch.object(api_token.os, "fstat", side_effect=fstat_failing_the_mode_check),
+        caplog.at_level(logging.WARNING, logger=LOGGER),
+    ):
+        ensure_takeover_token(settings)
+    assert settings.takeover_token is None
+    assert checked and closed == checked, "the mode check's descriptor was not closed"
+    assert f"TAKEOVER_TOKEN_FILE {path} could not be opened or read for its mode check" in caplog.text
+    assert "Input/output error" in caplog.text
     assert "mode could not be tightened" not in caplog.text
     assert SENTINEL not in caplog.text
 

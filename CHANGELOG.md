@@ -410,16 +410,16 @@ All notable changes to auto-browser are documented here.
   to `/data` itself (`MESH_IDENTITY_DIR`, say) leaves the default `/data/takeover-token` usable. Spaces and tabs
   around the presented header are not part of the token. A token file that cannot be read or written, holds an
   unusable token, or stays readable beyond its owner because its mode cannot be tightened (a root-owned 0444 mount),
-  or cannot be opened for that mode check (it vanished or turned unreadable since the read), logs a warning naming
-  that cause and the endpoint answers 503. A token file (either one) on a filesystem that accepts a chmod and keeps
-  the mode (a repository on a Windows drive under Docker Desktop, some FUSE or SMB mounts) is used with a warning that
-  the mode did not hold, instead of a log line saying it was changed to 0600, and one the controller has just
-  generated there gets that warning on the same start, not only the next; the line announcing a generated token file
-  says "mode 0600" only when that held, else the mode found, and a mode that cannot be checked after the write gets a
-  warning naming the setting and path, the token still used. A symlinked token file (a Kubernetes secret mount, 0644
-  by default), whether `TAKEOVER_TOKEN_FILE` or `API_TOKEN_FILE`, is used as it is, its target's mode untouched, with
-  one warning naming the path and mode when that target is readable beyond its owner, or that its mode could not be
-  checked when the target cannot be opened for that check (it vanished or turned unreadable since the read). The
+  or cannot be opened or read for that mode check (it vanished or turned unreadable since the read), logs a warning
+  naming that cause and the endpoint answers 503. A token file (either one) on a filesystem that accepts a chmod and
+  keeps the mode (a repository on a Windows drive under Docker Desktop, some FUSE or SMB mounts) is used with a
+  warning that the mode did not hold, instead of a log line saying it was changed to 0600, and one the controller has
+  just generated there gets that warning on the same start, not only the next; the line announcing a generated token
+  file says "mode 0600" only when that held, else the mode found, and a mode that cannot be checked after the write
+  gets a warning naming the setting and path, the token still used. A symlinked token file (a Kubernetes secret mount,
+  0644 by default), whether `TAKEOVER_TOKEN_FILE` or `API_TOKEN_FILE`, is used as it is, its target's mode untouched,
+  with one warning naming the path and mode when that target is readable beyond its owner, or that its mode could not
+  be checked when the target cannot be opened for that check (it vanished or turned unreadable since the read). The
   takeover token stops only agents without file access to the controller's host: one running as the host user that
   owns `./data` (a local MCP setup) can read `data/takeover-token`, and so can the controller's own `cli` providers,
   which run as its uid (or anything that reads the session container's own copy of the password). Open the dashboard
