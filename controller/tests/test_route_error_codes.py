@@ -12,6 +12,7 @@ the manager call under test is replaced.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Iterator
 from contextlib import ExitStack
@@ -253,6 +254,66 @@ def test_an_unreachable_browser_is_503_with_a_fixed_detail(client: TestClient, r
         response = _call(client, route)
     assert response.status_code == 503, response.text
     assert response.json() == {"detail": "the browser could not be reached"}
+
+
+class _UnreachableChromium:
+    async def connect(self, ws_target: str):
+        raise ConnectionRefusedError(f"connect ECONNREFUSED {ws_target}")
+
+
+def _shared_node_unreachable() -> ExitStack:
+    """The real path from create_session to connect_browser, with a shared browser-node that never answers."""
+    stack = ExitStack()
+    manager = main_module.manager
+    stack.enter_context(patch.object(manager, "playwright", SimpleNamespace(chromium=_UnreachableChromium())))
+    stack.enter_context(patch.object(manager, "browser", None))
+    stack.enter_context(patch.object(manager.settings, "connect_retries", 1))
+    stack.enter_context(patch.object(manager.settings, "connect_retry_delay_seconds", 0))
+    stack.enter_context(patch.object(manager.settings, "cdp_connect_url", None))
+    stack.enter_context(patch.object(manager.settings, "session_isolation_mode", "shared_browser_node"))
+    stack.enter_context(patch.object(manager.settings, "browser_ws_endpoint", "ws://browser-node:9223/sentinel-path"))
+    return stack
+
+
+def test_an_unreachable_shared_browser_node_is_503_on_create(client: TestClient) -> None:
+    # R-2: connect_browser raised a RuntimeError, which POST /sessions answers as a 409 Conflict.
+    with _shared_node_unreachable():
+        response = client.post("/sessions", json={})
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": "the browser could not be reached"}
+
+
+def test_an_unreachable_shared_browser_node_is_503_on_fork(client: TestClient) -> None:
+    async def connect_error() -> BaseException:
+        try:
+            await main_module.manager.runtime.connect_browser(
+                lambda: asyncio.sleep(0, result="ws://browser-node:9223/sentinel-path"), failure_context="unreachable"
+            )
+        except Exception as exc:
+            return exc
+        raise AssertionError("connect_browser did not fail")
+
+    with _shared_node_unreachable():
+        error = asyncio.run(connect_error())
+        with patch.object(main_module.manager, "fork_session", new=AsyncMock(side_effect=error)):
+            response = client.post(f"/sessions/{SID}/fork")
+    assert isinstance(error, BrowserUnreachableError)
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": "the browser could not be reached"}
+
+
+def test_a_sandbox_refusal_of_the_shared_browser_node_stays_409(client: TestClient) -> None:
+    manager = main_module.manager
+    with (
+        patch.object(manager.runtime, "ensure_browser", new=AsyncMock(return_value=SimpleNamespace())),
+        patch.object(manager.runtime, "shared_sandbox", None),
+        patch.object(manager.settings, "browser_sandbox", "on"),
+        patch.object(manager.settings, "cdp_connect_url", None),
+        patch.object(manager.settings, "session_isolation_mode", "shared_browser_node"),
+    ):
+        response = client.post("/sessions", json={})
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": "Conflict"}
 
 
 def test_a_cron_trigger_that_meets_an_unreachable_browser_is_503_with_a_fixed_detail(client: TestClient) -> None:
