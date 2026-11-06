@@ -204,7 +204,9 @@ All notable changes to auto-browser are documented here.
 - The Codex host bridge answers a request body that is not UTF-8 with 400 and a fixed message instead of a 500
   carrying the exception text, answers any other unexpected error with a fixed `internal error` and logs the detail on
   the bridge side, and no longer returns Codex's stderr to the controller on success (it logs it instead; the
-  controller never read that field).
+  controller never read that field). A Codex run that exits nonzero is answered 502 with the fixed message
+  `codex exited with <code>; see the bridge log` instead of up to 4,000 characters of Codex's stderr or stdout (host
+  paths, possibly a token); the bridge logs that output (stderr, or stdout when stderr is empty).
 
 ### Security
 

@@ -232,8 +232,11 @@ class CodexBridgeService:
                 print(f"[codex-bridge] codex stderr: {stderr.strip()[:2000]}", file=sys.stderr, flush=True)
             raw_text = output_path.read_text(encoding="utf-8") if output_path.exists() else stdout
             if returncode != 0:
-                detail = (stderr or stdout or f"codex exited with {returncode}").strip()
-                raise BridgeError(detail[:4000], status_code=502)
+                # Codex's output can name host paths or a token: it is logged here (stderr above, stdout when stderr
+                # is empty), and the controller gets a fixed message. It decides retries on the status code only.
+                if not stderr.strip() and stdout.strip():
+                    print(f"[codex-bridge] codex stdout: {stdout.strip()[:2000]}", file=sys.stderr, flush=True)
+                raise BridgeError(f"codex exited with {returncode}; see the bridge log", status_code=502)
             if not raw_text.strip():
                 raise BridgeError("codex returned an empty response", status_code=502)
 

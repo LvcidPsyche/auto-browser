@@ -214,6 +214,36 @@ class BridgeErrorReplyTests(unittest.TestCase):
         self.assertNotIn("stderr", reply)
         self.assertIn("warning: token", captured.getvalue())
 
+    def test_a_failed_codex_run_answers_a_fixed_502_and_logs_its_output_on_the_bridge(self) -> None:
+        # R-19: a nonzero exit answered 502 with up to 4,000 characters of Codex's stderr or stdout.
+        for stream in ("stderr", "stdout"):
+            with self.subTest(stream=stream):
+
+                class _FailingCodex(_FakeCodex):
+                    def __init__(self, command, **kwargs) -> None:
+                        super().__init__(command, **kwargs)
+                        Path(command[command.index("--output-last-message") + 1]).unlink()
+                        self.returncode = 1
+
+                    def communicate(self, input=None, timeout=None):
+                        secret = b"sentinel-secret-6f1d at /home/someone/.codex/auth.json"
+                        return (b"", secret) if stream == "stderr" else (secret, b"")
+
+                service = bridge.CodexBridgeService(codex_path="codex")
+                captured = io.StringIO()
+
+                with (
+                    patch.object(bridge.subprocess, "Popen", _FailingCodex),
+                    redirect_stderr(captured),
+                    self.assertRaises(bridge.BridgeError) as raised,
+                ):
+                    service.handle_openai_decide(dict(PAYLOAD))
+
+                self.assertEqual(raised.exception.status_code, 502)
+                self.assertNotIn("sentinel-secret", str(raised.exception))
+                self.assertEqual(str(raised.exception), "codex exited with 1; see the bridge log")
+                self.assertIn("sentinel-secret-6f1d", captured.getvalue())
+
 
 @unittest.skipIf(bridge is None, "scripts/ is not shipped in the controller image")
 class BridgeLimitsTests(unittest.TestCase):
