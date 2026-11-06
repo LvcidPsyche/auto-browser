@@ -444,8 +444,9 @@ async def test_close_frees_the_slot_even_when_teardown_fails(tmp_path: Path) -> 
 
     result = await manager.close_session("session-1")
 
-    # Gone, so the slot is free; not "closed", because a step failed (NAV-37).
-    assert result["closed"] is False
+    # Gone, so the slot is free and it is closed; the failed step makes the teardown partial (B-fix-9).
+    assert result["closed"] is True
+    assert result["teardown"] == "partial"
     assert result["failed_steps"] == ["close browser context"]
     assert "session-1" not in manager.sessions
 
