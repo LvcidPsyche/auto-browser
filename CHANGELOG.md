@@ -69,10 +69,11 @@ All notable changes to auto-browser are documented here.
 - Mesh `require_approval` is deprecated: no approval handler is wired, so a grant that sets it always answered
   `approval_required` and its capability could never run. Loading such a grant now logs a `mesh.peers:` warning saying
   so, the field is still parsed (an existing peers file stays valid), and the docs example no longer shows it.
-- Controller dependencies: `pydantic` is pinned to 2.14.2 (which pins `pydantic-core` 2.50.2) and `typing-inspection`
-  to 0.4.4. Their newer releases, which the 1.15.0 image carried (pydantic 2.14.3, pydantic-core 2.50.4,
-  typing-inspection 0.4.5), were uploaded on November 4 and 5, under 72 hours before this release was built;
-  pydantic 2.14.2 is outside the affected range of every pydantic advisory.
+- Controller dependencies: `pydantic` is pinned to 2.14.2 (which pins `pydantic-core` 2.50.2), `typing-inspection`
+  to 0.4.4 and `click`, which uvicorn needs, to 8.5.0. Their newer releases (pydantic 2.14.3, pydantic-core 2.50.4
+  and typing-inspection 0.4.5, which the 1.15.0 image carried, and click 8.5.1) were uploaded on November 4, 5 and 6,
+  under 72 hours before this release was built; pydantic 2.14.2 is outside the affected range of every pydantic
+  advisory, and OSV lists none for click 8.5.0.
 
 ### Fixed
 
