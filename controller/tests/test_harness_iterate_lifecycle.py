@@ -439,7 +439,9 @@ class RetentionTests(_Base):
 
         self.assertEqual(sorted(path.name for path in staging.iterdir()), [record.candidate.skill_id])
 
-    async def test_cb3_6_such_an_aside_is_left_while_its_target_is_missing(self) -> None:
+    async def test_w2_29_an_aside_without_candidate_json_holding_only_staged_files_is_removed(self) -> None:
+        # Nothing in it can be restored without candidate.json, whether or not its target is there (W2-29: it was
+        # left, and warned about at every start, while its target was missing).
         service = HarnessService(self.root)
         record = await self._run(service)
         staging = service.store.staging_root
@@ -447,10 +449,53 @@ class RetentionTests(_Base):
         os.replace(staging / record.candidate.skill_id, aside)
         (aside / "candidate.json").unlink()
 
-        with self.assertLogs("app.harness.iterate", "WARNING"):
+        HarnessService(self.root).store.recover_interrupted_staging()
+
+        self.assertFalse(aside.exists())
+
+    async def test_w2_29_an_empty_aside_or_one_with_only_staged_names_is_removed(self) -> None:
+        # A kill between rmtree's last unlink and its rmdir leaves it empty; on a filesystem that lists entries in
+        # creation order, candidate.json (written last) goes last, so the naming files can be gone first.
+        staging = HarnessService(self.root).store.staging_root
+        empty, partial = staging / ".tmp-000000000001.old", staging / ".tmp-000000000002.old"
+        empty.mkdir()
+        partial.mkdir()
+        for name in ("SKILL.md", "trace.json"):
+            (partial / name).write_text("x", encoding="utf-8")
+
+        HarnessService(self.root).store.recover_interrupted_staging()
+
+        self.assertEqual(sorted(path.name for path in staging.iterdir()), [])
+
+    async def test_w2_29_a_signed_envelope_names_the_asides_target_through_its_payload(self) -> None:
+        # mesh_identity_signer's envelope keeps the id under payload.skill_id; the top-level lookup missed it. The
+        # unknown entry keeps the staged-names rule out, so only the payload lookup can remove it.
+        service = HarnessService(self.root)
+        record = await self._run(service)
+        staging = service.store.staging_root
+        aside = staging / ".tmp-0123456789ab.old"
+        aside.mkdir()
+        signed = {"sender_node_id": "n", "payload": {"skill_id": record.candidate.skill_id}, "signature_b64": "s"}
+        (aside / "envelope.json").write_text(json.dumps(signed), encoding="utf-8")
+        (aside / "not-a-staged-file").write_text("x", encoding="utf-8")
+
+        HarnessService(self.root).store.recover_interrupted_staging()
+
+        self.assertFalse(aside.exists())
+        self.assertTrue((staging / record.candidate.skill_id).exists())
+
+    async def test_w2_29_an_aside_with_other_entries_and_nothing_naming_it_is_left_with_a_true_warning(self) -> None:
+        staging = HarnessService(self.root).store.staging_root
+        aside = staging / ".tmp-0123456789ab.old"
+        aside.mkdir()
+        (aside / "not-a-staged-file").write_text("x", encoding="utf-8")
+
+        with self.assertLogs("app.harness.iterate", "WARNING") as logs:
             HarnessService(self.root).store.recover_interrupted_staging()
 
         self.assertTrue(aside.exists())
+        self.assertIn("has no candidate.json", logs.output[0])
+        self.assertNotIn("its candidate.json names", logs.output[0])
 
     async def test_cb3_4_startup_restores_an_aged_aside_before_the_prune(self) -> None:
         # _init_harness calls recover_interrupted_staging, then prune; nothing pinned either. The order is not

@@ -19,7 +19,7 @@ from .contracts import RUN_ID_PATTERN, TaskContract
 from .converge import ConvergenceDecision, ConvergenceDetector
 from .drift import SkillDriftMonitor
 from .induce import SkillCandidate, SkillInducer, skill_id_for
-from .register import SkillStagingRegistry
+from .register import CANDIDATE_FILES, SkillStagingRegistry
 from .trace import TraceEnvelope, TraceIntegrityError, TraceRecorder
 from .verifier.base import VerificationResult, VerifierAdapter
 from .verifier.programmatic import ProgrammaticVerifier
@@ -155,7 +155,11 @@ class HarnessRunStore:
         Run once at startup, before the prune and before requests are served. Re-staging renames the old candidate
         aside (`.tmp-<hex>.old`), then the new build into place: a kill between the two left the candidate only in
         the aside. An aside whose candidate.json names a plain skill id is renamed back when that id is missing and
-        removed when it is there; one that names no such id is left, with a warning. Every other `.tmp-*` entry is a
+        removed when it is there; one whose candidate.json names no such id is left, with a warning. An aside with no
+        candidate.json (a kill during its removal) cannot be restored: it is removed when its envelope.json (a
+        signed one's payload included) or provenance.json names a target that is in place, or when it holds nothing
+        but the files a staged candidate has (empty included), and is left, with a warning, otherwise (W2-29).
+        Every other `.tmp-*` entry is a
         build that was never placed, and is removed. A `converged` run with no candidate (the process died while
         staging it) gets the candidate staged for its contract and last attempt's trace, when one is there, and is
         marked `failed` otherwise. Nothing here raises: what cannot be done is logged.
@@ -169,18 +173,30 @@ class HarnessRunStore:
         for aside in [entry for entry in entries if entry.name.endswith(".old") and entry.is_dir()]:
             skill_id = self._aside_skill_id(aside)
             if skill_id is None:
-                named = self._half_removed_aside_skill_id(aside)
-                if named is not None and (self.staging_root / named).exists():
-                    # A kill during the aside's removal after a finished swap took its candidate.json (CB3-6): no
-                    # candidate is left to restore, and its target is in place. Left, it was warned about at every
-                    # start, and prune no longer reclaims it by default.
+                has_candidate = (aside / "candidate.json").exists()
+                named = None if has_candidate else self._half_removed_aside_skill_id(aside)
+                if not has_candidate and (
+                    (named is not None and (self.staging_root / named).exists()) or self._only_staged_files(aside)
+                ):
+                    # A kill during the aside's removal took its candidate.json (CB3-6): no candidate is left to
+                    # restore, whether its target is in place or nothing but staged files (or nothing) is left.
+                    # Left, it was warned about at every start, and prune no longer reclaims it by default.
                     try:
                         shutil.rmtree(aside)
                         changed += 1
                     except OSError as exc:
                         logger.warning("harness staging recovery could not remove %s: %s", aside, exc)
                     continue
-                logger.warning("harness staging recovery left %s: its candidate.json names no plain skill id", aside)
+                if has_candidate:
+                    logger.warning(
+                        "harness staging recovery left %s: its candidate.json names no plain skill id", aside
+                    )
+                else:
+                    logger.warning(
+                        "harness staging recovery left %s: it has no candidate.json and holds entries a staged "
+                        "candidate does not",
+                        aside,
+                    )
                 continue
             target = self.staging_root / skill_id
             try:
@@ -270,11 +286,24 @@ class HarnessRunStore:
             return None
         return self._plain_skill_id(skill_id)
 
+    @staticmethod
+    def _only_staged_files(aside: Path) -> bool:
+        """Whether every entry of `aside` (none included) is a file name a staged candidate has."""
+        try:
+            return all(entry.name in CANDIDATE_FILES and not entry.is_dir() for entry in aside.iterdir())
+        except OSError:
+            return False
+
     def _half_removed_aside_skill_id(self, aside: Path) -> str | None:
-        """For an aside whose candidate.json is gone, the plain skill id its envelope.json or provenance.json names."""
+        """For an aside whose candidate.json is gone, the plain skill id its envelope.json (an unsigned one's own
+        field, a signed one's payload) or provenance.json names."""
         if (aside / "candidate.json").exists():
             return None
-        for name, keys in (("envelope.json", ("skill_id",)), ("provenance.json", ("candidate", "skill_id"))):
+        for name, keys in (
+            ("envelope.json", ("skill_id",)),
+            ("envelope.json", ("payload", "skill_id")),  # mesh_identity_signer's SignedEnvelope
+            ("provenance.json", ("candidate", "skill_id")),
+        ):
             try:
                 value: Any = json.loads((aside / name).read_text(encoding="utf-8"))
                 for key in keys:
