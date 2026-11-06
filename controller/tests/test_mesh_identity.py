@@ -174,6 +174,45 @@ class NodeIdentityLooseDirectoryTests(unittest.TestCase):
         self.assertEqual(self.dir.stat().st_mode & 0o777, 0o700)
         self.assertEqual(len([line for line in logs.output if "identity directory" in line]), 1)
 
+    def test_a_add_10_a_loose_directory_holding_other_files_keeps_its_mode_and_is_reported(self):
+        # MESH_IDENTITY_DIR pointed at /data/mesh or /data: a chmod 700 there locks every other reader out.
+        for other in ("peers.json", "artifacts"):
+            with self.subTest(other=other):
+                path = self.dir / other
+                path.mkdir() if "." not in other else path.write_text("{}", encoding="utf-8")
+                with self.assertLogs("app.mesh.identity", level="WARNING") as logs:
+                    chmod = self._load(0o755, ours=True)
+
+                chmod.assert_not_called()
+                text = "\n".join(logs.output)
+                self.assertIn("holds other files", text)
+                self.assertNotIn("tightened it to 700", text)
+                if path.is_dir():
+                    path.rmdir()
+                else:
+                    path.unlink()
+
+    def test_a_add_10_the_witness_signer_tightens_only_a_directory_of_identity_files(self):
+        from app.witness_signing import WitnessSigner
+
+        def load(dir_mode: int):
+            modes = {"dir": dir_mode}
+            with (
+                patch.object(identity_module, "_POSIX", True),
+                patch.object(
+                    identity_module, "_mode_bits", side_effect=lambda p: modes["dir"] if p == self.dir else 0o600
+                ),
+                patch.object(identity_module, "_owned_by_this_process", return_value=True),
+                patch.object(identity_module.os, "chmod", Mock()) as chmod_mock,
+            ):
+                WitnessSigner(self.dir)
+            return chmod_mock
+
+        load(0o755).assert_called_once_with(self.dir, 0o700)
+        (self.dir / "receipts.jsonl").write_text("", encoding="utf-8")
+        with self.assertLogs("app.mesh.identity", level="WARNING"):
+            load(0o755).assert_not_called()
+
     def test_a_private_directory_is_left_alone(self):
         with self.assertNoLogs("app.mesh.identity", level="WARNING"):
             chmod = self._load(_PRIVATE_DIR, ours=True)

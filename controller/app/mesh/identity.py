@@ -114,10 +114,23 @@ class NodeIdentity:
     def _tighten_a_loose_directory(self) -> None:
         """mkdir's mode applies only to a directory it creates: one an older release made at 0755 keeps that mode.
 
-        Ours: tightened to 0700, with one warning. Another user's, or one chmod refuses: a warning only.
+        Ours, holding only the identity files: tightened to 0700, with one warning. One that holds anything else,
+        another user's, or one chmod refuses: a warning only.
         """
         mode = _mode_bits(self._dir)
         if not mode & _GROUP_OR_WORLD_BITS:
+            return
+        others = self._other_entries()
+        if others:
+            # MESH_IDENTITY_DIR pointed at a shared folder (/data/mesh, /data): a chmod 700 there would lock out
+            # whatever else reads it (A-add-10). The key file itself is still created at 0600.
+            logger.warning(
+                "mesh.identity: identity directory %s is open to group or others (mode %o) and holds other files "
+                "(%s), so its mode is left; give the identity a directory of its own (MESH_IDENTITY_DIR)",
+                self._dir,
+                mode,
+                ", ".join(sorted(others)[:5]),
+            )
             return
         if not _owned_by_this_process(self._dir):
             logger.warning(
@@ -154,6 +167,14 @@ class NodeIdentity:
             self._dir,
             mode,
         )
+
+    def _other_entries(self) -> list[str]:
+        """The names in the identity directory that are not the identity's own files (an unlistable one counts)."""
+        own = {_PRIVKEY_FILE, _PUBKEY_FILE, _META_FILE}
+        try:
+            return [entry.name for entry in self._dir.iterdir() if entry.name not in own]
+        except OSError as exc:
+            return [f"<unlistable: {type(exc).__name__}>"]
 
     @staticmethod
     def _extract_raw_ed25519(pem: bytes) -> bytes:

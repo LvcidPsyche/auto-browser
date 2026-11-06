@@ -337,8 +337,10 @@ All notable changes to auto-browser are documented here.
 - The mesh and witness private key is now created with mode 0600 from the first byte (`O_EXCL`, no write-then-chmod
   window) in an identity directory created at 0700, and loading a key that is readable by group or others logs a
   warning on POSIX. An identity directory an earlier release left open to group or others is tightened to 0700 on load
-  when the controller owns it, with one warning, and reported with a warning when it belongs to another user or keeps
-  its mode after the chmod (a mount that does not keep modes).
+  when the controller owns it and it holds only the identity files, with one warning, and reported with a warning
+  when it holds anything else (a `MESH_IDENTITY_DIR` pointed at `/data/mesh` or `/data`, whose other readers a chmod
+  would lock out), belongs to another user or keeps its mode after the chmod (a mount that does not keep modes). The
+  witness signer's key directory goes through the same check.
 - Every secret `Settings` field (the auth-state encryption key, the witness remote key, every provider API key, the
   approval webhook secret, the default proxy password, the share-link secret) is now left out of `repr()`, so a logged
   `Settings` object no longer carries it. So are the URL fields that can carry a credential in their userinfo, path
