@@ -14,6 +14,8 @@ All notable changes to auto-browser are documented here.
   and `scripts/takeover_link.sh` reads it from `TAKEOVER_TOKEN` (the shell or `.env`) or `data/takeover-token`. A
   script or integration that took the password from `POST /sessions`, `GET /sessions/{id}`, `GET /remote-access` or
   the takeover result now calls `GET /sessions/{session_id}/takeover-link` with the `X-Takeover-Token` header.
+- **Upgrade note:** a `provider_model` outside the model-name pattern (below) is refused with a 422, and an agent
+  job saved before the upgrade with such a model fails when it runs and cannot be resumed.
 - **Upgrade note:** an empty `ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS`, which under
   `ISOLATED_TUNNEL_ACCESS_MODE=unsafe-public` bound the tunnel on every interface of the bastion, now stops startup:
   set `0.0.0.0` for that instead.
