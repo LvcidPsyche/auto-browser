@@ -276,6 +276,10 @@ _RECORDER = """#!/usr/bin/env bash
 for arg in "$0" "$@"; do printf '%s\\n' "$arg"; done >> "${STUB_LOG}/argv"
 if [[ "$(basename "$0")" == curl ]]; then
   cat > "${STUB_LOG}/curl-stdin"
+  if [[ -n "${STUB_CURL_STATUS:-}" ]]; then
+    echo "curl: (22) The requested URL returned error: ${STUB_CURL_STATUS}" >&2
+    exit 22
+  fi
   printf '{"session_id": "abc123", "takeover_url": "http://127.0.0.1:16080/vnc.html#password=%s"}' "${STUB_PASSWORD}"
   exit 0
 fi
@@ -320,16 +324,15 @@ class DashboardAndScriptTests(unittest.TestCase):
     def test_the_script_parses(self) -> None:
         subprocess.run([shutil.which("bash"), "-n", str(SCRIPT)], check=True)
 
-    def _tree(self) -> Path:
+    def _tree(self, *, takeover_in_env: bool = True) -> Path:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
         (root / "scripts").mkdir()
         for name in ("takeover_link.sh", "load_env.sh"):
             shutil.copy2(REPO / "scripts" / name, root / "scripts" / name)
-        (root / ".env").write_text(
-            f"API_PORT=18123\nAPI_BEARER_TOKEN={API_SENTINEL}\nTAKEOVER_TOKEN={TAKEOVER}\n", encoding="utf-8"
-        )
+        takeover = f"TAKEOVER_TOKEN={TAKEOVER}\n" if takeover_in_env else ""
+        (root / ".env").write_text(f"API_PORT=18123\nAPI_BEARER_TOKEN={API_SENTINEL}\n{takeover}", encoding="utf-8")
         (root / "bin").mkdir()
         (root / "log").mkdir()
         for name in ("curl", "python3"):
@@ -338,8 +341,9 @@ class DashboardAndScriptTests(unittest.TestCase):
             stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
         return root
 
-    def _run(self, root: Path, *args: str) -> subprocess.CompletedProcess:
+    def _run(self, root: Path, *args: str, **extra: str) -> subprocess.CompletedProcess:
         env = {
+            **extra,
             "PATH": f"{root / 'bin'}{os.pathsep}/usr/bin{os.pathsep}/bin",
             "HOME": str(root),
             "STUB_LOG": str(root / "log"),
@@ -370,6 +374,26 @@ class DashboardAndScriptTests(unittest.TestCase):
         config = (root / "log" / "curl-stdin").read_text(encoding="utf-8").splitlines()
         self.assertIn(f'header = "Authorization: Bearer {API_SENTINEL}"', config)
         self.assertIn(f'header = "X-Takeover-Token: {TAKEOVER}"', config)
+
+    @unittest.skipUnless(SCRIPT.is_file() and shutil.which("bash") and os.name != "nt", "scripts/ or bash is not here")
+    def test_w2_24_without_a_takeover_token_the_script_warns_and_names_where_it_looks(self) -> None:
+        root = self._tree(takeover_in_env=False)
+        result = self._run(root, "abc123")
+
+        self.assertIn("No takeover token", result.stderr)
+        self.assertIn("TAKEOVER_TOKEN", result.stderr)
+        self.assertIn("data/takeover-token", result.stderr)
+        self.assertNotIn(API_SENTINEL, result.stderr)
+
+    @unittest.skipUnless(SCRIPT.is_file() and shutil.which("bash") and os.name != "nt", "scripts/ or bash is not here")
+    def test_w2_24_a_refused_request_says_what_a_403_means(self) -> None:
+        root = self._tree()
+        result = self._run(root, "abc123", STUB_CURL_STATUS="403")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("A 403 means the takeover token was missing or wrong", result.stderr)
+        for secret in (API_SENTINEL, TAKEOVER):
+            self.assertNotIn(secret, result.stderr)
 
     @unittest.skipUnless(SCRIPT.is_file() and shutil.which("bash") and os.name != "nt", "scripts/ or bash is not here")
     def test_the_script_refuses_an_id_that_does_not_start_with_a_letter_or_digit(self) -> None:

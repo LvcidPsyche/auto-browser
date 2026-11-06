@@ -32,6 +32,12 @@ if [[ ! "${SESSION_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
 fi
 
 API_BASE_URL="${AUTO_BROWSER_BASE_URL:-http://127.0.0.1:${API_PORT:-8000}}"
+if ! have_takeover_token; then
+  echo "No takeover token: set TAKEOVER_TOKEN (in the shell or .env), or run this where data/takeover-token is" \
+    "readable. The request goes without one, and the controller answers 403." >&2
+fi
+# curl -f names the status; say what the two refusals mean.
+trap 'echo "A 403 means the takeover token was missing or wrong (TAKEOVER_TOKEN, else data/takeover-token); a 401 means the API token was." >&2' ERR
 takeover_curl -fsS "${API_BASE_URL%/}/sessions/${SESSION_ID}/takeover-link" | python3 -I -c '
 import json
 import sys

@@ -15,11 +15,13 @@ Makefile and the workflows. Repo-layout checks: skipped where scripts/ is absent
 
 from __future__ import annotations
 
+import http.server
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -119,7 +121,7 @@ class BearerCurlTests(unittest.TestCase):
         _, argv, stdin = self.run_bearer_curl(token=TOKEN, xtrace=True)
 
         self.assertIn("+ ", self.trace)  # the trace is on
-        self.assertIn("curl -q --config -", self.trace)
+        self.assertIn("curl -q --noproxy", self.trace)
         self.assertNotIn(TOKEN, self.trace)
         self.assertNotIn(TOKEN, argv)
         self.assertIn(f'header = "Authorization: Bearer {TOKEN}"', stdin)
@@ -157,6 +159,100 @@ class BearerCurlTests(unittest.TestCase):
                 self.assertNotIn("Authorization", argv + stdin)
                 self.assertIn("line break", self.trace)
                 self.assertNotIn(TOKEN[:20], self.trace)
+
+
+class _Recorder(http.server.BaseHTTPRequestHandler):
+    """Answers 200 and records the headers of every request it gets."""
+
+    seen: list[dict[str, str]]
+
+    def do_GET(self) -> None:  # noqa: N802 - http.server's name
+        type(self).seen.append({name.lower(): value for name, value in self.headers.items()})
+        self.send_response(200)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, *_args) -> None:
+        pass
+
+
+def _serve(seen: list) -> http.server.ThreadingHTTPServer:
+    handler = type("Handler", (_Recorder,), {"seen": seen})
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@unittest.skipUnless(
+    SCRIPTS.is_dir() and BASH and shutil.which("curl") and os.name != "nt", "scripts/, bash or curl is not here"
+)
+class LoopbackNoProxyTests(unittest.TestCase):
+    """W2-24: bearer_curl and takeover_curl never send their headers through a proxy for a loopback controller."""
+
+    def _run(self, function: str, url: str, extra_env: dict[str, str]) -> subprocess.CompletedProcess:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": tempdir.name,
+            "API_BEARER_TOKEN": TOKEN,
+            "TAKEOVER_TOKEN": "takeover-" + TOKEN,
+            **extra_env,
+        }
+        script = (
+            f'ROOT_DIR="{_bash_path(Path(tempdir.name))}"; source "{_bash_path(SCRIPTS / "load_env.sh")}"; '
+            f'{function} -fsS "{url}"'
+        )
+        return subprocess.run([BASH, "-c", script], capture_output=True, text=True, env=env, timeout=60)
+
+    def test_a_loopback_request_goes_direct_whatever_the_proxy_variables_say(self) -> None:
+        reached, proxied = [], []
+        target, proxy = _serve(reached), _serve(proxied)
+        self.addCleanup(target.shutdown)
+        self.addCleanup(proxy.shutdown)
+        proxy_url = f"http://127.0.0.1:{proxy.server_address[1]}"
+        environ = {name: proxy_url for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "ALL_PROXY")}
+        port = target.server_address[1]
+        for function in ("bearer_curl", "takeover_curl"):
+            for host in ("127.0.0.1", "localhost"):
+                with self.subTest(function=function, host=host):
+                    result = self._run(function, f"http://{host}:{port}/sessions", environ)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(proxied, [], "a request carrying the tokens went through the proxy")
+        self.assertEqual(len(reached), 4)
+        self.assertTrue(all(headers.get("authorization") == f"Bearer {TOKEN}" for headers in reached))
+
+    def test_the_environments_no_proxy_list_is_kept(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            fake_bin = Path(tempdir) / "bin"
+            fake_bin.mkdir()
+            argv_log = Path(tempdir) / "argv.log"
+            curl = fake_bin / "curl"
+            curl.write_text(
+                f'#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "{_bash_path(argv_log)}"\ncat > /dev/null\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            curl.chmod(0o755)
+            path = f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+            result = self._run("bearer_curl", "http://127.0.0.1:8000/", {"PATH": path, "NO_PROXY": "hooks.internal"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            argv = argv_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(argv[0], "-q")
+        self.assertEqual(argv[argv.index("--noproxy") + 1], "localhost,127.0.0.1,::1,hooks.internal")
+
+
+@unittest.skipUnless(SCRIPTS.is_dir(), "scripts/ is not shipped inside the controller image")
+class SmokeTakeoverResponseTests(unittest.TestCase):
+    def test_w2_24_no_smoke_holds_the_takeover_link_response_in_a_shell_variable(self) -> None:
+        # An assignment is printed by xtrace: the response carries the noVNC password. It is piped to Python.
+        for name in ("smoke_isolated_session.sh", "smoke_isolated_session_tunnel.sh"):
+            with self.subTest(script=name):
+                text = (SCRIPTS / name).read_text(encoding="utf-8")
+                self.assertNotIn("TAKEOVER_LINK_RESPONSE", text)
+                self.assertNotRegex(text, r'=\s*"\$\(\s*takeover_curl')
+                self.assertRegex(text, r"takeover_curl -fsS -i [^\n|]*\| python3 -I -c")
 
 
 @unittest.skipUnless(SCRIPTS.is_dir(), "scripts/ is not shipped inside the controller image")

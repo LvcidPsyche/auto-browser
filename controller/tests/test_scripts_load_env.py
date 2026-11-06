@@ -279,6 +279,25 @@ class LoadRepoEnvTests(unittest.TestCase):
 
         self.assertEqual((result.returncode, result.stdout.strip()), (0, "done"))
 
+    def test_w2_24_an_xtrace_run_never_prints_a_value_and_keeps_the_callers_trace(self) -> None:
+        # The loop exported each value with xtrace on, so `bash -x scripts/takeover_link.sh` printed TAKEOVER_TOKEN
+        # and API_BEARER_TOKEN.
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        env_file = Path(tempdir.name) / "scratch.env"
+        secret = "sentinel-xtrace-value-0123456789"
+        env_file.write_text(f"TAKEOVER_TOKEN={secret}\nAPI_BEARER_TOKEN='{secret}-2'\n", encoding="utf-8")
+        script = (
+            f'source "{_bash_path(SCRIPTS / "load_env.sh")}"; set -x; load_repo_env "{_bash_path(env_file)}"; '
+            'case "$-" in *x*) echo still-tracing;; *) echo not-tracing;; esac; set +x'
+        )
+        result = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=60, env=_minimal_env())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("+ load_repo_env", result.stderr)  # the trace was on
+        self.assertNotIn(secret, result.stderr)
+        self.assertEqual(result.stdout.strip(), "still-tracing")
+
     def test_bash_env_cannot_run_a_command_in_a_child_shell(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)

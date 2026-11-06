@@ -159,7 +159,7 @@ print("isolated tunnel remote-access endpoint ok")
 PY
 
 # The person's path (NAV-14): the tunnel's public URL plus the session's noVNC password, with Cache-Control: no-store.
-# The response goes to Python through the environment, never argv, and is not printed.
+# The response goes to Python on stdin, never argv or a variable, and is not printed.
 # NAV-14b: without the takeover token (the bearer token alone, as an agent holds it) the endpoint answers 403.
 NO_TAKEOVER_TOKEN_STATUS="$(bearer_curl -sS -o /dev/null -w '%{http_code}' "${API_BASE_URL}/sessions/${SESSION_ID}/takeover-link")"
 if [[ "${NO_TAKEOVER_TOKEN_STATUS}" != "403" ]]; then
@@ -167,16 +167,15 @@ if [[ "${NO_TAKEOVER_TOKEN_STATUS}" != "403" ]]; then
   exit 1
 fi
 # With it: takeover_curl reads the token the controller generated in data/takeover-token, as bearer_curl reads
-# data/api-token, and sends both on stdin.
-TAKEOVER_LINK_RESPONSE="$(takeover_curl -fsS -i "${API_BASE_URL}/sessions/${SESSION_ID}/takeover-link")"
-TAKEOVER_LINK_RESPONSE="${TAKEOVER_LINK_RESPONSE}" python3 -I - <<'PY' "${REMOTE_URL}" "${SESSION_ID}"
+# data/api-token, and sends both on stdin. The response goes from curl to Python on stdin, never into a shell
+# variable (`bash -x` prints an assignment, and it carries the password); the check comes from -c.
+TAKEOVER_LINK_CHECK="$(cat <<'PY'
 import json
-import os
 import re
 import sys
 
 remote_url, session_id = sys.argv[1], sys.argv[2]
-head, _, body = os.environ["TAKEOVER_LINK_RESPONSE"].replace("\r\n", "\n").partition("\n\n")
+head, _, body = sys.stdin.read().replace("\r\n", "\n").partition("\n\n")
 headers = {
     name.strip().lower(): value.strip()
     for name, _, value in (line.partition(":") for line in head.splitlines()[1:])
@@ -188,6 +187,8 @@ pattern = re.escape(remote_url) + r"#password=[A-Za-z0-9]{8}"
 assert re.fullmatch(pattern, str(link.get("takeover_url", ""))), "takeover-link is not the tunnel's password link"
 print("isolated tunnel takeover-link endpoint ok (the full link, no-store; not printed)")
 PY
+)"
+takeover_curl -fsS -i "${API_BASE_URL}/sessions/${SESSION_ID}/takeover-link" | python3 -I -c "${TAKEOVER_LINK_CHECK}" "${REMOTE_URL}" "${SESSION_ID}"
 
 CLOSE_JSON="$(bearer_curl -fsS "${API_BASE_URL}/sessions/${SESSION_ID}" -X DELETE)"
 python3 -I - <<'PY' "${CLOSE_JSON}"

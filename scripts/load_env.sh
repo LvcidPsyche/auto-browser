@@ -130,6 +130,11 @@ load_repo_env() {
     return 0
   fi
 
+  # xtrace off while the values are read and exported (the .env holds the tokens), restored after: `bash -x` would
+  # otherwise print every value.
+  local __lre_xtrace=0
+  if [[ $- == *x* ]]; then __lre_xtrace=1; fi
+  { set +x; } 2>/dev/null
   local __lre_pair_re='^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$'
   local __lre_line __lre_key __lre_raw __lre_value __lre_out __lre_number=0 __lre_start __lre_rc __lre_next=""
   local __lre_bad_escape=0
@@ -195,6 +200,7 @@ load_repo_env() {
     fi
     export "$__lre_key=$__lre_value"
   done < "$__lre_file"
+  if ((__lre_xtrace)); then set -x; fi
 }
 
 # True when a container path lies under /data/ with no ".." component: /data/../etc matches /data/* and
@@ -262,12 +268,21 @@ curl_auth_config() {
   fi
 }
 
+# The hosts curl reaches directly whatever HTTP_PROXY, HTTPS_PROXY or ALL_PROXY says: a request to a loopback
+# controller carries the tokens, and through a proxy it would hand them to the proxy. curl's --noproxy takes a
+# comma-separated list (an IPv6 address unbracketed) and replaces NO_PROXY for that curl, so the environment's own
+# list (no_proxy, which curl reads first, else NO_PROXY) follows them.
+loopback_noproxy() {
+  local inherited="${no_proxy:-${NO_PROXY:-}}"
+  printf '%s' "localhost,127.0.0.1,::1${inherited:+,${inherited}}"
+}
+
 # curl that sends the controller's bearer token. Without it every API call is a
 # 401 and the smoke scripts could only pass against an open controller.
 bearer_curl() {
   # -q first: curl would otherwise read a .curlrc (through CURL_HOME, XDG_CONFIG_HOME or HOME) that can add a proxy
   # or another header to a request carrying the token.
-  curl_auth_config | curl -q --config - "$@"
+  curl_auth_config | curl -q --noproxy "$(loopback_noproxy)" --config - "$@"
 }
 
 # The takeover token, the person's second secret that GET /sessions/{session_id}/takeover-link demands:
@@ -310,5 +325,11 @@ with_takeover_header() {
 
 # curl that sends the bearer token and the takeover token, for GET /sessions/{session_id}/takeover-link only.
 takeover_curl() {
-  curl_auth_config | with_takeover_header | curl -q --config - "$@"
+  curl_auth_config | with_takeover_header | curl -q --noproxy "$(loopback_noproxy)" --config - "$@"
 }
+
+# True when takeover_token finds a token. In a subshell with xtrace off, so a trace never shows it.
+have_takeover_token() (
+  { set +x; } 2>/dev/null
+  [[ -n "$(takeover_token)" ]]
+)

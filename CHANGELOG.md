@@ -280,6 +280,13 @@ All notable changes to auto-browser are documented here.
   and page content can prompt-inject them.
 - **Upgrade note:** a `HARNESS_UV_COMMAND` that needs a variable outside those base names (its own key or setting)
   names it in the new `HARNESS_UV_ENV_PASSTHROUGH` (comma-separated).
+- The scripts' `.env` loader runs with xtrace off and restores the caller's setting, so
+  `bash -x scripts/takeover_link.sh` (or any script that loads `.env`) no longer prints `TAKEOVER_TOKEN`,
+  `API_BEARER_TOKEN` or any other value; the isolated smokes pipe the takeover-link response to Python instead of
+  holding it in a variable `bash -x` would print. `bearer_curl` and `takeover_curl` pass curl `--noproxy` for
+  `localhost`, `127.0.0.1` and `::1` (then the environment's own `NO_PROXY`), so a request to a loopback controller no
+  longer hands its tokens to an `HTTP_PROXY` or `ALL_PROXY`. `scripts/takeover_link.sh` warns when it finds no
+  takeover token and says what a 403 means.
 - The Codex host bridge (`scripts/codex_host_bridge.py`, `OPENAI_AUTH_MODE=host_bridge`) now starts Codex with an
   allowlisted environment instead of the whole environment of the shell it was started from, which Codex, and every
   command a prompt-injected Codex ran under `-s read-only`, received: the names the controller gives its own provider
