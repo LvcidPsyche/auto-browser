@@ -290,14 +290,16 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                 refuse_another_navigation_host(start_url, field_name="start_url")
                 start_url = validate_url(start_url, field_name="start_url", allowed_schemes=HTTP_URL_SCHEMES)
             try:
-                return await manager.fork_session(
-                    session_id,
-                    name=name,
-                    start_url=start_url,
-                    proxy_persona=proxy_persona,
-                    user_agent=user_agent,
-                    protection_mode=protection_mode,
-                )
+                # The fork's session reads its proxy persona, as POST /sessions does: an unreadable file is a 503.
+                with persona_file_errors():
+                    return await manager.fork_session(
+                        session_id,
+                        name=name,
+                        start_url=start_url,
+                        proxy_persona=proxy_persona,
+                        user_agent=user_agent,
+                        protection_mode=protection_mode,
+                    )
             except SessionLimitError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from None
             except RuntimeError:
