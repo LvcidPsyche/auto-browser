@@ -172,7 +172,7 @@ class SessionCreation:
                 shared_browser_process=runtime is None,
                 max_live_sessions_per_browser_node=1,
                 proxy_persona=proxy_persona,
-                user_agent=user_agent,
+                user_agent=context_kwargs.get("user_agent"),  # the effective one: a stealth draw included
                 last_auth_state_path=source_path if storage_state_path else None,
                 auth_profile_name=self.manager.auth_profiles.normalize_name(auth_profile) if auth_profile else None,
                 mouse_position=(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from app.session_ownership import acting_as
 from tests.test_auth_state_ownership import ALICE, StateContext, build_manager
@@ -74,6 +74,26 @@ class ForkTests(unittest.IsolatedAsyncioTestCase):
             created = await self.manager.create_session(name="ua", user_agent="Created-UA/3.0")
 
         self.assertEqual(self.manager.sessions[created["id"]].user_agent, "Created-UA/3.0")
+
+    async def test_b_fix_1_a_stealth_ua_drawn_at_create_is_the_one_the_fork_gets(self) -> None:
+        # With STEALTH_ENABLED and no request UA, create drew a random pool entry and stored None, so the fork drew
+        # again: the source and its fork showed sites two different browsers.
+        del self.manager.create_session
+        self.manager.settings.stealth_enabled = True
+        draws = iter(["Pool-UA/A", "Pool-UA/B"])
+        new_context = self.manager.browser.new_context
+        with patch("app.config.random.choice", side_effect=lambda agents: next(draws)):
+            with acting_as(ALICE):
+                source_id = (await self.manager.create_session(name="stealth"))["id"]
+                source = self.manager.sessions[source_id]
+                source.context = StateContext(source.page)
+                source.page.url = "https://example.com/"
+                await self.manager.fork_session(source_id)
+
+        self.assertEqual(source.user_agent, "Pool-UA/A")
+        self.assertEqual(
+            [call.kwargs.get("user_agent") for call in new_context.await_args_list[-2:]], ["Pool-UA/A", "Pool-UA/A"]
+        )
 
 
 if __name__ == "__main__":
