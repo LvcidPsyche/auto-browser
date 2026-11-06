@@ -101,6 +101,11 @@ print(json.dumps(bridge._handle_line(json.dumps({{"jsonrpc": "2.0", "id": 1, "me
 
 def _bridge_error_through_the_bridge(base_url: str, proxy: ThreadingHTTPServer) -> str:
     """The JSON-RPC error message the stdio bridge answers a tools/list with, the proxy named in its environment."""
+    return _reply_through_the_bridge(base_url, proxy)["error"]["message"]
+
+
+def _reply_through_the_bridge(base_url: str, proxy: ThreadingHTTPServer) -> dict:
+    """What the stdio bridge answers a tools/list with, the proxy named in its environment."""
     proxy_url = f"http://127.0.0.1:{proxy.server_port}"
     env = {"http_proxy": proxy_url, "HTTP_PROXY": proxy_url, "PYTHONPATH": str(_IMPORT_ROOT)}
     for name in ("PATH", "SYSTEMROOT"):  # SYSTEMROOT: Python's sockets need it on Windows
@@ -115,7 +120,7 @@ def _bridge_error_through_the_bridge(base_url: str, proxy: ThreadingHTTPServer) 
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)["error"]["message"]
+    return json.loads(result.stdout)
 
 
 UNREACHABLE = "No Auto Browser controller reachable"
@@ -154,12 +159,17 @@ def test_a_bind_all_or_trailing_dot_host_never_goes_through_the_environment_prox
     # IPv6); the assertion is what the proxy saw, which holds everywhere.
     controller = _serve()
     try:
-        _post_through_the_bridge(f"http://{host}:{controller.server_port}/mcp", recording_proxy, check=False)
+        reply = _reply_through_the_bridge(f"http://{host}:{controller.server_port}/mcp", recording_proxy)
     finally:
         controller.shutdown()
         controller.server_close()
 
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
+    # W10-16: the direct attempt was made: the controller answered it, or the bridge reported it unreachable.
+    if "error" in reply:
+        assert UNREACHABLE in reply["error"]["message"], reply
+    else:
+        assert controller.seen == [("/mcp", f"Bearer {MARKER}")]  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("host", ["127.2", "2130706434", "0x7f000002", "[::ffff:127.0.0.2]", "%31%32%37.0.0.2"])
@@ -176,12 +186,14 @@ def test_w9_5_a_loopback_address_written_another_way_never_goes_through_the_envi
             pytest.skip(f"this platform's numeric parser does not read {host}, so no socket reaches it directly")
     controller = _serve()
     try:
-        _post_through_the_bridge(f"http://{host}:{controller.server_port}/mcp", recording_proxy, check=False)
+        message = _bridge_error_through_the_bridge(f"http://{host}:{controller.server_port}/mcp", recording_proxy)
     finally:
         controller.shutdown()
         controller.server_close()
 
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
+    # W10-16: the refused direct connection, not a failure before any request, as W10-14's TypeError was.
+    assert UNREACHABLE in message
 
 
 @pytest.mark.parametrize("base_url", ["localhost:8000/mcp", "http:/127.0.0.1:9/mcp"])

@@ -14,6 +14,7 @@ import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import httpx
 import pytest
 from auto_browser_client import AutoBrowserClient
 
@@ -113,7 +114,7 @@ def test_a_bind_all_or_trailing_dot_host_never_goes_through_the_proxy(servers, h
     with AutoBrowserClient(f"http://{host}:{controller.server_port}", token=MARKER) as client:
         try:
             client.list_sessions()
-        except Exception:
+        except httpx.ConnectError:  # W10-16: only the refused direct connection, never a failure before sending
             pass
     assert proxy.seen == []
 
@@ -133,15 +134,12 @@ def test_w9_5_a_loopback_address_written_another_way_never_goes_through_the_prox
         async with AutoBrowserClient(f"http://{host}:{controller.server_port}", token=MARKER) as client:
             await client.async_list_sessions()
 
+    # W10-16: each fails on the refused direct connection, never before sending (as W10-14's TypeError did).
     with AutoBrowserClient(f"http://{host}:{controller.server_port}", token=MARKER) as client:
-        try:
+        with pytest.raises(httpx.ConnectError):
             client.list_sessions()
-        except Exception:
-            pass
-    try:
+    with pytest.raises(httpx.ConnectError):
         asyncio.run(call())
-    except Exception:
-        pass
     assert proxy.seen == []
 
 
