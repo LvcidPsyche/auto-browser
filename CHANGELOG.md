@@ -615,17 +615,23 @@ All notable changes to auto-browser are documented here.
   to is local (an unbracketed `::1:8000` is `::1`, and urllib percent-decodes `%31%32%37.0.0.2` to `127.0.0.2`). They
   refuse the base URL as an invalid controller URL, before any opener is chosen and with the request sent nowhere,
   when another reading finds a local host http.client would not connect to (urllib's decoded host read as an
-  authority, which finds `127.0.0.2` in `127.0.0.2%23.bad`; the host of the URL as written, which a proxy reads,
-  `127.0.0.1` in `x%2f@127.0.0.1`; urllib's decoded host after its last `@`, `::1` in an unbracketed `::1` without
-  a port, which http.client reads as host `:`, and in `user@::1`; or the host http.client reads from that part, `::1`
-  in `user@::1:8000`, whose connect host is `user@::1`), when a reading cannot parse the host (`x%5b@127.0.0.1`), or
-  when a port is not a number. Any other host, a `*.localhost` name included, still goes through the proxy the
-  environment names. `scripts/check_sandbox_gate.py`, which only talks to `127.0.0.1`, never uses a proxy. The
-  bridges refuse a URL urllib cannot read, and they and `scripts/agent_eval.py` one whose path or query holds a
-  space or a control character, as an invalid controller URL with the request sent nowhere. The bridges' own error
-  answers name the controller URL without its userinfo, query or fragment, describe a URL they cannot read in their
-  own words, and remove the URL's userinfo, password, query and fragment, as written or percent-decoded, and any
-  other `user:password@`, from the error text they show; 1.15.0's echoed them. `scripts/agent_eval.py --execute`,
+  authority, which finds `127.0.0.2` in `127.0.0.2%23.bad`; the host of the URL as written, which urllib sends a proxy
+  for an `http://` URL, `127.0.0.1` in `x%2f@127.0.0.1`; urllib's decoded host after its last `@`, `::1` in an
+  unbracketed `::1` without a port, which http.client reads as host `:`, and in `user@::1`; or the host http.client
+  reads from that part, `::1` in `user@::1:8000`, whose connect host is `user@::1`), when a reading cannot parse the
+  host (`x%5b@127.0.0.1`), or when the port http.client reads is not a number from 0 to 65535 (it reads `:99999` as
+  99999, which the socket layer can wrap to another port). Any other host, a `*.localhost` name included, still goes
+  through the proxy the environment names. `scripts/check_sandbox_gate.py`, which only talks to `127.0.0.1`, never
+  uses a proxy. The bridges refuse a URL urllib cannot read or that is not an `http://` or `https://` URL with a host
+  (1.15.0 answered a `data:` or `file:` URL from the URL or the file, as if a controller had answered), and they and
+  `scripts/agent_eval.py` one whose path or query holds a space or a control character, as an invalid controller URL
+  with the request sent nowhere; that answer gives the reason in the bridges' own words and does not name the URL.
+  Their answer that no controller is reachable names it without its userinfo, query or fragment; the error text their
+  answers show has the URL's userinfo, password, query and fragment, each whole, as written or percent-decoded,
+  replaced with `[redacted]` and any other `user:password@` removed (a server's error detail that quotes one another
+  way, such as a query value alone, is shown as it came); a 429's `Retry-After` is shown only as a number of seconds;
+  and the bridges no longer send a token holding a line break, which http.client's header error quoted whole (a 401's
+  answer says why). 1.15.0's answers echoed them all. `scripts/agent_eval.py --execute`,
   `scripts/check_sandbox_gate.py` and `scripts/smoke_download.py` now also refuse redirects, as the bridges do, direct
   or proxied: urllib's default handler copied the `Authorization` header onto a redirect to any origin, and a 3xx is
   now reported as the HTTP error each script already reports.
