@@ -88,6 +88,24 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.status, "closed")
         self.assertFalse(record.live)
 
+    async def test_w8_2_a_failed_create_whose_record_cannot_be_parsed_ends_closed(self) -> None:
+        # The rollback's pre-read returned on any error but KeyError, so a record it could not parse stayed as it was.
+        from app.utils import record_path
+
+        path = record_path(self.manager.session_store.file_store.root, SESSION_ID, ".json")
+
+        async def corrupt_then_fail(*_args, **_kwargs):
+            path.write_text("{not json", encoding="utf-8")
+            raise RuntimeError("witness down")
+
+        self.manager.witness_bridge.record_session_receipt = AsyncMock(side_effect=corrupt_then_fail)  # type: ignore[method-assign]
+
+        with self.assertRaises(RuntimeError):
+            await self.manager.create_session()
+
+        record = await self.manager.session_store.get(SESSION_ID)
+        self.assertEqual((record.status, record.close_reason, record.live), ("closed", "create_failed", False))
+
     async def test_w5_6_a_cancel_during_the_rollback_still_closes_the_record_and_removes_the_directories(self) -> None:
         # The directory removal is awaited before the closed record is written: a second cancel there (a shutdown)
         # left a record the create had already persisted reading active.

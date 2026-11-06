@@ -442,6 +442,8 @@ class SessionCreation:
             await self.manager.session_store.get(session_id)
         except KeyError:
             return
+        except ValueError:
+            pass  # a record that cannot be parsed is closed over (W8-2)
         except Exception as exc:
             logger.warning("could not read the record of failed session %s: %s", session_id, exc)
             return

@@ -309,7 +309,9 @@ class BrowserSessionService(SessionCreation):
         try:
             try:
                 record = await store.get(session.id)
-            except KeyError:
+            except (KeyError, ValueError):
+                # No record, or one that cannot be parsed (W8-2): the closed record is built from the session and
+                # written over it. An OSError still reaches the handler below.
                 record = SessionRecord(
                     id=session.id,
                     name=session.name,

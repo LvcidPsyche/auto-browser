@@ -134,7 +134,8 @@ All notable changes to auto-browser are documented here.
   Redis is the primary store and holds a readable `closed` copy (then the write is refused, and a Redis read that
   fails otherwise, such as a lost connection, skips it), and one it cannot read (an I/O error, which could hide a
   closed record) skips that non-closed write for the next one to retry, each logged with the session id; neither fails
-  the action whose state the write mirrors, and a `closed` write always lands. The store makes one write at a time per
+  the action whose state the write mirrors, the check never refuses a `closed` write, and a close (or a failed
+  create's rollback) writes its `closed` record over one it cannot parse. The store makes one write at a time per
   session, from that check through the file and Redis copies, and a cancelled write finishes before the next one for
   that session starts, so the guard holds within one controller process; two processes sharing a store are not
   covered. Writes for different sessions do not wait for each other.

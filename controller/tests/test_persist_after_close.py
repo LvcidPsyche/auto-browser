@@ -143,6 +143,20 @@ class PersistAfterCloseTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([call.args[0].status for call in upsert.await_args_list], [])
 
+    async def test_w8_2_a_close_writes_its_record_over_one_it_cannot_parse(self) -> None:
+        # The pre-read caught only KeyError: pydantic's ValidationError reached the outer handler, which logged an
+        # error and wrote no closed record.
+        record_path(self.manager.session_store.file_store.root, self.session_id, ".json").write_text(
+            "{not json", encoding="utf-8"
+        )
+        self.manager._session_summary = AsyncMock(side_effect=RuntimeError("summary failed"))  # type: ignore[method-assign]
+
+        with acting_as(ALICE), self.assertRaises(RuntimeError):
+            await self.manager.close_session(self.session_id, reason="operator")
+
+        stored = await self.manager.session_store.get(self.session_id)
+        self.assertEqual((stored.status, stored.close_reason, stored.live), ("closed", "operator", False))
+
     async def test_a_live_session_still_persists_active(self) -> None:
         self.session.last_action = "click"
 
