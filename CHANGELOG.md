@@ -179,10 +179,12 @@ All notable changes to auto-browser are documented here.
   a wildcard, a longer wildcard prefix beats a shorter one, and ties go to the entry listed first. A broad `tool:*`
   listed early no longer shadows a stricter grant for one tool listed later. `docs/mesh.md` also states that
   `url_allowlist` covers the request's URL arguments only, not redirects or later navigation.
-- Mesh replay protection no longer depends on a size-evicted, memory-only nonce cache alone: nonces now expire after
-  twice `MESH_TIMESTAMP_WINDOW`, and `/mesh/receive` refuses an envelope stamped before the controller started (so one
-  captured before a restart cannot be replayed after it; a sender with a slow clock may be refused for its first
-  seconds after a restart and succeeds on retry).
+- Mesh replay protection no longer depends on a size-evicted, memory-only nonce cache alone: a nonce now expires once
+  the highest wall time seen is more than `MESH_TIMESTAMP_WINDOW` past its envelope's timestamp (a clock stepped back
+  does not free it), and `/mesh/receive` refuses an envelope stamped before the controller started or within one
+  window after it, since the last process accepted envelopes stamped up to one window ahead (so one it could have run
+  cannot be replayed after a restart). The cost is about one window, 30 s by default, of `403` refusals after each
+  start, which a sender's retry passes.
 - The Codex host bridge reads a request body within 60 seconds in total (a client trickling a byte every 29 s used
   to hold a handler thread indefinitely; it now gets 408) and the request line and headers within 30 seconds in total
   (past that it closes the connection; a request line cut off that way no longer ends in a broken-pipe traceback),

@@ -113,10 +113,13 @@ peer's grants decide whether the request may run. A request that fails one of th
 `403` and nothing runs; one that no grant covers is answered `rejected`.
 
 Replay protection: the timestamp window bounds how long an envelope can be replayed, and a seen nonce is
-remembered for twice that window, then forgotten. Nonces are kept in memory only, so a restart empties them;
-to close that gap the controller also refuses any envelope stamped before the moment it started (`403`, so a
-sender whose clock runs behind may be refused for its first few seconds after a restart and succeeds on
-retry). Replay protection therefore holds across a restart for anything captured before it.
+remembered until the latest time this node's clock has shown is more than one window past the envelope's
+timestamp, then forgotten (a clock stepped back does not free it early). Nonces are kept in memory only, so a
+restart empties them; to close that gap the controller also refuses any envelope stamped before the moment it
+started or within one window after it (`403`). The last process accepted envelopes stamped up to one window
+ahead of its clock, so this covers everything it could have run. The cost is about one window
+(`MESH_TIMESTAMP_WINDOW`, 30 seconds by default) of refusals after each start, which a sender's retry, with a
+new envelope, passes. Replay protection therefore holds across a restart.
 
 ## Upgrading from a release that had `POST /mesh/peers`
 

@@ -351,6 +351,8 @@ class TestMeshDelegation:
         peer_reg.add(sender_as_peer)
 
         mgr = DelegationManager(identity=receiver_id, peers=peer_reg)
+        # A node up for longer than one window: right after a start it refuses every envelope for that long.
+        mgr._started_at -= mgr._timestamp_window + 1
         return sender_id, receiver_id, peer_reg, mgr
 
     async def test_receive_inbound_permit(self, tmp_path):
