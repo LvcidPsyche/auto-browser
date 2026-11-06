@@ -1,14 +1,39 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from .auth_policy import is_loopback_host
 from .utils import utc_now
+
+
+def _is_bare_host(value: str) -> bool:
+    """A host name or IP address on its own: no surrounding space, brackets or port (an IPv6 literal has colons)."""
+    if not value or value != value.strip() or any(char.isspace() or char in "[]/@" for char in value):
+        return False
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return ":" not in value  # a name with a colon is host:port
+
+
+def _is_bare_loopback(value: str) -> bool:
+    """Strictly loopback, for the tunnel's remote bind address: `localhost`, or an address ipaddress reads as
+    loopback. is_loopback_host stays lenient (host:port, brackets) for its other callers."""
+    if not _is_bare_host(value):
+        return False
+    if value.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
+
 
 logger = logging.getLogger(__name__)
 
@@ -435,7 +460,13 @@ class IsolatedSessionTunnelBroker:
             )
 
         bind_address = self.settings.isolated_tunnel_remote_bind_address
-        if not is_loopback_host(bind_address) and (self.settings.isolated_tunnel_access_mode != "unsafe-public"):
+        if not _is_bare_host(bind_address):
+            # It goes into the -R spec as it is: a port, brackets or spaces there make a spec autossh misreads.
+            raise RuntimeError(
+                "ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS must be a bare host name or IP address, with no port, brackets "
+                f"or spaces (for example 127.0.0.1); got {bind_address!r}"
+            )
+        if not _is_bare_loopback(bind_address) and (self.settings.isolated_tunnel_access_mode != "unsafe-public"):
             raise RuntimeError(
                 "isolated session tunnels refuse non-local remote bind addresses unless "
                 "ISOLATED_TUNNEL_ACCESS_MODE=unsafe-public."

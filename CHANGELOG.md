@@ -100,8 +100,11 @@ All notable changes to auto-browser are documented here.
   machine, for both the per-session remote-access report and the production "TAKEOVER_URL is still local-only"
   warning. Before, each kept its own literal list that missed `127.0.0.2`, `*.localhost` and `[::ffff:127.0.0.1]`, so
   a session on such a URL was not offered an isolated tunnel and the startup warning was skipped. The isolated
-  tunnel's remote bind address check uses `is_loopback_host`, so it now also accepts another loopback address;
-  `0.0.0.0` stays refused there without `unsafe-public`.
+  tunnel's remote bind address (`ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS`) has its own strict check: a bare host or IP
+  only, `localhost` or any address that reads as loopback (another loopback address such as `127.0.0.2` included);
+  `0.0.0.0` stays refused there without `unsafe-public`, and a value with a port, brackets or surrounding spaces
+  (`localhost:22`, `[::1]:22`, ` 127.0.0.1 `), which built a malformed `-R` spec, now stops startup with a clear
+  error.
 - An isolated session tunnel whose autossh exits early for a reason other than a taken remote port (a refused key, an
   unreachable bastion) now fails the provision at once with that message instead of retrying every port in
   `ISOLATED_TUNNEL_REMOTE_PORT_START`..`END`, each after a full `ISOLATED_TUNNEL_STARTUP_GRACE_SECONDS`; "remote port
