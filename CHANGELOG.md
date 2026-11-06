@@ -130,7 +130,10 @@ All notable changes to auto-browser are documented here.
   found") for a gone container, and no longer carries on after a container removal that failed (any error but "not
   found", which means gone): the release now fails, `close_session` reports it in `failed_steps` (the audit event and
   receipt say partial), and the session's profile and downloads directories are kept instead of being deleted under
-  a container that may still be running (after a failed removal, with a warning naming them). A rollback that releases after a failed
+  a container that may still be running (after a failed removal, with a warning naming them). A provision that
+  fails before it returns (the container did not start, the session network could not be joined) does the same: when
+  its rollback cannot remove the container (or cannot look it up), the directories stay, with that warning, instead of
+  being emptied after a removal failure logged only at DEBUG. A rollback that releases after a failed
   provision or connect logs a failed release and raises the original error.
 - Two isolated sessions created at once now read the Docker daemon's API version once and log the "GwPriority is not
   honoured" warning once; both were unsynchronised across the provisioning threads.

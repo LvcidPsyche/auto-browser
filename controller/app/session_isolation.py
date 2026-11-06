@@ -553,10 +553,17 @@ class DockerBrowserNodeProvisioner:
             # No runtime exists to release, so release() will never run for
             # this id. containers.run is create + start: a failed start leaves a
             # created container behind, and it holds the network's endpoint.
-            self._remove_stale_container(client, container_name)
+            container_gone = self._remove_stale_container(client, container_name)
             if network is not None:
                 self._remove_session_network(network, session_id, controller_id)
-            self._remove_runtime_dirs(session_id, client=client)
+            if container_gone:
+                self._remove_runtime_dirs(session_id, client=client)
+            else:
+                # CB1-6, as R-12 on release: the container may still run with the profile and downloads mounted,
+                # so they stay, as the startup sweep leaves a container's that it could not remove.
+                logger.warning(
+                    "Keeping %s: browser container %s could not be removed", local_runtime_root, container_name
+                )
             raise
 
     def _join_session_network(self, client, network, controller_id: str) -> None:
@@ -640,19 +647,24 @@ class DockerBrowserNodeProvisioner:
     def _session_network_name(container_name: str) -> str:
         return f"{container_name}-net"
 
-    def _remove_stale_container(self, client, container_name: str) -> None:
+    def _remove_stale_container(self, client, container_name: str) -> bool:
+        """Remove a container by name, best effort, on a path that may be reporting another failure already.
+
+        True when no such container is left; False when the lookup or the removal failed, so the container may
+        still exist (and run, with the session's profile mounted)."""
         try:
             existing = self._safe_get_container(client, container_name)
         except Exception as exc:
-            # Best effort, on a path that may be reporting another failure already.
             logger.warning("Could not look up a stale container %s: %s", container_name, exc)
-            return
+            return False
         if existing is None:
-            return
+            return True
         try:
             existing.remove(force=True)
         except Exception as exc:
             logger.debug("Could not remove stale container %s: %s", container_name, exc)
+            return False
+        return True
 
     def _create_session_network(self, client, network_name: str, session_id: str):
         try:

@@ -143,6 +143,42 @@ class SessionDirCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("s5", [run["labels"]["auto-browser.session_id"] for run in self.client.containers.cleanup_runs])
         self.assertFalse(self._session_dir("s5").exists())
 
+    def _stuck_container_on_run(self) -> None:
+        """containers.run leaves a created container behind that the daemon then refuses to remove."""
+        real_run = self.client.containers.run
+
+        def run(image, *args, **kwargs):
+            if (kwargs.get("labels") or {}).get("auto-browser.role") != "cleanup":
+                stuck = FakeDockerContainer(container_id=f"{kwargs['name']}-id", name=kwargs["name"], attrs={})
+
+                def refuse(force: bool = False) -> None:
+                    raise RuntimeError("daemon refused the removal")
+
+                stuck.remove = refuse  # type: ignore[method-assign]
+                self.client.containers.browser_containers[kwargs["name"]] = stuck
+            return real_run(image, *args, **kwargs)
+
+        self.client.containers.run = run  # type: ignore[method-assign]
+
+    async def test_cb1_6_a_failed_start_whose_container_was_not_removed_keeps_the_dirs(self) -> None:
+        # The rollback logged the failed removal at DEBUG and then emptied the profile under a container that may
+        # still be running, the pattern R-12 fixed on release.
+        self.client.containers.start_fails_after_write = True
+        self._stuck_container_on_run()
+        with (
+            self.assertLogs("app.session_isolation", level=logging.WARNING) as logs,
+            self.assertRaisesRegex(RuntimeError, "container start failed"),
+        ):
+            await self.provisioner.provision("s8")
+
+        self.assertTrue((self._session_dir("s8") / "profile" / "Default" / "Cookies").exists())
+        self.assertNotIn(
+            "s8", [run["labels"]["auto-browser.session_id"] for run in self.client.containers.cleanup_runs]
+        )
+        kept = [line for line in logs.output if "Keeping" in line]
+        self.assertEqual(len(kept), 1, logs.output)
+        self.assertIn(str(self._session_dir("s8")), kept[0])
+
     @unittest.skipUnless(_can_symlink(), "symlinks need privileges on this host")
     async def test_a_symlinked_session_dir_is_never_followed(self) -> None:
         # D5: browser-sessions/<id> planted as a symlink to another directory: neither removed through nor emptied.
