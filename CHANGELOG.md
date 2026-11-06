@@ -388,12 +388,13 @@ All notable changes to auto-browser are documented here.
   or SMB mounts) is used with a warning that the mode did not hold, instead of a log line saying it was changed to
   0600. A symlinked token file (a Kubernetes secret mount, 0644 by default), whether `TAKEOVER_TOKEN_FILE` or
   `API_TOKEN_FILE`, is used as it is, its target's mode untouched, with one warning naming the path and mode when that
-  target is readable beyond its owner. The takeover token stops only agents without file access to the controller's
-  host: one running as the host user that owns `./data` (a local MCP setup) can read `data/takeover-token`, and so can
-  the controller's own `cli` providers, which run as its uid (or anything that reads the session container's own copy
-  of the password). Open the dashboard and the link in a browser no agent drives: such an agent can read the
-  dashboard's sessionStorage. The `takeover_note` names no script. The shared browser-node keeps the operator's
-  `VNC_PASSWORD` and a password-free link.
+  target is readable beyond its owner, or that its mode could not be checked when the target cannot be opened for that
+  check (it vanished or turned unreadable since the read). The takeover token stops only agents without file access to
+  the controller's host: one running as the host user that owns `./data` (a local MCP setup) can read
+  `data/takeover-token`, and so can the controller's own `cli` providers, which run as its uid (or anything that reads
+  the session container's own copy of the password). Open the dashboard and the link in a browser no agent drives:
+  such an agent can read the dashboard's sessionStorage. The `takeover_note` names no script. The shared browser-node
+  keeps the operator's `VNC_PASSWORD` and a password-free link.
 - **On a host shared with other users,** keep `./data` closed to them: mode 0700, or 0750 with a group only the
   operators are in. browser-node's endpoint file there (`./data/browser-profile/browser-ws-endpoint.txt`) holds the
   `ws://` URL that connects to the shared browser, and it cannot be private to one uid, since browser-node writes it

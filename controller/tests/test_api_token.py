@@ -495,6 +495,47 @@ def test_w4_4_a_symlinked_token_file_is_used_and_warns_when_its_target_is_readab
     assert STRONG_TOKEN not in caplog.text
 
 
+@requires_posix_symlinks
+@pytest.mark.parametrize("which", ["API_TOKEN_FILE", "TAKEOVER_TOKEN_FILE"])
+def test_w6_4_a_link_target_that_cannot_be_opened_for_its_mode_is_warned_about_and_the_token_used(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, which: str
+):
+    # The target vanished or turned unreadable between the read and the mode check: the open raised, which stopped
+    # startup for API_TOKEN_FILE and was reported as "could not be tightened" for TAKEOVER_TOKEN_FILE.
+    from app.api_token import ensure_takeover_token
+
+    marker = "w6-4-marker-" + "m" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH
+    api_path, takeover_path = tmp_path / "api-token", tmp_path / "takeover-token"
+    settings = make_settings(api_path, TAKEOVER_TOKEN_FILE=str(takeover_path))
+    link = api_path if which == "API_TOKEN_FILE" else takeover_path
+    for each, value in ((api_path, STRONG_TOKEN), (takeover_path, marker)):
+        target = tmp_path / "mount" / each.name
+        target.parent.mkdir(exist_ok=True)
+        target.write_text(value + "\n", encoding="utf-8")
+        target.chmod(0o600)
+        if each == link:
+            each.symlink_to(target)
+        else:
+            target.replace(each)
+    real_open = os.open
+
+    def follow_fails(path, flags, *args, **kwargs):
+        if Path(path) == link and not flags & os.O_NOFOLLOW:
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_open(path, flags, *args, **kwargs)
+
+    with patch.object(api_token.os, "open", follow_fails), caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_api_credential(settings)
+        ensure_takeover_token(settings)
+
+    warned = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warned) == 1
+    assert which in warned[0] and str(link) in warned[0] and "could not be checked" in warned[0]
+    assert "Permission denied" in warned[0]
+    assert settings.api_bearer_token == STRONG_TOKEN
+    assert settings.takeover_token == marker
+
+
 def test_any_other_open_error_is_raised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     def refuse(target, flags):
         raise OSError(errno.EACCES, "Permission denied")

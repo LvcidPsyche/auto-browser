@@ -372,12 +372,25 @@ def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
 
 
 def _warn_about_an_open_link_target(path: Path, name: str) -> None:
-    """Open a symlinked token file following the link and warn when its target grants group or other bits."""
-    fd = os.open(path, os.O_RDONLY)
+    """Open a symlinked token file following the link and warn when its target grants group or other bits.
+
+    Never raises: a target that vanished or turned unreadable since the token was read gets one warning that its mode
+    could not be checked, and the token already read is used.
+    """
     try:
-        mode = stat.S_IMODE(os.fstat(fd).st_mode)
-    finally:
-        os.close(fd)
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            mode = stat.S_IMODE(os.fstat(fd).st_mode)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        logger.warning(
+            "%s %s is a symlink whose target's mode could not be checked (%s); the token already read from it is used.",
+            name,
+            path,
+            exc,
+        )
+        return
     if mode & _GROUP_OR_OTHER_BITS:
         logger.warning(
             "%s %s is a symlink to a file readable beyond its owner (mode %o); it is used as it is, since its "
