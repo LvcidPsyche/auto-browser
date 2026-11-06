@@ -90,8 +90,9 @@ All notable changes to auto-browser are documented here.
   created without one gives its fork the same pool entry it drew instead of a second random draw. A fork whose proxy
   persona file cannot be read answers 503 with the fixed text, as `POST /sessions` does (it answered 409 Conflict).
 - `close_session` (`DELETE /sessions/{id}`) now runs its whole teardown as one task that a cancelled caller does not
-  stop, from the wait for a busy session's lock (which can close its browser context) to the last record (a dropped
-  client, shutdown used to leave the audit event, the witness receipt and the stored record unwritten), and says
+  stop, from the wait for a busy session's lock (which can close its browser context) to the last record (a
+  shutdown, or a cancel of the task that awaited the close, used to leave the audit event, the witness receipt and
+  the stored record unwritten), and says
   when a step failed: the answer's `closed` stays true (the session is unregistered either way, so its
   `MAX_SESSIONS` slot is free), the new `teardown` is `partial` (`complete` when every step succeeded),
   `failed_steps` names the steps that failed (trace stop, tunnel release, browser context, isolated browser,

@@ -193,7 +193,8 @@ class BrowserSessionService(SessionCreation):
     async def close(self, session_id: str, *, reason: str | None = None) -> dict[str, Any]:
         """Close a session; ``reason`` is the controller's own (SessionRecord.close_reason), the next call names it.
 
-        The teardown runs to its end even when the caller is cancelled (the HTTP client gave up, shutdown): a
+        The teardown runs to its end even when the caller is cancelled (a shutdown, or a cancel of the task that
+        awaited this; a REST client that disconnects does not cancel it): a
         half-done close left the audit event, the witness receipt and the stored record unwritten. ``closed`` in
         the answer is True (the session is gone); ``teardown`` is "partial" when a step failed, and ``failed_steps``
         names those steps ("complete" and an empty list otherwise).
