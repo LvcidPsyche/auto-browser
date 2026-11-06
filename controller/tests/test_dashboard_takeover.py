@@ -150,6 +150,44 @@ def test_a_blocked_popup_says_to_click_again_and_keeps_the_token() -> None:
     assert seen["requests"] == []
 
 
+_HEIGHT = "(selector) => document.querySelector(selector).getBoundingClientRect().height"
+
+
+@requires_chromium
+def test_an_empty_takeover_note_takes_no_space_and_a_shown_one_is_visible() -> None:
+    # The notes used to take `.empty`'s 32px padding: an empty 64px band under the Sessions header and the wizard.
+    stub = TakeoverStub()
+    stub.routes[("POST", "/sessions")] = (
+        200,
+        {"id": SESSION, "takeover_url": LISTED, "isolation": {"mode": "docker_ephemeral"}},
+    )
+    wizard_note = "#wizard-takeover div"
+
+    async def scenario(page, events) -> dict:
+        await _novnc(page)
+        await page.fill("#wizard-profile-name", "shop")
+        await page.click("#wizard-start")
+        await page.wait_for_selector(wizard_note, state="attached")
+        empty = {
+            "sessions": await page.evaluate(_HEIGHT, "#takeover-note"),
+            "wizard": await page.evaluate(_HEIGHT, wizard_note),
+        }
+        await page.evaluate("window.open = () => null")
+        await page.click("#sessions-tbody a")
+        await page.click("#wizard-takeover a")
+        await page.wait_for_function("document.querySelector('#wizard-takeover div').textContent.includes('blocked')")
+        shown = {
+            "sessions": await page.is_visible("#takeover-note"),
+            "wizard": await page.is_visible(wizard_note),
+        }
+        return {"empty": empty, "shown": shown}
+
+    seen = drive(stub, scenario)
+
+    assert seen["empty"] == {"sessions": 0, "wizard": 0}
+    assert seen["shown"] == {"sessions": True, "wizard": True}
+
+
 @requires_chromium
 def test_a_shared_browser_node_row_opens_its_listed_url_with_no_prompt() -> None:
     stub = TakeoverStub(mode="shared_browser_node")

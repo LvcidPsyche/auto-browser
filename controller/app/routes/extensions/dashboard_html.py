@@ -56,6 +56,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   .timeline-item strong { color: var(--text); font-weight: 600; }
   .empty { padding: 32px; text-align: center; color: var(--muted); }
   .section-note { padding: 10px 20px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--border); }
+  .takeover-note { padding: 10px 20px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--border); }
+  .takeover-note:empty { display: none; }
   .wrap { white-space: pre-wrap; word-break: break-word; max-width: 360px; }
   .arguments-viewer pre { margin: 0; padding: 12px 20px; max-height: 50vh; overflow: auto;
                           white-space: pre-wrap; word-break: break-word; }
@@ -111,7 +113,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <h2>Sessions</h2>
       <button class="refresh-btn" id="refresh-sessions">↻ Refresh</button>
     </div>
-    <div id="takeover-note" class="empty" role="status"></div>
+    <div id="takeover-note" class="takeover-note" role="status"></div>
     <table><thead><tr>
       <th>Session ID</th><th>Name</th><th>Status</th><th>Operator</th><th>URL</th><th>Actions</th>
     </tr></thead><tbody id="sessions-tbody"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody></table>
@@ -1045,7 +1047,8 @@ async function wizardStart() {
     const wizardId = wizardSessionId;
     const isolated = isIsolated(session);
     const note = document.createElement('div');
-    note.className = 'empty';
+    note.className = 'takeover-note';
+    note.setAttribute('role', 'status');
     if (wizardId) link.addEventListener('click', (event) => openTakeover(event, wizardId, url, isolated, note));
     takeover.appendChild(link);
     takeover.appendChild(note);
