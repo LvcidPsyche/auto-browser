@@ -178,6 +178,34 @@ class SessionDirCleanupTests(unittest.IsolatedAsyncioTestCase):
         kept = [line for line in logs.output if "Keeping" in line]
         self.assertEqual(len(kept), 1, logs.output)
         self.assertIn(str(self._session_dir("s8").resolve()), kept[0])  # resolved, as the warning is (an 8.3 temp)
+        self.assertIn("could not be removed", kept[0])
+        # W2-17: the daemon's reason for the failed removal reaches the operator too, not only DEBUG.
+        self.assertTrue(any("daemon refused the removal" in line for line in logs.output), logs.output)
+
+    async def test_w2_16_a_failed_start_whose_container_could_not_be_looked_up_keeps_the_dirs_and_says_so(self) -> None:
+        # The controller cannot tell whether a container exists, so the dirs stay; the warning said "could not be
+        # removed" for a container that may never have been created.
+        self.client.containers.start_fails_after_write = True
+        container_name = self.provisioner._container_name("s9")
+        real_get = self.client.containers.get
+
+        def get(identifier: str):
+            if identifier == container_name:
+                raise RuntimeError("sentinel-daemon-unreachable")
+            return real_get(identifier)
+
+        self.client.containers.get = get  # type: ignore[method-assign]
+        with (
+            self.assertLogs("app.session_isolation", level=logging.WARNING) as logs,
+            self.assertRaisesRegex(RuntimeError, "container start failed"),
+        ):
+            await self.provisioner.provision("s9")
+
+        self.assertTrue((self._session_dir("s9") / "profile").exists())
+        kept = [line for line in logs.output if "Keeping" in line]
+        self.assertEqual(len(kept), 1, logs.output)
+        self.assertIn("could not be looked up", kept[0])
+        self.assertNotIn("could not be removed", kept[0])
 
     @unittest.skipUnless(_can_symlink(), "symlinks need privileges on this host")
     async def test_a_symlinked_session_dir_is_never_followed(self) -> None:

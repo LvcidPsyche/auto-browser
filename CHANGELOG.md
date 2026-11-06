@@ -150,12 +150,13 @@ All notable changes to auto-browser are documented here.
 - Releasing an isolated session no longer takes an unreachable Docker daemon (or any Docker error other than "not
   found") for a gone container, and no longer carries on after a container removal that failed (any error but "not
   found", which means gone): the release now fails, `close_session` reports it in `failed_steps` (the audit event and
-  receipt say partial), and the session's profile and downloads directories are kept instead of being deleted under
-  a container that may still be running (after a failed removal, with a warning naming them). A provision that
-  fails before it returns (the container did not start, the session network could not be joined) does the same: when
-  its rollback cannot remove the container (or cannot look it up), the directories stay, with that warning, instead of
-  being emptied after a removal failure logged only at DEBUG. A rollback that releases after a failed
-  provision or connect logs a failed release and raises the original error.
+  receipt say partial), and the session's profile and downloads directories are kept instead of being deleted under a
+  container that may still be running (after a failed removal, with a warning naming them). A provision that fails
+  before it returns (the container did not start, the session network could not be joined) does the same: when its
+  rollback cannot remove the container, or cannot look it up (an unreachable daemon: whether one was created is then
+  unknown), the directories stay, with a warning that says which, instead of being emptied; the lookup failure was
+  already a warning, and the daemon's reason for a failed removal, logged only at DEBUG before, is now one too. A
+  rollback that releases after a failed provision or connect logs a failed release and raises the original error.
 - The `BROWSER_SANDBOX=on` refusal of an isolated session no longer ends "Its container was removed.": it was written
   before the rollback ran, so it was wrong when that removal failed and under `ISOLATED_BROWSER_KEEP_CONTAINERS`,
   which only stops the container.
