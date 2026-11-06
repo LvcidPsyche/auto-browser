@@ -326,6 +326,11 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
         record = await self.manager.session_store.get(SESSION_ID)
         self.assertEqual((record.status, record.close_reason), ("closed", "create_failed"))
         self.assertEqual(len([line for line in logs if "context" in line]), 1, logs)
+        # W10-17: the rollback's lines name it, so an operator can tell them from a close_session's.
+        self.assertIn(
+            f"gave up waiting to close the browser context of a failed create for session {SESSION_ID}",
+            "\n".join(logs),
+        )
 
     async def test_w9_3_a_context_close_that_never_returns_does_not_hold_the_rollback(self) -> None:
         release_runtime, cancels, logs = await self._create_whose_context_close_never_returns(cancel=False)

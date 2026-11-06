@@ -391,25 +391,32 @@ class SessionCreation:
             # left there was held, and re-registered with every replacement watcher.
             self.manager.window_births.forget_session(session)
         # Each await below is bounded as close_session's teardown steps are (W9-3): this unit runs to completion under
-        # a cancel, so a context.close() or runtime release that stalled held its caller for ever.
+        # a cancel, so a context.close() or runtime release that stalled held its caller for ever. The labels name the
+        # rollback (W10-17), so its log lines are not read as a close_session's.
         hook = self.manager._session_create_failed_hook
         if created_hook_started and hook is not None:
             # The created hook registered per-session state (network inspector,
             # CDP session) that only the closed path removed; a failed create
             # never reaches that path, so the dead session's entries stayed.
-            await self._teardown_step(session_id, "run the session create-failed hook", lambda: hook(session_id))
+            await self._teardown_step(
+                session_id, "run the create-failed hook of a failed create", lambda: hook(session_id)
+            )
         if session is not None and session.tunnel is not None:
             tunnel = session.tunnel
             await self._teardown_step(
-                session_id, "release session tunnel", lambda: self.manager.tunnel_broker.release(tunnel)
+                session_id,
+                "release the session tunnel of a failed create",
+                lambda: self.manager.tunnel_broker.release(tunnel),
             )
         if context is not None:
-            await self._teardown_step(session_id, "close browser context", context.close)
+            await self._teardown_step(session_id, "close the browser context of a failed create", context.close)
         if browser is not None and runtime is not None:
             await self._close_owned_browser(browser, session_id)
         if runtime is not None:
             await self._teardown_step(
-                session_id, "release isolated runtime", lambda: self.manager.runtime_provisioner.release(runtime)
+                session_id,
+                "release the isolated runtime of a failed create",
+                lambda: self.manager.runtime_provisioner.release(runtime),
             )
         await self._forget_failed_session_state(session, session_id)
 
