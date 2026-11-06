@@ -331,10 +331,20 @@ base_url_loopback_host() {
 # - a bracketed host holding anything but hex digits and :, or whose first group is empty or all zeros, other than
 #   exactly ::1: every IPv4-mapped and IPv4-compatible form ([::ffff:127.0.0.2]) is in ::/96, while a global IPv6
 #   literal ([2001:db8::5]) passes.
+# Refused before that, as a form curl reads another host from than base_url_host does (W9-4): a set base URL that
+# starts with a scheme and a colon but not with that scheme, // and a character other than / (curl connects to
+# 127.0.0.2 for http:///127.0.0.2:9/ and http:/127.0.0.2:9/), or whose host reads empty (http://:9/). Only an unset or
+# empty variable passes without a host; a scheme-less localhost:8000 is read as curl reads it.
 refuse_other_ipv4_spelling() {
+  local url="${API_BASE_URL:-${AUTO_BROWSER_BASE_URL:-}}"
+  [[ -n "$url" ]] || return 0
   local host
-  host="$(base_url_host "${API_BASE_URL:-${AUTO_BROWSER_BASE_URL:-}}")"
-  [[ -n "$host" ]] || return 0
+  host="$(base_url_host "$url")"
+  if [[ -z "$host" ]] || [[ "$url" =~ ^[A-Za-z][A-Za-z0-9+.-]*:/ && ! "$url" =~ ^[A-Za-z][A-Za-z0-9+.-]*://[^/] ]]; then
+    echo "The controller address is not written in a form the scripts can keep away from a proxy:" \
+      "write AUTO_BROWSER_BASE_URL (or API_BASE_URL) as http://host:port, such as http://127.0.0.2:8000" >&2
+    return 1
+  fi
   local plain=1
   if [[ "$host" == \[* ]]; then
     local inner="${host#\[}"

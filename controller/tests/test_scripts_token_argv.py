@@ -385,6 +385,10 @@ PLAIN_HOST_MESSAGE = (
     "write the controller address in AUTO_BROWSER_BASE_URL (or API_BASE_URL) as a plain host name or address, such "
     "as 127.0.0.2"
 )
+# Base URLs curl reads another host from than the guard did (W9-4): curl connects to 127.0.0.2 for the first two,
+# where the guard read an empty host and "http", so 127.0.0.2 missed the --noproxy list; the third has no host.
+UNREADABLE_BASE_URLS = ("http:///127.0.0.2:{port}/", "http:/127.0.0.2:{port}/", "http://:{port}/")
+URL_FORM_MESSAGE = "write AUTO_BROWSER_BASE_URL (or API_BASE_URL) as http://host:port, such as http://127.0.0.2:8000"
 
 
 @unittest.skipUnless(
@@ -413,7 +417,7 @@ class OtherIpv4SpellingTests(unittest.TestCase):
             newline="\n",
         )
         curl.chmod(0o755)
-        if "://" in host:
+        if "://" in host or "{port}" in host:
             url = host.replace("{port}", str(proxy.server_address[1]))
         else:
             url = f"http://{host}:{proxy.server_address[1]}/sessions"
@@ -452,6 +456,23 @@ class OtherIpv4SpellingTests(unittest.TestCase):
                     self.assertNotEqual(code, 0)
                     self.assertIn(PLAIN_HOST_MESSAGE, stderr)
                     self.assertFalse(ran, "curl ran")
+
+    def test_w9_4_a_base_url_curl_reads_another_host_from_is_refused_before_curl_runs(self) -> None:
+        for function in ("bearer_curl", "takeover_curl"):
+            for url in UNREADABLE_BASE_URLS:
+                with self.subTest(function=function, url=url):
+                    code, stderr, ran = self._run(function, url)
+                    self.assertNotEqual(code, 0)
+                    self.assertIn(URL_FORM_MESSAGE, stderr)
+                    self.assertFalse(ran, "curl ran")
+
+    def test_w9_4_a_scheme_less_base_url_is_not_refused(self) -> None:
+        for url in ("localhost:{port}", "127.0.0.2:{port}/x"):
+            with self.subTest(url=url):
+                _code, stderr, ran = self._run("bearer_curl", url, direct=False)
+                self.assertNotIn(URL_FORM_MESSAGE, stderr)
+                self.assertNotIn(PLAIN_HOST_MESSAGE, stderr)
+                self.assertTrue(ran)
 
     def test_api_base_url_is_checked_too(self) -> None:
         code, stderr, ran = self._run("bearer_curl", "127.2", variable="API_BASE_URL")
