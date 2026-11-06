@@ -29,7 +29,7 @@ async def _read_capped_body(request: Request, limit: int) -> bytes:
     """The request body, refused with 413 past `limit` bytes: by its Content-Length, then as it is read."""
     declared = request.headers.get("content-length")
     if declared is None or not declared.isascii() or not declared.isdigit() or int(declared) > limit:
-        raise HTTPException(413, "Mesh envelope too large or of unknown length")
+        raise HTTPException(413, "Mesh envelope too large or of unknown length (send Content-Length)")
     chunks: list[bytes] = []
     total = 0
     async for chunk in request.stream():

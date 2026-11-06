@@ -104,7 +104,8 @@ time, size and identity, and reads the file again when any of them has changed. 
 Before any of that the body is read with a cap: `MESH_MAX_BODY_BYTES` (1 MiB by default). A request with no
 `Content-Length`, one that declares more, or one that sends more than the cap gets `413` and is not parsed;
 the route takes no bearer token, so this is what stops an unauthenticated caller from making the controller
-buffer an arbitrary body.
+buffer an arbitrary body. A body sent without `Content-Length` (chunked) is refused however small, by design: a
+peer must send `Content-Length`, which auto-browser's own mesh client does.
 
 In this order: the sender is in the peers file; the envelope's timestamp is inside
 `MESH_TIMESTAMP_WINDOW` (a non-finite timestamp is outside it); the envelope is addressed to this

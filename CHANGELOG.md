@@ -461,8 +461,9 @@ All notable changes to auto-browser are documented here.
   (before, `GET /remote-access` and `browser.get_remote_access` passed a list or object on as it was and wrote a NaN
   as `null`; neither answered a 500).
 - `POST /mesh/receive`, which takes no bearer token, now reads at most `MESH_MAX_BODY_BYTES` (new, default 1 MiB): a
-  body with no `Content-Length`, a larger one, or one that streams past the cap gets `413` before anything is parsed,
-  and an uninitialised mesh answers `503` before the body is read. A malformed envelope is `422` as before.
+  body with no `Content-Length` (however small: a peer must send one, and the `413` says so), a larger one, or one
+  that streams past the cap gets `413` before anything is parsed, and an uninitialised mesh answers `503` before the
+  body is read. A malformed envelope is `422` as before.
 
 ## [1.15.0] — 2026-11-05
 

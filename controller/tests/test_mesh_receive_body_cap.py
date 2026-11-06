@@ -44,6 +44,8 @@ def test_a_body_with_no_content_length_is_refused_with_413(mesh) -> None:
     response = mesh.client.post("/mesh/receive", content=chunks(), headers={"content-type": "application/json"})
 
     assert response.status_code == 413
+    # However small: the cap is checked against Content-Length first, so the peer is told to send one (W4-14).
+    assert response.json()["detail"] == "Mesh envelope too large or of unknown length (send Content-Length)"
 
 
 def test_a_body_longer_than_its_declared_length_is_cut_off_at_the_cap(mesh) -> None:
