@@ -268,15 +268,8 @@ class HarnessRunStore:
             return None
         if candidate.contract_hash != record.contract_hash or candidate.owner != record.owner:
             return None
-        if candidate.trace_hash == expected:
-            return candidate
-        # The candidate hashes the trace the verifier saw; the attempt, the scrubbed copy it stored.
-        try:
-            staged_trace = TraceEnvelope.model_validate_json((directory / "trace.json").read_text(encoding="utf-8"))
-            scrubbed_hash = staged_trace.scrubbed().trace_hash
-        except Exception:  # an unreadable or unscrubbable trace matches nothing
-            return None
-        return candidate if staged_trace.trace_hash == candidate.trace_hash and scrubbed_hash == expected else None
+        # Induction and the attempt hash the same scrubbed trace, so the hashes match or the candidate is another's.
+        return candidate if candidate.trace_hash == expected else None
 
     def _aside_skill_id(self, aside: Path) -> str | None:
         """The skill id an aside's candidate.json names, when it is one plain name that stays inside the root."""
