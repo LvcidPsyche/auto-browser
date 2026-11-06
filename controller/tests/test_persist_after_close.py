@@ -77,9 +77,13 @@ class PersistAfterCloseTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.close_session(self.session_id)
         upsert = AsyncMock()
         self.manager.session_store.upsert = upsert  # type: ignore[method-assign]
+        # B3-5: the second check (after the summary) also stops the write, so only this pins the first one.
+        summary = AsyncMock(wraps=self.manager._session_summary)
+        self.manager._session_summary = summary  # type: ignore[method-assign]
 
         await self.manager._persist_session(self.session, status="active")
 
+        summary.assert_not_awaited()
         upsert.assert_not_awaited()
 
     async def test_b_fix_4_persist_attempts_no_active_write_when_the_close_races_the_summary(self) -> None:
