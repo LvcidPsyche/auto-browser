@@ -162,8 +162,8 @@ All notable changes to auto-browser are documented here.
   `/payments/1/authorize` (read as a login page).
 - The harness's `HARNESS_UV_COMMAND` verifier reads its stdout with a 1 MiB cap (it used to buffer all of it): a
   command that writes more is killed and the verification is `unverified`. Its stderr keeps the first 4 KiB, even
-  when one read crosses that, so a failure's notes still start with the command's own message. The docs now say the command receives the
-  full contract and the unscrubbed trace on stdin.
+  when one read crosses that, so a failure's notes still start with the command's own message. The docs now say the
+  command receives the full contract and the unscrubbed trace on stdin.
 - A drift check whose expected-text scrubber fails keeps the expectation as written: a failing URL scrubber hands
   back the value's path, the empty string for a `url_contains` value that starts with `?` or `#` and `/` for one
   that starts with `/?` or `/#`, and every URL contains either. A scrubber that raises is reported `unverified` with
@@ -190,7 +190,8 @@ All notable changes to auto-browser are documented here.
   (one more is answered 503 and closed at once; each held a thread, with no limit), and on a Codex timeout kills
   Codex's whole process group, not only the direct child. Stopping the bridge (Ctrl+C or SIGTERM) kills the Codex
   runs still in flight the same way, skipping only a run the handler has already reaped (a Codex that exited while its
-  children hold its pipes is still signalled, so they are killed too); Codex runs in its own session, so it no longer gets the terminal's Ctrl+C and used to run on, orphaned.
+  children hold its pipes is still signalled, so they are killed too); Codex runs in its own session, so it no
+  longer gets the terminal's Ctrl+C and used to run on, orphaned.
 - The Codex host bridge answers a request body that is not UTF-8 with 400 and a fixed message instead of a 500
   carrying the exception text, answers any other unexpected error with a fixed `internal error` and logs the detail on
   the bridge side, and no longer returns Codex's stderr to the controller on success (it logs it instead; the
