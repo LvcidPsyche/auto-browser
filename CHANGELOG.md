@@ -84,8 +84,9 @@ All notable changes to auto-browser are documented here.
 - `scripts/agent_eval.py --execute` reads the controller token from `AUTO_BROWSER_TOKEN`; `--bearer-token` still works
   but is deprecated, warns, and is documented as visible to every local user in the process list.
 - The Codex host bridge now removes only a stale socket at `--socket-path`: a regular file, directory or symlink there
-  stops it with a message instead of being deleted, a path too long for a unix socket is refused with its length, and
-  the socket is set to 0600 explicitly after binding.
+  stops it with a message instead of being deleted, as does a socket another bridge is listening on (it connects
+  first, and removes the socket only when the connection is refused), a path too long for a unix socket is refused
+  with its length, and the socket is set to 0600 explicitly after binding.
 - An encrypted auth-state save now removes the plaintext state file it replaces, and loading a plaintext state while
   `AUTH_STATE_ENCRYPTION_KEY` is set logs a warning.
 - `POST /sessions` with an auth profile or `storage_state_path` that cannot be decrypted (wrong or missing

@@ -145,7 +145,8 @@ class SocketPathError(RuntimeError):
 
 
 def prepare_socket_path(raw: str) -> Path:
-    """The resolved path to bind, with a stale socket there removed; SocketPathError when it cannot be used.
+    """The resolved path to bind, with a stale socket there removed; SocketPathError when it cannot be used, a socket
+    another bridge is listening on included.
 
     Only a socket is ever unlinked: the path used to be resolved and whatever file it named was deleted, so a
     --socket-path that pointed at a regular file or a symlink removed it (or the symlink's target).
@@ -165,8 +166,27 @@ def prepare_socket_path(raw: str) -> Path:
         if not stat.S_ISSOCK(mode):
             raise SocketPathError(f"{candidate} exists and is not a socket; refusing to remove it")
     if socket_path.exists():
-        socket_path.unlink()
+        if _socket_is_listening(socket_path):
+            raise SocketPathError(
+                f"another bridge is listening on {socket_path}; stop it or pass another --socket-path"
+            )
+        socket_path.unlink()  # refused: nothing listens, so it is stale
     return socket_path
+
+
+def _socket_is_listening(path: Path) -> bool:
+    """True when a connection to the socket at `path` is accepted; a refused one means a stale socket."""
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.settimeout(2.0)
+        probe.connect(str(path))
+    except (ConnectionRefusedError, FileNotFoundError):
+        return False
+    except OSError:
+        return True  # it answered somehow (a full backlog times out): not ours to remove
+    finally:
+        probe.close()
+    return True
 
 
 def model_name_is_valid(model: str) -> bool:

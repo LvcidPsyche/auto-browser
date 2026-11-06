@@ -76,6 +76,23 @@ class PrepareSocketPathTests(unittest.TestCase):
         bridge.prepare_socket_path(str(target))
         self.assertFalse(target.exists())
 
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX") and os.name == "posix", "needs AF_UNIX")
+    def test_w4_8_a_socket_another_bridge_is_listening_on_is_refused_and_kept(self) -> None:
+        # Any socket was removed, a live one included: a second bridge took over the first one's path.
+        target = self.root / "codex.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(str(target))
+        listener.listen(1)
+        with self.assertRaises(bridge.SocketPathError) as caught:
+            bridge.prepare_socket_path(str(target))
+        self.assertIn("another bridge is listening", str(caught.exception))
+        self.assertIn(str(target.resolve()), str(caught.exception))
+        self.assertTrue(target.exists())
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(probe.close)
+        probe.connect(str(target))  # still the first listener's
+
     @unittest.skipUnless(os.name == "posix", "needs symlinks")
     def test_a_symlink_at_the_path_is_refused_and_its_target_kept(self) -> None:
         real = self.root / "real.txt"
