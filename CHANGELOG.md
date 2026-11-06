@@ -163,7 +163,9 @@ All notable changes to auto-browser are documented here.
 - Releasing an isolated session's tunnel (a close, or a failed create's rollback) now waits at most 5 seconds for
   autossh to exit after `SIGKILL`, as it already did after the terminate, then logs a warning naming the session and
   the process id and finishes the teardown: an autossh that never exited (stuck in uninterruptible I/O) held the close
-  or the rollback for ever.
+  or the rollback for ever. An autossh already gone when it is terminated or killed (it exited while the first wait
+  timed out, so `kill()` raised `ProcessLookupError`) no longer stops the teardown before it frees the remote port,
+  forgets the tunnel, closes its log and removes its files.
 - A shadow browse that fails or is cancelled after its Chromium started no longer leaves that browser running, the
   shadow's artifact, auth and upload directories on disk, or an `active` record in the session store (a record
   already written is marked `closed` with reason `create_failed`, as a failed `create_session`'s is): the rollback

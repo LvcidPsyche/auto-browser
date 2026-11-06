@@ -668,6 +668,67 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(tunnel.info_path.exists())
             self.assertFalse(tunnel.log_path.exists())
 
+    async def _a_registered_tunnel(self, broker, process):
+        tunnel = broker._build_tunnel("session-1", remote_port=16181, local_host="h", local_port=6080)
+        tunnel.process = process
+        tunnel.info_path.write_text("{}", encoding="utf-8")
+        tunnel.stderr_handle = tunnel.log_path.open("ab")
+        broker._tunnels["session-1"] = tunnel
+        broker._allocated_ports.add(16181)
+        return tunnel
+
+    def _assert_torn_down(self, broker, tunnel, handle) -> None:
+        self.assertEqual(tunnel.status, "inactive")
+        self.assertEqual(broker._allocated_ports, set())
+        self.assertEqual(broker._tunnels, {})
+        self.assertIsNone(tunnel.stderr_handle)
+        self.assertTrue(handle.closed)
+        self.assertFalse(tunnel.info_path.exists())
+        self.assertFalse(tunnel.log_path.exists())
+
+    async def test_w11_2_release_completes_when_autossh_is_gone_before_the_kill(self) -> None:
+        """autossh exiting while the first wait's timeout was handled closed its transport, so kill() raised
+        ProcessLookupError and the teardown stopped before its bookkeeping, with `released` already set."""
+
+        class GoneAtTheKill(FakeProcess):
+            async def wait(self) -> int:
+                await asyncio.Event().wait()
+                return 0  # pragma: no cover - never reached
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def kill(self) -> None:
+                self.killed = True
+                raise ProcessLookupError
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            tunnel = await self._a_registered_tunnel(broker, GoneAtTheKill())
+            handle = tunnel.stderr_handle
+
+            with patch("app.session_tunnel._PROCESS_EXIT_WAIT_SECONDS", 0.05):
+                await asyncio.wait_for(broker.release(tunnel), timeout=10)
+
+            self.assertTrue(tunnel.process.killed)
+            self._assert_torn_down(broker, tunnel, handle)
+
+    async def test_w11_2_release_completes_when_autossh_is_gone_before_the_terminate(self) -> None:
+        class GoneAtTheTerminate(FakeProcess):
+            def terminate(self) -> None:
+                self.terminated = True
+                raise ProcessLookupError
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            tunnel = await self._a_registered_tunnel(broker, GoneAtTheTerminate())
+            handle = tunnel.stderr_handle
+
+            await asyncio.wait_for(broker.release(tunnel), timeout=10)
+
+            self.assertTrue(tunnel.process.terminated)
+            self._assert_torn_down(broker, tunnel, handle)
+
     async def test_failed_metadata_write_does_not_leak_the_log_handle(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             broker = await self._started_broker(Path(tempdir))

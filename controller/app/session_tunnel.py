@@ -304,21 +304,34 @@ class IsolatedSessionTunnelBroker:
 
         process = tunnel.process
         if process is not None and process.returncode is None:
-            process.terminate()
+            # ProcessLookupError from terminate() or kill() means autossh is gone (its transport closed, as when it
+            # exits while the first wait's timeout is handled): go on to the bookkeeping, which nothing retries once
+            # `released` is set (W11-2).
             try:
-                await asyncio.wait_for(process.wait(), timeout=_PROCESS_EXIT_WAIT_SECONDS)
-            except asyncio.TimeoutError:
-                process.kill()
-                # Bounded too (W10-7): an autossh stuck in uninterruptible I/O never exits after SIGKILL, and
-                # release() finishes this teardown under a cancel, so an unbounded wait held its caller for ever.
+                process.terminate()
+            except ProcessLookupError:
+                pass
+            else:
                 try:
                     await asyncio.wait_for(process.wait(), timeout=_PROCESS_EXIT_WAIT_SECONDS)
                 except asyncio.TimeoutError:
-                    logger.warning(
-                        "autossh (pid %s) of session %s's tunnel did not exit after SIGKILL; tearing down without it",
-                        process.pid,
-                        tunnel.session_id,
-                    )
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    else:
+                        # Bounded too (W10-7): an autossh stuck in uninterruptible I/O never exits after SIGKILL,
+                        # and release() finishes this teardown under a cancel, so an unbounded wait held its
+                        # caller for ever.
+                        try:
+                            await asyncio.wait_for(process.wait(), timeout=_PROCESS_EXIT_WAIT_SECONDS)
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "autossh (pid %s) of session %s's tunnel did not exit after SIGKILL;"
+                                " tearing down without it",
+                                process.pid,
+                                tunnel.session_id,
+                            )
 
         tunnel.status = "inactive"
         tunnel.error = None
