@@ -94,9 +94,10 @@ All notable changes to auto-browser are documented here.
   On POSIX each bridge holds an exclusive lock on `<socket-path>.lock` (created 0600, left in place) for its whole
   life, taken before that check, so a second bridge on the same path stops at startup with "another bridge is running
   on <path>" instead of racing the first one's probe, a lock file it cannot open (a symlink, or another uid's) or
-  cannot lock (`ENOLCK`, or a filesystem without locks) stops it with a message naming that file, and at shutdown a bridge checks, just before removing the socket, that the path
-  still names the one it bound, which keeps it from removing a socket a later bridge bound there, but not one a
-  process that ignores the lock puts there between the check and the removal.
+  cannot lock (`ENOLCK`, or a filesystem without locks) stops it with a message naming that file, and at shutdown a
+  bridge checks, just before removing the socket, that the path still names the one it bound, which keeps it from
+  removing a socket a later bridge bound there, but not one a process that ignores the lock puts there between the
+  check and the removal.
 - An encrypted auth-state save now removes the plaintext state file it replaces (best-effort: one that cannot be
   removed, a directory or a Windows lock, logs a warning naming it and the save still succeeds), and loading a
   plaintext state while `AUTH_STATE_ENCRYPTION_KEY` is set logs a warning.
@@ -130,25 +131,28 @@ All notable changes to auto-browser are documented here.
 - A late background write of a session's record can no longer put a closed session back to active: the active write is
   skipped when the session is no longer registered (checked before and after the summary is built), and the session
   store refuses to overwrite a stored `closed` record with any other status (an `interrupted` write replaced it and
-  lost its `close_reason`); a stored record it cannot parse (a corrupt file) is replaced by the next write, unless
-  Redis is the primary store and holds a readable `closed` copy (then the write is refused, and a Redis read that
-  fails otherwise, such as a lost connection, skips it), and one it cannot read (an I/O error, which could hide a
-  closed record) skips that non-closed write for the next one to retry, each logged with the session id; neither fails
-  the action whose state the write mirrors, the check never refuses a `closed` write, and a close (or a failed
-  create's rollback) writes its `closed` record over one it cannot parse. The store makes one write at a time per
-  session, from that check through the file and Redis copies, and a cancelled write finishes before the next one for
-  that session starts, so the guard holds within one controller process; two processes sharing a store are not
-  covered. Writes for different sessions do not wait for each other.
+  lost its `close_reason`), a guard that reads the file copy, which every write updates first; a stored record it
+  cannot parse (a corrupt file) is replaced by the next write, unless Redis is the primary store and holds a readable
+  `closed` copy (then the write is refused, and a Redis read that fails otherwise, such as a lost connection, skips
+  it), and one it cannot read (an I/O error, which could hide a closed record) skips that non-closed write for the
+  next one to retry, each logged with the session id; neither fails the action whose state the write mirrors, the
+  check never refuses a `closed` write, and a close (or a failed create's rollback) writes its `closed` record over
+  one it cannot parse. The store makes one write at a time per session, from that check through the file and Redis
+  copies, and a cancelled write finishes before the next one for that session starts, so the guard holds within one
+  controller process; two processes sharing a store are not covered. Writes for different sessions do not wait for
+  each other.
 - A `create_session` that fails no longer leaves its artifact, auth and upload directories behind or an `active`
   record in the session store: the directories are made only after every check that can refuse the request, removed
   again by the rollback (in a worker thread, so a large tree does not stall other requests, and each on its own: one
   whose removal or check fails is logged and the rest of the rollback goes on), and a record the create had already
   written is marked `closed` (reason `create_failed`). The whole rollback (the tunnel and isolated runtime releases,
   the context and browser closes, the directories and the record) runs to completion when the task awaiting it is
-  cancelled during it, then the cancel is raised. Each of its steps is bounded as `close_session`'s teardown
-  steps are (30 seconds, then logged and passed), so a context close or runtime release that never returns no longer
-  holds the rest of the rollback or its caller. When the controller itself stops, every task left is cancelled, the
-  rollback's own included, and the next start marks such a record `interrupted`.
+  cancelled during it, then the cancel is raised. The create-failed hook, the tunnel release, the context close, the
+  isolated browser's close and the runtime release are each bounded as `close_session`'s teardown steps are (30
+  seconds, then logged and passed), so a context close or runtime release that never returns no longer holds the rest
+  of the rollback or its caller; the directory removal and the record close are not bounded. When the controller
+  itself stops, every task left is cancelled, the rollback's own included, and the next start marks such a record
+  `interrupted`.
 - Releasing an isolated session's tunnel (a close, or a failed create's rollback) now waits at most 5 seconds for
   autossh to exit after `SIGKILL`, as it already did after the terminate, then logs a warning naming the session and
   the process id and finishes the teardown: an autossh that never exited (stuck in uninterruptible I/O) held the close
@@ -303,7 +307,9 @@ All notable changes to auto-browser are documented here.
   window (an envelope accepted, then 10,000 others inside its window, and it ran again): at the cap every expired
   nonce goes, and if none has, the new envelope is refused with `503` ("mesh replay cache is full; retry later") and
   not recorded, so the cap bounds how many nonces are remembered at once, and nothing remembered is dropped before it
-  expires; a reply that finds the cache full fails the delegation.
+  expires; a reply that finds the cache full fails the delegation. The limit: a nonce is recorded once the envelope's
+  signature checks out, before the request is decoded or granted, so one registered peer that sends 10,000 signed
+  envelopes inside a window fills the cache, and every peer is refused (`503`) until they expire.
 - The Codex host bridge reads a request body within 60 seconds in total (a client trickling a byte every 29 s used to
   hold a handler thread indefinitely; it now gets 408) and the request line and headers within 30 seconds in total
   (past that it closes the connection; a request line cut off that way no longer ends in a broken-pipe traceback),
@@ -371,10 +377,11 @@ All notable changes to auto-browser are documented here.
   authority ending at the first `/`, `?` or `#`, and they also refuse a set base URL that starts with a scheme and a
   colon but not with that scheme, `//` and a host, such as `http:///127.0.0.2:8000/` or `http:/127.0.0.2:8000/`,
   which curl reads as `127.0.0.2`, and one whose host is empty, such as `http://:8000/`; a scheme-less
-  `localhost:8000` is still accepted), then the environment's own `NO_PROXY` (a `NO_PROXY` of `*` is passed alone, so every host still goes direct), the reverse-SSH smoke's
-  bastion curl passes it for the bastion's own loopback names, and `scripts/smoke_download.py` sends its controller
-  requests with no proxy, so a request to a loopback controller no longer hands its tokens to an `HTTP_PROXY` or
-  `ALL_PROXY`. `scripts/takeover_link.sh` warns when it finds no takeover token and says what a 403 means.
+  `localhost:8000` is still accepted), then the environment's own `NO_PROXY` (a `NO_PROXY` of `*` is passed alone, so
+  every host still goes direct), the reverse-SSH smoke's bastion curl passes it for the bastion's own loopback names,
+  and `scripts/smoke_download.py` sends its controller requests with no proxy, so a request to a loopback controller
+  no longer hands its tokens to an `HTTP_PROXY` or `ALL_PROXY`. `scripts/takeover_link.sh` warns when it finds no
+  takeover token and says what a 403 means.
 - The Codex host bridge (`scripts/codex_host_bridge.py`, `OPENAI_AUTH_MODE=host_bridge`) now starts Codex with an
   allowlisted environment instead of the whole environment of the shell it was started from, which Codex, and every
   command a prompt-injected Codex ran under `-s read-only`, received: the names the controller gives its own provider
@@ -543,12 +550,12 @@ All notable changes to auto-browser are documented here.
   still reads `SSL_CERT_FILE` and `SSL_CERT_DIR`). The address is the IP literal, or what the platform's numeric
   parser (`getaddrinfo` with `AI_NUMERICHOST`, which never queries DNS) reads the host as, so `127.2`, `2130706434`
   and `0x7f000002` count as `127.0.0.2`, as they do for the socket layer; the bridges and `scripts/agent_eval.py`
-  judge the host urllib connects to, which it has percent-decoded (`%31%32%37.0.0.2` is `127.0.0.2`). Any other host, a `*.localhost` name
-  included, still goes through the proxy the environment names. `scripts/check_sandbox_gate.py`, which only talks to
-  `127.0.0.1`, never uses a proxy. `scripts/agent_eval.py --execute`, `scripts/check_sandbox_gate.py` and
-  `scripts/smoke_download.py` now also refuse redirects, as the bridges do, direct or proxied: urllib's default
-  handler copied the `Authorization` header onto a redirect to any origin, and a 3xx is now reported as the HTTP error
-  each script already reports.
+  judge the host urllib connects to, which it has percent-decoded (`%31%32%37.0.0.2` is `127.0.0.2`). Any other host,
+  a `*.localhost` name included, still goes through the proxy the environment names. `scripts/check_sandbox_gate.py`,
+  which only talks to `127.0.0.1`, never uses a proxy. `scripts/agent_eval.py --execute`,
+  `scripts/check_sandbox_gate.py` and `scripts/smoke_download.py` now also refuse redirects, as the bridges do, direct
+  or proxied: urllib's default handler copied the `Authorization` header onto a redirect to any origin, and a 3xx is
+  now reported as the HTTP error each script already reports.
 
 ## [1.15.0] — 2026-11-05
 

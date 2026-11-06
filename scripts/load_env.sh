@@ -272,9 +272,9 @@ curl_auth_config() {
 # controller carries the tokens, and through a proxy it would hand them to the proxy. curl's --noproxy takes a
 # comma-separated list (an IPv6 address unbracketed) and replaces NO_PROXY for that curl, so the environment's own
 # list (no_proxy, which curl reads first, else NO_PROXY) follows them. The scripts' base URL host (API_BASE_URL, else
-# AUTO_BROWSER_BASE_URL) is listed too when it is another loopback address (127.0.0.2, say): named exactly, since
-# older curls take no CIDR. curl reads `*` as every host only when it is the whole list, so an inherited `*` is
-# printed alone.
+# AUTO_BROWSER_BASE_URL) is listed too when it is another loopback address (127.0.0.2, say) or 0.0.0.0: named
+# exactly, since older curls take no CIDR. curl reads `*` as every host only when it is the whole list, so an
+# inherited `*` is printed alone.
 loopback_noproxy() {
   local inherited="${no_proxy:-${NO_PROXY:-}}"
   local trimmed="${inherited//[[:space:]]/}"

@@ -118,9 +118,11 @@ remembered until the latest time this node's clock has shown is more than one wi
 timestamp, then forgotten (a clock stepped back does not free it early). The cache remembers at most 10,000 nonces
 at once, and nothing it remembers is dropped before it expires: when it is full of nonces still inside their
 window, a new envelope is refused with `503` ("mesh replay cache is full; retry later") and not recorded, and a
-retry passes once older nonces expire. The timestamp window is checked against that same latest time, never the
-raw clock, so a clock stepped back cannot put an envelope whose nonce is already forgotten inside the window
-again. A peer's reply to a delegation this node sent is checked against the same clock and nonce cache, and
+retry passes once older nonces expire. The limit: a nonce is recorded once the envelope's signature checks out,
+before the request is decoded or granted, so one registered peer that sends 10,000 signed envelopes inside a
+window fills the cache, and every peer is refused (`503`) until they expire. The timestamp window is checked
+against that same latest time, never the raw clock, so a clock stepped back cannot put an envelope whose nonce is
+already forgotten inside the window again. A peer's reply to a delegation this node sent is checked against the same clock and nonce cache, and
 refused unless it names the request's id. The cost: after a large backward step of the clock, fresh envelopes are
 refused (`403`) until the clock catches up, for about the step minus the window. Nonces are kept in memory only,
 so a restart empties them; to close that gap the controller also refuses any envelope stamped before the moment it

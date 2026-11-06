@@ -390,9 +390,11 @@ class SessionCreation:
             # Registered with the window-birth watcher before the failure (watch runs early): a dead session
             # left there was held, and re-registered with every replacement watcher.
             self.manager.window_births.forget_session(session)
-        # Each await below is bounded as close_session's teardown steps are (W9-3): this unit runs to completion under
-        # a cancel, so a context.close() or runtime release that stalled held its caller for ever. The labels name the
-        # rollback (W10-17), so its log lines are not read as a close_session's.
+        # The hook, the tunnel release, the context close, the owned browser's close and the runtime release below are
+        # each bounded as close_session's teardown steps are (W9-3): this unit runs to completion under a cancel, so a
+        # context.close() or runtime release that stalled held its caller for ever. The directory removal and the
+        # record close in _forget_failed_session_state are not bounded. The labels name the rollback (W10-17), so its
+        # log lines are not read as a close_session's.
         hook = self.manager._session_create_failed_hook
         if created_hook_started and hook is not None:
             # The created hook registered per-session state (network inspector,

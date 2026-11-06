@@ -175,8 +175,7 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
 
     async def _cancel_while_rollback_waits_in(self, step: str) -> tuple[AsyncMock, int]:
         # W7-2: a failed create's rollback with an isolated runtime and a tunnel; the caller is cancelled while the
-        # rollback waits in ``step``. Returns the runtime release and how many
-        # CancelledErrors the caller saw.
+        # rollback waits in ``step``. Returns the runtime release and how many CancelledErrors the caller saw.
         import asyncio
 
         from app.session_isolation import IsolatedBrowserRuntime
