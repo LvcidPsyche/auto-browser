@@ -172,9 +172,33 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(path.name for path in artifacts.iterdir()), ["stuck.bin"])
         record = await self.manager.session_store.get(SESSION_ID)
         self.assertEqual((record.status, record.close_reason, record.live), ("closed", "create_failed", False))
-        self.assertTrue(
-            any(str(artifacts) in line and "Permission denied" in line for line in logs.output), logs.output
-        )
+        # W12-4: one warning for the directory, naming its first error (the unlink's), not the parent rmdir's
+        # "Directory not empty" too, nor an error-less line from the check that it is still there.
+        naming = [line for line in logs.output if str(artifacts) in line]
+        self.assertEqual(len(naming), 1, logs.output)
+        self.assertIn("Permission denied", naming[0])
+
+    async def test_w12_4_a_directory_never_created_is_not_logged(self) -> None:
+        # rmtree reports a missing directory to its callback as FileNotFoundError (lstat on Linux; scandir and rmdir
+        # on Windows); a path already gone is not an error, so no warning names it.
+        import shutil
+
+        uploads = self.root / "uploads" / SESSION_ID
+        armed = False
+
+        async def fail(*_args, **_kwargs):
+            nonlocal armed
+            armed = True
+            shutil.rmtree(uploads)
+            raise RuntimeError("witness down")
+
+        self.manager.witness_bridge.record_session_receipt = AsyncMock(side_effect=fail)  # type: ignore[method-assign]
+        with self.assertNoLogs("app.browser.services.session_creation", "WARNING"):
+            with self.assertRaisesRegex(RuntimeError, "witness down"):
+                await self.manager.create_session()
+
+        self.assertTrue(armed, "the create never reached the witness receipt")
+        self.assertEqual(self.leftovers(), [])
 
     async def test_w5_6_a_cancel_during_the_rollback_still_closes_the_record_and_removes_the_directories(self) -> None:
         # The directory removal is awaited before the closed record is written: a second cancel there (a shutdown)

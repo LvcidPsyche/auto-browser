@@ -429,19 +429,25 @@ class SessionCreation:
         Each directory on its own (W10-6): an OSError from its removal or its check (Path.exists raises for EACCES or
         EIO on Python 3.11) is logged and the loop goes on, so the other directories and the record close still run.
         A removal error inside rmtree is logged with the directory and the error, and rmtree goes on through the rest
-        of that tree (W11-5); a path already gone is not an error.
+        of that tree (W11-5); a path already gone is not an error. One warning per directory, naming its first error,
+        the root cause (W12-4): the parent's "Directory not empty" that follows a file's unlink error is not logged.
         """
         for directory in (
             self.manager.artifacts.artifact_root / session_id,
             self.auth_root(session_id),
             self.upload_root(session_id),
         ):
+            reported: list[BaseException] = []
 
-            def logged(_function: Any, _path: Any, error: Any, directory: Path = directory) -> None:
+            def logged(
+                _function: Any, _path: Any, error: Any, directory: Path = directory, reported: list = reported
+            ) -> None:
                 if isinstance(error, tuple):  # onerror's exc_info
                     error = error[1]
-                if not isinstance(error, FileNotFoundError):
-                    logger.warning("rollback could not remove %s: %s", directory, error)
+                if isinstance(error, FileNotFoundError) or reported:
+                    return
+                reported.append(error)
+                logger.warning("rollback could not remove %s: %s", directory, error)
 
             try:
                 # onexc from Python 3.12, where onerror is deprecated; onerror on 3.11.
@@ -449,10 +455,11 @@ class SessionCreation:
                     shutil.rmtree(directory, onexc=logged)
                 else:
                     shutil.rmtree(directory, onerror=logged)
-                if directory.exists():
+                if not reported and directory.exists():
                     logger.warning("rollback could not remove %s", directory)
             except OSError as exc:
-                logger.warning("rollback could not remove %s: %s", directory, exc)
+                if not reported:
+                    logger.warning("rollback could not remove %s: %s", directory, exc)
 
     async def _forget_failed_session_state(self, session: "BrowserSession | None", session_id: str) -> None:
         """Remove the directories a failed create made, and close the record it persisted, if it got that far.
