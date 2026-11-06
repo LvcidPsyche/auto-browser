@@ -630,11 +630,11 @@ All notable changes to auto-browser are documented here.
   answers show has the URL's userinfo, password, query and fragment, each whole, as written or percent-decoded,
   replaced with `[redacted]` and any other `user:password@` removed (a server's error detail that quotes one another
   way, such as a query value alone, is shown as it came); a 429's `Retry-After` is shown only as a number of seconds;
-  and the bridges no longer send a token holding a line break, which http.client's header error quoted whole (a 401's
-  answer says why). 1.15.0's answers echoed them all. `scripts/agent_eval.py --execute`,
-  `scripts/check_sandbox_gate.py` and `scripts/smoke_download.py` now also refuse redirects, as the bridges do, direct
-  or proxied: urllib's default handler copied the `Authorization` header onto a redirect to any origin, and a 3xx is
-  now reported as the HTTP error each script already reports.
+  and the bridges no longer send a token holding a line break, which http.client's header error quoted whole. 1.15.0's
+  answers echoed them all. `scripts/agent_eval.py --execute`, `scripts/check_sandbox_gate.py` and
+  `scripts/smoke_download.py` now also refuse redirects, as the bridges do, direct or proxied: urllib's default
+  handler copied the `Authorization` header onto a redirect to any origin, and a 3xx is now reported as the HTTP error
+  each script already reports.
 
 ## [1.15.0] — 2026-11-05
 
