@@ -14,6 +14,9 @@ All notable changes to auto-browser are documented here.
   and `scripts/takeover_link.sh` reads it from `TAKEOVER_TOKEN` (the shell or `.env`) or `data/takeover-token`. A
   script or integration that took the password from `POST /sessions`, `GET /sessions/{id}`, `GET /remote-access` or
   the takeover result now calls `GET /sessions/{session_id}/takeover-link` with the `X-Takeover-Token` header.
+- **Upgrade note:** an empty `ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS`, which under
+  `ISOLATED_TUNNEL_ACCESS_MODE=unsafe-public` bound the tunnel on every interface of the bastion, now stops startup:
+  set `0.0.0.0` for that instead.
 - **Upgrade note:** an approval webhook whose host is a private name (a service on the compose network, a LAN
   address) was reachable by name before and is now refused, as is one at a shared address (`100.64.0.0/10`, such as
   a Tailscale node): every address that is not global is. Set the new `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS=true`
@@ -107,9 +110,11 @@ All notable changes to auto-browser are documented here.
   a session on such a URL was not offered an isolated tunnel and the startup warning was skipped. The isolated
   tunnel's remote bind address (`ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS`) has its own strict check: a bare host or IP
   only, `localhost` or any address that reads as loopback (another loopback address such as `127.0.0.2` included);
-  `0.0.0.0` stays refused there without `unsafe-public`, and a value with a port, brackets or surrounding spaces
-  (`localhost:22`, `[::1]:22`, ` 127.0.0.1 `), which built a malformed `-R` spec, now stops startup with a clear
-  error.
+  `0.0.0.0` stays refused there without `unsafe-public`. A value with a port or surrounding spaces (`localhost:22`,
+  `[::1]:22`, ` 127.0.0.1 `) went into the `-R` spec as it was, which ssh then refused or read as another bind, and
+  an empty one binds every interface: each now stops startup with a clear error. An IPv6 literal, bare (`::1`) or in
+  ssh's brackets without a port (`[::1]`), is accepted and goes into the spec in brackets, as ssh needs
+  (`[::1]:16181:127.0.0.1:6080`; the bare `::1:16181:...` is a spec ssh refuses).
 - An isolated session tunnel whose autossh exits early for a reason other than a taken remote port (a refused key, an
   unreachable bastion) now fails the provision at once with that message instead of retrying every port in
   `ISOLATED_TUNNEL_REMOTE_PORT_START`..`END`, each after a full `ISOLATED_TUNNEL_STARTUP_GRACE_SECONDS`; "remote port

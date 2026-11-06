@@ -22,6 +22,29 @@ def _is_bare_host(value: str) -> bool:
         return ":" not in value  # a name with a colon is host:port
 
 
+def _bare_bind_address(value: str) -> str | None:
+    """The tunnel's remote bind address as a bare host or IP, or None when it is not one.
+
+    ssh's own spelling of an IPv6 literal, in brackets with no port (`[::1]`), is accepted and unbracketed; a host
+    name or IPv4 address in brackets, a port, spaces and an empty value are not."""
+    if len(value) > 2 and value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1]
+        try:
+            return inner if ipaddress.ip_address(inner).version == 6 else None
+        except ValueError:
+            return None
+    return value if _is_bare_host(value) else None
+
+
+def _ssh_address(value: str) -> str:
+    """An address as it goes into an ssh forwarding spec: an IPv6 literal in brackets (its colons would otherwise
+    split the spec), anything else as it is."""
+    try:
+        return f"[{value}]" if ipaddress.ip_address(value).version == 6 else value
+    except ValueError:
+        return value
+
+
 def _is_bare_loopback(value: str) -> bool:
     """Strictly loopback, for the tunnel's remote bind address: `localhost`, or an address ipaddress reads as
     loopback. is_loopback_host stays lenient (host:port, brackets) for its other callers."""
@@ -340,7 +363,10 @@ class IsolatedSessionTunnelBroker:
             ssh_port=self.settings.isolated_tunnel_port,
             ssh_user=self.settings.isolated_tunnel_user or "",
             access_mode=self.settings.isolated_tunnel_access_mode,
-            remote_bind_address=self.settings.isolated_tunnel_remote_bind_address,
+            remote_bind_address=(
+                _bare_bind_address(self.settings.isolated_tunnel_remote_bind_address)
+                or self.settings.isolated_tunnel_remote_bind_address
+            ),
             info_interval_seconds=self.settings.isolated_tunnel_info_interval_seconds,
         )
 
@@ -367,7 +393,10 @@ class IsolatedSessionTunnelBroker:
             "-i",
             self.settings.isolated_tunnel_key_path,
             "-R",
-            (f"{tunnel.remote_bind_address}:{tunnel.remote_port}:{tunnel.local_host}:{tunnel.local_port}"),
+            (
+                f"{_ssh_address(tunnel.remote_bind_address)}:{tunnel.remote_port}:"
+                f"{_ssh_address(tunnel.local_host)}:{tunnel.local_port}"
+            ),
             f"{tunnel.ssh_user}@{tunnel.ssh_host}",
         ]
 
@@ -459,12 +488,16 @@ class IsolatedSessionTunnelBroker:
                 f"{self.settings.isolated_tunnel_access_mode}; expected one of: {', '.join(sorted(allowed_modes))}"
             )
 
-        bind_address = self.settings.isolated_tunnel_remote_bind_address
-        if not _is_bare_host(bind_address):
-            # It goes into the -R spec as it is: a port, brackets or spaces there make a spec autossh misreads.
+        configured = self.settings.isolated_tunnel_remote_bind_address
+        bind_address = _bare_bind_address(configured)
+        if bind_address is None:
+            # It goes into the -R spec as host:port:local_host:local_port: a port or spaces there make a spec ssh
+            # refuses or reads as another bind, and an empty one binds every interface. An IPv6 literal is
+            # bracketed in the spec (_ssh_address).
             raise RuntimeError(
-                "ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS must be a bare host name or IP address, with no port, brackets "
-                f"or spaces (for example 127.0.0.1); got {bind_address!r}"
+                "ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS must be a bare host name or IP address, with no port or spaces "
+                "(for example 127.0.0.1, ::1 or [::1]; 0.0.0.0 for every interface, with "
+                f"ISOLATED_TUNNEL_ACCESS_MODE=unsafe-public); got {configured!r}"
             )
         if not _is_bare_loopback(bind_address) and (self.settings.isolated_tunnel_access_mode != "unsafe-public"):
             raise RuntimeError(

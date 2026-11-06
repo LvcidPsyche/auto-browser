@@ -241,9 +241,13 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
         for bind, mode in (
             ("localhost:22", "private"),
             ("[::1]:22", "private"),
-            ("[::1]", "private"),
             (" 127.0.0.1 ", "private"),
             ("0.0.0.0:22", "unsafe-public"),
+            # B3-2: empty (ssh reads it as all interfaces) stays refused; 0.0.0.0 says that on purpose.
+            ("", "unsafe-public"),
+            ("[localhost]", "private"),
+            ("[127.0.0.1]", "private"),
+            ("[::1", "private"),
         ):
             with self.subTest(bind=bind, mode=mode), tempfile.TemporaryDirectory() as tempdir:
                 with self.assertRaisesRegex(RuntimeError, "ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS"):
@@ -258,6 +262,33 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(bind=bind), tempfile.TemporaryDirectory() as tempdir:
                 broker = await self._started_broker(Path(tempdir), ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS=bind)
                 self.assertTrue(broker.enabled)
+
+    async def test_b3_2_the_forward_spec_brackets_an_ipv6_bind_and_keeps_an_ipv4_one_bare(self) -> None:
+        # `::1:16181:127.0.0.1:6080` is a spec ssh refuses ("Bad remote forwarding specification"); `[::1]` is ssh's
+        # own spelling, accepted before B-fix-11 and now again, normalised to the bare literal.
+        for bind, mode, spec, shown in (
+            ("::1", "private", "[::1]:16181:127.0.0.1:6080", "::1"),
+            ("[::1]", "private", "[::1]:16181:127.0.0.1:6080", "::1"),
+            ("::", "unsafe-public", "[::]:16181:127.0.0.1:6080", "::"),
+            ("127.0.0.1", "private", "127.0.0.1:16181:127.0.0.1:6080", "127.0.0.1"),
+            ("localhost", "private", "localhost:16181:127.0.0.1:6080", "localhost"),
+            ("0.0.0.0", "unsafe-public", "0.0.0.0:16181:127.0.0.1:6080", "0.0.0.0"),
+        ):
+            with self.subTest(bind=bind), tempfile.TemporaryDirectory() as tempdir:
+                broker = await self._started_broker(
+                    Path(tempdir), ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS=bind, ISOLATED_TUNNEL_ACCESS_MODE=mode
+                )
+                tunnel = broker._build_tunnel("session-1", remote_port=16181, local_host="127.0.0.1", local_port=6080)
+                self.assertEqual(tunnel.remote_bind_address, shown)
+                args = broker._autossh_args(tunnel)
+                self.assertEqual(args[args.index("-R") + 1], spec)
+
+    async def test_b3_2_an_ipv6_local_host_is_bracketed_in_the_spec_too(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            tunnel = broker._build_tunnel("session-1", remote_port=16181, local_host="::1", local_port=6080)
+            args = broker._autossh_args(tunnel)
+            self.assertEqual(args[args.index("-R") + 1], "127.0.0.1:16181:[::1]:6080")
 
     async def test_b_fix_11_a_bare_public_bind_address_still_needs_unsafe_public(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
