@@ -129,8 +129,8 @@ All notable changes to auto-browser are documented here.
 - Releasing an isolated session no longer takes an unreachable Docker daemon (or any Docker error other than "not
   found") for a gone container, and no longer carries on after a container removal that failed (any error but "not
   found", which means gone): the release now fails, `close_session` reports it in `failed_steps` (the audit event and
-  receipt say partial), and the session's profile and downloads directories are kept, with a warning naming them,
-  instead of being deleted under a container that may still be running. A rollback that releases after a failed
+  receipt say partial), and the session's profile and downloads directories are kept instead of being deleted under
+  a container that may still be running (after a failed removal, with a warning naming them). A rollback that releases after a failed
   provision or connect logs a failed release and raises the original error.
 - Two isolated sessions created at once now read the Docker daemon's API version once and log the "GwPriority is not
   honoured" warning once; both were unsynchronised across the provisioning threads.
