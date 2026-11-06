@@ -112,8 +112,9 @@ class BrowserRemoteAccessService:
 
     @staticmethod
     def _shown_tunnel_fields(tunnel: dict[str, Any], stale_after_seconds: float) -> dict[str, Any]:
-        """The sidecar fields the report passes on, as validated: stale_after_seconds as computed, a URL only when it
-        is a non-empty string (the raw file can hold NaN, "soon" or a list)."""
+        """The sidecar fields the report passes on, as validated: stale_after_seconds as computed, updated_at only
+        when it reads as a timestamp (and then in UTC), status and a URL only when they are a non-empty string. The
+        raw file can hold NaN, "soon", a list or an object, and a NaN copied on made the REST report a 500 (B3-4)."""
         shown: dict[str, Any] = {}
         for key in _TUNNEL_FIELDS_SHOWN:
             if key not in tunnel:
@@ -121,7 +122,12 @@ class BrowserRemoteAccessService:
             value = tunnel[key]
             if key == "stale_after_seconds":
                 value = stale_after_seconds
-            elif key in {"public_takeover_url", "public_api_url"} and not (isinstance(value, str) and value):
+            elif key == "updated_at":
+                parsed = BrowserRemoteAccessService.parse_timestamp(value)
+                if parsed is None:
+                    continue
+                value = parsed.isoformat().replace("+00:00", "Z")
+            elif not (isinstance(value, str) and value):
                 continue
             shown[key] = value
         return shown

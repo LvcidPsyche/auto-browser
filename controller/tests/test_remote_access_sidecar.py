@@ -94,6 +94,24 @@ class SidecarTests(unittest.TestCase):
         self.assertNotIn("public_takeover_url", info["tunnel"])
         self.assertNotIn("public_api_url", info["tunnel"])
 
+    def test_b3_4_the_report_stays_strict_json_whatever_the_shown_fields_hold(self) -> None:
+        # Starlette's JSONResponse encodes with allow_nan=False: a NaN copied raw into the tunnel block was a 500.
+        for key in ("status", "updated_at", "public_takeover_url", "public_api_url", "stale_after_seconds"):
+            for raw in ("NaN", "[1, 2]", '{"a": NaN}', "Infinity"):
+                with self.subTest(key=key, raw=raw):
+                    others = {"status": '"active"', "updated_at": f'"{UPDATED}"'}
+                    others[key] = raw
+                    body = "{" + ", ".join(f'"{name}": {value}' for name, value in others.items()) + "}"
+                    info = self.info(body)
+                    json.dumps(info, allow_nan=False)
+                    if key in ("status", "updated_at"):
+                        self.assertNotIn(key, info["tunnel"])
+
+    def test_b3_4_a_readable_updated_at_is_shown_in_utc(self) -> None:
+        info = self.info({"status": "active", "updated_at": "2999-01-01T01:00:00+01:00"})
+        self.assertEqual(info["tunnel"]["updated_at"], "2999-01-01T00:00:00Z")
+        self.assertEqual(info["tunnel"]["status"], "active")
+
     def test_a_file_that_is_not_an_object_is_unreadable_metadata(self) -> None:
         for content in ("[1, 2]", '"text"', "7", "null"):
             with self.subTest(content=content):
