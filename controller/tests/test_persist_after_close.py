@@ -346,6 +346,30 @@ class PersistAfterCloseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(path.read_text(encoding="utf-8"), "{not json")
         self.assertEqual(SessionRecord.model_validate_json(client.values["t:record:s1"]).status, "closed")
 
+    async def test_w8_5_a_record_with_bad_utf8_is_replaced_by_the_next_active_write(self) -> None:
+        # UnicodeDecodeError is a ValueError: the record cannot be parsed, so the write replaces it.
+        store = await self._store()
+        await store.upsert(_record("closed", live=False))
+        record_path(Path(self.tmp.name) / "rec", "s1", ".json").write_bytes(b'{"id": "s1", "status": "\xff"}')
+
+        with self.assertLogs("app.session_store", "WARNING") as logged:
+            await store.upsert(_record("active", live=True))
+
+        self.assertIn("cannot be parsed", "\n".join(logged.output))
+        self.assertEqual((await store.get("s1")).status, "active")
+
+    async def test_w8_5_a_directory_in_the_records_place_skips_an_active_write(self) -> None:
+        # IsADirectoryError on Linux, PermissionError on Windows: both OSError, so the write is skipped, not raised.
+        store = await self._store()
+        path = record_path(Path(self.tmp.name) / "rec", "s1", ".json")
+        path.mkdir()
+
+        with self.assertLogs("app.session_store", "WARNING") as logged:
+            await store.upsert(_record("active", live=True))
+
+        self.assertIn("so it is not written this time", "\n".join(logged.output))
+        self.assertTrue(path.is_dir())
+
     async def test_w4_10_a_missing_record_is_still_not_closed(self) -> None:
         store = await self._store()
 
