@@ -78,14 +78,32 @@ async def _novnc(page) -> None:
     await page.wait_for_selector("#sessions-tbody a")
 
 
+_RECORD_ORDER = """
+window.__takeoverOrder = [];
+const recordedPrompt = window.prompt.bind(window);
+const recordedOpen = window.open.bind(window);
+window.prompt = (message, ...rest) => {
+  window.__takeoverOrder.push('prompt:' + String(message).slice(0, %d));
+  return recordedPrompt(message, ...rest);
+};
+window.open = (...args) => {
+  window.__takeoverOrder.push('open');
+  return recordedOpen(...args);
+};
+""" % len(TAKEOVER_PROMPT)
+
+
 @requires_chromium
 def test_the_prompt_comes_before_the_popup_and_the_header_is_sent() -> None:
     stub = TakeoverStub()
 
     async def scenario(page, events) -> dict:
+        # Playwright reports the popup only once the modal prompt is answered, whichever came first; the page itself
+        # records the order of its prompt() and window.open() calls. The reload keeps the stored API token.
+        await page.add_init_script(_RECORD_ORDER)
+        await page.reload()
         await _novnc(page)
         stub.gate = asyncio.Event()
-        page.on("popup", lambda popup: events.append(("popup", popup.url)))
         async with page.expect_popup() as popup_info:
             await page.click("#sessions-tbody a")
         popup = await popup_info.value
@@ -99,12 +117,12 @@ def test_the_prompt_comes_before_the_popup_and_the_header_is_sent() -> None:
         opener = await page.evaluate(
             "[sessionStorage.getItem('ab_token'), sessionStorage.getItem('ab_takeover_token')]"
         )
-        return {"events": list(events), "storage": storage, "url": popup.url, "opener": opener}
+        order = await page.evaluate("window.__takeoverOrder")
+        return {"events": list(events), "storage": storage, "url": popup.url, "opener": opener, "order": order}
 
     seen = drive(stub, scenario)
 
-    kinds = [event[0] if event[0] == "popup" else event[1][:24] for event in seen["events"]]
-    assert kinds.index(TAKEOVER_PROMPT[:24]) < kinds.index("popup"), kinds
+    assert seen["order"] == [f"prompt:{TAKEOVER_PROMPT}", "open"]
     assert len(_takeover_prompts(seen["events"])) == 1
     assert stub.headers == [TOKEN]
     assert seen["storage"] == 0
