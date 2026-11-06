@@ -683,6 +683,7 @@ class BridgeShutdownTests(unittest.TestCase):
                 patch.object(bridge, "UnixHTTPServer", _StoppedServer),
                 patch.object(bridge.signal, "signal"),
                 patch.object(bridge.os, "umask"),
+                patch.object(bridge, "make_non_dumpable"),  # main() would leave the runner non-dumpable (W2-27)
                 patch.object(
                     bridge.CodexBridgeService,
                     "kill_in_flight",

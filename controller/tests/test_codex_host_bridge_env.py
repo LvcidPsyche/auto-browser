@@ -109,6 +109,7 @@ class PassEnvOptionTests(unittest.TestCase):
             patch.object(bridge, "prepare_socket_path", Mock(return_value=Path("unused.sock"))) as prepare,
             patch.object(bridge, "CodexBridgeService", service),
             patch.object(bridge.os, "umask"),  # main() sets 0o077; left set, it changed later tests' file modes
+            patch.object(bridge, "make_non_dumpable"),  # left set, the runner would stay non-dumpable
             redirect_stderr(captured),
         ):
             try:
@@ -123,6 +124,14 @@ class PassEnvOptionTests(unittest.TestCase):
 
         self.assertIsNone(code)  # reached the service
         self.assertEqual(tuple(service.call_args.kwargs["pass_env"]), ("MY_A", "_B2"))
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "PR_GET_DUMPABLE is Linux-only")
+    def test_main_leaves_the_test_runner_dumpable(self) -> None:
+        # main() makes the bridge non-dumpable first (W2-27); run in this process, it must not flip the runner.
+        import ctypes
+
+        self._main()
+        self.assertEqual(ctypes.CDLL(None).prctl(3, 0, 0, 0, 0), 1)  # PR_GET_DUMPABLE
 
     def test_no_option_passes_no_extra_name(self) -> None:
         _, _, service = self._main()
