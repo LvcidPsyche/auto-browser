@@ -207,3 +207,94 @@ def test_w2_21_a_token_file_inside_a_served_or_uploadable_root_refuses_startup(t
     with pytest.raises(RuntimeError, match=root):
         ensure_takeover_token(settings)
     assert not (served / "tok").exists()
+
+
+# Every data root the API reads, lists, exports or mounts (W4-1): AUTH_ROOT, for one, is packaged by
+# GET /auth-profiles/{name}/export.
+DATA_ROOT_SETTINGS = [
+    "ARTIFACT_ROOT",
+    "UPLOAD_ROOT",
+    "AUTH_ROOT",
+    "APPROVAL_ROOT",
+    "AUDIT_ROOT",
+    "WITNESS_ROOT",
+    "SESSION_STORE_ROOT",
+    "JOB_STORE_ROOT",
+    "HARNESS_ROOT",
+    "MEMORY_ROOT",
+    "MESH_IDENTITY_DIR",
+    "ISOLATED_TUNNEL_INFO_ROOT",
+]
+
+
+def data_layout(data: Path) -> dict[str, str]:
+    """The shipped layout under ``data`` (/data in the image), so the fixed mount paths resolve under it too."""
+    return {
+        "ARTIFACT_ROOT": str(data / "artifacts"),
+        "UPLOAD_ROOT": str(data / "uploads"),
+        "AUTH_ROOT": str(data / "auth"),
+        "APPROVAL_ROOT": str(data / "approvals"),
+        "AUDIT_ROOT": str(data / "audit"),
+        "WITNESS_ROOT": str(data / "witness"),
+        "SESSION_STORE_ROOT": str(data / "sessions"),
+        "JOB_STORE_ROOT": str(data / "jobs"),
+        "HARNESS_ROOT": str(data / "harness"),
+        "MEMORY_ROOT": str(data / "memory"),
+        "MESH_IDENTITY_DIR": str(data / "mesh" / "identity"),
+        "ISOLATED_TUNNEL_INFO_ROOT": str(data / "tunnels" / "sessions"),
+        "BROWSER_WS_ENDPOINT_FILE": str(data / "browser-profile" / "browser-ws-endpoint.txt"),
+    }
+
+
+@pytest.mark.parametrize("root", DATA_ROOT_SETTINGS)
+def test_w4_1_a_token_file_inside_any_data_root_refuses_startup(tmp_path: Path, root: str) -> None:
+    data = tmp_path / "data"
+    inside = Path(data_layout(data)[root]) / "demo" / "takeover-token"
+    settings = make_settings(tmp_path, **data_layout(data), TAKEOVER_TOKEN_FILE=str(inside))
+    with pytest.raises(RuntimeError, match=root):
+        ensure_takeover_token(settings)
+    assert not inside.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating a symlink on Windows needs a privilege CI's runner lacks")
+@pytest.mark.parametrize("root", ["AUTH_ROOT", "MEMORY_ROOT"])
+def test_w4_1_a_token_file_reached_through_a_symlinked_parent_is_refused(tmp_path: Path, root: str) -> None:
+    data = tmp_path / "data"
+    layout = data_layout(data)
+    Path(layout[root]).mkdir(parents=True)
+    link = tmp_path / "elsewhere"
+    link.symlink_to(layout[root], target_is_directory=True)
+    settings = make_settings(tmp_path, **layout, TAKEOVER_TOKEN_FILE=str(link / "takeover-token"))
+    with pytest.raises(RuntimeError, match=root):
+        ensure_takeover_token(settings)
+    assert not (Path(layout[root]) / "takeover-token").exists()
+
+
+@pytest.mark.parametrize(
+    ("relative", "named"),
+    [
+        ("browser-profile/takeover-token", "BROWSER_WS_ENDPOINT_FILE"),
+        ("downloads/takeover-token", "downloads"),
+        ("browser-sessions/abc123/profile/takeover-token", "browser-sessions"),
+        ("tunnels/takeover-token", "ISOLATED_TUNNEL_INFO_ROOT"),
+    ],
+)
+def test_w4_1_a_token_file_in_a_directory_mounted_into_a_container_refuses_startup(
+    tmp_path: Path, relative: str, named: str
+) -> None:
+    # browser-node mounts browser-profile and downloads, each isolated session gets browser-sessions/<id>/, and
+    # reverse-ssh mounts the tunnels directory: a compromised container could read or replace a token there.
+    data = tmp_path / "data"
+    inside = data / relative
+    settings = make_settings(tmp_path, **data_layout(data), TAKEOVER_TOKEN_FILE=str(inside))
+    with pytest.raises(RuntimeError, match=named):
+        ensure_takeover_token(settings)
+    assert not inside.exists()
+
+
+def test_w4_1_the_default_token_file_in_the_data_root_itself_is_accepted(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    settings = make_settings(tmp_path, **data_layout(data), TAKEOVER_TOKEN_FILE=str(data / "takeover-token"))
+    ensure_takeover_token(settings)
+    assert settings.takeover_token
+    assert (data / "takeover-token").read_text(encoding="utf-8").strip() == settings.takeover_token

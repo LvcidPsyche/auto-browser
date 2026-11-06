@@ -196,14 +196,61 @@ def _printable_ascii(token: str) -> bool:
     return all("!" <= char <= "~" for char in token)
 
 
+# The controller's data roots, which the API reads, lists, exports or mounts (setting name to Settings attribute):
+# a takeover token inside one could reach an agent (GET /auth-profiles/{name}/export packages AUTH_ROOT, for one).
+TAKEOVER_TOKEN_REFUSED_ROOTS = {
+    "ARTIFACT_ROOT": "artifact_root",
+    "UPLOAD_ROOT": "upload_root",
+    "AUTH_ROOT": "auth_root",
+    "APPROVAL_ROOT": "approval_root",
+    "AUDIT_ROOT": "audit_root",
+    "WITNESS_ROOT": "witness_root",
+    "SESSION_STORE_ROOT": "session_store_root",
+    "JOB_STORE_ROOT": "job_store_root",
+    "HARNESS_ROOT": "harness_root",
+    "MEMORY_ROOT": "memory_root",
+    "MESH_IDENTITY_DIR": "mesh_identity_dir",
+    "ISOLATED_TUNNEL_INFO_ROOT": "isolated_tunnel_info_root",
+}
+
+
+def _refused_token_directories(settings: Any) -> list[tuple[str, Path]]:
+    """Each directory a takeover token must not be in, with the name the refusal gives it.
+
+    The data roots above, then the directories mounted into the browser, session and helper containers, where a
+    compromised browser could read or replace the file: browser-node's profile (BROWSER_WS_ENDPOINT_FILE's directory)
+    and downloads, each isolated session's browser-sessions/<id>/, and the tunnels directory reverse-ssh mounts (the
+    parent of ISOLATED_TUNNEL_INFO_ROOT). The ones without a setting are found as session_isolation finds them, under
+    the parent of ARTIFACT_ROOT (/data in the image).
+    """
+    directories = [
+        (name, Path(getattr(settings, attribute))) for name, attribute in TAKEOVER_TOKEN_REFUSED_ROOTS.items()
+    ]
+    data_root = Path(settings.artifact_root).resolve().parent
+    directories += [
+        (
+            "BROWSER_WS_ENDPOINT_FILE's directory, which browser-node mounts",
+            Path(settings.browser_ws_endpoint_file).parent,
+        ),
+        ("the browser-profile directory browser-node mounts", data_root / "browser-profile"),
+        ("the downloads directory browser-node mounts", data_root / "downloads"),
+        ("the browser-sessions directory isolated sessions mount", data_root / "browser-sessions"),
+        (
+            "the tunnels directory reverse-ssh mounts (ISOLATED_TUNNEL_INFO_ROOT's parent)",
+            Path(settings.isolated_tunnel_info_root).parent,
+        ),
+    ]
+    return directories
+
+
 def _refuse_a_served_token_file(settings: Any, path: Path) -> None:
-    """RuntimeError when TAKEOVER_TOKEN_FILE resolves inside ARTIFACT_ROOT or UPLOAD_ROOT (served or uploadable)."""
+    """RuntimeError when TAKEOVER_TOKEN_FILE resolves inside a data root or a container-mounted directory."""
     target = path.resolve()
-    for name, root in (("ARTIFACT_ROOT", settings.artifact_root), ("UPLOAD_ROOT", settings.upload_root)):
-        if target.is_relative_to(Path(root).resolve()):
+    for name, root in _refused_token_directories(settings):
+        if target.is_relative_to(root.resolve()):
             raise RuntimeError(
                 f"TAKEOVER_TOKEN_FILE {path} is inside {name} ({root}), whose files can be read or replaced through "
-                "the API. Point it outside, such as /data/takeover-token, or set TAKEOVER_TOKEN."
+                "the API or by a container. Point it outside, such as /data/takeover-token, or set TAKEOVER_TOKEN."
             )
 
 
