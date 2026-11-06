@@ -224,13 +224,15 @@ FIXED_NAME_ROOT_SETTINGS = [
     "MESH_IDENTITY_DIR",
     "ISOLATED_TUNNEL_INFO_ROOT",
 ]
-# The directories compose mounts into containers, under the parent of ARTIFACT_ROOT (/data in the image), with what
-# the refusal names each by.
+# The directories mounted into a container (by compose, or browser-sessions/<id> by the controller through the
+# Docker SDK), found under the parent of ARTIFACT_ROOT (/data in the image), with what the refusal names each by.
 MOUNTED_DIRECTORIES = {
     "browser-profile": "browser-profile",
     "downloads": "downloads",
     "browser-sessions/abc123/profile": "browser-sessions",
     "tunnels": "tunnels",
+    # W7-10: compose mounts ./data/ssh read-only into reverse-ssh (and the smoke's test-bastion).
+    "ssh": "the ssh directory",
 }
 
 
@@ -309,7 +311,8 @@ def test_w4_1_a_token_file_in_a_directory_mounted_into_a_container_refuses_start
     tmp_path: Path, relative: str, named: str
 ) -> None:
     # browser-node mounts browser-profile and downloads, each isolated session gets browser-sessions/<id>/, and
-    # reverse-ssh mounts the tunnels directory: a compromised container could read or replace a token there.
+    # reverse-ssh mounts the tunnels and ssh directories: a compromised container could read or replace a token
+    # there.
     data = tmp_path / "data"
     inside = data / relative / "takeover-token"
     settings = make_settings(tmp_path, **data_layout(data), TAKEOVER_TOKEN_FILE=str(inside))

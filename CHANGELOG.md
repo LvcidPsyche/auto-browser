@@ -384,11 +384,12 @@ All notable changes to auto-browser are documented here.
   generates one there (mode 0600) on first start, and logs only a sha256 fingerprint. A `TAKEOVER_TOKEN` shorter than
   32 characters, outside printable ASCII or containing a space (the token file's rule, so the variable and the file
   accept the same tokens and every client sends one unchanged: curl sends a UTF-8 `.env` value that Starlette reads as
-  latin-1) or equal to an API credential refuses startup, as does a `TAKEOVER_TOKEN_FILE` in one of seven directories:
-  `ARTIFACT_ROOT` (served under `/artifacts`), `UPLOAD_ROOT` (uploadable into a page) and `AUTH_ROOT` (packaged whole
-  by the profile export), all three swept by maintenance, and the four that compose mounts into a container, found
-  under the parent of `ARTIFACT_ROOT` (`browser-profile` and `downloads` in browser-node, `browser-sessions` in
-  isolated sessions, `tunnels` in reverse-ssh). The other data roots are read by fixed names, so a token there reaches
+  latin-1) or equal to an API credential refuses startup, as does a `TAKEOVER_TOKEN_FILE` in one of eight directories:
+  `ARTIFACT_ROOT` (served under `/artifacts`), `UPLOAD_ROOT` (uploadable into a page) and `AUTH_ROOT` (its profiles
+  exported as archives), all three swept by maintenance, and the five mounted into a container, found under the parent
+  of `ARTIFACT_ROOT` (so a relocated `ARTIFACT_ROOT` moves them too): `browser-profile` and `downloads` in browser-node
+  and `tunnels` and `ssh` in reverse-ssh, which compose mounts, and `browser-sessions`, whose `<id>` directory the
+  controller binds into each isolated session. The other data roots are read by fixed names, so a token there reaches
   no agent, and one of them set to `/data` itself (`MESH_IDENTITY_DIR`, say) leaves the default `/data/takeover-token`
   usable. Spaces and tabs around the presented header are not part of the token. A token file that cannot be read or
   written, holds an unusable token, or stays readable beyond its owner because its mode cannot be tightened (a
