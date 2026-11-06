@@ -6,9 +6,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
-from .mcp_stdio import _is_loopback_host, _NoRedirects
+from .mcp_stdio import _goes_direct, _NoRedirects
 
 
 @dataclass(frozen=True)
@@ -360,10 +359,12 @@ class ControllerEvalClient:
         # only when no_proxy names it, so the Authorization header went to the proxy. Any other host still uses the
         # proxy the environment names. The bridge's rule decides, not auth_policy.is_loopback_host, whose meaning
         # feeds auth decisions (W8-3). Redirects are refused on both branches, as the bridge refuses them (W9-6):
-        # urllib's default handler copied the Authorization header onto a redirect to any origin. The host judged is
-        # the one urllib connects to, request.host, which it has percent-decoded (%31%32%37.0.0.1 is 127.0.0.1), read
-        # as the bridges read it (W10-4); a host-less request (None) falls through to urllib's own error.
-        if _is_loopback_host(urlsplit("//" + (request.host or "")).hostname):
+        # urllib's default handler copied the Authorization header onto a redirect to any origin. The bridges'
+        # _goes_direct decides (W11-1): direct when any of three readings of the host is loopback (the host
+        # http.client connects to, so an unbracketed ::1:8000 is ::1; urllib's percent-decoded host, W10-4; and the
+        # URL as written, which a proxy reads). Its InvalidURL (a non-numeric port) propagates before any opener is
+        # chosen; a host-less request (None) falls through to urllib's own error.
+        if _goes_direct(request):
             urlopen = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects).open
         else:
             urlopen = urllib.request.build_opener(_NoRedirects).open

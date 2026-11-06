@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -53,8 +54,12 @@ class _Recording(BaseHTTPRequestHandler):
         return
 
 
-def _serve() -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _Recording)
+class _V6Server(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+def _serve(host: str = "127.0.0.1") -> ThreadingHTTPServer:
+    server = (_V6Server if ":" in host else ThreadingHTTPServer)((host, 0), _Recording)
     server.seen = []  # type: ignore[attr-defined]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
@@ -146,6 +151,60 @@ class AgentEvalProxyTests(unittest.TestCase):
             with self.subTest(host=host):
                 self._post(f"http://{host}:{self.controller.server_port}", check=False)
                 self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
+
+    def test_w11_1_an_unbracketed_ipv6_loopback_is_reached_directly(self) -> None:
+        # http.client reads the unbracketed ::1:PORT (and its percent-encoded spelling, which urllib decodes) as ::1,
+        # while urlsplit read no host at all, so the Authorization header went to the proxy.
+        try:
+            controller = _serve("::1")
+        except OSError:
+            self.skipTest("no IPv6 loopback here")
+        self.addCleanup(controller.server_close)
+        self.addCleanup(controller.shutdown)
+        for host in ("::1", "%3a%3a1"):
+            with self.subTest(host=host):
+                self.proxy.seen.clear()  # type: ignore[attr-defined]
+                controller.seen.clear()  # type: ignore[attr-defined]
+                self.assertEqual(self._post(f"http://{host}:{controller.server_port}"), {"id": "s1"})
+                self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
+                self.assertEqual(controller.seen, [("/sessions", f"Bearer {MARKER}")])  # type: ignore[attr-defined]
+
+    def test_w11_1_a_host_any_reading_finds_local_never_goes_through_the_proxy(self) -> None:
+        # Each is local by one reading of the host (the one http.client connects to, urllib's decoded host, or the
+        # URL as written, which a proxy reads). The direct attempt may fail (nothing listens on ::1 at this port, a
+        # host without IPv6 has no ::1, and the others name hosts no resolver finds); a failure is urllib's URLError.
+        for authority in (
+            "::1",
+            "%3a%3a1",
+            "::ffff:127.0.0.1",
+            "127.0.0.2%23.bad",
+            "user:pass@127.0.0.1",
+            "x%2f@127.0.0.1",
+        ):
+            with self.subTest(authority=authority):
+                self.proxy.seen.clear()  # type: ignore[attr-defined]
+                self.controller.seen.clear()  # type: ignore[attr-defined]
+                result = self._post_raw(f"http://{authority}:{self.controller.server_port}")
+                self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
+                if result.returncode == 0:
+                    seen = self.controller.seen  # type: ignore[attr-defined]
+                    self.assertEqual(seen, [("/sessions", f"Bearer {MARKER}")])
+                else:
+                    self.assertIn("urllib.error.URLError", result.stderr)
+
+    def test_w11_1_a_non_numeric_port_is_refused_before_any_proxy_is_used(self) -> None:
+        result = self._post_raw("http://controller.invalid:abc")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("InvalidURL", result.stderr)
+        self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
+
+    def test_w11_1_a_loopback_userinfo_before_a_remote_host_still_goes_through_the_proxy(self) -> None:
+        # 127.0.0.1 is the userinfo here; the host is controller.invalid all three ways, so the proxy is used.
+        self.assertEqual(self._post("http://127.0.0.1@controller.invalid:8000"), {"id": "s1"})
+
+        self.assertEqual([auth for _, auth in self.proxy.seen], [f"Bearer {MARKER}"])  # type: ignore[attr-defined]
+        self.assertEqual(self.controller.seen, [])  # type: ignore[attr-defined]
 
     def test_a_remote_controller_still_goes_through_the_proxy(self) -> None:
         # controller.invalid is never resolved: the request goes to the (local) recording proxy.

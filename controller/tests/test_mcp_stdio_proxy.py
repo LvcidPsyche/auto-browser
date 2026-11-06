@@ -207,6 +207,68 @@ def test_w10_14_a_host_less_base_url_reports_no_controller_reachable(recording_p
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize("host", ["::1", "%3a%3a1"])
+def test_w11_1_an_unbracketed_ipv6_loopback_is_reached_directly_past_an_environment_proxy(
+    recording_proxy, host: str
+) -> None:
+    # http.client reads the unbracketed ::1:PORT (and its percent-encoded spelling, which urllib decodes) as ::1,
+    # while urlsplit read no host at all, so the token went to the proxy.
+    try:
+        controller = _serve("::1")
+    except OSError:
+        pytest.skip("no IPv6 loopback here")
+    try:
+        status = _post_through_the_bridge(f"http://{host}:{controller.server_port}/mcp", recording_proxy)
+    finally:
+        controller.shutdown()
+        controller.server_close()
+
+    assert status == 200
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+    assert controller.seen == [("/mcp", f"Bearer {MARKER}")]  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "authority", ["::1", "%3a%3a1", "::ffff:127.0.0.1", "127.0.0.2%23.bad", "user:pass@127.0.0.1", "x%2f@127.0.0.1"]
+)
+def test_w11_1_a_host_any_reading_finds_local_never_goes_through_the_environment_proxy(
+    recording_proxy, authority: str
+) -> None:
+    # Each is local by one reading of the host (the one http.client connects to, urllib's decoded host, or the URL
+    # as written, which a proxy reads) and was, or could be, sent to the proxy. The direct attempt may fail (nothing
+    # listens on ::1 at the controller's port, and a host without IPv6 has no ::1 at all).
+    controller = _serve()
+    try:
+        reply = _reply_through_the_bridge(f"http://{authority}:{controller.server_port}/mcp", recording_proxy)
+    finally:
+        controller.shutdown()
+        controller.server_close()
+
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+    if "error" in reply:
+        assert UNREACHABLE in reply["error"]["message"], reply
+    else:
+        assert controller.seen == [("/mcp", f"Bearer {MARKER}")]  # type: ignore[attr-defined]
+
+
+def test_w11_1_a_non_numeric_port_is_refused_before_any_proxy_is_used(recording_proxy) -> None:
+    # http.client's parse raises InvalidURL before an opener is chosen, so even a remote host never reaches the proxy.
+    message = _bridge_error_through_the_bridge("http://controller.invalid:abc/mcp", recording_proxy)
+
+    assert "nonnumeric port" in message
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
+def test_w11_1_a_loopback_userinfo_before_a_remote_host_still_goes_through_the_environment_proxy(
+    recording_proxy,
+) -> None:
+    # 127.0.0.1 is the userinfo here; the host is controller.invalid all three ways, so the proxy is used.
+    status = _post_through_the_bridge("http://127.0.0.1@controller.invalid/mcp", recording_proxy)
+
+    assert status == 200
+    assert [auth for _, auth in recording_proxy.seen] == [f"Bearer {MARKER}"]  # type: ignore[attr-defined]
+
+
 def test_a_non_loopback_controller_still_goes_through_the_environment_proxy(recording_proxy) -> None:
     # controller.invalid is never resolved: the request goes to the (local) recording proxy.
     status = _post_through_the_bridge("http://controller.invalid/mcp", recording_proxy)
