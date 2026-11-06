@@ -74,6 +74,17 @@ def test_a_configured_token_wins_and_the_file_is_neither_read_nor_written(tmp_pa
     assert not (tmp_path / "takeover-token").exists()
 
 
+def test_a_configured_token_wins_over_an_existing_file_which_is_left_as_it_was(tmp_path: Path) -> None:
+    # W2-3: the test above starts with no file, so a regression that preferred an existing file passed.
+    path = tmp_path / "takeover-token"
+    on_disk = "file-sentinel-" + "f" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH + "\n"
+    path.write_text(on_disk, encoding="utf-8")
+    settings = make_settings(tmp_path, TAKEOVER_TOKEN=SENTINEL)
+    ensure_takeover_token(settings)
+    assert settings.takeover_token == SENTINEL
+    assert path.read_text(encoding="utf-8") == on_disk
+
+
 def test_a_short_configured_token_refuses_startup(tmp_path: Path) -> None:
     settings = make_settings(tmp_path, TAKEOVER_TOKEN="short-sentinel")
     with pytest.raises(RuntimeError, match="TAKEOVER_TOKEN") as raised:
