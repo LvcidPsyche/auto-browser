@@ -120,7 +120,9 @@ class NodeIdentityLooseDirectoryTests(unittest.TestCase):
     def _load(self, dir_mode: int, *, ours: bool, chmod=None):
         """Load with the directory's mode and owner injected (the key reads as 0600); returns the chmod mock.
 
-        The default chmod sets the injected mode, as a filesystem that keeps modes does.
+        The default chmod sets the injected mode, as a filesystem that keeps modes does. The key's own check is
+        replaced (W10-11): it reads os.fstat on the open key, which on Windows reports 0666 and goes on to os.fchmod
+        (absent there before Python 3.13); the key's tightening keeps its own POSIX-only tests.
         """
         modes = {"dir": dir_mode}
 
@@ -129,6 +131,7 @@ class NodeIdentityLooseDirectoryTests(unittest.TestCase):
 
         with (
             patch.object(identity_module, "_POSIX", True),
+            patch.object(identity_module, "_tighten_a_loose_key", Mock()),
             patch.object(identity_module, "_mode_bits", side_effect=lambda p: modes["dir"] if p == self.dir else 0o600),
             patch.object(identity_module, "_owned_by_this_process", return_value=ours),
             patch.object(identity_module.os, "chmod", chmod or Mock(side_effect=keep_mode)) as chmod_mock,
@@ -207,6 +210,7 @@ class NodeIdentityLooseDirectoryTests(unittest.TestCase):
             modes = {"dir": dir_mode}
             with (
                 patch.object(identity_module, "_POSIX", True),
+                patch.object(identity_module, "_tighten_a_loose_key", Mock()),  # W10-11, as in _load
                 patch.object(
                     identity_module, "_mode_bits", side_effect=lambda p: modes["dir"] if p == self.dir else 0o600
                 ),
