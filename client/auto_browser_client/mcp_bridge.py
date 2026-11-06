@@ -92,13 +92,15 @@ def _numeric_address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address
 
 
 def _goes_direct(request: Request) -> bool:
-    """Whether the request goes past any environment proxy: any of three readings of its host is loopback (W11-1).
+    """Whether the request goes past any environment proxy: any of four readings of its host is loopback (W11-1).
 
     The readings: (1) the host http.client connects to, which reads an unbracketed ::1:8000 as ::1; (2) the host of
     urllib's percent-decoded ``request.host`` read as a URL authority (W9-5: %31%32%37.0.0.2 is 127.0.0.2), which
     drops a userinfo http.client keeps in its host; (3) the host of the URL as written, which a proxy reads, so a
-    percent-encoded / ? or # in a userinfo (x%2f@127.0.0.1) cannot hide a loopback host from this rule. Going direct
-    only ever sends the request to the host named or fails; a host remote all three ways still uses the proxy.
+    percent-encoded / ? or # in a userinfo (x%2f@127.0.0.1) cannot hide a loopback host from this rule; (4) urllib's
+    decoded ``request.host`` as a whole (W12-2), so an unbracketed ::1 or :: without a port, which http.client reads
+    as host ":" and urlsplit as no host, is local (a host:port form is no address and is left to the others). Going
+    direct only ever sends the request to the host named or fails; a host remote all four ways still uses the proxy.
     Constructing the HTTPConnection parses and does not connect; its InvalidURL (a non-numeric port) propagates, so
     a malformed authority is refused before any opener is chosen. A host-less request (``request.host`` None) is
     not direct and falls through to urllib's own error, raised before any proxy is used (W10-14).
@@ -109,6 +111,7 @@ def _goes_direct(request: Request) -> bool:
         HTTPConnection(request.host).host,
         urlsplit("//" + request.host).hostname,
         urlsplit(request.full_url).hostname,
+        request.host,
     )
     return any(_is_loopback_host(host) for host in readings)
 
@@ -119,7 +122,7 @@ def urlopen(request: Request, *args: Any, **kwargs: Any) -> Any:
 
     urllib skips a proxy for localhost only when no_proxy names it, so with http_proxy set the bridge's
     Authorization header for a local controller went to the proxy. Any other host still uses the proxy the
-    environment names, read for each request. ``_goes_direct`` decides, from three readings of the host.
+    environment names, read for each request. ``_goes_direct`` decides, from four readings of the host.
     """
     if _goes_direct(request):
         return _DIRECT.open(request, *args, **kwargs)

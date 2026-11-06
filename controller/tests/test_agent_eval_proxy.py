@@ -187,6 +187,17 @@ class AgentEvalProxyTests(unittest.TestCase):
                 result = self._post_raw(f"http://{authority}:{self.controller.server_port}")
                 self._assert_the_direct_attempt_was_made(result)
 
+    def test_w12_2_an_unbracketed_ipv6_loopback_without_a_port_never_goes_through_the_proxy(self) -> None:
+        # http.client splits the port at the last colon (host ":"), and urlsplit reads no host, so every reading was
+        # remote; urllib's decoded host as a whole is ::1 or ::, and the direct attempt to ":" fails with URLError.
+        for base_url in ("http://::1", "http://::", "http://%3a%3a1"):
+            with self.subTest(base_url=base_url):
+                self.proxy.seen.clear()  # type: ignore[attr-defined]
+                result = self._post_raw(base_url)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("urllib.error.URLError", result.stderr)
+                self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
+
     def test_w11_1_a_non_numeric_port_is_refused_before_any_proxy_is_used(self) -> None:
         result = self._post_raw("http://controller.invalid:abc")
 

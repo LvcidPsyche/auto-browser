@@ -260,6 +260,19 @@ def test_w11_1_a_host_any_reading_finds_local_never_goes_through_the_environment
         assert controller.seen == [("/mcp", f"Bearer {MARKER}")]  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize("base_url", ["http://::1/mcp", "http://::/mcp", "http://%3a%3a1/mcp"])
+def test_w12_2_an_unbracketed_ipv6_loopback_without_a_port_never_goes_through_the_environment_proxy(
+    recording_proxy, base_url: str
+) -> None:
+    # http.client splits the port at the last colon (host ":"), and urlsplit reads no host, so every reading was
+    # remote and the token went to the proxy; urllib's decoded host as a whole is ::1 or ::, and the direct attempt
+    # to ":" fails.
+    message = _bridge_error_through_the_bridge(base_url, recording_proxy)
+
+    assert UNREACHABLE in message
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
 def test_w11_1_a_non_numeric_port_is_refused_before_any_proxy_is_used(recording_proxy) -> None:
     # http.client's parse raises InvalidURL before an opener is chosen, so even a remote host never reaches the proxy.
     message = _bridge_error_through_the_bridge("http://controller.invalid:abc/mcp", recording_proxy)
