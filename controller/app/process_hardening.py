@@ -1,7 +1,7 @@
 """Make the controller process non-dumpable, and keep the controller's secrets out of Playwright's driver and Tesseract.
 
 The controller starts children that run as its own uid: the provider CLIs, the Universal Verifier command, autossh,
-the regex worker, and Playwright's node driver (and any browser the driver launches). proc(5): reading
+the regex worker, Tesseract, and Playwright's node driver (and any browser the driver launches). proc(5): reading
 /proc/PID/environ (or mem, maps, fd) takes a PTRACE_MODE_READ check, which a same-uid caller passes while the target
 is dumpable. A non-dumpable process passes it only for a caller holding CAP_SYS_PTRACE, so a same-uid child that runs
 unsandboxed can no longer read the controller's whole environment around the allowlisted one it was given. The flag
@@ -108,8 +108,8 @@ def confine_tesseract_environment() -> None:
     get_tesseract_version, reading it each time. So this replaces the global with the base names,
     TESSERACT_ENV_NAMES and TESSERACT_ENV_PREFIXES of this process's environment. get_languages passes no env=, so
     its Tesseract inherits the controller's real environment: the controller must not call it (a test fails if a
-    module under app/ names it). If an upgrade drops the global, this raises rather than let Tesseract start with the controller's
-    secrets (the pin is exact, and CI runs the lifespan, so that goes red there first).
+    module under app/ names it). If an upgrade drops the global, this raises rather than let Tesseract start with
+    the controller's secrets (the pin is exact, and CI runs the lifespan, so that goes red there first).
     """
     from .providers.base import allowlisted_environment
 

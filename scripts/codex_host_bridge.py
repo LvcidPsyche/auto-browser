@@ -754,7 +754,9 @@ def main() -> int:
         pass_env=tuple(args.pass_env),
     )
     server = UnixHTTPServer(str(socket_path), service)
-    # What this bridge bound: its shutdown removes the socket only while the path still names it (W5-7).
+    # What this bridge bound: just before its shutdown removes the socket it checks that the path still names it
+    # (W5-7). That keeps out a socket a later bridge bound (each bridge holds its lock until it exits), but not one a
+    # process ignoring the lock puts there between the check and the unlink (W7-6).
     bound = _socket_identity(socket_path)
     # The umask above already makes it 0600; say so explicitly rather than rely on it.
     os.chmod(socket_path, 0o600)

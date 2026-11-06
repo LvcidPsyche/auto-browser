@@ -94,8 +94,9 @@ All notable changes to auto-browser are documented here.
   bridge holds an exclusive lock on `<socket-path>.lock` (created 0600, left in place) for its whole life, taken
   before that check, so a second bridge on the same path stops at startup with "another bridge is running on <path>"
   instead of racing the first one's probe, a lock file it cannot open (a symlink, or another uid's) stops it with a
-  message naming that file, and at shutdown a bridge removes the socket only while the path still names the one it
-  bound, not one that replaced it.
+  message naming that file, and at shutdown a bridge checks, just before removing the socket, that the path still
+  names the one it bound, which keeps it from removing a socket a later bridge bound there, but not one a process
+  that ignores the lock puts there between the check and the removal.
 - An encrypted auth-state save now removes the plaintext state file it replaces (best-effort: one that cannot be
   removed, a directory or a Windows lock, logs a warning naming it and the save still succeeds), and loading a
   plaintext state while `AUTH_STATE_ENCRYPTION_KEY` is set logs a warning.
