@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -82,6 +84,78 @@ class PersistAfterCloseTests(unittest.IsolatedAsyncioTestCase):
         await store.upsert(_record("active", live=True))
 
         self.assertEqual((await store.get("s1")).status, "closed")
+
+    async def _store(self) -> DurableSessionStore:
+        store = DurableSessionStore(file_root=Path(self.tmp.name) / "rec", redis_url=None, redis_prefix="t")
+        await store.startup()
+        return store
+
+    async def test_an_active_write_whose_check_ran_before_a_close_does_not_land_after_it(self) -> None:
+        # R-13 (a): the closed check and the write ran in separate thread hops with no lock, so an active write that
+        # had read the record before a close landed after it and reopened the session.
+        store = await self._store()
+        await store.upsert(_record("active", live=True))
+        read_done, release = threading.Event(), threading.Event()
+        real_get = store.file_store._get_sync
+        gated = [True]
+
+        def gated_get(session_id: str) -> SessionRecord:
+            result = real_get(session_id)
+            if gated[0]:
+                gated[0] = False
+                read_done.set()
+                release.wait(5)
+            return result
+
+        store.file_store._get_sync = gated_get  # type: ignore[method-assign]
+        active = asyncio.create_task(store.upsert(_record("active", live=True)))
+        await asyncio.to_thread(read_done.wait, 5)
+        closed_record = _record("closed", live=False).model_copy(update={"close_reason": "operator"})
+        closed = asyncio.create_task(store.upsert(closed_record))
+        for _ in range(50):  # the close lands, or waits behind the active write
+            if closed.done():
+                break
+            await asyncio.sleep(0.01)
+        release.set()
+        await asyncio.gather(active, closed)
+
+        stored = await store.get("s1")
+        self.assertEqual(stored.status, "closed")
+        self.assertEqual(stored.close_reason, "operator")
+
+    async def test_a_slower_redis_active_write_cannot_land_after_the_close(self) -> None:
+        # R-13 (b): get() and list() prefer the Redis copy, which an out-of-order active write left active.
+        store = await self._store()
+
+        class _SlowActiveRedis:
+            def __init__(self) -> None:
+                self.records: dict[str, SessionRecord] = {}
+
+            async def upsert(self, record: SessionRecord) -> None:
+                if record.status == "active":
+                    await asyncio.sleep(0.1)
+                self.records[record.id] = record
+
+            async def get(self, session_id: str) -> SessionRecord:
+                return self.records[session_id]
+
+        redis = _SlowActiveRedis()
+        store.redis_store = redis  # type: ignore[assignment]
+        store._primary = redis  # type: ignore[assignment]
+
+        await asyncio.gather(store.upsert(_record("active", live=True)), store.upsert(_record("closed", live=False)))
+
+        self.assertEqual((await store.get("s1")).status, "closed")
+
+    async def test_an_interrupted_write_does_not_replace_a_closed_record(self) -> None:
+        # R-13 (c): it did, and the record lost its close_reason.
+        store = await self._store()
+        await store.upsert(_record("closed", live=False).model_copy(update={"close_reason": "operator"}))
+
+        await store.upsert(_record("interrupted", live=False))
+
+        stored = await store.get("s1")
+        self.assertEqual((stored.status, stored.close_reason), ("closed", "operator"))
 
     async def test_the_store_still_marks_active_records_interrupted_and_closes_them(self) -> None:
         store = DurableSessionStore(file_root=Path(self.tmp.name) / "rec", redis_url=None, redis_prefix="t")

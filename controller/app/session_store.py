@@ -18,6 +18,21 @@ except Exception:  # pragma: no cover - graceful fallback when redis isn't insta
     redis_from_url = None
 
 
+async def _run_to_completion(work) -> None:
+    """Await ``work`` as its own task, which a cancel aimed at the caller does not stop; the cancel is raised once the
+    work has finished (the pattern of BrowserSessionService._run_to_completion)."""
+    task = asyncio.create_task(work)
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+    task.result()
+    if cancelled is not None:
+        raise cancelled
+
+
 class SessionStoreBackend(Protocol):
     async def startup(self) -> None: ...
     async def shutdown(self) -> None: ...
@@ -162,6 +177,8 @@ class DurableSessionStore:
         self.file_store = FileSessionStore(file_root)
         self.redis_store = RedisSessionStore(redis_url, redis_prefix) if redis_url else None
         self._primary: SessionStoreBackend = self.file_store
+        # Serializes upsert() within this process; another controller process on the same store is not covered.
+        self._write_lock = asyncio.Lock()
 
     async def startup(self) -> None:
         await self.file_store.startup()
@@ -210,13 +227,21 @@ class DurableSessionStore:
         return await self.file_store.get(session_id)
 
     async def upsert(self, record: SessionRecord) -> None:
-        if record.status == "active" and await self._is_closed(record.id):
-            # A late write of a session that has been closed: a session never reopens.
-            logger.info("not writing an active record over the closed session %s", record.id)
-            return
-        await self.file_store.upsert(record)
-        if self.redis_store is not None and self._primary is self.redis_store:
-            await self.redis_store.upsert(record)
+        # One write at a time, from the closed check through both backends, so a check cannot go stale before its
+        # write lands, and the Redis copy lands in the same order as the file. Run to completion when the caller is
+        # cancelled: a to_thread write keeps going after a cancel, so letting the lock go early reopens the race.
+        await _run_to_completion(self._upsert_locked(record))
+
+    async def _upsert_locked(self, record: SessionRecord) -> None:
+        async with self._write_lock:
+            if record.status != "closed" and await self._is_closed(record.id):
+                # A late write of a session that has been closed: a session never reopens, and an interrupted write
+                # must not replace the close (and its close_reason) either.
+                logger.info("not writing a %s record over the closed session %s", record.status, record.id)
+                return
+            await self.file_store.upsert(record)
+            if self.redis_store is not None and self._primary is self.redis_store:
+                await self.redis_store.upsert(record)
 
     async def _is_closed(self, session_id: str) -> bool:
         """Whether the durable (file) record says the session is closed; no record is not closed."""
