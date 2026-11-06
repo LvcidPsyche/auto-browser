@@ -582,15 +582,17 @@ All notable changes to auto-browser are documented here.
   counting as the IPv4 address it maps, is reached directly (the httpx clients get a transport of their own, which
   still reads `SSL_CERT_FILE` and `SSL_CERT_DIR`). The address is the IP literal, or what the platform's numeric
   parser (`getaddrinfo` with `AI_NUMERICHOST`, which never queries DNS) reads the host as, so `127.2`, `2130706434`
-  and `0x7f000002` count as `127.0.0.2`, as they do for the socket layer; the bridges and `scripts/agent_eval.py`
-  go direct when any of three readings of the host is local: the host http.client connects to (an unbracketed
-  `::1:8000` is `::1`), the host urllib has percent-decoded (`%31%32%37.0.0.2` is `127.0.0.2`), and the host of
-  the URL as written, which a proxy reads (`x%2f@127.0.0.1` is `127.0.0.1`); a non-numeric port is refused before
-  any opener is chosen. Any other host, a `*.localhost` name included, still goes through the proxy the
-  environment names. `scripts/check_sandbox_gate.py`, which only talks to `127.0.0.1`, never uses a proxy.
-  `scripts/agent_eval.py --execute`, `scripts/check_sandbox_gate.py` and `scripts/smoke_download.py` now also
-  refuse redirects, as the bridges do, direct or proxied: urllib's default handler copied the `Authorization`
-  header onto a redirect to any origin, and a 3xx is now reported as the HTTP error each script already reports.
+  and `0x7f000002` count as `127.0.0.2`, as they do for the socket layer, and a name is compared as the socket layer
+  resolves it, after the `idna` encoding `getaddrinfo` applies and lowercased (`local%C2%ADhost`, with a soft hyphen,
+  is `localhost` to the bridges); the bridges and `scripts/agent_eval.py` go direct when any of three readings of the
+  host is local: the host http.client connects to (an unbracketed `::1:8000` is `::1`), the host urllib has
+  percent-decoded (`%31%32%37.0.0.2` is `127.0.0.2`), and the host of the URL as written, which a proxy reads
+  (`x%2f@127.0.0.1` is `127.0.0.1`); a non-numeric port is refused before any opener is chosen. Any other host, a
+  `*.localhost` name included, still goes through the proxy the environment names. `scripts/check_sandbox_gate.py`,
+  which only talks to `127.0.0.1`, never uses a proxy. `scripts/agent_eval.py --execute`,
+  `scripts/check_sandbox_gate.py` and `scripts/smoke_download.py` now also refuse redirects, as the bridges do, direct
+  or proxied: urllib's default handler copied the `Authorization` header onto a redirect to any origin, and a 3xx is
+  now reported as the HTTP error each script already reports.
 
 ## [1.15.0] — 2026-11-05
 

@@ -177,6 +177,9 @@ class AgentEvalProxyTests(unittest.TestCase):
             "127.0.0.2%23.bad",
             "user:pass@127.0.0.1",
             "x%2f@127.0.0.1",
+            # W12-1: the socket layer's idna codec maps these (a soft hyphen, a masculine ordinal) to localhost.
+            "local%C2%ADhost",
+            "l%C2%BAcalhost",
         ):
             with self.subTest(authority=authority):
                 self.proxy.seen.clear()  # type: ignore[attr-defined]

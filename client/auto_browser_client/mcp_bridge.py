@@ -56,10 +56,17 @@ def _is_loopback_host(host: str | None) -> bool:
     loopback or unspecified (0.0.0.0 and ::, which a server's startup line prints and which reach this host on Linux
     and macOS), an IPv4-mapped IPv6 address counting as the IPv4 address it maps. The address is the IP literal, or
     what the platform's numeric parser reads the host as (W9-5: 127.2, 2130706434 and 0x7f000002 are 127.0.0.2 to
-    the socket layer), never a DNS answer. A *.localhost name is not local here.
+    the socket layer), never a DNS answer. A *.localhost name is not local here. The name compared is the one the
+    socket layer resolves (W12-1): the host encoded with the ``idna`` codec, as getaddrinfo encodes it, and
+    lowercased, so local<U+00AD>host and l<U+00BA>calhost are localhost; a host the codec refuses is compared as
+    given.
     """
     host = host or ""
-    if host.removesuffix(".") == "localhost":
+    try:
+        name = host.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        name = host
+    if name.removesuffix(".") == "localhost":
         return True
     try:
         address = ipaddress.ip_address(host)

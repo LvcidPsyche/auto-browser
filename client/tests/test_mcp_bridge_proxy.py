@@ -227,7 +227,18 @@ def test_w11_1_an_unbracketed_ipv6_loopback_is_reached_directly_past_an_environm
 
 
 @pytest.mark.parametrize(
-    "authority", ["::1", "%3a%3a1", "::ffff:127.0.0.1", "127.0.0.2%23.bad", "user:pass@127.0.0.1", "x%2f@127.0.0.1"]
+    "authority",
+    [
+        "::1",
+        "%3a%3a1",
+        "::ffff:127.0.0.1",
+        "127.0.0.2%23.bad",
+        "user:pass@127.0.0.1",
+        "x%2f@127.0.0.1",
+        # W12-1: the socket layer's idna codec maps these (a soft hyphen, a masculine ordinal) to localhost.
+        "local%C2%ADhost",
+        "l%C2%BAcalhost",
+    ],
 )
 def test_w11_1_a_host_any_reading_finds_local_never_goes_through_the_environment_proxy(
     recording_proxy, authority: str
