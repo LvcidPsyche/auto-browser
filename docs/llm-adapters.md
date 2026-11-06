@@ -63,7 +63,8 @@ A `cli` provider's CLI gets an allowlisted environment, and on Linux the control
 non-dumpable, so the CLI cannot read the controller's environment through `/proc`. Known limit: the CLI runs as the
 controller's uid (the bridge's Codex as the bridge's), so it can still read the controller's files: `data/api-token`,
 `data/takeover-token`, the mesh and witness keys. Page content shown to the model can prompt-inject the CLI into
-doing so.
+doing so. On macOS and Windows the controller and the bridge do not change this, and whether a process of the same
+user can read their environment depends on the system.
 
 ### OpenAI
 Uses the Responses API (`POST {OPENAI_BASE_URL}/responses`) with:

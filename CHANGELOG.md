@@ -299,7 +299,9 @@ All notable changes to auto-browser are documented here.
   their environment holds no secret, but their memory holds page content and what is typed into pages, which a
   command one of them runs could read where the host lets a process ptrace another of the same user
   (`kernel.yama.ptrace_scope` 0). A provider CLI's key is readable by the commands it runs and by those another CLI
-  runs at the same time (`/proc/PID/environ` of a dumpable process of the same user).
+  runs at the same time (`/proc/PID/environ` of a dumpable process of the same user). On macOS and Windows the
+  controller and the bridge do not change this, and whether a process of the same user can read their environment
+  depends on the system.
 - **Upgrade note:** a `HARNESS_UV_COMMAND` that needs a variable outside those base names (its own key or setting)
   names it in the new `HARNESS_UV_ENV_PASSTHROUGH` (comma-separated).
 - The scripts' `.env` loader runs with xtrace off and restores the caller's setting, so
