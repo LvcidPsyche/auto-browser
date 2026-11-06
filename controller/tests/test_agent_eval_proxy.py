@@ -109,25 +109,21 @@ class AgentEvalProxyTests(unittest.TestCase):
                 self.assertEqual(len(server.seen), 1, server.seen)  # type: ignore[attr-defined]
                 self.assertEqual(elsewhere.seen, [])  # type: ignore[attr-defined]
 
-    def _post(self, base_url: str, *, check: bool = True) -> dict | None:
-        proxy_url = f"http://127.0.0.1:{self.proxy.server_port}"
-        env = {"http_proxy": proxy_url, "HTTP_PROXY": proxy_url, "PYTHONPATH": str(_IMPORT_ROOT)}
-        for name in ("PATH", "SYSTEMROOT"):  # SYSTEMROOT: Python's sockets need it on Windows
-            if name in os.environ:
-                env[name] = os.environ[name]
-        result = subprocess.run(
-            [sys.executable, "-c", _CHILD, base_url, MARKER],
-            env=env,
-            cwd=_IMPORT_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        if not check:
-            return None
+    def _post(self, base_url: str) -> dict:
+        result = self._post_raw(base_url)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
+
+    def _assert_the_direct_attempt_was_made(self, result: subprocess.CompletedProcess) -> None:
+        """The child reached the controller directly, or failed in that direct attempt with urllib's URLError.
+
+        Not a failure before any request is sent (W10-14's TypeError), which a check of the proxy alone passed."""
+        self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
+        if result.returncode == 0:
+            seen = self.controller.seen  # type: ignore[attr-defined]
+            self.assertEqual(seen, [("/sessions", f"Bearer {MARKER}")])
+        else:
+            self.assertIn("urllib.error.URLError", result.stderr)
 
     def test_a_loopback_controller_is_reached_directly(self) -> None:
         self.assertEqual(self._post(f"http://127.0.0.1:{self.controller.server_port}"), {"id": "s1"})
@@ -146,11 +142,12 @@ class AgentEvalProxyTests(unittest.TestCase):
 
     def test_a_bind_all_or_trailing_dot_host_never_goes_through_the_proxy(self) -> None:
         # The direct request may fail where nothing answers on that address (0.0.0.0 on Windows, :: on a host
-        # without IPv6); the assertion is what the proxy saw, which holds everywhere.
+        # without IPv6); W11-8: either way it is the direct attempt's outcome, and the proxy saw nothing.
         for host in ("0.0.0.0", "[::]", "localhost."):
             with self.subTest(host=host):
-                self._post(f"http://{host}:{self.controller.server_port}", check=False)
-                self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
+                self.proxy.seen.clear()  # type: ignore[attr-defined]
+                self.controller.seen.clear()  # type: ignore[attr-defined]
+                self._assert_the_direct_attempt_was_made(self._post_raw(f"http://{host}:{self.controller.server_port}"))
 
     def test_w11_1_an_unbracketed_ipv6_loopback_is_reached_directly(self) -> None:
         # http.client reads the unbracketed ::1:PORT (and its percent-encoded spelling, which urllib decodes) as ::1,
@@ -185,12 +182,7 @@ class AgentEvalProxyTests(unittest.TestCase):
                 self.proxy.seen.clear()  # type: ignore[attr-defined]
                 self.controller.seen.clear()  # type: ignore[attr-defined]
                 result = self._post_raw(f"http://{authority}:{self.controller.server_port}")
-                self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
-                if result.returncode == 0:
-                    seen = self.controller.seen  # type: ignore[attr-defined]
-                    self.assertEqual(seen, [("/sessions", f"Bearer {MARKER}")])
-                else:
-                    self.assertIn("urllib.error.URLError", result.stderr)
+                self._assert_the_direct_attempt_was_made(result)
 
     def test_w11_1_a_non_numeric_port_is_refused_before_any_proxy_is_used(self) -> None:
         result = self._post_raw("http://controller.invalid:abc")

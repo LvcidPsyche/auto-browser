@@ -86,7 +86,8 @@ def test_localhost_is_reached_directly(servers) -> None:
     tool = AutoBrowserTool(base_url=f"http://localhost:{controller.server_port}", bearer_token=MARKER)
     try:
         assert tool._run("browser.observe", {}) == "ok"
-    except Exception:  # localhost resolved only to ::1 here, where the controller does not listen
+    except httpx.ConnectError:  # localhost resolved only to ::1 here, where the controller does not listen
+        # W11-8: only the refused direct connection skips; a failure before the request is sent fails the test.
         pytest.skip("localhost does not reach 127.0.0.1 on this host")
     assert proxy.seen == []
 

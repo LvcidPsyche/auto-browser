@@ -70,7 +70,7 @@ def _serve(host: str = "127.0.0.1") -> ThreadingHTTPServer:
     return server
 
 
-def _post_through_the_bridge(base_url: str, proxy: ThreadingHTTPServer, *, check: bool = True) -> int | None:
+def _post_through_the_bridge(base_url: str, proxy: ThreadingHTTPServer) -> int:
     proxy_url = f"http://127.0.0.1:{proxy.server_port}"
     env = {"http_proxy": proxy_url, "HTTP_PROXY": proxy_url, "PYTHONPATH": str(_IMPORT_ROOT)}
     for name in ("PATH", "SYSTEMROOT"):  # SYSTEMROOT: Python's sockets need it on Windows
@@ -84,8 +84,6 @@ def _post_through_the_bridge(base_url: str, proxy: ThreadingHTTPServer, *, check
         timeout=60,
         check=False,
     )
-    if not check:
-        return None
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
