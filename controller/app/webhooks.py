@@ -43,39 +43,49 @@ _METADATA_NETWORKS = tuple(
     ipaddress.ip_network(net)
     for net in ("169.254.0.0/16", "100.100.100.200/32", "fe80::/10", "fd00:ec2::254/128")  # .200: Alibaba Cloud
 )
-# IPv6 prefixes whose last 32 bits are an IPv4 address: translated (::ffff:0:a.b.c.d), compatible (::a.b.c.d) and
-# NAT64's well-known prefix (64:ff9b::a.b.c.d). Mapped (::ffff:a.b.c.d) and 6to4 (2002::/16) have stdlib properties.
-# Translated, compatible, NAT64 well-known (RFC 6052) and local-use NAT64 (RFC 8215): the IPv4 address in the last
-# 32 bits.
-_IPV4_SUFFIX_NETWORKS = tuple(
-    ipaddress.ip_network(net) for net in ("::ffff:0:0:0/96", "::/96", "64:ff9b::/96", "64:ff9b:1::/48")
+# How an IPv6 address spells an IPv4 one. Mapped (::ffff:a.b.c.d), 6to4 (2002::/16) and Teredo (2001::/32, the
+# client's address) have stdlib properties. Translated (::ffff:0:a.b.c.d), compatible (::a.b.c.d) and NAT64's
+# well-known prefix (64:ff9b::/96, RFC 6052) hold it in the last 32 bits. Inside the local-use NAT64 prefix
+# (64:ff9b:1::/48, RFC 8215) an operator picks the NAT64 prefix length, so it is read at every RFC 6052 position.
+# An ISATAP interface id (0:5efe or 200:5efe, then the IPv4 address) can follow any prefix. A network-specific NAT64
+# prefix (one an operator chose outside 64:ff9b::/96 and 64:ff9b:1::/48) cannot be recognised.
+_IPV4_SUFFIX_NETWORKS = tuple(ipaddress.ip_network(net) for net in ("::ffff:0:0:0/96", "::/96", "64:ff9b::/96"))
+_LOCAL_USE_NAT64 = ipaddress.ip_network("64:ff9b:1::/48")
+# RFC 6052 section 2.2: the IPv4 address's bytes for each prefix length; bits 64-71 (byte 8, "u") are skipped.
+_RFC6052_LAYOUTS = (
+    (4, 5, 6, 7),  # /32
+    (5, 6, 7, 9),  # /40
+    (6, 7, 9, 10),  # /48
+    (7, 9, 10, 11),  # /56
+    (9, 10, 11, 12),  # /64
+    (12, 13, 14, 15),  # /96
 )
+_ISATAP_IDS = (bytes.fromhex("00005efe"), bytes.fromhex("02005efe"))
 _RESOLVE_TIMEOUT_SECONDS = 5.0
 
 
-def _embedded_ipv4(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
-    """The IPv4 address an IPv6 address spells, if it spells one."""
+def _embedded_ipv4s(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> tuple[ipaddress.IPv4Address, ...]:
+    """Every IPv4 address an IPv6 address may spell (none for an IPv4 address)."""
     if not isinstance(ip, ipaddress.IPv6Address):
-        return None
+        return ()
+    packed = ip.packed
+    found: list[ipaddress.IPv4Address] = []
     if ip.ipv4_mapped is not None:
-        return ip.ipv4_mapped
+        found.append(ip.ipv4_mapped)
     if ip.sixtofour is not None:
-        return ip.sixtofour
+        found.append(ip.sixtofour)
     if ip.teredo is not None:
-        return ip.teredo[1]  # the client's address (the server's is public by design)
+        found.append(ip.teredo[1])  # the client's address (the server's is public by design)
     if any(ip in network for network in _IPV4_SUFFIX_NETWORKS):
-        return ipaddress.IPv4Address(ip.packed[-4:])
-    return None
+        found.append(ipaddress.IPv4Address(packed[-4:]))
+    if ip in _LOCAL_USE_NAT64:
+        found.extend(ipaddress.IPv4Address(bytes(packed[i] for i in layout)) for layout in _RFC6052_LAYOUTS)
+    if packed[8:12] in _ISATAP_IDS:
+        found.append(ipaddress.IPv4Address(packed[12:]))
+    return tuple(found)
 
 
-def _address_is_disallowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, *, allow_private: bool) -> bool:
-    embedded = _embedded_ipv4(ip)
-    if any(address in network for address in (ip, embedded) if address is not None for network in _METADATA_NETWORKS):
-        return True
-    if allow_private:
-        return False
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
+def _not_global(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     # Not global catches what the flags miss, such as shared address space (100.64.0.0/10: carrier-grade NAT,
     # Tailscale); the flags catch what is_global misses, such as multicast and IPv4 spelled inside ::/8.
     return (
@@ -87,6 +97,19 @@ def _address_is_disallowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, *,
         or ip.is_multicast
         or ip.is_reserved
     )
+
+
+def _address_is_disallowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, *, allow_private: bool) -> bool:
+    """Whether a resolved address is refused: metadata always (spelled directly or inside IPv6), and without
+    `allow_private` anything not global, or an IPv6 address that spells an IPv4 address that is not."""
+    embedded = _embedded_ipv4s(ip)
+    if any(address in network for address in (ip, *embedded) for network in _METADATA_NETWORKS):
+        return True
+    if allow_private:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return _not_global(ip) or any(_not_global(address) for address in embedded)
 
 
 def _is_disallowed_webhook_name(host: str, *, allow_private: bool) -> bool:
@@ -135,9 +158,9 @@ async def _checked_target(webhook_url: str, *, allow_private: bool) -> _Target |
     """Where to send the request, or None (after a warning) when the target is refused.
 
     The host is read as a browser reads it (numeric spellings of loopback are refused), resolved here, and every
-    answer must be a global address; `allow_private` admits any answer but cloud metadata (169.254.0.0/16,
-    100.100.100.200, fe80::/10, fd00:ec2::254, any of those spelled inside an IPv6 address, and the names metadata
-    and metadata.google.internal, refused before any lookup). With no proxy the
+    answer must be a global address, and so must any IPv4 address an IPv6 answer spells (_embedded_ipv4s);
+    `allow_private` admits any answer but cloud metadata (_METADATA_NETWORKS, spelled directly or inside an IPv6
+    address, and the names metadata and metadata.google.internal, refused before any lookup). With no proxy the
     request goes to the checked answers (pinned_urls), with the name (its ASCII, IDNA form) kept in the Host header and
     the TLS server name, so a second lookup cannot return a different address; dispatch_approval_event decides that.
     """

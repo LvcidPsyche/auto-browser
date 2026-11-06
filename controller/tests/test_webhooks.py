@@ -185,6 +185,32 @@ class WebhookTargetTests(unittest.IsolatedAsyncioTestCase):
                     await self._send("http://hooks.internal/hook", allow_private_targets=allow_private_targets)
                     self.client.post.assert_not_awaited()
 
+    async def test_w2_32_every_rfc_6052_layout_in_local_use_nat64_and_isatap_is_unwrapped(self) -> None:
+        # Only the /96 layout inside 64:ff9b:1::/48 was unwrapped, so the /48, /56 and /64 spellings of
+        # 169.254.169.254 passed with the opt-in on; an ISATAP interface id (0:5efe or 200:5efe, then the IPv4
+        # address) behind a global prefix passed in both modes.
+        for address in (
+            "64:ff9b:1:a9fe:a9:fe00::",  # /48
+            "64:ff9b:1:aba9:fe:a9fe::",  # /56
+            "64:ff9b:1:abcd:a9:fea9:fe00:0",  # /64
+            "2600::5efe:a9fe:a9fe",  # ISATAP, u/l bit clear
+            "2600::200:5efe:a9fe:a9fe",  # ISATAP, u/l bit set
+        ):
+            for allow_private_targets in (True, False):
+                with self.subTest(address=address, allow_private_targets=allow_private_targets):
+                    self.client.post.reset_mock()
+                    self._resolver(address)
+                    await self._send("http://hooks.internal/hook", allow_private_targets=allow_private_targets)
+                    self.client.post.assert_not_awaited()
+
+    async def test_w2_32_an_isatap_private_address_is_refused_without_the_opt_in_and_allowed_with_it(self) -> None:
+        for allow_private_targets, posted in ((False, False), (True, True)):
+            with self.subTest(allow_private_targets=allow_private_targets):
+                self.client.post.reset_mock()
+                self._resolver("2600::5efe:a00:1")  # a global prefix, then ISATAP's 10.0.0.1
+                await self._send("http://hooks.internal/hook", allow_private_targets=allow_private_targets)
+                self.assertEqual(self.client.post.await_count, int(posted))
+
     async def test_the_alibaba_cloud_metadata_address_is_refused_with_the_opt_in_on_and_off(self) -> None:
         # 100.100.100.200 sits in 100.64.0.0/10, which is neither private nor reserved: it passed both checks.
         for allow_private_targets in (False, True):
