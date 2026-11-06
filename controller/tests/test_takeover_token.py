@@ -260,6 +260,95 @@ def test_w10_9_a_file_whose_mode_cannot_be_read_says_so_and_the_link_is_503(
     assert response.status_code == 503, response.text
 
 
+def _fstat_failing_after_the_chmod(path: Path):
+    """Patches for api_token's os: the second fstat of the mode check's descriptor (after fchmod) raises EIO."""
+    import errno
+    from unittest.mock import patch
+
+    from app import api_token
+
+    real_open, real_close, real_fstat = os.open, os.close, os.fstat
+    checked: set[int] = set()
+    closed: set[int] = set()
+    calls: dict[int, int] = {}
+
+    def recording_open(file, flags, *args, **kwargs):
+        fd = real_open(file, flags, *args, **kwargs)
+        if flags & os.O_NOFOLLOW and Path(file) == path:
+            checked.add(fd)
+        return fd
+
+    def recording_close(fd):
+        if fd in checked:
+            closed.add(fd)
+        return real_close(fd)
+
+    def fstat_failing_the_second_read(fd, *args, **kwargs):
+        if fd in checked:
+            calls[fd] = calls.get(fd, 0) + 1
+            if calls[fd] == 2:
+                raise OSError(errno.EIO, "Input/output error")
+        return real_fstat(fd, *args, **kwargs)
+
+    patches = (
+        patch.object(api_token.os, "open", side_effect=recording_open),
+        patch.object(api_token.os, "close", side_effect=recording_close),
+        patch.object(api_token.os, "fstat", side_effect=fstat_failing_the_second_read),
+    )
+    return patches, checked, closed, calls
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the mode check is POSIX only: Windows applies the folder's ACL")
+def test_w11_6_a_mode_that_cannot_be_reread_after_the_chmod_says_so_and_the_link_is_503(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The second fstat, after fchmod, had no handling: its OSError reached the generic branch, whose message says the
+    # file "is readable beyond its owner and its mode could not be tightened", though the chmod went through.
+    from unittest.mock import Mock
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.routes.sessions import create_sessions_router
+
+    path = tmp_path / "takeover-token"
+    path.write_text(SENTINEL + "\n", encoding="utf-8")
+    path.chmod(0o644)
+    settings = make_settings(tmp_path)
+    patches, checked, closed, calls = _fstat_failing_after_the_chmod(path)
+
+    with patches[0], patches[1], patches[2], caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_takeover_token(settings)
+    assert settings.takeover_token is None
+    assert checked and all(calls[fd] == 2 for fd in checked), calls
+    assert closed == checked, "the mode check's descriptor was not closed"
+    assert f"TAKEOVER_TOKEN_FILE {path} could not be opened or read for its mode check" in caplog.text
+    assert "Input/output error" in caplog.text
+    assert "mode could not be tightened" not in caplog.text
+    assert SENTINEL not in caplog.text
+
+    app = FastAPI()
+    app.include_router(create_sessions_router(manager=Mock(settings=settings)))
+    with TestClient(app) as client:
+        response = client.get("/sessions/abc123/takeover-link", headers={"X-Takeover-Token": SENTINEL})
+    assert response.status_code == 503, response.text
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the mode check is POSIX only: Windows applies the folder's ACL")
+def test_w11_6_api_token_file_keeps_the_original_error_when_its_mode_cannot_be_reread(tmp_path: Path) -> None:
+    from app import api_token
+
+    path = tmp_path / "api-token"
+    path.write_text(API_SENTINEL + "\n", encoding="utf-8")
+    path.chmod(0o644)
+    patches, checked, closed, _ = _fstat_failing_after_the_chmod(path)
+
+    with patches[0], patches[1], patches[2], pytest.raises(OSError, match="Input/output error") as raised:
+        api_token._restrict_mode(path, name="API_TOKEN_FILE")
+    assert type(raised.value) is OSError
+    assert checked and closed == checked
+
+
 def test_a_file_token_equal_to_an_api_credential_is_not_used(tmp_path: Path) -> None:
     (tmp_path / "takeover-token").write_text(SENTINEL + "\n", encoding="utf-8")
     settings = make_settings(tmp_path, API_BEARER_TOKEN=SENTINEL)

@@ -389,7 +389,13 @@ def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
         os.fchmod(fd, PRIVATE_FILE_MODE)
         # Some filesystems accept a chmod and keep the mode (a Windows drive under Docker Desktop, some FUSE or SMB
         # mounts, W5-4): check that it held. Nobody can tighten such a file, so the token is still used.
-        kept = stat.S_IMODE(os.fstat(fd).st_mode)
+        try:
+            kept = stat.S_IMODE(os.fstat(fd).st_mode)
+        except OSError as exc:
+            # The chmod went through but the mode could not be read back (W11-6): handled as the first read is.
+            if name != "TAKEOVER_TOKEN_FILE":
+                raise
+            raise _ModeCheckOpenError(exc.errno, exc.strerror, exc.filename) from exc
     finally:
         os.close(fd)
     if kept & _GROUP_OR_OTHER_BITS:
