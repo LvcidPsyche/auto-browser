@@ -100,8 +100,11 @@ All notable changes to auto-browser are documented here.
   `ISOLATED_TAKEOVER_HOST`, so the takeover URL a session hands out through its tunnel was refused by noVNC's own
   Origin/Host guard.
 - Releasing an isolated session no longer takes an unreachable Docker daemon (or any Docker error other than "not
-  found") for a gone container: the release now fails, `close_session` reports it in `failed_steps`, and the session's
-  profile and downloads directories are kept instead of being deleted under a container that may still be running.
+  found") for a gone container, and no longer carries on after a container removal that failed (any error but "not
+  found", which means gone): the release now fails, `close_session` reports it in `failed_steps` (the audit event and
+  receipt say partial), and the session's profile and downloads directories are kept, with a warning naming them,
+  instead of being deleted under a container that may still be running. A rollback that releases after a failed
+  provision or connect logs a failed release and raises the original error.
 - Two isolated sessions created at once now read the Docker daemon's API version once and log the "daemon ignores
   GwPriority" warning once; both were unsynchronised across the provisioning threads.
 - When the active tab closes (`browser.close_tab`, or the page closing itself), the session no longer moves to a tab

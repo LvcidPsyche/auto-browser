@@ -285,7 +285,10 @@ class BrowserRuntimeService:
             )
             return browser, runtime
         except BaseException:  # cancellation included, or the container leaks
-            await manager.runtime_provisioner.release(runtime)
+            try:
+                await manager.runtime_provisioner.release(runtime)
+            except Exception as exc:  # the connect failure is the one to raise; this one is logged
+                logger.warning("isolated runtime of session %s was not fully released: %s", session_id, exc)
             raise
 
     def gate_lost(self, gate: RequestGate) -> None:

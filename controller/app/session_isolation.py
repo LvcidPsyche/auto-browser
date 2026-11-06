@@ -410,7 +410,12 @@ class DockerBrowserNodeProvisioner:
         except BaseException:
             # BaseException: a cancelled create (client gone, shutdown) left the
             # container running with nothing tracking it until the next restart.
-            await asyncio.to_thread(self._cleanup_pending_container, pending)
+            try:
+                await asyncio.to_thread(self._cleanup_pending_container, pending)
+            except Exception as exc:  # the original error is the one to raise; this one is logged
+                logger.warning(
+                    "Could not release browser container %s after a failed provision: %s", pending.container_name, exc
+                )
             raise
 
     async def release(self, runtime: IsolatedBrowserRuntime) -> None:
@@ -806,16 +811,30 @@ class DockerBrowserNodeProvisioner:
             except Exception as exc:
                 logger.debug("Could not stop browser container %s: %s", runtime.container_name, exc)
         stranded = None
+        removal_error: Exception | None = None
+        not_found = (docker.errors.NotFound,) if docker is not None else ()
         if not self.settings.isolated_browser_keep_containers:
             if container is not None:
                 try:
                     container.remove(force=True)
+                except not_found:
+                    pass  # gone already: nothing holds the profile
                 except Exception as exc:
                     logger.warning("Could not remove browser container %s: %s", runtime.container_name, exc)
                     # It still holds an endpoint on the session network.
                     stranded = container
+                    removal_error = exc
         if runtime.network_owned:
             self._release_session_network(client, runtime, stranded=stranded)
+        if removal_error is not None:
+            # The container may still run with the profile and downloads mounted: emptying them under it is not a
+            # release. They stay, as the startup sweep leaves a container's that it could not remove.
+            logger.warning(
+                "Keeping %s: browser container %s could not be removed",
+                self._local_runtime_root(runtime.session_id),
+                runtime.container_name,
+            )
+            raise RuntimeError(f"browser container {runtime.container_name} could not be removed") from removal_error
         if not self.settings.isolated_browser_keep_containers:
             # Also when the container is already gone (docker rm, a crashed
             # daemon): its profile directory, cookies included, is still here.
