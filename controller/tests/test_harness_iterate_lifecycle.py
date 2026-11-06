@@ -839,6 +839,32 @@ class RetentionTests(_Base):
             self.assertEqual(service.store.prune(30), 1)
         self.assertFalse(staged.exists())
 
+    async def test_w9_7_an_entry_whose_type_cannot_be_read_is_logged_and_the_prune_goes_on(self) -> None:
+        # Path.is_dir() raises for EACCES or EIO on Python 3.11, and the check sat before the per-entry try, so one
+        # unreadable entry ended a prune whose docstring says it never raises.
+        from unittest.mock import patch
+
+        service = HarnessService(self.root)
+        unreadable = service.store.staging_root / "unreadable"
+        unreadable.mkdir()
+        aged = []
+        for name in ("oldskill", "otherskill"):
+            staged = service.store.staging_root / name
+            staged.mkdir()
+            _age(staged, 40)
+            aged.append(staged)
+        real_is_dir = Path.is_dir
+
+        def is_dir(path: Path) -> bool:
+            if path == unreadable:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_is_dir(path)
+
+        with patch.object(Path, "is_dir", is_dir), self.assertLogs("app.harness.iterate", "WARNING") as logs:
+            self.assertEqual(service.store.prune(30), 2)
+        self.assertTrue(any("unreadable" in line for line in logs.output), logs.output)
+        self.assertEqual([path for path in aged if path.exists()], [])
+
     async def test_the_per_operator_cap_refuses_a_run_past_it_and_counts_each_operator_apart(self) -> None:
         service = HarnessService(self.root, max_runs_per_operator=2)
         token = set_current_operator("alice", source="token")

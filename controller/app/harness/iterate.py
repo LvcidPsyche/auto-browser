@@ -376,9 +376,12 @@ class HarnessRunStore:
             except OSError as exc:
                 logger.warning("harness prune could not list %s: %s", root, exc)
         for directory, marker, staged in candidates:
-            if not directory.is_dir() or directory.name in self._active:
+            if directory.name in self._active:
                 continue
             try:
+                # Inside the try (W9-7): is_dir() raises for EACCES or EIO, and one such entry ended the prune.
+                if not directory.is_dir():
+                    continue
                 # A staged entry's age check and removal are one step against staging's rename into place; staging
                 # never replaces a run directory, so removing one does not hold staging up.
                 with self.staging_lock if staged else contextlib.nullcontext():
