@@ -81,7 +81,11 @@ def test_the_prompt_comes_before_the_popup_and_the_header_is_sent() -> None:
         storage = await popup.evaluate("sessionStorage.length")
         stub.gate.set()
         await popup.wait_for_url("http://novnc.test/**")
-        return {"events": list(events), "storage": storage, "url": popup.url}
+        # Only the new window's copy was cleared: the dashboard tab keeps both tokens.
+        opener = await page.evaluate(
+            "[sessionStorage.getItem('ab_token'), sessionStorage.getItem('ab_takeover_token')]"
+        )
+        return {"events": list(events), "storage": storage, "url": popup.url, "opener": opener}
 
     seen = drive(stub, scenario)
 
@@ -90,6 +94,7 @@ def test_the_prompt_comes_before_the_popup_and_the_header_is_sent() -> None:
     assert len(_takeover_prompts(seen["events"])) == 1
     assert stub.headers == [TOKEN]
     assert seen["storage"] == 0
+    assert seen["opener"] == [TOKEN, TOKEN]
     assert seen["url"] == FULL
 
 
