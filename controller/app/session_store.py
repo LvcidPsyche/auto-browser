@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -166,6 +169,14 @@ class RedisSessionStore(_MarkInterruptedMixin):
         return f"{self.prefix}:index"
 
 
+@dataclass
+class _RecordLock:
+    """One record id's write lock, and how many writes hold it or wait for it."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
+
+
 class DurableSessionStore:
     def __init__(
         self,
@@ -177,8 +188,10 @@ class DurableSessionStore:
         self.file_store = FileSessionStore(file_root)
         self.redis_store = RedisSessionStore(redis_url, redis_prefix) if redis_url else None
         self._primary: SessionStoreBackend = self.file_store
-        # Serializes upsert() within this process; another controller process on the same store is not covered.
-        self._write_lock = asyncio.Lock()
+        # Serializes upsert() per record id within this process (CB3-2: one lock for the store queued every
+        # session's persist behind one slow write); another controller process on the same store is not covered.
+        # An entry goes once no write holds or waits for it, so the table does not grow with every session.
+        self._write_locks: dict[str, _RecordLock] = {}
 
     async def startup(self) -> None:
         await self.file_store.startup()
@@ -227,13 +240,28 @@ class DurableSessionStore:
         return await self.file_store.get(session_id)
 
     async def upsert(self, record: SessionRecord) -> None:
-        # One write at a time, from the closed check through both backends, so a check cannot go stale before its
-        # write lands, and the Redis copy lands in the same order as the file. Run to completion when the caller is
-        # cancelled: a to_thread write keeps going after a cancel, so letting the lock go early reopens the race.
+        # One write at a time per record id, from the closed check through both backends, so a check cannot go stale
+        # before its write lands, and the Redis copy lands in the same order as the file. Run to completion when the
+        # caller is cancelled: a to_thread write keeps going after a cancel, so letting the lock go early reopens the
+        # race.
         await _run_to_completion(self._upsert_locked(record))
 
+    @asynccontextmanager
+    async def _record_lock(self, record_id: str) -> AsyncIterator[None]:
+        entry = self._write_locks.get(record_id)
+        if entry is None:
+            entry = self._write_locks[record_id] = _RecordLock()
+        entry.users += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            entry.users -= 1
+            if entry.users == 0 and self._write_locks.get(record_id) is entry:
+                del self._write_locks[record_id]
+
     async def _upsert_locked(self, record: SessionRecord) -> None:
-        async with self._write_lock:
+        async with self._record_lock(record.id):
             if record.status != "closed" and await self._is_closed(record.id):
                 # A late write of a session that has been closed: a session never reopens, and an interrupted write
                 # must not replace the close (and its close_reason) either.
