@@ -14,9 +14,20 @@ from app.config import Settings
 from app.models import MODEL_NAME_PATTERN, AgentStepRequest
 from app.providers.gemini_adapter import GeminiAdapter
 
-_GOOD = ("gpt-6.1-sol", "claude-sonnet-4-6", "gemini-3.5-flash", "models/gemini-3.5-flash", "llama3:8b", "a")
+_GOOD = (
+    "gpt-6.1-sol",
+    "claude-sonnet-4-6",
+    "gemini-3.5-flash",
+    "models/gemini-3.5-flash",
+    "llama3:8b",
+    "a",
+    # R-7: Vertex-style ids, as written for Vertex and through LiteLLM.
+    "claude-3-5-sonnet@20240620",
+    "vertex_ai/claude-x@20240620",
+)
 _BAD = (
     "",
+    "@claude",
     "-rf",
     "--model",
     "a/../b",
@@ -49,7 +60,7 @@ class ProviderModelPatternTests(unittest.TestCase):
         self.assertIsNone(AgentStepRequest(provider="openai", goal="g").provider_model)
 
     def test_the_pattern_is_the_documented_one(self):
-        self.assertEqual(MODEL_NAME_PATTERN, r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+        self.assertEqual(MODEL_NAME_PATTERN, r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$")
 
 
 class GeminiUrlQuotingTests(unittest.IsolatedAsyncioTestCase):
@@ -85,6 +96,22 @@ class GeminiUrlQuotingTests(unittest.IsolatedAsyncioTestCase):
             pass
         url = adapter._post_json.await_args.kwargs["url"]
         self.assertTrue(url.endswith("/models/tunedModels/my-model:v1:generateContent"), url)
+
+    async def test_a_vertex_style_model_is_quoted_with_its_at_sign_encoded(self):
+        adapter = GeminiAdapter(Settings(_env_file=None, GEMINI_API_KEY="k"))
+        adapter._post_json = AsyncMock(return_value={})
+        try:
+            await adapter._decide(
+                goal="g",
+                observation={"url": "u", "title": "t", "text_excerpt": "", "preset": "text"},
+                context_hints=None,
+                previous_steps=[],
+                model_override="claude-3-5-sonnet@20240620",
+            )
+        except RuntimeError:
+            pass
+        url = adapter._post_json.await_args.kwargs["url"]
+        self.assertTrue(url.endswith("/models/claude-3-5-sonnet%4020240620:generateContent"), url)
 
 
 if __name__ == "__main__":

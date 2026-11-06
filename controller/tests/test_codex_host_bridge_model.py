@@ -52,9 +52,21 @@ class BridgeModelValidationTests(unittest.TestCase):
             self._service(default_model="--evil").handle_openai_decide(dict(_PAYLOAD))
         self.assertEqual(caught.exception.status_code, 400)
 
+    def test_vertex_style_models_are_accepted_and_a_leading_at_sign_is_not(self):
+        # R-7: `claude-3-5-sonnet@20240620` (Vertex) and `vertex_ai/claude-x@20240620` (LiteLLM) were refused.
+        for model in ("claude-3-5-sonnet@20240620", "vertex_ai/claude-x@20240620"):
+            with self.subTest(model=model):
+                self.assertTrue(bridge.model_name_is_valid(model))
+        for model in ("@20240620", "-x@y", "a@..b"):
+            with self.subTest(model=model):
+                self.assertFalse(bridge.model_name_is_valid(model))
+                with self.assertRaises(bridge.BridgeError) as raised:
+                    self._service().handle_openai_decide({**_PAYLOAD, "model": model})
+                self.assertEqual(raised.exception.status_code, 400)
+
     def test_the_bridge_pattern_matches_models_py(self):
         self.assertEqual(bridge.MODEL_NAME_PATTERN, MODEL_NAME_PATTERN)
-        for name in ("gpt-6.1-sol", "a", "x:y/z", "..", "a..b", "-x", "", "a" * 128, "a" * 129):
+        for name in ("gpt-6.1-sol", "a", "x:y/z", "..", "a..b", "-x", "", "a" * 128, "a" * 129, "@x", "a@..b"):
             with self.subTest(name=name):
                 from_models = bool(__import__("re").fullmatch(MODEL_NAME_PATTERN, name)) and ".." not in name
                 self.assertEqual(bridge.model_name_is_valid(name), from_models)

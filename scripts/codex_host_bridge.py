@@ -70,7 +70,7 @@ def build_sandbox_flags(*, allow_host_exec: bool, sandbox_mode: str) -> list[str
 
 # Same pattern as MODEL_NAME_PATTERN in controller/app/models.py (this script ships without the controller; a test
 # keeps the two equal). The leading alphanumeric keeps a model from being read as a codex flag.
-MODEL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+MODEL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$"
 _MODEL_NAME_RE = re.compile(MODEL_NAME_PATTERN)
 
 

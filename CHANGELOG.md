@@ -15,9 +15,6 @@ All notable changes to auto-browser are documented here.
   spells a metadata address (mapped, translated, compatible, NAT64 `64:ff9b::` or 6to4). Behind a proxy
   (`HTTPS_PROXY` and the like) the controller must still be able to resolve the webhook host itself: it checks the
   addresses before it posts by name through the proxy, and a name it cannot resolve is not posted to.
-- **Upgrade note:** `provider_model` must now match the model-name pattern (see Security), so an id with any other
-  character, such as a Vertex-style `claude-x@20240620`, is refused with a 422. An agent job saved before the upgrade
-  with such a model fails when it runs and cannot be resumed.
 - `MESH_ENABLED`, `MESH_IDENTITY_DIR`, `MESH_PEERS_PATH`, `MESH_TIMESTAMP_WINDOW`, `CURATOR_PROVIDER` and
   `CURATOR_MODEL` are now `Settings` fields, read from the controller's settings rather than from `os.environ` at
   startup. The names and defaults are unchanged; `MESH_ENABLED` now takes any boolean spelling pydantic accepts (not
@@ -247,8 +244,8 @@ All notable changes to auto-browser are documented here.
   dot), at the tool boundary and again in the run store, so an id cannot name a directory outside the harness runs
   root.
 - `provider_model` on the agent step and run requests, and the model the Codex host bridge passes to `codex --model`,
-  must now match one pattern (letters, digits, `.`, `_`, `:`, `/`, `-`; 1 to 128 characters; starting with a letter or
-  digit; no `..`). The bridge answers 400 otherwise, so a model can no longer be read as a CLI flag. The Gemini
+  must now match one pattern (letters, digits, `.`, `_`, `:`, `/`, `@`, `-`; 1 to 128 characters; starting with a
+  letter or digit; no `..`), which a Vertex-style id such as `claude-3-5-sonnet@20240620` passes. The bridge answers 400 otherwise, so a model can no longer be read as a CLI flag. The Gemini
   adapter, and the curator for `CURATOR_MODEL`, also URL-quote the model they put in the request path.
 - The mesh and witness private key is now created with mode 0600 from the first byte (`O_EXCL`, no write-then-chmod
   window) in an identity directory created at 0700, and loading a key that is readable by group or others logs a

@@ -47,7 +47,7 @@ def validate_coordinate_pair(
 # One shape for every model name that reaches a URL path or a CLI argument: provider_model here, and the Codex host
 # bridge (scripts/codex_host_bridge.py keeps a copy; a test pins the two together). The leading alphanumeric rules out
 # a "-flag"; ".." is refused separately because "." is allowed inside a name.
-MODEL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+MODEL_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$"
 _MODEL_NAME_RE = re.compile(MODEL_NAME_PATTERN)
 
 
