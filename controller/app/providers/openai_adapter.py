@@ -36,7 +36,8 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
 
 class OpenAIAdapter(BaseProviderAdapter):
     provider = "openai"
-    cli_env_names = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME", "CODEX_API_KEY")
+    # CODEX_CA_CERTIFICATE: the PEM bundle Codex reads before SSL_CERT_FILE (a TLS proxy or a private root CA).
+    cli_env_names = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME", "CODEX_API_KEY", "CODEX_CA_CERTIFICATE")
 
     @property
     def supported_auth_modes(self) -> tuple[str, ...]:

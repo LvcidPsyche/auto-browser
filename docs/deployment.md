@@ -536,7 +536,7 @@ Treat the socket as a host-trust boundary: any local process that can connect to
 The bridge starts Codex with an allowlisted environment, not the whole environment of the shell it was started
 from: the names the controller gives its own provider CLIs (`PATH`, `HOME`, the locale (`LANG`, `LC_*`), the temp
 directories, the proxy and CA settings, and a few Windows basics) plus `OPENAI_API_KEY`, `OPENAI_BASE_URL`,
-`CODEX_HOME` and `CODEX_API_KEY`. A Codex setup that needs another variable passes it with `--pass-env NAME`
+`CODEX_HOME`, `CODEX_API_KEY` and `CODEX_CA_CERTIFICATE` (the PEM bundle Codex reads before `SSL_CERT_FILE`). A Codex setup that needs another variable passes it with `--pass-env NAME`
 (repeatable; a name must be letters, digits and underscores, not starting with a digit). That passes the
 variable's value to Codex and to every command Codex runs, so pass only what Codex needs.
 

@@ -83,6 +83,14 @@ class CodexEnvironmentTests(unittest.TestCase):
 
         self.assertEqual(env, {"Path": "C:\\bin", "LC_ALL": "C", "lc_ctype": "C", "codex_home": "/c"})
 
+    def test_codex_ca_certificate_passes(self) -> None:
+        # W2-30: Codex's own CA bundle variable, read before SSL_CERT_FILE; a path, not a secret.
+        environ = {"PATH": "/usr/bin", "CODEX_CA_CERTIFICATE": "/etc/ssl/corp-ca.pem"}
+
+        env = self._env_given(bridge.CodexBridgeService(codex_path="codex"), environ)
+
+        self.assertEqual(env, environ)
+
     def test_pass_env_adds_exactly_the_named_variable(self) -> None:
         environ = {"PATH": "/usr/bin", "MY_PROXY_HINT": "on", "OTHER_SECRET": UNRELATED}
 

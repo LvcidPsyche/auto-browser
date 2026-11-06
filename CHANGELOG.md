@@ -280,8 +280,9 @@ All notable changes to auto-browser are documented here.
 - The Codex host bridge (`scripts/codex_host_bridge.py`, `OPENAI_AUTH_MODE=host_bridge`) now starts Codex with an
   allowlisted environment instead of the whole environment of the shell it was started from, which Codex, and every
   command a prompt-injected Codex ran under `-s read-only`, received: the names the controller gives its own provider
-  CLIs (`CLI_BASE_ENV_NAMES` and `LC_*`) plus `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME` and `CODEX_API_KEY`,
-  and each name given with the new `--pass-env NAME` (a bad name exits 2 at startup).
+  CLIs (`CLI_BASE_ENV_NAMES` and `LC_*`) plus `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME`, `CODEX_API_KEY` and
+  `CODEX_CA_CERTIFICATE` (the PEM bundle Codex reads before `SSL_CERT_FILE`, which the controller's own `cli`-mode
+  Codex now gets too), and each name given with the new `--pass-env NAME` (a bad name exits 2 at startup).
 - The model no longer receives an isolated session's noVNC password. `create_session`, `get_session`,
   `get_remote_access` and `request_human_takeover` (REST and MCP) carried it in the takeover URL's fragment, which
   over MCP reached the calling model, and with a session tunnel up the URL was the public one. No MCP tool result, and
