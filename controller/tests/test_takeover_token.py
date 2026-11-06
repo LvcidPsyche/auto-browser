@@ -57,8 +57,12 @@ def test_the_first_start_generates_a_private_file_and_the_next_reuses_it(
     assert token not in caplog.text
 
     again = make_settings(tmp_path, API_BIND_SCOPE=scope)
-    ensure_takeover_token(again)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        ensure_takeover_token(again)
     assert again.takeover_token == token
+    assert "Using the takeover token" in caplog.text  # the reuse logs a fingerprint, never the token
+    assert token not in caplog.text
 
 
 def test_tokenless_loopback_still_gets_a_takeover_token(tmp_path: Path) -> None:

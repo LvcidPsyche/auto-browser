@@ -270,6 +270,32 @@ class RouteWiringTests(unittest.TestCase):
             self.assertNotIn("takeover-link", text, str(path))
             self.assertNotIn("takeover_token", text, str(path))
 
+    def test_only_the_human_only_paths_reach_the_takeover_link_anywhere_in_the_app(self) -> None:
+        # W2-25: the guard above covered tool_gateway only. Across controller/app, takeover_link() is called only by
+        # the route, defined only in the remote-access service, and the endpoint's path (a string with no spaces:
+        # prose, docstrings and log messages may name it) is spelled only by the route's constant.
+        import ast
+
+        app_dir = Path(__file__).resolve().parents[1] / "app"
+        calls, definitions, paths = set(), set(), set()
+        for path in app_dir.rglob("*.py"):
+            relative = path.relative_to(app_dir).as_posix()
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    if (func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")) == "takeover_link":
+                        calls.add(relative)
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "takeover_link":
+                    definitions.add(relative)
+                elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    if "takeover-link" in node.value and not any(char.isspace() for char in node.value):
+                        paths.add(relative)
+        self.assertEqual(calls, {"routes/sessions.py"})
+        self.assertEqual(definitions, {"browser/services/remote_access.py"})
+        self.assertEqual(paths, {"routes/_utils.py"})
+        dashboard = (app_dir / "routes" / "extensions" / "dashboard_html.py").read_text(encoding="utf-8")
+        self.assertIn("/takeover-link`", dashboard)
+
     def test_the_agent_facing_note_names_no_token(self) -> None:
         from app.browser.services.remote_access import TAKEOVER_NOTE
 

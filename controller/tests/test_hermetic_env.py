@@ -42,6 +42,8 @@ print(json.dumps({
     "artifact_root": s.artifact_root,
     "api_allow_tokenless_loopback": s.api_allow_tokenless_loopback,
     "api_token_file": s.api_token_file,
+    "takeover_token_file": s.takeover_token_file,
+    "takeover_token": s.takeover_token,
 }))
 """
 
@@ -54,6 +56,8 @@ HOSTILE_ENV = {
     "ARTIFACT_ROOT": "/data/artifacts",
     "API_ALLOW_TOKENLESS_LOOPBACK": "false",
     "API_TOKEN_FILE": "/data/api-token",
+    "TAKEOVER_TOKEN_FILE": "/data/takeover-token",
+    "TAKEOVER_TOKEN": "hostile-takeover-sentinel-" + "t" * 40,
 }
 
 HOSTILE_DOTENV = """\
@@ -88,6 +92,9 @@ def test_exported_variables_do_not_change_settings(tmp_path: Path) -> None:
     assert "auto-browser-tests-" in str(seen["artifact_root"])
     assert seen["api_allow_tokenless_loopback"] is True
     assert "auto-browser-tests-" in str(seen["api_token_file"])
+    # W2-25: no test failed when tests/__init__.py's TAKEOVER_TOKEN_FILE default was dropped.
+    assert "auto-browser-tests-" in str(seen["takeover_token_file"])
+    assert seen["takeover_token"] is None
 
 
 def test_a_dotenv_in_the_working_directory_does_not_change_settings(tmp_path: Path) -> None:
@@ -111,7 +118,7 @@ def test_results_are_the_same_with_and_without_a_hostile_environment(tmp_path: P
     hostile = _settings_seen_by_a_fresh_process(hostile_dir, HOSTILE_ENV)
 
     # Each run makes its own throwaway data root; everything else must match.
-    for per_run in ("artifact_root", "api_token_file"):
+    for per_run in ("artifact_root", "api_token_file", "takeover_token_file"):
         clean.pop(per_run)
         hostile.pop(per_run)
     assert hostile == clean

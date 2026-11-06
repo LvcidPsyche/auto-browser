@@ -381,6 +381,21 @@ class DashboardAndScriptTests(unittest.TestCase):
         self.assertIn(f'header = "X-Takeover-Token: {TAKEOVER}"', config)
 
     @unittest.skipUnless(SCRIPT.is_file() and shutil.which("bash") and os.name != "nt", "scripts/ or bash is not here")
+    def test_w2_25_without_takeover_token_the_script_reads_data_takeover_token(self) -> None:
+        root = self._tree(takeover_in_env=False)
+        (root / "data").mkdir()
+        (root / "data" / "takeover-token").write_text(TAKEOVER + "\n", encoding="utf-8")
+        result = self._run(root, "abc123")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f"http://127.0.0.1:16080/vnc.html#password={SENTINEL}\n")
+        self.assertNotIn("No takeover token", result.stderr)
+        self.assertNotIn(TAKEOVER, result.stderr)
+        self.assertNotIn(TAKEOVER, (root / "log" / "argv").read_text(encoding="utf-8"))
+        config = (root / "log" / "curl-stdin").read_text(encoding="utf-8").splitlines()
+        self.assertIn(f'header = "X-Takeover-Token: {TAKEOVER}"', config)
+
+    @unittest.skipUnless(SCRIPT.is_file() and shutil.which("bash") and os.name != "nt", "scripts/ or bash is not here")
     def test_w2_24_without_a_takeover_token_the_script_warns_and_names_where_it_looks(self) -> None:
         root = self._tree(takeover_in_env=False)
         result = self._run(root, "abc123")
