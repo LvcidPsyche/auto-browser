@@ -110,7 +110,7 @@ class BrowserRemoteAccessService:
             return default
         try:
             seconds = float(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):  # OverflowError: an integer too large for a float
             return default
         return seconds if math.isfinite(seconds) and seconds > 0 else default
 
@@ -248,11 +248,11 @@ class BrowserRemoteAccessService:
             return None
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=UTC)
+            return parsed.astimezone(UTC)
+        except (ValueError, OverflowError):  # OverflowError: a date the conversion to UTC takes out of range
             return None
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=UTC)
-        return parsed.astimezone(UTC)
 
     @staticmethod
     def takeover_url_is_local_only(value: str) -> bool:

@@ -61,6 +61,21 @@ class SidecarTests(unittest.TestCase):
 
         self.assertEqual(info["stale_after_seconds"], 45.0)
 
+    def test_an_oversized_stale_after_seconds_falls_back_too(self) -> None:
+        # R-20: float(10**400) raises OverflowError, which was not caught, so the report raised.
+        info = self.info(
+            '{"status": "active", "updated_at": "2999-01-01T00:00:00Z", "stale_after_seconds": 1' + "0" * 400 + "}"
+        )
+
+        self.assertEqual(info["stale_after_seconds"], 45.0)
+        self.assertEqual(info["status"], "active")
+
+    def test_an_out_of_range_updated_at_falls_back_to_the_file_time(self) -> None:
+        # fromisoformat reads it, and converting it to UTC overflows below year 1.
+        info = self.info({"status": "active", "updated_at": "0001-01-01T00:00:00+01:00"})
+
+        self.assertIsNotNone(info["last_updated"])
+
     def test_a_file_that_is_not_an_object_is_unreadable_metadata(self) -> None:
         for content in ("[1, 2]", '"text"', "7", "null"):
             with self.subTest(content=content):
