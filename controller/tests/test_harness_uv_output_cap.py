@@ -90,7 +90,8 @@ def _is_running(pid: int) -> bool:
 
 # A launcher that starts a grandchild sharing its stdout, then waits for it.
 _LAUNCHER = "import subprocess, sys; subprocess.Popen([sys.executable, '-c', sys.argv[1], *sys.argv[2:]]).wait()"
-# Writes 64 KiB chunks for 20 s, counting what it wrote (a write blocks until the controller reads).
+# Writes 64 KiB chunks for 20 s, counting what it wrote (a write blocks until the controller reads). The count is
+# replaced atomically: the kill can land at any point, and an open(..., 'w') it interrupts leaves the file empty.
 _WRITER = (
     "import os, sys, time\n"
     "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
@@ -98,7 +99,9 @@ _WRITER = (
     "while time.time() < end:\n"
     "    os.write(1, chunk)\n"
     "    total += len(chunk)\n"
-    "    open(sys.argv[2], 'w').write(str(total))\n"
+    "    with open(sys.argv[2] + '.tmp', 'w') as count:\n"
+    "        count.write(str(total))\n"
+    "    os.replace(sys.argv[2] + '.tmp', sys.argv[2])\n"
 )
 # Holds stdout open without writing.
 _HOLDER = "import os, sys, time\nopen(sys.argv[1], 'w').write(str(os.getpid()))\ntime.sleep(30)\n"
