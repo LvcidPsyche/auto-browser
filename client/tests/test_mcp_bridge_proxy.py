@@ -45,10 +45,13 @@ class _Recording(BaseHTTPRequestHandler):
         self.server.seen.append((self.path, self.headers.get("Authorization")))  # type: ignore[attr-defined]
         answer = self.server.answer  # type: ignore[attr-defined]
         if answer:
-            status, body = answer
+            # (status, body), or (status, body, extra headers).
+            status, body, *extra = answer
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            for name, value in (extra[0] if extra else {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(body)
             return
@@ -553,6 +556,79 @@ def test_w15_5_a_fixed_reason_gives_its_causes_as_examples(recording_proxy, base
     assert INVALID in message
     assert "(for example, " in message
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "shown"),
+    [
+        # Only the detail went through _shown: a Retry-After quoting the URL was shown whole.
+        ("http://controller.invalid/mcp?key=sentinel", " (rate limited)"),
+        ("Wed, 21 Oct 2026 07:28:00 GMT", " (rate limited)"),
+        (" 12 ", " (rate limited; retry after 12s)"),
+    ],
+)
+def test_w15_6_a_429s_retry_after_is_shown_only_as_seconds(recording_proxy, retry_after: str, shown: str) -> None:
+    recording_proxy.answer = (  # type: ignore[attr-defined]
+        429,
+        json.dumps({"detail": "Too many requests"}).encode(),
+        {"Retry-After": retry_after},
+    )
+
+    message = _bridge_error_through_the_bridge("http://controller.invalid/mcp?key=sentinel", recording_proxy)
+
+    assert message == f"Auto Browser controller returned HTTP 429: Too many requests{shown}"
+    assert len(recording_proxy.seen) == 1  # type: ignore[attr-defined]
+
+
+def test_w15_6_the_error_text_shown_drops_the_urls_secrets_when_the_url_ends_in_a_cr() -> None:
+    # A CRLF .env file leaves a CR on the URL; urllib's Request strips it, so the values to drop must be read the same
+    # way, or key=sentinel + CR matches no text.
+    from auto_browser_client.mcp_bridge import _redacted
+
+    assert _redacted("upstream key=sentinel failed", "http://controller.invalid/mcp?key=sentinel" + chr(13)) == (
+        "upstream [redacted] failed"
+    )
+
+
+def test_w15_6_the_unreachable_answer_names_the_url_as_urllib_reads_it(closed_port: int) -> None:
+    # urllib's Request strips surrounding whitespace and a <URL:...> wrapper; the answer named the URL as given.
+    import auto_browser_client.mcp_bridge as bridge
+
+    client = bridge.HttpMcpClient(base_url=f" <URL:http://127.0.0.1:{closed_port}/mcp?key=sentinel>\r")
+    reply = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())._handle_line(
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    )
+    assert reply is not None
+    message = reply["error"]["message"]
+
+    assert f"{UNREACHABLE} at http://127.0.0.1:{closed_port}/mcp — " in message
+    assert "sentinel" not in message
+
+
+def test_w15_6_the_token_file_problem_is_shown_without_the_urls_secrets(tmp_path: Path) -> None:
+    # The 401 answer adds why no token was sent, which names the token file; that text goes through _shown, like the
+    # detail. Here the file's path holds the base URL's query.
+    import auto_browser_client.mcp_bridge as bridge
+
+    controller = _serve()
+    controller.answer = (401, b'{"detail": "Missing or invalid bearer token"}')  # type: ignore[attr-defined]
+    try:
+        client = bridge.HttpMcpClient(
+            base_url=f"http://127.0.0.1:{controller.server_port}/mcp?key=sentinel",
+            token_file=str(tmp_path / "key=sentinel" / "api-token"),
+        )
+        reply = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())._handle_line(
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        )
+    finally:
+        controller.shutdown()
+        controller.server_close()
+    assert reply is not None
+    message = reply["error"]["message"]
+
+    assert "HTTP 401" in message
+    assert "could not read the token file" in message
+    assert "sentinel" not in message
 
 
 def test_w14_1_a_proxys_error_detail_never_shows_the_urls_query(recording_proxy) -> None:

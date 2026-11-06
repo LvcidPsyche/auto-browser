@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from http.client import HTTPConnection, InvalidURL
 from typing import Any, TextIO
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, unwrap, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 # MCP spec header names, kept as local constants so the bridge has no
@@ -81,18 +81,24 @@ def _split_userinfo(url: str) -> tuple[str, str, str]:
 
 
 def _display_url(url: str) -> str:
-    """``url`` without its userinfo, query or fragment, cut as a string so a malformed URL is handled too (W13-1)."""
-    before, _, after = _split_userinfo(url)
+    """``url`` without its userinfo, query or fragment, cut as a string so a malformed URL is handled too (W13-1).
+
+    The URL is read first as urllib's Request reads it, without surrounding whitespace or a ``<URL:...>`` wrapper
+    (W15-6).
+    """
+    before, _, after = _split_userinfo(unwrap(url))
     return _without_userinfo((before + after).split("#", 1)[0].split("?", 1)[0])
 
 
 def _redacted(text: str, url: str) -> str:
     """``text`` with ``url``'s userinfo, password, query and fragment replaced and any userinfo run dropped (W14-1).
 
-    Each is found with string operations, so a malformed URL is handled, and is replaced as written and
-    percent-decoded, longest first, with ``[redacted]``; then ``_without_userinfo`` drops any other
-    ``user:password@``.
+    The URL is read first as urllib's Request reads it (W15-6): a CR left on it by a CRLF .env file, which urllib
+    strips, would otherwise end the query and match no text. Each is found with string operations, so a malformed
+    URL is handled, and is replaced as written and percent-decoded, longest first, with ``[redacted]``; then
+    ``_without_userinfo`` drops any other ``user:password@``.
     """
+    url = unwrap(url)
     userinfo = _split_userinfo(url)[1]
     parts = (userinfo, userinfo.partition(":")[2], url.partition("?")[2].partition("#")[0], url.partition("#")[2])
     known = {value for part in parts for value in (part, unquote(part)) if value}
@@ -489,15 +495,19 @@ class StdioMcpBridge:
             )
             problem = getattr(self.client, "token_file_problem", None)
             if problem:
-                message += f"; {problem}"
+                message += f"; {self._shown(str(problem))}"
         elif response.status_code == 400 and "operator" in str(detail).lower():
             message += (
                 " (this controller requires an operator id on every request: pass --operator-id or set"
                 " AUTO_BROWSER_OPERATOR_ID, or turn off REQUIRE_OPERATOR_ID on the controller)"
             )
         elif response.status_code == 429:
-            retry_after = response.headers.get("retry-after")
-            message += f" (rate limited; retry after {retry_after}s)" if retry_after else " (rate limited)"
+            # Seconds only (W15-6): an HTTP-date, or any other text, which can quote the URL, is not shown.
+            retry_after = (response.headers.get("retry-after") or "").strip()
+            if retry_after.isascii() and retry_after.isdigit():
+                message += f" (rate limited; retry after {retry_after}s)"
+            else:
+                message += " (rate limited)"
         return message
 
     def _reinitialize(self) -> bool:
