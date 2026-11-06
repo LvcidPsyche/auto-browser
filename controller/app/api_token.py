@@ -303,11 +303,11 @@ def main(argv: list[str]) -> int:
     return 0
 
 
-def _permissions_note() -> str:
+def _permissions_note(name: str) -> str:
     if os.name == "nt":
         return (
             "the file inherits the permissions of its folder, which may let other local users read it: "
-            "set API_TOKEN_FILE under your user profile"
+            f"set {name} under your user profile"
         )
     return "mode 0600"
 
@@ -411,7 +411,7 @@ def _check_the_mode_was_kept(path: Path, name: str) -> str:
     when that held (W9-8), else the mode found, or that it could not be checked. The token is still used. POSIX
     only; never raises."""
     if os.name == "nt":
-        return _permissions_note()
+        return _permissions_note(name)
     try:
         mode = stat.S_IMODE(os.stat(path).st_mode)
     except OSError as exc:

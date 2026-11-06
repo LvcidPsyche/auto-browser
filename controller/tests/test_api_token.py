@@ -179,6 +179,30 @@ def test_the_generation_warning_only_promises_0600_where_it_holds(
         assert "API_TOKEN_FILE under your user profile" in caplog.text
 
 
+def test_w10_10_the_takeover_tokens_windows_note_names_its_own_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    # The note said "set API_TOKEN_FILE under your user profile" for a generated TAKEOVER_TOKEN_FILE too.
+    from app.api_token import ensure_takeover_token
+
+    real_os = api_token.os
+    monkeypatch.setattr(api_token, "os", SimpleNamespace(**{**vars(real_os), "name": "nt"}))
+    monkeypatch.setattr(api_token, "_match_parent_owner", lambda _path: None)
+    settings = make_settings(
+        tmp_path / "api-token", API_BEARER_TOKEN=STRONG_TOKEN, TAKEOVER_TOKEN_FILE=str(tmp_path / "takeover-token")
+    )
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_takeover_token(settings)
+
+    generated = [
+        record.getMessage() for record in caplog.records if "Generated a takeover token" in record.getMessage()
+    ]
+    assert len(generated) == 1, caplog.text
+    assert "set TAKEOVER_TOKEN_FILE under your user profile" in generated[0]
+    assert "API_TOKEN_FILE" not in generated[0]
+
+
 def test_a_second_start_reuses_the_saved_token(tmp_path: Path, caplog: pytest.LogCaptureFixture):
     path = tmp_path / "api-token"
     first = make_settings(path)
