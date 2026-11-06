@@ -121,6 +121,7 @@ class IsolatedSessionTunnelBroker:
                     tunnel.error = "autossh_start_failed"
                     self._write_metadata(tunnel, status="error")
                     tunnel.stderr_handle.close()
+                    self._remove_files(session_id, tunnel.info_path, tunnel.log_path)  # given up: B-fix-3
                     raise
                 # Reserved and visible while it starts, so a concurrent provision
                 # picks another port and release()/shutdown() can still find it.
@@ -166,6 +167,10 @@ class IsolatedSessionTunnelBroker:
                 await self._abort_starting(tunnel, "provision_failed")
                 raise
 
+        # Given up: no port left, or autossh failed for a reason another port would not change. The last attempt's
+        # metadata and log go (a released tunnel's do too); the error is raised and logged by the caller.
+        if session_id not in self._tunnels:
+            self._remove_files(session_id)
         raise RuntimeError(
             last_error
             or (
@@ -189,6 +194,8 @@ class IsolatedSessionTunnelBroker:
         tunnel.error = reason
         self._write_metadata(tunnel, status="error")
         self._close_stderr(tunnel)
+        # Given up on: the files (bastion, user, key path; autossh's stderr) go, as on release.
+        self._remove_files(tunnel.session_id, tunnel.info_path, tunnel.log_path)
 
     def _forget_starting(self, tunnel: IsolatedSessionTunnel) -> None:
         self._allocated_ports.discard(tunnel.remote_port)
@@ -243,13 +250,19 @@ class IsolatedSessionTunnelBroker:
         if tunnel.stderr_handle is not None:
             tunnel.stderr_handle.close()
             tunnel.stderr_handle = None
-        # The metadata names the bastion, its user and key paths, and the log holds autossh's stderr: neither
-        # outlives the tunnel (an inactive tunnel's file has no reader, and the controller restarts without them).
-        for path in (tunnel.info_path, tunnel.log_path):
+        self._remove_files(tunnel.session_id, tunnel.info_path, tunnel.log_path)
+
+    def _remove_files(self, session_id: str, *paths: Path) -> None:
+        """Delete a tunnel's metadata and log: released, or given up on by provision().
+
+        The metadata names the bastion, its user and key paths, and the log holds autossh's stderr: neither outlives
+        the tunnel (an inactive tunnel's file has no reader, and the controller restarts without them).
+        """
+        for path in paths or (self.root / f"{session_id}.json", self.root / f"{session_id}.log"):
             try:
                 path.unlink(missing_ok=True)
             except OSError as exc:
-                logger.warning("could not remove %s for session %s: %s", path.name, tunnel.session_id, exc)
+                logger.warning("could not remove %s for session %s: %s", path.name, session_id, exc)
 
     def describe(self, tunnel: IsolatedSessionTunnel | None) -> dict[str, Any] | None:
         if tunnel is None:

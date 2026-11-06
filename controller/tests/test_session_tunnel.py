@@ -135,8 +135,9 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
                     await task
 
             self.assertTrue(processes[0].killed)
-            metadata = json.loads((root / "tunnels" / "sessions" / "session-1.json").read_text(encoding="utf-8"))
-            self.assertEqual(metadata["status"], "error")
+            # B-fix-3 (NAV-22): a provision that gives up leaves neither its metadata nor its log behind.
+            self.assertFalse((root / "tunnels" / "sessions" / "session-1.json").exists())
+            self.assertFalse((root / "tunnels" / "sessions" / "session-1.log").exists())
 
     async def test_broker_tries_next_port_when_first_process_exits_immediately(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -231,6 +232,8 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(written[-1][0], "error")
             self.assertIn("Permission denied (publickey)", written[-1][1])
             self.assertNotIn(("error", "provision_failed"), written)
+            # B-fix-3 (NAV-22): once provision gives up, neither file is left under ISOLATED_TUNNEL_INFO_ROOT.
+            self.assertEqual(sorted(path.name for path in broker.root.iterdir()), [])
 
     async def test_concurrent_provisions_wait_out_the_startup_grace_together(self) -> None:
         """The lock was held across the grace-period sleep, so N provisions took N
@@ -336,9 +339,10 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
 
             tunnel = built[0]
             self.assertTrue(tunnel.stderr_handle.closed)
-            metadata = json.loads(tunnel.info_path.read_text(encoding="utf-8"))
-            self.assertEqual(metadata["status"], "error")
-            tunnel.log_path.unlink()  # a leaked handle blocks this on Windows
+            # B-fix-3: given up, so the error metadata and the log are deleted (an open handle blocks that on Windows).
+            self.assertEqual(tunnel.error, "autossh_start_failed")
+            self.assertFalse(tunnel.info_path.exists())
+            self.assertFalse(tunnel.log_path.exists())
             self.assertEqual(broker._tunnels, {})
             self.assertEqual(broker._allocated_ports, set())
 
