@@ -11,9 +11,12 @@ stored token, closes the window and says so on the page, with no second prompt. 
 from __future__ import annotations
 
 import asyncio
+import json
+
+import pytest
 
 from tests._chromium import requires_chromium
-from tests.test_dashboard_errors import Stub, drive
+from tests.test_dashboard_errors import NETWORK_DOWN, Stub, drive
 
 LISTED = "http://novnc.test/vnc.html?autoconnect=true"
 FULL = LISTED + "#password=Ab3dEf7h"
@@ -24,14 +27,18 @@ TAKEOVER_PROMPT = "Enter the takeover token"
 
 
 class TakeoverStub(Stub):
-    """Requires X-Takeover-Token on the takeover link, serves `refusals` 403s first, and can hold its answer."""
+    """Requires X-Takeover-Token on the takeover link, serves `refusals` 403s first, and can hold its answer.
 
-    def __init__(self, mode: str = "docker_ephemeral", refusals: int = 0) -> None:
+    `failure`, a (status, body) or NETWORK_DOWN, is what the link answers instead.
+    """
+
+    def __init__(self, mode: str = "docker_ephemeral", refusals: int = 0, failure=None) -> None:
         row = {"id": SESSION, "status": "active", "takeover_url": LISTED}
         if mode:
             row["isolation"] = {"mode": mode}
         super().__init__({("GET", "/sessions"): (200, [row])})
         self.refusals = refusals
+        self.failure = failure
         self.headers: list[str | None] = []
         self.gate: asyncio.Event | None = None
 
@@ -42,6 +49,13 @@ class TakeoverStub(Stub):
             self.headers.append(token)
             if self.gate is not None:
                 await self.gate.wait()
+            if self.failure == NETWORK_DOWN:
+                await route.abort("connectionrefused")
+                return
+            if self.failure is not None:
+                status, body = self.failure
+                await route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
+                return
             if self.refusals > 0 or token != TOKEN:
                 self.refusals -= 1
                 await route.fulfill(status=403, content_type="application/json", body='{"detail": "refused"}')
@@ -148,6 +162,60 @@ def test_a_blocked_popup_says_to_click_again_and_keeps_the_token() -> None:
 
     assert seen["stored"] == TOKEN
     assert seen["requests"] == []
+
+
+LINK_FAILURES = {
+    "a 401": ((401, {"detail": "unauthorized"}), "closed", "The API token was refused and cleared; reload the page"),
+    "a 404": ((404, {"detail": f"Session {SESSION} not found"}), "closed", "That session is closed or unknown."),
+    "a 503": (
+        (503, {"detail": "no takeover token"}),
+        "closed",
+        "This controller has no takeover token; see TAKEOVER_TOKEN in docs/deployment.md.",
+    ),
+    "the operator-header 400": (
+        (400, {"detail": "Missing required operator header: X-Operator-Id"}),
+        "closed",
+        "Missing required operator header: X-Operator-Id",
+    ),
+    "a 500": ((500, {"detail": "boom"}), "fallback", "Could not read the takeover link; noVNC will ask for"),
+    "the network down": (NETWORK_DOWN, "fallback", "Could not read the takeover link; noVNC will ask for"),
+}
+
+
+@requires_chromium
+@pytest.mark.parametrize("case", list(LINK_FAILURES))
+def test_a_failed_takeover_link_shows_no_dialog_and_says_why_on_the_page(case: str) -> None:
+    failure, window, note = LINK_FAILURES[case]
+    stub = TakeoverStub(failure=failure)
+
+    async def scenario(page, events) -> dict:
+        await _novnc(page)
+        async with page.expect_popup() as popup_info:
+            await page.click("#sessions-tbody a")
+        popup = await popup_info.value
+        popup.set_default_timeout(5000)
+        if window == "closed":
+            if not popup.is_closed():
+                await popup.wait_for_event("close")
+        else:
+            await popup.wait_for_url("http://novnc.test/**")
+        await page.wait_for_function("document.getElementById('takeover-note').textContent.length > 0")
+        return {
+            "dialogs": [event for event in events if event[0] != "prompt"],
+            "closed": popup.is_closed(),
+            "url": None if popup.is_closed() else popup.url,
+            "note": await page.text_content("#takeover-note"),
+            "api_token": await page.evaluate("sessionStorage.getItem('ab_token')"),
+        }
+
+    seen = drive(stub, scenario)
+
+    assert seen["dialogs"] == []
+    assert seen["closed"] is (window == "closed")
+    if window == "fallback":
+        assert seen["url"] == LISTED
+    assert note in seen["note"]
+    assert seen["api_token"] == (None if case == "a 401" else TOKEN)
 
 
 _HEIGHT = "(selector) => document.querySelector(selector).getBoundingClientRect().height"

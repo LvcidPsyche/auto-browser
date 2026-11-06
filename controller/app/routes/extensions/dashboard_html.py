@@ -260,8 +260,10 @@ const errorText = (body, status) => {
 };
 // Resolves with the response to a successful request and rejects with an Error
 // carrying the server's own text otherwise, so no caller can mistake a failed
-// request for a done one. Callers show err.message.
-const apiResponse = async (path, options = {}) => {
+// request for a done one. Callers show err.message. With {alerts: false} a 401 or a
+// missing operator header still clears what it clears but shows no alert(): the
+// caller says so on the page (the takeover flow, whose window may be in front).
+const apiResponse = async (path, options = {}, {alerts = true} = {}) => {
   const headers = {..._authHeaders(), ...(options.headers || {})};
   let r;
   try {
@@ -271,15 +273,17 @@ const apiResponse = async (path, options = {}) => {
   }
   if (r.status === 401) {
     sessionStorage.removeItem('ab_token');
-    alert('Auth failed — token cleared. Reload and try again.');
-    throw new Error('unauthorized: token cleared, reload and try again');
+    if (alerts) alert('Auth failed — token cleared. Reload and try again.');
+    const err = new Error('unauthorized: token cleared, reload and try again');
+    err.status = 401;
+    throw err;
   }
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));
     if (r.status === 400 && String((body && body.detail) || '').includes('operator header')) {
       sessionStorage.removeItem('ab_operator_id');
       sessionStorage.removeItem('ab_operator_name');
-      alert('Operator identity missing. Reload and provide an operator id.');
+      if (alerts) alert('Operator identity missing. Reload and provide an operator id.');
     }
     const err = new Error(errorText(body, r.status));
     err.status = r.status;
@@ -464,8 +468,10 @@ const showTakeoverNote = (note, text) => { if (note) note.textContent = text; };
 // kept and the note says to click again), loses its copy of this tab's
 // sessionStorage, and is pointed at the link once it arrives. A 403 means the stored
 // token is wrong: it is cleared, the window closes and the note says so; the next
-// click asks again. If the link cannot be read otherwise, the list's URL still opens:
-// noVNC then asks for the password.
+// click asks again. A 401, 404, 503 or 400 also closes the window, with the reason
+// in the note and no alert() (the window may be in front of this tab). Any other
+// failure still opens the list's URL, and the note says noVNC will ask for the
+// password.
 async function openTakeover(event, sessionId, fallback, isolated, note) {
   event.preventDefault();
   showTakeoverNote(note, '');
@@ -485,17 +491,25 @@ async function openTakeover(event, sessionId, fallback, isolated, note) {
   if (token) {
     const path = `/sessions/${encodeURIComponent(sessionId)}/takeover-link`;
     try {
-      const r = await apiResponse(path, {headers: {'X-Takeover-Token': token}});
+      const r = await apiResponse(path, {headers: {'X-Takeover-Token': token}}, {alerts: false});
       const link = await r.json();
       target = safeHttpUrl(link.takeover_url) || fallback;
     } catch (err) {
-      if (err.status === 403) {
-        sessionStorage.removeItem(TAKEOVER_TOKEN_KEY);
+      if (err.status === 403) sessionStorage.removeItem(TAKEOVER_TOKEN_KEY);
+      const closing = {
+        403: 'The takeover token was refused; click Open noVNC again to enter it.',
+        401: 'The API token was refused and cleared; reload the page to enter it again.',
+        404: 'That session is closed or unknown.',
+        503: 'This controller has no takeover token; see TAKEOVER_TOKEN in docs/deployment.md.',
+        400: err.message,
+      }[err.status];
+      if (closing !== undefined) {
         win.close();
-        showTakeoverNote(note, 'The takeover token was refused; click Open noVNC again to enter it.');
+        showTakeoverNote(note, closing);
         return;
       }
       console.warn(`takeover link: could not read session ${sessionId}: ${err.message}`);
+      showTakeoverNote(note, "Could not read the takeover link; noVNC will ask for the session's password.");
     }
   }
   win.location.href = target;
