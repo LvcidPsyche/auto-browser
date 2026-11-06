@@ -288,9 +288,11 @@ All notable changes to auto-browser are documented here.
   reaches the processes it started, not only the command itself (on Windows only the command itself is killed); its
   pipes are then drained, discarding, for at most 5 seconds instead of read to their end with no cap or timeout, which
   a descendant holding one could hang. A descendant that calls `setsid` leaves the group and is not killed. The docs
-  now say the command receives the full contract and the attempt's trace on stdin, its final observation as the page
-  gave it (only secret-named keys, and a `text` or `text_preview` beside a truthy `sensitive` or `text_redacted` flag,
-  redacted; not the PII and URL-token scrubbing of what is stored).
+  now say that during a run the command receives the full contract and the attempt's trace on stdin, its final
+  observation as the page gave it (only secret-named keys, and a `text` or `text_preview` beside a truthy `sensitive`
+  or `text_redacted` flag, redacted; not the PII and URL-token scrubbing of what is stored), and that a drift check
+  (`harness.check_drift`, `harness.check_all_drifts`) sends it the candidate's stored trace, which is scrubbed, with
+  the contract's expected text scrubbed to match.
 - A drift check whose expected-text scrubber fails keeps a `url_contains` expectation as written: a failing URL
   scrubber hands back the value up to its first `?` or `#`, the empty string for a `url_contains` value that starts
   with `?` or `#` and `/` for one that starts with `/?` or `/#`, and every URL contains the first, every `http://` or
@@ -335,8 +337,11 @@ All notable changes to auto-browser are documented here.
   the delegation. The limit: a nonce is recorded once the envelope's signature checks out, before the request is
   decoded or granted, so registered peers that get 10,000 signed envelopes through inside a window fill the cache, and
   every peer is refused (`503`) until they expire (`/mesh/receive` takes no bearer token, so the request rate limit,
-  on by default at 120 requests a minute, counts it per client address, and one address alone cannot fill it unless
-  that limit is raised or off).
+  on by default at 120 requests a minute, counts it per client address; since a nonce is kept for up to two windows,
+  one address can hold about four times as many nonces as the window has seconds (120 at the default 30-second
+  `MESH_TIMESTAMP_WINDOW`), so alone it cannot fill the cache unless that limit is raised or off or the window is
+  about 2,500 seconds or more; when the controller serves without a token (`API_ALLOW_TOKENLESS_LOOPBACK`), the limit
+  counts each `Authorization` or `X-Operator-Id` value apart, so a sender that varies one is not limited).
 - The Codex host bridge reads a request body within 60 seconds in total (a client trickling a byte every 29 s used to
   hold a handler thread indefinitely; it now gets 408) and the request line and headers within 30 seconds in total
   (past that it closes the connection; a request line cut off that way no longer ends in a broken-pipe traceback),
@@ -408,11 +413,12 @@ All notable changes to auto-browser are documented here.
   `127.0.0.1` itself was normalised to it; the host is read as curl reads it, a scheme only at the start of the URL
   and the authority ending at the first `/`, `?` or `#`, and they also refuse a set base URL that starts with a
   scheme, a colon and a slash but not with that scheme, `//` and a host, such as `http:///127.0.0.2:8000/` or
-  `http:/127.0.0.2:8000/`, which curl reads as `127.0.0.2`, and one whose host is empty, such as `http://:8000/`; a
-  scheme-less `localhost:8000` is still accepted), then the environment's own `no_proxy`, else `NO_PROXY`, as curl
-  reads them (one that is `*` is passed alone, so every host still goes direct), the reverse-SSH smoke's bastion curl
-  passes it for the bastion's own loopback names, and `scripts/smoke_download.py` sends its controller requests with
-  no proxy, so a request to a loopback controller no longer hands its tokens to an `HTTP_PROXY` or `ALL_PROXY`.
+  `http:/127.0.0.2:8000/`, which curl reads as `127.0.0.2`, and one whose host is empty, such as `http://:8000/` (an
+  empty bracketed host, as in `http://[]:8000/`, passes these checks and is left to curl); a scheme-less
+  `localhost:8000` is still accepted), then the environment's own `no_proxy`, else `NO_PROXY`, as curl reads them (one
+  that is `*` is passed alone, so every host still goes direct), the reverse-SSH smoke's bastion curl passes it for
+  the bastion's own loopback names, and `scripts/smoke_download.py` sends its controller requests with no proxy, so a
+  request to a loopback controller no longer hands its tokens to an `HTTP_PROXY` or `ALL_PROXY`.
   `scripts/takeover_link.sh` warns when it finds no takeover token and says what a 403 means.
 - The Codex host bridge (`scripts/codex_host_bridge.py`, `OPENAI_AUTH_MODE=host_bridge`) now starts Codex with an
   allowlisted environment instead of the whole environment of the shell it was started from, which Codex, and every
@@ -577,13 +583,14 @@ All notable changes to auto-browser are documented here.
   controller no longer holds is answered from its stored record, so one recorded before the upgrade still shows the
   whole file's fields. A file that is not a JSON object is reported as unreadable, a `stale_after_seconds` that does
   not read as a positive finite number (a numeric string such as `"90"` reads as one, a boolean does not; one too
-  large for a float included) falls back to `REMOTE_ACCESS_STALE_AFTER_SECONDS` instead of raising, an `updated_at`
-  that cannot be read or converted to UTC (`0001-01-01T00:00:00+01:00`) falls back to the file's modification time,
-  and a public URL that is not a string is ignored. The `tunnel` block passes the file's fields only as validated: the
-  `stale_after_seconds` in use, `updated_at` only when it reads as a timestamp (then in UTC), and `status` and a
-  public URL only when they are a non-empty string, so a `status` or `updated_at` that is NaN, a list or an object is
-  now left out of the block (before, `GET /remote-access` and `browser.get_remote_access` passed a list or object on
-  as it was and wrote a NaN as `null`; neither answered a 500).
+  large for a float included) falls back to `REMOTE_ACCESS_STALE_AFTER_SECONDS` (1.15.0 raised on a non-numeric
+  string, a list or object, or an integer too large for a float, took `true` as one second, and used NaN, an infinity
+  or a negative number as read), an `updated_at` that cannot be read or converted to UTC (`0001-01-01T00:00:00+01:00`)
+  falls back to the file's modification time, and a public URL that is not a string is ignored. The `tunnel` block
+  passes the file's fields only as validated: the `stale_after_seconds` in use, `updated_at` only when it reads as a
+  timestamp (then in UTC), and `status` and a public URL only when they are a non-empty string, so a `status` or
+  `updated_at` that is NaN, a list or an object is now left out of the block (before, `GET /remote-access` and
+  `browser.get_remote_access` passed a list or object on as it was and wrote a NaN as `null`; neither answered a 500).
 - `POST /mesh/receive`, which takes no bearer token, now reads at most `MESH_MAX_BODY_BYTES` (new, default 1 MiB): a
   body with no `Content-Length` (however small: a peer must send one, and the `413` says so), a larger one, or one
   that streams past the cap gets `413` before anything is parsed, and an uninitialised mesh answers `503` before the
