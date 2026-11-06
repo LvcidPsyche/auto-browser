@@ -89,6 +89,25 @@ def test_localhost_is_reached_directly(servers) -> None:
     assert proxy.seen == []
 
 
+@pytest.mark.parametrize("host", ["0.0.0.0", "[::]", "localhost."])
+def test_a_bind_all_or_trailing_dot_host_never_goes_through_the_proxy(servers, host: str) -> None:
+    # The direct request may fail where nothing answers on that address (0.0.0.0 on Windows, :: on a host without
+    # IPv6); the assertion is what the proxy saw, which holds everywhere.
+    proxy, controller = servers
+    base_url = f"http://{host}:{controller.server_port}"
+    calls = (
+        lambda: AutoBrowserTool(base_url=base_url, bearer_token=MARKER)._run("browser.observe", {}),
+        lambda: AutoBrowserTool.list_tools(base_url=base_url, bearer_token=MARKER),
+        lambda: asyncio.run(AutoBrowserNode(base_url=base_url, bearer_token=MARKER).call_tool("browser.observe", {})),
+    )
+    for call in calls:
+        try:
+            call()
+        except Exception:
+            pass
+    assert proxy.seen == []
+
+
 def test_a_remote_controller_still_goes_through_the_proxy(servers) -> None:
     proxy, controller = servers
     _calls("http://controller.invalid:8000")

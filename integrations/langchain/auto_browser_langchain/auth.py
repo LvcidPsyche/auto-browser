@@ -43,13 +43,20 @@ def loopback_transport(base_url: str, *, asynchronous: bool) -> httpx.BaseTransp
     httpx follows HTTP_PROXY, http_proxy and ALL_PROXY to a loopback host unless NO_PROXY names it, so the
     Authorization header for a local controller went to the proxy. A client given a transport uses no
     environment proxy, and the transport still reads SSL_CERT_FILE and SSL_CERT_DIR (trust_env=False would drop
-    those too). Any other host keeps the proxy the environment names.
+    those too). Any other host keeps the proxy the environment names. The rule is the bridge's (W8-3): localhost,
+    also with one trailing dot, or an IP literal that is loopback or unspecified (0.0.0.0 and ::, which reach this
+    host on Linux and macOS).
     """
     host = httpx.URL(base_url).host
-    try:
-        loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        loopback = False
+    if host.removesuffix(".") == "localhost":
+        loopback = True
+    else:
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            loopback = False
+        else:
+            loopback = address.is_loopback or address.is_unspecified
     if not loopback:
         return None
     return httpx.AsyncHTTPTransport() if asynchronous else httpx.HTTPTransport()

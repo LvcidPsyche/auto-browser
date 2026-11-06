@@ -48,12 +48,20 @@ _DIRECT = build_opener(ProxyHandler({}), _NoRedirects)
 
 
 def _is_loopback_host(host: str | None) -> bool:
-    if host == "localhost":
+    """Whether a request to this host stays on this machine, so it goes past any environment proxy.
+
+    One rule for every Python sender of the token: localhost, also with one trailing dot, or an IP literal that is
+    loopback or unspecified (0.0.0.0 and ::, which a server's startup line prints and which reach this host on Linux
+    and macOS). A short IPv4 form (127.1) and a *.localhost name are not local here.
+    """
+    host = host or ""
+    if host.removesuffix(".") == "localhost":
         return True
     try:
-        return ipaddress.ip_address(host or "").is_loopback
+        address = ipaddress.ip_address(host)
     except ValueError:
         return False
+    return address.is_loopback or address.is_unspecified
 
 
 # Module-level, as urllib's own urlopen was, so tests can patch it.

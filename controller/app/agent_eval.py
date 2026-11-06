@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .auth_policy import is_loopback_host
+from .mcp_stdio import _is_loopback_host
 
 
 @dataclass(frozen=True)
@@ -358,8 +358,9 @@ class ControllerEvalClient:
         )
         # A loopback controller is reached past any environment proxy (W7-1): urllib skips a proxy for localhost
         # only when no_proxy names it, so the Authorization header went to the proxy. Any other host still uses the
-        # proxy the environment names.
-        if is_loopback_host(urlsplit(request.full_url).hostname or ""):
+        # proxy the environment names. The bridge's rule decides, not auth_policy.is_loopback_host, whose meaning
+        # feeds auth decisions (W8-3).
+        if _is_loopback_host(urlsplit(request.full_url).hostname):
             urlopen = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
         else:
             urlopen = urllib.request.urlopen

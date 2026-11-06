@@ -58,7 +58,7 @@ def _serve(host: str = "127.0.0.1") -> ThreadingHTTPServer:
     return server
 
 
-def _post_through_the_bridge(base_url: str, proxy: ThreadingHTTPServer) -> int:
+def _post_through_the_bridge(base_url: str, proxy: ThreadingHTTPServer, *, check: bool = True) -> int | None:
     proxy_url = f"http://127.0.0.1:{proxy.server_port}"
     env = {"http_proxy": proxy_url, "HTTP_PROXY": proxy_url, "PYTHONPATH": str(_IMPORT_ROOT)}
     for name in ("PATH", "SYSTEMROOT"):  # SYSTEMROOT: Python's sockets need it on Windows
@@ -72,6 +72,8 @@ def _post_through_the_bridge(base_url: str, proxy: ThreadingHTTPServer) -> int:
         timeout=60,
         check=False,
     )
+    if not check:
+        return None
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
@@ -99,6 +101,19 @@ def test_a_loopback_controller_is_reached_directly_past_an_environment_proxy(rec
     assert status == 200
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
     assert controller.seen == [("/mcp", f"Bearer {MARKER}")]  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "[::]", "localhost."])
+def test_a_bind_all_or_trailing_dot_host_never_goes_through_the_environment_proxy(recording_proxy, host: str) -> None:
+    # The direct request may fail where nothing answers on that address (0.0.0.0 on Windows, :: on a host without
+    # IPv6); the assertion is what the proxy saw, which holds everywhere.
+    controller = _serve()
+    try:
+        _post_through_the_bridge(f"http://{host}:{controller.server_port}/mcp", recording_proxy, check=False)
+    finally:
+        controller.shutdown()
+
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
 
 
 def test_a_non_loopback_controller_still_goes_through_the_environment_proxy(recording_proxy) -> None:

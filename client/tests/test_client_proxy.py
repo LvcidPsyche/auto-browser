@@ -104,6 +104,19 @@ def test_a_remote_controller_still_goes_through_the_proxy(servers) -> None:
     assert controller.seen == []
 
 
+@pytest.mark.parametrize("host", ["0.0.0.0", "[::]", "localhost."])
+def test_a_bind_all_or_trailing_dot_host_never_goes_through_the_proxy(servers, host: str) -> None:
+    # The direct request may fail where nothing answers on that address (0.0.0.0 on Windows, :: on a host without
+    # IPv6); the assertion is what the proxy saw, which holds everywhere.
+    proxy, controller = servers
+    with AutoBrowserClient(f"http://{host}:{controller.server_port}", token=MARKER) as client:
+        try:
+            client.list_sessions()
+        except Exception:
+            pass
+    assert proxy.seen == []
+
+
 def test_the_event_stream_reaches_a_loopback_controller_directly(servers) -> None:
     proxy, controller = servers
     with AutoBrowserClient(_loopback(controller), token=MARKER) as client:

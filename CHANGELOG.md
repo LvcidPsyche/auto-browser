@@ -349,16 +349,16 @@ All notable changes to auto-browser are documented here.
   `API_BEARER_TOKEN` or any other value; the isolated smokes pipe the takeover-link response to Python instead of
   holding it in a variable `bash -x` would print. `bearer_curl`, `takeover_curl` and `doctor.sh`'s API calls pass curl
   `--noproxy` for `localhost`, `127.0.0.1`, `::1` and the scripts' base URL host when it is another loopback address
-  (`127.0.0.2`, say; `bearer_curl` and `takeover_curl` refuse, before any token is sent, a base URL whose host is not
-  a plain host name or address: an IPv4 address written another way than four dotted decimals, such as `127.2`,
-  `0x7f.0.0.2`, `2130706434` or `0177.0.0.1`, a host holding anything but ASCII letters, digits, `.` and `-` (such as
-  `%31%32%37.0.0.2`) or ending in `.`, and a bracketed IPv6 host other than `[::1]` whose first group is empty or all
-  zeros, which covers every IPv4-mapped form such as `[::ffff:127.0.0.2]`; curl normalises a host before it matches
-  `--noproxy`, so a spelling of another loopback address missed the list, while a spelling of `127.0.0.1` itself was
-  normalised to it; the host is read as curl reads it, the authority ending at the first `/`, `?` or `#`), then the
-  environment's own `NO_PROXY` (a `NO_PROXY` of `*` is passed alone, so every host still goes direct), the reverse-SSH
-  smoke's bastion curl passes it for the bastion's own loopback names, and `scripts/smoke_download.py` sends its
-  controller requests with no proxy, so a request to a loopback controller no longer hands its tokens to an
+  or `0.0.0.0` (`127.0.0.2`, say; `bearer_curl` and `takeover_curl` refuse, before any token is sent, a base URL whose
+  host is not a plain host name or address: an IPv4 address written another way than four dotted decimals, such as
+  `127.2`, `0x7f.0.0.2`, `2130706434` or `0177.0.0.1`, a host holding anything but ASCII letters, digits, `.` and `-`
+  (such as `%31%32%37.0.0.2`) or ending in `.`, and a bracketed IPv6 host other than `[::1]` whose first group is
+  empty or all zeros, which covers every IPv4-mapped form such as `[::ffff:127.0.0.2]`; curl normalises a host before
+  it matches `--noproxy`, so a spelling of another loopback address missed the list, while a spelling of `127.0.0.1`
+  itself was normalised to it; the host is read as curl reads it, the authority ending at the first `/`, `?` or `#`),
+  then the environment's own `NO_PROXY` (a `NO_PROXY` of `*` is passed alone, so every host still goes direct), the
+  reverse-SSH smoke's bastion curl passes it for the bastion's own loopback names, and `scripts/smoke_download.py`
+  sends its controller requests with no proxy, so a request to a loopback controller no longer hands its tokens to an
   `HTTP_PROXY` or `ALL_PROXY`. `scripts/takeover_link.sh` warns when it finds no takeover token and says what a 403
   means.
 - The Codex host bridge (`scripts/codex_host_bridge.py`, `OPENAI_AUTH_MODE=host_bridge`) now starts Codex with an
@@ -510,15 +510,18 @@ All notable changes to auto-browser are documented here.
   body with no `Content-Length` (however small: a peer must send one, and the `413` says so), a larger one, or one
   that streams past the cap gets `413` before anything is parsed, and an uninitialised mesh answers `503` before the
   body is read. A malformed envelope is `422` as before.
-- The Python senders of the bearer token no longer send it to an environment proxy when the controller is local: the
-  MCP stdio bridges (the `auto-browser-mcp` console script of the `auto-browser-client` package and the controller's
-  `app.mcp_stdio`), `AutoBrowserClient`'s sync and async HTTP clients and its event stream (`stream_events`), the
-  LangChain package's `AutoBrowserTool` (calls and `list_tools`) and `AutoBrowserNode`, and
-  `scripts/agent_eval.py --execute`. urllib skips a proxy for `localhost` only when `no_proxy` names it, and httpx
-  follows `HTTP_PROXY`, `http_proxy` and `ALL_PROXY` to a loopback host the same way, so with a proxy set and no
-  `NO_PROXY` the `Authorization` header went to the proxy. A base URL whose host is `localhost` or a loopback IP
-  literal is now reached directly (the httpx clients get a transport of their own, which still reads `SSL_CERT_FILE`
-  and `SSL_CERT_DIR`); any other host still goes through the proxy the environment names.
+- The Python senders of the bearer token no longer send it to an environment proxy when the base URL's host is
+  `localhost` (also as `localhost.`), a loopback IP literal or `0.0.0.0` or `::`: the MCP stdio bridges (the
+  `auto-browser-mcp` console script of the `auto-browser-client` package and the controller's `app.mcp_stdio`),
+  `AutoBrowserClient`'s sync and async HTTP clients and its event stream (`stream_events`), the LangChain package's
+  `AutoBrowserTool` (calls and `list_tools`) and `AutoBrowserNode`, and `scripts/agent_eval.py --execute`. urllib
+  skips a proxy for `localhost` only when `no_proxy` names it, and httpx follows `HTTP_PROXY`, `http_proxy` and
+  `ALL_PROXY` to a loopback host the same way, so with a proxy set and no `NO_PROXY` the `Authorization` header went
+  to the proxy. One rule now decides for all of them: a host that, after one trailing dot is stripped from a name, is
+  `localhost`, or an IP literal that is loopback or unspecified (`0.0.0.0` and `::`, which a server's startup line
+  prints and which reach this host on Linux and macOS), is reached directly (the httpx clients get a transport of
+  their own, which still reads `SSL_CERT_FILE` and `SSL_CERT_DIR`); any other host, a short IPv4 form such as `127.1`
+  or a `*.localhost` name included, still goes through the proxy the environment names.
   `scripts/check_sandbox_gate.py`, which only talks to `127.0.0.1`, never uses a proxy.
 
 ## [1.15.0] — 2026-11-05

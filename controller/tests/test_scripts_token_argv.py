@@ -273,6 +273,7 @@ class LoopbackNoProxyTests(unittest.TestCase):
             "http://LOCALHOST:8000": "localhost,127.0.0.1,::1",
             "http://[::1]:8000": "localhost,127.0.0.1,::1",
             "http://127.0.0.1:8000": "localhost,127.0.0.1,::1",
+            "http://0.0.0.0:8000": "localhost,127.0.0.1,::1,0.0.0.0",
             "http://10.0.0.5:8000": "localhost,127.0.0.1,::1",
             "http://127.0.0.2.example.com:8000": "localhost,127.0.0.1,::1",
         }

@@ -306,15 +306,16 @@ base_url_host() {
   fi
 }
 
-# The host of a base URL when it is a loopback address (localhost, anything in 127.0.0.0/8, ::1), IPv6 unbracketed
-# as --noproxy takes it; nothing otherwise.
+# The host of a base URL when it is a loopback address (localhost, anything in 127.0.0.0/8, ::1) or 0.0.0.0, which a
+# server's startup line prints and which reaches this host on Linux and macOS, IPv6 unbracketed as --noproxy takes
+# it; nothing otherwise.
 base_url_loopback_host() {
   local host
   host="$(base_url_host "$1")"
   host="${host#\[}"
   host="${host%\]}"
   host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
-  if [[ "$host" == "localhost" || "$host" == "::1" || "$host" =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+  if [[ "$host" == "localhost" || "$host" == "::1" || "$host" == "0.0.0.0" || "$host" =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
     printf '%s' "$host"
   fi
 }

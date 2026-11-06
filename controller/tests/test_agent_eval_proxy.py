@@ -58,7 +58,7 @@ class AgentEvalProxyTests(unittest.TestCase):
             self.addCleanup(server.server_close)
             self.addCleanup(server.shutdown)
 
-    def _post(self, base_url: str) -> dict:
+    def _post(self, base_url: str, *, check: bool = True) -> dict | None:
         proxy_url = f"http://127.0.0.1:{self.proxy.server_port}"
         env = {"http_proxy": proxy_url, "HTTP_PROXY": proxy_url, "PYTHONPATH": str(_IMPORT_ROOT)}
         for name in ("PATH", "SYSTEMROOT"):  # SYSTEMROOT: Python's sockets need it on Windows
@@ -73,6 +73,8 @@ class AgentEvalProxyTests(unittest.TestCase):
             timeout=60,
             check=False,
         )
+        if not check:
+            return None
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
@@ -81,6 +83,14 @@ class AgentEvalProxyTests(unittest.TestCase):
 
         self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
         self.assertEqual(self.controller.seen, [("/sessions", f"Bearer {MARKER}")])  # type: ignore[attr-defined]
+
+    def test_a_bind_all_or_trailing_dot_host_never_goes_through_the_proxy(self) -> None:
+        # The direct request may fail where nothing answers on that address (0.0.0.0 on Windows, :: on a host
+        # without IPv6); the assertion is what the proxy saw, which holds everywhere.
+        for host in ("0.0.0.0", "[::]", "localhost."):
+            with self.subTest(host=host):
+                self._post(f"http://{host}:{self.controller.server_port}", check=False)
+                self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
 
     def test_a_remote_controller_still_goes_through_the_proxy(self) -> None:
         # controller.invalid is never resolved: the request goes to the (local) recording proxy.
