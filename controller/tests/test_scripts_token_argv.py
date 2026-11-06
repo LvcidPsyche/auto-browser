@@ -53,7 +53,8 @@ ARGV_TOKEN = re.compile(r"""(-H|--header)\s+["']?Authorization:\s*Bearer\s+\$|["
 # The token reaches curl one way: as a config piped from curl_auth_config (load_env.sh). curl reads a .curlrc unless its
 # first argument is -q (or --disable), and that file, found through CURL_HOME, XDG_CONFIG_HOME or HOME, can add a
 # proxy or a header to the request that carries the token. So every use of curl_auth_config must pipe it into a curl
-# whose first argument is exactly one of those, however that curl then reads its config.
+# whose first argument is exactly one of those, however that curl then reads its config. That curl must also pass
+# --noproxy (W4-5): curl otherwise sends a loopback request through HTTP_PROXY or ALL_PROXY, headers and all.
 TOKEN_USE = re.compile(r"\bcurl_auth_config\b(?!\s*\(\))")  # a use, not the definition
 TOKEN_PIPE = re.compile(r"\bcurl_auth_config\s*\|(?P<rest>.*)")
 PIPED_CURL = re.compile(r"""\bcurl\s+(?P<first>[^\s"';|&)`]+)""")
@@ -61,7 +62,8 @@ PIPED_CURL = re.compile(r"""\bcurl\s+(?P<first>[^\s"';|&)`]+)""")
 
 def _token_curls_that_read_a_curlrc(text: str) -> list[str]:
     """Each command (continued lines joined) that hands curl_auth_config's output to anything but a curl whose first
-    argument is -q or --disable: another curl, a program behind a variable, or a process substitution."""
+    argument is -q or --disable and that passes --noproxy: another curl, a program behind a variable, a process
+    substitution, or a curl that would follow the environment's proxy."""
     offenders = []
     for line in re.sub(r"\\\r?\n", " ", text).splitlines():
         if line.lstrip().startswith("#") or not TOKEN_USE.search(line):
@@ -69,6 +71,8 @@ def _token_curls_that_read_a_curlrc(text: str) -> list[str]:
         pipe = TOKEN_PIPE.search(line)
         curl = PIPED_CURL.search(pipe.group("rest")) if pipe else None
         if curl is None or curl.group("first") not in ("-q", "--disable"):
+            offenders.append(line.strip())
+        elif not re.search(r"\s--noproxy\s", pipe.group("rest")[curl.start() :]):
             offenders.append(line.strip())
     return offenders
 
@@ -243,6 +247,90 @@ class LoopbackNoProxyTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--noproxy") + 1], "localhost,127.0.0.1,::1,hooks.internal")
 
 
+def _proxy_environment(proxy_url: str) -> dict[str, str]:
+    return {name: proxy_url for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")}
+
+
+@unittest.skipUnless(
+    SCRIPTS.is_dir() and BASH and shutil.which("curl") and os.name != "nt", "scripts/, bash or curl is not here"
+)
+class DoctorApiCurlNoProxyTests(unittest.TestCase):
+    """W4-5: doctor.sh's api_curl sent its bearer header through an environment proxy."""
+
+    def test_doctors_api_curl_reaches_a_loopback_controller_directly(self) -> None:
+        doctor = (SCRIPTS / "doctor.sh").read_text(encoding="utf-8")
+        match = re.search(r"^api_curl\(\) \{\n.*?^\}\n", doctor, re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(match, "doctor.sh no longer defines api_curl")
+        reached, proxied = [], []
+        target, proxy = _serve(reached), _serve(proxied)
+        self.addCleanup(target.shutdown)
+        self.addCleanup(proxy.shutdown)
+        with tempfile.TemporaryDirectory() as tempdir:
+            definition = Path(tempdir) / "api_curl.sh"
+            definition.write_text(match.group(0), encoding="utf-8", newline="\n")
+            env = {
+                "PATH": os.environ.get("PATH", ""),
+                "HOME": tempdir,
+                "API_BEARER_TOKEN": TOKEN,
+                **_proxy_environment(f"http://127.0.0.1:{proxy.server_address[1]}"),
+            }
+            script = (
+                f'ROOT_DIR="{_bash_path(Path(tempdir))}"; source "{_bash_path(SCRIPTS / "load_env.sh")}"; '
+                f'source "{_bash_path(definition)}"; OPERATOR_ID_ARGS=(); '
+                f'api_curl -fsS "http://127.0.0.1:{target.server_address[1]}/sessions"'
+            )
+            result = subprocess.run([BASH, "-c", script], capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(proxied, [], "doctor.sh's bearer header went through the proxy")
+        self.assertEqual([headers.get("authorization") for headers in reached], [f"Bearer {TOKEN}"])
+
+
+class _JsonRecorder(_Recorder):
+    def do_GET(self) -> None:  # noqa: N802 - http.server's name
+        type(self).seen.append({name.lower(): value for name, value in self.headers.items()})
+        self.send_response(200)
+        self.send_header("Content-Length", "4")
+        self.end_headers()
+        self.wfile.write(b"null")
+
+
+@unittest.skipUnless((SCRIPTS / "smoke_download.py").is_file(), "scripts/ is not shipped inside the controller image")
+class SmokeDownloadNoProxyTests(unittest.TestCase):
+    """W4-5: smoke_download.py's urlopen followed http_proxy, with no loopback bypass, carrying the token."""
+
+    def test_the_download_smoke_reaches_the_controller_directly(self) -> None:
+        import importlib.util
+        from unittest.mock import patch
+
+        spec = importlib.util.spec_from_file_location("smoke_download_under_test", SCRIPTS / "smoke_download.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        reached, proxied = [], []
+        target = http.server.ThreadingHTTPServer(("127.0.0.1", 0), type("Target", (_JsonRecorder,), {"seen": reached}))
+        threading.Thread(target=target.serve_forever, daemon=True).start()
+        proxy = http.server.ThreadingHTTPServer(("127.0.0.1", 0), type("Proxy", (_JsonRecorder,), {"seen": proxied}))
+        threading.Thread(target=proxy.serve_forever, daemon=True).start()
+        self.addCleanup(target.shutdown)
+        self.addCleanup(proxy.shutdown)
+        proxy_url = f"http://127.0.0.1:{proxy.server_address[1]}"
+        with tempfile.TemporaryDirectory() as tempdir:
+            (Path(tempdir) / "data").mkdir()
+            (Path(tempdir) / "data" / "api-token").write_text(TOKEN + "\n", encoding="utf-8")
+            cwd = os.getcwd()
+            os.chdir(tempdir)
+            try:
+                with (
+                    patch.dict(os.environ, _proxy_environment(proxy_url), clear=True),
+                    patch.object(module, "API", f"http://127.0.0.1:{target.server_address[1]}"),
+                ):
+                    status, _ = module.api("GET", "/sessions")
+            finally:
+                os.chdir(cwd)
+        self.assertEqual(status, 200)
+        self.assertEqual(proxied, [], "the download smoke's bearer header went through the proxy")
+        self.assertEqual([headers.get("authorization") for headers in reached], [f"Bearer {TOKEN}"])
+
+
 @unittest.skipUnless(SCRIPTS.is_dir(), "scripts/ is not shipped inside the controller image")
 class SmokeTakeoverResponseTests(unittest.TestCase):
     def test_w2_24_no_smoke_holds_the_takeover_link_response_in_a_shell_variable(self) -> None:
@@ -281,7 +369,8 @@ class NoTokenInArgvTests(unittest.TestCase):
                 self.assertRegex(line, ARGV_TOKEN)
 
     def test_every_curl_that_reads_the_token_from_stdin_skips_its_curlrc(self) -> None:
-        # D3b-7: bearer_curl got -q; doctor.sh's api_curl and smoke_reverse_ssh.sh's bastion curl did not.
+        # D3b-7: bearer_curl got -q; doctor.sh's api_curl and smoke_reverse_ssh.sh's bastion curl did not. W4-5: nor
+        # --noproxy, which bearer_curl had.
         offenders = [
             f"{path.name}: {command}"
             for path in sorted(SCRIPTS.glob("*.sh"))
@@ -304,14 +393,16 @@ class NoTokenInArgvTests(unittest.TestCase):
             '  curl_auth_config | curl --disable-epsv --config - "$u"',
             '  curl_auth_config | "$CURL" -q --config - "$u"',
             '  curl -fsS --config <(curl_auth_config) "$u"',
+            '  curl_auth_config | curl -q --config - "$@"',
+            '  curl_auth_config | curl -q --config - ${args[@]+"${args[@]}"} "$@"',
         ):
             with self.subTest(text=text):
                 self.assertEqual(len(_token_curls_that_read_a_curlrc(text)), 1)
         for text in (
-            '  curl_auth_config | curl -q --config - "$@"',
-            '  curl_auth_config | "${COMPOSE[@]}" exec -T test-bastion sh -lc "curl -q --config - $1"',
-            '  out="$(curl_auth_config | curl -q --config - "$u")"',
-            '  curl_auth_config | curl --disable --config - "$u"',
+            '  curl_auth_config | curl -q --noproxy "$(loopback_noproxy)" --config - "$@"',
+            '  curl_auth_config | "${COMPOSE[@]}" exec -T test-bastion sh -lc "curl -q --noproxy 127.0.0.1 --config - $1"',
+            '  out="$(curl_auth_config | curl -q --noproxy "$(loopback_noproxy)" --config - "$u")"',
+            '  curl_auth_config | curl --disable --noproxy localhost --config - "$u"',
             "curl_auth_config() {",
             "# pipe it in: curl_auth_config | curl --config - ...",
         ):

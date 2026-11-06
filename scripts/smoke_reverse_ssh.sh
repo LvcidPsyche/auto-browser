@@ -73,9 +73,10 @@ wait_for "controller readiness" "curl -fsS ${API_BASE_URL}/readyz" 120 2
 # The token, for the curls that run inside the bastion against the forwarded API.
 # Read after readiness: the controller writes data/api-token during startup. It
 # reaches the bastion's curl as a config on stdin (`curl --config -`), never in the
-# argv of docker, sh or curl, where every local user could read it.
+# argv of docker, sh or curl, where every local user could read it. The forwarded
+# API is on the bastion's loopback, so no proxy in its environment gets the token.
 bastion_curl() {
-  curl_auth_config | "${COMPOSE[@]}" exec -T test-bastion sh -lc "curl -q --config - $1"
+  curl_auth_config | "${COMPOSE[@]}" exec -T test-bastion sh -lc "curl -q --noproxy localhost,127.0.0.1,::1 --config - $1"
 }
 wait_for "remote access metadata" "[ -f '${REMOTE_INFO}' ]" 60 1
 wait_for \

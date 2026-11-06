@@ -23,6 +23,8 @@ import urllib.request
 from pathlib import Path
 
 API = f"http://127.0.0.1:{os.environ.get('API_PORT', '8000')}"
+# No proxy for the controller: urlopen follows http_proxy with no loopback bypass, and the request carries the token.
+DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 PORT = 8099
 
 
@@ -42,7 +44,7 @@ def api(method: str, path: str, body: dict | None = None) -> tuple[int, object]:
         data = json.dumps(body).encode()
         request.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(request, data=data, timeout=120) as response:  # noqa: S310
+        with DIRECT.open(request, data=data, timeout=120) as response:
             return response.status, json.loads(response.read() or b"null")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode(errors="replace")[:200]

@@ -311,10 +311,11 @@ All notable changes to auto-browser are documented here.
 - The scripts' `.env` loader runs with xtrace off and restores the caller's setting, so
   `bash -x scripts/takeover_link.sh` (or any script that loads `.env`) no longer prints `TAKEOVER_TOKEN`,
   `API_BEARER_TOKEN` or any other value; the isolated smokes pipe the takeover-link response to Python instead of
-  holding it in a variable `bash -x` would print. `bearer_curl` and `takeover_curl` pass curl `--noproxy` for
-  `localhost`, `127.0.0.1` and `::1` (then the environment's own `NO_PROXY`), so a request to a loopback controller no
-  longer hands its tokens to an `HTTP_PROXY` or `ALL_PROXY`. `scripts/takeover_link.sh` warns when it finds no
-  takeover token and says what a 403 means.
+  holding it in a variable `bash -x` would print. `bearer_curl`, `takeover_curl` and `doctor.sh`'s API calls pass curl
+  `--noproxy` for `localhost`, `127.0.0.1` and `::1` (then the environment's own `NO_PROXY`), the reverse-SSH smoke's
+  bastion curl passes it for those three, and `scripts/smoke_download.py` sends its controller requests with no proxy,
+  so a request to a loopback controller no longer hands its tokens to an `HTTP_PROXY` or `ALL_PROXY`.
+  `scripts/takeover_link.sh` warns when it finds no takeover token and says what a 403 means.
 - The Codex host bridge (`scripts/codex_host_bridge.py`, `OPENAI_AUTH_MODE=host_bridge`) now starts Codex with an
   allowlisted environment instead of the whole environment of the shell it was started from, which Codex, and every
   command a prompt-injected Codex ran under `-s read-only`, received: the names the controller gives its own provider
