@@ -292,7 +292,8 @@ All notable changes to auto-browser are documented here.
   log; the caller of the tool or a route gets the fixed text below, not the reason. A request that meets a browser
   that cannot be reached (Chrome over CDP, the shared browser-node, or an isolated session's own browser) at
   `POST /sessions`, a fork or `POST /crons/{job_id}/trigger` answers 503 with the fixed detail "the browser could not
-  be reached" instead of a 500 (CDP) or a 409 Conflict (a browser-node), and an MCP call (`browser.cdp_attach`, a
+  be reached" instead of a 500 (CDP, or any browser at the cron trigger) or a 409 Conflict (a browser-node at
+  `POST /sessions` or a fork), and an MCP call (`browser.cdp_attach`, a
   session it creates) answers the same text with the code `browser_unreachable`. A `CDP_CONNECT_URL` in which a
   browser could read another host than that log shows (a backslash or a control character in it, or a host written in
   a form a browser maps to another) now stops startup, as the tool's `cdp_url` already was refused. Whitespace around
