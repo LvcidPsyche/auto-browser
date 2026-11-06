@@ -203,7 +203,7 @@ All notable changes to auto-browser are documented here.
   command that writes more is killed and the verification is `unverified`. Its stderr keeps the first 4 KiB, even
   when one read crosses that, so a failure's notes still start with the command's own message. On POSIX the command
   now runs in its own process group, and a kill (past the cap, at its timeout, or when the caller gives up) reaches
-  the processes it started, not only the command itself (on Windows it still does); its pipes are then drained,
+  the processes it started, not only the command itself (on Windows only the command itself is killed); its pipes are then drained,
   discarding, for at most 5 seconds instead of read to their end with no cap or timeout, which a descendant holding
   one could hang. A descendant that calls `setsid` leaves the group and is not killed. The docs now say the command
   receives the full contract and the unscrubbed trace on stdin.
