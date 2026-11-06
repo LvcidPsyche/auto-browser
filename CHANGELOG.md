@@ -217,12 +217,12 @@ All notable changes to auto-browser are documented here.
 - The convergence harness can now be bounded: `HARNESS_RETENTION_DAYS` removes run directories and staged candidates
   not touched for that long, at startup and in each maintenance sweep (never a run the process is driving, and never a
   candidate re-staged between the age check and the removal: the two hold one lock against staging's rename; listing
-  runs skips one removed while it sorts). The default, `0`, keeps everything, so an upgrade deletes nothing (staging
-  holds a candidate's only copy); 30 suits a shared or long-running controller. `HARNESS_MAX_RUNS_PER_OPERATOR`
-  (default `0`, no cap; set it when several operators share one controller) refuses a new run once the verified
-  operator has that many stored or starting (admissions run one at a time; the stored runs are read in a worker thread
-  holding no lock, so neither the event loop nor a run ending waits for the scan, and a start cancelled during it
-  holds no place); runs with no verified operator share one count.
+  runs skips one removed while it sorts, and one it cannot stat, with a warning naming it). The default, `0`, keeps
+  everything, so an upgrade deletes nothing (staging holds a candidate's only copy); 30 suits a shared or long-running
+  controller. `HARNESS_MAX_RUNS_PER_OPERATOR` (default `0`, no cap; set it when several operators share one
+  controller) refuses a new run once the verified operator has that many stored or starting (admissions run one at a
+  time; the stored runs are read in a worker thread holding no lock, so neither the event loop nor a run ending waits
+  for the scan, and a start cancelled during it holds no place); runs with no verified operator share one count.
 - **Upgrade note:** a controller rolled back to 1.15.0 cannot read a harness run this version has saved (each run now
   records the `generation` of the process that created it, and each attempt a `trace_hash`, fields 1.15.0 rejects),
   including an older run this version's startup sweep marked `interrupted`: such runs drop out of `harness.list_runs`,

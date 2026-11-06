@@ -435,12 +435,16 @@ class HarnessRunStore:
 
 
 def _with_mtimes(paths: Iterable[Path]) -> list[tuple[float, Path]]:
-    """Each path with its modification time, leaving out one removed since it was listed (a prune in between)."""
+    """Each path with its modification time, leaving out one removed since it was listed (a prune in between) and,
+    with a warning, one that cannot be stat'ed (W5-9): one such entry must not fail the whole listing."""
     stamped: list[tuple[float, Path]] = []
     for path in paths:
         try:
             stamped.append((path.stat().st_mtime, path))
         except FileNotFoundError:
+            continue
+        except OSError as exc:
+            logger.warning("skipping harness run record %s: cannot read its modification time: %s", path, exc)
             continue
     return stamped
 

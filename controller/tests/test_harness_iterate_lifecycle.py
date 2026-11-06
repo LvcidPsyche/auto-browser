@@ -407,6 +407,31 @@ class RetentionTests(_Base):
 
         self.assertEqual([record.id for record in listed], [kept.id])
 
+    async def test_w5_9_listing_skips_a_run_it_cannot_stat_with_a_warning(self) -> None:
+        # Only FileNotFoundError was skipped, so one run directory the controller could not stat (PermissionError)
+        # failed the whole list_runs. The glob is pinned to what it listed: on 3.11 its own existence check already
+        # drops such an entry, but one whose permissions change between the glob and the stat reaches it.
+        service = HarnessService(self.root)
+        kept, unreadable = await self._run(service), await self._run(service)
+        blocked = service.store.runs_root / unreadable.id / "run.json"
+        globbed = sorted(service.store.runs_root.glob("*/run.json"))
+        real_stat = Path.stat
+
+        def stat(self, *args, **kwargs):
+            if self.name == "run.json" and self.parent.name == unreadable.id:
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_stat(self, *args, **kwargs)
+
+        with (
+            patch.object(Path, "glob", lambda self, pattern: iter(globbed)),
+            patch.object(Path, "stat", stat),
+            self.assertLogs("app.harness.iterate", "WARNING") as logs,
+        ):
+            listed = service.store.list()
+
+        self.assertEqual([record.id for record in listed], [kept.id])
+        self.assertTrue(any(str(blocked) in line for line in logs.output))
+
     async def test_w4_22_the_run_cap_check_runs_in_a_worker_thread(self) -> None:
         # Reading every stored run.json on the event loop stalled it at each start; it runs in a worker thread now,
         # holding no lock (W5-5).
