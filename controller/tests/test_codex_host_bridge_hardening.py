@@ -245,6 +245,29 @@ class BridgeErrorReplyTests(unittest.TestCase):
                 self.assertEqual(str(raised.exception), "codex exited with 1; see the bridge log")
                 self.assertIn("sentinel-secret-6f1d", captured.getvalue())
 
+    def test_a_failed_codex_run_with_no_output_logs_its_exit_code(self) -> None:
+        # CB2-5: the reply says "see the bridge log", which then held nothing for a silent failure.
+        class _SilentCodex(_FakeCodex):
+            def __init__(self, command, **kwargs) -> None:
+                super().__init__(command, **kwargs)
+                Path(command[command.index("--output-last-message") + 1]).unlink()
+                self.returncode = 3
+
+            def communicate(self, input=None, timeout=None):
+                return b"", b"  \n"
+
+        service = bridge.CodexBridgeService(codex_path="codex")
+        captured = io.StringIO()
+        with (
+            patch.object(bridge.subprocess, "Popen", _SilentCodex),
+            redirect_stderr(captured),
+            self.assertRaises(bridge.BridgeError) as raised,
+        ):
+            service.handle_openai_decide(dict(PAYLOAD))
+
+        self.assertEqual(str(raised.exception), "codex exited with 3; see the bridge log")
+        self.assertIn("[codex-bridge] codex exited with 3 and printed nothing", captured.getvalue())
+
 
 @unittest.skipIf(bridge is None, "scripts/ is not shipped in the controller image")
 class BridgeLimitsTests(unittest.TestCase):

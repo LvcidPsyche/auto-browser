@@ -249,7 +249,8 @@ All notable changes to auto-browser are documented here.
   the bridge side, and no longer returns Codex's stderr to the controller on success (it logs it instead; the
   controller never read that field). A Codex run that exits nonzero is answered 502 with the fixed message
   `codex exited with <code>; see the bridge log` instead of up to 4,000 characters of Codex's stderr or stdout (host
-  paths, possibly a token); the bridge logs that output (stderr, or stdout when stderr is empty).
+  paths, possibly a token); the bridge logs that output (stderr, or stdout when stderr is empty), or the exit code
+  when Codex printed nothing.
 
 ### Security
 

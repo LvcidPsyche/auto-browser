@@ -236,6 +236,13 @@ class CodexBridgeService:
                 # is empty), and the controller gets a fixed message. It decides retries on the status code only.
                 if not stderr.strip() and stdout.strip():
                     print(f"[codex-bridge] codex stdout: {stdout.strip()[:2000]}", file=sys.stderr, flush=True)
+                elif not stderr.strip():
+                    # Nothing to show, but the reply points here: say what happened (CB2-5).
+                    print(
+                        f"[codex-bridge] codex exited with {returncode} and printed nothing",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 raise BridgeError(f"codex exited with {returncode}; see the bridge log", status_code=502)
             if not raw_text.strip():
                 raise BridgeError("codex returned an empty response", status_code=502)
