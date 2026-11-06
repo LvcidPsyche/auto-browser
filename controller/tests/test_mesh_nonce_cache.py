@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import tempfile
 import time
 import unittest
@@ -19,12 +20,17 @@ from app.mesh.delegation import (
     DelegationManager,
     DelegationRejected,
     DelegationReplayError,
+    MeshReplayCacheFull,
     _NonceCache,
 )
 from app.mesh.identity import NodeIdentity
 from app.mesh.models import CapabilityGrant, DelegationRequest, DelegationResponse, PeerRecord, SignedEnvelope
 from app.mesh.peers import PeerRegistryFile
 from app.mesh.transport import _canonical_bytes, make_envelope
+from tests import test_mesh_peer_registration as _registration
+from tests.test_mesh_peer_registration import OBSERVE, add_legit_peer, send
+
+mesh = _registration.mesh  # the route fixture: a server, a legit identity, the peers file and a test client
 
 
 class NonceCacheTests(unittest.TestCase):
@@ -85,12 +91,40 @@ class NonceExpiryTests(unittest.TestCase):
 
         self.assertEqual(list(cache._seen), ["new"])
 
-    def test_the_size_cap_still_applies_inside_the_ttl(self) -> None:
-        cache = _NonceCache(max_size=3, ttl_seconds=60, clock=_Clock())
-        for nonce in ("a", "b", "c", "d"):
-            cache.check_and_record(nonce)
+    def test_w4_2_a_full_cache_refuses_a_new_nonce_and_never_forgets_an_unexpired_one(self) -> None:
+        # The cap evicted the oldest entry whether or not it had expired: accept A, then fill the cache inside A's
+        # window, and A was accepted again.
+        clock = _Clock()
+        cache = _NonceCache(max_size=3, ttl_seconds=60, clock=clock)
+        for nonce in ("a", "b", "c"):
+            self.assertTrue(cache.check_and_record(nonce))
 
-        self.assertEqual(list(cache._seen), ["b", "c", "d"])
+        with self.assertRaises(MeshReplayCacheFull):
+            cache.check_and_record("d")
+        self.assertFalse(cache.check_and_record("a"))
+        self.assertEqual(list(cache._seen), ["a", "b", "c"])  # "d" was not recorded
+
+        clock.now += 61  # the window has passed for a, b and c
+        self.assertTrue(cache.check_and_record("d"))
+        self.assertTrue(cache.check_and_record("e"))
+
+    def test_w4_2_at_capacity_an_expired_entry_behind_a_newer_one_is_dropped(self) -> None:
+        # Entries are in insertion order, not stamp order: "y" was recorded after "x" with an older stamp.
+        clock = _Clock()
+        cache = _NonceCache(max_size=2, ttl_seconds=60, clock=clock)
+        self.assertTrue(cache.check_and_record("x", stamped_at=1000))
+        self.assertTrue(cache.check_and_record("y", stamped_at=950))
+
+        clock.now = 1015  # "y" is 65 s past its stamp, "x" only 15
+        self.assertTrue(cache.check_and_record("z", stamped_at=1015))
+        self.assertEqual(list(cache._seen), ["x", "z"])
+        self.assertFalse(cache.check_and_record("x"))
+
+    def test_w4_2_a_cache_without_a_ttl_keeps_evicting_the_oldest(self) -> None:
+        cache = _NonceCache(max_size=2)
+        for nonce in ("a", "b", "c"):
+            self.assertTrue(cache.check_and_record(nonce))
+        self.assertEqual(list(cache._seen), ["b", "c"])
 
 
 def _signed(identity: NodeIdentity, payload: dict, *, recipient: str, timestamp: float) -> SignedEnvelope:
@@ -161,6 +195,17 @@ class ReplyReplayTests(unittest.TestCase):
                 retry = DelegationRequest(request_id=first.request_id, capability="tool:browser.observe")
                 with self.assertRaisesRegex(DelegationError, "reply timestamp out of window"):
                     self._delegate(mesh, manager, retry, reply_a)
+
+    def test_w4_2_a_reply_when_the_replay_cache_is_full_raises_a_delegation_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mesh = _Mesh(Path(tmp))
+            manager = mesh.manager(timestamp_window=30)
+            manager._nonce_cache._max = 1
+            first, second = DelegationRequest(capability="tool:browser.observe"), DelegationRequest(capability="x")
+            with patch.object(delegation.time, "time", return_value=5000):
+                self._delegate(mesh, manager, first, self._reply(mesh, first.request_id, 5000))
+                with self.assertRaisesRegex(DelegationError, "replay cache is full"):
+                    self._delegate(mesh, manager, second, self._reply(mesh, second.request_id, 5001))
 
     def test_w2_4_a_reply_for_another_request_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -300,6 +345,20 @@ class RestartReplayTests(unittest.TestCase):
             fresh = _signed(legit, payload, recipient=server.node_id, timestamp=later)
             with patch.object(delegation.time, "time", return_value=later):
                 self.assertEqual(asyncio.run(manager.receive_inbound(fresh)).status, "ok")
+
+
+def test_w4_2_a_full_replay_cache_answers_503_and_runs_nothing(mesh, caplog) -> None:
+    add_legit_peer(mesh, OBSERVE)
+    mesh.app.state.delegation_manager._nonce_cache._max = 1
+    assert send(mesh, mesh.legit).status_code == 200
+
+    with caplog.at_level(logging.WARNING, logger="app.mesh.delegation"):
+        refused = send(mesh, mesh.legit)
+
+    assert refused.status_code == 503
+    assert refused.json()["detail"] == "mesh replay cache is full; retry later"
+    assert len(mesh.calls) == 1
+    assert "replay cache is full" in caplog.text
 
 
 if __name__ == "__main__":

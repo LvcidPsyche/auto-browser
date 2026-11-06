@@ -70,11 +70,13 @@ async def mesh_receive(request: Request):
     except ValidationError:
         raise HTTPException(422, "Invalid mesh envelope") from None
 
-    from app.mesh import DelegationRejected, DelegationReplayError, SignedEnvelope, make_envelope
+    from app.mesh import DelegationRejected, DelegationReplayError, MeshReplayCacheFull, SignedEnvelope, make_envelope
 
     envelope = SignedEnvelope(**body.model_dump())
     try:
         response = await delegation_mgr.receive_inbound(envelope)
+    except MeshReplayCacheFull:
+        raise HTTPException(503, "mesh replay cache is full; retry later")
     except (DelegationRejected, DelegationReplayError):
         raise HTTPException(403, "Mesh delegation rejected")
     except Exception:

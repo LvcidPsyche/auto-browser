@@ -260,7 +260,11 @@ All notable changes to auto-browser are documented here.
   clock, so an envelope whose nonce has expired cannot come back inside the window when the clock steps back; a peer's
   reply to this node's own delegation request is checked the same way, and a reply whose request id is not the
   request's is refused. The cost: after a large backward step of the clock, fresh envelopes are refused until it
-  catches up (for about the step minus the window).
+  catches up (for about the step minus the window). The 10,000-nonce cap no longer evicts a nonce still inside its
+  window (an envelope accepted, then 10,000 others inside its window, and it ran again): at the cap every expired
+  nonce goes, and if none has, the new envelope is refused with `503` ("mesh replay cache is full; retry later") and
+  not recorded, so the cap bounds how many envelopes are accepted per window; a reply that finds the cache full fails
+  the delegation.
 - The Codex host bridge reads a request body within 60 seconds in total (a client trickling a byte every 29 s used
   to hold a handler thread indefinitely; it now gets 408) and the request line and headers within 30 seconds in total
   (past that it closes the connection; a request line cut off that way no longer ends in a broken-pipe traceback),
