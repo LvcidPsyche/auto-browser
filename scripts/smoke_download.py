@@ -23,8 +23,19 @@ import urllib.request
 from pathlib import Path
 
 API = f"http://127.0.0.1:{os.environ.get('API_PORT', '8000')}"
+
+
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect, as the MCP bridge does (W9-6): urllib's default handler copied the Authorization
+    header onto a redirect to any origin. The 3xx is reported as the HTTP error it is."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 # No proxy for the controller: urlopen follows http_proxy with no loopback bypass, and the request carries the token.
-DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+# Redirects are refused (W10-13).
+DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects)
 PORT = 8099
 
 

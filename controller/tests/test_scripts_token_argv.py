@@ -621,6 +621,52 @@ class SmokeDownloadNoProxyTests(unittest.TestCase):
         self.assertEqual(proxied, [], "the download smoke's bearer header went through the proxy")
         self.assertEqual([headers.get("authorization") for headers in reached], [f"Bearer {TOKEN}"])
 
+    def test_w10_13_a_redirect_is_reported_and_not_followed(self) -> None:
+        # urllib's default handler copied the Authorization header onto a redirect to any origin.
+        import importlib.util
+        from unittest.mock import patch
+
+        spec = importlib.util.spec_from_file_location("smoke_download_under_test", SCRIPTS / "smoke_download.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        reached, elsewhere_seen = [], []
+        elsewhere = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), type("Elsewhere", (_JsonRecorder,), {"seen": elsewhere_seen})
+        )
+        threading.Thread(target=elsewhere.serve_forever, daemon=True).start()
+        self.addCleanup(elsewhere.shutdown)
+        location = f"http://127.0.0.1:{elsewhere.server_address[1]}/stolen"
+
+        class Redirecting(_Recorder):
+            seen = reached
+
+            def do_GET(self) -> None:  # noqa: N802 - http.server's name
+                type(self).seen.append({name.lower(): value for name, value in self.headers.items()})
+                self.send_response(302)
+                self.send_header("Location", location)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        target = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirecting)
+        threading.Thread(target=target.serve_forever, daemon=True).start()
+        self.addCleanup(target.shutdown)
+        with tempfile.TemporaryDirectory() as tempdir:
+            (Path(tempdir) / "data").mkdir()
+            (Path(tempdir) / "data" / "api-token").write_text(TOKEN + "\n", encoding="utf-8")
+            cwd = os.getcwd()
+            os.chdir(tempdir)
+            try:
+                with (
+                    patch.dict(os.environ, {}, clear=True),
+                    patch.object(module, "API", f"http://127.0.0.1:{target.server_address[1]}"),
+                ):
+                    status, _ = module.api("GET", "/sessions")
+            finally:
+                os.chdir(cwd)
+        self.assertEqual(status, 302)
+        self.assertEqual(len(reached), 1)
+        self.assertEqual(elsewhere_seen, [], "the download smoke followed a redirect with its bearer header")
+
 
 @unittest.skipUnless(SCRIPTS.is_dir(), "scripts/ is not shipped inside the controller image")
 class SmokeTakeoverResponseTests(unittest.TestCase):

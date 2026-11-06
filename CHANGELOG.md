@@ -540,9 +540,10 @@ All notable changes to auto-browser are documented here.
   and `0x7f000002` count as `127.0.0.2`, as they do for the socket layer; the bridges and `scripts/agent_eval.py`
   judge the host urllib connects to, which it has percent-decoded (`%31%32%37.0.0.2` is `127.0.0.2`). Any other host, a `*.localhost` name
   included, still goes through the proxy the environment names. `scripts/check_sandbox_gate.py`, which only talks to
-  `127.0.0.1`, never uses a proxy. `scripts/agent_eval.py --execute` and `scripts/check_sandbox_gate.py` now also
-  refuse redirects, as the bridges do, direct or proxied: urllib's default handler copied the `Authorization` header
-  onto a redirect to any origin, and a 3xx is now reported as the HTTP error each script already reports.
+  `127.0.0.1`, never uses a proxy. `scripts/agent_eval.py --execute`, `scripts/check_sandbox_gate.py` and
+  `scripts/smoke_download.py` now also refuse redirects, as the bridges do, direct or proxied: urllib's default
+  handler copied the `Authorization` header onto a redirect to any origin, and a 3xx is now reported as the HTTP error
+  each script already reports.
 
 ## [1.15.0] — 2026-11-05
 
