@@ -162,8 +162,12 @@ All notable changes to auto-browser are documented here.
   `/payments/1/authorize` (read as a login page).
 - The harness's `HARNESS_UV_COMMAND` verifier reads its stdout with a 1 MiB cap (it used to buffer all of it): a
   command that writes more is killed and the verification is `unverified`. Its stderr keeps the first 4 KiB, even
-  when one read crosses that, so a failure's notes still start with the command's own message. The docs now say the
-  command receives the full contract and the unscrubbed trace on stdin.
+  when one read crosses that, so a failure's notes still start with the command's own message. On POSIX the command
+  now runs in its own process group, and a kill (past the cap, at its timeout, or when the caller gives up) reaches
+  the processes it started, not only the command itself (on Windows it still does); its pipes are then drained,
+  discarding, for at most 5 seconds instead of read to their end with no cap or timeout, which a descendant holding
+  one could hang. A descendant that calls `setsid` leaves the group and is not killed. The docs now say the command
+  receives the full contract and the unscrubbed trace on stdin.
 - A drift check whose expected-text scrubber fails keeps the expectation as written: a failing URL scrubber hands
   back the value's path, the empty string for a `url_contains` value that starts with `?` or `#` and `/` for one
   that starts with `/?` or `/#`, and every URL contains either. A scrubber that raises is reported `unverified` with

@@ -5,6 +5,7 @@ import json
 from shutil import which
 from typing import Any
 
+from ...process_tree import GROUP_SPAWN_KWARGS, kill_and_drain
 from ..contracts import TaskContract
 from .base import VerificationResult
 
@@ -96,6 +97,7 @@ class UniversalVerifierAdapter:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **GROUP_SPAWN_KWARGS,  # its own process group on POSIX, so the kill reaches what it started
         )
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -149,11 +151,9 @@ class UniversalVerifierAdapter:
 
     @staticmethod
     async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
-        try:
-            process.kill()
-        except ProcessLookupError:
-            pass  # exited between the timeout and the kill
-        await process.communicate()
+        # The whole process group on POSIX (a descendant holding a pipe kept it open), then a drain that discards
+        # and gives up after DRAIN_TIMEOUT_SECONDS: an uncapped communicate() hung on such a pipe and buffered it.
+        await kill_and_drain(process, label="Universal Verifier command")
 
     def _unavailable(self, note: str) -> VerificationResult:
         return VerificationResult(
