@@ -283,23 +283,50 @@ class DurableSessionStore:
         Never raises: the write it guards mirrors a change that has already taken effect. No record is not closed, and
         neither is one that cannot be parsed (no readable closed record), so the write replaces it. Any other read
         failure is None, so a non-closed write is skipped: an I/O error could be hiding a closed record.
+
+        With Redis as the primary store, a file record that cannot be parsed defers to the Redis copy (W8-1), which
+        get() reads first: a readable closed one refuses the write, a missing, unparseable or not closed one lets it
+        replace both, and any other Redis read failure, such as a lost connection, is None.
         """
         try:
             return (await self.file_store.get(session_id)).status == "closed"
         except KeyError:
             return False
         except ValueError as exc:
+            if self.redis_store is not None and self._primary is self.redis_store:
+                return await self._redis_is_closed(session_id, exc)
             logger.warning(
                 "the stored record of session %s cannot be parsed, so this write replaces it: %s", session_id, exc
             )
             return False
         except Exception as exc:
-            logger.warning(
-                "could not read the record of session %s before writing it, so it is not written this time: %s",
-                session_id,
-                exc,
-            )
+            self._warn_unreadable(session_id, exc)
             return None
+
+    async def _redis_is_closed(self, session_id: str, file_error: ValueError) -> bool | None:
+        try:
+            closed = (await self.redis_store.get(session_id)).status == "closed"  # type: ignore[union-attr]
+        except (KeyError, ValueError):
+            closed = False
+        except Exception as exc:
+            self._warn_unreadable(session_id, exc)
+            return None
+        if not closed:
+            logger.warning(
+                "the stored record of session %s cannot be parsed and redis holds no closed one, so this write "
+                "replaces it: %s",
+                session_id,
+                file_error,
+            )
+        return closed
+
+    @staticmethod
+    def _warn_unreadable(session_id: str, exc: BaseException) -> None:
+        logger.warning(
+            "could not read the record of session %s before writing it, so it is not written this time: %s",
+            session_id,
+            exc,
+        )
 
     async def mark_all_active_interrupted(self) -> None:
         await self.file_store.mark_all_active_interrupted()

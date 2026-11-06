@@ -11,9 +11,48 @@ from unittest.mock import AsyncMock
 
 from app.models import SessionRecord
 from app.session_ownership import acting_as
-from app.session_store import DurableSessionStore
+from app.session_store import DurableSessionStore, RedisSessionStore
 from app.utils import record_path
 from tests.test_auth_state_ownership import ALICE, build_manager
+
+
+class _MemoryPipeline:
+    def __init__(self, client: _MemoryRedis) -> None:
+        self.client = client
+        self.writes: list[tuple[str, str]] = []
+
+    async def __aenter__(self) -> _MemoryPipeline:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    async def set(self, key: str, value: str) -> None:
+        self.writes.append((key, value))
+
+    async def sadd(self, *_args: object) -> None:
+        return None
+
+    async def execute(self) -> None:
+        if self.client.fail is not None:
+            raise self.client.fail
+        self.client.values.update(self.writes)
+
+
+class _MemoryRedis:
+    """An in-memory stand-in for the redis client RedisSessionStore uses: get, and a pipeline's set and execute."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+        self.fail: Exception | None = None
+
+    async def get(self, key: str) -> str | None:
+        if self.fail is not None:
+            raise self.fail
+        return self.values.get(key)
+
+    def pipeline(self, transaction: bool = True) -> _MemoryPipeline:
+        return _MemoryPipeline(self)
 
 
 def _record(status: str, *, live: bool) -> SessionRecord:
@@ -236,6 +275,62 @@ class PersistAfterCloseTests(unittest.IsolatedAsyncioTestCase):
         await store.upsert(_record("active", live=True))
 
         self.assertEqual((await store.get("s1")).status, "active")
+
+    async def _store_with_redis(self) -> tuple[DurableSessionStore, _MemoryRedis]:
+        # The real RedisSessionStore over an in-memory client, as startup() leaves it when Redis answers.
+        store = await self._store()
+        client = _MemoryRedis()
+        redis = RedisSessionStore("redis://127.0.0.1:6379/0", "t")
+        redis.client = client  # type: ignore[assignment]
+        store.redis_store = redis
+        store._primary = redis
+        return store, client
+
+    async def test_w8_1_with_redis_a_corrupt_file_copy_of_a_closed_record_refuses_an_active_write(self) -> None:
+        # W6-1 read only the file copy: one that cannot be parsed counted as not closed, so a late active write
+        # replaced the readable closed record in Redis too.
+        store, client = await self._store_with_redis()
+        await store.upsert(_record("closed", live=False).model_copy(update={"close_reason": "operator"}))
+        path = record_path(Path(self.tmp.name) / "rec", "s1", ".json")
+        path.write_text("{not json", encoding="utf-8")
+
+        await store.upsert(_record("active", live=True))
+
+        stored = SessionRecord.model_validate_json(client.values["t:record:s1"])
+        self.assertEqual((stored.status, stored.close_reason), ("closed", "operator"))
+        self.assertEqual((await store.get("s1")).status, "closed")
+        self.assertEqual(path.read_text(encoding="utf-8"), "{not json")
+
+    async def test_w8_1_with_redis_a_corrupt_file_copy_is_replaced_when_redis_holds_no_closed_record(self) -> None:
+        for redis_value in (None, "{not json", _record("active", live=True).model_dump_json()):
+            with self.subTest(redis_value=redis_value):
+                store, client = await self._store_with_redis()
+                await store.upsert(_record("active", live=True))
+                record_path(Path(self.tmp.name) / "rec", "s1", ".json").write_text("{not json", encoding="utf-8")
+                if redis_value is None:
+                    client.values.clear()
+                else:
+                    client.values["t:record:s1"] = redis_value
+
+                await store.upsert(_record("active", live=True).model_copy(update={"title": "replaced"}))
+
+                self.assertEqual((await store.file_store.get("s1")).title, "replaced")
+                self.assertEqual(SessionRecord.model_validate_json(client.values["t:record:s1"]).title, "replaced")
+
+    async def test_w8_1_with_redis_a_corrupt_file_copy_and_an_unreadable_redis_skip_an_active_write(self) -> None:
+        store, client = await self._store_with_redis()
+        await store.upsert(_record("closed", live=False))
+        path = record_path(Path(self.tmp.name) / "rec", "s1", ".json")
+        path.write_text("{not json", encoding="utf-8")
+        client.fail = ConnectionError("redis down")
+
+        with self.assertLogs("app.session_store", "WARNING") as logged:
+            await store.upsert(_record("active", live=True))
+
+        self.assertIn("so it is not written this time", "\n".join(logged.output))
+        client.fail = None
+        self.assertEqual(path.read_text(encoding="utf-8"), "{not json")
+        self.assertEqual(SessionRecord.model_validate_json(client.values["t:record:s1"]).status, "closed")
 
     async def test_w4_10_a_missing_record_is_still_not_closed(self) -> None:
         store = await self._store()

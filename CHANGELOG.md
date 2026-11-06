@@ -130,12 +130,14 @@ All notable changes to auto-browser are documented here.
 - A late background write of a session's record can no longer put a closed session back to active: the active write is
   skipped when the session is no longer registered (checked before and after the summary is built), and the session
   store refuses to overwrite a stored `closed` record with any other status (an `interrupted` write replaced it and
-  lost its `close_reason`); a stored record it cannot parse (a corrupt file) is replaced by the next write, and one it
-  cannot read (an I/O error, which could hide a closed record) skips that non-closed write for the next one to retry,
-  each logged with the session id; neither fails the action whose state the write mirrors, and a `closed` write always
-  lands. The store makes one write at a time per session, from that check through the file and Redis copies, and a
-  cancelled write finishes before the next one for that session starts, so the guard holds within one controller
-  process; two processes sharing a store are not covered. Writes for different sessions do not wait for each other.
+  lost its `close_reason`); a stored record it cannot parse (a corrupt file) is replaced by the next write, unless
+  Redis is the primary store and holds a readable `closed` copy (then the write is refused, and a Redis read that
+  fails otherwise, such as a lost connection, skips it), and one it cannot read (an I/O error, which could hide a
+  closed record) skips that non-closed write for the next one to retry, each logged with the session id; neither fails
+  the action whose state the write mirrors, and a `closed` write always lands. The store makes one write at a time per
+  session, from that check through the file and Redis copies, and a cancelled write finishes before the next one for
+  that session starts, so the guard holds within one controller process; two processes sharing a store are not
+  covered. Writes for different sessions do not wait for each other.
 - A `create_session` that fails no longer leaves its artifact, auth and upload directories behind or an `active`
   record in the session store: the directories are made only after every check that can refuse the request, removed
   again by the rollback (in a worker thread, so a large tree does not stall other requests), and a record the create
