@@ -719,6 +719,42 @@ class BridgeProcessGroupTests(unittest.TestCase):
                 time.sleep(0.05)
             self.assertFalse(_is_running(child), "the grandchild outlived the timeout")
 
+    def test_w4_7_a_timeout_returns_even_when_a_descendant_in_its_own_session_holds_stdout(self) -> None:
+        # The group kill misses a descendant that called setsid, and it keeps codex's stdout open: the unbounded
+        # communicate() after the kill waited for its EOF, holding a decision slot for as long as it lived.
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "escaped.pid"
+            escape = (
+                "import os, sys, time; os.setsid(); "
+                f"open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(20)"
+            )
+            fake = Path(tmp) / "fake-codex"
+            fake.write_text(f"#!/bin/sh\n'{sys.executable}' -c \"{escape}\" &\nsleep 60\n", encoding="utf-8")
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            service = bridge.CodexBridgeService(codex_path=str(fake), request_timeout_seconds=1.0)
+            errors: list[BaseException] = []
+
+            def decide() -> None:
+                try:
+                    service.handle_openai_decide(dict(PAYLOAD))
+                except BaseException as exc:  # noqa: BLE001 - recorded for the assertion below
+                    errors.append(exc)
+
+            worker = threading.Thread(target=decide, daemon=True)
+            started = time.monotonic()
+            worker.start()
+            try:
+                worker.join(1.0 + 2 * bridge.CODEX_DRAIN_TIMEOUT_SECONDS + 5)
+                elapsed = time.monotonic() - started
+            finally:
+                if pid_file.exists() and pid_file.read_text().strip():
+                    _kill_quietly(int(pid_file.read_text().strip()))
+            self.assertFalse(worker.is_alive(), "the run waited on the escaped descendant's stdout")
+            self.assertLess(elapsed, 1.0 + 2 * bridge.CODEX_DRAIN_TIMEOUT_SECONDS + 5)
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(getattr(errors[0], "status_code", None), 504)
+            self.assertEqual(service._in_flight, {})
+
     def test_the_shutdown_sweep_reaches_the_group_of_a_leader_that_already_exited(self) -> None:
         # R-10: poll() reaped the exited leader, so the sweep skipped the group its children still held the pipes of.
         with tempfile.TemporaryDirectory() as tmp:

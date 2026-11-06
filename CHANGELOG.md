@@ -265,13 +265,15 @@ All notable changes to auto-browser are documented here.
   nonce goes, and if none has, the new envelope is refused with `503` ("mesh replay cache is full; retry later") and
   not recorded, so the cap bounds how many envelopes are accepted per window; a reply that finds the cache full fails
   the delegation.
-- The Codex host bridge reads a request body within 60 seconds in total (a client trickling a byte every 29 s used
-  to hold a handler thread indefinitely; it now gets 408) and the request line and headers within 30 seconds in total
+- The Codex host bridge reads a request body within 60 seconds in total (a client trickling a byte every 29 s used to
+  hold a handler thread indefinitely; it now gets 408) and the request line and headers within 30 seconds in total
   (past that it closes the connection; a request line cut off that way no longer ends in a broken-pipe traceback),
   runs at most two Codex decisions at once (a third waits 2 s, then gets 503), serves at most 32 connections at once
   (one more is answered 503 and closed at once; each held a thread, with no limit), and on a Codex timeout kills
-  Codex's whole process group, not only the direct child. Stopping the bridge (Ctrl+C or SIGTERM) kills the Codex
-  runs still in flight the same way, skipping only a run the handler has already reaped (a Codex that exited while its
+  Codex's whole process group, not only the direct child, then drains its pipes for at most 3 s and waits at most 3 s
+  more (a descendant that left the group with `setsid` and kept stdout open used to hold the request, and its decision
+  slot, for as long as it ran; the reply stays 504). Stopping the bridge (Ctrl+C or SIGTERM) kills the Codex runs
+  still in flight the same way, skipping only a run the handler has already reaped (a Codex that exited while its
   children hold its pipes is still signalled, so they are killed too). Codex now runs in its own session, so the
   terminal's Ctrl+C no longer reaches it and the shutdown sweep kills it instead (in 1.15.0 a SIGTERM to the bridge
   left it running, orphaned).

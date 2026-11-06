@@ -101,6 +101,9 @@ REQUEST_HEADER_DEADLINE_SECONDS = 30.0
 MAX_CONCURRENT_DECISIONS = 2
 # Seconds a request waits for one of those slots before it is answered 503.
 DECISION_SLOT_WAIT_SECONDS = 2.0
+# Seconds a killed codex run's pipes are drained, and then its exit waited for, before the run gives up on each: a
+# descendant that left codex's process group (setsid) can hold stdout open long after the kill.
+CODEX_DRAIN_TIMEOUT_SECONDS = 3.0
 # Connections served at once. Each holds a handler thread, and a timer thread while its headers come in; a connection
 # past this is answered 503 and closed at once.
 MAX_CONNECTIONS = 32
@@ -333,14 +336,14 @@ class CodexBridgeService:
             stdout, stderr = process.communicate(prompt, timeout=self.request_timeout_seconds)
         except subprocess.TimeoutExpired as exc:
             _kill_process_tree(process, grouped)
-            process.communicate()
+            _reap_killed(process)
             raise BridgeError(
                 f"codex timed out after {self.request_timeout_seconds:.0f}s",
                 status_code=504,
             ) from exc
         except BaseException:
             _kill_process_tree(process, grouped)
-            process.communicate()
+            _reap_killed(process)
             raise
         finally:
             with self._in_flight_lock:
@@ -382,6 +385,30 @@ def _kill_process_tree(process: subprocess.Popen, grouped: bool) -> None:
             process.kill()
     except (ProcessLookupError, PermissionError):
         pass  # already gone
+
+
+def _reap_killed(process: subprocess.Popen) -> None:
+    """Drain a killed run's pipes, then close them and wait for it, each for at most CODEX_DRAIN_TIMEOUT_SECONDS.
+
+    An unbounded communicate() waited for EOF on stdout, which a descendant that moved to its own session (setsid),
+    out of the group the kill reached, could hold open for as long as it lived. This never blocks longer than twice
+    the bound; a run still not reaped by then is left to the shutdown sweep and the OS.
+    """
+    try:
+        process.communicate(timeout=CODEX_DRAIN_TIMEOUT_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    for pipe in (process.stdin, process.stdout, process.stderr):
+        if pipe is not None:
+            try:
+                pipe.close()
+            except OSError:
+                pass
+    try:
+        process.wait(timeout=CODEX_DRAIN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        print(f"[codex-bridge] killed codex run {process.pid} did not exit in time", file=sys.stderr, flush=True)
 
 
 class UnixHTTPServer(ThreadingMixIn, UnixStreamServer):
