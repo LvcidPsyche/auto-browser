@@ -107,14 +107,13 @@ All notable changes to auto-browser are documented here.
   created without one gives its fork the same pool entry it drew instead of a second random draw. A fork whose proxy
   persona file cannot be read answers 503 with the fixed text, as `POST /sessions` does (it answered 409 Conflict).
 - `close_session` (`DELETE /sessions/{id}`) now runs its whole teardown as one task that a cancelled caller does not
-  stop, from the wait for a busy session's lock (which can close its browser context) to the last record (a
-  shutdown, or a cancel of the task that awaited the close, used to leave the audit event, the witness receipt and
-  the stored record unwritten), and says
-  when a step failed: the answer's `closed` stays true (the session is unregistered either way, so its
-  `MAX_SESSIONS` slot is free), the new `teardown` is `partial` (`complete` when every step succeeded),
-  `failed_steps` names the steps that failed (trace stop, tunnel release, browser context, isolated browser,
-  isolated runtime), and the `session_closed` audit event and witness receipt carry status `partial` and those names
-  instead of `ok`.
+  stop, from the wait for a busy session's lock (which can close its browser context) to the last record (a shutdown,
+  or a cancel of the task that awaited the close, used to leave the audit event, the witness receipt and the stored
+  record unwritten), and says when a step failed: the answer's `closed` stays true (the session is unregistered either
+  way, so its `MAX_SESSIONS` slot is free), the new `teardown` is `partial` (`complete` when every step succeeded),
+  `failed_steps` names the steps that failed (trace stop, tunnel release, browser context, isolated browser, isolated
+  runtime), and the `session_closed` audit event and witness receipt carry status `partial` and those names instead of
+  `ok`.
 - A late background write of a session's record can no longer put a closed session back to active: the active write is
   skipped when the session is no longer registered (checked before and after the summary is built), and the session
   store refuses to overwrite a stored `closed` record with any other status (an `interrupted` write replaced it and
@@ -372,14 +371,14 @@ All notable changes to auto-browser are documented here.
   connected to, with the name kept as the `Host` header and the TLS server name, so a second lookup cannot return a
   different one. A non-ASCII host (`bücher.example`) is looked up, sent as `Host` and named for TLS in its IDNA form
   (`xn--bcher-kva.example`), as 1.15.0 did when it posted by name; a lookup that cannot encode the name counts as one
-  that did not resolve. When a proxy from the environment applies to
-  the URL (`HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY`, less `NO_PROXY`), the answers are still checked, but the
-  request goes by name through the proxy, which then owns resolution. Logs carry only `scheme://host`, never the path,
-  query or credentials: httpx's own INFO line for each request, which named the whole URL, is no longer logged (the
-  controller sets the `httpx` logger to WARNING, or to `LOG_LEVEL` if higher). A name that does not resolve is not
-  posted to. A cloud metadata address stays refused, even with `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS` on, when an
-  IPv6 answer spells it: mapped, translated, compatible, NAT64 (the well-known `64:ff9b::/96` and the local-use
-  `64:ff9b:1::/48`, its last 32 bits), 6to4, or Teredo (the client address).
+  that did not resolve. When a proxy from the environment applies to the URL (`HTTPS_PROXY`, `HTTP_PROXY` or
+  `ALL_PROXY`, less `NO_PROXY`), the answers are still checked, but the request goes by name through the proxy, which
+  then owns resolution. Logs carry only `scheme://host`, never the path, query or credentials: httpx's own INFO line
+  for each request, which named the whole URL, is no longer logged (the controller sets the `httpx` logger to WARNING,
+  or to `LOG_LEVEL` if higher). A name that does not resolve is not posted to. A cloud metadata address stays refused,
+  even with `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS` on, when an IPv6 answer spells it: mapped, translated,
+  compatible, NAT64 (the well-known `64:ff9b::/96` and the local-use `64:ff9b:1::/48`, its last 32 bits), 6to4, or
+  Teredo (the client address).
 - A harness `run_id` must now look like the ids the harness generates (letters, digits, `.`, `_`, `-`; no leading
   dot), at the tool boundary and again in the run store, so an id cannot name a directory outside the harness runs
   root.
