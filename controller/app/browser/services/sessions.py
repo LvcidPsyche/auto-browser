@@ -242,7 +242,7 @@ class BrowserSessionService(SessionCreation):
         try:
             if session.tunnel is not None:
                 await self._teardown_step(
-                    session,
+                    session_id,
                     "release session tunnel",
                     lambda: self.manager.tunnel_broker.release(session.tunnel),
                     failed_steps,
@@ -346,7 +346,7 @@ class BrowserSessionService(SessionCreation):
             return True
         except TimeoutError:
             logger.warning("session %s is busy; closing its browser context so it can be closed", session.id)
-        await self._teardown_step(session, "close a stuck browser context", session.context.close)
+        await self._teardown_step(session.id, "close a stuck browser context", session.context.close)
         try:
             await asyncio.wait_for(session.lock.acquire(), timeout=CLOSE_LOCK_WAIT_SECONDS)
             return True
@@ -362,7 +362,7 @@ class BrowserSessionService(SessionCreation):
         The label of each step that failed is appended to ``failed_steps``.
         """
         await self._teardown_step(
-            session,
+            session.id,
             "stop trace recording",
             lambda: self.manager.observation.stop_trace_recording(session),
             failed_steps,
@@ -373,13 +373,13 @@ class BrowserSessionService(SessionCreation):
         # The window-birth watcher is per-browser and shared with other sessions on it; drop only this
         # session's context mapping (the watcher itself is released with its browser).
         self.manager.window_births.forget_session(session)
-        await self._teardown_step(session, "close browser context", session.context.close, failed_steps)
+        await self._teardown_step(session.id, "close browser context", session.context.close, failed_steps)
         if session.browser is not None and session.owns_browser:
             if not await self._close_owned_browser(session.browser, session.id):
                 failed_steps.append("close isolated browser")
         if session.runtime is not None:
             await self._teardown_step(
-                session,
+                session.id,
                 "release isolated runtime",
                 lambda: self.manager.runtime_provisioner.release(session.runtime),
                 failed_steps,
@@ -406,16 +406,15 @@ class BrowserSessionService(SessionCreation):
         return True
 
     @staticmethod
-    async def _teardown_step(
-        session: "BrowserSession", label: str, step: Any, failed_steps: list[str] | None = None
-    ) -> bool:
-        """Run one teardown step, bounded; on failure log it and append ``label`` to ``failed_steps``."""
+    async def _teardown_step(session_id: str, label: str, step: Any, failed_steps: list[str] | None = None) -> bool:
+        """Run one teardown step, bounded; on failure log it and append ``label`` to ``failed_steps``. Used by
+        close_session's teardown and by a failed create's rollback, whose session may not exist yet."""
         try:
             await asyncio.wait_for(step(), timeout=TEARDOWN_STEP_TIMEOUT_SECONDS)
         except TimeoutError:
-            logger.warning("gave up waiting to %s for session %s", label, session.id)
+            logger.warning("gave up waiting to %s for session %s", label, session_id)
         except Exception as exc:
-            logger.warning("failed to %s for session %s: %s", label, session.id, exc)
+            logger.warning("failed to %s for session %s: %s", label, session_id, exc)
         else:
             return True
         if failed_steps is not None:

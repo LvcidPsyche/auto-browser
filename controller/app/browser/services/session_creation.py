@@ -390,31 +390,27 @@ class SessionCreation:
             # Registered with the window-birth watcher before the failure (watch runs early): a dead session
             # left there was held, and re-registered with every replacement watcher.
             self.manager.window_births.forget_session(session)
-        if created_hook_started and self.manager._session_create_failed_hook is not None:
+        # Each await below is bounded as close_session's teardown steps are (W9-3): this unit runs to completion under
+        # a cancel, so a context.close() or runtime release that stalled held its caller for ever.
+        hook = self.manager._session_create_failed_hook
+        if created_hook_started and hook is not None:
             # The created hook registered per-session state (network inspector,
             # CDP session) that only the closed path removed; a failed create
             # never reaches that path, so the dead session's entries stayed.
-            try:
-                await self.manager._session_create_failed_hook(session_id)
-            except Exception as exc:
-                logger.warning("session create-failed hook failed for %s: %s", session_id, exc)
+            await self._teardown_step(session_id, "run the session create-failed hook", lambda: hook(session_id))
         if session is not None and session.tunnel is not None:
-            try:
-                await self.manager.tunnel_broker.release(session.tunnel)
-            except Exception as exc:
-                logger.warning("failed to release session tunnel during create_session rollback: %s", exc)
+            tunnel = session.tunnel
+            await self._teardown_step(
+                session_id, "release session tunnel", lambda: self.manager.tunnel_broker.release(tunnel)
+            )
         if context is not None:
-            try:
-                await context.close()
-            except Exception as exc:
-                logger.warning("failed to close browser context during create_session rollback: %s", exc)
+            await self._teardown_step(session_id, "close browser context", context.close)
         if browser is not None and runtime is not None:
             await self._close_owned_browser(browser, session_id)
         if runtime is not None:
-            try:
-                await self.manager.runtime_provisioner.release(runtime)
-            except Exception as exc:
-                logger.warning("failed to release isolated runtime during create_session rollback: %s", exc)
+            await self._teardown_step(
+                session_id, "release isolated runtime", lambda: self.manager.runtime_provisioner.release(runtime)
+            )
         await self._forget_failed_session_state(session, session_id)
 
     def remove_session_dirs(self, session_id: str) -> None:

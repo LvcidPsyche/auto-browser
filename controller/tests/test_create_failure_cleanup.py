@@ -219,6 +219,87 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_w7_2_a_cancel_during_the_tunnel_release_still_finishes_the_rollback(self) -> None:
         await self._assert_rolled_back(*await self._cancel_while_rollback_waits_in("tunnel release"))
 
+    async def _create_whose_context_close_never_returns(self, *, cancel: bool) -> tuple[AsyncMock, int, list[str]]:
+        # W9-3: none of the rollback's awaits was bounded, so a context.close() that stalled held the runtime release,
+        # the directory removal and the record write, and a cancelled caller waited with it. Returns the runtime
+        # release, how many CancelledErrors the caller saw, and the rollback's warnings.
+        import asyncio
+
+        from app.browser.services import sessions as sessions_module
+        from app.session_isolation import IsolatedBrowserRuntime
+
+        runtime = IsolatedBrowserRuntime(
+            session_id=SESSION_ID,
+            container_id="c0",
+            container_name="browser-node-x",
+            network_name="net",
+            browser_node_name="browser-node-x",
+            profile_dir=self.root / "profile",
+            downloads_dir=self.root / "downloads",
+            ws_endpoint_file=self.root / "ws",
+            ws_endpoint="ws://127.0.0.1:1/",
+            takeover_url="http://127.0.0.1:6080/",
+            novnc_port=None,
+        )
+        browser = self.manager.browser
+        browser.close = AsyncMock()  # type: ignore[attr-defined]
+        self.manager._acquire_session_browser = AsyncMock(  # type: ignore[method-assign]
+            return_value=(browser, runtime)
+        )
+        release_runtime = AsyncMock()
+        self.manager.runtime_provisioner.release = release_runtime  # type: ignore[method-assign]
+        self.manager.witness_bridge.record_session_receipt = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("witness down")
+        )
+        reached, never = asyncio.Event(), asyncio.Event()
+
+        async def stalled(*_args, **_kwargs) -> None:
+            reached.set()
+            await never.wait()
+
+        real_new_context = browser.new_context.side_effect
+
+        def new_context(**kwargs):
+            context = real_new_context(**kwargs)
+            context.close = AsyncMock(side_effect=stalled)
+            return context
+
+        browser.new_context = AsyncMock(side_effect=new_context)
+        cancels = 0
+        with (
+            patch.object(sessions_module, "TEARDOWN_STEP_TIMEOUT_SECONDS", 0.2),
+            self.assertLogs("app.browser.services", level="WARNING") as logs,
+        ):
+            task = asyncio.create_task(self.manager.create_session())
+            await asyncio.wait_for(reached.wait(), 10)
+            if cancel:
+                task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), 10)
+            except asyncio.CancelledError:
+                cancels += 1
+            except RuntimeError:
+                pass
+        self.assertTrue(task.done())
+        return release_runtime, cancels, logs.output
+
+    async def _assert_rolled_back_past_the_stalled_close(self, release_runtime, logs: list[str]) -> None:
+        release_runtime.assert_awaited_once()
+        self.assertEqual(self.leftovers(), [])
+        record = await self.manager.session_store.get(SESSION_ID)
+        self.assertEqual((record.status, record.close_reason), ("closed", "create_failed"))
+        self.assertEqual(len([line for line in logs if "context" in line]), 1, logs)
+
+    async def test_w9_3_a_context_close_that_never_returns_does_not_hold_the_rollback(self) -> None:
+        release_runtime, cancels, logs = await self._create_whose_context_close_never_returns(cancel=False)
+        self.assertEqual(cancels, 0)
+        await self._assert_rolled_back_past_the_stalled_close(release_runtime, logs)
+
+    async def test_w9_3_a_cancel_during_a_stalled_context_close_is_raised_once_at_the_end(self) -> None:
+        release_runtime, cancels, logs = await self._create_whose_context_close_never_returns(cancel=True)
+        self.assertEqual(cancels, 1)
+        await self._assert_rolled_back_past_the_stalled_close(release_runtime, logs)
+
     async def test_a_successful_create_keeps_its_directories(self) -> None:
         await self.manager.create_session()
 
