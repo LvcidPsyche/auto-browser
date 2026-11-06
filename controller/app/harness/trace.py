@@ -31,9 +31,11 @@ _REDACTED = "[REDACTED]"
 # The keys that hold what an action typed or chose (`value` and `label`, for select_option) and who it signed in as.
 # They are redacted when the action is marked sensitive.
 # Beside a sensitive flag, `text` and `text_preview` are hidden in any dict; `value`, `label` and `username` only in an
-# action's own payload, because a site's own row can carry a "sensitive" key and those are its data.
+# action's own payload, because a site's own row can carry a "sensitive" key and those are its data. That rule stops
+# at the page data an event carries (_PAGE_DATA_KEYS): a row there keeps what final_observation keeps.
 _TYPED_TEXT_KEYS = frozenset({"text", "text_preview"})
 _ACTION_TYPED_TEXT_KEYS = _TYPED_TEXT_KEYS | {"value", "label", "username"}
+_PAGE_DATA_KEYS = frozenset({"observation", "before", "after"})
 _SENSITIVE_FLAG_KEYS = ("sensitive", "text_redacted")
 # The keys of an agent step's observation that point at its screenshot.
 _SCREENSHOT_KEYS = ("screenshot_path", "screenshot_url")
@@ -437,8 +439,9 @@ def _redact_sensitive(
 
     The typed text of a dict flagged sensitive is hidden too: its `text` and `text_preview` anywhere, and with
     `decision` (an event payload: the agent's decision and its action) its `value`, `label` and `username` as well.
-    In page data (an observation, extracted data) those three stay: a "sensitive" key a site's own data carries
-    must not blank its neighbours.
+    In page data (an observation, extracted data, and inside an event its `observation` and the execution's `before`
+    and `after`) those three stay: a "sensitive" key a site's own data carries must not blank its neighbours. A
+    sensitive select_option's own execution `target` is the action's, and keeps the action rule.
     """
     if isinstance(value, dict):
         flagged = any(value.get(flag) for flag in _SENSITIVE_FLAG_KEYS)
@@ -451,7 +454,9 @@ def _redact_sensitive(
             elif flagged and key_text in typed_keys:
                 redacted[key] = _REDACTED
             else:
-                redacted[key] = _redact_sensitive(item, strings=strings, decision=decision)
+                # The action rule stops at page data inside an event: its observation and the execution's snapshots.
+                below = decision and key_text not in _PAGE_DATA_KEYS
+                redacted[key] = _redact_sensitive(item, strings=strings, decision=below)
         return redacted
     if isinstance(value, (list, tuple)):
         return [_redact_sensitive(item, strings=strings, decision=decision) for item in value]

@@ -178,7 +178,10 @@ All notable changes to auto-browser are documented here.
   whose query or fragment a failing scrub dropped is kept as written too, instead of shrinking to its path.
 - The harness trace no longer blanks the `value`, `label` and `username` of a dict in page data (an observation or
   extracted data) just because the site's own data carries a `sensitive` or `text_redacted` key: that hiding applies
-  to an action's own event payload only. A `text` or `text_preview` beside such a key is still hidden everywhere.
+  to an action's own event payload only, and stops at the page data the action event carries (its `observation` and
+  the execution's `before` and `after`), so a row there keeps what the same row keeps in `final_observation`. A
+  sensitive `select_option`'s execution `target` is still hidden. A `text` or `text_preview` beside such a key is
+  still hidden everywhere.
 - A URL the harness trace scrubs out of quoted text now ends before the closing quote when `.`, `!` or `?` and then a
   space or the end follow it (`see 'https://site/a?token=...'.` lost its quote and full stop); an apostrophe inside
   a URL (`?q=o'neil`) is still part of it.
