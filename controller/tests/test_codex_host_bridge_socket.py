@@ -33,6 +33,16 @@ def _load_bridge():
 bridge = _load_bridge() if _SCRIPT.is_file() else None
 
 
+def _give_back_socket_locks() -> None:
+    """Close every lock descriptor prepare_socket_path kept, then forget them: one cleanup, in that order (W7-8).
+    Two cleanups ran last-registered first, so the dict was cleared before the close loop and the descriptors and
+    their flocks leaked until the process exited."""
+    locks = getattr(bridge, "_SOCKET_LOCKS", {})
+    for fd in locks.values():
+        os.close(fd)
+    locks.clear()
+
+
 @unittest.skipIf(bridge is None, "scripts/ is not shipped in the controller image")
 class PrepareSocketPathTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -40,8 +50,7 @@ class PrepareSocketPathTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
         # prepare_socket_path keeps its lock for the bridge's life; a test gives back the ones it took.
-        self.addCleanup(lambda: [os.close(fd) for fd in getattr(bridge, "_SOCKET_LOCKS", {}).values()])
-        self.addCleanup(lambda: getattr(bridge, "_SOCKET_LOCKS", {}).clear())
+        self.addCleanup(_give_back_socket_locks)
 
     def test_a_regular_file_at_the_path_is_refused_and_kept(self) -> None:
         target = self.root / "codex.sock"
@@ -149,8 +158,7 @@ class BridgeSocketLockTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
-        self.addCleanup(lambda: [os.close(fd) for fd in getattr(bridge, "_SOCKET_LOCKS", {}).values()])
-        self.addCleanup(lambda: getattr(bridge, "_SOCKET_LOCKS", {}).clear())
+        self.addCleanup(_give_back_socket_locks)
 
     def test_a_second_bridge_stops_while_the_first_holds_the_lock_and_the_socket_is_kept(self) -> None:
         import fcntl
