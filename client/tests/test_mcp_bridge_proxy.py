@@ -535,6 +535,26 @@ def test_w15_4_a_port_outside_0_to_65535_is_refused(recording_proxy, base_url: s
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        # Request() refuses both though each has a scheme and balanced brackets: the netloc holds a character that NFKC
+        # normalizes to a colon, and notanip is not an IP address. The reason said "(no scheme, or an unbalanced
+        # bracket)".
+        "http://controller.invalid" + chr(0xFF1A) + "8000/mcp",
+        "http://[notanip]:8000/mcp",
+        # A reading's parse error: urlsplit refuses the decoded x[@127.0.0.1:8000.
+        "http://x%5b@127.0.0.1:8000/mcp",
+    ],
+)
+def test_w15_5_a_fixed_reason_gives_its_causes_as_examples(recording_proxy, base_url: str) -> None:
+    message = _bridge_error_through_the_bridge(base_url, recording_proxy)
+
+    assert INVALID in message
+    assert "(for example, " in message
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
 def test_w14_1_a_proxys_error_detail_never_shows_the_urls_query(recording_proxy) -> None:
     # A proxy's JSON 502 whose detail echoes the URL reached the agent whole through the HTTP error message.
     recording_proxy.answer = (  # type: ignore[attr-defined]

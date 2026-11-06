@@ -191,7 +191,7 @@ def _goes_direct(request: Request) -> bool:
             HTTPConnection(request.host.rpartition("@")[2]).host,
         )
     except (InvalidURL, ValueError) as exc:
-        raise InvalidControllerURL("a reading cannot parse its host (an unbalanced or misplaced bracket)") from exc
+        raise InvalidControllerURL("a reading cannot parse its host (for example, a malformed bracket)") from exc
     if _is_loopback_host(connected):
         return True
     if any(_is_loopback_host(host) for host in others):
@@ -302,7 +302,8 @@ class HttpMcpClient:
         except ValueError as exc:
             # urllib's text quotes the URL, query and fragment included (W14-1).
             raise InvalidControllerURL(
-                "urllib cannot read it as an http:// or https:// URL (no scheme, or an unbalanced bracket)"
+                "urllib cannot read it as an http:// or https:// URL (for example, no scheme, a malformed bracket or "
+                "a character it refuses)"
             ) from exc
         # Before any opener is chosen, so nothing is sent (W15-3). urllib reads a scheme-less userinfo's user name as
         # the scheme (sentinel:x@host/mcp), answers a data: or file: URL from the URL or the local file as if a
