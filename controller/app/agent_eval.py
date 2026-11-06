@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from .mcp_stdio import _is_loopback_host
+from .mcp_stdio import _is_loopback_host, _NoRedirects
 
 
 @dataclass(frozen=True)
@@ -359,11 +359,12 @@ class ControllerEvalClient:
         # A loopback controller is reached past any environment proxy (W7-1): urllib skips a proxy for localhost
         # only when no_proxy names it, so the Authorization header went to the proxy. Any other host still uses the
         # proxy the environment names. The bridge's rule decides, not auth_policy.is_loopback_host, whose meaning
-        # feeds auth decisions (W8-3).
+        # feeds auth decisions (W8-3). Redirects are refused on both branches, as the bridge refuses them (W9-6):
+        # urllib's default handler copied the Authorization header onto a redirect to any origin.
         if _is_loopback_host(urlsplit(request.full_url).hostname):
-            urlopen = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+            urlopen = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects).open
         else:
-            urlopen = urllib.request.urlopen
+            urlopen = urllib.request.build_opener(_NoRedirects).open
         try:
             with urlopen(request, timeout=120) as response:
                 return json.loads(response.read().decode("utf-8"))

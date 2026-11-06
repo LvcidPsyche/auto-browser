@@ -27,9 +27,18 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
+
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect, as the MCP bridge does (W9-6): urllib's default handler copied the Authorization
+    header onto a redirect to any origin. The 3xx is reported as the HTTP error it is."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 # Every request goes to the loopback controller, so none goes through an environment proxy: urllib skips one for
 # 127.0.0.1 only when no_proxy names it, and the API token would go to the proxy.
-_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects)
 
 
 def call(method: str, url: str, token: str, body: dict | None = None) -> tuple[int, dict]:
