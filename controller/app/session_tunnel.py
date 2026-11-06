@@ -194,7 +194,14 @@ class IsolatedSessionTunnelBroker:
                         tunnel.error = self._tail_file(tunnel.log_path) or (
                             f"autossh exited early with code {tunnel.process.returncode}"
                         )
-                        self._write_metadata(tunnel, status="error")
+                        try:
+                            self._write_metadata(tunnel, status="error")
+                        except Exception as exc:
+                            # Diagnostic only (W2-7): raised, it reached the handler below, which wrote
+                            # provision_failed over autossh's tail and deleted the log, and the tail was lost.
+                            logger.warning(
+                                "could not record the error status of session %s's tunnel: %s", session_id, exc
+                            )
                         self._close_stderr(tunnel)
                         last_error = tunnel.error
                         if not any(text in last_error.lower() for text in _REMOTE_PORT_UNAVAILABLE):

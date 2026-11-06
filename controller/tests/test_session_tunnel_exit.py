@@ -63,6 +63,31 @@ class TunnelExitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.spawned), 1, "five ports in the range, one autossh started")
         self.assertIn("Permission denied", str(caught.exception))
 
+    async def test_w2_7_a_failed_error_status_write_on_an_early_exit_keeps_autosshs_message(self) -> None:
+        # The write's OSError fell into the outer handler: _abort_starting wrote provision_failed over the tail,
+        # deleted the log, and provision raised the write's error, so autossh's message was lost.
+        real_write = self.broker._write_metadata
+
+        def write(tunnel, *, status):
+            if status == "error":
+                raise OSError(28, "sentinel-disk-full")
+            return real_write(tunnel, status=status)
+
+        self.broker._write_metadata = write  # type: ignore[method-assign]
+        with (
+            self.exiting_with(STDERR_TAIL.encode() + b"\n"),
+            self.assertLogs("app.session_tunnel", level="WARNING") as logs,
+            self.assertRaises(RuntimeError) as caught,
+        ):
+            await self.broker.provision("s1", local_port=6080)
+
+        self.assertIn("Permission denied", str(caught.exception))
+        self.assertEqual(len(self.spawned), 1)
+        self.assertTrue(any("sentinel-disk-full" in line for line in logs.output))
+        self.assertEqual(sorted(path.name for path in (self.root / "tunnels").iterdir()), [])
+        self.assertEqual(self.broker._tunnels, {})
+        self.assertEqual(self.broker._allocated_ports, set())
+
     async def test_nav21_an_address_already_in_use_moves_to_the_next_port(self) -> None:
         with self.exiting_with(b"bind [127.0.0.1]:16181: Address already in use\n", then_succeed=True):
             tunnel = await self.broker.provision("s1", local_port=6080)

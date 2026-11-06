@@ -287,13 +287,16 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             real_write = broker._write_metadata
 
             def write(tunnel, *, status):
-                if status in {"active", "error"}:
-                    raise OSError(28, "No space left on device")
+                # W2-8: distinct messages, so the test can tell which write provision raised: the active one's.
+                if status == "active":
+                    raise OSError(28, "sentinel-active-write-failed")
+                if status == "error":
+                    raise OSError(28, "sentinel-error-write-failed")
                 return real_write(tunnel, status=status)
 
             broker._write_metadata = write  # type: ignore[method-assign]
             with patch("app.session_tunnel.asyncio.create_subprocess_exec", new=fake_exec):
-                with self.assertRaisesRegex(OSError, "No space left"):
+                with self.assertRaisesRegex(OSError, "^\\[Errno 28\\] sentinel-active-write-failed$"):
                     await broker.provision("session-1", local_port=6080)
             self.assertTrue(processes[0].killed)
             self.assertEqual(sorted(path.name for path in broker.root.iterdir()), [])

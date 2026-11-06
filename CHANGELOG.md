@@ -396,13 +396,12 @@ All notable changes to auto-browser are documented here.
   `MAX_SESSIONS`.
 - A session tunnel's metadata (`<session>.json`) and autossh log (`<session>.log`) under `ISOLATED_TUNNEL_INFO_ROOT`
   are now deleted when it is released, and when its provision gives up (autossh did not start, exited early, was
-  cancelled, or no port was left; also when the first metadata write or the log open fails, or the error-status
-  write does, which is then logged while the original error is raised); they named the bastion, its user and the
-  key path. The tunnel
-  block in `remote_access.session_tunnel` (a session's `remote_access` in its summary) no longer carries `ssh_host`,
-  `ssh_port`, `ssh_user`, `info_path` or `log_path`, and its `error` is a short code (`autossh_exited`,
-  `autossh_start_failed`, `provision_cancelled`, `provision_failed`) instead of autossh's stderr, which is logged by
-  the controller.
+  cancelled, or no port was left; also when the first metadata write or the log open fails, or the error-status write
+  does, which is then logged while the original error is raised, on an early exit autossh's own message); they named
+  the bastion, its user and the key path. The tunnel block in `remote_access.session_tunnel` (a session's
+  `remote_access` in its summary) no longer carries `ssh_host`, `ssh_port`, `ssh_user`, `info_path` or `log_path`, and
+  its `error` is a short code (`autossh_exited`, `autossh_start_failed`, `provision_cancelled`, `provision_failed`)
+  instead of autossh's stderr, which is logged by the controller.
 - `browser.request_human_takeover` no longer writes the takeover URL and the remote-access block to the session's
   `actions.jsonl` (served under `/artifacts` to the session's users): the line keeps the reason and the
   session, without `takeover_url` or `remote_access`. The tool's own result still carries them, as before.
