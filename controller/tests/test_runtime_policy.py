@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import socketserver
 import tempfile
 import threading
@@ -412,6 +413,25 @@ class CdpConnectUrlPolicyTests(unittest.TestCase):
                     self.assertEqual(len(errors), 1, report.errors)
                     for part in ("pw-5c1e", "id-77d2", "user:"):
                         self.assertNotIn(part, errors[0])
+
+    def test_whitespace_around_a_cdp_connect_url_is_stripped_before_the_checks(self) -> None:
+        # R-5: a quoted .env value or a process variable can end in CR or LF, which the refusal turned into a stop.
+        for padded in ("ws://chrome.internal:9222/devtools/browser/abc\n", "\r\n ws://chrome.internal:9222\r\n"):
+            with self.subTest(url=padded):
+                with patch.dict(os.environ, {"CDP_CONNECT_URL": padded}, clear=True):
+                    settings = Settings(_env_file=None)
+
+                report = validate_runtime_policy(settings)
+
+                self.assertEqual(settings.cdp_connect_url, padded.strip())
+                self.assertFalse(any("CDP_CONNECT_URL" in error for error in report.errors), report.errors)
+
+    def test_a_control_character_or_backslash_inside_a_cdp_connect_url_is_still_refused(self) -> None:
+        for url in ("ws://chrome.inter\nnal:9222\n", "ws://evil.example\\@chrome.internal:9222\n"):
+            with self.subTest(url=url):
+                report = validate_runtime_policy(Settings(_env_file=None, CDP_CONNECT_URL=url))
+
+                self.assertEqual(len([error for error in report.errors if "CDP_CONNECT_URL" in error]), 1)
 
     def test_a_plain_cdp_connect_url_passes(self) -> None:
         settings = Settings(_env_file=None, CDP_CONNECT_URL="ws://user:pw@chrome.internal:9222/devtools/browser/abc")

@@ -225,7 +225,9 @@ All notable changes to auto-browser are documented here.
   be reached" instead of a 500 (CDP) or a 409 Conflict (a browser-node), and an MCP call (`browser.cdp_attach`, a
   session it creates) answers the same text with the code `browser_unreachable`. A `CDP_CONNECT_URL` in which a
   browser could read another host than that log shows (a backslash or a control character in it, or a host written in
-  a form a browser maps to another) now stops startup, as the tool's `cdp_url` already was refused.
+  a form a browser maps to another) now stops startup, as the tool's `cdp_url` already was refused. Whitespace around
+  `CDP_CONNECT_URL` (a trailing CR or LF from a quoted `.env` value or the process environment) is stripped first, so
+  it does not stop startup.
 - `.gitignore` now ignores everything under `data/` except each directory's `.gitkeep` (it listed directories one by
   one and missed `data/memory`, `data/mesh` with the node identity key, `data/harness`, the proxy and cron stores),
   and ignores `.env.*` except `.env.example`.

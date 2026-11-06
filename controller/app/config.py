@@ -492,6 +492,15 @@ class Settings(BaseSettings):
             raise ValueError(f"{info.field_name} must be a finite number, got {value!r}")
         return value
 
+    @field_validator("cdp_connect_url", mode="before")
+    @classmethod
+    def _cdp_connect_url_stripped(cls, value: object) -> object:
+        # A quoted .env value or a process variable can carry a trailing CR or LF, which the control-character
+        # refusal (runtime_policy) turned into a startup failure. Only the ends are trimmed: one inside is refused.
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
     @field_validator("session_isolation_mode", mode="before")
     @classmethod
     def _isolation_mode_trimmed_and_lowercased(cls, value: object) -> object:
