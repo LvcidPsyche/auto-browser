@@ -629,7 +629,8 @@ class BrowserSessionService(SessionCreation):
                         "failed to close the shadow context during rollback: %s", f"{type(exc).__name__}: {exc}"
                     )
             await self._close_owned_browser(headed_browser, shadow_session_id)
-            self.remove_session_dirs(shadow_session_id)
+            # The directories, and the record a persist may already have written, closed as create_failed.
+            await self._forget_failed_session_state(shadow_session, shadow_session_id)
             raise
 
         await manager.audit.append(

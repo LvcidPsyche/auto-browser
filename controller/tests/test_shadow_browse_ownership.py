@@ -8,7 +8,9 @@ pages. The copy is the same logins, so it belongs to the same operator.
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -83,6 +85,58 @@ class ShadowBrowseOwnershipTests(unittest.IsolatedAsyncioTestCase):
         _, shadow_id = await self._shadow_of(ALICE)
 
         self.assertIn(shadow_id, self.manager.sessions)
+
+    async def _source(self) -> str:
+        with acting_as(ALICE):
+            session_id = (await self.manager.create_session(name="source"))["id"]
+        self.manager.sessions[session_id].context = StateContext(self.manager.sessions[session_id].page)
+        return session_id
+
+    async def _shadow_records(self) -> list:
+        with acting_as(ALICE):
+            return [r for r in await self.manager.session_store.list() if r.name == "shadow-source"]
+
+    async def test_a_rollback_after_the_record_was_written_closes_the_record(self) -> None:
+        # R-15: the rollback never touched the session store, so the shadow's record stayed active.
+        session_id = await self._source()
+        real_persist = self.manager._persist_session
+
+        async def persist_then_fail(session, *, status):
+            await real_persist(session, status=status)
+            raise RuntimeError("persist failed after the write")
+
+        self.manager._persist_session = persist_then_fail  # type: ignore[method-assign]
+        with acting_as(ALICE), self.assertRaisesRegex(RuntimeError, "persist failed"):
+            await self.manager.enable_shadow_browse(session_id)
+
+        records = await self._shadow_records()
+        self.assertEqual([(r.status, r.close_reason) for r in records], [("closed", "create_failed")])
+
+    async def test_a_cancel_while_the_shadow_record_is_written_still_ends_closed(self) -> None:
+        session_id = await self._source()
+        store = self.manager.session_store.file_store
+        real_write = store._upsert_sync
+        writing, release = threading.Event(), threading.Event()
+
+        def gated_write(record) -> None:
+            if record.name == "shadow-source" and record.status == "active":
+                writing.set()
+                release.wait(5)
+            real_write(record)
+
+        store._upsert_sync = gated_write  # type: ignore[method-assign]
+        with acting_as(ALICE):
+            task = asyncio.create_task(self.manager.enable_shadow_browse(session_id))
+        await asyncio.to_thread(writing.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        records = await self._shadow_records()
+        self.assertEqual([r.status for r in records], ["closed"])
+        self.assertNotIn(records[0].id, self.manager.sessions)
 
 
 class ShadowBrowseAllowedHostsTests(unittest.IsolatedAsyncioTestCase):

@@ -82,9 +82,10 @@ All notable changes to auto-browser are documented here.
 - A `create_session` that fails no longer leaves its artifact, auth and upload directories behind or an `active`
   record in the session store: the directories are made only after every check that can refuse the request, removed
   again by the rollback, and a record the create had already written is marked `closed` (reason `create_failed`).
-- A shadow browse that fails or is cancelled after its Chromium started no longer leaves that browser running or the
-  shadow's artifact, auth and upload directories on disk: the rollback now also runs on a cancel, and the directories
-  are made only once the browser is up.
+- A shadow browse that fails or is cancelled after its Chromium started no longer leaves that browser running, the
+  shadow's artifact, auth and upload directories on disk, or an `active` record in the session store (a record
+  already written is marked `closed` with reason `create_failed`, as a failed `create_session`'s is): the rollback
+  now also runs on a cancel, and the directories are made only once the browser is up.
 - One helper (`is_local_only_host`, next to `is_loopback_host`) now decides whether a takeover URL names only this
   machine, for both the per-session remote-access report and the production "TAKEOVER_URL is still local-only"
   warning. Before, each kept its own literal list that missed `127.0.0.2`, `*.localhost` and `[::ffff:127.0.0.1]`, so
