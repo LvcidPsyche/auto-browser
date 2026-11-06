@@ -552,6 +552,39 @@ class RetentionTests(_Base):
         self.assertIn("HARNESS_MAX_RUNS_PER_OPERATOR", str(refused[0]))
         self.assertEqual(len(service.store.list()), 1)
 
+    async def test_w7_5_the_admission_lock_holds_the_cap_while_a_run_ends_during_another_scan(self) -> None:
+        # The one window the lock covers, since reserve re-reads the starting runs: B's scan has listed the stored
+        # runs (none) when A is admitted, runs and ends, so A is neither starting nor in B's count. Without the lock
+        # both are admitted under a cap of one.
+        service = HarnessService(self.root, max_runs_per_operator=1)
+        started, go_on = threading.Event(), threading.Event()
+        self.addCleanup(go_on.set)
+        real = service.store._owned_runs
+        scans = 0
+
+        def gated(owner):
+            nonlocal scans
+            scans += 1
+            result = real(owner)
+            if scans == 1:  # B's scan only: its result is read before A's run.json exists
+                started.set()
+                go_on.wait(10)
+            return result
+
+        with patch.object(service.store, "_owned_runs", side_effect=gated):
+            second = asyncio.create_task(self._run(service))
+            await self._until(started)
+            first = asyncio.create_task(self._run(service))
+            # With the lock A waits for B's admission, so it cannot finish here; without it, A runs to its end.
+            await asyncio.wait({first}, timeout=2)
+            go_on.set()
+            results = await asyncio.gather(second, first, return_exceptions=True)
+
+        admitted = [isinstance(result, HarnessRunRecord) for result in results]
+        self.assertEqual(admitted, [True, False], results)
+        self.assertIsInstance(results[1], ValueError)
+        self.assertEqual(len(service.store.list()), 1)
+
     async def test_zero_days_keeps_everything(self) -> None:
         service = HarnessService(self.root)
         record = await self._run(service)
@@ -837,8 +870,9 @@ class RetentionTests(_Base):
             self.assertEqual(Settings().harness_max_runs_per_operator, 0)
 
     async def test_a_run_still_starting_counts_toward_the_cap(self) -> None:
-        # The count and the mark are one step under the store's lock: a start that holds its place but has not
-        # written run.json yet is counted, so two starts at once cannot both pass a cap of one.
+        # A start that holds its place but has not written run.json yet is counted: the scan of the stored runs
+        # holds no lock, admissions are serialised by HarnessService._admission, and reserve re-reads the starting
+        # runs under the store's _active_lock, so two starts at once cannot both pass a cap of one.
         service = HarnessService(self.root, max_runs_per_operator=1)
         self.assertTrue(service.store.begin_run("0123456789ab", None, max_owned=1))
 
