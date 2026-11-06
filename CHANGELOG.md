@@ -281,22 +281,23 @@ All notable changes to auto-browser are documented here.
   and each name given with the new `--pass-env NAME` (a bad name exits 2 at startup).
 - The model no longer receives an isolated session's noVNC password. `create_session`, `get_session`,
   `get_remote_access` and `request_human_takeover` (REST and MCP) carried it in the takeover URL's fragment, which
-  over MCP reached the calling model, and with a session tunnel up the URL was the public one. No MCP tool result,
-  and no response of a route the agent-facing packages (the Python client, the MCP package, the LangChain
-  integration) call, carries it now; an isolated session's `remote_access` block and takeover result carry a fixed
-  `takeover_note` instead. The full link comes from the new `GET /sessions/{session_id}/takeover-link`, which no
-  MCP tool and no agent-facing package calls and the dashboard and the new `scripts/takeover_link.sh` read. Beside
-  the bearer token, which agents hold, it demands a second secret agents are not given: the takeover token, in the
-  `X-Takeover-Token` header, compared in constant time and required in every scope, `API_ALLOW_TOKENLESS_LOOPBACK`
-  included. A missing or wrong one is a 403, checked before the session lookup (so before a 404 for an unknown or
-  closed session) and audited as `takeover_link_refused` without a token or the URL; a read is
+  over MCP reached the calling model, and with a session tunnel up the URL was the public one. No MCP tool result, and
+  no response of a route the agent-facing packages (the Python client, the MCP package, the LangChain integration)
+  call, carries it now; an isolated session's `remote_access` block and takeover result carry a fixed `takeover_note`
+  instead. The full link comes from the new `GET /sessions/{session_id}/takeover-link`, which no MCP tool and no
+  agent-facing package calls and the dashboard and the new `scripts/takeover_link.sh` read. Beside the bearer token,
+  which agents hold, it demands a second secret agents are not given: the takeover token, in the `X-Takeover-Token`
+  header, compared in constant time and required in every scope, `API_ALLOW_TOKENLESS_LOOPBACK` included. A malformed
+  session id is a 400; then a missing or wrong token is a 403, checked before the session lookup (so before a 404 for
+  an unknown, closed or, under `API_BEARER_TOKENS`, another operator's session: the route is exempt from the app-wide
+  session check) and audited as `takeover_link_refused` without a token or the URL; a read is
   `Cache-Control: no-store` and audited as `takeover_link_viewed` without the URL or the password. The token is
-  `TAKEOVER_TOKEN` when set; else the controller reads it from `TAKEOVER_TOKEN_FILE` (default
-  `/data/takeover-token`) or generates one there (mode 0600) on first start, and logs only a sha256 fingerprint. A
-  `TAKEOVER_TOKEN` shorter than 32 characters or equal to an API credential refuses startup; a token file that
-  cannot be read or written, or holds an unusable token, logs a warning and the endpoint answers 503. An agent that
-  can read files on the controller's host can still read `data/takeover-token` (or the session container's own copy
-  of the password). The shared browser-node keeps the operator's `VNC_PASSWORD` and a password-free link.
+  `TAKEOVER_TOKEN` when set; else the controller reads it from `TAKEOVER_TOKEN_FILE` (default `/data/takeover-token`)
+  or generates one there (mode 0600) on first start, and logs only a sha256 fingerprint. A `TAKEOVER_TOKEN` shorter
+  than 32 characters or equal to an API credential refuses startup; a token file that cannot be read or written, or
+  holds an unusable token, logs a warning and the endpoint answers 503. An agent that can read files on the
+  controller's host can still read `data/takeover-token` (or the session container's own copy of the password). The
+  shared browser-node keeps the operator's `VNC_PASSWORD` and a password-free link.
 - **On a host shared with other users,** keep `./data` closed to them: mode 0700, or 0750 with a group only the
   operators are in. browser-node's endpoint file there (`./data/browser-profile/browser-ws-endpoint.txt`) holds the
   `ws://` URL that connects to the shared browser, and it cannot be private to one uid, since browser-node writes it

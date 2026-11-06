@@ -29,6 +29,9 @@ def require_safe_segment(value: str, *, field: str) -> str:
     return value
 
 
+TAKEOVER_LINK_ROUTE = "/sessions/{session_id}/takeover-link"
+
+
 async def require_session_access(request: Request) -> None:
     """Refuse another operator's session on every route that names one.
 
@@ -42,6 +45,10 @@ async def require_session_access(request: Request) -> None:
     # Controller-wide approvals are listed by their owner: their scope names no session.
     route = getattr(request.scope.get("route"), "path", None)
     listing_controller = route == "/approvals" and session_id == CONTROLLER_SCOPE
+    # The takeover link checks its takeover token first and looks the session up itself (W2-19): a 404 from here
+    # came before that check, so a caller without the token could tell which ids exist, unaudited.
+    if route == TAKEOVER_LINK_ROUTE:
+        return
     if session_id and manager is not None and not listing_controller:
         await manager.ensure_session_accessible(session_id)
 

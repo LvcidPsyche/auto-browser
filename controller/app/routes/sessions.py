@@ -38,8 +38,10 @@ from ._utils import (
     OFF_LIST_OTHER_TAB_DETAIL,
     OFF_LIST_PAGE_DETAIL,
     OFF_LIST_TAB_DETAIL,
+    TAKEOVER_LINK_ROUTE,
     UNJUDGED_TAB_DETAIL,
     persona_file_errors,
+    require_safe_segment,
     typed_route_errors,
 )
 
@@ -92,7 +94,7 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
     async def get_session(session_id: str) -> dict[str, Any]:
         return await manager.get_session_record(session_id)
 
-    @router.get("/sessions/{session_id}/takeover-link")
+    @router.get(TAKEOVER_LINK_ROUTE)
     async def get_takeover_link(
         session_id: str,
         x_takeover_token: Annotated[str | None, Header(alias="X-Takeover-Token")] = None,
@@ -100,9 +102,11 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
         # Human-only (NAV-14): the full link, an isolated session's noVNC password in its fragment. No MCP tool and
         # no agent-facing package calls this; the dashboard and scripts/takeover_link.sh do. Beside the bearer
         # token, which agents hold, it demands the takeover token (NAV-14b), in every scope, tokenless loopback
-        # included, and before the session lookup, so a caller without it cannot tell which sessions exist. A
-        # closed or unknown session is then a 404 (get_session). The audit events name the read or the refusal,
-        # never a token, the URL or the password.
+        # included, and before the session lookup, so a caller without it cannot tell which sessions exist: the
+        # route is exempt from the app-wide require_session_access (W2-19). A malformed id is a 400 first; a
+        # closed, unknown or other operator's session is then a 404 (get_session). The audit events name the read
+        # or the refusal, never a token, the URL or the password.
+        require_safe_segment(session_id, field="session_id")
         expected = getattr(manager.settings, "takeover_token", None)
         if not expected:
             raise HTTPException(status_code=503, detail=TAKEOVER_LINK_UNAVAILABLE_DETAIL)
