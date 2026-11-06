@@ -186,7 +186,7 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(metadata["status"], "active")
             await broker.release(tunnel)
 
-    async def _started_broker(self, root: Path, *, ports: int = 8) -> IsolatedSessionTunnelBroker:
+    async def _started_broker(self, root: Path, *, ports: int = 8, **extra: str) -> IsolatedSessionTunnelBroker:
         ssh_root = root / "ssh"
         ssh_root.mkdir(parents=True, exist_ok=True)
         (ssh_root / "id_ed25519").write_text("dummy", encoding="utf-8")
@@ -203,6 +203,7 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             ISOLATED_TUNNEL_REMOTE_PORT_END=16181 + ports - 1,
             ISOLATED_TUNNEL_STARTUP_GRACE_SECONDS=_GRACE,
             ISOLATED_TUNNEL_INFO_INTERVAL_SECONDS=30,
+            **extra,
         )
         broker = IsolatedSessionTunnelBroker(settings)
         await broker.startup()
@@ -234,6 +235,34 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(("error", "provision_failed"), written)
             # B-fix-3 (NAV-22): once provision gives up, neither file is left under ISOLATED_TUNNEL_INFO_ROOT.
             self.assertEqual(sorted(path.name for path in broker.root.iterdir()), [])
+
+    async def test_b_fix_11_the_remote_bind_address_must_be_a_bare_host_or_ip(self) -> None:
+        # NAV-29: the lenient loopback check accepted these, and the -R spec built from them was malformed.
+        for bind, mode in (
+            ("localhost:22", "private"),
+            ("[::1]:22", "private"),
+            ("[::1]", "private"),
+            (" 127.0.0.1 ", "private"),
+            ("0.0.0.0:22", "unsafe-public"),
+        ):
+            with self.subTest(bind=bind, mode=mode), tempfile.TemporaryDirectory() as tempdir:
+                with self.assertRaisesRegex(RuntimeError, "ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS"):
+                    await self._started_broker(
+                        Path(tempdir),
+                        ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS=bind,
+                        ISOLATED_TUNNEL_ACCESS_MODE=mode,
+                    )
+
+    async def test_b_fix_11_a_bare_loopback_bind_address_is_accepted(self) -> None:
+        for bind in ("localhost", "127.0.0.1", "127.0.0.2", "::1"):
+            with self.subTest(bind=bind), tempfile.TemporaryDirectory() as tempdir:
+                broker = await self._started_broker(Path(tempdir), ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS=bind)
+                self.assertTrue(broker.enabled)
+
+    async def test_b_fix_11_a_bare_public_bind_address_still_needs_unsafe_public(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            with self.assertRaisesRegex(RuntimeError, "non-local remote bind"):
+                await self._started_broker(Path(tempdir), ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS="0.0.0.0")
 
     async def test_concurrent_provisions_wait_out_the_startup_grace_together(self) -> None:
         """The lock was held across the grace-period sleep, so N provisions took N
