@@ -223,10 +223,13 @@ All notable changes to auto-browser are documented here.
   one and missed `data/memory`, `data/mesh` with the node identity key, `data/harness`, the proxy and cron stores),
   and ignores `.env.*` except `.env.example`.
 - The approval webhook target is now checked after DNS: the host is read as a browser reads it (`2130706433`, `0x7f.1`
-  and `127.1` are refused), resolved, and refused when any answer is a loopback, private, link-local, unspecified,
-  multicast or reserved address; the request is then sent to the addresses that were checked, in the resolver's order
-  and moving to the next only when one cannot be connected to, with the original name kept as the `Host` header and
-  the TLS server name, so a second lookup cannot return a different one. When a proxy from the environment applies to
+  and `127.1` are refused), resolved, and refused when any answer is not a global address (loopback, private,
+  link-local, unspecified, multicast, reserved and the shared `100.64.0.0/10` space among them); the request is then
+  sent to the addresses that were checked, in the resolver's order and moving to the next only when one cannot be
+  connected to, with the name kept as the `Host` header and the TLS server name, so a second lookup cannot return a
+  different one. A non-ASCII host (`bücher.example`) is looked up, sent as `Host` and named for TLS in its IDNA form
+  (`xn--bcher-kva.example`), as 1.15.0 did when it posted by name; a lookup that cannot encode the name counts as one
+  that did not resolve. When a proxy from the environment applies to
   the URL (`HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY`, less `NO_PROXY`), the answers are still checked, but the
   request goes by name through the proxy, which then owns resolution. Logs carry only `scheme://host`, never the path,
   query or credentials: httpx's own INFO line for each request, which named the whole URL, is no longer logged (the

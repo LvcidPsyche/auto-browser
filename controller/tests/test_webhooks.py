@@ -299,9 +299,17 @@ class WebhookWireTests(unittest.IsolatedAsyncioTestCase):
             if client is not None:
                 await client.aclose()
 
-    async def _dispatch(self, env: dict[str, str], replies: dict, *answers: str, **kwargs) -> _Wire:
+    async def _dispatch(
+        self,
+        env: dict[str, str],
+        replies: dict,
+        *answers: str,
+        url: str = "https://hooks.example.com:8443/approval?x=1",
+        resolver: AsyncMock | None = None,
+        **kwargs,
+    ) -> _Wire:
         wire = _Wire(replies)
-        self.resolver = AsyncMock(return_value=list(answers))
+        self.resolver = resolver or AsyncMock(return_value=list(answers))
         # Only the proxy variables go: OpenSSL on Windows cannot build a context in an empty environment.
         kept = {name: value for name, value in os.environ.items() if not name.lower().endswith("_proxy")}
         with (
@@ -310,10 +318,29 @@ class WebhookWireTests(unittest.IsolatedAsyncioTestCase):
             patch.object(webhooks, "_resolve_host", self.resolver),
             patch.object(webhooks.logger, "warning") as self.warnings,
         ):
-            await webhooks.dispatch_approval_event(
-                _approval(), webhook_url="https://hooks.example.com:8443/approval?x=1", **kwargs
-            )
+            await webhooks.dispatch_approval_event(_approval(), webhook_url=url, **kwargs)
         return wire
+
+    async def test_a_non_ascii_host_is_posted_to_under_its_idna_name(self) -> None:
+        # R-9: the netloc went into Host and the TLS name as written, and httpx raised UnicodeEncodeError for it.
+        wire = await self._dispatch({}, {_PUBLIC: [_OK]}, _PUBLIC, url="https://b\u00fccher.example/hook")
+
+        self.assertEqual(wire.connects, [(_PUBLIC, 443)])
+        self.assertEqual(wire.tls_names, ["xn--bcher-kva.example"])
+        self.assertEqual(wire.request_head()[1][b"host"], b"xn--bcher-kva.example")
+        self.assertEqual(self.resolver.await_args.args[0], "xn--bcher-kva.example")
+
+    async def test_a_non_ascii_host_is_looked_up_under_its_idna_name(self) -> None:
+        await self._dispatch({}, {_PUBLIC: [_OK]}, _PUBLIC, url="https://stra\u00dfe.de/hook")
+
+        self.assertEqual(self.resolver.await_args.args[0], "xn--strae-oqa.de")
+
+    async def test_a_lookup_that_raises_unicode_error_posts_nothing_and_does_not_raise(self) -> None:
+        resolver = AsyncMock(side_effect=UnicodeError("label too long"))
+        wire = await self._dispatch({}, {_PUBLIC: [_OK]}, url="https://hooks.example.com/hook", resolver=resolver)
+
+        self.assertEqual(wire.connects, [])
+        self.assertTrue(self.warnings.called)
 
     async def test_without_a_proxy_the_connection_goes_to_the_checked_address_with_the_name_for_tls(self) -> None:
         wire = await self._dispatch({}, {_PUBLIC: [_OK]}, _PUBLIC)

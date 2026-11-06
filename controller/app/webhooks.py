@@ -132,21 +132,23 @@ async def _checked_target(webhook_url: str, *, allow_private: bool) -> _Target |
     answer must be a global address; `allow_private` admits any answer but cloud metadata (169.254.0.0/16,
     100.100.100.200, fe80::/10, fd00:ec2::254, any of those spelled inside an IPv6 address, and the names metadata
     and metadata.google.internal, refused before any lookup). With no proxy the
-    request goes to the checked answers (pinned_urls), with the original name kept in the Host header and the TLS
-    server name, so a second lookup cannot return a different address; dispatch_approval_event decides that.
+    request goes to the checked answers (pinned_urls), with the name (its ASCII, IDNA form) kept in the Host header and
+    the TLS server name, so a second lookup cannot return a different address; dispatch_approval_event decides that.
     """
     label = _loggable(webhook_url)
     try:
         parsed = urlsplit(webhook_url)
         refuse_ambiguous_host(webhook_url, field_name="approval webhook URL")
         port = parsed.port
-    except ValueError:
+        # One ASCII (IDNA) name for the lookup, the Host header and the TLS name: httpx cannot encode a non-ASCII one.
+        ascii_host = httpx.URL(webhook_url).raw_host.decode("ascii").rstrip(".")
+    except (ValueError, httpx.InvalidURL):
         logger.warning("blocked disallowed approval webhook target: %s", label)
         return None
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or not ascii_host:
         logger.warning("blocked disallowed approval webhook target: %s", label)
         return None
-    host = parsed.hostname.rstrip(".")
+    host = ascii_host
     if _is_disallowed_webhook_name(host, allow_private=allow_private):
         logger.warning("blocked disallowed approval webhook target: %s", label)
         return None
@@ -159,7 +161,7 @@ async def _checked_target(webhook_url: str, *, allow_private: bool) -> _Target |
     else:
         try:
             addresses = await _resolve_host(host, port or (443 if parsed.scheme == "https" else 80))
-        except (OSError, asyncio.TimeoutError) as exc:
+        except (OSError, UnicodeError, asyncio.TimeoutError) as exc:
             logger.warning("approval webhook host did not resolve: %s (%s)", label, type(exc).__name__)
             return None
     if not addresses or any(
@@ -170,7 +172,8 @@ async def _checked_target(webhook_url: str, *, allow_private: bool) -> _Target |
     if literal is not None:
         return _Target(url=webhook_url)
 
-    userinfo, _, authority = parsed.netloc.rpartition("@")
+    userinfo, _, _ = parsed.netloc.rpartition("@")
+    authority = host + (f":{port}" if port is not None else "")
     pinned_urls = []
     for address in addresses:
         pinned_host = f"[{address}]" if ":" in address else address
