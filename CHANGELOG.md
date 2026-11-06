@@ -231,8 +231,9 @@ All notable changes to auto-browser are documented here.
   (one more is answered 503 and closed at once; each held a thread, with no limit), and on a Codex timeout kills
   Codex's whole process group, not only the direct child. Stopping the bridge (Ctrl+C or SIGTERM) kills the Codex
   runs still in flight the same way, skipping only a run the handler has already reaped (a Codex that exited while its
-  children hold its pipes is still signalled, so they are killed too); Codex runs in its own session, so it no
-  longer gets the terminal's Ctrl+C and used to run on, orphaned.
+  children hold its pipes is still signalled, so they are killed too). Codex now runs in its own session, so the
+  terminal's Ctrl+C no longer reaches it and the shutdown sweep kills it instead (in 1.15.0 a SIGTERM to the bridge
+  left it running, orphaned).
 - The Codex host bridge answers a request body that is not UTF-8 with 400 and a fixed message instead of a 500
   carrying the exception text, answers any other unexpected error with a fixed `internal error` and logs the detail on
   the bridge side, and no longer returns Codex's stderr to the controller on success (it logs it instead; the
