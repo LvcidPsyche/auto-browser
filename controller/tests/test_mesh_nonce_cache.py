@@ -236,9 +236,39 @@ class RestartReplayTests(unittest.TestCase):
             with patch.object(delegation.time, "time", return_value=5025):
                 with self.assertRaises(DelegationRejected):
                     asyncio.run(manager.receive_inbound(first))
-                # The cost: a fresh envelope stamped by the stepped-back clock is refused too, until it catches up.
+                # Judged against the high-water mark (5040), not the clock (5025): one stamped 5005 is 35 s old.
                 with self.assertRaises(DelegationRejected):
                     asyncio.run(manager.receive_inbound(mesh.envelope(5005)))
+
+            self.assertEqual(mesh.runs, 2)
+
+    def test_w2_11_a_step_back_within_the_window_costs_a_fresh_envelope_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mesh = _Mesh(Path(tmp))
+            manager = mesh.manager(timestamp_window=30)
+            manager._started_at = 4000
+            with patch.object(delegation.time, "time", return_value=5040):
+                self.assertEqual(asyncio.run(manager.receive_inbound(mesh.envelope(5040))).status, "ok")
+            # 15 s back: an envelope stamped by the stepped-back clock is 15 s behind the mark, inside the window.
+            with patch.object(delegation.time, "time", return_value=5025):
+                self.assertEqual(asyncio.run(manager.receive_inbound(mesh.envelope(5025))).status, "ok")
+
+            self.assertEqual(mesh.runs, 2)
+
+    def test_w2_11_a_step_back_past_the_window_refuses_fresh_envelopes_until_the_clock_catches_up(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mesh = _Mesh(Path(tmp))
+            manager = mesh.manager(timestamp_window=30)
+            manager._started_at = 4000
+            with patch.object(delegation.time, "time", return_value=5040):
+                self.assertEqual(asyncio.run(manager.receive_inbound(mesh.envelope(5040))).status, "ok")
+            # 40 s back, more than the window: one stamped by that clock is 40 s behind the mark, and refused.
+            with patch.object(delegation.time, "time", return_value=5000):
+                with self.assertRaisesRegex(DelegationRejected, "out of window"):
+                    asyncio.run(manager.receive_inbound(mesh.envelope(5000)))
+            # Once the clock is back within a window of the mark, a fresh envelope runs again.
+            with patch.object(delegation.time, "time", return_value=5015):
+                self.assertEqual(asyncio.run(manager.receive_inbound(mesh.envelope(5015))).status, "ok")
 
             self.assertEqual(mesh.runs, 2)
 
