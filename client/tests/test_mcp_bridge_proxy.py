@@ -122,6 +122,7 @@ def _reply_through_the_bridge(base_url: str, proxy: ThreadingHTTPServer) -> dict
 
 
 UNREACHABLE = "No Auto Browser controller reachable"
+INVALID = "is not a valid Auto Browser controller URL"
 
 
 @pytest.fixture
@@ -271,6 +272,25 @@ def test_w12_2_an_unbracketed_ipv6_loopback_without_a_port_never_goes_through_th
 
     assert UNREACHABLE in message
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("authority", ["%5b127.0.0.1%5d:{port}", "x%5b@127.0.0.1:{port}", "controller.invalid:abc"])
+def test_w12_3_a_malformed_authority_is_refused_as_an_invalid_controller_url(recording_proxy, authority: str) -> None:
+    # One reading's parse error (urlsplit's ValueError for the first two, http.client's InvalidURL for the port)
+    # was reported as an unexpected bridge failure; it is a configuration error, and nothing is sent anywhere.
+    controller = _serve()
+    try:
+        base_url = f"http://{authority.format(port=controller.server_port)}/mcp"
+        message = _bridge_error_through_the_bridge(base_url, recording_proxy)
+    finally:
+        controller.shutdown()
+        controller.server_close()
+
+    assert INVALID in message
+    assert base_url in message
+    assert "Unexpected stdio bridge failure" not in message
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+    assert controller.seen == []  # type: ignore[attr-defined]
 
 
 def test_w11_1_a_non_numeric_port_is_refused_before_any_proxy_is_used(recording_proxy) -> None:

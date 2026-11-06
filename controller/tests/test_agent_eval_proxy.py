@@ -198,6 +198,18 @@ class AgentEvalProxyTests(unittest.TestCase):
                 self.assertIn("urllib.error.URLError", result.stderr)
                 self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
 
+    def test_w12_3_a_malformed_authority_is_refused_as_an_invalid_url(self) -> None:
+        # One reading's parse error (urlsplit's ValueError for the first two) is raised as http.client's InvalidURL,
+        # as a non-numeric port already was, before any opener is chosen.
+        port = self.controller.server_port
+        for authority in (f"%5b127.0.0.1%5d:{port}", f"x%5b@127.0.0.1:{port}", "controller.invalid:abc"):
+            with self.subTest(authority=authority):
+                result = self._post_raw(f"http://{authority}")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("http.client.InvalidURL", result.stderr)
+                self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
+                self.assertEqual(self.controller.seen, [])  # type: ignore[attr-defined]
+
     def test_w11_1_a_non_numeric_port_is_refused_before_any_proxy_is_used(self) -> None:
         result = self._post_raw("http://controller.invalid:abc")
 

@@ -16,7 +16,7 @@ import os
 import socket
 import sys
 from dataclasses import dataclass
-from http.client import HTTPConnection
+from http.client import HTTPConnection, InvalidURL
 from typing import Any, TextIO
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -101,18 +101,23 @@ def _goes_direct(request: Request) -> bool:
     decoded ``request.host`` as a whole (W12-2), so an unbracketed ::1 or :: without a port, which http.client reads
     as host ":" and urlsplit as no host, is local (a host:port form is no address and is left to the others). Going
     direct only ever sends the request to the host named or fails; a host remote all four ways still uses the proxy.
-    Constructing the HTTPConnection parses and does not connect; its InvalidURL (a non-numeric port) propagates, so
-    a malformed authority is refused before any opener is chosen. A host-less request (``request.host`` None) is
-    not direct and falls through to urllib's own error, raised before any proxy is used (W10-14).
+    Constructing the HTTPConnection parses and does not connect; its InvalidURL (a non-numeric port) propagates,
+    and a reading urlsplit cannot parse (%5b127.0.0.1%5d, x%5b@127.0.0.1) raises InvalidURL from its ValueError
+    (W12-3), so a malformed authority is refused before any opener is chosen and the request is sent nowhere. A
+    host-less request (``request.host`` None) is not direct and falls through to urllib's own error, raised before
+    any proxy is used (W10-14).
     """
     if request.host is None:
         return False
-    readings = (
-        HTTPConnection(request.host).host,
-        urlsplit("//" + request.host).hostname,
-        urlsplit(request.full_url).hostname,
-        request.host,
-    )
+    try:
+        readings = (
+            HTTPConnection(request.host).host,
+            urlsplit("//" + request.host).hostname,
+            urlsplit(request.full_url).hostname,
+            request.host,
+        )
+    except ValueError as exc:
+        raise InvalidURL(str(exc)) from exc
     return any(_is_loopback_host(host) for host in readings)
 
 
@@ -309,6 +314,14 @@ class StdioMcpBridge:
                 f"No Auto Browser controller reachable at {self.client.base_url} — "
                 "start one with 'docker compose up -d' in the auto-browser repo, or pass "
                 f"--base-url/AUTO_BROWSER_BASE_URL for a remote deployment. (underlying: {exc.reason})",
+            )
+        except InvalidURL as exc:
+            # A configuration error, not a bridge failure: nothing was sent anywhere (W12-3).
+            return self._jsonrpc_error(
+                request_id,
+                -32000,
+                f"{self.client.base_url} is not a valid Auto Browser controller URL — fix "
+                f"--base-url/AUTO_BROWSER_BASE_URL. (underlying: {exc})",
             )
         except Exception as exc:  # pragma: no cover - defensive bridge guard
             print(f"stdio bridge unexpected error: {exc}", file=self.stderr)

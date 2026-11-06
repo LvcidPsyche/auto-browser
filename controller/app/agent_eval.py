@@ -360,10 +360,11 @@ class ControllerEvalClient:
         # proxy the environment names. The bridge's rule decides, not auth_policy.is_loopback_host, whose meaning
         # feeds auth decisions (W8-3). Redirects are refused on both branches, as the bridge refuses them (W9-6):
         # urllib's default handler copied the Authorization header onto a redirect to any origin. The bridges'
-        # _goes_direct decides (W11-1): direct when any of three readings of the host is loopback (the host
-        # http.client connects to, so an unbracketed ::1:8000 is ::1; urllib's percent-decoded host, W10-4; and the
-        # URL as written, which a proxy reads). Its InvalidURL (a non-numeric port) propagates before any opener is
-        # chosen; a host-less request (None) falls through to urllib's own error.
+        # _goes_direct decides (W11-1): direct when any of four readings of the host is loopback (the host
+        # http.client connects to, so an unbracketed ::1:8000 is ::1; urllib's percent-decoded host, W10-4; the URL
+        # as written, which a proxy reads; and that decoded host as a whole, W12-2). Its InvalidURL (a non-numeric
+        # port, or a host a reading cannot parse, W12-3) propagates before any opener is chosen; a host-less request
+        # (None) falls through to urllib's own error.
         if _goes_direct(request):
             urlopen = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects).open
         else:
