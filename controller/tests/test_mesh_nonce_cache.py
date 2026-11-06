@@ -14,9 +14,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.mesh import delegation
-from app.mesh.delegation import DelegationManager, DelegationRejected, DelegationReplayError, _NonceCache
+from app.mesh.delegation import (
+    DelegationError,
+    DelegationManager,
+    DelegationRejected,
+    DelegationReplayError,
+    _NonceCache,
+)
 from app.mesh.identity import NodeIdentity
-from app.mesh.models import CapabilityGrant, PeerRecord, SignedEnvelope
+from app.mesh.models import CapabilityGrant, DelegationRequest, DelegationResponse, PeerRecord, SignedEnvelope
 from app.mesh.peers import PeerRegistryFile
 from app.mesh.transport import _canonical_bytes, make_envelope
 
@@ -121,6 +127,52 @@ class _Mesh:
 
     def envelope(self, timestamp: float) -> SignedEnvelope:
         return _signed(self.legit, self.payload, recipient=self.server.node_id, timestamp=timestamp)
+
+
+class ReplyReplayTests(unittest.TestCase):
+    """delegate() checks a peer's reply against the same clock and nonce cache as an inbound envelope (W2-2, W2-4)."""
+
+    def _delegate(self, mesh: _Mesh, manager: DelegationManager, request: DelegationRequest, reply: SignedEnvelope):
+        async def send(*, peer, envelope):
+            return reply
+
+        with patch.object(delegation, "send_envelope", send):
+            return asyncio.run(manager.delegate(mesh.legit.node_id, request))
+
+    def _reply(self, mesh: _Mesh, request_id: str, timestamp: float) -> SignedEnvelope:
+        payload = DelegationResponse(request_id=request_id, status="ok").model_dump(mode="json")
+        return _signed(mesh.legit, payload, recipient=mesh.server.node_id, timestamp=timestamp)
+
+    def test_w2_2_a_reply_replayed_after_its_nonce_was_evicted_and_the_clock_stepped_back_is_refused(self) -> None:
+        # The reply path read the raw clock while the nonce cache expires by its high-water mark: reply A accepted
+        # at 5000, reply X at 5040 evicts A's nonce, the clock steps back to 5025, and A (raw age 25 s) was
+        # accepted again.
+        with tempfile.TemporaryDirectory() as tmp:
+            mesh = _Mesh(Path(tmp))
+            manager = mesh.manager(timestamp_window=30)
+            first, second = DelegationRequest(capability="tool:browser.observe"), DelegationRequest(capability="x")
+            reply_a = self._reply(mesh, first.request_id, 5000)
+            with patch.object(delegation.time, "time", return_value=5000):
+                self.assertEqual(self._delegate(mesh, manager, first, reply_a).status, "ok")
+            with patch.object(delegation.time, "time", return_value=5040):
+                self._delegate(mesh, manager, second, self._reply(mesh, second.request_id, 5040))
+            with patch.object(delegation.time, "time", return_value=5025):
+                # The same request id, so only the clock can refuse the replay.
+                retry = DelegationRequest(request_id=first.request_id, capability="tool:browser.observe")
+                with self.assertRaisesRegex(DelegationError, "reply timestamp out of window"):
+                    self._delegate(mesh, manager, retry, reply_a)
+
+    def test_w2_4_a_reply_for_another_request_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mesh = _Mesh(Path(tmp))
+            manager = mesh.manager(timestamp_window=30)
+            request = DelegationRequest(capability="tool:browser.observe")
+            stale = self._reply(mesh, "another-request-id", 5000)
+            with patch.object(delegation.time, "time", return_value=5000):
+                with self.assertRaisesRegex(DelegationRejected, "request id"):
+                    self._delegate(mesh, manager, request, stale)
+                matching = self._reply(mesh, request.request_id, 5001)
+                self.assertEqual(self._delegate(mesh, manager, request, matching).request_id, request.request_id)
 
 
 class RestartReplayTests(unittest.TestCase):

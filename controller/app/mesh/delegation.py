@@ -201,8 +201,10 @@ class DelegationManager:
             raise DelegationError(f"reply envelope verification failed: {exc}") from exc
 
         # Reply timestamp window — symmetric with inbound, closes a MITM replay vector
-        # where a captured reply could be re-served long after the original.
-        reply_now = time.time()
+        # where a captured reply could be re-served long after the original. Against the clock the nonces expire by,
+        # as the inbound check is (W2-2): read raw, a clock stepped back put a reply whose nonce had expired inside
+        # the window again, and it was accepted twice.
+        reply_now = max(time.time(), self._nonce_cache.high_water)
         reply_age = reply_now - reply_envelope.timestamp
         # "not <=", not ">": a NaN timestamp compares false both ways and would pass ">".
         if not abs(reply_age) <= self._timestamp_window:
@@ -216,7 +218,11 @@ class DelegationManager:
         ):
             raise DelegationReplayError(f"reply nonce replay from peer={peer_node_id}")
 
-        return DelegationResponse.model_validate(reply_payload)
+        response = DelegationResponse.model_validate(reply_payload)
+        # A reply to another request (a stale one replayed, W2-4) is not this request's answer.
+        if response.request_id != request.request_id:
+            raise DelegationRejected(f"reply request id does not match the request's from peer={peer_node_id}")
+        return response
 
     # ------------------------------------------------------------------
     # Inbound
