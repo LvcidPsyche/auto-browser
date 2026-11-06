@@ -211,12 +211,13 @@ def test_w9_5_a_loopback_address_written_another_way_never_goes_through_the_envi
 
 
 @pytest.mark.parametrize("base_url", ["localhost:8000/mcp", "http:/127.0.0.1:9/mcp"])
-def test_w10_14_a_host_less_base_url_reports_no_controller_reachable(recording_proxy, base_url: str) -> None:
+def test_w10_14_a_host_less_base_url_is_refused_as_an_invalid_controller_url(recording_proxy, base_url: str) -> None:
     # urllib leaves request.host None for these (localhost: reads as a scheme), and the rule's "//" + None raised a
-    # TypeError the bridge reported as an unexpected failure; urllib refuses them itself before any proxy is used.
+    # TypeError the bridge reported as an unexpected failure. They were then left to urllib's own error, answered
+    # as no controller reachable; W15-3 refuses them as invalid before any opener is chosen.
     message = _bridge_error_through_the_bridge(base_url, recording_proxy)
 
-    assert UNREACHABLE in message
+    assert INVALID in message
     assert "Unexpected stdio bridge failure" not in message
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
 
@@ -407,9 +408,9 @@ def request_line_echo():
         listener.close()
 
 
-# Of test_w13_1's base URLs, those answered with urllib's URLError, the answer that no controller is reachable; each
-# other one is an invalid controller URL.
-_ANSWERED_AS_UNREACHABLE = ("http://127.0.0.1:{port}/mcp?key=sentinel", "alice:sentinel@controller.invalid/mcp")
+# Of test_w13_1's base URLs, the one answered with urllib's URLError, the answer that no controller is reachable;
+# each other one is an invalid controller URL (alice:sentinel@... too since W15-3: its scheme reads as "alice").
+_ANSWERED_AS_UNREACHABLE = ("http://127.0.0.1:{port}/mcp?key=sentinel",)
 
 
 @pytest.mark.parametrize(
@@ -479,6 +480,39 @@ def test_w14_1_a_url_the_bridge_cannot_read_is_refused_in_its_own_words(recordin
     assert "Unexpected stdio bridge failure" not in message
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
     assert controller.seen == []  # type: ignore[attr-defined]
+
+
+_A_RESULT = '{"jsonrpc":"2.0","id":1,"result":{"from":"sentinel"}}'
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        # urllib reads a scheme-less userinfo's user name as the scheme, and the answer quoted it.
+        "sentinel:x@controller.invalid/mcp",
+        # Codex Q02: answered as no controller reachable "at alice:sentinel controller.invalid/mcp".
+        "alice:sentinel tail@controller.invalid/mcp?next=//here",
+        "localhost:8000/mcp",
+        "http:///mcp",
+        # urllib's default handlers answered these from the URL or the local file, as if a controller had.
+        "data:application/json," + _A_RESULT,
+        "FILE_URI",
+    ],
+)
+def test_w15_3_a_base_url_that_is_not_http_or_https_with_a_host_is_refused(
+    recording_proxy, tmp_path: Path, base_url: str
+) -> None:
+    result_file = tmp_path / "result.json"
+    result_file.write_text(_A_RESULT, encoding="utf-8")
+
+    reply = _reply_through_the_bridge(base_url.replace("FILE_URI", result_file.as_uri()), recording_proxy)
+
+    assert "result" not in reply, reply
+    assert INVALID in reply["error"]["message"]
+    assert "it is not an http:// or https:// URL with a host" in reply["error"]["message"]
+    assert "sentinel" not in json.dumps(reply)
+    assert "alice" not in json.dumps(reply)
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
 
 
 def test_w14_1_a_proxys_error_detail_never_shows_the_urls_query(recording_proxy) -> None:

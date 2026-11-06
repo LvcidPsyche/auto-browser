@@ -299,6 +299,12 @@ class HttpMcpClient:
             raise InvalidControllerURL(
                 "urllib cannot read it as an http:// or https:// URL (no scheme, or an unbalanced bracket)"
             ) from exc
+        # Before any opener is chosen, so nothing is sent (W15-3). urllib reads a scheme-less userinfo's user name as
+        # the scheme (sentinel:x@host/mcp), answers a data: or file: URL from the URL or the local file as if a
+        # controller had, and leaves a URL without a host to fail later. Its type is lowercased; its host is "" for
+        # http:///mcp and None for http:mcp.
+        if request.type not in ("http", "https") or not request.host:
+            raise InvalidControllerURL("it is not an http:// or https:// URL with a host")
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 raw = response.read()
