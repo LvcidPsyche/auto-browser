@@ -284,10 +284,12 @@ the exception (below).
 
 The controller joins each session network at gateway priority -1, so its own compose network keeps its default
 gateway and its published API port. That needs Docker Engine 28 or later (API 1.48). On an older engine Docker picks
-the gateway by network name, lowest first, so a session network whose name sorts before the compose network takes it
-and the request creating the session can be cut: the controller logs a warning when that would happen. Upgrade the
-engine, or set `ISOLATED_BROWSER_CONTAINER_PREFIX` to a prefix that sorts after the compose network's name (the
-default `browser-session` sorts after `auto-browser_default`).
+the gateway by network name, lowest first, and weighs a network's other properties too, so a session network can
+take it (and the published port with it) and the request creating the session can be cut. On such an engine the
+controller logs one warning, starting "GwPriority is not honoured", at the first isolated provision, whatever the
+names; when the session network's name sorts before the compose network's, it also names that order problem. Upgrade
+the engine; setting `ISOLATED_BROWSER_CONTAINER_PREFIX` to a prefix that sorts after the compose network's name (the
+default `browser-session` sorts after `auto-browser_default`) avoids only the name-order case.
 
 - **Upgrading:** isolated browsers no longer reach compose-network services. A proxy
   sidecar named in `DEFAULT_PROXY_SERVER` or a proxy persona must be reachable some
