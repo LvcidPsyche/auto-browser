@@ -122,6 +122,85 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(record.live)
         self.assertEqual(self.leftovers(), [])
 
+    async def _cancel_while_rollback_waits_in(self, step: str) -> tuple[AsyncMock, int]:
+        # W7-2: a failed create's rollback with an isolated runtime and a tunnel; the caller is cancelled while the
+        # rollback waits in ``step`` (a cancelled MCP tool call, say). Returns the runtime release and how many
+        # CancelledErrors the caller saw.
+        import asyncio
+
+        from app.session_isolation import IsolatedBrowserRuntime
+
+        runtime = IsolatedBrowserRuntime(
+            session_id=SESSION_ID,
+            container_id="c0",
+            container_name="browser-node-x",
+            network_name="net",
+            browser_node_name="browser-node-x",
+            profile_dir=self.root / "profile",
+            downloads_dir=self.root / "downloads",
+            ws_endpoint_file=self.root / "ws",
+            ws_endpoint="ws://127.0.0.1:1/",
+            takeover_url="http://127.0.0.1:6080/",
+            novnc_port=None,
+        )
+        browser = self.manager.browser
+        browser.close = AsyncMock()  # type: ignore[attr-defined]
+        self.manager._acquire_session_browser = AsyncMock(return_value=(browser, runtime))  # type: ignore[method-assign]
+        release_runtime = AsyncMock()
+        self.manager.runtime_provisioner.release = release_runtime  # type: ignore[method-assign]
+
+        async def provision(session) -> None:
+            session.tunnel = object()
+
+        self.manager._maybe_provision_session_tunnel = AsyncMock(side_effect=provision)  # type: ignore[method-assign]
+        self.manager.tunnel_broker.release = AsyncMock()  # type: ignore[method-assign]
+        self.manager.witness_bridge.record_session_receipt = AsyncMock(side_effect=RuntimeError("witness down"))  # type: ignore[method-assign]
+        reached, go_on = asyncio.Event(), asyncio.Event()
+
+        async def gated(*_args, **_kwargs) -> None:
+            reached.set()
+            await go_on.wait()
+
+        if step == "context close":
+            real_new_context = browser.new_context.side_effect
+
+            def new_context(**kwargs):
+                context = real_new_context(**kwargs)
+                context.close = AsyncMock(side_effect=gated)
+                return context
+
+            browser.new_context = AsyncMock(side_effect=new_context)
+        else:
+            self.manager.tunnel_broker.release = AsyncMock(side_effect=gated)  # type: ignore[method-assign]
+
+        task = asyncio.create_task(self.manager.create_session())
+        await asyncio.wait_for(reached.wait(), 10)
+        self.assertEqual((await self.manager.session_store.get(SESSION_ID)).status, "active")
+        task.cancel()
+        await asyncio.sleep(0.05)
+        go_on.set()
+        cancels = 0
+        try:
+            await asyncio.wait_for(asyncio.shield(task), 10)
+        except asyncio.CancelledError:
+            cancels += 1
+        self.assertTrue(task.done())
+        return release_runtime, cancels
+
+    async def _assert_rolled_back(self, release_runtime: AsyncMock, cancels: int) -> None:
+        self.assertEqual(cancels, 1)
+        release_runtime.assert_awaited_once()
+        self.assertEqual(self.leftovers(), [])
+        record = await self.manager.session_store.get(SESSION_ID)
+        self.assertEqual(record.status, "closed")
+        self.assertEqual(record.close_reason, "create_failed")
+
+    async def test_w7_2_a_cancel_during_the_context_close_still_finishes_the_rollback(self) -> None:
+        await self._assert_rolled_back(*await self._cancel_while_rollback_waits_in("context close"))
+
+    async def test_w7_2_a_cancel_during_the_tunnel_release_still_finishes_the_rollback(self) -> None:
+        await self._assert_rolled_back(*await self._cancel_while_rollback_waits_in("tunnel release"))
+
     async def test_a_successful_create_keeps_its_directories(self) -> None:
         await self.manager.create_session()
 

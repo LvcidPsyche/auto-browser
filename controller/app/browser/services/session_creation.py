@@ -361,6 +361,30 @@ class SessionCreation:
         runtime: "IsolatedBrowserRuntime | None",
         created_hook_started: bool = False,
     ) -> None:
+        """Roll back a create that failed: every step runs to its end even when the caller is cancelled during
+        one (a cancelled MCP tool call, W7-2), and the cancel is raised once the rollback is done. A cancel at any
+        step left the isolated runtime running, the directories in place and the record reading active."""
+        await self._run_to_completion(
+            self._cleanup_failed_steps(
+                session_id,
+                session=session,
+                context=context,
+                browser=browser,
+                runtime=runtime,
+                created_hook_started=created_hook_started,
+            )
+        )
+
+    async def _cleanup_failed_steps(
+        self,
+        session_id: str,
+        *,
+        session: "BrowserSession | None",
+        context: "BrowserContext | None",
+        browser: "Browser | None",
+        runtime: "IsolatedBrowserRuntime | None",
+        created_hook_started: bool,
+    ) -> None:
         self.manager.sessions.pop(session_id, None)
         if session is not None:
             # Registered with the window-birth watcher before the failure (watch runs early): a dead session
@@ -407,12 +431,9 @@ class SessionCreation:
     async def _forget_failed_session_state(self, session: "BrowserSession | None", session_id: str) -> None:
         """Remove the directories a failed create made, and close the record it persisted, if it got that far.
 
-        Run to completion despite a cancel (a shutdown during the rollback, W5-6), which is raised once it is done:
-        each await below is a point where a cancel stopped it before the record read closed.
+        Part of cleanup_failed's protected unit (W5-6, W7-2): each await below was a point where a cancel stopped
+        the rollback before the record read closed.
         """
-        await self._run_to_completion(self._forget_failed_session_state_steps(session, session_id))
-
-    async def _forget_failed_session_state_steps(self, session: "BrowserSession | None", session_id: str) -> None:
         # In a worker thread: rmtree of a large profile or artifact tree would stall every request on the loop.
         await asyncio.to_thread(self.remove_session_dirs, session_id)
         if session is None:

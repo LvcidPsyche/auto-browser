@@ -138,8 +138,10 @@ All notable changes to auto-browser are documented here.
 - A `create_session` that fails no longer leaves its artifact, auth and upload directories behind or an `active`
   record in the session store: the directories are made only after every check that can refuse the request, removed
   again by the rollback (in a worker thread, so a large tree does not stall other requests), and a record the create
-  had already written is marked `closed` (reason `create_failed`). That step runs to completion when the caller is
-  cancelled during it (a shutdown, say), then the cancel is raised.
+  had already written is marked `closed` (reason `create_failed`). The whole rollback (the tunnel and isolated runtime
+  releases, the context and browser closes, the directories and the record) runs to completion when the caller is
+  cancelled during it (a cancelled MCP tool call, say), then the cancel is raised. When the controller itself stops,
+  every task left is cancelled, the rollback's own included, and the next start marks such a record `interrupted`.
 - A shadow browse that fails or is cancelled after its Chromium started no longer leaves that browser running, the
   shadow's artifact, auth and upload directories on disk, or an `active` record in the session store (a record
   already written is marked `closed` with reason `create_failed`, as a failed `create_session`'s is): the rollback
