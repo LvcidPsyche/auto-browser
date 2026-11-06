@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -365,18 +366,22 @@ class HarnessRunStore:
             return 0
         cutoff = time.time() - max_age_days * 86400
         removed = 0
-        candidates: list[tuple[Path, str]] = []
-        for root, marker in ((self.runs_root, "run.json"), (self.staging_root, "candidate.json")):
+        candidates: list[tuple[Path, str, bool]] = []
+        for root, marker, staged in (
+            (self.runs_root, "run.json", False),
+            (self.staging_root, "candidate.json", True),
+        ):
             try:
-                candidates += [(path, marker) for path in root.iterdir()]
+                candidates += [(path, marker, staged) for path in root.iterdir()]
             except OSError as exc:
                 logger.warning("harness prune could not list %s: %s", root, exc)
-        for directory, marker in candidates:
+        for directory, marker, staged in candidates:
             if not directory.is_dir() or directory.name in self._active:
                 continue
             try:
-                # The age check and the removal are one step against staging's rename into place.
-                with self.staging_lock:
+                # A staged entry's age check and removal are one step against staging's rename into place; staging
+                # never replaces a run directory, so removing one does not hold staging up.
+                with self.staging_lock if staged else contextlib.nullcontext():
                     marker_path = directory / marker
                     newest = max(
                         directory.stat().st_mtime, marker_path.stat().st_mtime if marker_path.exists() else 0.0

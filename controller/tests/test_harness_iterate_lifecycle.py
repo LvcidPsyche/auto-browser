@@ -378,6 +378,41 @@ class RetentionTests(_Base):
         self.assertFalse(restage.is_alive())
         self.assertEqual((target / "candidate.json").read_text(encoding="utf-8"), '{"fresh": true}')
 
+    async def test_w6_3_a_run_directory_is_removed_without_the_staging_lock(self) -> None:
+        # Staging only replaces staged candidates, so a stage that met the prune of a large run directory waited for
+        # its rmtree for nothing.
+        from app.harness import iterate
+
+        service = HarnessService(self.root)
+        record = await self._run(service)
+        run_dir = service.store.run_dir(record.id)
+        _age(run_dir / "run.json", 40)
+        _age(run_dir, 40)
+        build = service.store.staging_root / ".tmp-other"
+        build.mkdir()
+        target = service.store.staging_root / "other-skill"
+        real_rmtree = shutil.rmtree
+        seen: list[tuple[bool, bool]] = []
+
+        def gated_rmtree(path, *args, **kwargs):
+            if Path(path) == run_dir:
+                stage = threading.Thread(target=service.inducer.place, args=(build, target))
+                stage.start()
+                stage.join(5)  # returns at once unless prune holds the staging lock
+                seen.append((service.store.staging_lock.locked(), stage.is_alive()))
+                if stage.is_alive():
+                    service.store.staging_lock.release()  # let the stage finish, so the test ends
+                    stage.join(10)
+                    service.store.staging_lock.acquire()
+            return real_rmtree(path, *args, **kwargs)
+
+        with patch.object(iterate.shutil, "rmtree", gated_rmtree):
+            service.store.prune(30)
+
+        self.assertEqual(seen, [(False, False)])
+        self.assertFalse(run_dir.exists())
+        self.assertTrue(target.is_dir())
+
     async def test_w4_11_staging_replaces_a_candidate_under_the_stores_staging_lock(self) -> None:
         from app.harness import induce
 
