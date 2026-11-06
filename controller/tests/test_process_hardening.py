@@ -175,6 +175,29 @@ class LifespanHardeningTests(unittest.IsolatedAsyncioTestCase):
                     pass
         self.assertEqual(order, ["dumpable", "credential"])
 
+    @unittest.skipUnless(_BRIDGE.is_file(), "scripts/ is not shipped in the controller image")
+    def test_the_bridge_main_makes_itself_non_dumpable_before_anything_else(self) -> None:
+        from .test_codex_host_bridge_hardening import bridge
+
+        order: list[str] = []
+
+        class _Stop(Exception):
+            pass
+
+        def parse_args():
+            order.append("parse_args")
+            raise _Stop
+
+        with (
+            patch.object(bridge, "make_non_dumpable", side_effect=lambda: order.append("dumpable")),
+            patch.object(bridge, "parse_args", side_effect=parse_args),
+            patch.object(bridge, "prepare_socket_path", side_effect=lambda _path: order.append("socket")),
+            patch.object(bridge.os, "umask", side_effect=lambda _mask: order.append("umask")),
+        ):
+            with self.assertRaises(_Stop):
+                bridge.main()
+        self.assertEqual(order, ["dumpable", "parse_args"])
+
 
 def _transport_module():
     import playwright._impl._transport as transport
