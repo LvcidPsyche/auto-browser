@@ -124,7 +124,9 @@ class SessionCreation:
         gate = None
         gate_context_id: str | None = None
         created_hook_started = False
-        # No await since check_limit, so nothing slipped in between.
+        # Checked again: the reads above await, and another create may have reserved a slot meanwhile. Nothing awaits
+        # between this check and the reservation.
+        self.manager._check_session_limit()
         self._creating += 1
         reserved = True
         try:

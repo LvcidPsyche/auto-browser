@@ -72,6 +72,9 @@ All notable changes to auto-browser are documented here.
 
 ### Fixed
 
+- Two session creates that both passed the `MAX_SESSIONS` check while one was still reading its storage state or
+  memory profile no longer both start: the limit is checked again right before a create reserves its slot, with no
+  await in between.
 - `POST /crons/{job_id}/trigger` answers a run whose session meets the session cap with 409 and an unreadable
   encrypted auth state with 422, as `POST /sessions` does; both were a bare 500 there. The 422 carries the same
   detail; the 409's is a fixed text that names no session, since `POST /sessions`'s names the job owner's live
