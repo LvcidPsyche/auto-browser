@@ -432,6 +432,10 @@ def _check_the_mode_was_kept(path: Path, name: str) -> str:
             mode,
         )
         return f"mode {mode:o}, not 0600"
+    if mode != PRIVATE_FILE_MODE:
+        # Another owner-only mode (0400, 0700): named as found (W10-8), with no warning, since nothing beyond the
+        # owner can read it.
+        return f"mode {mode:o}"
     return "mode 0600"
 
 

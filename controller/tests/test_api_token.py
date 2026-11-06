@@ -473,6 +473,43 @@ def test_w7_4_a_generated_token_file_whose_filesystem_kept_no_mode_is_warned_abo
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX modes: Windows applies the folder's ACL")
 @pytest.mark.parametrize("which", ["API_TOKEN_FILE", "TAKEOVER_TOKEN_FILE"])
+def test_w10_8_a_generated_token_file_with_another_owner_only_mode_is_named_as_found(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, which: str
+):
+    # The generation line said "mode 0600" for any mode without group or other bits (0400, 0700, 0000).
+    from app.api_token import ensure_takeover_token
+
+    api_path, takeover_path = tmp_path / "api-token", tmp_path / "takeover-token"
+    settings = make_settings(api_path, TAKEOVER_TOKEN_FILE=str(takeover_path))
+    other, value = (
+        (takeover_path, "w10-8-marker-" + "m" * 32) if which == "API_TOKEN_FILE" else (api_path, STRONG_TOKEN)
+    )
+    other.write_text(value + "\n", encoding="utf-8")
+    other.chmod(0o600)
+    real_write = api_token.atomic_write_text
+
+    def write_owner_read_only(target, text, **kwargs):
+        real_write(target, text, **kwargs)
+        os.chmod(target, 0o400)
+
+    with (
+        patch.object(api_token, "atomic_write_text", write_owner_read_only),
+        caplog.at_level(logging.INFO, logger=LOGGER),
+    ):
+        ensure_api_credential(settings)
+        ensure_takeover_token(settings)
+
+    generated = [record.getMessage() for record in caplog.records if "enerated a" in record.getMessage()]
+    assert len(generated) == 1, caplog.text
+    assert "mode 0600" not in generated[0] and "mode 400" in generated[0]
+    # Nothing beyond the owner can read it, so nothing is warned about.
+    assert "did not keep" not in caplog.text
+    assert settings.api_bearer_token
+    assert settings.takeover_token
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes: Windows applies the folder's ACL")
+@pytest.mark.parametrize("which", ["API_TOKEN_FILE", "TAKEOVER_TOKEN_FILE"])
 def test_w9_8_a_mode_check_that_cannot_stat_the_generated_file_warns_and_the_token_is_used(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, which: str
 ):
