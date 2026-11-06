@@ -325,18 +325,120 @@ class BrowserManagerConfinesTheDriverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(order, ["confine", "start"])
 
 
-def _spawn_calls(tree: ast.AST):
+_SPAWN_APIS = {
+    "subprocess": {"run", "call", "check_call", "check_output", "Popen", "getoutput", "getstatusoutput"},
+    "os": {
+        "system", "popen", "fork", "posix_spawn", "posix_spawnp",
+        "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe",
+        "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe",
+    },
+    "asyncio": {"create_subprocess_exec", "create_subprocess_shell"},
+}  # fmt: skip
+# Matched on any owner: an event loop's methods, and asyncio's and subprocess's names however they were reached.
+_SPAWN_METHODS = {"subprocess_exec", "subprocess_shell", "create_subprocess_exec", "create_subprocess_shell", "Popen"}
+# os.exec* replaces the process and os.fork copies it: neither starts a child with an environment of its own, so
+# they are allowed only where that is the point. drop_caps.py execs the container entrypoint's own command after
+# dropping capabilities; run_as.py forks a child that becomes the data user to write its marker, then _exits.
+_EXEC_ALLOWED = {"drop_caps.py", "run_as.py"}
+# The forms that can take no environment at all (a shell command line, or a copy of this process).
+_NO_ENV_FORM = {"system", "popen", "getoutput", "getstatusoutput", "fork"}
+
+
+def _passes_env(call: ast.Call, api: str) -> bool:
+    if any(keyword.arg == "env" for keyword in call.keywords):
+        return True
+    if api.startswith(("exec", "spawn")) and api.endswith("e"):  # execve, spawnle...: the environment is the last
+        return bool(call.args)
+    return api.startswith("posix_spawn") and len(call.args) >= 3  # posix_spawn(path, argv, env)
+
+
+def _unconfined_spawns(tree: ast.AST, filename: str) -> tuple[int, list[int]]:
+    """How many places in `tree` reach an API that starts a process, and the lines of those that pass no env=.
+
+    Aliases count (`import subprocess as sp`, `from subprocess import run as r`), and so does a reference that is not
+    called on the spot (`start = subprocess.call`): it is flagged, since what it is called with is not known here.
+    """
+    modules = {name: name for name in _SPAWN_APIS}  # a bound name -> the module it is
+    imported: dict[str, tuple[str, str]] = {}  # a bound name -> (module, API)
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in _SPAWN_APIS:
+                    modules[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module in _SPAWN_APIS:
+            for alias in node.names:
+                if alias.name in _SPAWN_APIS[node.module]:
+                    imported[alias.asname or alias.name] = (node.module, alias.name)
+
+    def api_of(node: ast.AST) -> tuple[str, str] | None:
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            return imported.get(node.id)
+        if isinstance(node, ast.Attribute):
+            owner = modules.get(node.value.id) if isinstance(node.value, ast.Name) else None
+            if owner and node.attr in _SPAWN_APIS[owner]:
+                return owner, node.attr
+            if node.attr in _SPAWN_METHODS:
+                return "", node.attr
+        return None
+
+    called = {id(node.func): node for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    found = 0
+    flagged: list[int] = []
+    for node in ast.walk(tree):
+        api = api_of(node)
+        if api is None:
             continue
-        func = node.func
-        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-        if name in {"create_subprocess_exec", "create_subprocess_shell", "Popen", "run", "check_output", "call"}:
-            owner = func.value if isinstance(func, ast.Attribute) else None
-            owner_name = getattr(owner, "id", "") or getattr(owner, "attr", "")
-            if name in {"run", "check_output", "call"} and owner_name != "subprocess":
-                continue
-            yield node
+        found += 1
+        module, name = api
+        if (module == "os" and name.startswith("exec")) or name == "fork":
+            if filename not in _EXEC_ALLOWED:
+                flagged.append(node.lineno)
+            continue
+        call = called.get(id(node))
+        if call is None or name in _NO_ENV_FORM or not _passes_env(call, name):
+            flagged.append(node.lineno)
+    return found, sorted(flagged)
+
+
+def _missing(source: str, filename: str = "module.py") -> list[int]:
+    return _unconfined_spawns(ast.parse(source), filename)[1]
+
+
+# Each form a child can be started with, as (source, the lines the scanner must flag).
+SPAWN_FORMS = {
+    "subprocess.run": ("import subprocess\nsubprocess.run(['x'])\nsubprocess.run(['x'], env={})\n", [2]),
+    "subprocess.check_call": ("import subprocess\nsubprocess.check_call(['x'])\n", [2]),
+    "subprocess.getoutput": ("import subprocess\nsubprocess.getoutput('x')\n", [2]),
+    "subprocess.getstatusoutput": ("import subprocess\nsubprocess.getstatusoutput('x')\n", [2]),
+    "an aliased module": ("import subprocess as sp\nsp.run(['x'])\nsp.check_output(['x'], env={})\n", [2]),
+    "a from-import": ("from subprocess import run\nrun(['x'])\n", [2]),
+    "an aliased from-import": ("from subprocess import Popen as P\nP(['x'])\n", [2]),
+    "a reference passed on": ("import subprocess\nstart = subprocess.call\nstart(['x'])\n", [2]),
+    "os.system": ("import os\nos.system('x')\n", [2]),
+    "os.popen": ("import os\nos.popen('x')\n", [2]),
+    "os.spawnv": ("import os\nos.spawnv(os.P_WAIT, 'x', ['x'])\nos.spawnve(os.P_WAIT, 'x', ['x'], {})\n", [2]),
+    "os.posix_spawn": ("import os\nos.posix_spawnp('x', ['x'])\nos.posix_spawn('x', ['x'], {})\n", [2]),
+    "os.exec": ("import os\nos.execvp('x', ['x'])\nos.execve('x', ['x'], {})\n", [2, 3]),
+    "os.fork": ("from os import fork\nfork()\n", [2]),
+    "asyncio": (
+        "import asyncio\nasyncio.create_subprocess_exec('x')\nasyncio.create_subprocess_shell('x', env={})\n",
+        [2],
+    ),
+    "loop.subprocess_exec": ("loop.subprocess_exec(factory, 'x')\nloop.subprocess_shell(factory, 'x', env={})\n", [1]),
+}
+
+
+class SpawnScannerTests(unittest.TestCase):
+    def test_the_scanner_flags_every_form_without_env(self) -> None:
+        for form, (source, lines) in SPAWN_FORMS.items():
+            with self.subTest(form):
+                self.assertEqual(_missing(source), lines)
+
+    def test_exec_and_fork_pass_only_in_the_allowlisted_files(self) -> None:
+        source = "import os\nos.execvp('x', ['x'])\npid = os.fork()\n"
+        for filename in sorted(_EXEC_ALLOWED):
+            with self.subTest(filename):
+                self.assertEqual(_missing(source, filename), [])
 
 
 class EveryChildGetsAnEnvironmentTests(unittest.TestCase):
@@ -345,10 +447,9 @@ class EveryChildGetsAnEnvironmentTests(unittest.TestCase):
         found = 0
         for path in sorted(_APP.rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for call in _spawn_calls(tree):
-                found += 1
-                if not any(keyword.arg == "env" for keyword in call.keywords):
-                    missing.append(f"{path.relative_to(_CONTROLLER)}:{call.lineno}")
+            count, lines = _unconfined_spawns(tree, path.name)
+            found += count
+            missing += [f"{path.relative_to(_CONTROLLER)}:{line}" for line in lines]
         self.assertGreaterEqual(found, 4)  # the CLIs, the uv verifier, the regex worker, autossh
         self.assertEqual(missing, [], "a child the controller starts must get an allowlisted env=")
 
