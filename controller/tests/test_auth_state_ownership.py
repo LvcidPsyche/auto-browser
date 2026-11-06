@@ -56,7 +56,7 @@ def build_manager(root: Path) -> tuple[BrowserManager, AsyncMock]:
 class SessionAuthStateOwnershipTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()  # the code passes resolved paths (a Windows 8.3 temp dir: B3-8)
         self.manager, self.new_context = build_manager(self.root)
         self.manager.settings.max_sessions = 5
 

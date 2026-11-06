@@ -616,7 +616,7 @@ if __name__ == "__main__":
 
 
 class HostDataRootTests(unittest.IsolatedAsyncioTestCase):
-    """Docker Desktop on Windows reports the controller's /data source as
+    r"""Docker Desktop on Windows reports the controller's /data source as
     C:\...\data. Resolved inside the Linux controller it became
     /app/C:\...\data and every session create failed ("too many colons")."""
 
