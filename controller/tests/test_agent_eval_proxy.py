@@ -234,7 +234,18 @@ class AgentEvalProxyTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("InvalidURL", result.stderr)
+        # W14-1: in the bridges' own words, chained to http.client's error for the operator.
+        self.assertIn("app.mcp_stdio.InvalidControllerURL: http.client cannot read its host and port", result.stderr)
         self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
+
+    def test_w14_1_a_path_with_a_space_is_refused_as_an_invalid_url(self) -> None:
+        # http.client refused it only once the direct connection was chosen; it is refused before any opener.
+        result = self._post_raw(f"http://127.0.0.1:{self.controller.server_port}/a b")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("app.mcp_stdio.InvalidControllerURL: its path or query holds a space", result.stderr)
+        self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
+        self.assertEqual(self.controller.seen, [])  # type: ignore[attr-defined]
 
     def test_w11_1_a_loopback_userinfo_before_a_remote_host_still_goes_through_the_proxy(self) -> None:
         # 127.0.0.1 is the userinfo here; the host is controller.invalid all three ways, so the proxy is used.

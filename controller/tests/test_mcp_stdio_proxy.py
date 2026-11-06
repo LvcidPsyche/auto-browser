@@ -16,6 +16,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -38,6 +39,15 @@ class _Recording(BaseHTTPRequestHandler):
         # Read the body first: on Windows a socket closed with unread data resets.
         self.rfile.read(int(self.headers.get("Content-Length") or 0))
         self.server.seen.append((self.path, self.headers.get("Authorization")))  # type: ignore[attr-defined]
+        answer = self.server.answer  # type: ignore[attr-defined]
+        if answer:
+            status, body = answer
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         redirect_to = self.server.redirect_to  # type: ignore[attr-defined]
         if redirect_to:
             # Once: a followed redirect comes back as a second request, which is answered and recorded.
@@ -66,6 +76,7 @@ def _serve(host: str = "127.0.0.1") -> ThreadingHTTPServer:
     server = (_V6Server if ":" in host else ThreadingHTTPServer)((host, 0), _Recording)
     server.seen = []  # type: ignore[attr-defined]
     server.redirect_to = None  # type: ignore[attr-defined]
+    server.answer = None  # type: ignore[attr-defined]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -327,6 +338,14 @@ def _closed_port() -> int:
         ("http://alice:sentinel@controller.invalid:abc/mcp", "controller.invalid"),
         ("http://controller.invalid:abc/mcp?key=sentinel", "controller.invalid"),
         ("http://127.0.0.1:{port}/mcp?key=sentinel", "127.0.0.1"),
+        # W14-1: the answers quoted urllib's and http.client's text, which quotes the URL or its decoded host.
+        ("controller.invalid/mcp?key=sentinel#fragment-sentinel", "controller.invalid"),
+        ("http://127.0.0.1:{port}/mcp?key=sentinel bad", "127.0.0.1"),
+        ("http://alice:sentinel%20tail@controller.invalid/mcp", "controller.invalid"),
+        ("http://alice:sentinel%27tail@controller.invalid/mcp", "controller.invalid"),
+        ("http://alice:sentinel%2ftail@controller.invalid/mcp", "controller.invalid"),
+        ("http://[::1/mcp?key=sentinel", "::1"),
+        ("alice:sentinel@controller.invalid/mcp", "controller.invalid"),
     ],
 )
 def test_w13_1_an_answer_never_shows_the_urls_userinfo_or_query(recording_proxy, base_url: str, host: str) -> None:
@@ -337,6 +356,68 @@ def test_w13_1_an_answer_never_shows_the_urls_userinfo_or_query(recording_proxy,
     assert "sentinel" not in message
     assert host in message
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "controller.invalid/mcp?key=sentinel#fragment-sentinel",
+        "http://127.0.0.1:{port}/mcp?key=sentinel bad",
+        "http://alice:sentinel%20tail@controller.invalid/mcp",
+        "http://alice:sentinel%27tail@controller.invalid/mcp",
+        "http://alice:sentinel%2ftail@controller.invalid/mcp",
+        "http://[::1/mcp?key=sentinel",
+    ],
+)
+def test_w14_1_a_url_the_bridge_cannot_read_is_refused_in_its_own_words(recording_proxy, base_url: str) -> None:
+    # urllib's Request(), http.client's path check and its port parse each quoted the URL or its decoded host in
+    # their text, which the answer showed; they are invalid controller URLs, and nothing is sent anywhere.
+    controller = _serve()
+    try:
+        message = _bridge_error_through_the_bridge(base_url.format(port=controller.server_port), recording_proxy)
+    finally:
+        controller.shutdown()
+        controller.server_close()
+
+    assert INVALID in message
+    assert "sentinel" not in message
+    assert "Unexpected stdio bridge failure" not in message
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+    assert controller.seen == []  # type: ignore[attr-defined]
+
+
+def test_w14_1_a_proxys_error_detail_never_shows_the_urls_query(recording_proxy) -> None:
+    # A proxy's JSON 502 whose detail echoes the URL reached the agent whole through the HTTP error message.
+    recording_proxy.answer = (  # type: ignore[attr-defined]
+        502,
+        json.dumps({"detail": "upstream http://controller.invalid/mcp?key=sentinel failed"}).encode(),
+    )
+
+    message = _bridge_error_through_the_bridge("http://controller.invalid/mcp?key=sentinel", recording_proxy)
+
+    assert "HTTP 502" in message
+    assert "sentinel" not in message
+    assert len(recording_proxy.seen) == 1  # type: ignore[attr-defined]
+
+
+def test_w14_1_the_error_text_shown_drops_the_urls_known_secrets() -> None:
+    from app.mcp_stdio import _redacted
+
+    shown = _redacted(
+        "nonnumeric port: 'sentinel tail@controller.invalid' for key=sentinel",
+        "http://alice:sentinel%20tail@controller.invalid/mcp?key=sentinel",
+    )
+
+    assert shown == "nonnumeric port: 'controller.invalid' for [redacted]"
+
+
+def test_w14_1_dropping_userinfo_runs_is_linear() -> None:
+    from app.mcp_stdio import _without_userinfo
+
+    started = time.monotonic()
+    _without_userinfo("a" * 65536)
+
+    assert time.monotonic() - started < 2
 
 
 def test_w13_1_an_invalid_proxy_port_is_not_answered_as_an_invalid_controller_url(recording_proxy) -> None:
@@ -363,7 +444,7 @@ def test_w11_1_a_non_numeric_port_is_refused_before_any_proxy_is_used(recording_
     # http.client's parse raises InvalidURL before an opener is chosen, so even a remote host never reaches the proxy.
     message = _bridge_error_through_the_bridge("http://controller.invalid:abc/mcp", recording_proxy)
 
-    assert "nonnumeric port" in message
+    assert "http.client cannot read its host and port" in message
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
 
 

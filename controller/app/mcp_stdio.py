@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from http.client import HTTPConnection, InvalidURL
 from typing import Any, TextIO
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 # MCP spec header names, kept as local constants so the bridge has no
@@ -50,11 +50,15 @@ class _NoRedirects(HTTPRedirectHandler):
 _DIRECT = build_opener(ProxyHandler({}), _NoRedirects)
 
 # A userinfo-shaped run in an error's text: characters other than whitespace, quotes, / and @, ending in @ (W13-1).
-_USERINFO_RUN = re.compile(r"""[^\s'"/@]*@""")
+# The lookbehind lets a match start only where a run starts, so the scan is linear in the text's length (W14-1).
+_USERINFO_RUN = re.compile(r"""(?<![^\s'"/@])[^\s'"/@]*@""")
 
 
 class InvalidControllerURL(InvalidURL):
-    """The controller URL cannot be read, or reads as a local host it would not connect to; nothing was sent."""
+    """The controller URL cannot be read, or reads as a local host it would not connect to; nothing was sent.
+
+    Its text is a fixed reason in the bridges' own words, never an exception's text, which can quote the URL (W14-1).
+    """
 
 
 def _without_userinfo(text: str) -> str:
@@ -62,16 +66,39 @@ def _without_userinfo(text: str) -> str:
     return _USERINFO_RUN.sub("", text)
 
 
-def _display_url(url: str) -> str:
-    """``url`` without its userinfo, query or fragment, cut as a string so a malformed URL is handled too (W13-1).
+def _split_userinfo(url: str) -> tuple[str, str, str]:
+    """``url`` as (everything before the userinfo, the userinfo, everything after its ``@``), cut as a string.
 
-    The userinfo is everything after ``//`` up to the last ``@`` before the first ``/``, ``?`` or ``#``.
+    The userinfo runs from ``//``, or the start when there is none, up to the last ``@`` before the first ``/``,
+    ``?`` or ``#``; it is empty when there is no such ``@``.
     """
     head, slashes, rest = url.partition("//")
-    if slashes:
-        end = min((index for index in (rest.find(delimiter) for delimiter in "/?#") if index != -1), default=len(rest))
-        rest = rest[rest.rfind("@", 0, end) + 1 :]
-    return (head + slashes + rest).split("#", 1)[0].split("?", 1)[0]
+    if not slashes:
+        head, rest = "", url
+    end = min((index for index in (rest.find(delimiter) for delimiter in "/?#") if index != -1), default=len(rest))
+    at = rest.rfind("@", 0, end)
+    return head + slashes, rest[: max(at, 0)], rest[at + 1 :]
+
+
+def _display_url(url: str) -> str:
+    """``url`` without its userinfo, query or fragment, cut as a string so a malformed URL is handled too (W13-1)."""
+    before, _, after = _split_userinfo(url)
+    return _without_userinfo((before + after).split("#", 1)[0].split("?", 1)[0])
+
+
+def _redacted(text: str, url: str) -> str:
+    """``text`` with ``url``'s userinfo, password, query and fragment replaced and any userinfo run dropped (W14-1).
+
+    Each is found with string operations, so a malformed URL is handled, and is replaced as written and
+    percent-decoded, longest first, with ``[redacted]``; then ``_without_userinfo`` drops any other
+    ``user:password@``.
+    """
+    userinfo = _split_userinfo(url)[1]
+    parts = (userinfo, userinfo.partition(":")[2], url.partition("?")[2].partition("#")[0], url.partition("#")[2])
+    known = {value for part in parts for value in (part, unquote(part)) if value}
+    for value in sorted(known, key=len, reverse=True):
+        text = text.replace(value, "[redacted]")
+    return _without_userinfo(text)
 
 
 def _is_loopback_host(host: str | None) -> bool:
@@ -132,20 +159,31 @@ def _goes_direct(request: Request) -> bool:
     Constructing the HTTPConnection parses and does not connect; its InvalidURL (a non-numeric port), and a
     reading urlsplit cannot parse (%5b127.0.0.1%5d, x%5b@127.0.0.1) and its ValueError (W12-3), raise
     InvalidControllerURL (W13-1), so a malformed authority is refused before any opener is chosen and the request
-    is sent nowhere. A host-less request (``request.host`` None) is not direct and falls through to urllib's own
-    error, raised before any proxy is used (W10-14).
+    is sent nowhere. So, before the readings, does a ``request.selector`` holding a space or a control character
+    (U+0000 to U+0020 or U+007F), which http.client refuses only once a connection is chosen. Each reason is the
+    bridges' own, never the parse error's text, which can quote the URL (W14-1). A host-less request
+    (``request.host`` None) is not direct and falls through to urllib's own error, raised before any proxy is used
+    (W10-14).
     """
     if request.host is None:
         return False
+    if any(character <= " " or character == "\x7f" for character in request.selector):
+        raise InvalidControllerURL("its path or query holds a space or a control character; percent-encode it")
     try:
         connected = HTTPConnection(request.host).host
+    except InvalidURL as exc:
+        raise InvalidControllerURL(
+            "http.client cannot read its host and port (a port that is not a number, a userinfo, or a space or "
+            "control character)"
+        ) from exc
+    try:
         others = (
             urlsplit("//" + request.host).hostname,
             urlsplit(request.full_url).hostname,
             request.host.rpartition("@")[2],
         )
-    except (InvalidURL, ValueError) as exc:
-        raise InvalidControllerURL(str(exc)) from exc
+    except ValueError as exc:
+        raise InvalidControllerURL("a reading cannot parse its host (an unbalanced or misplaced bracket)") from exc
     if _is_loopback_host(connected):
         return True
     if any(_is_loopback_host(host) for host in others):
@@ -251,7 +289,13 @@ class HttpMcpClient:
 
     def _request(self, method: str, *, headers: dict[str, str], body: dict[str, Any] | None) -> HttpMcpResponse:
         payload = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
-        request = Request(self.base_url, data=payload, headers=headers, method=method)
+        try:
+            request = Request(self.base_url, data=payload, headers=headers, method=method)
+        except ValueError as exc:
+            # urllib's text quotes the URL, query and fragment included (W14-1).
+            raise InvalidControllerURL(
+                "urllib cannot read it as an http:// or https:// URL (no scheme, or an unbalanced bracket)"
+            ) from exc
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 raw = response.read()
@@ -345,8 +389,9 @@ class StdioMcpBridge:
                 )
             if method == "notifications/initialized":
                 self._initialized_sent = True
-        # The answers go to the agent: they name the URL without its userinfo, query or fragment, and drop any
-        # user:password@ from the error they show (W13-1).
+        # The answers go to the agent: they name the URL without its userinfo, query or fragment (W13-1), and the
+        # error text they show has the URL's userinfo, password, query and fragment and any user:password@
+        # removed (W14-1).
         except URLError as exc:
             return self._jsonrpc_error(
                 request_id,
@@ -354,22 +399,21 @@ class StdioMcpBridge:
                 f"No Auto Browser controller reachable at {_display_url(self.client.base_url)} — "
                 "start one with 'docker compose up -d' in the auto-browser repo, or pass "
                 "--base-url/AUTO_BROWSER_BASE_URL for a remote deployment. "
-                f"(underlying: {_without_userinfo(str(exc.reason))})",
+                f"(underlying: {self._shown(str(exc.reason))})",
             )
         except InvalidControllerURL as exc:
             # A configuration error, not a bridge failure: nothing was sent anywhere (W12-3). Only the controller
-            # URL's own: an InvalidURL from elsewhere (an environment proxy's port) is answered as a failure.
+            # URL's own: an InvalidURL from elsewhere (an environment proxy's port) is answered as a failure. Its
+            # text is a fixed reason in the bridges' own words (W14-1).
             return self._jsonrpc_error(
                 request_id,
                 -32000,
                 f"{_display_url(self.client.base_url)} is not a valid Auto Browser controller URL — fix "
-                f"--base-url/AUTO_BROWSER_BASE_URL. (underlying: {_without_userinfo(str(exc))})",
+                f"--base-url/AUTO_BROWSER_BASE_URL. (underlying: {exc})",
             )
         except Exception as exc:  # pragma: no cover - defensive bridge guard
             print(f"stdio bridge unexpected error: {exc}", file=self.stderr)
-            return self._jsonrpc_error(
-                request_id, -32000, f"Unexpected stdio bridge failure: {_without_userinfo(str(exc))}"
-            )
+            return self._jsonrpc_error(request_id, -32000, f"Unexpected stdio bridge failure: {self._shown(str(exc))}")
 
         next_session_id = response.headers.get(MCP_SESSION_HEADER.lower())
         if next_session_id:
@@ -410,13 +454,18 @@ class StdioMcpBridge:
             "result": {**result, "capabilities": {**capabilities, "resources": {**resources, "subscribe": False}}},
         }
 
+    def _shown(self, text: str) -> str:
+        """An error's ``text`` as an answer shows it, without the base URL's known secrets (W14-1)."""
+        base_url = getattr(self.client, "base_url", "")
+        return _redacted(text, base_url if isinstance(base_url, str) else "")
+
     def _http_error_message(self, response: HttpMcpResponse) -> str:
         if response.body is None:
             return f"Empty or non-JSON response from Auto Browser MCP endpoint ({response.status_code})"
         detail = response.body.get("detail") if isinstance(response.body, dict) else None
         message = f"Auto Browser controller returned HTTP {response.status_code}"
         if detail:
-            message += f": {detail}"
+            message += f": {self._shown(str(detail))}"
         if response.status_code == 401:
             message += (
                 " (set --token-file or AUTO_BROWSER_TOKEN_FILE to the controller's token file, data/api-token in"
