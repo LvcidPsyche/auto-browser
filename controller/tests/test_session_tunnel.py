@@ -309,9 +309,11 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             ("0.0.0.0:22", "unsafe-public"),
             # B3-2: empty (ssh reads it as all interfaces) stays refused; 0.0.0.0 says that on purpose.
             ("", "unsafe-public"),
-            ("[localhost]", "private"),
-            ("[127.0.0.1]", "private"),
             ("[::1", "private"),
+            ("[]", "unsafe-public"),
+            ("[127.0.0.1:22]", "unsafe-public"),
+            ("[[::1]]", "private"),
+            ("[ 127.0.0.1]", "private"),
         ):
             with self.subTest(bind=bind, mode=mode), tempfile.TemporaryDirectory() as tempdir:
                 with self.assertRaisesRegex(RuntimeError, "ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS"):
@@ -346,6 +348,33 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(tunnel.remote_bind_address, shown)
                 args = broker._autossh_args(tunnel)
                 self.assertEqual(args[args.index("-R") + 1], spec)
+
+    async def test_w2_5_a_bracketed_ipv4_or_name_is_unbracketed_and_judged_as_its_bare_spelling(self) -> None:
+        # B3-2 refused these, which 1.15.0 passed to ssh (it parses them: `ssh -G`) under unsafe-public.
+        for bind, mode, spec, shown in (
+            ("[127.0.0.1]", "private", "127.0.0.1:16181:127.0.0.1:6080", "127.0.0.1"),
+            ("[localhost]", "private", "localhost:16181:127.0.0.1:6080", "localhost"),
+            ("[203.0.113.5]", "unsafe-public", "203.0.113.5:16181:127.0.0.1:6080", "203.0.113.5"),
+            (
+                "[bastion.example.com]",
+                "unsafe-public",
+                "bastion.example.com:16181:127.0.0.1:6080",
+                "bastion.example.com",
+            ),
+        ):
+            with self.subTest(bind=bind, mode=mode), tempfile.TemporaryDirectory() as tempdir:
+                broker = await self._started_broker(
+                    Path(tempdir), ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS=bind, ISOLATED_TUNNEL_ACCESS_MODE=mode
+                )
+                tunnel = broker._build_tunnel("session-1", remote_port=16181, local_host="127.0.0.1", local_port=6080)
+                self.assertEqual(tunnel.remote_bind_address, shown)
+                args = broker._autossh_args(tunnel)
+                self.assertEqual(args[args.index("-R") + 1], spec)
+        # As its bare spelling would be: a public address in brackets still needs unsafe-public.
+        for bind in ("[203.0.113.5]", "[bastion.example.com]"):
+            with self.subTest(bind=bind, mode="private"), tempfile.TemporaryDirectory() as tempdir:
+                with self.assertRaisesRegex(RuntimeError, "non-local remote bind"):
+                    await self._started_broker(Path(tempdir), ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS=bind)
 
     async def test_b3_2_an_ipv6_local_host_is_bracketed_in_the_spec_too(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

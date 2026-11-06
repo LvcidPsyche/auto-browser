@@ -26,14 +26,10 @@ def _is_bare_host(value: str) -> bool:
 def _bare_bind_address(value: str) -> str | None:
     """The tunnel's remote bind address as a bare host or IP, or None when it is not one.
 
-    ssh's own spelling of an IPv6 literal, in brackets with no port (`[::1]`), is accepted and unbracketed; a host
-    name or IPv4 address in brackets, a port, spaces and an empty value are not."""
+    Any bare host in brackets with no port (`[::1]`, `[127.0.0.1]`, `[localhost]`: ssh parses each) is unbracketed
+    and then judged as its bare spelling (W2-5); a port, spaces and an empty value are refused."""
     if len(value) > 2 and value.startswith("[") and value.endswith("]"):
-        inner = value[1:-1]
-        try:
-            return inner if ipaddress.ip_address(inner).version == 6 else None
-        except ValueError:
-            return None
+        value = value[1:-1]
     return value if _is_bare_host(value) else None
 
 

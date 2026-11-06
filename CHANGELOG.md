@@ -130,10 +130,12 @@ All notable changes to auto-browser are documented here.
   tunnel's remote bind address (`ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS`) has its own strict check: a bare host or IP
   only, `localhost` or any address that reads as loopback (another loopback address such as `127.0.0.2` included);
   `0.0.0.0` stays refused there without `unsafe-public`. A value with a port or surrounding spaces (`localhost:22`,
-  `[::1]:22`, ` 127.0.0.1 `) went into the `-R` spec as it was, which ssh then refused or read as another bind, and
-  an empty one binds every interface: each now stops startup with a clear error. An IPv6 literal, bare (`::1`) or in
+  `[::1]:22`, ` 127.0.0.1 `) went into the `-R` spec as it was, which ssh then refused or read as another bind, and an
+  empty one binds every interface: each now stops startup with a clear error. An IPv6 literal, bare (`::1`) or in
   ssh's brackets without a port (`[::1]`), is accepted and goes into the spec in brackets, as ssh needs
-  (`[::1]:16181:127.0.0.1:6080`; the bare `::1:16181:...` is a spec ssh refuses).
+  (`[::1]:16181:127.0.0.1:6080`; the bare `::1:16181:...` is a spec ssh refuses). Any other bare host in brackets
+  (`[127.0.0.1]`, `[localhost]`, `[203.0.113.5]`, which ssh parses too) is unbracketed and judged as its bare
+  spelling.
 - An isolated session tunnel whose autossh exits early for a reason other than a taken remote port (a refused key, an
   unreachable bastion) now fails the provision at once with that message instead of retrying every port in
   `ISOLATED_TUNNEL_REMOTE_PORT_START`..`END`, each after a full `ISOLATED_TUNNEL_STARTUP_GRACE_SECONDS`; "remote port
