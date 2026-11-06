@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 from app.models import SessionRecord
 from app.session_ownership import acting_as
 from app.session_store import DurableSessionStore
+from app.utils import record_path
 from tests.test_auth_state_ownership import ALICE, build_manager
 
 
@@ -191,20 +192,50 @@ class PersistAfterCloseTests(unittest.IsolatedAsyncioTestCase):
         stored = await store.get("s1")
         self.assertEqual((stored.status, stored.close_reason), ("closed", "operator"))
 
-    async def test_w4_10_a_record_that_cannot_be_read_fails_an_active_write_instead_of_being_replaced(self) -> None:
-        # An I/O error read as "not closed", so a late active write replaced a closed record the error hid.
+    async def test_w6_1_a_record_that_cannot_be_read_skips_an_active_write_without_raising(self) -> None:
+        # W4-10: an I/O error read as "not closed", so a late active write replaced a closed record the error hid.
+        # W6-1: raising instead failed every later write, after the action it mirrors had taken effect; skip it.
         store = await self._store()
         await store.upsert(_record("closed", live=False).model_copy(update={"close_reason": "operator"}))
         store.file_store.get = AsyncMock(side_effect=OSError("I/O error"))
 
         with self.assertLogs("app.session_store", "WARNING") as logged:
-            with self.assertRaises(OSError):
-                await store.upsert(_record("active", live=True))
+            await store.upsert(_record("active", live=True))
 
         self.assertIn("s1", "\n".join(logged.output))
         del store.file_store.get  # the instance attribute: the real get again
         stored = await store.get("s1")
         self.assertEqual((stored.status, stored.close_reason), ("closed", "operator"))
+
+    async def test_w6_1_a_closed_write_lands_when_the_record_cannot_be_read(self) -> None:
+        store = await self._store()
+        await store.upsert(_record("active", live=True))
+        store.file_store.get = AsyncMock(side_effect=OSError("I/O error"))
+
+        await store.upsert(_record("closed", live=False))
+
+        del store.file_store.get
+        self.assertEqual((await store.get("s1")).status, "closed")
+
+    async def test_w6_1_a_corrupt_record_is_replaced_by_the_next_active_write(self) -> None:
+        store = await self._store()
+        await store.upsert(_record("active", live=True))
+        record_path(Path(self.tmp.name) / "rec", "s1", ".json").write_text("{not json", encoding="utf-8")
+
+        with self.assertLogs("app.session_store", "WARNING") as logged:
+            await store.upsert(_record("active", live=True))
+
+        self.assertIn("s1", "\n".join(logged.output))
+        self.assertEqual((await store.get("s1")).status, "active")
+
+    async def test_w6_1_a_record_that_fails_validation_is_replaced_by_the_next_active_write(self) -> None:
+        store = await self._store()
+        await store.upsert(_record("active", live=True))
+        record_path(Path(self.tmp.name) / "rec", "s1", ".json").write_text('{"id": "s1"}', encoding="utf-8")
+
+        await store.upsert(_record("active", live=True))
+
+        self.assertEqual((await store.get("s1")).status, "active")
 
     async def test_w4_10_a_missing_record_is_still_not_closed(self) -> None:
         store = await self._store()

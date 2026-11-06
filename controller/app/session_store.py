@@ -262,30 +262,44 @@ class DurableSessionStore:
 
     async def _upsert_locked(self, record: SessionRecord) -> None:
         async with self._record_lock(record.id):
-            if record.status != "closed" and await self._is_closed(record.id):
-                # A late write of a session that has been closed: a session never reopens, and an interrupted write
-                # must not replace the close (and its close_reason) either.
-                logger.info("not writing a %s record over the closed session %s", record.status, record.id)
-                return
+            if record.status != "closed":
+                closed = await self._is_closed(record.id)
+                if closed is None:
+                    # The stored record could not be read and could be a closed one: skip this write and go on (the
+                    # record is a mirror), so the next write tries again.
+                    return
+                if closed:
+                    # A late write of a session that has been closed: a session never reopens, and an interrupted
+                    # write must not replace the close (and its close_reason) either.
+                    logger.info("not writing a %s record over the closed session %s", record.status, record.id)
+                    return
             await self.file_store.upsert(record)
             if self.redis_store is not None and self._primary is self.redis_store:
                 await self.redis_store.upsert(record)
 
-    async def _is_closed(self, session_id: str) -> bool:
-        """Whether the durable (file) record says the session is closed; no record is not closed.
+    async def _is_closed(self, session_id: str) -> bool | None:
+        """Whether the durable (file) record says the session is closed, or None when that cannot be told.
 
-        Any other read failure is raised, so the write fails: an I/O error could be hiding a closed record, which a
-        late active write must not replace.
+        Never raises: the write it guards mirrors a change that has already taken effect. No record is not closed, and
+        neither is one that cannot be parsed (no readable closed record), so the write replaces it. Any other read
+        failure is None, so a non-closed write is skipped: an I/O error could be hiding a closed record.
         """
         try:
             return (await self.file_store.get(session_id)).status == "closed"
         except KeyError:
             return False
+        except ValueError as exc:
+            logger.warning(
+                "the stored record of session %s cannot be parsed, so this write replaces it: %s", session_id, exc
+            )
+            return False
         except Exception as exc:
             logger.warning(
-                "could not read the record of session %s before writing it, so it is not written: %s", session_id, exc
+                "could not read the record of session %s before writing it, so it is not written this time: %s",
+                session_id,
+                exc,
             )
-            raise
+            return None
 
     async def mark_all_active_interrupted(self) -> None:
         await self.file_store.mark_all_active_interrupted()
