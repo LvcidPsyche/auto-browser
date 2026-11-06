@@ -45,7 +45,11 @@ _METADATA_NETWORKS = tuple(
 )
 # IPv6 prefixes whose last 32 bits are an IPv4 address: translated (::ffff:0:a.b.c.d), compatible (::a.b.c.d) and
 # NAT64's well-known prefix (64:ff9b::a.b.c.d). Mapped (::ffff:a.b.c.d) and 6to4 (2002::/16) have stdlib properties.
-_IPV4_SUFFIX_NETWORKS = tuple(ipaddress.ip_network(net) for net in ("::ffff:0:0:0/96", "::/96", "64:ff9b::/96"))
+# Translated, compatible, NAT64 well-known (RFC 6052) and local-use NAT64 (RFC 8215): the IPv4 address in the last
+# 32 bits.
+_IPV4_SUFFIX_NETWORKS = tuple(
+    ipaddress.ip_network(net) for net in ("::ffff:0:0:0/96", "::/96", "64:ff9b::/96", "64:ff9b:1::/48")
+)
 _RESOLVE_TIMEOUT_SECONDS = 5.0
 
 
@@ -57,6 +61,8 @@ def _embedded_ipv4(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> ipaddre
         return ip.ipv4_mapped
     if ip.sixtofour is not None:
         return ip.sixtofour
+    if ip.teredo is not None:
+        return ip.teredo[1]  # the client's address (the server's is public by design)
     if any(ip in network for network in _IPV4_SUFFIX_NETWORKS):
         return ipaddress.IPv4Address(ip.packed[-4:])
     return None

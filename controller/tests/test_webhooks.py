@@ -172,6 +172,17 @@ class WebhookTargetTests(unittest.IsolatedAsyncioTestCase):
                     await self._send("http://hooks.internal/hook", allow_private_targets=allow_private_targets)
                     self.client.post.assert_not_awaited()
 
+    async def test_a_add_7_cloud_metadata_in_local_use_nat64_and_teredo_is_refused_with_the_opt_in_on(self) -> None:
+        # RFC 8215 local-use NAT64 (64:ff9b:1::/48, the last 32 bits) and Teredo (the client address, stored
+        # inverted) were not unwrapped, so the opt-in let them through.
+        for address in ("64:ff9b:1::a9fe:a9fe", "64:ff9b:1:2::169.254.169.254", "2001:0:4136:e378:8000:63bf:5601:5601"):
+            for allow_private_targets in (True, False):
+                with self.subTest(address=address, allow_private_targets=allow_private_targets):
+                    self.client.post.reset_mock()
+                    self._resolver(address)
+                    await self._send("http://hooks.internal/hook", allow_private_targets=allow_private_targets)
+                    self.client.post.assert_not_awaited()
+
     async def test_the_alibaba_cloud_metadata_address_is_refused_with_the_opt_in_on_and_off(self) -> None:
         # 100.100.100.200 sits in 100.64.0.0/10, which is neither private nor reserved: it passed both checks.
         for allow_private_targets in (False, True):

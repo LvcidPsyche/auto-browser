@@ -25,7 +25,8 @@ All notable changes to auto-browser are documented here.
   to allow it. The flag lifts the name and address checks, so loopback (`localhost`, `127.0.0.1`) and every private
   range are allowed too; cloud metadata stays refused whatever it says: `169.254.0.0/16`, `100.100.100.200`,
   `fe80::/10`, `fd00:ec2::254` and the names `metadata` and `metadata.google.internal`, and an IPv6 address that
-  spells a metadata address (mapped, translated, compatible, NAT64 `64:ff9b::` or 6to4). Behind a proxy
+  spells a metadata address (mapped, translated, compatible, NAT64 `64:ff9b::` or `64:ff9b:1::`, 6to4 or Teredo).
+  Behind a proxy
   (`HTTPS_PROXY` and the like) the controller must still be able to resolve the webhook host itself: it checks the
   addresses before it posts by name through the proxy, and a name it cannot resolve is not posted to.
 - `MESH_ENABLED`, `MESH_IDENTITY_DIR`, `MESH_PEERS_PATH`, `MESH_TIMESTAMP_WINDOW`, `CURATOR_PROVIDER` and
@@ -322,7 +323,9 @@ All notable changes to auto-browser are documented here.
   request goes by name through the proxy, which then owns resolution. Logs carry only `scheme://host`, never the path,
   query or credentials: httpx's own INFO line for each request, which named the whole URL, is no longer logged (the
   controller sets the `httpx` logger to WARNING, or to `LOG_LEVEL` if higher). A name that does not resolve is not
-  posted to.
+  posted to. A cloud metadata address stays refused, even with `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS` on, when an
+  IPv6 answer spells it: mapped, translated, compatible, NAT64 (the well-known `64:ff9b::/96` and the local-use
+  `64:ff9b:1::/48`, its last 32 bits), 6to4, or Teredo (the client address).
 - A harness `run_id` must now look like the ids the harness generates (letters, digits, `.`, `_`, `-`; no leading
   dot), at the tool boundary and again in the run store, so an id cannot name a directory outside the harness runs
   root.
