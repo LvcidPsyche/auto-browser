@@ -392,9 +392,10 @@ class StdioMcpBridge:
                 )
             if method == "notifications/initialized":
                 self._initialized_sent = True
-        # The answers go to the agent: they name the URL without its userinfo, query or fragment (W13-1), and the
-        # error text they show has the URL's userinfo, password, query and fragment and any user:password@
-        # removed (W14-1).
+        # The answers go to the agent. The answer that no controller is reachable names the URL without its userinfo,
+        # query or fragment (W13-1); the invalid-URL answer names no part of it, since a URL that cannot be read
+        # cannot be cut safely either (W15-2); and the error text they show has the URL's userinfo, password, query
+        # and fragment and any user:password@ removed (W14-1).
         except URLError as exc:
             return self._jsonrpc_error(
                 request_id,
@@ -411,7 +412,7 @@ class StdioMcpBridge:
             return self._jsonrpc_error(
                 request_id,
                 -32000,
-                f"{_display_url(self.client.base_url)} is not a valid Auto Browser controller URL — fix "
+                "The configured controller URL is not a valid Auto Browser controller URL — fix "
                 f"--base-url/AUTO_BROWSER_BASE_URL. (underlying: {exc})",
             )
         except Exception as exc:  # pragma: no cover - defensive bridge guard

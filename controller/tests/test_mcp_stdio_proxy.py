@@ -354,8 +354,11 @@ def test_w12_3_a_malformed_authority_is_refused_as_an_invalid_controller_url(rec
         controller.server_close()
 
     assert INVALID in message
-    # W13-1: the answer names the URL without its userinfo.
-    assert base_url.replace("x%5b@", "") in message
+    # W15-2: the answer names no part of the URL: not the URL, nor its host or userinfo as written. 127.0.0.1 is not
+    # checked: the W13-2 reason names http://127.0.0.1:PORT as an example.
+    userinfo, _, host_and_port = authority.rpartition("@")
+    named = [part for part in (base_url, userinfo, host_and_port.rpartition(":")[0]) if part and part != "127.0.0.1"]
+    assert [part for part in named if part in message] == []
     assert "Unexpected stdio bridge failure" not in message
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
     assert controller.seen == []  # type: ignore[attr-defined]
@@ -404,6 +407,11 @@ def request_line_echo():
         listener.close()
 
 
+# Of test_w13_1's base URLs, those answered with urllib's URLError, the answer that no controller is reachable; each
+# other one is an invalid controller URL.
+_ANSWERED_AS_UNREACHABLE = ("http://127.0.0.1:{port}/mcp?key=sentinel", "alice:sentinel@controller.invalid/mcp")
+
+
 @pytest.mark.parametrize(
     ("base_url", "host"),
     [
@@ -419,6 +427,8 @@ def request_line_echo():
         ("http://alice:sentinel%2ftail@controller.invalid/mcp", "controller.invalid"),
         ("http://[::1/mcp?key=sentinel", "::1"),
         ("alice:sentinel@controller.invalid/mcp", "controller.invalid"),
+        # W15-2: an unencoded # in the password, which the URL cut as a string ended at, so it named the password.
+        ("http://alice:sentinel#tail@controller.invalid/mcp", "controller.invalid"),
     ],
 )
 def test_w13_1_an_answer_never_shows_the_urls_userinfo_or_query(
@@ -430,8 +440,17 @@ def test_w13_1_an_answer_never_shows_the_urls_userinfo_or_query(
     message = _bridge_error_through_the_bridge(base_url.format(port=closed_port), recording_proxy)
 
     assert "sentinel" not in message
-    assert host in message
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
+    if base_url in _ANSWERED_AS_UNREACHABLE:
+        # The answer that no controller is reachable names the URL without its userinfo, query or fragment.
+        assert UNREACHABLE in message
+        assert host in message
+    else:
+        # W15-2: the invalid answer names no part of the URL: not the URL, its host, its user name or its query.
+        # 127.0.0.1 is not checked: the W13-2 reason names http://127.0.0.1:PORT as an example.
+        assert INVALID in message
+        named = [base_url.format(port=closed_port), host, "alice", "key="]
+        assert [part for part in named if part != "127.0.0.1" and part in message] == []
 
 
 @pytest.mark.parametrize(
