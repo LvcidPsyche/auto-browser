@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import ValidationError
 
+from ..action_errors import BROWSER_UNREACHABLE_DETAIL, BrowserUnreachableError
 from ..approvals import ServerStateRefusal
 from ..cron_service import CronJobDisabledError
 from ..models import ApprovalDecisionRequest
@@ -187,6 +188,8 @@ def create_operations_router(
             raise HTTPException(status_code=403, detail="Not permitted") from None
         except CronJobDisabledError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
+        except BrowserUnreachableError:  # the run's session could not reach its browser (create_session)
+            raise HTTPException(status_code=503, detail=BROWSER_UNREACHABLE_DETAIL) from None
         except (ValidationError, ValueError):
             raise HTTPException(status_code=400, detail="Invalid request") from None
 

@@ -255,6 +255,17 @@ def test_an_unreachable_browser_is_503_with_a_fixed_detail(client: TestClient, r
     assert response.json() == {"detail": "the browser could not be reached"}
 
 
+def test_a_cron_trigger_that_meets_an_unreachable_browser_is_503_with_a_fixed_detail(client: TestClient) -> None:
+    # R-1: the trigger creates the run's session (create_session, then ensure_browser) and mapped no such error.
+    reason = "could not connect to Chrome over CDP at ws://10.0.0.9:9222: WebSocket error: connect ECONNREFUSED"
+    with patch.object(
+        main_module.cron_service, "trigger_via_webhook", new=AsyncMock(side_effect=BrowserUnreachableError(reason))
+    ):
+        response = client.post("/crons/job-1/trigger", json={"webhook_key": "sentinel-key"})
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": "the browser could not be reached"}
+
+
 @pytest.mark.parametrize("route", ALL_ROUTES, ids=lambda r: r.id)
 def test_file_not_found_is_404_without_its_message(client: TestClient, route: Route) -> None:
     with _raising(route, FileNotFoundError("/srv/secret/path is missing")):
