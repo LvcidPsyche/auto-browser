@@ -158,20 +158,71 @@ def prepare_socket_path(raw: str) -> Path:
             f"limit {AF_UNIX_PATH_MAX - 1}): {socket_path}; pass a shorter --socket-path"
         )
     socket_path.parent.mkdir(parents=True, exist_ok=True)
-    for candidate in (Path(raw), socket_path):
-        try:
-            mode = os.lstat(candidate).st_mode
-        except FileNotFoundError:
-            continue
-        if not stat.S_ISSOCK(mode):
-            raise SocketPathError(f"{candidate} exists and is not a socket; refusing to remove it")
-    if socket_path.exists():
-        if _socket_is_listening(socket_path):
-            raise SocketPathError(
-                f"another bridge is listening on {socket_path}; stop it or pass another --socket-path"
-            )
-        socket_path.unlink()  # refused: nothing listens, so it is stale
+    # Held for the bridge's life, before the stale-socket check: two bridges probing at once could each find the
+    # socket refused, and one then removed the socket the other had just bound (W5-7).
+    _hold_socket_lock(socket_path)
+    try:
+        for candidate in (Path(raw), socket_path):
+            try:
+                mode = os.lstat(candidate).st_mode
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISSOCK(mode):
+                raise SocketPathError(f"{candidate} exists and is not a socket; refusing to remove it")
+        if socket_path.exists():
+            if _socket_is_listening(socket_path):
+                raise SocketPathError(
+                    f"another bridge is listening on {socket_path}; stop it or pass another --socket-path"
+                )
+            socket_path.unlink()  # refused: nothing listens, so it is stale
+    except BaseException:
+        _release_socket_lock(socket_path)
+        raise
     return socket_path
+
+
+# The lock each socket path's bridge holds (path to descriptor), kept open for the process's life: an flock ends
+# with its holder, so the lock file itself stays.
+_SOCKET_LOCKS: dict[Path, int] = {}
+
+
+def _hold_socket_lock(socket_path: Path) -> None:
+    """Take an exclusive flock on <socket-path>.lock (created 0600); SocketPathError when another bridge holds it.
+
+    Skipped where fcntl is missing (Windows), as the rest of the POSIX-only code is.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        return
+    lock_path = socket_path.with_name(socket_path.name + ".lock")
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise SocketPathError(
+            f"another bridge is running on {socket_path}; stop it or pass another --socket-path"
+        ) from None
+    except BaseException:
+        os.close(fd)
+        raise
+    _SOCKET_LOCKS[socket_path] = fd
+
+
+def _release_socket_lock(socket_path: Path) -> None:
+    fd = _SOCKET_LOCKS.pop(socket_path, None)
+    if fd is not None:
+        os.close(fd)
+
+
+def _socket_identity(path: Path) -> tuple[int, int] | None:
+    """(st_dev, st_ino) of what `path` names, not following a symlink; None when nothing is there."""
+    try:
+        found = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    return found.st_dev, found.st_ino
 
 
 def _socket_is_listening(path: Path) -> bool:
@@ -687,6 +738,8 @@ def main() -> int:
         pass_env=tuple(args.pass_env),
     )
     server = UnixHTTPServer(str(socket_path), service)
+    # What this bridge bound: its shutdown removes the socket only while the path still names it (W5-7).
+    bound = _socket_identity(socket_path)
     # The umask above already makes it 0600; say so explicitly rather than rely on it.
     os.chmod(socket_path, 0o600)
 
@@ -704,7 +757,7 @@ def main() -> int:
         if stopped:
             print(f"[codex-bridge] stopped {stopped} codex run(s) still in flight", file=sys.stderr)
         server.server_close()
-        if socket_path.exists():
+        if bound is not None and _socket_identity(socket_path) == bound:
             socket_path.unlink()
     return 0
 

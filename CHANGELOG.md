@@ -89,7 +89,11 @@ All notable changes to auto-browser are documented here.
 - The Codex host bridge now removes only a stale socket at `--socket-path`: a regular file, directory or symlink there
   stops it with a message instead of being deleted, as does a socket another bridge is listening on (it connects
   first, and removes the socket only when the connection is refused), a path too long for a unix socket is refused
-  with its length, and the socket is set to 0600 explicitly after binding.
+  with its length, and the socket is set to 0600 explicitly after binding. On POSIX each bridge holds an exclusive
+  lock on `<socket-path>.lock` (created 0600, left in place) for its whole life, taken before that check, so a second
+  bridge on the same path stops at startup with "another bridge is running on <path>" instead of racing the first
+  one's probe, and at shutdown a bridge removes the socket only while the path still names the one it bound, not one
+  that replaced it.
 - An encrypted auth-state save now removes the plaintext state file it replaces (best-effort: one that cannot be
   removed, a directory or a Windows lock, logs a warning naming it and the save still succeeds), and loading a
   plaintext state while `AUTH_STATE_ENCRYPTION_KEY` is set logs a warning.
