@@ -18,6 +18,13 @@ from ._utils import cron_store_errors, persona_file_errors, typed_route_errors
 logger = logging.getLogger(__name__)
 
 
+# The cap's own text names the job owner's live session ids (check_limit runs as the owner), and the trigger checks
+# only the job's webhook key, which another operator may hold: the trigger names no session (W2-14).
+CRON_TRIGGER_SESSION_LIMIT_DETAIL = (
+    "Session limit reached: the job's run could not start a session. Close a session or raise MAX_SESSIONS."
+)
+
+
 def create_operations_router(
     *,
     manager: Any,
@@ -192,8 +199,8 @@ def create_operations_router(
             raise HTTPException(status_code=409, detail=str(exc)) from None
         except BrowserUnreachableError:  # the run's session could not reach its browser (create_session)
             raise HTTPException(status_code=503, detail=BROWSER_UNREACHABLE_DETAIL) from None
-        except SessionLimitError as exc:  # the run's session, as POST /sessions answers it (CB1-8)
-            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except SessionLimitError:  # the run's session (CB1-8), with a detail that names none (W2-14)
+            raise HTTPException(status_code=409, detail=CRON_TRIGGER_SESSION_LIMIT_DETAIL) from None
         except AuthStateDecryptError as exc:
             # A fixed text that says what to check; it names no path.
             raise HTTPException(status_code=422, detail=str(exc)) from None

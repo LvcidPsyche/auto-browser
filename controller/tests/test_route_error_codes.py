@@ -357,13 +357,20 @@ def test_a_cron_trigger_that_meets_an_unreachable_browser_is_503_with_a_fixed_de
     assert response.json() == {"detail": "the browser could not be reached"}
 
 
-def test_a_cron_trigger_at_the_session_cap_is_409_as_post_sessions_is(client: TestClient) -> None:
-    # CB1-8: SessionLimitError (a RuntimeError) from the run's create_session was a bare 500 here.
-    error = SessionLimitError("MAX_SESSIONS=1 live sessions already exist; close one first")
+def test_a_cron_trigger_at_the_session_cap_is_409_with_a_fixed_detail_naming_no_session(client: TestClient) -> None:
+    # CB1-8: SessionLimitError (a RuntimeError) from the run's create_session was a bare 500 here. W2-14: its text
+    # names the job owner's live session ids (check_limit runs as the owner), and the trigger checks only the
+    # webhook key, so another operator holding the key read them: the trigger answers a fixed detail instead.
+    from app.routes.operations import CRON_TRIGGER_SESSION_LIMIT_DETAIL
+
+    error = SessionLimitError(
+        "Session limit reached: max_sessions=1. Active live session(s): sentinel-owner-session-id."
+    )
     with patch.object(main_module.cron_service, "trigger_via_webhook", new=AsyncMock(side_effect=error)):
         response = client.post("/crons/job-1/trigger", json={"webhook_key": "sentinel-key"})
     assert response.status_code == 409, response.text
-    assert response.json() == {"detail": str(error)}
+    assert response.json() == {"detail": CRON_TRIGGER_SESSION_LIMIT_DETAIL}
+    assert "sentinel-owner-session-id" not in response.text
 
 
 def test_a_cron_trigger_whose_auth_state_cannot_be_decrypted_is_422_as_post_sessions_is(client: TestClient) -> None:
