@@ -100,12 +100,15 @@ def confine_playwright_driver_environment() -> None:
 
 
 def confine_tesseract_environment() -> None:
-    """Give every Tesseract that pytesseract starts an allowlisted environment. Harmless to call again.
+    """Give the Tesseract launches that read pytesseract's environ global an allowlisted environment. Harmless to
+    call again.
 
     pytesseract has no way to set Tesseract's environment: it does `from os import environ` and passes that module
-    global as env= both in subprocess_args (every OCR call) and in get_tesseract_version, reading it each time. So
-    this replaces the global with the base names, TESSERACT_ENV_NAMES and TESSERACT_ENV_PREFIXES of this process's
-    environment. If an upgrade drops the global, this raises rather than let Tesseract start with the controller's
+    global as env= in two launches, subprocess_args (every OCR call: image_to_data and the rest) and
+    get_tesseract_version, reading it each time. So this replaces the global with the base names,
+    TESSERACT_ENV_NAMES and TESSERACT_ENV_PREFIXES of this process's environment. get_languages passes no env=, so
+    its Tesseract inherits the controller's real environment: the controller must not call it (a test fails if a
+    module under app/ names it). If an upgrade drops the global, this raises rather than let Tesseract start with the controller's
     secrets (the pin is exact, and CI runs the lifespan, so that goes red there first).
     """
     from .providers.base import allowlisted_environment

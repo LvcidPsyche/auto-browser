@@ -547,6 +547,22 @@ class EveryChildGetsAnEnvironmentTests(unittest.TestCase):
         self.assertGreaterEqual(found, 4)  # the CLIs, the uv verifier, the regex worker, autossh
         self.assertEqual(missing, [], "a child the controller starts must get an allowlisted env=")
 
+    def test_no_controller_module_names_pytesseract_get_languages(self) -> None:
+        # W7-7: pytesseract 0.3.13's get_languages starts Tesseract with subprocess.run and no env=, so it inherits
+        # the controller's real environment; confine_tesseract_environment's global reaches only subprocess_args
+        # and get_tesseract_version. A name or attribute in code counts, a docstring that mentions it does not.
+        named: list[str] = []
+        for path in sorted(_APP.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if (
+                    (isinstance(node, ast.Name) and node.id == "get_languages")
+                    or (isinstance(node, ast.Attribute) and node.attr == "get_languages")
+                    or (isinstance(node, ast.alias) and node.name.split(".")[-1] == "get_languages")
+                ):
+                    named.append(f"{path.relative_to(_CONTROLLER)}:{getattr(node, 'lineno', '?')}")
+        self.assertEqual(named, [], "get_languages starts Tesseract with the controller's whole environment")
+
 
 CONTRACT = TaskContract(
     id="uv-env",
