@@ -391,17 +391,18 @@ All notable changes to auto-browser are documented here.
   latin-1) or equal to an API credential refuses startup, as does a `TAKEOVER_TOKEN_FILE` in one of eight directories:
   `ARTIFACT_ROOT` (served under `/artifacts`), `UPLOAD_ROOT` (uploadable into a page) and `AUTH_ROOT` (its profiles
   exported as archives), all three swept by maintenance, and the five mounted into a container, found under the parent
-  of `ARTIFACT_ROOT` (so a relocated `ARTIFACT_ROOT` moves them too): `browser-profile` and `downloads` in browser-node
-  and `tunnels` and `ssh` in reverse-ssh, which compose mounts, and `browser-sessions`, whose `<id>` directory the
-  controller binds into each isolated session. The other data roots are read by fixed names, so a token there reaches
-  no agent, and one of them set to `/data` itself (`MESH_IDENTITY_DIR`, say) leaves the default `/data/takeover-token`
-  usable. Spaces and tabs around the presented header are not part of the token. A token file that cannot be read or
-  written, holds an unusable token, or stays readable beyond its owner because its mode cannot be tightened (a
-  root-owned 0444 mount) logs a warning naming that cause and the endpoint answers 503. A token file (either one) on a
+  of `ARTIFACT_ROOT` (so a relocated `ARTIFACT_ROOT` moves them too): `browser-profile` and `downloads` in
+  browser-node and `tunnels` and `ssh` in reverse-ssh, which compose mounts, and `browser-sessions`, whose `<id>`
+  directory the controller binds into each isolated session. The other data roots are read by fixed names, so a token
+  there reaches no agent, and one of them set to `/data` itself (`MESH_IDENTITY_DIR`, say) leaves the default
+  `/data/takeover-token` usable. Spaces and tabs around the presented header are not part of the token. A token file
+  that cannot be read or written, holds an unusable token, or stays readable beyond its owner because its mode cannot
+  be tightened (a root-owned 0444 mount), or cannot be opened for that mode check (it vanished or turned unreadable
+  since the read), logs a warning naming that cause and the endpoint answers 503. A token file (either one) on a
   filesystem that accepts a chmod and keeps the mode (a repository on a Windows drive under Docker Desktop, some FUSE
   or SMB mounts) is used with a warning that the mode did not hold, instead of a log line saying it was changed to
-  0600, and one the controller has just generated there gets that warning on the same start, not only the next.
-  A symlinked token file (a Kubernetes secret mount, 0644 by default), whether `TAKEOVER_TOKEN_FILE` or
+  0600, and one the controller has just generated there gets that warning on the same start, not only the next. A
+  symlinked token file (a Kubernetes secret mount, 0644 by default), whether `TAKEOVER_TOKEN_FILE` or
   `API_TOKEN_FILE`, is used as it is, its target's mode untouched, with one warning naming the path and mode when that
   target is readable beyond its owner, or that its mode could not be checked when the target cannot be opened for that
   check (it vanished or turned unreadable since the read). The takeover token stops only agents without file access to

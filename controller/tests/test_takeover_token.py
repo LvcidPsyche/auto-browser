@@ -156,6 +156,50 @@ def test_w2_23_a_file_whose_mode_cannot_be_tightened_fails_closed_and_says_why(
     assert SENTINEL not in caplog.text
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the mode check is POSIX only: Windows applies the folder's ACL")
+def test_w8_6_a_file_that_cannot_be_opened_for_its_mode_check_says_so_and_the_link_is_503(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A regular file that vanished or turned unreadable between the read and the O_NOFOLLOW open was reported with
+    # the fchmod failure's message, "its mode could not be tightened".
+    import errno
+    from unittest.mock import Mock, patch
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app import api_token
+    from app.routes.sessions import create_sessions_router
+
+    path = tmp_path / "takeover-token"
+    path.write_text(SENTINEL + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    settings = make_settings(tmp_path)
+    real_open = os.open
+
+    def open_refusing_the_mode_check(file, flags, *args, **kwargs):
+        if flags & os.O_NOFOLLOW:
+            raise PermissionError(errno.EACCES, "Permission denied", str(file))
+        return real_open(file, flags, *args, **kwargs)
+
+    with (
+        patch.object(api_token.os, "open", side_effect=open_refusing_the_mode_check),
+        caplog.at_level(logging.WARNING, logger=LOGGER),
+    ):
+        ensure_takeover_token(settings)
+    assert settings.takeover_token is None
+    assert f"TAKEOVER_TOKEN_FILE {path} could not be opened for its mode check" in caplog.text
+    assert "Permission denied" in caplog.text
+    assert "mode could not be tightened" not in caplog.text
+    assert SENTINEL not in caplog.text
+
+    app = FastAPI()
+    app.include_router(create_sessions_router(manager=Mock(settings=settings)))
+    with TestClient(app) as client:
+        response = client.get("/sessions/abc123/takeover-link", headers={"X-Takeover-Token": SENTINEL})
+    assert response.status_code == 503, response.text
+
+
 def test_a_file_token_equal_to_an_api_credential_is_not_used(tmp_path: Path) -> None:
     (tmp_path / "takeover-token").write_text(SENTINEL + "\n", encoding="utf-8")
     settings = make_settings(tmp_path, API_BEARER_TOKEN=SENTINEL)

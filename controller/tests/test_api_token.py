@@ -578,8 +578,10 @@ def test_any_other_open_error_is_raised(tmp_path: Path, monkeypatch: pytest.Monk
 
     monkeypatch.setattr(api_token, "os", _posix_stand_in(open=refuse))
 
-    with pytest.raises(PermissionError):
+    # W8-6: raised as an OSError of _restrict_mode's own, which keeps the errno, so a takeover token file can name it.
+    with pytest.raises(OSError) as raised:
         api_token._restrict_mode(tmp_path / "api-token")
+    assert raised.value.errno == errno.EACCES
 
 
 @pytest.mark.parametrize(

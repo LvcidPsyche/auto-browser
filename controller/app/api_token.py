@@ -166,6 +166,15 @@ def ensure_takeover_token(settings: Any) -> None:
         else:
             try:
                 _restrict_mode(path, name="TAKEOVER_TOKEN_FILE")
+            except _ModeCheckOpenError as exc:
+                logger.warning(
+                    "No takeover token: TAKEOVER_TOKEN_FILE %s could not be opened for its mode check (%s). Make it a "
+                    "file the controller's user can read, or set TAKEOVER_TOKEN; "
+                    "GET /sessions/{session_id}/takeover-link answers 503 until then and a restart.",
+                    path,
+                    exc,
+                )
+                return
             except OSError as exc:
                 # It reads fine but stays readable beyond its owner (a root-owned 0444 secret mount): fail closed,
                 # naming that cause rather than the read-or-write one below (W2-23).
@@ -338,6 +347,10 @@ def _generate_token_file(path: Path) -> str:
     return token
 
 
+class _ModeCheckOpenError(OSError):
+    """_restrict_mode could not open the file for its mode check (other than through a symlink)."""
+
+
 def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
     """Take group and other permissions off a token file. POSIX only: Windows applies the folder's ACL.
 
@@ -355,7 +368,8 @@ def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
         if exc.errno == errno.ELOOP:
             _warn_about_an_open_link_target(path, name)
             return
-        raise
+        # The file vanished or turned unreadable since it was read (W8-6): not a mode that could not be tightened.
+        raise _ModeCheckOpenError(exc.errno, exc.strerror, exc.filename) from exc
     try:
         mode = stat.S_IMODE(os.fstat(fd).st_mode)
         if not mode & _GROUP_OR_OTHER_BITS:
