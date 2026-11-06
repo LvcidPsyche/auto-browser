@@ -10,10 +10,12 @@ All notable changes to auto-browser are documented here.
   hands over a link without the noVNC password. The person opens the full link from the dashboard ("Open noVNC") or
   prints it with `scripts/takeover_link.sh <session_id>`; a link opened without the password makes noVNC ask for it.
   Both need the new takeover token (`TAKEOVER_TOKEN`, else the token the controller generates in
-  `TAKEOVER_TOKEN_FILE`, `./data/takeover-token` with the shipped compose): the dashboard asks for it once per tab,
-  and `scripts/takeover_link.sh` reads it from `TAKEOVER_TOKEN` (the shell or `.env`) or `data/takeover-token`. A
-  script or integration that took the password from `POST /sessions`, `GET /sessions/{id}`, `GET /remote-access` or
-  the takeover result now calls `GET /sessions/{session_id}/takeover-link` with the `X-Takeover-Token` header.
+  `TAKEOVER_TOKEN_FILE`, `./data/takeover-token` with the shipped compose): the dashboard asks for it on the first
+  "Open noVNC" of an isolated session in a tab, before it opens the window (Chrome and Edge show no prompt in a tab
+  that is not in front), and again on the click after a refusal, and `scripts/takeover_link.sh` reads it from
+  `TAKEOVER_TOKEN` (the shell or `.env`) or `data/takeover-token`. A script or integration that took the password from
+  `POST /sessions`, `GET /sessions/{id}`, `GET /remote-access` or the takeover result now calls
+  `GET /sessions/{session_id}/takeover-link` with the `X-Takeover-Token` header.
 - **Upgrade note:** a `provider_model` outside the model-name pattern (below) is refused with a 422, and an agent
   job saved before the upgrade with such a model fails when it runs and cannot be resumed.
 - **Upgrade note:** the Codex host bridge now gives Codex only an allowlisted environment: a Codex setup that needs

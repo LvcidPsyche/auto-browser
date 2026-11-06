@@ -326,7 +326,17 @@ def test_the_session_lists_takeover_link_opens_the_takeover_link_endpoints_url()
     listed = "http://novnc.test/vnc.html?autoconnect=true"
     stub = Stub(
         {
-            ("GET", "/sessions"): (200, [{"id": "sess-abcdef123456", "status": "active", "takeover_url": listed}]),
+            ("GET", "/sessions"): (
+                200,
+                [
+                    {
+                        "id": "sess-abcdef123456",
+                        "status": "active",
+                        "takeover_url": listed,
+                        "isolation": {"mode": "docker_ephemeral"},
+                    }
+                ],
+            ),
             ("GET", "/sessions/sess-abcdef123456/takeover-link"): (
                 200,
                 {"session_id": "sess-abcdef123456", "takeover_url": listed + "#password=Ab3dEf7h"},

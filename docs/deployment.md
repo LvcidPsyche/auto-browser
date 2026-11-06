@@ -349,7 +349,9 @@ What per-session networks do not change:
   controller generates in `TAKEOVER_TOKEN_FILE` (`./data/takeover-token` with the shipped
   compose) on first start. Without it the answer is 403 (audited as
   `takeover_link_refused`), before any 404, and 503 when the controller could not load or
-  write one (its startup log says why). The dashboard asks for it once per tab;
+  write one (its startup log says why). The dashboard asks for it on the first "Open
+  noVNC" of an isolated session in a tab, before it opens the noVNC window, and again
+  on the click after a 403 (a shared browser-node session's link needs no token);
   `scripts/takeover_link.sh` reads it from `TAKEOVER_TOKEN` or `data/takeover-token`. An
   agent that can read files on the controller's host can still read
   `data/takeover-token` (or the session container's own copy of the password). That link carries

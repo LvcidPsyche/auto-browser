@@ -301,8 +301,8 @@ class DashboardAndScriptTests(unittest.TestCase):
         self.assertIn("TAKEOVER_TOKEN", asker)
         self.assertIn("data/takeover-token", asker)
         self.assertIn("const TAKEOVER_TOKEN_KEY = 'ab_takeover_token';", _DASHBOARD_HTML)
-        # A 403 clears the stored token and asks again.
-        self.assertIn("r.status === 403", opener)
+        # A 403 clears the stored token; the next click asks again (W2-18: never a prompt behind the popup).
+        self.assertIn("err.status === 403", opener)
         self.assertIn("sessionStorage.removeItem(TAKEOVER_TOKEN_KEY)", opener)
 
     def test_the_login_wizard_opens_its_takeover_window_through_open_takeover(self) -> None:
