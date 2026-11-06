@@ -81,7 +81,13 @@ class CodexEnvironmentTests(unittest.TestCase):
 
         env = self._env_given(bridge.CodexBridgeService(codex_path="codex"), environ)
 
-        self.assertEqual(env, {"Path": "C:\\bin", "LC_ALL": "C", "lc_ctype": "C", "codex_home": "/c"})
+        expected = {"Path": "C:\\bin", "LC_ALL": "C", "lc_ctype": "C", "codex_home": "/c"}
+        if os.name == "nt":
+            # W2-28: Windows' os.environ upper-cases every name it stores, so the case cannot be kept there; the
+            # names still have to pass as cli_environment compares them.
+            env = {name.upper(): value for name, value in env.items()}
+            expected = {name.upper(): value for name, value in expected.items()}
+        self.assertEqual(env, expected)
 
     def test_codex_ca_certificate_passes(self) -> None:
         # W2-30: Codex's own CA bundle variable, read before SSL_CERT_FILE; a path, not a secret.
