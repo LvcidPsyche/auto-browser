@@ -171,6 +171,17 @@ class PassEnvOptionTests(unittest.TestCase):
         text = " ".join(captured.getvalue().split())
         self.assertIn("--pass-env NAME", text)
         self.assertIn("every command Codex runs", text)
+        # W2-34: it named part of the allowlist; it now names the constants and points to the full list.
+        self.assertIn("CODEX_BASE_ENV_NAMES", text)
+        self.assertIn("docs/deployment.md", text)
+
+    def test_w2_34_the_deployment_docs_list_every_name_that_passes(self) -> None:
+        docs = _SCRIPT.parents[1] / "docs" / "deployment.md"
+        text = docs.read_text(encoding="utf-8")
+        start = text.index("The bridge starts Codex with an allowlisted environment")
+        section = text[start : start + 3000]
+        for name in (*bridge.CODEX_BASE_ENV_NAMES, *bridge.CODEX_PROVIDER_ENV_NAMES, "LC_"):
+            self.assertIn(f"`{name}", section, name)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -539,10 +539,22 @@ That keeps `codex` on the host, reuses the host login state directly, and lets t
 The controller now health-checks that socket and the bridge kills stuck host `codex` jobs after 55 seconds by default.
 Treat the socket as a host-trust boundary: any local process that can connect to it can trigger host-side `codex exec`.
 The bridge starts Codex with an allowlisted environment, not the whole environment of the shell it was started
-from: the names the controller gives its own provider CLIs (`PATH`, `HOME`, the locale (`LANG`, `LC_*`), the temp
-directories, the proxy and CA settings, and a few Windows basics) plus `OPENAI_API_KEY`, `OPENAI_BASE_URL`,
-`CODEX_HOME`, `CODEX_API_KEY` and `CODEX_CA_CERTIFICATE` (the PEM bundle Codex reads before `SSL_CERT_FILE`). A Codex setup that needs another variable passes it with `--pass-env NAME`
-(repeatable; a name must be letters, digits and underscores, not starting with a digit). That passes the
+from. Exactly these pass, matched case-insensitively (the bridge's copies of the controller's `CLI_BASE_ENV_NAMES`,
+`CLI_BASE_ENV_PREFIXES` and the OpenAI adapter's `cli_env_names`, which a test keeps equal):
+
+- `CODEX_BASE_ENV_NAMES`: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`, `TZ`, `TERM`,
+  `NO_COLOR`, `CI`, the temp directories `TMPDIR`, `TEMP` and `TMP`, the proxy settings `HTTP_PROXY`,
+  `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`, the CA settings `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+  `REQUESTS_CA_BUNDLE` and `NODE_EXTRA_CA_CERTS`, and the Windows names `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`,
+  `APPDATA`, `LOCALAPPDATA`, `SYSTEMROOT`, `SYSTEMDRIVE`, `WINDIR`, `COMSPEC` and `PATHEXT`;
+- `CODEX_BASE_ENV_PREFIXES`: any name starting `LC_`;
+- `CODEX_PROVIDER_ENV_NAMES`: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME`, `CODEX_API_KEY` and
+  `CODEX_CA_CERTIFICATE` (the PEM bundle Codex reads before `SSL_CERT_FILE`).
+
+A Codex setup that needs another variable passes it with `--pass-env NAME` (repeatable; a name must be letters,
+digits and underscores, not starting with a digit), for example `DBUS_SESSION_BUS_ADDRESS` or `XDG_RUNTIME_DIR`
+for a sign-in kept in the desktop keyring where the bus is not at its default path, or `VOLTA_HOME`,
+`ASDF_DATA_DIR` or `MISE_DATA_DIR` for a node version manager with a non-default home. That passes the
 variable's value to Codex and to every command Codex runs, so pass only what Codex needs.
 
 In `APP_ENV=production`, startup now fails fast if:

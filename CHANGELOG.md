@@ -20,7 +20,10 @@ All notable changes to auto-browser are documented here.
   job saved before the upgrade with such a model fails when it runs and cannot be resumed.
 - **Upgrade note:** the Codex host bridge now gives Codex only an allowlisted environment: a Codex setup that needs
   another variable from the bridge's shell passes it with `--pass-env NAME` (repeatable), which hands that value to
-  Codex and to every command Codex runs.
+  Codex and to every command Codex runs. `docs/deployment.md` lists every name that already passes. Two setups that
+  need it: a sign-in kept in the desktop keyring (`DBUS_SESSION_BUS_ADDRESS` or `XDG_RUNTIME_DIR`, where the bus is
+  not at its default path) and a node version manager with a non-default home (`VOLTA_HOME`, `ASDF_DATA_DIR`,
+  `MISE_DATA_DIR`).
 - **Upgrade note:** for a controller that reads `ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS` itself (outside compose:
   `docker-compose.isolation.yml` passes `${ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS:-127.0.0.1}`, so there an empty value
   reached the controller as `127.0.0.1`), an empty value, which under `ISOLATED_TUNNEL_ACCESS_MODE=unsafe-public`

@@ -604,9 +604,9 @@ def parse_args() -> argparse.Namespace:
         default=[],
         metavar="NAME",
         help=(
-            "Also pass environment variable NAME to Codex (repeatable). Codex otherwise gets only an allowlist "
-            "(PATH, HOME, locale, proxy and CA settings, OPENAI_API_KEY, OPENAI_BASE_URL, CODEX_HOME, CODEX_API_KEY). "
-            "Its value reaches Codex and every command Codex runs."
+            "Also pass environment variable NAME to Codex (repeatable). Codex otherwise gets only an allowlist: "
+            "CODEX_BASE_ENV_NAMES, any LC_* name and CODEX_PROVIDER_ENV_NAMES, each listed in docs/deployment.md "
+            "(Codex host bridge). Its value reaches Codex and every command Codex runs."
         ),
     )
     return parser.parse_args()
