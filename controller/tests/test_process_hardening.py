@@ -176,6 +176,132 @@ class LifespanHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(order, ["dumpable", "credential"])
 
 
+def _transport_module():
+    import playwright._impl._transport as transport
+
+    return transport
+
+
+class _UnwrappedDriverEnv:
+    """The original get_driver_env in place for the block; whatever was there before is put back after."""
+
+    def __enter__(self):
+        self.transport = _transport_module()
+        self.found = self.transport.get_driver_env
+        self.transport.get_driver_env = getattr(self.found, "__wrapped__", self.found)
+        return self.transport
+
+    def __exit__(self, *_exc) -> None:
+        self.transport.get_driver_env = self.found
+
+
+class PlaywrightDriverEnvironmentTests(unittest.TestCase):
+    def test_the_confined_driver_env_drops_secrets_and_keeps_what_the_driver_needs(self) -> None:
+        from app.process_hardening import confine_playwright_driver_environment
+
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "LC_ALL": "C",
+            "PLAYWRIGHT_BROWSERS_PATH": "/opt/pw-browsers",
+            "DISPLAY": ":0",
+            SENTINEL_NAME: SENTINEL,
+        }
+        with _UnwrappedDriverEnv() as transport, patch.dict(os.environ, env, clear=True):
+            original = transport.get_driver_env
+            confine_playwright_driver_environment()
+            confined = transport.get_driver_env
+            confine_playwright_driver_environment()
+            self.assertIs(transport.get_driver_env, confined, "a second call must not wrap again")
+            self.assertIs(confined.__wrapped__, original)
+            driver_env = confined()
+        self.assertNotIn(SENTINEL_NAME, driver_env)
+        for name in ("PATH", "LC_ALL", "PLAYWRIGHT_BROWSERS_PATH", "DISPLAY", "PW_LANG_NAME"):
+            self.assertIn(name, driver_env)
+
+    def test_a_playwright_without_get_driver_env_fails_closed(self) -> None:
+        from app.process_hardening import confine_playwright_driver_environment
+
+        stub = type(sys)("playwright._impl._transport")
+        with patch.dict(sys.modules, {"playwright._impl._transport": stub}):
+            with self.assertRaises(RuntimeError) as raised:
+                confine_playwright_driver_environment()
+        self.assertIn("Playwright", str(raised.exception))
+
+
+def _driver_pids() -> list[int]:
+    """This process's children whose command line holds run-driver (Playwright's node driver)."""
+    pids = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat_line = (entry / "stat").read_text()
+            cmdline = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if int(stat_line.rsplit(")", 1)[1].split()[1]) == os.getpid() and b"run-driver" in cmdline:
+            pids.append(int(entry.name))
+    return pids
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "/proc/PID/environ is Linux-only")
+class PlaywrightDriverEnvironmentProbeTests(unittest.IsolatedAsyncioTestCase):
+    async def _driver_environ(self) -> dict[str, str]:
+        """Start Playwright, read its driver's /proc/PID/environ as name -> 'found'/'missing' for two names, stop."""
+        from playwright.async_api import async_playwright
+
+        playwright = await async_playwright().start()
+        try:
+            pids = _driver_pids()
+            self.assertEqual(len(pids), 1, "expected one Playwright driver child")
+            data = Path(f"/proc/{pids[0]}/environ").read_bytes()
+        finally:
+            await playwright.stop()
+        names = {item.split(b"=", 1)[0].decode() for item in data.split(b"\0") if item}
+        return {name: ("found" if name in names else "missing") for name in (SENTINEL_NAME, "PW_LANG_NAME")}
+
+    async def test_the_driver_holds_no_controller_secret_once_confined(self) -> None:
+        from app.process_hardening import confine_playwright_driver_environment
+
+        with _UnwrappedDriverEnv(), patch.dict(os.environ, {SENTINEL_NAME: SENTINEL}):
+            before = await self._driver_environ()
+            self.assertEqual(before[SENTINEL_NAME], "found", "the probe must see the sentinel unconfined")
+            confine_playwright_driver_environment()
+            after = await self._driver_environ()
+        self.assertEqual(after, {SENTINEL_NAME: "missing", "PW_LANG_NAME": "found"})
+
+
+class BrowserManagerConfinesTheDriverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_startup_confines_the_driver_environment_before_starting_playwright(self) -> None:
+        from app import browser_manager
+        from app.browser_manager import BrowserManager
+
+        from .test_browser_manager_create_session import _settings
+
+        order: list[str] = []
+
+        class _Stop(Exception):
+            pass
+
+        class _Starter:
+            async def start(self):
+                order.append("start")
+                raise _Stop
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            manager = BrowserManager(_settings(Path(tempdir)))
+            with (
+                patch(
+                    "app.process_hardening.confine_playwright_driver_environment",
+                    side_effect=lambda: order.append("confine"),
+                ),
+                patch.object(browser_manager, "async_playwright", return_value=_Starter()),
+            ):
+                with self.assertRaises(_Stop):
+                    await manager.startup()
+        self.assertEqual(order, ["confine", "start"])
+
+
 def _spawn_calls(tree: ast.AST):
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):

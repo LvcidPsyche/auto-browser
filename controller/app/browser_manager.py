@@ -14,6 +14,7 @@ from urllib.parse import urlparse, urlsplit
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
+from . import process_hardening
 from .action_errors import RefusedPageError, SessionNotFoundError
 from .action_records import drain_unfinished_records
 from .actions import BrowserActionPipeline
@@ -325,6 +326,7 @@ class BrowserManager:
         await self.session_store.mark_all_active_interrupted()
         if self.memory is not None:
             await self.memory.startup()
+        process_hardening.confine_playwright_driver_environment()
         self.playwright = await async_playwright().start()
         await self.tunnel_broker.startup()
         await self.runtime_provisioner.startup()
