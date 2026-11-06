@@ -640,6 +640,40 @@ class BridgeProcessGroupTests(unittest.TestCase):
                 time.sleep(0.05)
             self.assertFalse(_is_running(child), "the grandchild outlived the timeout")
 
+    def test_the_shutdown_sweep_reaches_the_group_of_a_leader_that_already_exited(self) -> None:
+        # R-10: poll() reaped the exited leader, so the sweep skipped the group its children still held the pipes of.
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "child.pid"
+            fake = Path(tmp) / "fake-codex"
+            fake.write_text(f"#!/bin/sh\nsleep 60 &\necho $! > {pid_file}\nexit 0\n", encoding="utf-8")
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            service = bridge.CodexBridgeService(codex_path="codex", request_timeout_seconds=60.0)
+            worker = threading.Thread(target=service._run_codex, args=([str(fake)], b""), daemon=True)
+            worker.start()
+            deadline = time.monotonic() + 10
+            leader = None
+            while time.monotonic() < deadline:
+                with service._in_flight_lock:
+                    leader = next(iter(service._in_flight), None)
+                if leader is not None and pid_file.exists() and pid_file.read_text().strip():
+                    if not _is_running(leader.pid):  # exited, not reaped: a zombie
+                        break
+                time.sleep(0.05)
+            self.assertIsNotNone(leader)
+            self.assertFalse(_is_running(leader.pid), "the fake codex leader never exited")
+            child = int(pid_file.read_text().strip())
+
+            self.assertEqual(service.kill_in_flight(), 1)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and _is_running(child):
+                time.sleep(0.05)
+            alive = _is_running(child)
+            if alive:  # pragma: no cover - leave nothing behind when the assertion fails
+                os.kill(child, 9)
+            self.assertFalse(alive, "the child of the exited leader outlived the sweep")
+            worker.join(5)
+            self.assertFalse(worker.is_alive())
+
 
 def _is_running(pid: int) -> bool:
     try:

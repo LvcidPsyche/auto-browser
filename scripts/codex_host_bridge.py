@@ -282,17 +282,20 @@ class CodexBridgeService:
         the handler threads that wait on it are daemon threads: without this it would run on, orphaned. From here on
         the service starts no codex: a decision that gets that far is refused with 503.
 
-        Each run is polled just before its signal, and one already reaped is skipped: its pid may belong to another
-        process by then. That narrows the race with the handler thread's communicate() to the moment between the poll
-        and the signal; it does not close it.
+        A run whose returncode is set just before its signal is skipped: only the handler thread's communicate() sets
+        it, by reaping codex, and the pid may belong to another process by then. The sweep never polls: a poll would
+        reap a leader that exited while its children still hold its pipes, and the group would go unsignalled. An
+        exited leader nobody has reaped stays a zombie, so its pid and process group stay reserved and killpg reaches
+        the children. The race with communicate() narrows to the moment between that check and the signal; it is not
+        closed.
         """
         with self._in_flight_lock:
             self._stopping = True  # no codex starts after this sweep
             in_flight = list(self._in_flight.items())
         signalled = 0
         for process, grouped in in_flight:
-            if process.poll() is not None:
-                continue  # reaped since the list was taken (or by this poll)
+            if process.returncode is not None:
+                continue  # reaped by the handler's communicate() since the list was taken
             _kill_process_tree(process, grouped)
             signalled += 1
         return signalled
