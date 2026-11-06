@@ -218,7 +218,10 @@ All notable changes to auto-browser are documented here.
   does not free it), and `/mesh/receive` refuses an envelope stamped before the controller started or within one
   window after it, since the last process accepted envelopes stamped up to one window ahead (so one it could have run
   cannot be replayed after a restart). The cost is about one window, 30 s by default, of `403` refusals after each
-  start, which a sender's retry passes.
+  start, which a sender's retry passes. The timestamp window is checked against that same high-water mark, not the
+  raw clock, so an envelope whose nonce has expired cannot come back inside the window when the clock steps back.
+  The cost: after a large backward step of the clock, fresh envelopes are refused until it catches up (for about the
+  step minus the window).
 - The Codex host bridge reads a request body within 60 seconds in total (a client trickling a byte every 29 s used
   to hold a handler thread indefinitely; it now gets 408) and the request line and headers within 30 seconds in total
   (past that it closes the connection; a request line cut off that way no longer ends in a broken-pipe traceback),

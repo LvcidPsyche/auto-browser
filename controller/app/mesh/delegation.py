@@ -83,6 +83,12 @@ class _NonceCache:
         self._high_water = float("-inf")
         self._lock = Lock()
 
+    @property
+    def high_water(self) -> float:
+        """The highest wall time a check has seen (-inf before the first): the clock the nonces expire by."""
+        with self._lock:
+            return self._high_water
+
     def check_and_record(self, nonce: str, *, stamped_at: Optional[float] = None, now: Optional[float] = None) -> bool:
         """
         Returns True (first time seen → OK) or False (replay detected → reject).
@@ -235,8 +241,11 @@ class DelegationManager:
         if peer is None:
             raise DelegationRejected(f"Unknown sender node_id={sender_id!r}")
 
-        # Timestamp window — check before signature verification (cheap, fails fast)
-        now = time.time()
+        # Timestamp window — check before signature verification (cheap, fails fast). Against the clock the nonces
+        # expire by, which never moves back (CB3-1): read raw, a clock stepped back put an envelope whose nonce had
+        # already expired inside the window again, and it ran twice. The cost: after a large backward step, fresh
+        # envelopes are refused until the wall clock catches up (about the step minus the window).
+        now = max(time.time(), self._nonce_cache.high_water)
         age = now - envelope.timestamp
         # "not <=", not ">": a NaN timestamp compares false both ways and would pass ">".
         if not abs(age) <= self._timestamp_window:

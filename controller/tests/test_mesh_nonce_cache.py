@@ -167,6 +167,29 @@ class RestartReplayTests(unittest.TestCase):
 
             self.assertEqual(mesh.runs, 1)
 
+    def test_cb3_1_a_replay_after_its_nonce_was_evicted_and_the_clock_stepped_back_is_refused(self) -> None:
+        # The window check read the raw clock while the nonce cache expires by its high-water mark: once a later
+        # envelope moved the mark past A's stamp + window and evicted A's nonce, a clock stepped back into A's window
+        # let A run a second time (1.15.0's size-only cache refused it). Both checks now read one clock that never
+        # moves back.
+        with tempfile.TemporaryDirectory() as tmp:
+            mesh = _Mesh(Path(tmp))
+            manager = mesh.manager(timestamp_window=30)
+            manager._started_at = 4000
+            first, later = mesh.envelope(5000), mesh.envelope(5040)
+            with patch.object(delegation.time, "time", return_value=5000):
+                self.assertEqual(asyncio.run(manager.receive_inbound(first)).status, "ok")
+            with patch.object(delegation.time, "time", return_value=5040):
+                self.assertEqual(asyncio.run(manager.receive_inbound(later)).status, "ok")
+            with patch.object(delegation.time, "time", return_value=5025):
+                with self.assertRaises(DelegationRejected):
+                    asyncio.run(manager.receive_inbound(first))
+                # The cost: a fresh envelope stamped by the stepped-back clock is refused too, until it catches up.
+                with self.assertRaises(DelegationRejected):
+                    asyncio.run(manager.receive_inbound(mesh.envelope(5005)))
+
+            self.assertEqual(mesh.runs, 2)
+
     def test_an_envelope_stamped_before_this_process_started_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

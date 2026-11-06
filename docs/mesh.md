@@ -114,7 +114,10 @@ peer's grants decide whether the request may run. A request that fails one of th
 
 Replay protection: the timestamp window bounds how long an envelope can be replayed, and a seen nonce is
 remembered until the latest time this node's clock has shown is more than one window past the envelope's
-timestamp, then forgotten (a clock stepped back does not free it early). Nonces are kept in memory only, so a
+timestamp, then forgotten (a clock stepped back does not free it early). The timestamp window is checked
+against that same latest time, never the raw clock, so a clock stepped back cannot put an envelope whose nonce is
+already forgotten inside the window again. The cost: after a large backward step of the clock, fresh envelopes are
+refused (`403`) until the clock catches up, for about the step minus the window. Nonces are kept in memory only, so a
 restart empties them; to close that gap the controller also refuses any envelope stamped before the moment it
 started or within one window after it (`403`). The last process accepted envelopes stamped up to one window
 ahead of its clock, so this covers everything it could have run. The cost is about one window
