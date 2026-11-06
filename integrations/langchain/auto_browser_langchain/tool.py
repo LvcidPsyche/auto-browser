@@ -7,7 +7,7 @@ from typing import Any, Optional, Type, Union
 
 import httpx
 
-from .auth import resolve_bearer_token
+from .auth import loopback_transport, resolve_bearer_token
 
 try:
     from langchain_core.tools import BaseTool
@@ -85,7 +85,8 @@ class AutoBrowserTool(BaseTool):
         if self.operator_id:
             headers["X-Operator-Id"] = self.operator_id
         payload = {"name": action, "arguments": arguments or {}}
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout) as client:
+        transport = loopback_transport(self.base_url, asynchronous=True)
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout, transport=transport) as client:
             response = await client.post("/mcp/tools/call", json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
@@ -109,7 +110,8 @@ class AutoBrowserTool(BaseTool):
             headers["Authorization"] = f"Bearer {bearer_token}"
         if operator_id:
             headers["X-Operator-Id"] = operator_id
-        with httpx.Client(base_url=base_url, timeout=10) as client:
+        transport = loopback_transport(base_url, asynchronous=False)
+        with httpx.Client(base_url=base_url, timeout=10, transport=transport) as client:
             response = client.get("/mcp/tools", headers=headers)
             response.raise_for_status()
             return response.json()

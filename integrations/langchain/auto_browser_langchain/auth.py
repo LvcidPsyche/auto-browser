@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 from pathlib import Path
+
+import httpx
 
 
 def resolve_bearer_token(bearer_token: str | None, token_file: str | os.PathLike[str] | None) -> str | None:
@@ -32,3 +35,21 @@ def resolve_bearer_token(bearer_token: str | None, token_file: str | os.PathLike
     if not token:
         raise ValueError(f"token_file {token_file} is empty")
     return token
+
+
+def loopback_transport(base_url: str, *, asynchronous: bool) -> httpx.BaseTransport | httpx.AsyncBaseTransport | None:
+    """A transport of its own for a loopback controller, else None (W7-1).
+
+    httpx follows HTTP_PROXY, http_proxy and ALL_PROXY to a loopback host unless NO_PROXY names it, so the
+    Authorization header for a local controller went to the proxy. A client given a transport uses no
+    environment proxy, and the transport still reads SSL_CERT_FILE and SSL_CERT_DIR (trust_env=False would drop
+    those too). Any other host keeps the proxy the environment names.
+    """
+    host = httpx.URL(base_url).host
+    try:
+        loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = False
+    if not loopback:
+        return None
+    return httpx.AsyncHTTPTransport() if asynchronous else httpx.HTTPTransport()

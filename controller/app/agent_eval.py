@@ -6,6 +6,9 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+
+from .auth_policy import is_loopback_host
 
 
 @dataclass(frozen=True)
@@ -353,8 +356,15 @@ class ControllerEvalClient:
             headers=self.headers,
             method="POST",
         )
+        # A loopback controller is reached past any environment proxy (W7-1): urllib skips a proxy for localhost
+        # only when no_proxy names it, so the Authorization header went to the proxy. Any other host still uses the
+        # proxy the environment names.
+        if is_loopback_host(urlsplit(request.full_url).hostname or ""):
+            urlopen = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+        else:
+            urlopen = urllib.request.urlopen
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with urlopen(request, timeout=120) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")

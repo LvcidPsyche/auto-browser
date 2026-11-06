@@ -502,12 +502,16 @@ All notable changes to auto-browser are documented here.
   body with no `Content-Length` (however small: a peer must send one, and the `413` says so), a larger one, or one
   that streams past the cap gets `413` before anything is parsed, and an uninitialised mesh answers `503` before the
   body is read. A malformed envelope is `422` as before.
-- The MCP stdio bridges (the `auto-browser-mcp` console script of the `auto-browser-client` package and the
-  controller's `app.mcp_stdio`) no longer send the bearer token to an environment proxy when the controller is local:
-  urllib skips a proxy for `localhost` only when `no_proxy` names it, so with `http_proxy` set and no `NO_PROXY` the
-  `Authorization` header went to the proxy. A base URL whose host is `localhost` or a loopback IP literal is now
-  reached directly; any other host still goes through the proxy the environment names. `scripts/check_sandbox_gate.py`,
-  which only talks to `127.0.0.1`, never uses a proxy.
+- The Python senders of the bearer token no longer send it to an environment proxy when the controller is local: the
+  MCP stdio bridges (the `auto-browser-mcp` console script of the `auto-browser-client` package and the controller's
+  `app.mcp_stdio`), `AutoBrowserClient`'s sync and async HTTP clients (its `stream_events` is not yet covered), the
+  LangChain package's `AutoBrowserTool` (calls and `list_tools`) and `AutoBrowserNode`, and
+  `scripts/agent_eval.py --execute`. urllib skips a proxy for `localhost` only when `no_proxy` names it, and httpx
+  follows `HTTP_PROXY`, `http_proxy` and `ALL_PROXY` to a loopback host the same way, so with a proxy set and no
+  `NO_PROXY` the `Authorization` header went to the proxy. A base URL whose host is `localhost` or a loopback IP
+  literal is now reached directly (the httpx clients get a transport of their own, which still reads `SSL_CERT_FILE`
+  and `SSL_CERT_DIR`); any other host still goes through the proxy the environment names.
+  `scripts/check_sandbox_gate.py`, which only talks to `127.0.0.1`, never uses a proxy.
 
 ## [1.15.0] — 2026-11-05
 

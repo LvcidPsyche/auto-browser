@@ -27,6 +27,8 @@ from urllib.parse import quote
 
 import httpx
 
+from .mcp_bridge import _is_loopback_host
+
 
 def _seg(value: str) -> str:
     """Percent-encode one URL path segment.
@@ -111,14 +113,14 @@ class AutoBrowserClient:
     # ── Context managers ─────────────────────────────────────────────────────
 
     def __enter__(self) -> "AutoBrowserClient":
-        self._sync_client = httpx.Client(base_url=self.base_url, headers=self._headers, timeout=self._timeout)
+        self._sync_client = self._new_sync_client()
         return self
 
     def __exit__(self, *_) -> None:
         self.close()
 
     async def __aenter__(self) -> "AutoBrowserClient":
-        self._async_client = httpx.AsyncClient(base_url=self.base_url, headers=self._headers, timeout=self._timeout)
+        self._async_client = self._new_async_client()
         return self
 
     async def __aexit__(self, *_) -> None:
@@ -138,14 +140,31 @@ class AutoBrowserClient:
 
     # ── Internal helpers ─────────────────────────────────────────────────────
 
+    def _direct(self) -> bool:
+        # A loopback controller is reached past any environment proxy (W7-1): httpx follows HTTP_PROXY, http_proxy
+        # and ALL_PROXY to it unless NO_PROXY names it, and the Authorization header went to the proxy. A client
+        # given a transport uses no environment proxy, and the transport still reads SSL_CERT_FILE and SSL_CERT_DIR
+        # (trust_env=False would drop those too). Any other host still uses the proxy the environment names.
+        return _is_loopback_host(httpx.URL(self.base_url).host)
+
+    def _new_sync_client(self) -> httpx.Client:
+        transport = httpx.HTTPTransport() if self._direct() else None
+        return httpx.Client(base_url=self.base_url, headers=self._headers, timeout=self._timeout, transport=transport)
+
+    def _new_async_client(self) -> httpx.AsyncClient:
+        transport = httpx.AsyncHTTPTransport() if self._direct() else None
+        return httpx.AsyncClient(
+            base_url=self.base_url, headers=self._headers, timeout=self._timeout, transport=transport
+        )
+
     def _client(self) -> httpx.Client:
         if self._sync_client is None:
-            self._sync_client = httpx.Client(base_url=self.base_url, headers=self._headers, timeout=self._timeout)
+            self._sync_client = self._new_sync_client()
         return self._sync_client
 
     def _aclient(self) -> httpx.AsyncClient:
         if self._async_client is None:
-            self._async_client = httpx.AsyncClient(base_url=self.base_url, headers=self._headers, timeout=self._timeout)
+            self._async_client = self._new_async_client()
         return self._async_client
 
     @staticmethod
