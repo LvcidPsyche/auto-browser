@@ -664,9 +664,12 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertLogs("app.session_tunnel", "WARNING") as logs:
                     release = asyncio.create_task(broker.release(tunnel))
                     done, _ = await asyncio.wait({release}, timeout=10)
+                    finished = release in done
                     process.exit.set()  # whatever happened, nothing is left waiting on the fake
-                    self.assertIn(release, done, "release() did not end while autossh never exited after the kill")
+                    # W12-6: awaited before the assertion, so a failure leaves no release pending and no log handle
+                    # open (on Windows the temporary directory's removal failed on it, a second error).
                     await release
+                    self.assertTrue(finished, "release() did not end while autossh never exited after the kill")
 
             self.assertTrue(tunnel.process.killed)
             self.assertTrue(

@@ -67,10 +67,15 @@ def _serve(host: str = "127.0.0.1") -> ThreadingHTTPServer:
 
 class AgentEvalProxyTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.proxy, self.controller = _serve(), _serve()
-        for server in (self.proxy, self.controller):
-            self.addCleanup(server.server_close)
-            self.addCleanup(server.shutdown)
+        # Each server's cleanup registered as it starts (W12-7): a second bind that fails leaves no listener behind.
+        self.proxy = self._started()
+        self.controller = self._started()
+
+    def _started(self) -> ThreadingHTTPServer:
+        server = _serve()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server
 
     def _post_raw(self, base_url: str) -> subprocess.CompletedProcess:
         proxy_url = f"http://127.0.0.1:{self.proxy.server_port}"
