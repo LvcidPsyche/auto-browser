@@ -279,7 +279,8 @@ def _read_takeover_token_file(path: Path) -> str | None:
 def file_to_read(settings: Any) -> Path | None:
     """The token file ensure_api_credential reads (or generates), or None when it reads none: an environment token
     (API_BEARER_TOKEN, API_BEARER_TOKENS), or tokenless loopback (loopback bind, not production, the setting on).
-    entrypoint.sh asks this through `python -m app.api_token --file-to-read`, so its pre-check follows the controller."""
+    entrypoint.sh asks this through `python -m app.api_token --file-to-read`, so its pre-check follows the
+    controller."""
     if credentials_for(settings):
         return None
     loopback = resolve_bind_scope(settings) == BIND_SCOPE_LOOPBACK
