@@ -7,8 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
+from app.browser.services import sessions as sessions_module
 from app.session_ownership import acting_as
 from tests.test_auth_state_ownership import ALICE, build_manager
 
@@ -107,6 +108,44 @@ class CloseTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn(self.session_id, self.manager.sessions)
         self.assertEqual(self.closed_audit()["status"], "ok")
+        self.receipt.assert_awaited_once()
+        record = await self.manager.session_store.get(self.session_id)
+        self.assertEqual(record.status, "closed")
+        self.assertFalse(self.session.lock.locked())
+
+    async def test_a_cancel_during_the_busy_paths_second_lock_wait_still_records_the_close(self) -> None:
+        # R-14: the lock waits and the busy path's context close ran in the caller, outside the protected task, so a
+        # cancel there left a registered session with a closed context and no record, audit event or receipt.
+        holding, let_go = asyncio.Event(), asyncio.Event()
+
+        async def hold_the_lock() -> None:
+            async with self.session.lock:
+                holding.set()
+                await let_go.wait()
+
+        context_closed = asyncio.Event()
+        real_context_close = self.session.context.close
+
+        async def close_context() -> None:
+            context_closed.set()
+            await real_context_close()
+
+        self.session.context.close = close_context
+        holder = asyncio.create_task(hold_the_lock())
+        await holding.wait()
+        with patch.object(sessions_module, "CLOSE_LOCK_WAIT_SECONDS", 0.5), acting_as(ALICE):
+            task = asyncio.create_task(self.manager.close_session(self.session_id))
+            await asyncio.wait_for(context_closed.wait(), timeout=5)
+            await asyncio.sleep(0.05)  # in the second lock wait
+            task.cancel()
+            await asyncio.sleep(0)
+            let_go.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        await holder
+
+        self.assertNotIn(self.session_id, self.manager.sessions)
+        self.closed_audit()  # exactly one session_closed event
         self.receipt.assert_awaited_once()
         record = await self.manager.session_store.get(self.session_id)
         self.assertEqual(record.status, "closed")

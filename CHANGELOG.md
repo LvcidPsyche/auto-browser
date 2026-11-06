@@ -68,11 +68,12 @@ All notable changes to auto-browser are documented here.
   `browser.fork_session` take optional `proxy_persona`, `user_agent` and `protection_mode`; a value named there wins.
   A source created with a raw request proxy (`proxy_server`) stored no proxy to carry, so its fork gets the default.
 - `close_session` (`DELETE /sessions/{id}`) now runs its whole teardown as one task that a cancelled caller does not
-  stop (a dropped client, shutdown used to leave the audit event, the witness receipt and the stored record
-  unwritten), and says when a step failed: the answer's `closed` is true only when every step succeeded,
-  `failed_steps` names the ones that did not (trace stop, tunnel release, browser context, isolated browser, isolated
-  runtime), and the `session_closed` audit event and witness receipt carry status `partial` and those names instead of
-  `ok`. The session is unregistered either way, so its `MAX_SESSIONS` slot is free.
+  stop, from the wait for a busy session's lock (which can close its browser context) to the last record (a dropped
+  client, shutdown used to leave the audit event, the witness receipt and the stored record unwritten), and says
+  when a step failed: the answer's `closed` is true only when every step succeeded, `failed_steps` names the ones
+  that did not (trace stop, tunnel release, browser context, isolated browser, isolated runtime), and the
+  `session_closed` audit event and witness receipt carry status `partial` and those names instead of `ok`. The
+  session is unregistered either way, so its `MAX_SESSIONS` slot is free.
 - A late background write of a session's record can no longer put a closed session back to active: the active write is
   skipped when the session is no longer registered (checked before and after the summary is built), and the session
   store refuses to overwrite a stored `closed` record with any other status (an `interrupted` write replaced it and

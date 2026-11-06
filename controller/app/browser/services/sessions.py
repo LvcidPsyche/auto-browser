@@ -199,16 +199,22 @@ class BrowserSessionService(SessionCreation):
         the answer is True only when every teardown step succeeded; ``failed_steps`` names the ones that did not.
         """
         session = await self.manager.get_session(session_id)
+        # One protected unit from here: the busy path of _lock_for_close already closes the context, so a cancel
+        # between it and _close_locked left a registered session with no close record, audit event or receipt.
+        # Every wait inside is bounded.
+        return await self._run_to_completion(self._close(session, reason))
+
+    async def _close(self, session: "BrowserSession", reason: str | None) -> dict[str, Any]:
         locked = await self._lock_for_close(session)
         try:
-            if self.manager.sessions.get(session_id) is not session:
+            if self.manager.sessions.get(session.id) is not session:
                 # Closed by a concurrent call while this one waited for the
                 # lock. Carrying on released the tunnel and runtime twice and
                 # wrote a second close to the audit log and witness chain.
-                raise SessionNotFoundError(session_id, status="closed")
+                raise SessionNotFoundError(session.id, status="closed")
             # A cancelled action's record may still be finishing behind it: the close is recorded after it.
             await wait_for_pending_record(session)
-            return await self._run_to_completion(self._close_locked(session, reason))
+            return await self._close_locked(session, reason)
         finally:
             if locked:
                 session.lock.release()
