@@ -265,8 +265,11 @@ All notable changes to auto-browser are documented here.
   the highest wall time seen is more than `MESH_TIMESTAMP_WINDOW` past its envelope's timestamp (a clock stepped back
   does not free it), and `/mesh/receive` refuses an envelope stamped before the controller started or within one
   window after it, since the last process accepted envelopes stamped up to one window ahead (so one it could have run
-  cannot be replayed after a restart, unless the clock stepped back by more than a window across it: the high-water
-  mark below is kept in memory only). The cost is about one window, 30 s by default, of `403` refusals after each
+  cannot be replayed after a restart, unless the clock stepped back across it: by more than a window, any envelope the
+  last process ran; by less, those it accepted stamped ahead of its clock; the high-water mark below is kept in memory
+  only). After lowering `MESH_TIMESTAMP_WINDOW`, a restart is safe once the old window has passed since the last
+  envelope was accepted (or restart first with the old value and lower it after that long): the check assumes the last
+  process ran with no larger window. The cost is about one window, 30 s by default, of `403` refusals after each
   start, which a sender's retry passes. The timestamp window is checked against that same high-water mark, not the raw
   clock, so an envelope whose nonce has expired cannot come back inside the window when the clock steps back; a peer's
   reply to this node's own delegation request is checked the same way, and a reply whose request id is not the
@@ -414,12 +417,15 @@ All notable changes to auto-browser are documented here.
   (`xn--bcher-kva.example`), as 1.15.0 did when it posted by name; a lookup that cannot encode the name counts as one
   that did not resolve. When a proxy from the environment applies to the URL (`HTTPS_PROXY`, `HTTP_PROXY` or
   `ALL_PROXY`, less `NO_PROXY`), the answers are still checked, but the request goes by name through the proxy, which
-  then owns resolution. Logs carry only `scheme://host`, never the path, query or credentials: httpx's own INFO line
-  for each request, which named the whole URL, is no longer logged (the controller sets the `httpx` logger to WARNING,
-  or to `LOG_LEVEL` if higher). A name that does not resolve is not posted to. A cloud metadata address stays refused,
-  even with `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS` on, when an IPv6 answer spells it: mapped, translated,
-  compatible, NAT64 (the well-known `64:ff9b::/96` and the local-use `64:ff9b:1::/48`, its last 32 bits), 6to4, or
-  Teredo (the client address).
+  then owns resolution: the proxy resolves the name, so its own rules decide which addresses the request can reach.
+  Logs carry only `scheme://host`, never the path, query or credentials: httpx's own INFO line for each request, which
+  named the whole URL, is no longer logged (the controller sets the `httpx` logger to WARNING, or to `LOG_LEVEL` if
+  higher). A name that does not resolve is not posted to. A cloud metadata address stays refused, even with
+  `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS` on, when an IPv6 answer spells it: mapped, translated, compatible, NAT64
+  (the well-known `64:ff9b::/96` and the local-use `64:ff9b:1::/48`, its last 32 bits), 6to4, or Teredo (the client
+  address). That check fails closed: a local-use NAT64 target whose address another RFC 6052 layout than the
+  operator's reads as `169.254.x.x` is refused even with the opt-in (behind a prefix such as `64:ff9b:1:a9fe::/64`,
+  every address).
 - A harness `run_id` must now look like the ids the harness generates (letters, digits, `.`, `_`, `-`; no leading
   dot), at the tool boundary and again in the run store, so an id cannot name a directory outside the harness runs
   root.
