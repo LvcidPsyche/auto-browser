@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from app.models import SessionRecord
 from app.session_ownership import acting_as
@@ -68,6 +69,35 @@ class PersistAfterCloseTests(unittest.IsolatedAsyncioTestCase):
         await self.manager._persist_session(self.session, status="active")
 
         self.assertEqual(await self.stored_status(), "closed")
+
+    async def test_b_fix_4_persist_attempts_no_active_write_after_the_close(self) -> None:
+        # The store's closed refusal masked persist()'s own registration checks: with upsert recording every write,
+        # an active write must not even be attempted.
+        with acting_as(ALICE):
+            await self.manager.close_session(self.session_id)
+        upsert = AsyncMock()
+        self.manager.session_store.upsert = upsert  # type: ignore[method-assign]
+
+        await self.manager._persist_session(self.session, status="active")
+
+        upsert.assert_not_awaited()
+
+    async def test_b_fix_4_persist_attempts_no_active_write_when_the_close_races_the_summary(self) -> None:
+        real_summary = self.manager._session_summary
+        upsert = AsyncMock(wraps=self.manager.session_store.upsert)
+
+        async def summary_then_close(session, **kwargs):
+            summary = await real_summary(session, **kwargs)
+            self.manager._session_summary = real_summary  # type: ignore[method-assign]
+            with acting_as(ALICE):
+                await self.manager.close_session(self.session_id)
+            self.manager.session_store.upsert = upsert  # type: ignore[method-assign]  # from here on, recorded
+            return summary
+
+        self.manager._session_summary = summary_then_close  # type: ignore[method-assign]
+        await self.manager._persist_session(self.session, status="active")
+
+        self.assertEqual([call.args[0].status for call in upsert.await_args_list], [])
 
     async def test_a_live_session_still_persists_active(self) -> None:
         self.session.last_action = "click"
