@@ -411,10 +411,11 @@ All notable changes to auto-browser are documented here.
   reported as unreadable, a `stale_after_seconds` that is not a positive finite number (one too large for a float
   included) falls back to `REMOTE_ACCESS_STALE_AFTER_SECONDS` instead of raising, an `updated_at` that cannot be read
   or converted to UTC (`0001-01-01T00:00:00+01:00`) falls back to the file's modification time, and a public URL that
-  is not a string is ignored. The `tunnel` block passes the file's fields only as validated: the
-  `stale_after_seconds` in use, `updated_at` only when it reads as a timestamp (then in UTC), and `status` and a
-  public URL only when they are a non-empty string, so a NaN, list or object there no longer makes the REST report a
-  500.
+  is not a string is ignored. The `tunnel` block passes the file's fields only as validated: the `stale_after_seconds`
+  in use, `updated_at` only when it reads as a timestamp (then in UTC), and `status` and a public URL only when they
+  are a non-empty string, so a `status` or `updated_at` that is NaN, a list or an object is now left out of the block
+  (before, `GET /remote-access` and `browser.get_remote_access` passed a list or object on as it was and wrote a NaN
+  as `null`; neither answered a 500).
 - `POST /mesh/receive`, which takes no bearer token, now reads at most `MESH_MAX_BODY_BYTES` (new, default 1 MiB): a
   body with no `Content-Length`, a larger one, or one that streams past the cap gets `413` before anything is parsed,
   and an uninitialised mesh answers `503` before the body is read. A malformed envelope is `422` as before.
