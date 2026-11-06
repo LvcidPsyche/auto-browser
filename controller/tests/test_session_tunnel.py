@@ -630,6 +630,44 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(tunnel.info_path.exists())
             self.assertFalse(tunnel.log_path.exists())
 
+    async def test_w10_7_release_ends_when_autossh_never_exits_after_the_kill(self) -> None:
+        """The wait after kill() was unbounded: an autossh stuck in uninterruptible I/O held a failed create's
+        rollback or a close for ever, and release() finishes its teardown under a cancel by design."""
+
+        class StuckProcess(FakeProcess):
+            async def wait(self) -> int:
+                await asyncio.Event().wait()
+                return 0  # pragma: no cover - never reached
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def kill(self) -> None:
+                self.killed = True
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            tunnel = broker._build_tunnel("session-1", remote_port=16181, local_host="h", local_port=6080)
+            tunnel.process = StuckProcess()
+            tunnel.stderr_handle = tunnel.log_path.open("ab")
+            broker._tunnels["session-1"] = tunnel
+            broker._allocated_ports.add(16181)
+
+            with patch("app.session_tunnel._PROCESS_EXIT_WAIT_SECONDS", 0.05):
+                with self.assertLogs("app.session_tunnel", "WARNING") as logs:
+                    await asyncio.wait_for(broker.release(tunnel), timeout=10)
+
+            self.assertTrue(tunnel.process.killed)
+            self.assertTrue(
+                any("session-1" in line and str(tunnel.process.pid) in line for line in logs.output), logs.output
+            )
+            self.assertEqual(tunnel.status, "inactive")
+            self.assertEqual(broker._allocated_ports, set())
+            self.assertEqual(broker._tunnels, {})
+            self.assertIsNone(tunnel.stderr_handle)
+            self.assertFalse(tunnel.info_path.exists())
+            self.assertFalse(tunnel.log_path.exists())
+
     async def test_failed_metadata_write_does_not_leak_the_log_handle(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             broker = await self._started_broker(Path(tempdir))

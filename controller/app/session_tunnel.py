@@ -62,6 +62,8 @@ logger = logging.getLogger(__name__)
 _REMOTE_PORT_UNAVAILABLE = ("remote port forwarding failed", "address already in use")
 # The error session users see when the cause is autossh's own output (which can name the bastion, its user, key paths).
 TUNNEL_EXITED_CODE = "autossh_exited"
+# How long a release waits for autossh to exit after terminate(), and again after kill().
+_PROCESS_EXIT_WAIT_SECONDS = 5.0
 # Errors set by the broker itself: short codes, safe to show as they are.
 _TUNNEL_ERROR_CODES = frozenset({"autossh_start_failed", "provision_cancelled", "provision_failed"})
 
@@ -304,10 +306,19 @@ class IsolatedSessionTunnelBroker:
         if process is not None and process.returncode is None:
             process.terminate()
             try:
-                await asyncio.wait_for(process.wait(), timeout=5)
+                await asyncio.wait_for(process.wait(), timeout=_PROCESS_EXIT_WAIT_SECONDS)
             except asyncio.TimeoutError:
                 process.kill()
-                await process.wait()
+                # Bounded too (W10-7): an autossh stuck in uninterruptible I/O never exits after SIGKILL, and
+                # release() finishes this teardown under a cancel, so an unbounded wait held its caller for ever.
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=_PROCESS_EXIT_WAIT_SECONDS)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "autossh (pid %s) of session %s's tunnel did not exit after SIGKILL; tearing down without it",
+                        process.pid,
+                        tunnel.session_id,
+                    )
 
         tunnel.status = "inactive"
         tunnel.error = None

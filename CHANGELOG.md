@@ -149,6 +149,10 @@ All notable changes to auto-browser are documented here.
   steps are (30 seconds, then logged and passed), so a context close or runtime release that never returns no longer
   holds the rest of the rollback or its caller. When the controller itself stops, every task left is cancelled, the
   rollback's own included, and the next start marks such a record `interrupted`.
+- Releasing an isolated session's tunnel (a close, or a failed create's rollback) now waits at most 5 seconds for
+  autossh to exit after `SIGKILL`, as it already did after the terminate, then logs a warning naming the session and
+  the process id and finishes the teardown: an autossh that never exited (stuck in uninterruptible I/O) held the close
+  or the rollback for ever.
 - A shadow browse that fails or is cancelled after its Chromium started no longer leaves that browser running, the
   shadow's artifact, auth and upload directories on disk, or an `active` record in the session store (a record
   already written is marked `closed` with reason `create_failed`, as a failed `create_session`'s is): the rollback
