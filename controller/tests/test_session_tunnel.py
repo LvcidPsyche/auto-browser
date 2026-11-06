@@ -207,6 +207,31 @@ class SessionTunnelBrokerTests(unittest.IsolatedAsyncioTestCase):
         await broker.startup()
         return broker
 
+    async def test_an_autossh_that_exits_for_another_reason_keeps_its_tail_as_the_error(self) -> None:
+        # B-fix-2 (NAV-21): the early exit raised inside the try whose handler wrote provision_failed over the tail.
+        async def failing_exec(*args, **kwargs):
+            kwargs["stderr"].write(b"Permission denied (publickey).\n")
+            kwargs["stderr"].flush()
+            return FakeProcess(returncode=255)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            broker = await self._started_broker(Path(tempdir))
+            written: list[tuple[str, str | None]] = []
+            real_write = broker._write_metadata
+
+            def record(tunnel, *, status):
+                written.append((status, tunnel.error))
+                return real_write(tunnel, status=status)
+
+            broker._write_metadata = record  # type: ignore[method-assign]
+            with patch("app.session_tunnel.asyncio.create_subprocess_exec", new=failing_exec):
+                with self.assertRaisesRegex(RuntimeError, "Permission denied"):
+                    await broker.provision("session-1", local_port=6080)
+
+            self.assertEqual(written[-1][0], "error")
+            self.assertIn("Permission denied (publickey)", written[-1][1])
+            self.assertNotIn(("error", "provision_failed"), written)
+
     async def test_concurrent_provisions_wait_out_the_startup_grace_together(self) -> None:
         """The lock was held across the grace-period sleep, so N provisions took N
         grace periods. Counts how many are inside the grace sleep at once instead

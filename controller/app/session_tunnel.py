@@ -152,7 +152,9 @@ class IsolatedSessionTunnelBroker:
                         last_error = tunnel.error
                         if not any(text in last_error.lower() for text in _REMOTE_PORT_UNAVAILABLE):
                             # Not the port: the next one would fail the same way after another grace period.
-                            raise RuntimeError(last_error)
+                            # Out of the loop, which raises last_error: raised here, the handler below wrote
+                            # provision_failed over the tail.
+                            break
                         continue
 
                     self._write_metadata(tunnel, status="active")
