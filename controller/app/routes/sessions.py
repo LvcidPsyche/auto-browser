@@ -7,7 +7,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-from ..action_errors import ErrorPageSourceError, RefusedPageError
+from ..action_errors import RefusedPageError
 from ..api_token import TAKEOVER_LINK_UNAVAILABLE_DETAIL
 from ..auth_state import AuthStateDecryptError
 from ..browser.services.session_creation import SessionLimitError
@@ -331,9 +331,6 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                 raise HTTPException(status_code=409, detail=str(exc)) from None
             except RuntimeError:
                 raise HTTPException(status_code=409, detail="Conflict") from None
-            except ErrorPageSourceError as exc:
-                # Its fixed text says what to pass instead, and names no host or path.
-                raise HTTPException(status_code=400, detail=str(exc)) from None
             except RefusedPageError:
                 # The page checks' refusal, as the page routes answer it. Every other PermissionError
                 # (create_session's URL check among them) stays the generic one.

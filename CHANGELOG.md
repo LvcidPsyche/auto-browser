@@ -76,7 +76,8 @@ All notable changes to auto-browser are documented here.
   cleanup) now stops startup with an error naming the setting. Zero and negative retention still mean "keep forever".
 - Forking a session that sits on `about:blank` or a `data:` page no longer fails with a 403, nor one on Chrome's error
   page (`chrome-error://chromewebdata/`) with a 400 asking for `start_url`: with no `start_url` named, the fork
-  starts on a blank page with the source's cookies, and the audit records no start URL.
+  starts on a blank page with the source's cookies, and the audit records no start URL. Such a page is still judged
+  first, so one refused while another tab of the session is refused answers the 403, an error page as about:blank.
 - A forked session now keeps the source's proxy persona, User-Agent, protection mode and TOTP secret and hosts, as
   `create_session` would have set them (the fork used the deployment defaults before). `POST /sessions/{id}/fork` and
   `browser.fork_session` take optional `proxy_persona`, `user_agent` and `protection_mode`; a value named there wins.

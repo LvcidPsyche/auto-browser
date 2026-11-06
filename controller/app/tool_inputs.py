@@ -389,8 +389,8 @@ class ForkSessionInput(SessionIdInput):
         default=None,
         max_length=2000,
         description=(
-            "Omitted: the source session's current URL; refused while that is Chrome's error page for a stopped "
-            "or failed navigation."
+            "Omitted: the source session's current URL, or a blank page when that is no URL to open (blank, "
+            "data:, Chrome's error page for a stopped or failed navigation)."
         ),
     )
     proxy_persona: str | None = Field(

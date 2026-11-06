@@ -12,12 +12,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.action_errors import ERROR_PAGE_SOURCE_FORK, ERROR_PAGE_SOURCE_SHADOW, ErrorPageSourceError, RefusedPageError
+from app.action_errors import ERROR_PAGE_SOURCE_SHADOW, ErrorPageSourceError, RefusedPageError
 from app.models import McpToolCallRequest
 from app.routes._utils import OFF_LIST_PAGE_DETAIL
 from app.routes.session_diagnostics import create_session_diagnostics_router
@@ -59,6 +59,24 @@ class ForkFromAnErrorPageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(forked["forked_from"], self.source_id)
         self.assertIsNone(create.await_args.kwargs["start_url"])
         self.export.assert_awaited_once()
+
+    async def test_b3_6_an_unrefused_error_page_is_judged_and_still_forks(self) -> None:
+        judge = Mock(wraps=self.manager._assert_page_allowed)
+        self.manager._assert_page_allowed = judge  # type: ignore[method-assign]
+        with acting_as(ALICE):
+            forked = await self.manager.fork_session(self.source_id)
+
+        self.assertEqual(forked["forked_from"], self.source_id)
+        judge.assert_called_once()
+
+    async def test_b3_6_a_refused_error_page_is_not_forked(self) -> None:
+        # Skipping the page judgment for an error page let a provenance-refused one fork while about:blank in the
+        # same state answered 403.
+        self.manager.page_provenance.refused_by_another_page = Mock(return_value=True)  # type: ignore[method-assign]
+        with acting_as(ALICE), self.assertRaises(RefusedPageError):
+            await self.manager.fork_session(self.source_id)
+
+        self.export.assert_not_awaited()
 
     async def test_a_start_url_the_caller_names_still_forks(self) -> None:
         with acting_as(ALICE):
@@ -117,12 +135,6 @@ class RestSurfaceTests(unittest.TestCase):
         app.include_router(create_session_diagnostics_router(manager=manager, settings=SimpleNamespace()))
         return TestClient(app)
 
-    def test_fork_answers_400_saying_what_to_pass(self) -> None:
-        with self.client(ErrorPageSourceError(ERROR_PAGE_SOURCE_FORK)) as client:
-            response = client.post("/sessions/s1/fork")
-
-        self.assertEqual((response.status_code, response.json()["detail"]), (400, ERROR_PAGE_SOURCE_FORK))
-
     def test_shadow_browse_answers_400_saying_what_to_do(self) -> None:
         with self.client(ErrorPageSourceError(ERROR_PAGE_SOURCE_SHADOW)) as client:
             response = client.post("/sessions/s1/shadow-browse")
@@ -156,7 +168,7 @@ class RestSurfaceTests(unittest.TestCase):
 
 
 class McpSurfaceTests(unittest.IsolatedAsyncioTestCase):
-    """browser.fork_session and browser.enable_shadow_browse pass the fixed text through (7c)."""
+    """browser.enable_shadow_browse passes the fixed text through (7c); fork no longer raises it (B-fix-0)."""
 
     def gateway(self, error: Exception) -> McpToolGateway:
         manager = MagicMock()
@@ -165,20 +177,6 @@ class McpSurfaceTests(unittest.IsolatedAsyncioTestCase):
         manager.ensure_session_accessible = AsyncMock()
         manager.require_governed_approval = AsyncMock(return_value=None)  # shadow browse is governed
         return McpToolGateway(manager=manager, orchestrator=MagicMock(), job_queue=MagicMock(), tool_profile="full")
-
-    async def test_fork_session_without_a_start_url_says_what_to_pass(self) -> None:
-        gateway = self.gateway(ErrorPageSourceError(ERROR_PAGE_SOURCE_FORK))
-
-        response = await gateway.call_tool(
-            McpToolCallRequest(name="browser.fork_session", arguments={"session_id": "s1"})
-        )
-
-        self.assertTrue(response.isError)
-        self.assertEqual(response.content[0].text, ERROR_PAGE_SOURCE_FORK)
-        self.assertEqual(response.structuredContent, {"error": ERROR_PAGE_SOURCE_FORK})
-        gateway.manager.fork_session.assert_awaited_once_with(
-            "s1", name=None, start_url=None, proxy_persona=None, user_agent=None, protection_mode=None
-        )
 
     async def test_enable_shadow_browse_says_what_to_do(self) -> None:
         gateway = self.gateway(ErrorPageSourceError(ERROR_PAGE_SOURCE_SHADOW))

@@ -816,8 +816,9 @@ can choose that URL. Forking a session onto its page's URL (no `start_url`) refu
 refused, and over REST answers the same 403 as observe (any other refusal of a fork answers the generic
 403); a fork onto a `start_url` the caller names is judged by that URL, as a new session is. Shadow browse
 from a refused page answers that 403 too, and from a `data:` or `blob:` page the generic one. From Chrome's
-error page, a fork without `start_url` and a shadow browse answer 400 with a fixed text: the page is Chrome's
-error page for a navigation that was stopped or failed; fork's says to pass `start_url`.
+error page, a fork without `start_url` starts on a blank page with the source's cookies, as from
+`about:blank` (a refused error page still answers the 403), and a shadow browse answers 400 with a fixed text:
+the page is Chrome's error page for a navigation that was stopped or failed.
 
 ### Other tabs while one is refused
 

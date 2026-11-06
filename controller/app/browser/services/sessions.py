@@ -444,8 +444,9 @@ class BrowserSessionService(SessionCreation):
             # cookies, and a refused page chose that URL, so a refused page is not forked onto it and the
             # URL is recorded as shown. A start_url the caller names is judged by create_session.
             # Chrome's error page is no URL to open either: like about:blank and data:, it forks with no start URL
-            # (the scheme fallback below), so it is not judged as a page here.
-            if start_url is None and not _on_error_page(session.page):
+            # (the scheme fallback below). It is still judged as a page: chrome-error is an allowed scheme, so an
+            # unrefused one passes, and a refused one answers 403 as about:blank in the same state does (B3-6).
+            if start_url is None:
                 self.manager._assert_page_allowed(session)
             current_url = self.manager._shown_url(session.page)
             # Export through AuthStateManager so the state file is encrypted
