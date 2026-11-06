@@ -523,6 +523,12 @@ OPENAI_HOST_BRIDGE_SOCKET=/data/host-bridge/codex.sock
 That keeps `codex` on the host, reuses the host login state directly, and lets the container call it over a shared Unix socket, so the controller image does not need the CLIs for OpenAI.
 The controller now health-checks that socket and the bridge kills stuck host `codex` jobs after 55 seconds by default.
 Treat the socket as a host-trust boundary: any local process that can connect to it can trigger host-side `codex exec`.
+The bridge starts Codex with an allowlisted environment, not the whole environment of the shell it was started
+from: the names the controller gives its own provider CLIs (`PATH`, `HOME`, the locale (`LANG`, `LC_*`), the temp
+directories, the proxy and CA settings, and a few Windows basics) plus `OPENAI_API_KEY`, `OPENAI_BASE_URL`,
+`CODEX_HOME` and `CODEX_API_KEY`. A Codex setup that needs another variable passes it with `--pass-env NAME`
+(repeatable; a name must be letters, digits and underscores, not starting with a digit). That passes the
+variable's value to Codex and to every command Codex runs, so pass only what Codex needs.
 
 In `APP_ENV=production`, startup now fails fast if:
 - any `*_AUTH_MODE` value is not one of its supported modes (`api`, `cli`, and for OpenAI also `host_bridge`)

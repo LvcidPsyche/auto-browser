@@ -16,6 +16,9 @@ All notable changes to auto-browser are documented here.
   the takeover result now calls `GET /sessions/{session_id}/takeover-link` with the `X-Takeover-Token` header.
 - **Upgrade note:** a `provider_model` outside the model-name pattern (below) is refused with a 422, and an agent
   job saved before the upgrade with such a model fails when it runs and cannot be resumed.
+- **Upgrade note:** the Codex host bridge now gives Codex only an allowlisted environment: a Codex setup that needs
+  another variable from the bridge's shell passes it with `--pass-env NAME` (repeatable), which hands that value to
+  Codex and to every command Codex runs.
 - **Upgrade note:** an empty `ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS`, which under
   `ISOLATED_TUNNEL_ACCESS_MODE=unsafe-public` bound the tunnel on every interface of the bastion, now stops startup:
   set `0.0.0.0` for that instead.
@@ -259,6 +262,11 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- The Codex host bridge (`scripts/codex_host_bridge.py`, `OPENAI_AUTH_MODE=host_bridge`) now starts Codex with an
+  allowlisted environment instead of the whole environment of the shell it was started from, which Codex, and every
+  command a prompt-injected Codex ran under `-s read-only`, received: the names the controller gives its own provider
+  CLIs (`CLI_BASE_ENV_NAMES` and `LC_*`) plus `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME` and `CODEX_API_KEY`,
+  and each name given with the new `--pass-env NAME` (a bad name exits 2 at startup).
 - The model no longer receives an isolated session's noVNC password. `create_session`, `get_session`,
   `get_remote_access` and `request_human_takeover` (REST and MCP) carried it in the takeover URL's fragment, which
   over MCP reached the calling model, and with a session tunnel up the URL was the public one. No MCP tool result,

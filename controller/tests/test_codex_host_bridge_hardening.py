@@ -674,7 +674,7 @@ class BridgeShutdownTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             socket_path = Path(tmp) / "codex.sock"
             args = SimpleNamespace(
-                socket_path=str(socket_path), codex_path="codex", model=None, request_timeout_seconds=55.0
+                socket_path=str(socket_path), codex_path="codex", model=None, request_timeout_seconds=55.0, pass_env=[]
             )
             with (
                 patch.dict(os.environ, {}, clear=True),

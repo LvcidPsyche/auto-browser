@@ -23,6 +23,36 @@ from pathlib import Path
 from socketserver import ThreadingMixIn, UnixStreamServer
 from typing import Any
 
+# The environment Codex gets: what the controller gives its own provider CLIs (cli_environment in
+# controller/app/providers/base.py: CLI_BASE_ENV_NAMES, CLI_BASE_ENV_PREFIXES, and the OpenAI adapter's
+# cli_env_names), plus each --pass-env NAME. Copies, since the bridge runs with the host's Python and cannot import
+# the controller; controller/tests/test_codex_host_bridge_env.py keeps them equal. Without it Codex, and every
+# command a prompt-injected Codex runs, got the whole environment of the shell the bridge was started from.
+CODEX_BASE_ENV_NAMES = frozenset(
+    {
+        "PATH", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT",
+        "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "LANG", "LANGUAGE", "TZ",
+        "TERM", "NO_COLOR", "CI", "USER", "LOGNAME", "SHELL",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+    }
+)  # fmt: skip
+CODEX_BASE_ENV_PREFIXES = ("LC_",)
+CODEX_PROVIDER_ENV_NAMES = ("OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME", "CODEX_API_KEY")
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def codex_environment(pass_env: tuple[str, ...] | list[str] = ()) -> dict[str, str]:
+    """The allowlisted part of this process's environment, compared as cli_environment compares it (upper-cased)."""
+    allowed = CODEX_BASE_ENV_NAMES | {name.upper() for name in CODEX_PROVIDER_ENV_NAMES}
+    allowed |= {name.upper() for name in pass_env}
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() in allowed or name.upper().startswith(CODEX_BASE_ENV_PREFIXES)
+    }
+
+
 SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 DEFAULT_SANDBOX_MODE = "read-only"
 
@@ -137,7 +167,10 @@ class CodexBridgeService:
         sandbox_mode: str = DEFAULT_SANDBOX_MODE,
         allow_host_exec: bool = False,
         max_concurrent_decisions: int = MAX_CONCURRENT_DECISIONS,
+        pass_env: tuple[str, ...] = (),
     ) -> None:
+        # Extra environment variable names Codex gets beside the allowlist (--pass-env).
+        self.pass_env = tuple(pass_env)
         self._decision_slots = threading.BoundedSemaphore(max(1, max_concurrent_decisions))
         # Codex runs still going, and whether each leads its own process group: kill_in_flight stops them. Codex is
         # started under the lock and the sweep sets _stopping under it, so a run is either swept or never started.
@@ -264,6 +297,7 @@ class CodexBridgeService:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=grouped,
+                env=codex_environment(self.pass_env),
             )
             self._in_flight[process] = grouped
         try:
@@ -535,11 +569,30 @@ def parse_args() -> argparse.Namespace:
         default=55.0,
         help="Kill host codex requests that exceed this timeout",
     )
+    parser.add_argument(
+        "--pass-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "Also pass environment variable NAME to Codex (repeatable). Codex otherwise gets only an allowlist "
+            "(PATH, HOME, locale, proxy and CA settings, OPENAI_API_KEY, OPENAI_BASE_URL, CODEX_HOME, CODEX_API_KEY). "
+            "Its value reaches Codex and every command Codex runs."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    for name in args.pass_env:
+        if not _ENV_NAME_RE.fullmatch(name) or not name.isascii():
+            print(
+                f"[codex-bridge] --pass-env {name!r} is not an environment variable name: use letters, digits and "
+                "underscores, not starting with a digit",
+                file=sys.stderr,
+            )
+            return 2
     try:
         socket_path = prepare_socket_path(args.socket_path)
     except SocketPathError as exc:
@@ -554,6 +607,7 @@ def main() -> int:
         sandbox_mode=os.environ.get("CODEX_SANDBOX_MODE", DEFAULT_SANDBOX_MODE),
         allow_host_exec=os.environ.get("CODEX_BRIDGE_ALLOW_HOST_EXEC", "").strip().lower()
         in {"1", "true", "yes", "on"},
+        pass_env=tuple(args.pass_env),
     )
     server = UnixHTTPServer(str(socket_path), service)
     # The umask above already makes it 0600; say so explicitly rather than rely on it.

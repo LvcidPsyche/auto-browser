@@ -56,7 +56,8 @@ The controller now includes:
 Each of the three first-party providers has an `api` mode (a key in the environment)
 and a `cli` mode (the vendor's CLI, signed in under `CLI_HOME`: `codex`, `claude`,
 `gemini`). OpenAI also has a `host_bridge` mode that reaches a host-side Codex over a
-Unix socket. `GET /agent/providers` reports the mode each provider is in.
+Unix socket (`scripts/codex_host_bridge.py`, which gives Codex an allowlisted environment plus each
+`--pass-env NAME`; see docs/deployment.md). `GET /agent/providers` reports the mode each provider is in.
 
 ### OpenAI
 Uses the Responses API (`POST {OPENAI_BASE_URL}/responses`) with:
