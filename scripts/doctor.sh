@@ -174,6 +174,7 @@ fi
 # never in argv, where every local user could read it. --noproxy as bearer_curl
 # has it: a proxy in the environment would otherwise receive the token.
 api_curl() {
+  refuse_other_ipv4_spelling || return 1
   local args=(${OPERATOR_ID_ARGS[@]+"${OPERATOR_ID_ARGS[@]}"})
   curl_auth_config | curl -q --noproxy "$(loopback_noproxy)" --config - ${args[@]+"${args[@]}"} "$@"
 }

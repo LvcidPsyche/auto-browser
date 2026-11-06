@@ -339,11 +339,13 @@ All notable changes to auto-browser are documented here.
   `API_BEARER_TOKEN` or any other value; the isolated smokes pipe the takeover-link response to Python instead of
   holding it in a variable `bash -x` would print. `bearer_curl`, `takeover_curl` and `doctor.sh`'s API calls pass curl
   `--noproxy` for `localhost`, `127.0.0.1`, `::1` and the scripts' base URL host when it is another loopback address
-  (`127.0.0.2`, say), then the environment's own `NO_PROXY` (a `NO_PROXY` of `*` is passed alone, so every host still
-  goes direct), the reverse-SSH smoke's bastion curl passes it for the bastion's own loopback names, and
-  `scripts/smoke_download.py` sends its controller requests with no proxy, so a request to a loopback controller no
-  longer hands its tokens to an `HTTP_PROXY` or `ALL_PROXY`. `scripts/takeover_link.sh` warns when it finds no
-  takeover token and says what a 403 means.
+  (`127.0.0.2`, say; they refuse, before any token is sent, a base URL host that reads as an IPv4 address written
+  another way than four dotted decimals, such as `127.2`, `0x7f.0.0.2`, `2130706434` or `0177.0.0.1`, which curl reads
+  as an address but `--noproxy` would not match), then the environment's own `NO_PROXY` (a `NO_PROXY` of `*` is passed
+  alone, so every host still goes direct), the reverse-SSH smoke's bastion curl passes it for the bastion's own
+  loopback names, and `scripts/smoke_download.py` sends its controller requests with no proxy, so a request to a
+  loopback controller no longer hands its tokens to an `HTTP_PROXY` or `ALL_PROXY`. `scripts/takeover_link.sh` warns
+  when it finds no takeover token and says what a 403 means.
 - The Codex host bridge (`scripts/codex_host_bridge.py`, `OPENAI_AUTH_MODE=host_bridge`) now starts Codex with an
   allowlisted environment instead of the whole environment of the shell it was started from, which Codex, and every
   command a prompt-injected Codex ran under `-s read-only`, received: the names the controller gives its own provider

@@ -310,9 +310,47 @@ base_url_loopback_host() {
   fi
 }
 
+# Fails, with a message, when the scripts' base URL host (API_BASE_URL, else AUTO_BROWSER_BASE_URL) reads as an IPv4
+# address written another way than four dotted decimals: one to four dot-separated parts, each all decimal digits or
+# 0x and hex digits, that are not four decimal numbers from 0 to 255 without leading zeros (127.2, 0x7f.0.0.2,
+# 2130706434, 0177.0.0.1). curl and the resolver read those as addresses, but --noproxy names hosts exactly, so such
+# a loopback controller was reached through an environment proxy with the tokens. A name (cafe.bad) is not refused.
+refuse_other_ipv4_spelling() {
+  local rest="${API_BASE_URL:-${AUTO_BROWSER_BASE_URL:-}}"
+  rest="${rest#*://}"
+  rest="${rest%%/*}"
+  rest="${rest##*@}"
+  [[ "$rest" == \[* ]] && return 0
+  local host="${rest%%:*}"
+  [[ -n "$host" ]] || return 0
+  local -a parts
+  IFS=. read -r -a parts <<< "$host"
+  [[ "$host" == *. || ${#parts[@]} -lt 1 || ${#parts[@]} -gt 4 ]] && return 0
+  local part decimal=1
+  for part in "${parts[@]}"; do
+    if [[ "$part" =~ ^[0-9]+$ ]]; then
+      if [[ ! "$part" =~ ^(0|[1-9][0-9]{0,2})$ ]] || (( 10#$part > 255 )); then
+        decimal=0
+      fi
+    elif [[ "$part" =~ ^0[xX][0-9a-fA-F]*$ ]]; then
+      decimal=0
+    else
+      return 0
+    fi
+  done
+  if (( decimal == 1 && ${#parts[@]} == 4 )); then
+    return 0
+  fi
+  echo "The controller address ${host} is an IPv4 address written another way, which the scripts cannot keep" \
+    "away from a proxy: write the controller address in AUTO_BROWSER_BASE_URL (or API_BASE_URL) as four decimal" \
+    "numbers, such as 127.0.0.2" >&2
+  return 1
+}
+
 # curl that sends the controller's bearer token. Without it every API call is a
 # 401 and the smoke scripts could only pass against an open controller.
 bearer_curl() {
+  refuse_other_ipv4_spelling || return 1
   # -q first: curl would otherwise read a .curlrc (through CURL_HOME, XDG_CONFIG_HOME or HOME) that can add a proxy
   # or another header to a request carrying the token.
   curl_auth_config | curl -q --noproxy "$(loopback_noproxy)" --config - "$@"
@@ -358,6 +396,7 @@ with_takeover_header() {
 
 # curl that sends the bearer token and the takeover token, for GET /sessions/{session_id}/takeover-link only.
 takeover_curl() {
+  refuse_other_ipv4_spelling || return 1
   curl_auth_config | with_takeover_header | curl -q --noproxy "$(loopback_noproxy)" --config - "$@"
 }
 

@@ -359,6 +359,91 @@ class DoctorApiCurlNoProxyTests(unittest.TestCase):
         self.assertEqual([headers.get("authorization") for headers in reached], [f"Bearer {TOKEN}"])
 
 
+# Spellings of a loopback address curl and the resolver accept that are not four dotted decimals (W5-8): the
+# scripts' --noproxy list names hosts exactly, so such a base URL went through an environment proxy with both tokens.
+OTHER_IPV4_SPELLINGS = ("127.2", "0x7f.0.0.2", "2130706434", "0177.0.0.1")
+FOUR_DECIMALS_MESSAGE = (
+    "write the controller address in AUTO_BROWSER_BASE_URL (or API_BASE_URL) as four decimal numbers, such as 127.0.0.2"
+)
+
+
+@unittest.skipUnless(
+    SCRIPTS.is_dir() and BASH and shutil.which("curl") and os.name != "nt", "scripts/, bash or curl is not here"
+)
+class OtherIpv4SpellingTests(unittest.TestCase):
+    """W5-8: a base URL whose host is an IPv4 address written another way is refused before any token is sent."""
+
+    def _run(
+        self, function: str, host: str, *, variable: str = "AUTO_BROWSER_BASE_URL", direct: bool = True
+    ) -> tuple[int, str, bool]:
+        """Run `function` against http://<host>:<port>/ with a recording proxy; (exit code, stderr, curl ran)."""
+        proxied: list = []
+        proxy = _serve(proxied)
+        self.addCleanup(proxy.shutdown)
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        temp = Path(tempdir.name)
+        fake_bin, marker = temp / "bin", temp / "curl-ran"
+        fake_bin.mkdir()
+        curl = fake_bin / "curl"
+        curl.write_text(
+            f'#!/usr/bin/env bash\ntouch "{_bash_path(marker)}"\nexec "{shutil.which("curl")}" "$@"\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        curl.chmod(0o755)
+        url = f"http://{host}:{proxy.server_address[1]}/sessions"
+        env = {
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+            "HOME": tempdir.name,
+            "API_BEARER_TOKEN": TOKEN,
+            "TAKEOVER_TOKEN": "takeover-" + TOKEN,
+            variable: url,
+            **_proxy_environment(f"http://127.0.0.1:{proxy.server_address[1]}"),
+        }
+        prelude = f'ROOT_DIR="{_bash_path(temp)}"; source "{_bash_path(SCRIPTS / "load_env.sh")}"; '
+        if function == "api_curl":
+            doctor = (SCRIPTS / "doctor.sh").read_text(encoding="utf-8")
+            match = re.search(r"^api_curl\(\) \{\n.*?^\}\n", doctor, re.MULTILINE | re.DOTALL)
+            self.assertIsNotNone(match, "doctor.sh no longer defines api_curl")
+            definition = temp / "api_curl.sh"
+            definition.write_text(match.group(0), encoding="utf-8", newline="\n")
+            prelude += f'source "{_bash_path(definition)}"; OPERATOR_ID_ARGS=(); '
+        result = subprocess.run(
+            [BASH, "-c", prelude + f'{function} -sS --max-time 5 "{url}"'],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        if direct:
+            self.assertEqual(proxied, [], f"{function} sent the tokens through the proxy for {host}")
+        return result.returncode, result.stderr, marker.exists()
+
+    def test_each_other_spelling_is_refused_before_curl_runs(self) -> None:
+        for function in ("bearer_curl", "takeover_curl", "api_curl"):
+            for host in OTHER_IPV4_SPELLINGS:
+                with self.subTest(function=function, host=host):
+                    code, stderr, ran = self._run(function, host)
+                    self.assertNotEqual(code, 0)
+                    self.assertIn(FOUR_DECIMALS_MESSAGE, stderr)
+                    self.assertFalse(ran, "curl ran")
+
+    def test_api_base_url_is_checked_too(self) -> None:
+        code, stderr, ran = self._run("bearer_curl", "127.2", variable="API_BASE_URL")
+        self.assertNotEqual(code, 0)
+        self.assertIn(FOUR_DECIMALS_MESSAGE, stderr)
+        self.assertFalse(ran)
+
+    def test_four_decimals_and_names_are_not_refused(self) -> None:
+        for host in ("127.0.0.1", "cafe.bad", "localhost"):
+            with self.subTest(host=host):
+                # The recorder is both proxy and target here, so what reached it says nothing.
+                _code, stderr, ran = self._run("bearer_curl", host, direct=False)
+                self.assertNotIn(FOUR_DECIMALS_MESSAGE, stderr)
+                self.assertTrue(ran)
+
+
 class _JsonRecorder(_Recorder):
     def do_GET(self) -> None:  # noqa: N802 - http.server's name
         type(self).seen.append({name.lower(): value for name, value in self.headers.items()})
