@@ -12,7 +12,6 @@ the manager call under test is replaced.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Iterator
 from contextlib import ExitStack
@@ -244,7 +243,8 @@ def test_value_error_is_400_without_its_message(client: TestClient, route: Route
     assert response.json() == {"detail": "Invalid request"}
 
 
-# The routes whose manager call can reach ensure_browser. Under CDP_CONNECT_URL a failed connect raises
+# The routes whose manager call can reach a browser connect: Chrome over CDP_CONNECT_URL, the shared browser-node, or
+# an isolated session's own browser (connect_browser, under acquire_session_browser). A failed connect raises
 # BrowserUnreachableError, which is not a RuntimeError, so their "Conflict" for one does not answer it.
 BROWSER_ROUTES = [route for route in ALL_ROUTES if route.method in ("create_session", "fork_session")]
 
@@ -286,22 +286,50 @@ def test_an_unreachable_shared_browser_node_is_503_on_create(client: TestClient)
 
 
 def test_an_unreachable_shared_browser_node_is_503_on_fork(client: TestClient) -> None:
-    async def connect_error() -> BaseException:
-        try:
-            await main_module.manager.runtime.connect_browser(
-                lambda: asyncio.sleep(0, result="ws://browser-node:9223/sentinel-path"), failure_context="unreachable"
-            )
-        except Exception as exc:
-            return exc
-        raise AssertionError("connect_browser did not fail")
+    # CB2-2: the real fork path, from the route through fork_session and create_session to connect_browser. The
+    # source session is made on a fake browser; the fork's own create then connects and meets the unreachable node.
+    from tests.test_auth_state_ownership import StateContext
+    from tests.test_browser_manager_create_session import FakeBrowser, FakePage
 
-    with _shared_node_unreachable():
-        error = asyncio.run(connect_error())
-        with patch.object(main_module.manager, "fork_session", new=AsyncMock(side_effect=error)):
-            response = client.post(f"/sessions/{SID}/fork")
-    assert isinstance(error, BrowserUnreachableError)
+    manager = main_module.manager
+    source = FakeBrowser(StateContext(FakePage()))
+    with (
+        patch.object(manager, "_acquire_session_browser", new=AsyncMock(return_value=(source, None))),
+        patch.object(manager, "_settle", new=AsyncMock()),
+        patch.object(manager, "_maybe_provision_session_tunnel", new=AsyncMock()),
+    ):
+        source_id = client.post("/sessions", json={"name": "fork-source"}).json()["id"]
+    try:
+        connect = AsyncMock(side_effect=ConnectionRefusedError("connect ECONNREFUSED"))
+        with (
+            _shared_node_unreachable(),
+            patch.object(manager.playwright.chromium, "connect", new=connect),
+            patch.object(manager.settings, "max_sessions", 2),  # a fork counts as a session
+        ):
+            response = client.post(f"/sessions/{source_id}/fork")
+        connect.assert_awaited()  # the fork's own session reached the connect
+    finally:
+        manager.sessions.pop(source_id, None)
     assert response.status_code == 503, response.text
     assert response.json() == {"detail": "the browser could not be reached"}
+
+
+def test_an_unreachable_isolated_browser_is_503_and_its_container_is_released(client: TestClient) -> None:
+    # CB2-2: the docker_ephemeral branch of acquire_session_browser: the session's own browser does not answer.
+    manager = main_module.manager
+    runtime = SimpleNamespace(
+        ws_endpoint="ws://browser-session-x:9223/sentinel-path", ws_endpoint_file="/data/browser-sessions/x/profile"
+    )
+    provisioner = SimpleNamespace(provision=AsyncMock(return_value=runtime), release=AsyncMock())
+    with (
+        _shared_node_unreachable(),
+        patch.object(manager.settings, "session_isolation_mode", "docker_ephemeral"),
+        patch.object(manager, "runtime_provisioner", provisioner),
+    ):
+        response = client.post("/sessions", json={})
+    assert response.status_code == 503, response.text
+    assert response.json() == {"detail": "the browser could not be reached"}
+    provisioner.release.assert_awaited_once_with(runtime)
 
 
 def test_a_sandbox_refusal_of_the_shared_browser_node_stays_409(client: TestClient) -> None:
