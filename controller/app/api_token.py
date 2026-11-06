@@ -198,50 +198,37 @@ def _printable_ascii(token: str) -> bool:
     return all("!" <= char <= "~" for char in token)
 
 
-# The controller's data roots, which the API reads, lists, exports or mounts (setting name to Settings attribute):
-# a takeover token inside one could reach an agent (GET /auth-profiles/{name}/export packages AUTH_ROOT, for one).
+# The data roots whose files the API exposes by path (setting name to Settings attribute): /artifacts serves
+# ARTIFACT_ROOT, UPLOAD_ROOT's files can be uploaded into a page, GET /auth-profiles/{name}/export packages AUTH_ROOT,
+# and maintenance sweeps all three. The other roots are read by fixed names (W5-3), so a token file there reaches no
+# agent, and one of them set to the data root itself must not refuse the default /data/takeover-token.
 TAKEOVER_TOKEN_REFUSED_ROOTS = {
     "ARTIFACT_ROOT": "artifact_root",
     "UPLOAD_ROOT": "upload_root",
     "AUTH_ROOT": "auth_root",
-    "APPROVAL_ROOT": "approval_root",
-    "AUDIT_ROOT": "audit_root",
-    "WITNESS_ROOT": "witness_root",
-    "SESSION_STORE_ROOT": "session_store_root",
-    "JOB_STORE_ROOT": "job_store_root",
-    "HARNESS_ROOT": "harness_root",
-    "MEMORY_ROOT": "memory_root",
-    "MESH_IDENTITY_DIR": "mesh_identity_dir",
-    "ISOLATED_TUNNEL_INFO_ROOT": "isolated_tunnel_info_root",
+}
+# The directories compose mounts into containers, under the parent of ARTIFACT_ROOT (/data in the image), where a
+# compromised browser or helper container could read or replace the file, with the name the refusal gives each.
+TAKEOVER_TOKEN_REFUSED_MOUNTS = {
+    "browser-profile": "the browser-profile directory browser-node mounts",
+    "downloads": "the downloads directory browser-node mounts",
+    "browser-sessions": "the browser-sessions directory isolated sessions mount",
+    "tunnels": "the tunnels directory reverse-ssh mounts",
 }
 
 
 def _refused_token_directories(settings: Any) -> list[tuple[str, Path]]:
     """Each directory a takeover token must not be in, with the name the refusal gives it.
 
-    The data roots above, then the directories mounted into the browser, session and helper containers, where a
-    compromised browser could read or replace the file: browser-node's profile (BROWSER_WS_ENDPOINT_FILE's directory)
-    and downloads, each isolated session's browser-sessions/<id>/, and the tunnels directory reverse-ssh mounts (the
-    parent of ISOLATED_TUNNEL_INFO_ROOT). The ones without a setting are found as session_isolation finds them, under
-    the parent of ARTIFACT_ROOT (/data in the image).
+    The data roots above, then the directories mounted into the browser, session and helper containers, found as
+    session_isolation finds them, under the parent of ARTIFACT_ROOT: never guessed from another setting, which can
+    name the data root itself.
     """
     directories = [
         (name, Path(getattr(settings, attribute))) for name, attribute in TAKEOVER_TOKEN_REFUSED_ROOTS.items()
     ]
     data_root = Path(settings.artifact_root).resolve().parent
-    directories += [
-        (
-            "BROWSER_WS_ENDPOINT_FILE's directory, which browser-node mounts",
-            Path(settings.browser_ws_endpoint_file).parent,
-        ),
-        ("the browser-profile directory browser-node mounts", data_root / "browser-profile"),
-        ("the downloads directory browser-node mounts", data_root / "downloads"),
-        ("the browser-sessions directory isolated sessions mount", data_root / "browser-sessions"),
-        (
-            "the tunnels directory reverse-ssh mounts (ISOLATED_TUNNEL_INFO_ROOT's parent)",
-            Path(settings.isolated_tunnel_info_root).parent,
-        ),
-    ]
+    directories += [(name, data_root / relative) for relative, name in TAKEOVER_TOKEN_REFUSED_MOUNTS.items()]
     return directories
 
 

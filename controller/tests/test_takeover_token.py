@@ -209,12 +209,11 @@ def test_w2_21_a_token_file_inside_a_served_or_uploadable_root_refuses_startup(t
     assert not (served / "tok").exists()
 
 
-# Every data root the API reads, lists, exports or mounts (W4-1): AUTH_ROOT, for one, is packaged by
-# GET /auth-profiles/{name}/export.
-DATA_ROOT_SETTINGS = [
-    "ARTIFACT_ROOT",
-    "UPLOAD_ROOT",
-    "AUTH_ROOT",
+# The data roots that expose a file by path (W5-3): ARTIFACT_ROOT is served under /artifacts, UPLOAD_ROOT's files can
+# be uploaded into a page, AUTH_ROOT is packaged whole by GET /auth-profiles/{name}/export, and maintenance sweeps all
+# three. The other roots are read by fixed names, so a token file there reaches no agent.
+REFUSED_ROOT_SETTINGS = ["ARTIFACT_ROOT", "UPLOAD_ROOT", "AUTH_ROOT"]
+FIXED_NAME_ROOT_SETTINGS = [
     "APPROVAL_ROOT",
     "AUDIT_ROOT",
     "WITNESS_ROOT",
@@ -225,6 +224,14 @@ DATA_ROOT_SETTINGS = [
     "MESH_IDENTITY_DIR",
     "ISOLATED_TUNNEL_INFO_ROOT",
 ]
+# The directories compose mounts into containers, under the parent of ARTIFACT_ROOT (/data in the image), with what
+# the refusal names each by.
+MOUNTED_DIRECTORIES = {
+    "browser-profile": "browser-profile",
+    "downloads": "downloads",
+    "browser-sessions/abc123/profile": "browser-sessions",
+    "tunnels": "tunnels",
+}
 
 
 def data_layout(data: Path) -> dict[str, str]:
@@ -246,8 +253,8 @@ def data_layout(data: Path) -> dict[str, str]:
     }
 
 
-@pytest.mark.parametrize("root", DATA_ROOT_SETTINGS)
-def test_w4_1_a_token_file_inside_any_data_root_refuses_startup(tmp_path: Path, root: str) -> None:
+@pytest.mark.parametrize("root", REFUSED_ROOT_SETTINGS)
+def test_w4_1_a_token_file_inside_a_served_exported_or_swept_root_refuses_startup(tmp_path: Path, root: str) -> None:
     data = tmp_path / "data"
     inside = Path(data_layout(data)[root]) / "demo" / "takeover-token"
     settings = make_settings(tmp_path, **data_layout(data), TAKEOVER_TOKEN_FILE=str(inside))
@@ -256,38 +263,69 @@ def test_w4_1_a_token_file_inside_any_data_root_refuses_startup(tmp_path: Path, 
     assert not inside.exists()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="creating a symlink on Windows needs a privilege CI's runner lacks")
-@pytest.mark.parametrize("root", ["AUTH_ROOT", "MEMORY_ROOT"])
-def test_w4_1_a_token_file_reached_through_a_symlinked_parent_is_refused(tmp_path: Path, root: str) -> None:
+@pytest.mark.parametrize("root", [*FIXED_NAME_ROOT_SETTINGS, "BROWSER_WS_ENDPOINT_FILE"])
+def test_w5_3_a_root_read_by_fixed_names_set_to_the_data_root_keeps_the_default_token_file(
+    tmp_path: Path, root: str
+) -> None:
+    # The mesh-key upgrade note points MESH_IDENTITY_DIR at /data: refusing every root put the compose-pinned
+    # /data/takeover-token inside a refused one and stopped startup after the upgrade.
     data = tmp_path / "data"
     layout = data_layout(data)
-    Path(layout[root]).mkdir(parents=True)
-    link = tmp_path / "elsewhere"
-    link.symlink_to(layout[root], target_is_directory=True)
-    settings = make_settings(tmp_path, **layout, TAKEOVER_TOKEN_FILE=str(link / "takeover-token"))
-    with pytest.raises(RuntimeError, match=root):
+    layout[root] = str(data / "browser-ws-endpoint.txt") if root == "BROWSER_WS_ENDPOINT_FILE" else str(data)
+    settings = make_settings(tmp_path, **layout, TAKEOVER_TOKEN_FILE=str(data / "takeover-token"))
+    ensure_takeover_token(settings)
+    assert settings.takeover_token
+    assert (data / "takeover-token").read_text(encoding="utf-8").strip() == settings.takeover_token
+
+
+def test_w5_3_artifact_root_set_to_the_data_root_refuses_the_default_token_file(tmp_path: Path) -> None:
+    # /artifacts would serve /data/takeover-token itself.
+    data = tmp_path / "data"
+    settings = make_settings(
+        tmp_path, **{**data_layout(data), "ARTIFACT_ROOT": str(data)}, TAKEOVER_TOKEN_FILE=str(data / "takeover-token")
+    )
+    with pytest.raises(RuntimeError, match="ARTIFACT_ROOT"):
         ensure_takeover_token(settings)
-    assert not (Path(layout[root]) / "takeover-token").exists()
+    assert not (data / "takeover-token").exists()
 
 
-@pytest.mark.parametrize(
-    ("relative", "named"),
-    [
-        ("browser-profile/takeover-token", "BROWSER_WS_ENDPOINT_FILE"),
-        ("downloads/takeover-token", "downloads"),
-        ("browser-sessions/abc123/profile/takeover-token", "browser-sessions"),
-        ("tunnels/takeover-token", "ISOLATED_TUNNEL_INFO_ROOT"),
-    ],
-)
+@pytest.mark.skipif(os.name == "nt", reason="creating a symlink on Windows needs a privilege CI's runner lacks")
+@pytest.mark.parametrize("refused", [*REFUSED_ROOT_SETTINGS, *MOUNTED_DIRECTORIES])
+def test_w4_1_a_token_file_reached_through_a_symlinked_parent_is_refused(tmp_path: Path, refused: str) -> None:
+    data = tmp_path / "data"
+    layout = data_layout(data)
+    target = Path(layout[refused]) if refused in layout else data / refused
+    target.mkdir(parents=True)
+    link = tmp_path / "elsewhere"
+    link.symlink_to(target, target_is_directory=True)
+    settings = make_settings(tmp_path, **layout, TAKEOVER_TOKEN_FILE=str(link / "takeover-token"))
+    with pytest.raises(RuntimeError, match=refused if refused in layout else MOUNTED_DIRECTORIES[refused]):
+        ensure_takeover_token(settings)
+    assert not (target / "takeover-token").exists()
+
+
+@pytest.mark.parametrize(("relative", "named"), MOUNTED_DIRECTORIES.items())
 def test_w4_1_a_token_file_in_a_directory_mounted_into_a_container_refuses_startup(
     tmp_path: Path, relative: str, named: str
 ) -> None:
     # browser-node mounts browser-profile and downloads, each isolated session gets browser-sessions/<id>/, and
     # reverse-ssh mounts the tunnels directory: a compromised container could read or replace a token there.
     data = tmp_path / "data"
-    inside = data / relative
+    inside = data / relative / "takeover-token"
     settings = make_settings(tmp_path, **data_layout(data), TAKEOVER_TOKEN_FILE=str(inside))
     with pytest.raises(RuntimeError, match=named):
+        ensure_takeover_token(settings)
+    assert not inside.exists()
+
+
+def test_w5_3_the_tunnels_directory_is_refused_wherever_isolated_tunnel_info_root_points(tmp_path: Path) -> None:
+    # Codex F01: the tunnels directory was guessed as ISOLATED_TUNNEL_INFO_ROOT's parent, so with the info root
+    # elsewhere a token in the tunnels directory compose mounts into reverse-ssh passed.
+    data = tmp_path / "data"
+    layout = {**data_layout(data), "ISOLATED_TUNNEL_INFO_ROOT": str(data / "isolated-info" / "sessions")}
+    inside = data / "tunnels" / "takeover-token"
+    settings = make_settings(tmp_path, **layout, TAKEOVER_TOKEN_FILE=str(inside))
+    with pytest.raises(RuntimeError, match="tunnels"):
         ensure_takeover_token(settings)
     assert not inside.exists()
 
