@@ -9,6 +9,11 @@ All notable changes to auto-browser are documented here.
 - **Upgrade note:** an agent that handed a person the takeover link of an isolated (`docker_ephemeral`) session now
   hands over a link without the noVNC password. The person opens the full link from the dashboard ("Open noVNC") or
   prints it with `scripts/takeover_link.sh <session_id>`; a link opened without the password makes noVNC ask for it.
+  Both need the new takeover token (`TAKEOVER_TOKEN`, else the token the controller generates in
+  `TAKEOVER_TOKEN_FILE`, `./data/takeover-token` with the shipped compose): the dashboard asks for it once per tab,
+  and `scripts/takeover_link.sh` reads it from `TAKEOVER_TOKEN` (the shell or `.env`) or `data/takeover-token`. A
+  script or integration that took the password from `POST /sessions`, `GET /sessions/{id}`, `GET /remote-access` or
+  the takeover result now calls `GET /sessions/{session_id}/takeover-link` with the `X-Takeover-Token` header.
 - **Upgrade note:** an approval webhook whose host is a private name (a service on the compose network, a LAN
   address) was reachable by name before and is now refused, as is one at a shared address (`100.64.0.0/10`, such as
   a Tailscale node): every address that is not global is. Set the new `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS=true`
@@ -228,13 +233,22 @@ All notable changes to auto-browser are documented here.
 
 - The model no longer receives an isolated session's noVNC password. `create_session`, `get_session`,
   `get_remote_access` and `request_human_takeover` (REST and MCP) carried it in the takeover URL's fragment, which
-  over MCP reached the calling model, and with a session tunnel up the URL was the public one. No REST or MCP result
-  an agent gets carries it now; an isolated session's `remote_access` block and takeover result carry a fixed
-  `takeover_note` instead. The full link comes from the new `GET /sessions/{session_id}/takeover-link` (bearer token,
-  404 for an unknown or closed session, `Cache-Control: no-store`, each read audited as `takeover_link_viewed`
-  without the URL or the password), which the dashboard and the new `scripts/takeover_link.sh` read and no MCP tool,
-  the Python client, the MCP package or the LangChain integration calls. The shared browser-node keeps the
-  operator's `VNC_PASSWORD` and a password-free link.
+  over MCP reached the calling model, and with a session tunnel up the URL was the public one. No MCP tool result,
+  and no response of a route the agent-facing packages (the Python client, the MCP package, the LangChain
+  integration) call, carries it now; an isolated session's `remote_access` block and takeover result carry a fixed
+  `takeover_note` instead. The full link comes from the new `GET /sessions/{session_id}/takeover-link`, which no
+  MCP tool and no agent-facing package calls and the dashboard and the new `scripts/takeover_link.sh` read. Beside
+  the bearer token, which agents hold, it demands a second secret agents are not given: the takeover token, in the
+  `X-Takeover-Token` header, compared in constant time and required in every scope, `API_ALLOW_TOKENLESS_LOOPBACK`
+  included. A missing or wrong one is a 403, checked before the session lookup (so before a 404 for an unknown or
+  closed session) and audited as `takeover_link_refused` without a token or the URL; a read is
+  `Cache-Control: no-store` and audited as `takeover_link_viewed` without the URL or the password. The token is
+  `TAKEOVER_TOKEN` when set; else the controller reads it from `TAKEOVER_TOKEN_FILE` (default
+  `/data/takeover-token`) or generates one there (mode 0600) on first start, and logs only a sha256 fingerprint. A
+  `TAKEOVER_TOKEN` shorter than 32 characters or equal to an API credential refuses startup; a token file that
+  cannot be read or written, or holds an unusable token, logs a warning and the endpoint answers 503. An agent that
+  can read files on the controller's host can still read `data/takeover-token` (or the session container's own copy
+  of the password). The shared browser-node keeps the operator's `VNC_PASSWORD` and a password-free link.
 - **On a host shared with other users,** keep `./data` closed to them: mode 0700, or 0750 with a group only the
   operators are in. browser-node's endpoint file there (`./data/browser-profile/browser-ws-endpoint.txt`) holds the
   `ws://` URL that connects to the shared browser, and it cannot be private to one uid, since browser-node writes it

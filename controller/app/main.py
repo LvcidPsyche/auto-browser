@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from .action_errors import BrowserActionError, SessionNotFoundError
-from .api_token import ensure_api_credential
+from .api_token import ensure_api_credential, ensure_takeover_token
 from .app_factory import build_controller_services, create_controller_app
 from .auth_policy import has_named_credentials
 from .compliance import apply_compliance_template, write_compliance_manifest
@@ -67,6 +67,8 @@ async def lifespan(application: FastAPI):
     # First, so the runtime policy below sees a token loaded or generated from
     # API_TOKEN_FILE. Not at import: tests and dev harnesses import this module.
     ensure_api_credential(settings)
+    # After it, so a token loaded from API_TOKEN_FILE counts as an agent's credential the takeover token must differ from.
+    ensure_takeover_token(settings)
     if _compliance_template and _compliance_overrides is not None:
         write_compliance_manifest(
             template_name=_compliance_template,

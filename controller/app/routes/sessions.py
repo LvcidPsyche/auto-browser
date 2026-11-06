@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import hmac
 import logging
 from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from ..action_errors import ErrorPageSourceError, RefusedPageError
+from ..api_token import TAKEOVER_LINK_UNAVAILABLE_DETAIL
 from ..auth_state import AuthStateDecryptError
 from ..browser.services.session_creation import SessionLimitError
 from ..browser.services.tabs import TabRefusedByAnotherTabError, TabUnjudgedError
@@ -42,6 +44,12 @@ from ._utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# One text for a missing and a wrong takeover token, and for a session that exists and one that does not.
+TAKEOVER_LINK_REFUSED_DETAIL = (
+    "This endpoint needs the takeover token in the X-Takeover-Token header (TAKEOVER_TOKEN, or data/takeover-token "
+    "on a local install)."
+)
 
 
 def create_sessions_router(*, manager: Any) -> APIRouter:
@@ -85,10 +93,29 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
         return await manager.get_session_record(session_id)
 
     @router.get("/sessions/{session_id}/takeover-link")
-    async def get_takeover_link(session_id: str) -> JSONResponse:
+    async def get_takeover_link(
+        session_id: str,
+        x_takeover_token: Annotated[str | None, Header(alias="X-Takeover-Token")] = None,
+    ) -> JSONResponse:
         # Human-only (NAV-14): the full link, an isolated session's noVNC password in its fragment. No MCP tool and
-        # no agent-facing package calls this; the dashboard and scripts/takeover_link.sh do. A closed or unknown
-        # session is a 404 (get_session). The audit event names the read, never the URL or the password.
+        # no agent-facing package calls this; the dashboard and scripts/takeover_link.sh do. Beside the bearer
+        # token, which agents hold, it demands the takeover token (NAV-14b), in every scope, tokenless loopback
+        # included, and before the session lookup, so a caller without it cannot tell which sessions exist. A
+        # closed or unknown session is then a 404 (get_session). The audit events name the read or the refusal,
+        # never a token, the URL or the password.
+        expected = getattr(manager.settings, "takeover_token", None)
+        if not expected:
+            raise HTTPException(status_code=503, detail=TAKEOVER_LINK_UNAVAILABLE_DETAIL)
+        presented = (x_takeover_token or "").encode("utf-8", "surrogateescape")
+        if not hmac.compare_digest(presented, expected.encode("utf-8")):
+            await manager.audit.append(
+                event_type="takeover_link_refused",
+                status="refused",
+                action="get_takeover_link",
+                session_id=session_id,
+                details={"reason": "missing takeover token" if not x_takeover_token else "wrong takeover token"},
+            )
+            raise HTTPException(status_code=403, detail=TAKEOVER_LINK_REFUSED_DETAIL)
         session = await manager.get_session(session_id)
         link = manager.remote_access.takeover_link(session)
         await manager.audit.append(

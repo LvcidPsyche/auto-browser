@@ -104,6 +104,8 @@ payload = json.loads(sys.argv[1])
 assert payload["isolation"]["mode"] == "docker_ephemeral", payload
 assert payload["remote_access"]["status"] == "active", payload
 assert payload["remote_access"]["session_tunnel"]["active"] is True, payload
+# The note says where the person opens the full link.
+assert "scripts/takeover_link.sh" in str(payload["remote_access"].get("takeover_note", "")), payload
 print(
     payload["id"],
     payload["isolation"]["runtime"]["container_name"],
@@ -158,7 +160,15 @@ PY
 
 # The person's path (NAV-14): the tunnel's public URL plus the session's noVNC password, with Cache-Control: no-store.
 # The response goes to Python through the environment, never argv, and is not printed.
-TAKEOVER_LINK_RESPONSE="$(bearer_curl -fsS -i "${API_BASE_URL}/sessions/${SESSION_ID}/takeover-link")"
+# NAV-14b: without the takeover token (the bearer token alone, as an agent holds it) the endpoint answers 403.
+NO_TAKEOVER_TOKEN_STATUS="$(bearer_curl -sS -o /dev/null -w '%{http_code}' "${API_BASE_URL}/sessions/${SESSION_ID}/takeover-link")"
+if [[ "${NO_TAKEOVER_TOKEN_STATUS}" != "403" ]]; then
+  echo >&2 "takeover-link without X-Takeover-Token answered ${NO_TAKEOVER_TOKEN_STATUS}, not 403"
+  exit 1
+fi
+# With it: takeover_curl reads the token the controller generated in data/takeover-token, as bearer_curl reads
+# data/api-token, and sends both on stdin.
+TAKEOVER_LINK_RESPONSE="$(takeover_curl -fsS -i "${API_BASE_URL}/sessions/${SESSION_ID}/takeover-link")"
 TAKEOVER_LINK_RESPONSE="${TAKEOVER_LINK_RESPONSE}" python3 -I - <<'PY' "${REMOTE_URL}" "${SESSION_ID}"
 import json
 import os
@@ -186,6 +196,8 @@ import sys
 
 payload = json.loads(sys.argv[1])
 assert payload["closed"] is True, payload
+# B-fix-9 made `closed` true even for a partial close: only `teardown` tells the two apart.
+assert payload["teardown"] == "complete", payload
 assert payload["session"]["status"] == "closed", payload
 assert payload["session"]["remote_access"]["session_tunnel"]["status"] == "inactive", payload
 print("isolated tunnel close ok")

@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     # which is ./data/api-token on the host, where clients read it from.
     # See app/api_token.py.
     api_token_file: str = Field("/data/api-token", alias="API_TOKEN_FILE")
+    # The person's second secret: GET /sessions/{session_id}/takeover-link, which returns an isolated session's
+    # noVNC password, also demands it in X-Takeover-Token. Agents hold the bearer token, never this one. Set, it is
+    # used and the file is ignored; unset, the controller reads it from TAKEOVER_TOKEN_FILE or generates one there
+    # on first start, in every scope. See app/api_token.py (ensure_takeover_token).
+    takeover_token: str | None = Field(None, alias="TAKEOVER_TOKEN", repr=False, exclude=True)
+    takeover_token_file: str = Field("/data/takeover-token", alias="TAKEOVER_TOKEN_FILE")
     # The old default: a loopback controller with no token serves every
     # route unauthenticated. "Loopback" is the host publish mapping, not who can
     # reach port 8000, so any container on the compose network can drive the API;
@@ -463,6 +469,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "api_bearer_token",
+        "takeover_token",
         "witness_remote_api_key",
         "openai_api_key",
         "anthropic_api_key",

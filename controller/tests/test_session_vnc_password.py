@@ -257,6 +257,25 @@ class RouteWiringTests(unittest.TestCase):
             self.assertNotIn("with_takeover_password", text, relative)
             self.assertNotIn("takeover_url_with_password", text, relative)
 
+    def test_no_mcp_tool_reaches_the_takeover_link(self) -> None:
+        app_dir = Path(__file__).resolve().parents[1] / "app"
+        tool_files = [
+            app_dir / "tool_gateway" / "gateway.py",
+            *sorted((app_dir / "tool_gateway" / "packs").glob("*.py")),
+        ]
+        self.assertGreater(len(tool_files), 1)
+        for path in tool_files:
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("takeover_link(", text, str(path))
+            self.assertNotIn("takeover-link", text, str(path))
+            self.assertNotIn("takeover_token", text, str(path))
+
+    def test_the_agent_facing_note_names_no_token(self) -> None:
+        from app.browser.services.remote_access import TAKEOVER_NOTE
+
+        for needle in ("TAKEOVER_TOKEN", "takeover-token", "takeover token", "X-Takeover-Token"):
+            self.assertNotIn(needle, TAKEOVER_NOTE)
+
 
 if __name__ == "__main__":
     unittest.main()

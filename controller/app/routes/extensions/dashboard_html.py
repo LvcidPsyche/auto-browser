@@ -278,7 +278,9 @@ const apiResponse = async (path, options = {}) => {
       sessionStorage.removeItem('ab_operator_name');
       alert('Operator identity missing. Reload and provide an operator id.');
     }
-    throw new Error(errorText(body, r.status));
+    const err = new Error(errorText(body, r.status));
+    err.status = r.status;
+    throw err;
   }
   return r;
 };
@@ -430,20 +432,49 @@ async function loadSessions() {
   });
 }
 
+// The takeover token: a second secret, held by the person and never by agents, that
+// the takeover-link endpoint demands beside the API token. Asked for once per tab and
+// kept in sessionStorage under its own key; empty when the person cancels.
+const TAKEOVER_TOKEN_KEY = 'ab_takeover_token';
+function takeoverToken() {
+  const stored = (sessionStorage.getItem(TAKEOVER_TOKEN_KEY) || '').trim();
+  if (stored) return stored;
+  const entered = prompt('Enter the takeover token (TAKEOVER_TOKEN, or data/takeover-token in your auto-browser folder on a local install):', '');
+  const token = (entered || '').trim();
+  if (token) sessionStorage.setItem(TAKEOVER_TOKEN_KEY, token);
+  return token;
+}
+
 // No session record carries an isolated session's noVNC password (the model reads
 // those); GET /sessions/{id}/takeover-link, a human-only endpoint, returns the full
-// link with it in the fragment. The window opens on the click, which popup blockers
-// allow, and is pointed at that link once it arrives. If it cannot be read, the
-// list's URL still opens: noVNC then asks for the password.
+// link with it in the fragment, given the takeover token in X-Takeover-Token. A 403
+// means the stored token is wrong: it is cleared and asked for again. The window opens
+// on the click, which popup blockers allow, and is pointed at that link once it
+// arrives. If it cannot be read, the list's URL still opens: noVNC then asks for the
+// password.
 async function openTakeover(event, sessionId, fallback) {
   event.preventDefault();
   const win = window.open('about:blank', '_blank');
   if (!win) return;
   win.opener = null;
   let target = fallback;
+  const path = `/sessions/${encodeURIComponent(sessionId)}/takeover-link`;
   try {
-    const link = await api(`/sessions/${encodeURIComponent(sessionId)}/takeover-link`);
-    target = safeHttpUrl(link.takeover_url) || fallback;
+    for (;;) {
+      const token = takeoverToken();
+      if (!token) break;
+      const r = await apiResponse(path, {headers: {'X-Takeover-Token': token}}).catch((err) => err);
+      if (r instanceof Error) {
+        if (r.status === 403) {
+          sessionStorage.removeItem(TAKEOVER_TOKEN_KEY);
+          continue;
+        }
+        throw r;
+      }
+      const link = await r.json();
+      target = safeHttpUrl(link.takeover_url) || fallback;
+      break;
+    }
   } catch (err) {
     console.warn(`takeover link: could not read session ${sessionId}: ${err.message}`);
   }
@@ -992,6 +1023,9 @@ async function wizardStart() {
     link.target = '_blank';
     link.rel = 'noopener';
     link.textContent = 'Open takeover window to log in';
+    // session.takeover_url carries no noVNC password: openTakeover reads the full link.
+    const wizardId = wizardSessionId;
+    if (wizardId) link.addEventListener('click', (event) => openTakeover(event, wizardId, url));
     takeover.appendChild(link);
   } else {
     const note = document.createElement('span');

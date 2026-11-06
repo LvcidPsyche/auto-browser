@@ -43,6 +43,8 @@ curl -s "${AUTH[@]}" "http://127.0.0.1:8000/sessions/$SESSION_ID/takeover" \
   -d '{"reason":"Complete manual login"}' | jq
 ```
 
+An isolated session's full link, with its noVNC password, comes from `scripts/takeover_link.sh <session_id>`.
+
 You can also open the local takeover UI directly:
 
 ```text

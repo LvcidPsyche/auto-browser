@@ -95,6 +95,98 @@ def ensure_api_credential(settings: Any) -> None:
     )
 
 
+# The fixed text GET /sessions/{session_id}/takeover-link answers with when ensure_takeover_token loaded none.
+TAKEOVER_LINK_UNAVAILABLE_DETAIL = (
+    "The controller has no takeover token (see its startup log): set TAKEOVER_TOKEN, or make TAKEOVER_TOKEN_FILE "
+    "writable, and restart."
+)
+
+
+def ensure_takeover_token(settings: Any) -> None:
+    """Load or generate the takeover token, and put it in ``settings.takeover_token`` (None when there is none).
+
+    GET /sessions/{session_id}/takeover-link returns an isolated session's noVNC password, so it demands this
+    second secret beside the bearer token, which agents hold. Precedence: TAKEOVER_TOKEN when set (the file is
+    then ignored); else the token in TAKEOVER_TOKEN_FILE; else one generated there, in every scope.
+
+    A configured TAKEOVER_TOKEN that is short, or equal to an API credential (a token an agent already holds
+    protects nothing), refuses startup. A file that cannot be read or written, or holds an unusable token, only
+    warns: the controller starts and that endpoint answers 503. Never logs the token; a sha256 fingerprint at most.
+    Called after ensure_api_credential, so a token it loaded from API_TOKEN_FILE counts as an API credential.
+    """
+    api_tokens = {credential.token for credential in credentials_for(settings)}
+    configured = settings.takeover_token
+    path = Path(settings.takeover_token_file)
+    if configured:
+        if len(configured) < MIN_PRODUCTION_BEARER_TOKEN_LENGTH:
+            raise RuntimeError(
+                f"TAKEOVER_TOKEN must be at least {MIN_PRODUCTION_BEARER_TOKEN_LENGTH} characters "
+                f"(found {len(configured)}). Set a longer one, or unset it to have the controller generate one."
+            )
+        if configured in api_tokens:
+            raise RuntimeError(
+                "TAKEOVER_TOKEN equals API_BEARER_TOKEN or an API_BEARER_TOKENS entry: agents hold those, so it "
+                "would protect nothing. Set a different TAKEOVER_TOKEN, or unset it to have one generated."
+            )
+        if os.path.exists(path):
+            logger.info("TAKEOVER_TOKEN is set, so the token in %s is ignored", path)
+        return
+
+    settings.takeover_token = None
+    try:
+        token = _read_takeover_token_file(path)
+        if token is None:
+            token = secrets.token_urlsafe(GENERATED_TOKEN_BYTES)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(path, token + "\n", mode=PRIVATE_FILE_MODE)
+            _match_parent_owner(path)
+            logger.warning(
+                "Generated a takeover token and saved it to %s (%s; with the shipped compose it is "
+                "./data/takeover-token on the host; sha256 fingerprint %s). GET /sessions/{session_id}/takeover-link "
+                "demands it in the X-Takeover-Token header; the dashboard asks for it once per tab and "
+                "scripts/takeover_link.sh reads it. Never give it to an agent.",
+                path,
+                _permissions_note(),
+                _fingerprint(token),
+            )
+        else:
+            _restrict_mode(path, name="TAKEOVER_TOKEN_FILE")
+            logger.info("Using the takeover token in %s (sha256 fingerprint %s)", path, _fingerprint(token))
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "No takeover token: %s. GET /sessions/{session_id}/takeover-link answers 503 until TAKEOVER_TOKEN is "
+            "set or TAKEOVER_TOKEN_FILE %s holds a usable token (or can be written) and the controller restarts.",
+            exc,
+            path,
+        )
+        return
+    if token in api_tokens:
+        logger.warning(
+            "TAKEOVER_TOKEN_FILE %s holds an API credential, which agents hold, so it is not used: "
+            "GET /sessions/{session_id}/takeover-link answers 503 until the file holds a different token.",
+            path,
+        )
+        return
+    settings.takeover_token = token
+
+
+def _read_takeover_token_file(path: Path) -> str | None:
+    """The stripped token, None when there is no file; ValueError (naming no token) when it is unusable."""
+    try:
+        token = path.read_text(encoding="utf-8").strip()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"TAKEOVER_TOKEN_FILE {path} is not UTF-8 text") from exc
+    if len(token) < MIN_PRODUCTION_BEARER_TOKEN_LENGTH or not all("!" <= char <= "~" for char in token):
+        raise ValueError(
+            f"TAKEOVER_TOKEN_FILE {path} does not hold a usable token: it must be at least "
+            f"{MIN_PRODUCTION_BEARER_TOKEN_LENGTH} printable ASCII characters with no spaces "
+            f"(found {len(token)} characters); replace it, or delete it to have the controller generate one"
+        )
+    return token
+
+
 def file_to_read(settings: Any) -> Path | None:
     """The token file ensure_api_credential reads (or generates), or None when it reads none: an environment token
     (API_BEARER_TOKEN, API_BEARER_TOKENS), or tokenless loopback (loopback bind, not production, the setting on).
@@ -166,7 +258,7 @@ def _generate_token_file(path: Path) -> str:
     return token
 
 
-def _restrict_mode(path: Path) -> None:
+def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
     """Take group and other permissions off a token file. POSIX only: Windows applies the folder's ACL.
 
     The file is opened without following a symlink and changed through that
@@ -189,7 +281,7 @@ def _restrict_mode(path: Path) -> None:
         os.fchmod(fd, PRIVATE_FILE_MODE)
     finally:
         os.close(fd)
-    logger.warning("API_TOKEN_FILE %s was readable beyond its owner (mode %o); changed it to 0600", path, mode)
+    logger.warning("%s %s was readable beyond its owner (mode %o); changed it to 0600", name, path, mode)
 
 
 def _match_parent_owner(path: Path) -> None:

@@ -268,3 +268,45 @@ bearer_curl() {
   # or another header to a request carrying the token.
   curl_auth_config | curl -q --config - "$@"
 }
+
+# The takeover token, the person's second secret that GET /sessions/{session_id}/takeover-link demands:
+# TAKEOVER_TOKEN when set, else the token the compose controller saved in /data/takeover-token
+# (<repo>/data/takeover-token on the host). Not TAKEOVER_TOKEN_FILE, for the reason api_token gives. Prints
+# nothing when there is none.
+takeover_token() {
+  if [[ -n "${TAKEOVER_TOKEN:-}" ]]; then
+    printf '%s' "${TAKEOVER_TOKEN}"
+    return 0
+  fi
+  local token_file
+  token_file="$(resolve_repo_host_path "${ROOT_DIR}" /data/takeover-token)"
+  if [[ -r "$token_file" ]]; then
+    tr -d '[:space:]' < "$token_file"
+  elif [[ -e "$token_file" ]]; then
+    echo "Cannot read the takeover token in $token_file; rerun with sudo, or read it with:" >&2
+    echo "  docker compose exec -T controller cat /data/takeover-token" >&2
+  fi
+}
+
+# A filter for the config curl_auth_config prints: it passes that config through and adds the X-Takeover-Token
+# header, so both headers reach curl in one config on stdin and neither token goes in argv. xtrace is off for it,
+# as for curl_auth_config.
+with_takeover_header() {
+  { set +x; } 2>/dev/null
+  cat
+  local token
+  token="$(takeover_token)"
+  if [[ "$token" == *$'\n'* || "$token" == *$'\r'* ]]; then
+    echo "The takeover token contains a line break; fix TAKEOVER_TOKEN (or data/takeover-token)." >&2
+    return 1
+  fi
+  if [[ -n "$token" ]]; then
+    token="${token//\\/\\\\}"
+    printf 'header = "X-Takeover-Token: %s"\n' "${token//\"/\\\"}"
+  fi
+}
+
+# curl that sends the bearer token and the takeover token, for GET /sessions/{session_id}/takeover-link only.
+takeover_curl() {
+  curl_auth_config | with_takeover_header | curl -q --config - "$@"
+}

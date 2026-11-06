@@ -1,0 +1,139 @@
+"""The takeover token: a second secret, held by the person, that GET /sessions/{id}/takeover-link demands (NAV-14b).
+
+The bearer token is the agents' token, so an agent that can make its own HTTP calls read any isolated session's
+password link with it. The takeover token is loaded or generated at startup next to the API token, and nothing
+agent-facing reads it.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import stat
+from pathlib import Path
+
+import pytest
+
+from app.api_token import ensure_takeover_token
+from app.config import Settings
+from app.runtime_policy import MIN_PRODUCTION_BEARER_TOKEN_LENGTH
+
+REPO = Path(__file__).resolve().parents[2]
+SENTINEL = "takeover-sentinel-" + "t" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH
+API_SENTINEL = "api-sentinel-" + "a" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH
+LOGGER = "app.api_token"
+
+
+def make_settings(tmp_path: Path, **overrides: str) -> Settings:
+    values = {"TAKEOVER_TOKEN_FILE": str(tmp_path / "takeover-token"), "API_TOKEN_FILE": str(tmp_path / "api-token")}
+    return Settings(_env_file=None, **{**values, **overrides})
+
+
+def test_the_settings_keep_the_token_out_of_repr_and_dumps(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, TAKEOVER_TOKEN=SENTINEL)
+    assert settings.takeover_token == SENTINEL
+    assert SENTINEL not in repr(settings)
+    assert SENTINEL not in str(settings.model_dump())
+    assert Settings.model_fields["takeover_token_file"].default == "/data/takeover-token"
+
+
+def test_a_whitespace_only_takeover_token_is_unset(tmp_path: Path) -> None:
+    assert make_settings(tmp_path, TAKEOVER_TOKEN="   ").takeover_token is None
+
+
+@pytest.mark.parametrize("scope", ["loopback", "exposed"])
+def test_the_first_start_generates_a_private_file_and_the_next_reuses_it(
+    tmp_path: Path, scope: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "takeover-token"
+    settings = make_settings(tmp_path, API_BIND_SCOPE=scope)
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        ensure_takeover_token(settings)
+    token = settings.takeover_token
+    assert token and len(token) >= MIN_PRODUCTION_BEARER_TOKEN_LENGTH
+    assert path.read_text(encoding="utf-8").strip() == token
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert token not in caplog.text
+
+    again = make_settings(tmp_path, API_BIND_SCOPE=scope)
+    ensure_takeover_token(again)
+    assert again.takeover_token == token
+
+
+def test_tokenless_loopback_still_gets_a_takeover_token(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, API_BIND_SCOPE="loopback", API_ALLOW_TOKENLESS_LOOPBACK="true")
+    ensure_takeover_token(settings)
+    assert settings.takeover_token
+
+
+def test_a_configured_token_wins_and_the_file_is_neither_read_nor_written(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, TAKEOVER_TOKEN=SENTINEL)
+    ensure_takeover_token(settings)
+    assert settings.takeover_token == SENTINEL
+    assert not (tmp_path / "takeover-token").exists()
+
+
+def test_a_short_configured_token_refuses_startup(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, TAKEOVER_TOKEN="short-sentinel")
+    with pytest.raises(RuntimeError, match="TAKEOVER_TOKEN") as raised:
+        ensure_takeover_token(settings)
+    assert "short-sentinel" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"API_BEARER_TOKEN": SENTINEL},
+        {"API_BEARER_TOKENS": f"alice:{API_SENTINEL},bob:{SENTINEL}"},
+    ],
+)
+def test_a_configured_token_equal_to_an_api_credential_refuses_startup(tmp_path: Path, overrides: dict) -> None:
+    settings = make_settings(tmp_path, TAKEOVER_TOKEN=SENTINEL, **overrides)
+    with pytest.raises(RuntimeError, match="TAKEOVER_TOKEN") as raised:
+        ensure_takeover_token(settings)
+    assert SENTINEL not in str(raised.value)
+
+
+def test_an_unwritable_file_warns_and_leaves_no_token(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+    settings = make_settings(tmp_path, TAKEOVER_TOKEN_FILE=str(blocker / "takeover-token"))
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_takeover_token(settings)  # does not raise: the controller starts
+    assert settings.takeover_token is None
+    assert any(r.levelno == logging.WARNING and "503" in r.getMessage() for r in caplog.records), caplog.text
+
+
+def test_an_unusable_file_warns_and_is_not_overwritten(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    path = tmp_path / "takeover-token"
+    path.write_text("too-short\n", encoding="utf-8")
+    settings = make_settings(tmp_path)
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_takeover_token(settings)
+    assert settings.takeover_token is None
+    assert path.read_text(encoding="utf-8") == "too-short\n"
+    assert "too-short" not in caplog.text
+
+
+def test_a_file_token_equal_to_an_api_credential_is_not_used(tmp_path: Path) -> None:
+    (tmp_path / "takeover-token").write_text(SENTINEL + "\n", encoding="utf-8")
+    settings = make_settings(tmp_path, API_BEARER_TOKEN=SENTINEL)
+    ensure_takeover_token(settings)
+    assert settings.takeover_token is None
+
+
+def test_the_lifespan_loads_the_takeover_token_after_the_api_token() -> None:
+    text = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    assert text.index("ensure_api_credential(settings)") < text.index("ensure_takeover_token(settings)")
+
+
+@pytest.mark.skipif(not (REPO / "client").is_dir(), reason="the agent-facing packages are not shipped in the image")
+def test_no_agent_facing_package_reads_the_takeover_token() -> None:
+    for package in ("client", "integrations/langchain", "packaging/auto-browser-mcp"):
+        for path in (REPO / package).rglob("*"):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for needle in ("TAKEOVER_TOKEN", "takeover-token", "takeover_token", "X-Takeover-Token"):
+                assert needle not in text, f"{path} names {needle}"
