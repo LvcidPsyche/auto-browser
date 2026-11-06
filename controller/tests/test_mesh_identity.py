@@ -67,37 +67,45 @@ class NodeIdentityLooseKeyWarningTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.dir = Path(self._tmp.name) / "identity"
-        NodeIdentity(self.dir)
+        self.node_id = NodeIdentity(self.dir).node_id
+        self.key = self.dir / identity_module._PRIVKEY_FILE
 
-    def _key_mode(self, mode: int):
-        # The key's mode is injected so this runs the same on Windows, where chmod cannot loosen a file; the
-        # directory reads as private, so only the key is in question here.
-        return patch.object(
-            identity_module, "_mode_bits", side_effect=lambda path: _PRIVATE_DIR if path == self.dir else mode
-        )
+    def _reload(self, **patches):
+        with self.assertLogs("app.mesh.identity", level="WARNING") as logs:
+            with patch.multiple(identity_module.os, **patches) if patches else _nothing():
+                loaded = NodeIdentity(self.dir)
+        self.assertEqual(loaded.node_id, self.node_id)
+        return "\n".join(logs.output)
 
-    def _reload(self, mode: int):
-        with (
-            patch.object(identity_module, "_POSIX", True),
-            self._key_mode(mode),
-            self.assertLogs("app.mesh.identity", level="WARNING") as logs,
-        ):
-            NodeIdentity(self.dir)
-        return logs.output
-
-    def test_group_or_world_readable_key_warns_on_load(self):
+    @_POSIX_ONLY
+    def test_w4_15_a_group_or_world_readable_key_is_tightened_to_0600_with_a_warning(self):
         for mode in (0o640, 0o644, 0o604, 0o666):
             with self.subTest(mode=oct(mode)):
-                output = self._reload(mode)
-                self.assertTrue(any("readable by group or others" in line for line in output))
+                os.chmod(self.key, mode)
+                output = self._reload()
+                self.assertIn("readable by group or others", output)
+                self.assertIn("changed it to 0600", output)
+                self.assertEqual(stat.S_IMODE(self.key.stat().st_mode), 0o600)
+
+    @_POSIX_ONLY
+    def test_w4_15_a_key_that_cannot_be_tightened_is_still_loaded_with_a_warning(self):
+        os.chmod(self.key, 0o644)
+        output = self._reload(fchmod=Mock(side_effect=PermissionError(1, "Operation not permitted")))
+        self.assertIn("could not be tightened", output)
+        self.assertIn("stays readable", output)
+        self.assertEqual(stat.S_IMODE(self.key.stat().st_mode), 0o644)
 
     def test_private_key_does_not_warn(self):
-        with (
-            patch.object(identity_module, "_POSIX", True),
-            self._key_mode(0o600),
-            self.assertNoLogs("app.mesh.identity", level="WARNING"),
-        ):
+        with self.assertNoLogs("app.mesh.identity", level="WARNING"):
             NodeIdentity(self.dir)
+
+
+class _nothing:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *exc):
+        return False
 
 
 class NodeIdentityLooseDirectoryTests(unittest.TestCase):

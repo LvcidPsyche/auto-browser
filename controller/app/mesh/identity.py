@@ -9,10 +9,12 @@ Private key lives on disk at 0600; never transmitted.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import json
 import logging
 import os
+import stat
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -55,6 +57,48 @@ def _write_private_file(path: Path, data: bytes) -> None:
         handle.write(data)
 
 
+def _tighten_a_loose_key(path: Path) -> None:
+    """Take group and other bits off the private key, as the token files are, with one warning; never fails the load.
+
+    Opened without following a symlink and changed through that descriptor, so a path swapped between the check and
+    the chmod cannot aim it at another file (a symlinked key is only reported: its target is not ours). A key that
+    cannot be tightened is still loaded, as before, with a warning that it stays readable.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        if exc.errno == errno.ELOOP and _mode_bits(path) & _GROUP_OR_WORLD_BITS:
+            logger.warning(
+                "mesh.identity: private key %s is a symlink to a file readable by group or others (mode %o); it is "
+                "loaded as it is: restrict it where it is mounted",
+                path,
+                _mode_bits(path),
+            )
+        return
+    try:
+        mode = stat.S_IMODE(os.fstat(fd).st_mode)
+        if not mode & _GROUP_OR_WORLD_BITS:
+            return
+        try:
+            os.fchmod(fd, _KEY_FILE_MODE)
+            if stat.S_IMODE(os.fstat(fd).st_mode) & _GROUP_OR_WORLD_BITS:
+                raise OSError("the filesystem did not keep the new mode")
+        except OSError as exc:
+            logger.warning(
+                "mesh.identity: private key %s is readable by group or others (mode %o) and could not be tightened "
+                "(%s); it is loaded and stays readable: run chmod 600 on it",
+                path,
+                mode,
+                exc,
+            )
+            return
+    finally:
+        os.close(fd)
+    logger.warning(
+        "mesh.identity: private key %s was readable by group or others (mode %o); changed it to 0600", path, mode
+    )
+
+
 class NodeIdentity:
     """Loaded (or generated) Ed25519 identity for this mesh node."""
 
@@ -70,12 +114,8 @@ class NodeIdentity:
 
         if priv_path.exists():
             logger.info("mesh.identity: loading existing keypair from %s", self._dir)
-            if _POSIX and _mode_bits(priv_path) & _GROUP_OR_WORLD_BITS:
-                logger.warning(
-                    "mesh.identity: private key %s is readable by group or others (mode %o); run chmod 600 on it",
-                    priv_path,
-                    _mode_bits(priv_path),
-                )
+            if _POSIX:
+                _tighten_a_loose_key(priv_path)
             pem = priv_path.read_bytes()
             self._private_key = Ed25519PrivateKey.from_private_bytes(self._extract_raw_ed25519(pem))
         else:

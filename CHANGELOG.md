@@ -424,12 +424,14 @@ All notable changes to auto-browser are documented here.
   400 otherwise, so a model can no longer be read as a CLI flag. The Gemini adapter, and the curator for
   `CURATOR_MODEL`, also URL-quote the model they put in the request path.
 - The mesh and witness private key is now created with mode 0600 from the first byte (`O_EXCL`, no write-then-chmod
-  window) in an identity directory created at 0700, and loading a key that is readable by group or others logs a
-  warning on POSIX. An identity directory an earlier release left open to group or others is tightened to 0700 on load
-  when the controller owns it and it holds only the identity files, with one warning, and reported with a warning
-  when it holds anything else (a `MESH_IDENTITY_DIR` pointed at `/data/mesh` or `/data`, whose other readers a chmod
-  would lock out), belongs to another user or keeps its mode after the chmod (a mount that does not keep modes). The
-  witness signer's key directory goes through the same check.
+  window) in an identity directory created at 0700, and on POSIX a key that is readable by group or others is changed
+  to 0600 on load, through the descriptor it was opened with and with a warning, as the token files are (one that
+  cannot be tightened is still loaded, with a warning that it stays readable). An identity directory an earlier
+  release left open to group or others is tightened to 0700 on load when the controller owns it and it holds only the
+  identity files, with one warning, and reported with a warning when it holds anything else (a `MESH_IDENTITY_DIR`
+  pointed at `/data/mesh` or `/data`, whose other readers a chmod would lock out), belongs to another user or keeps
+  its mode after the chmod (a mount that does not keep modes). The witness signer's key directory goes through the
+  same check.
 - Every secret `Settings` field (the auth-state encryption key, the witness remote key, every provider API key, the
   approval webhook secret, the default proxy password, the share-link secret) is now left out of `repr()`, so a logged
   `Settings` object no longer carries it. So are the URL fields that can carry a credential in their userinfo, path
