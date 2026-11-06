@@ -167,8 +167,9 @@ def _goes_direct(request: Request) -> bool:
     Constructing the HTTPConnection parses and does not connect; its InvalidURL (a non-numeric port), a port it
     reads outside 0 to 65535 (W15-4), and a reading urlsplit cannot parse (%5b127.0.0.1%5d, x%5b@127.0.0.1) and
     its ValueError (W12-3), raise InvalidControllerURL (W13-1), so a malformed authority is refused before any
-    opener is chosen and the request is sent nowhere. So, before the readings, does a ``request.selector`` holding a space or a control character
-    (U+0000 to U+0020 or U+007F), which http.client refuses only once a connection is chosen. Each reason is the
+    opener is chosen and the request is sent nowhere. So, before the readings, does a ``request.selector``
+    holding a space or a control character (U+0000 to U+0020 or U+007F), which http.client refuses only once a
+    connection is chosen. Each reason is the
     bridges' own, never the parse error's text, which can quote the URL (W14-1). A host-less request
     (``request.host`` None) is not direct and falls through to urllib's own error, raised before any proxy is used
     (W10-14).
