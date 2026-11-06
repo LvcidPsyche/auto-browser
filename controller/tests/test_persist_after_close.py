@@ -191,6 +191,28 @@ class PersistAfterCloseTests(unittest.IsolatedAsyncioTestCase):
         stored = await store.get("s1")
         self.assertEqual((stored.status, stored.close_reason), ("closed", "operator"))
 
+    async def test_w4_10_a_record_that_cannot_be_read_fails_an_active_write_instead_of_being_replaced(self) -> None:
+        # An I/O error read as "not closed", so a late active write replaced a closed record the error hid.
+        store = await self._store()
+        await store.upsert(_record("closed", live=False).model_copy(update={"close_reason": "operator"}))
+        store.file_store.get = AsyncMock(side_effect=OSError("I/O error"))
+
+        with self.assertLogs("app.session_store", "WARNING") as logged:
+            with self.assertRaises(OSError):
+                await store.upsert(_record("active", live=True))
+
+        self.assertIn("s1", "\n".join(logged.output))
+        del store.file_store.get  # the instance attribute: the real get again
+        stored = await store.get("s1")
+        self.assertEqual((stored.status, stored.close_reason), ("closed", "operator"))
+
+    async def test_w4_10_a_missing_record_is_still_not_closed(self) -> None:
+        store = await self._store()
+
+        await store.upsert(_record("active", live=True))
+
+        self.assertEqual((await store.get("s1")).status, "active")
+
     async def test_the_store_still_marks_active_records_interrupted_and_closes_them(self) -> None:
         store = DurableSessionStore(file_root=Path(self.tmp.name) / "rec", redis_url=None, redis_prefix="t")
         await store.startup()
