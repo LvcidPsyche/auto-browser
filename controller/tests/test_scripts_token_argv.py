@@ -478,6 +478,62 @@ class OtherIpv4SpellingTests(unittest.TestCase):
                     self.assertNotIn(URL_FORM_MESSAGE, stderr)
                     self.assertTrue(ran, "curl did not run")
 
+    def test_w10_5_a_scheme_is_read_only_at_the_start_of_the_base_url(self) -> None:
+        # curl guesses http:// for a scheme-less URL and connects to 127.0.0.2 (or localhost) for each; a guard that
+        # cut through the first :// anywhere read the host as cafe.bad, 127.0.0.2 missed the --noproxy list, and the
+        # tokens went to the proxy. The controller, on the URL's own address, must get each request, the proxy none.
+        try:
+            probe = http.server.ThreadingHTTPServer(("127.0.0.2", 0), _Recorder)
+        except OSError:
+            self.skipTest("127.0.0.2 cannot be bound here")
+        probe.server_close()
+        proxied: list = []
+        proxy = _serve(proxied)
+        self.addCleanup(proxy.shutdown)
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        for function in ("bearer_curl", "takeover_curl"):
+            for address, url in (
+                ("127.0.0.2", "127.0.0.2:{port}/?next=http://cafe.bad/"),
+                ("127.0.0.2", "127.0.0.2:{port}/#http://cafe.bad/"),
+                ("127.0.0.1", "localhost:{port}/x?u=https://cafe.bad"),
+                ("127.0.0.2", "http://127.0.0.2:{port}/?next=http://cafe.bad/"),
+            ):
+                with self.subTest(function=function, url=url):
+                    seen: list = []
+                    proxied.clear()
+                    controller = http.server.ThreadingHTTPServer(
+                        (address, 0), type("Handler", (_Recorder,), {"seen": seen})
+                    )
+                    threading.Thread(target=controller.serve_forever, daemon=True).start()
+                    self.addCleanup(controller.server_close)
+                    self.addCleanup(controller.shutdown)
+                    target = url.replace("{port}", str(controller.server_address[1]))
+                    result = subprocess.run(
+                        [
+                            BASH,
+                            "-c",
+                            f'ROOT_DIR="{_bash_path(Path(tempdir.name))}"; '
+                            f'source "{_bash_path(SCRIPTS / "load_env.sh")}"; '
+                            f'{function} -4 -sS --max-time 5 "$TARGET_URL"',
+                        ],
+                        capture_output=True,
+                        text=True,
+                        env={
+                            "PATH": os.environ.get("PATH", ""),
+                            "HOME": tempdir.name,
+                            "API_BEARER_TOKEN": TOKEN,
+                            "TAKEOVER_TOKEN": "takeover-" + TOKEN,
+                            "AUTO_BROWSER_BASE_URL": target,
+                            "TARGET_URL": target,
+                            **_proxy_environment(f"http://127.0.0.1:{proxy.server_address[1]}"),
+                        },
+                        timeout=60,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(len(seen), 1, "the controller did not get the request directly")
+                    self.assertEqual(proxied, [], f"{function} sent the tokens through the proxy for {url}")
+
     def test_w9_4_a_scheme_less_base_url_is_not_refused(self) -> None:
         for url in ("localhost:{port}", "127.0.0.2:{port}/x"):
             with self.subTest(url=url):

@@ -291,11 +291,15 @@ loopback_noproxy() {
   printf '%s' "${hosts}${inherited:+,${inherited}}"
 }
 
-# The host of a base URL as curl reads its authority: the scheme stripped, the authority cut at the first /, ? or #,
-# the userinfo dropped up to the last @, then a bracketed host up to ] (printed with its brackets), else the host up
-# to the port's colon. Nothing is decoded: refuse_other_ipv4_spelling refuses a host curl would decode or normalise.
+# The host of a base URL as curl reads its authority: a scheme stripped only when the URL starts with one (curl
+# guesses http:// for 127.0.0.2:8000/?next=http://cafe.bad/ and connects to 127.0.0.2), the authority cut at the
+# first /, ? or #, the userinfo dropped up to the last @, then a bracketed host up to ] (printed with its brackets),
+# else the host up to the port's colon. Nothing is decoded: refuse_other_ipv4_spelling refuses a host curl would decode or normalise.
 base_url_host() {
-  local rest="${1#*://}"
+  local rest="$1"
+  if [[ "$rest" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
+    rest="${rest#*://}"
+  fi
   rest="${rest%%[/?#]*}"
   rest="${rest##*@}"
   if [[ "$rest" == \[* ]]; then

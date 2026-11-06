@@ -362,11 +362,11 @@ All notable changes to auto-browser are documented here.
   (such as `%31%32%37.0.0.2`) or ending in `.`, and a bracketed IPv6 host other than `[::1]` whose first group is
   empty or all zeros, which covers every IPv4-mapped form such as `[::ffff:127.0.0.2]`; curl normalises a host before
   it matches `--noproxy`, so a spelling of another loopback address missed the list, while a spelling of `127.0.0.1`
-  itself was normalised to it; the host is read as curl reads it, the authority ending at the first `/`, `?` or `#`,
-  and they also refuse a set base URL that starts with a scheme and a colon but not with that scheme, `//` and a
-  host, such as `http:///127.0.0.2:8000/` or `http:/127.0.0.2:8000/`, which curl reads as `127.0.0.2`, and one whose
-  host is empty, such as `http://:8000/`; a scheme-less `localhost:8000` is still accepted), then the environment's
-  own `NO_PROXY` (a `NO_PROXY` of `*` is passed alone, so every host still goes direct), the reverse-SSH smoke's
+  itself was normalised to it; the host is read as curl reads it, a scheme only at the start of the URL and the
+  authority ending at the first `/`, `?` or `#`, and they also refuse a set base URL that starts with a scheme and a
+  colon but not with that scheme, `//` and a host, such as `http:///127.0.0.2:8000/` or `http:/127.0.0.2:8000/`,
+  which curl reads as `127.0.0.2`, and one whose host is empty, such as `http://:8000/`; a scheme-less
+  `localhost:8000` is still accepted), then the environment's own `NO_PROXY` (a `NO_PROXY` of `*` is passed alone, so every host still goes direct), the reverse-SSH smoke's
   bastion curl passes it for the bastion's own loopback names, and `scripts/smoke_download.py` sends its controller
   requests with no proxy, so a request to a loopback controller no longer hands its tokens to an `HTTP_PROXY` or
   `ALL_PROXY`. `scripts/takeover_link.sh` warns when it finds no takeover token and says what a 403 means.
