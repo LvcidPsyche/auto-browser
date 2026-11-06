@@ -277,7 +277,7 @@ class HarnessService:
         if not self.store.begin_run(run_id, owner, max_owned=self.max_runs_per_operator):
             raise ValueError(
                 f"harness run limit reached: {self.max_runs_per_operator} stored runs for this operator "
-                "(HARNESS_MAX_RUNS_PER_OPERATOR); old runs are removed after HARNESS_RETENTION_DAYS"
+                "(HARNESS_MAX_RUNS_PER_OPERATOR); HARNESS_RETENTION_DAYS, when set, removes old runs"
             )
         try:
             run_dir = self.store.run_dir(run_id)

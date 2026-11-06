@@ -315,6 +315,22 @@ class RetentionTests(_Base):
         self.assertEqual(service.store.prune(0), 0)
         self.assertTrue(service.store.run_dir(record.id).exists())
 
+    async def test_the_default_retention_keeps_a_400_day_old_run_and_candidate(self) -> None:
+        # R-6: a default of 30 deleted every older run, and the only copy of each staged candidate, on the first
+        # start after the upgrade. An upgrade must delete nothing.
+        with patch.dict(os.environ, {}, clear=True):
+            days = Settings(_env_file=None).harness_retention_days
+        service = HarnessService(self.root)
+        record = await self._run(service)
+        candidate = Path(record.candidate.files["candidate.json"])
+        for path in (service.store.run_dir(record.id) / "run.json", service.store.run_dir(record.id), candidate):
+            _age(path, 400)
+        _age(candidate.parent, 400)
+
+        self.assertEqual(service.store.prune(days), 0)
+        self.assertTrue(service.store.run_dir(record.id).exists())
+        self.assertTrue(candidate.exists())
+
     async def test_prune_leaves_a_run_this_process_is_driving(self) -> None:
         service = HarnessService(self.root)
         record = await self._run(service)

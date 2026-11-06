@@ -99,9 +99,10 @@ class Settings(BaseSettings):
     harness_explorer_model: str = Field("", alias="HARNESS_EXPLORER_MODEL")
     harness_verifier_model: str = Field("", alias="HARNESS_VERIFIER_MODEL")
     harness_executor_model: str = Field("", alias="HARNESS_EXECUTOR_MODEL")
-    # Runs and staged candidates older than this many days are removed (0 or less keeps them); at most this many
-    # runs are kept per operator before a new one is refused (0 or less means no cap).
-    harness_retention_days: float = Field(30.0, alias="HARNESS_RETENTION_DAYS")
+    # Runs and staged candidates older than this many days are removed (0 or less, the default, keeps them: staging
+    # holds a candidate's only copy, and an upgrade must delete nothing); at most this many runs are kept per
+    # operator before a new one is refused (0 or less means no cap).
+    harness_retention_days: float = Field(0.0, alias="HARNESS_RETENTION_DAYS")
     harness_max_runs_per_operator: int = Field(0, alias="HARNESS_MAX_RUNS_PER_OPERATOR")
     # Mesh: signed delegation between auto-browser nodes (docs/mesh.md). Off by default.
     mesh_enabled: bool = Field(False, alias="MESH_ENABLED")

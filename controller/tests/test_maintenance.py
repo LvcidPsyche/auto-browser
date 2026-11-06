@@ -70,6 +70,10 @@ class MaintenanceServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.service.harness_service = harness
         await self.service.run_cleanup()
+        self.assertTrue(run_dir.exists())  # the default, 0, keeps everything (R-6)
+
+        self.settings.harness_retention_days = 30
+        await self.service.run_cleanup()
         self.assertFalse(run_dir.exists())
 
     async def test_the_harness_prune_reads_its_setting_only_once_a_harness_is_attached(self) -> None:
