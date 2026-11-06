@@ -354,8 +354,20 @@ def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
         if not mode & _GROUP_OR_OTHER_BITS:
             return
         os.fchmod(fd, PRIVATE_FILE_MODE)
+        # Some filesystems accept a chmod and keep the mode (a Windows drive under Docker Desktop, some FUSE or SMB
+        # mounts, W5-4): check that it held. Nobody can tighten such a file, so the token is still used.
+        kept = stat.S_IMODE(os.fstat(fd).st_mode)
     finally:
         os.close(fd)
+    if kept & _GROUP_OR_OTHER_BITS:
+        logger.warning(
+            "%s %s is readable beyond its owner (mode %o) and its filesystem did not keep a change to 0600, so it "
+            "stays readable beyond its owner where that filesystem enforces modes. Restrict it where it is mounted.",
+            name,
+            path,
+            kept,
+        )
+        return
     logger.warning("%s %s was readable beyond its owner (mode %o); changed it to 0600", name, path, mode)
 
 

@@ -385,7 +385,7 @@ def test_group_or_other_bits_are_removed_with_a_warning(
     closed: list[int] = []
     fake_os = _posix_stand_in(
         open=lambda target, flags: 7,
-        fstat=lambda fd: SimpleNamespace(st_mode=mode),
+        fstat=lambda fd: SimpleNamespace(st_mode=0o100600 if fchmods else mode),
         fchmod=lambda fd, bits: fchmods.append((fd, bits)),
         close=closed.append,
     )
@@ -397,7 +397,38 @@ def test_group_or_other_bits_are_removed_with_a_warning(
     # Changed through the descriptor it opened without following a symlink, never by path.
     assert fchmods == ([(7, 0o600)] if tightened else [])
     assert closed == [7]
-    assert ("0600" in caplog.text) is tightened
+    assert ("changed it to 0600" in caplog.text) is tightened
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes: Windows applies the folder's ACL")
+@pytest.mark.parametrize("which", ["API_TOKEN_FILE", "TAKEOVER_TOKEN_FILE"])
+def test_w5_4_a_filesystem_that_ignores_chmod_is_warned_about_and_the_token_still_used(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, which: str
+):
+    # A repo on a Windows drive under Docker Desktop, or some FUSE and SMB mounts, accept a chmod and keep the mode:
+    # the log said "changed it to 0600" while the file stayed readable beyond its owner.
+    from app.api_token import ensure_takeover_token
+
+    marker = "w5-4-marker-" + "m" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH
+    api_path, takeover_path = tmp_path / "api-token", tmp_path / "takeover-token"
+    settings = make_settings(api_path, TAKEOVER_TOKEN_FILE=str(takeover_path))
+    path = api_path if which == "API_TOKEN_FILE" else takeover_path
+    for each, value in ((api_path, STRONG_TOKEN), (takeover_path, marker)):
+        each.write_text(value + "\n", encoding="utf-8")
+        each.chmod(0o600)
+    path.chmod(0o644)
+
+    with patch.object(api_token.os, "fchmod", lambda fd, bits: None), caplog.at_level(logging.INFO, logger=LOGGER):
+        ensure_api_credential(settings)
+        ensure_takeover_token(settings)
+
+    assert "changed it" not in caplog.text
+    warned = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warned) == 1
+    assert which in warned[0] and str(path) in warned[0] and "did not keep" in warned[0]
+    assert "644" in warned[0]
+    assert settings.api_bearer_token == STRONG_TOKEN
+    assert settings.takeover_token == marker
 
 
 def _posix_stand_in(**functions) -> SimpleNamespace:
