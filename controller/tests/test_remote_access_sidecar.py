@@ -76,6 +76,24 @@ class SidecarTests(unittest.TestCase):
 
         self.assertIsNotNone(info["last_updated"])
 
+    def test_the_tunnel_block_carries_the_validated_values_not_the_raw_ones(self) -> None:
+        # B-fix-5 (NAV-40): the block copied the file's raw values: NaN (invalid JSON for a strict client), "soon",
+        # and a URL that was a list or an object.
+        for content in (
+            '{"status": "active", "updated_at": "2999-01-01T00:00:00Z", "stale_after_seconds": NaN}',
+            {"status": "active", "updated_at": UPDATED, "stale_after_seconds": "soon"},
+        ):
+            with self.subTest(content=content):
+                info = self.info(content)
+
+                self.assertEqual(info["tunnel"]["stale_after_seconds"], 45.0)
+        info = self.info(
+            {"status": "active", "updated_at": UPDATED, "public_takeover_url": ["x"], "public_api_url": ""}
+        )
+
+        self.assertNotIn("public_takeover_url", info["tunnel"])
+        self.assertNotIn("public_api_url", info["tunnel"])
+
     def test_a_file_that_is_not_an_object_is_unreadable_metadata(self) -> None:
         for content in ("[1, 2]", '"text"', "7", "null"):
             with self.subTest(content=content):

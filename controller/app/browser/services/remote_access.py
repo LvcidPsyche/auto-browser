@@ -105,10 +105,26 @@ class BrowserRemoteAccessService:
                 "age_seconds": age_seconds,
                 "stale_after_seconds": stale_after_seconds,
                 # Only these: the file also names the bastion, its user, a pid and the log path.
-                "tunnel": {key: tunnel[key] for key in _TUNNEL_FIELDS_SHOWN if key in tunnel},
+                "tunnel": self._shown_tunnel_fields(tunnel, stale_after_seconds),
             }
         )
         return payload
+
+    @staticmethod
+    def _shown_tunnel_fields(tunnel: dict[str, Any], stale_after_seconds: float) -> dict[str, Any]:
+        """The sidecar fields the report passes on, as validated: stale_after_seconds as computed, a URL only when it
+        is a non-empty string (the raw file can hold NaN, "soon" or a list)."""
+        shown: dict[str, Any] = {}
+        for key in _TUNNEL_FIELDS_SHOWN:
+            if key not in tunnel:
+                continue
+            value = tunnel[key]
+            if key == "stale_after_seconds":
+                value = stale_after_seconds
+            elif key in {"public_takeover_url", "public_api_url"} and not (isinstance(value, str) and value):
+                continue
+            shown[key] = value
+        return shown
 
     def _stale_after_seconds(self, value: Any) -> float:
         """The file's stale_after_seconds when it is a positive finite number, else the setting."""
