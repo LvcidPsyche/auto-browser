@@ -63,9 +63,10 @@ def _is_loopback_host(host: str | None) -> bool:
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
-        address = _numeric_address(host)
-        if address is None:
+        numeric = _numeric_address(host)
+        if numeric is None:
             return False
+        address = numeric
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
         address = address.ipv4_mapped
     return address.is_loopback or address.is_unspecified
