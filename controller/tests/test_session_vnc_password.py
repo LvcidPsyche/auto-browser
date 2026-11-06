@@ -5,17 +5,16 @@ containers: Docker routes to published ports across bridge networks. The
 operator's one VNC_PASSWORD used to be handed to every isolated container,
 where code in one session could read its own copy and open any other
 session's desktop, or the shared browser-node's. Each container now gets a
-fresh password, and only the human-handoff responses (create_session,
-get_session, get_remote_access, request_human_takeover, over REST and MCP)
-carry it, in the takeover URL's fragment. Observations, the model's context,
-the stored session records, the tunnel metadata file, the audit trail and
-logs never do.
+fresh password, and only the human-only takeover link (GET
+/sessions/{id}/takeover-link, which the dashboard and scripts/takeover_link.sh
+read) carries it, in the takeover URL's fragment. No REST or MCP result an agent
+gets, the stored session records, the tunnel metadata file, the audit trail and
+logs ever do (NAV-14).
 """
 
 from __future__ import annotations
 
 import logging
-import re
 import tempfile
 import unittest
 from datetime import datetime
@@ -116,8 +115,8 @@ class PasswordGenerationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HandoffSurfaceTests(unittest.IsolatedAsyncioTestCase):
-    """Handoff responses carry the password; everything else, on disk or in
-    the model's context, does not."""
+    """Only the takeover link carries the password; everything else, on disk or
+    in the model's context, does not."""
 
     def setUp(self) -> None:
         self._tempdir = tempfile.TemporaryDirectory()
@@ -195,7 +194,9 @@ class HandoffSurfaceTests(unittest.IsolatedAsyncioTestCase):
         manager.sessions[session.id] = session
         return manager, session
 
-    async def test_handoff_responses_carry_the_password_and_nothing_else_does(self) -> None:
+    async def test_only_the_takeover_link_carries_the_password(self) -> None:
+        # NAV-14: the handoff results (session record, remote access, takeover result) reach the model over MCP, so
+        # none of them carries it any more; only the human-only takeover link does.
         manager, session = self.manager_with_session()
         handoff = f"{TAKEOVER}#password={PASSWORD}"
 
@@ -206,79 +207,55 @@ class HandoffSurfaceTests(unittest.IsolatedAsyncioTestCase):
             takeover = await manager.request_human_takeover("s1", "log in")
             record = await manager.get_session_record("s1")
             remote = manager.get_remote_access_info("s1")
-            handoffs = [manager.remote_access.with_takeover_password(view) for view in (record, remote, takeover)]
+            link = manager.remote_access.takeover_link(session)
 
-        # The handoff surfaces: the session record, remote access, the takeover result.
-        session_view, remote_view, takeover_view = handoffs
-        self.assertEqual(session_view["takeover_url"], handoff)
-        self.assertEqual(session_view["remote_access"]["takeover_url"], handoff)
-        self.assertEqual(remote_view["takeover_url"], handoff)
-        self.assertEqual(takeover_view["takeover_url"], handoff)
-        self.assertEqual(takeover_view["session"]["takeover_url"], handoff)
-        self.assertEqual(takeover_view["remote_access"]["takeover_url"], handoff)
-        # MCP returns create_session / get_session whole, fragment included.
-        self.assertEqual(shape_mcp_result("browser.get_session", session_view)["takeover_url"], handoff)
-
-        # Everything else: the summary observations and action results embed,
-        # the URL observe reports, compact references, and the payloads before
-        # the handoff view.
+        self.assertEqual(link, {"session_id": "s1", "takeover_url": handoff})
         for name, value in {
             "summary": summary,
             "current_takeover_url": manager._current_takeover_url(session),
             "compact reference": compact_session(summary),
-            "raw record": record,
-            "raw remote access": remote,
-            "raw takeover result": takeover,
+            "record": record,
+            "get_session over MCP": shape_mcp_result("browser.get_session", record),
+            "remote access": remote,
+            "takeover result": takeover,
         }.items():
             self.assertNotIn(PASSWORD, repr(value), name)
-        # The views are copies: the stored payloads were not changed.
-        self.assertEqual(record["takeover_url"], TAKEOVER)
         # On disk: the session store, the audit trail, actions.jsonl, witness receipts.
         self.assertEqual(_files_containing(self.root, PASSWORD), [])
         self.assertNotIn(PASSWORD, "\n".join(logs.output))
 
-    async def test_the_tunnel_takeover_url_carries_it_but_the_tunnel_file_does_not(self) -> None:
+    async def test_the_tunnel_takeover_link_carries_it_but_the_tunnel_file_does_not(self) -> None:
         manager, session = self.manager_with_session(tunnel=True)
         tunnel_url = session.tunnel.public_takeover_url
         session.tunnel.info_path.parent.mkdir(parents=True, exist_ok=True)  # the broker's startup makes it
 
         manager.tunnel_broker._write_metadata(session.tunnel, status="active")
-        view = manager.remote_access.with_takeover_password(manager.get_remote_access_info("s1"))
+        link = manager.remote_access.takeover_link(session)
+        view = manager.get_remote_access_info("s1")
         await manager._persist_session(session, status="active")
 
-        self.assertEqual(view["takeover_url"], f"{tunnel_url}#password={PASSWORD}")
-        # The local URL and the tunnel description stay as they were.
-        self.assertEqual(view["configured_takeover_url"], TAKEOVER)
-        self.assertNotIn(PASSWORD, repr(view["session_tunnel"]))
+        self.assertEqual(link["takeover_url"], f"{tunnel_url}#password={PASSWORD}")
+        self.assertEqual(view["takeover_url"], tunnel_url)
+        self.assertNotIn(PASSWORD, repr(view))
         self.assertTrue(session.tunnel.info_path.is_file())
         self.assertEqual(_files_containing(self.root, PASSWORD), [])
 
-    async def test_a_closed_session_and_a_shared_one_get_no_password(self) -> None:
+    async def test_a_shared_session_gets_its_plain_url(self) -> None:
         manager, session = self.manager_with_session()
-        record = await manager._session_summary(session)
-        del manager.sessions["s1"]
-
-        self.assertEqual(manager.remote_access.with_takeover_password(record)["takeover_url"], TAKEOVER)
-
-        manager.sessions["s1"] = session
         session.isolation_mode = "shared_browser_node"
-        self.assertEqual(manager.remote_access.with_takeover_password(record)["takeover_url"], TAKEOVER)
-        self.assertEqual(manager.remote_access.with_takeover_password([record]), [record])
+
+        self.assertNotIn(PASSWORD, manager.remote_access.takeover_link(session)["takeover_url"])
 
 
 class RouteWiringTests(unittest.TestCase):
-    """The four handoff handlers, REST and MCP, go through the handoff view."""
+    """No REST or MCP handler adds the password any more (NAV-14)."""
 
-    def test_rest_and_mcp_handoff_handlers_add_the_password(self) -> None:
+    def test_no_handler_adds_the_password(self) -> None:
         app_dir = Path(__file__).resolve().parents[1] / "app"
-        sources = {
-            "routes/sessions.py": 3,  # create_session, get_session, request_human_takeover
-            "routes/operations.py": 1,  # get_remote_access
-            "tool_gateway/gateway.py": 4,  # the same four MCP tools
-        }
-        for relative, expected in sources.items():
+        for relative in ("routes/sessions.py", "routes/operations.py", "tool_gateway/gateway.py"):
             text = (app_dir / relative).read_text(encoding="utf-8")
-            self.assertEqual(len(re.findall(r"with_takeover_password\(", text)), expected, relative)
+            self.assertNotIn("with_takeover_password", text, relative)
+            self.assertNotIn("takeover_url_with_password", text, relative)
 
 
 if __name__ == "__main__":

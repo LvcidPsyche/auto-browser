@@ -4,6 +4,7 @@ import logging
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from ..action_errors import ErrorPageSourceError, RefusedPageError
 from ..auth_state import AuthStateDecryptError
@@ -54,7 +55,6 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
     async def create_session(payload: CreateSessionRequest) -> dict[str, Any]:
         with typed_route_errors(logger, "create session failed"):
             try:
-                # A human-handoff response: its takeover URL carries the session's noVNC password.
                 with persona_file_errors():
                     created = await manager.create_session(
                         name=payload.name,
@@ -78,11 +78,27 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                 raise HTTPException(status_code=422, detail=str(exc)) from None
             except RuntimeError:
                 raise HTTPException(status_code=409, detail="Conflict") from None
-            return manager.remote_access.with_takeover_password(created)
+            return created
 
     @router.get("/sessions/{session_id}")
     async def get_session(session_id: str) -> dict[str, Any]:
-        return manager.remote_access.with_takeover_password(await manager.get_session_record(session_id))
+        return await manager.get_session_record(session_id)
+
+    @router.get("/sessions/{session_id}/takeover-link")
+    async def get_takeover_link(session_id: str) -> JSONResponse:
+        # Human-only (NAV-14): the full link, an isolated session's noVNC password in its fragment. No MCP tool and
+        # no agent-facing package calls this; the dashboard and scripts/takeover_link.sh do. A closed or unknown
+        # session is a 404 (get_session). The audit event names the read, never the URL or the password.
+        session = await manager.get_session(session_id)
+        link = manager.remote_access.takeover_link(session)
+        await manager.audit.append(
+            event_type="takeover_link_viewed",
+            status="ok",
+            action="get_takeover_link",
+            session_id=session.id,
+            details={},
+        )
+        return JSONResponse(link, headers={"Cache-Control": "no-store"})
 
     @router.get("/sessions/{session_id}/observe")
     async def observe(session_id: str, limit: int = 40, preset: str | None = None) -> dict[str, Any]:
@@ -251,9 +267,7 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
     @router.post("/sessions/{session_id}/takeover")
     async def request_human_takeover(session_id: str, payload: HumanTakeoverRequest) -> dict[str, Any]:
         with typed_route_errors(logger, "takeover request failed for session %s", session_id):
-            return manager.remote_access.with_takeover_password(
-                await manager.request_human_takeover(session_id, payload.reason)
-            )
+            return await manager.request_human_takeover(session_id, payload.reason)
 
     @router.delete("/sessions/{session_id}")
     async def close_session(session_id: str) -> dict[str, Any]:

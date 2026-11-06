@@ -430,11 +430,11 @@ async function loadSessions() {
   });
 }
 
-// The session list leaves an isolated session's noVNC password out of its takeover
-// URL; the session's own record (GET /sessions/{id}) is a handoff response and
-// carries it in the fragment. The window opens on the click, which popup blockers
-// allow, and is pointed at the record's URL once it arrives. If the record cannot
-// be read, the list's URL still opens: noVNC then asks for the password.
+// No session record carries an isolated session's noVNC password (the model reads
+// those); GET /sessions/{id}/takeover-link, a human-only endpoint, returns the full
+// link with it in the fragment. The window opens on the click, which popup blockers
+// allow, and is pointed at that link once it arrives. If it cannot be read, the
+// list's URL still opens: noVNC then asks for the password.
 async function openTakeover(event, sessionId, fallback) {
   event.preventDefault();
   const win = window.open('about:blank', '_blank');
@@ -442,8 +442,8 @@ async function openTakeover(event, sessionId, fallback) {
   win.opener = null;
   let target = fallback;
   try {
-    const record = await api(`/sessions/${encodeURIComponent(sessionId)}`);
-    target = safeHttpUrl(record.takeover_url) || fallback;
+    const link = await api(`/sessions/${encodeURIComponent(sessionId)}/takeover-link`);
+    target = safeHttpUrl(link.takeover_url) || fallback;
   } catch (err) {
     console.warn(`takeover link: could not read session ${sessionId}: ${err.message}`);
   }
