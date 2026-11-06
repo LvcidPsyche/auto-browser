@@ -97,8 +97,8 @@ def ensure_api_credential(settings: Any) -> None:
 
 # The fixed text GET /sessions/{session_id}/takeover-link answers with when ensure_takeover_token loaded none.
 TAKEOVER_LINK_UNAVAILABLE_DETAIL = (
-    "The controller has no takeover token (see its startup log): set TAKEOVER_TOKEN, or make TAKEOVER_TOKEN_FILE "
-    "writable, and restart."
+    "The controller has no takeover token: set TAKEOVER_TOKEN, or fix TAKEOVER_TOKEN_FILE as the startup log says (it "
+    "names the cause), and restart."
 )
 
 
@@ -110,8 +110,9 @@ def ensure_takeover_token(settings: Any) -> None:
     then ignored); else the token in TAKEOVER_TOKEN_FILE; else one generated there, in every scope.
 
     A configured TAKEOVER_TOKEN that is short, or equal to an API credential (a token an agent already holds
-    protects nothing), refuses startup. A file that cannot be read or written, or holds an unusable token, only
-    warns: the controller starts and that endpoint answers 503. Never logs the token; a sha256 fingerprint at most.
+    protects nothing), refuses startup. A file that cannot be read or written, holds an unusable token or an API
+    credential, or stays readable beyond its owner because its mode cannot be tightened (a root-owned 0444 mount),
+    only warns, naming that cause: the controller starts and that endpoint answers 503. Never logs the token; a sha256 fingerprint at most.
     Called after ensure_api_credential, so a token it loaded from API_TOKEN_FILE counts as an API credential.
     """
     api_tokens = {credential.token for credential in credentials_for(settings)}

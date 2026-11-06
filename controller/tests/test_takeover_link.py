@@ -241,6 +241,13 @@ class TakeoverTokenTests(_Isolated):
         self.assertEqual(second.status_code, 503, second.text)
         self.assertEqual(first.json()["detail"], second.json()["detail"])
         self.assertNotIn(SENTINEL, first.text)
+        # W4-18: a file with an unusable token, an API credential or a mode that cannot be tightened is not fixed by
+        # making it writable, so the text points at the startup log, which names the cause.
+        self.assertEqual(
+            first.json()["detail"],
+            "The controller has no takeover token: set TAKEOVER_TOKEN, or fix TAKEOVER_TOKEN_FILE as the startup log "
+            "says (it names the cause), and restart.",
+        )
 
     async def test_tokenless_loopback_still_needs_the_takeover_token(self) -> None:
         from types import SimpleNamespace
