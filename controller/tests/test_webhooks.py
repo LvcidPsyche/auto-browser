@@ -340,7 +340,8 @@ class WebhookWireTests(unittest.IsolatedAsyncioTestCase):
         wire = await self._dispatch({}, {_PUBLIC: [_OK]}, url="https://hooks.example.com/hook", resolver=resolver)
 
         self.assertEqual(wire.connects, [])
-        self.assertTrue(self.warnings.called)
+        messages = [call.args[0] for call in self.warnings.call_args_list]
+        self.assertIn("approval webhook host did not resolve: %s (%s)", messages)
 
     async def test_without_a_proxy_the_connection_goes_to_the_checked_address_with_the_name_for_tls(self) -> None:
         wire = await self._dispatch({}, {_PUBLIC: [_OK]}, _PUBLIC)

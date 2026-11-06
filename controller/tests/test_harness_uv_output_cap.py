@@ -63,12 +63,13 @@ class UvOutputCapTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_chunk_that_crosses_the_cap_keeps_the_part_that_fits(self) -> None:
         stream = asyncio.StreamReader()
-        stream.feed_data(b"x" * 5000)
+        data = bytes(index % 251 for index in range(5000))  # distinct bytes: the head, not any 4096 of them
+        stream.feed_data(data)
         stream.feed_eof()
 
         kept = await _read_capped(stream, _STDERR_KEEP_BYTES, strict=False)
 
-        self.assertEqual(len(kept), 4096)
+        self.assertEqual(kept, data[:4096])
 
     async def test_a_normal_answer_is_unchanged(self) -> None:
         result, _ = await self._verify(VALID)

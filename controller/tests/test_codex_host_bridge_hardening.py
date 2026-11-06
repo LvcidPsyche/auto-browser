@@ -12,6 +12,7 @@ import io
 import json
 import os
 import select
+import signal
 import socket
 import socketserver
 import stat
@@ -713,6 +714,9 @@ class BridgeProcessGroupTests(unittest.TestCase):
                     if not _is_running(leader.pid):  # exited, not reaped: a zombie
                         break
                 time.sleep(0.05)
+            if pid_file.exists() and pid_file.read_text().strip():
+                # Registered before any assert: a failing one must not leave `sleep 60` running.
+                self.addCleanup(_kill_quietly, int(pid_file.read_text().strip()))
             self.assertIsNotNone(leader)
             self.assertFalse(_is_running(leader.pid), "the fake codex leader never exited")
             child = int(pid_file.read_text().strip())
@@ -721,12 +725,16 @@ class BridgeProcessGroupTests(unittest.TestCase):
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline and _is_running(child):
                 time.sleep(0.05)
-            alive = _is_running(child)
-            if alive:  # pragma: no cover - leave nothing behind when the assertion fails
-                os.kill(child, 9)
-            self.assertFalse(alive, "the child of the exited leader outlived the sweep")
+            self.assertFalse(_is_running(child), "the child of the exited leader outlived the sweep")
             worker.join(5)
             self.assertFalse(worker.is_alive())
+
+
+def _kill_quietly(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def _is_running(pid: int) -> bool:
