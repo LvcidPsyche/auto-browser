@@ -6,6 +6,7 @@ from shutil import which
 from typing import Any
 
 from ...process_tree import GROUP_SPAWN_KWARGS, kill_and_drain
+from ...providers.base import allowlisted_environment
 from ..contracts import TaskContract
 from .base import VerificationResult
 
@@ -73,9 +74,16 @@ class UniversalVerifierAdapter:
 
     backend = "uv"
 
-    def __init__(self, command: list[str] | None = None, timeout_seconds: float = 60.0):
+    def __init__(
+        self,
+        command: list[str] | None = None,
+        timeout_seconds: float = 60.0,
+        env_passthrough: list[str] | tuple[str, ...] = (),
+    ):
         self.command = command
         self.timeout_seconds = timeout_seconds
+        # HARNESS_UV_ENV_PASSTHROUGH: names the command gets on top of the base ones (W2-27).
+        self.env_passthrough = tuple(env_passthrough)
 
     @property
     def available(self) -> bool:
@@ -97,6 +105,8 @@ class UniversalVerifierAdapter:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # The base names and HARNESS_UV_ENV_PASSTHROUGH, not the controller's tokens and keys (W2-27).
+            env=allowlisted_environment(self.env_passthrough),
             **GROUP_SPAWN_KWARGS,  # its own process group on POSIX, so the kill reaches what it started
         )
         try:

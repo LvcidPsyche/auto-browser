@@ -165,7 +165,10 @@ def _build_harness_verifier(settings):
 
     mode = str(getattr(settings, "harness_verifier", "") or "programmatic").lower()
     uv_command = str(getattr(settings, "harness_uv_command", "") or "")
-    uv = UniversalVerifierAdapter(command=shlex.split(uv_command) if uv_command else None)
+    uv = UniversalVerifierAdapter(
+        command=shlex.split(uv_command) if uv_command else None,
+        env_passthrough=list(getattr(settings, "harness_uv_env_passthrough_names", []) or []),
+    )
     programmatic = ProgrammaticVerifier()
     if mode == "uv":
         return uv

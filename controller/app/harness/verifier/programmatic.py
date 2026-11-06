@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sys
 from typing import Any
@@ -187,6 +188,8 @@ async def _regex_search_child(patterns: list[str], text: str, *, timeout: float)
         "-S",  # the worker imports only json, re and sys: no site module, so a cheaper start
         "-c",
         _REGEX_WORKER,
+        # It needs no variable (W2-27); Windows' Python cannot start without SYSTEMROOT.
+        env={name: os.environ[name] for name in ("SYSTEMROOT",) if name in os.environ},
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

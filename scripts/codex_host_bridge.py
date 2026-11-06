@@ -53,6 +53,35 @@ def codex_environment(pass_env: tuple[str, ...] | list[str] = ()) -> dict[str, s
     }
 
 
+PR_SET_DUMPABLE = 4
+
+
+def make_non_dumpable() -> bool:
+    """prctl(PR_SET_DUMPABLE, 0) on Linux, as the controller does (controller/app/process_hardening.py).
+
+    The commands Codex runs are processes of the bridge's uid, and proc(5) lets a same-uid process read a dumpable
+    process's /proc/PID/environ: the bridge's whole environment, around the allowlisted one Codex is given. The flag
+    resets at execve, so Codex itself stays ordinary. True when it took; False, after one warning, when it did not.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(*[ctypes.c_ulong(value) for value in (PR_SET_DUMPABLE, 0, 0, 0, 0)]) != 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code))
+    except (OSError, AttributeError, ImportError) as exc:
+        print(
+            f"[codex-bridge] warning: could not make the bridge non-dumpable ({exc}); a process running as its uid "
+            "can read its environment through /proc",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 DEFAULT_SANDBOX_MODE = "read-only"
 
@@ -584,6 +613,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    make_non_dumpable()  # first, before any Codex run (W2-27)
     args = parse_args()
     for name in args.pass_env:
         if not _ENV_NAME_RE.fullmatch(name) or not name.isascii():

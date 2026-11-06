@@ -102,6 +102,8 @@ class Settings(BaseSettings):
     harness_root: str = Field("/data/harness", alias="HARNESS_ROOT")
     harness_verifier: str = Field("programmatic", alias="HARNESS_VERIFIER")
     harness_uv_command: str = Field("", alias="HARNESS_UV_COMMAND")
+    # Extra environment variable names (comma-separated) the HARNESS_UV_COMMAND child gets on top of the base ones.
+    harness_uv_env_passthrough: str = Field("", alias="HARNESS_UV_ENV_PASSTHROUGH")
     harness_explorer_model: str = Field("", alias="HARNESS_EXPLORER_MODEL")
     harness_verifier_model: str = Field("", alias="HARNESS_VERIFIER_MODEL")
     harness_executor_model: str = Field("", alias="HARNESS_EXECUTOR_MODEL")
@@ -534,6 +536,10 @@ class Settings(BaseSettings):
         if value is None or (isinstance(value, str) and not value.strip()):
             return str(SECCOMP_PROFILE_PATH)
         return value
+
+    @property
+    def harness_uv_env_passthrough_names(self) -> list[str]:
+        return [item.strip() for item in self.harness_uv_env_passthrough.split(",") if item.strip()]
 
     @property
     def cli_provider_env_passthrough_names(self) -> list[str]:

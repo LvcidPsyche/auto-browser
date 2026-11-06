@@ -455,7 +455,15 @@ INSTALL_AGENT_CLIS=true
 A CLI child gets only the operating-system basics (`PATH`, `HOME`, proxy and certificate variables) and its own
 provider's variables (such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), never the controller's
 tokens or other keys. If a CLI needs another variable, name it in `CLI_PROVIDER_ENV_PASSTHROUGH`
-(comma-separated).
+(comma-separated). The other children the controller starts get the same base names: the Universal Verifier
+command (plus the names in `HARNESS_UV_ENV_PASSTHROUGH`) and autossh; the regex worker gets none. On Linux the
+controller also makes itself non-dumpable at startup, so a process of its uid cannot read its environment through
+`/proc/PID/environ`.
+
+Known limit: a child running as the controller's uid can still read the controller's files: `data/api-token`,
+`data/takeover-token`, the mesh and witness keys. The CLI providers (`OPENAI_AUTH_MODE=cli` and the others) and the
+Codex host bridge's Codex are such children, and page content they are shown can prompt-inject them. Use `api`
+mode where that matters.
 
 `INSTALL_AGENT_CLIS=true` builds the three CLIs (and Node.js, about 750 MB) into
 the controller image, which leaves them out by default. Rebuild after setting it:

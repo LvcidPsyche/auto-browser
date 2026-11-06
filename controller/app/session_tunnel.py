@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from .providers.base import allowlisted_environment
 from .utils import utc_now
 
 
@@ -162,6 +163,9 @@ class IsolatedSessionTunnelBroker:
                         *self._autossh_args(tunnel),
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=tunnel.stderr_handle,
+                        # The base names only, not the controller's tokens and keys (W2-27); this code sets no
+                        # AUTOSSH_ variable.
+                        env=allowlisted_environment(),
                     )
                 except BaseException:
                     # BaseException: a create cancelled while autossh is starting

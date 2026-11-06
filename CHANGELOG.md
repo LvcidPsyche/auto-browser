@@ -262,6 +262,16 @@ All notable changes to auto-browser are documented here.
 
 ### Security
 
+- On Linux the controller makes itself non-dumpable at startup (`prctl(PR_SET_DUMPABLE, 0)`, first in its lifespan),
+  and so does the Codex host bridge: a process of the same uid, such as an unsandboxed child, could read either's
+  whole environment through `/proc/PID/environ`, around the allowlisted one it was given. Where the call fails the
+  process logs one warning and goes on. The Universal Verifier command and autossh now get the provider CLIs' base
+  names (`CLI_BASE_ENV_NAMES` and `LC_*`) instead of the controller's whole environment, and the regex worker gets
+  none. Known limit: such a child still runs as the controller's uid and can read its files (`data/api-token`,
+  `data/takeover-token`, the mesh and witness keys); the `cli` providers and the bridge's Codex are such children,
+  and page content can prompt-inject them.
+- **Upgrade note:** a `HARNESS_UV_COMMAND` that needs a variable outside those base names (its own key or setting)
+  names it in the new `HARNESS_UV_ENV_PASSTHROUGH` (comma-separated).
 - The Codex host bridge (`scripts/codex_host_bridge.py`, `OPENAI_AUTH_MODE=host_bridge`) now starts Codex with an
   allowlisted environment instead of the whole environment of the shell it was started from, which Codex, and every
   command a prompt-injected Codex ran under `-s read-only`, received: the names the controller gives its own provider
