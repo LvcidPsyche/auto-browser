@@ -401,8 +401,13 @@ class BridgeConnectionCapTests(unittest.TestCase):
         deadline = time.monotonic() + 5.0
         while True:
             client = self._connect(server)
-            client.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-            reply = self._read_to_end(client)
+            try:
+                client.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            except (BrokenPipeError, ConnectionResetError):
+                # The slot was not free yet: the 503 and its close came before the request went out. Try again.
+                reply = b""
+            else:
+                reply = self._read_to_end(client)
             if reply.startswith(b"HTTP/1.1 200 ") or time.monotonic() > deadline:
                 break
             time.sleep(0.05)
