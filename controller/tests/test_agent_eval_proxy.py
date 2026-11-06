@@ -204,14 +204,15 @@ class AgentEvalProxyTests(unittest.TestCase):
                 self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
 
     def test_w12_3_a_malformed_authority_is_refused_as_an_invalid_url(self) -> None:
-        # One reading's parse error (urlsplit's ValueError for the first two) is raised as http.client's InvalidURL,
-        # as a non-numeric port already was, before any opener is chosen.
+        # One reading's parse error (urlsplit's ValueError for the first two, http.client's InvalidURL for the port)
+        # is raised as the bridges' InvalidControllerURL, a subclass of http.client's InvalidURL (W13-1), before any
+        # opener is chosen.
         port = self.controller.server_port
         for authority in (f"%5b127.0.0.1%5d:{port}", f"x%5b@127.0.0.1:{port}", "controller.invalid:abc"):
             with self.subTest(authority=authority):
                 result = self._post_raw(f"http://{authority}")
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("http.client.InvalidURL", result.stderr)
+                self.assertIn("app.mcp_stdio.InvalidControllerURL", result.stderr)
                 self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
                 self.assertEqual(self.controller.seen, [])  # type: ignore[attr-defined]
 

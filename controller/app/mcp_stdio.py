@@ -13,6 +13,7 @@ import argparse
 import ipaddress
 import json
 import os
+import re
 import socket
 import sys
 from dataclasses import dataclass
@@ -47,6 +48,30 @@ class _NoRedirects(HTTPRedirectHandler):
 
 
 _DIRECT = build_opener(ProxyHandler({}), _NoRedirects)
+
+# A userinfo-shaped run in an error's text: characters other than whitespace, quotes, / and @, ending in @ (W13-1).
+_USERINFO_RUN = re.compile(r"""[^\s'"/@]*@""")
+
+
+class InvalidControllerURL(InvalidURL):
+    """The controller URL cannot be read, or reads as a local host it would not connect to; nothing was sent."""
+
+
+def _without_userinfo(text: str) -> str:
+    """``text`` with every userinfo-shaped run removed, so an error the agent sees carries no ``user:password@``."""
+    return _USERINFO_RUN.sub("", text)
+
+
+def _display_url(url: str) -> str:
+    """``url`` without its userinfo, query or fragment, cut as a string so a malformed URL is handled too (W13-1).
+
+    The userinfo is everything after ``//`` up to the last ``@`` before the first ``/``, ``?`` or ``#``.
+    """
+    head, slashes, rest = url.partition("//")
+    if slashes:
+        end = min((index for index in (rest.find(delimiter) for delimiter in "/?#") if index != -1), default=len(rest))
+        rest = rest[rest.rfind("@", 0, end) + 1 :]
+    return (head + slashes + rest).split("#", 1)[0].split("?", 1)[0]
 
 
 def _is_loopback_host(host: str | None) -> bool:
@@ -101,11 +126,11 @@ def _goes_direct(request: Request) -> bool:
     decoded ``request.host`` as a whole (W12-2), so an unbracketed ::1 or :: without a port, which http.client reads
     as host ":" and urlsplit as no host, is local (a host:port form is no address and is left to the others). Going
     direct only ever sends the request to the host named or fails; a host remote all four ways still uses the proxy.
-    Constructing the HTTPConnection parses and does not connect; its InvalidURL (a non-numeric port) propagates,
-    and a reading urlsplit cannot parse (%5b127.0.0.1%5d, x%5b@127.0.0.1) raises InvalidURL from its ValueError
-    (W12-3), so a malformed authority is refused before any opener is chosen and the request is sent nowhere. A
-    host-less request (``request.host`` None) is not direct and falls through to urllib's own error, raised before
-    any proxy is used (W10-14).
+    Constructing the HTTPConnection parses and does not connect; its InvalidURL (a non-numeric port), and a
+    reading urlsplit cannot parse (%5b127.0.0.1%5d, x%5b@127.0.0.1) and its ValueError (W12-3), raise
+    InvalidControllerURL (W13-1), so a malformed authority is refused before any opener is chosen and the request
+    is sent nowhere. A host-less request (``request.host`` None) is not direct and falls through to urllib's own
+    error, raised before any proxy is used (W10-14).
     """
     if request.host is None:
         return False
@@ -116,8 +141,8 @@ def _goes_direct(request: Request) -> bool:
             urlsplit(request.full_url).hostname,
             request.host,
         )
-    except ValueError as exc:
-        raise InvalidURL(str(exc)) from exc
+    except (InvalidURL, ValueError) as exc:
+        raise InvalidControllerURL(str(exc)) from exc
     return any(_is_loopback_host(host) for host in readings)
 
 
@@ -307,25 +332,31 @@ class StdioMcpBridge:
                 )
             if method == "notifications/initialized":
                 self._initialized_sent = True
+        # The answers go to the agent: they name the URL without its userinfo, query or fragment, and drop any
+        # user:password@ from the error they show (W13-1).
         except URLError as exc:
             return self._jsonrpc_error(
                 request_id,
                 -32000,
-                f"No Auto Browser controller reachable at {self.client.base_url} — "
+                f"No Auto Browser controller reachable at {_display_url(self.client.base_url)} — "
                 "start one with 'docker compose up -d' in the auto-browser repo, or pass "
-                f"--base-url/AUTO_BROWSER_BASE_URL for a remote deployment. (underlying: {exc.reason})",
+                "--base-url/AUTO_BROWSER_BASE_URL for a remote deployment. "
+                f"(underlying: {_without_userinfo(str(exc.reason))})",
             )
-        except InvalidURL as exc:
-            # A configuration error, not a bridge failure: nothing was sent anywhere (W12-3).
+        except InvalidControllerURL as exc:
+            # A configuration error, not a bridge failure: nothing was sent anywhere (W12-3). Only the controller
+            # URL's own: an InvalidURL from elsewhere (an environment proxy's port) is answered as a failure.
             return self._jsonrpc_error(
                 request_id,
                 -32000,
-                f"{self.client.base_url} is not a valid Auto Browser controller URL — fix "
-                f"--base-url/AUTO_BROWSER_BASE_URL. (underlying: {exc})",
+                f"{_display_url(self.client.base_url)} is not a valid Auto Browser controller URL — fix "
+                f"--base-url/AUTO_BROWSER_BASE_URL. (underlying: {_without_userinfo(str(exc))})",
             )
         except Exception as exc:  # pragma: no cover - defensive bridge guard
             print(f"stdio bridge unexpected error: {exc}", file=self.stderr)
-            return self._jsonrpc_error(request_id, -32000, f"Unexpected stdio bridge failure: {exc}")
+            return self._jsonrpc_error(
+                request_id, -32000, f"Unexpected stdio bridge failure: {_without_userinfo(str(exc))}"
+            )
 
         next_session_id = response.headers.get(MCP_SESSION_HEADER.lower())
         if next_session_id:

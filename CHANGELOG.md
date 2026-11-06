@@ -610,10 +610,12 @@ All notable changes to auto-browser are documented here.
   http.client reads as host `:`, is `::1`); a host one of the readings cannot parse (`%5b127.0.0.1%5d`), or a port
   http.client cannot read as a number, is refused as an invalid controller URL before any opener is chosen, and the
   request is sent nowhere. Any other host, a `*.localhost` name included, still goes through the proxy the
-  environment names. `scripts/check_sandbox_gate.py`, which only talks to `127.0.0.1`, never uses a proxy.
-  `scripts/agent_eval.py --execute`, `scripts/check_sandbox_gate.py` and `scripts/smoke_download.py` now also
-  refuse redirects, as the bridges do, direct or proxied: urllib's default handler copied the `Authorization`
-  header onto a redirect to any origin, and a 3xx is now reported as the HTTP error each script already reports.
+  environment names. `scripts/check_sandbox_gate.py`, which only talks to `127.0.0.1`, never uses a proxy. The
+  bridges' answers name the controller URL without its userinfo, query or fragment and drop any `user:password@` text
+  from the error they show; 1.15.0's echoed them. `scripts/agent_eval.py --execute`, `scripts/check_sandbox_gate.py`
+  and `scripts/smoke_download.py` now also refuse redirects, as the bridges do, direct or proxied: urllib's default
+  handler copied the `Authorization` header onto a redirect to any origin, and a 3xx is now reported as the HTTP error
+  each script already reports.
 
 ## [1.15.0] — 2026-11-05
 

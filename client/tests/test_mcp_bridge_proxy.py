@@ -102,9 +102,9 @@ def _bridge_error_through_the_bridge(base_url: str, proxy: ThreadingHTTPServer) 
     return _reply_through_the_bridge(base_url, proxy)["error"]["message"]
 
 
-def _reply_through_the_bridge(base_url: str, proxy: ThreadingHTTPServer) -> dict:
-    """What the stdio bridge answers a tools/list with, the proxy named in its environment."""
-    proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+def _reply_through_the_bridge(base_url: str, proxy: ThreadingHTTPServer, proxy_url: str | None = None) -> dict:
+    """What the stdio bridge answers a tools/list with, the proxy (or ``proxy_url``) named in its environment."""
+    proxy_url = proxy_url or f"http://127.0.0.1:{proxy.server_port}"
     env = {"http_proxy": proxy_url, "HTTP_PROXY": proxy_url, "PYTHONPATH": str(_IMPORT_ROOT)}
     for name in ("PATH", "SYSTEMROOT"):  # SYSTEMROOT: Python's sockets need it on Windows
         if name in os.environ:
@@ -287,10 +287,56 @@ def test_w12_3_a_malformed_authority_is_refused_as_an_invalid_controller_url(rec
         controller.server_close()
 
     assert INVALID in message
-    assert base_url in message
+    # W13-1: the answer names the URL without its userinfo.
+    assert base_url.replace("x%5b@", "") in message
     assert "Unexpected stdio bridge failure" not in message
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
     assert controller.seen == []  # type: ignore[attr-defined]
+
+
+def _closed_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+@pytest.mark.parametrize(
+    ("base_url", "host"),
+    [
+        ("http://alice:sentinel@controller.invalid/mcp", "controller.invalid"),
+        ("http://alice:sentinel@controller.invalid:abc/mcp", "controller.invalid"),
+        ("http://controller.invalid:abc/mcp?key=sentinel", "controller.invalid"),
+        ("http://127.0.0.1:{port}/mcp?key=sentinel", "127.0.0.1"),
+    ],
+)
+def test_w13_1_an_answer_never_shows_the_urls_userinfo_or_query(recording_proxy, base_url: str, host: str) -> None:
+    # The answer goes to the agent: it named the base URL whole, and http.client's InvalidURL text for a userinfo
+    # without a port ("nonnumeric port: 'sentinel@controller.invalid'") carried the password.
+    message = _bridge_error_through_the_bridge(base_url.format(port=_closed_port()), recording_proxy)
+
+    assert "sentinel" not in message
+    assert host in message
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
+def test_w13_1_an_invalid_proxy_port_is_not_answered_as_an_invalid_controller_url(recording_proxy) -> None:
+    # The base URL is valid; only the environment's proxy URL is not, so --base-url is not what to fix.
+    reply = _reply_through_the_bridge(
+        "http://controller.invalid/mcp", recording_proxy, proxy_url="http://proxy.invalid:abc"
+    )
+    message = reply["error"]["message"]
+
+    assert INVALID not in message
+    assert "Unexpected stdio bridge failure" in message
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
+def test_w13_1_the_error_text_shown_drops_every_userinfo() -> None:
+    from auto_browser_client.mcp_bridge import _without_userinfo
+
+    shown = _without_userinfo("nonnumeric port: 'sentinel@controller.invalid' via alice:sentinel@proxy.invalid:3128")
+
+    assert shown == "nonnumeric port: 'controller.invalid' via proxy.invalid:3128"
 
 
 def test_w11_1_a_non_numeric_port_is_refused_before_any_proxy_is_used(recording_proxy) -> None:
