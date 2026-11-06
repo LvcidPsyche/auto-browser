@@ -125,8 +125,9 @@ def ensure_takeover_token(settings: Any) -> None:
                 f"(found {len(configured)}). Set a longer one, or unset it to have the controller generate one."
             )
         if not _printable_ascii(configured):
-            # Not the value: it is a secret. Starlette decodes headers as latin-1 and curl sends UTF-8, so a
-            # non-ASCII token could never be presented, and the header's surrounding whitespace is stripped.
+            # Not the value: it is a secret. The token file's rule, so the variable and the file accept the same
+            # tokens, and one that every client sends unchanged: curl sends a UTF-8 .env value that Starlette reads
+            # as latin-1, so a non-ASCII token can fail for one client and pass for another.
             raise RuntimeError(
                 "TAKEOVER_TOKEN must be printable ASCII with no spaces (letters, digits and punctuation), as a "
                 "token file must. Set another, or unset it to have the controller generate one."

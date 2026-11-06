@@ -353,23 +353,24 @@ All notable changes to auto-browser are documented here.
   `TAKEOVER_TOKEN` when set; else the controller reads it from `TAKEOVER_TOKEN_FILE` (default `/data/takeover-token`,
   which `docker-compose.yml` pins, as it pins `API_TOKEN_FILE`, and passes a `TAKEOVER_TOKEN` from the shell or
   `.env`) or generates one there (mode 0600) on first start, and logs only a sha256 fingerprint. A `TAKEOVER_TOKEN`
-  shorter than 32 characters, outside printable ASCII (a space included: a header could not carry it) or equal to an
-  API credential refuses startup, as does a `TAKEOVER_TOKEN_FILE` inside one of the controller's data roots, which the
-  API reads, lists, exports or mounts (`ARTIFACT_ROOT`, `UPLOAD_ROOT`, `AUTH_ROOT`, `APPROVAL_ROOT`, `AUDIT_ROOT`,
-  `WITNESS_ROOT`, `SESSION_STORE_ROOT`, `JOB_STORE_ROOT`, `HARNESS_ROOT`, `MEMORY_ROOT`, `MESH_IDENTITY_DIR`,
-  `ISOLATED_TUNNEL_INFO_ROOT`), or in a directory mounted into the browser, session or helper containers
-  (browser-node's profile and downloads, `browser-sessions/`, the tunnels directory); the default, in `/data` itself,
-  is in none of them. Spaces and tabs around the presented header are not part of the token. A token file that cannot
-  be read or written, holds an unusable token, or stays readable beyond its owner because its mode cannot be tightened
-  (a root-owned 0444 mount) logs a warning naming that cause and the endpoint answers 503. A symlinked token file (a
-  Kubernetes secret mount, 0644 by default), whether `TAKEOVER_TOKEN_FILE` or `API_TOKEN_FILE`, is used as it is, its
-  target's mode untouched, with one warning naming the path and mode when that target is readable beyond its owner.
-  The takeover token stops only agents without file access to the controller's host: one running as the host user that
-  owns `./data` (a local MCP setup) can read `data/takeover-token`, and so can the controller's own `cli` providers,
-  which run as its uid (or anything that reads the session container's own copy of the password). Open the dashboard
-  and the link in a browser no agent drives: such an agent can read the dashboard's sessionStorage. The
-  `takeover_note` names no script. The shared browser-node keeps the operator's `VNC_PASSWORD` and a password-free
-  link.
+  shorter than 32 characters, outside printable ASCII or containing a space (the token file's rule, so the variable
+  and the file accept the same tokens and every client sends one unchanged: curl sends a UTF-8 `.env` value that
+  Starlette reads as latin-1) or equal to an API credential refuses startup, as does a `TAKEOVER_TOKEN_FILE` inside
+  one of the controller's data roots, which the API reads, lists, exports or mounts (`ARTIFACT_ROOT`, `UPLOAD_ROOT`,
+  `AUTH_ROOT`, `APPROVAL_ROOT`, `AUDIT_ROOT`, `WITNESS_ROOT`, `SESSION_STORE_ROOT`, `JOB_STORE_ROOT`, `HARNESS_ROOT`,
+  `MEMORY_ROOT`, `MESH_IDENTITY_DIR`, `ISOLATED_TUNNEL_INFO_ROOT`), or in a directory mounted into the browser,
+  session or helper containers (browser-node's profile and downloads, `browser-sessions/`, the tunnels directory); the
+  default, in `/data` itself, is in none of them. Spaces and tabs around the presented header are not part of the
+  token. A token file that cannot be read or written, holds an unusable token, or stays readable beyond its owner
+  because its mode cannot be tightened (a root-owned 0444 mount) logs a warning naming that cause and the endpoint
+  answers 503. A symlinked token file (a Kubernetes secret mount, 0644 by default), whether `TAKEOVER_TOKEN_FILE` or
+  `API_TOKEN_FILE`, is used as it is, its target's mode untouched, with one warning naming the path and mode when that
+  target is readable beyond its owner. The takeover token stops only agents without file access to the controller's
+  host: one running as the host user that owns `./data` (a local MCP setup) can read `data/takeover-token`, and so can
+  the controller's own `cli` providers, which run as its uid (or anything that reads the session container's own copy
+  of the password). Open the dashboard and the link in a browser no agent drives: such an agent can read the
+  dashboard's sessionStorage. The `takeover_note` names no script. The shared browser-node keeps the operator's
+  `VNC_PASSWORD` and a password-free link.
 - **On a host shared with other users,** keep `./data` closed to them: mode 0700, or 0750 with a group only the
   operators are in. browser-node's endpoint file there (`./data/browser-profile/browser-ws-endpoint.txt`) holds the
   `ws://` URL that connects to the shared browser, and it cannot be private to one uid, since browser-node writes it

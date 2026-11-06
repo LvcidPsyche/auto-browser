@@ -190,8 +190,8 @@ def test_no_agent_facing_package_reads_the_takeover_token() -> None:
 def test_w2_21_a_configured_token_outside_printable_ascii_refuses_startup_without_naming_it(
     tmp_path: Path, configured: str
 ) -> None:
-    # The file's rule now holds for TAKEOVER_TOKEN too: Starlette decodes headers as latin-1 and curl sends UTF-8, so
-    # a non-ASCII token could never be presented, and a space cannot survive the header's whitespace stripping.
+    # The file's rule now holds for TAKEOVER_TOKEN too, so both accept the same tokens and every client sends one
+    # unchanged (curl sends a UTF-8 .env value that Starlette reads as latin-1).
     settings = make_settings(tmp_path, TAKEOVER_TOKEN=configured)
     with pytest.raises(RuntimeError, match="printable ASCII") as raised:
         ensure_takeover_token(settings)
