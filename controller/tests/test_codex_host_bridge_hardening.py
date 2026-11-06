@@ -122,11 +122,21 @@ def _raw_post(port: int, headers: str, body: bytes = b"", *, read_timeout: float
 
 
 class _ThreadingWithTimer:
-    """Stands in for the bridge module's `threading` name only: Timer is the given fake and the rest is the real
-    module, so no other module, and no other test's lingering thread, picks up the fake."""
+    """Stands in for the bridge module's `threading` name only, so no other module picks up the fake: a Timer whose
+    callback belongs to `owner` (the test's own handler) is the given fake, and everything else is the real module.
 
-    def __init__(self, timer) -> None:
-        self.Timer = timer
+    A keep-alive BridgeRequestHandler thread another test in this module left running reads this same patched name;
+    the Timer it asks for has its own handler's callback, so it gets a real one and never lands in the capture.
+    """
+
+    def __init__(self, timer, owner) -> None:
+        self._timer = timer
+        self._owner = owner
+
+    def Timer(self, interval, function, args=None, kwargs=None):  # noqa: N802 - threading.Timer's own name
+        if getattr(function, "__self__", None) is self._owner:
+            return self._timer(interval, function, args, kwargs)
+        return threading.Timer(interval, function, args, kwargs)
 
     def __getattr__(self, name: str):
         return getattr(threading, name)
@@ -332,7 +342,9 @@ class BridgeConnectionCapTests(unittest.TestCase):
         client = socket.socket(server.address_family, socket.SOCK_STREAM)
         client.settimeout(timeout)
         client.connect(server.server_address)
-        self.addCleanup(client.close)  # before the server's cleanups run: its close waits for the handlers
+        # Before the server's cleanups run, so each handler sees its client gone and ends. server_close joins none of
+        # them: UnixHTTPServer sets daemon_threads, and the stdlib does not track daemon handler threads.
+        self.addCleanup(client.close)
         return client
 
     @staticmethod
@@ -407,11 +419,12 @@ class BridgeHeaderDeadlineRaceTests(unittest.TestCase):
         handler.close_connection = False
         real_timer, real_parse = threading.Timer, bridge.BaseHTTPRequestHandler.parse_request
 
-        with patch.object(bridge, "threading", _ThreadingWithTimer(_CapturedTimer)):
+        with patch.object(bridge, "threading", _ThreadingWithTimer(_CapturedTimer, handler)):
             # A handler thread another test left running looks these up: it must see the real ones.
             self.assertIs(threading.Timer, real_timer)
             self.assertIs(bridge.BaseHTTPRequestHandler.parse_request, real_parse)
             handler.handle_one_request()
+            self.assertEqual(len(captured), 1)  # this handler's own deadline, and nobody else's
             function, args, kwargs = captured[0]
             function(*args, **kwargs)
 
@@ -452,8 +465,14 @@ class BridgeHeaderDeadlineFragmentTests(unittest.TestCase):
         handler.rfile = _StalledLine()
         handler.wfile = _BrokenWriter(connection, error)
         handler.close_connection = False
-        with patch.object(bridge, "threading", _ThreadingWithTimer(_CapturedTimer)), redirect_stderr(io.StringIO()):
-            handler.handle_one_request()
+        with (
+            patch.object(bridge, "threading", _ThreadingWithTimer(_CapturedTimer, handler)),
+            redirect_stderr(io.StringIO()),
+        ):
+            try:
+                handler.handle_one_request()
+            finally:
+                self.assertEqual(len(captured), 1)  # this handler's own deadline, and nobody else's
         return handler, connection
 
     def test_a_request_line_cut_off_by_the_deadline_ends_without_an_error(self) -> None:
