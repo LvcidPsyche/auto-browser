@@ -45,7 +45,7 @@ Useful env knobs:
 | `HARNESS_ROOT` | Runtime directory for runs, traces, and staged candidates |
 | `HARNESS_VERIFIER` | `programmatic`, `uv`, or `ensemble` |
 | `HARNESS_UV_COMMAND` | Pinned command used by `UniversalVerifierAdapter` |
-| `HARNESS_UV_ENV_PASSTHROUGH` | Variable names (comma-separated) the command gets on top of `PATH`, `HOME`, the locale, proxy and CA variables; it gets nothing else of the controller's environment |
+| `HARNESS_UV_ENV_PASSTHROUGH` | Variable names (comma-separated) the command gets on top of the provider CLIs' base names (`CLI_BASE_ENV_NAMES`, listed in [deployment.md](deployment.md#option-b--subscription-backed-clis)); it gets nothing else of the controller's environment |
 | `HARNESS_EXPLORER_MODEL` | Model recorded for induction/exploration cost provenance |
 | `HARNESS_VERIFIER_MODEL` | Model recorded for verifier cost provenance |
 | `HARNESS_EXECUTOR_MODEL` | Minimum executor tier recorded on staged skills |
