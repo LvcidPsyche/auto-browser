@@ -169,6 +169,17 @@ class HarnessRunStore:
         for aside in [entry for entry in entries if entry.name.endswith(".old") and entry.is_dir()]:
             skill_id = self._aside_skill_id(aside)
             if skill_id is None:
+                named = self._half_removed_aside_skill_id(aside)
+                if named is not None and (self.staging_root / named).exists():
+                    # A kill during the aside's removal after a finished swap took its candidate.json (CB3-6): no
+                    # candidate is left to restore, and its target is in place. Left, it was warned about at every
+                    # start, and prune no longer reclaims it by default.
+                    try:
+                        shutil.rmtree(aside)
+                        changed += 1
+                    except OSError as exc:
+                        logger.warning("harness staging recovery could not remove %s: %s", aside, exc)
+                    continue
                 logger.warning("harness staging recovery left %s: its candidate.json names no plain skill id", aside)
                 continue
             target = self.staging_root / skill_id
@@ -257,6 +268,26 @@ class HarnessRunStore:
             skill_id = json.loads((aside / "candidate.json").read_text(encoding="utf-8")).get("skill_id")
         except (OSError, ValueError, AttributeError):
             return None
+        return self._plain_skill_id(skill_id)
+
+    def _half_removed_aside_skill_id(self, aside: Path) -> str | None:
+        """For an aside whose candidate.json is gone, the plain skill id its envelope.json or provenance.json names."""
+        if (aside / "candidate.json").exists():
+            return None
+        for name, keys in (("envelope.json", ("skill_id",)), ("provenance.json", ("candidate", "skill_id"))):
+            try:
+                value: Any = json.loads((aside / name).read_text(encoding="utf-8"))
+                for key in keys:
+                    value = value.get(key)
+            except (OSError, ValueError, AttributeError):
+                continue
+            skill_id = self._plain_skill_id(value)
+            if skill_id is not None:
+                return skill_id
+        return None
+
+    def _plain_skill_id(self, skill_id: Any) -> str | None:
+        """`skill_id` when it is one plain name that stays inside the staging root."""
         if not isinstance(skill_id, str) or not skill_id or skill_id.startswith(".") or skill_id in {".", ".."}:
             return None
         if "/" in skill_id or "\\" in skill_id or "\x00" in skill_id:

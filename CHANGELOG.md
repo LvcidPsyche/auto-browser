@@ -166,7 +166,8 @@ All notable changes to auto-browser are documented here.
   during a build, is settled at the next start, before the prune: the earlier candidate is renamed back when nothing
   replaced it, unplaced builds are removed, and a run left `converged` with no candidate gets the candidate staged
   for its contract and last attempt's trace (a kill after the build was in place, before the run was saved), or is
-  marked `failed` when none matches.
+  marked `failed` when none matches. An aside a kill left half removed after a finished swap (its `candidate.json`
+  gone) is removed once its candidate is in place, instead of being warned about at every start.
 - A staged skill's `SKILL.md` renders the contract's goal, precondition and postcondition values and the verifier
   notes as single-line code spans (with a fence longer than any backtick run inside), so a goal holding a heading,
   HTML, a link or a code fence can no longer change the document a reviewer reads before promotion.

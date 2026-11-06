@@ -425,6 +425,33 @@ class RetentionTests(_Base):
         self.assertEqual(stored.status, "failed")
         self.assertIsNone(stored.candidate)
 
+    async def test_cb3_6_an_aside_whose_candidate_json_is_gone_is_removed_once_its_target_exists(self) -> None:
+        # A kill during the aside's rmtree after a finished swap: no candidate.json, so it was warned about at every
+        # start and never removed (and prune no longer reclaims it by default).
+        service = HarnessService(self.root)
+        record = await self._run(service)
+        staging = service.store.staging_root
+        aside = staging / ".tmp-0123456789ab.old"
+        shutil.copytree(staging / record.candidate.skill_id, aside)
+        (aside / "candidate.json").unlink()
+
+        HarnessService(self.root).store.recover_interrupted_staging()
+
+        self.assertEqual(sorted(path.name for path in staging.iterdir()), [record.candidate.skill_id])
+
+    async def test_cb3_6_such_an_aside_is_left_while_its_target_is_missing(self) -> None:
+        service = HarnessService(self.root)
+        record = await self._run(service)
+        staging = service.store.staging_root
+        aside = staging / ".tmp-0123456789ab.old"
+        os.replace(staging / record.candidate.skill_id, aside)
+        (aside / "candidate.json").unlink()
+
+        with self.assertLogs("app.harness.iterate", "WARNING"):
+            HarnessService(self.root).store.recover_interrupted_staging()
+
+        self.assertTrue(aside.exists())
+
     async def test_cb3_4_startup_restores_an_aged_aside_before_the_prune(self) -> None:
         # _init_harness calls recover_interrupted_staging, then prune; nothing pinned either. The order is not
         # visible in what prune keeps (an aside and its restored candidate age alike), so the calls are recorded.
