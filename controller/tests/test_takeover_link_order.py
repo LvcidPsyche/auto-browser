@@ -101,6 +101,11 @@ class TakeoverLinkOrderTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers["cache-control"], "no-store")
 
+    def test_w2_22_the_refusal_names_only_the_header(self) -> None:
+        # It told every caller without the token where the token lives (TAKEOVER_TOKEN, data/takeover-token).
+        detail = self._get("owned-by-alice", None).json()["detail"]
+        self.assertEqual(detail, "This endpoint needs the takeover token in the X-Takeover-Token header.")
+
     def test_w2_21_spaces_and_tabs_around_the_presented_token_are_not_part_of_it(self) -> None:
         # As normalize_authorization does for the bearer token: uvicorn's httptools keeps trailing whitespace.
         self.assertEqual(self._get("owned-by-alice", f" \t{TAKEOVER}\t ").status_code, 200)

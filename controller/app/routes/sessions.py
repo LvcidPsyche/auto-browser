@@ -47,11 +47,9 @@ from ._utils import (
 
 logger = logging.getLogger(__name__)
 
-# One text for a missing and a wrong takeover token, and for a session that exists and one that does not.
-TAKEOVER_LINK_REFUSED_DETAIL = (
-    "This endpoint needs the takeover token in the X-Takeover-Token header (TAKEOVER_TOKEN, or data/takeover-token "
-    "on a local install)."
-)
+# One text for a missing and a wrong takeover token, and for a session that exists and one that does not. It names
+# only the header, not where the token lives: every caller without the token reads it (W2-22).
+TAKEOVER_LINK_REFUSED_DETAIL = "This endpoint needs the takeover token in the X-Takeover-Token header."
 
 
 def create_sessions_router(*, manager: Any) -> APIRouter:
