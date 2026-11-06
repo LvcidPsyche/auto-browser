@@ -206,11 +206,12 @@ All notable changes to auto-browser are documented here.
   compares it. The hash chain alone covered only the events. A run recorded before this release has no hash and is
   read as before.
 - The convergence harness can now be bounded: `HARNESS_RETENTION_DAYS` removes run directories and staged candidates
-  not touched for that long, at startup and in each maintenance sweep (never a run the process is driving). The
-  default, `0`, keeps everything, so an upgrade deletes nothing (staging holds a candidate's only copy); 30 suits a
-  shared or long-running controller. `HARNESS_MAX_RUNS_PER_OPERATOR` (default `0`, no cap; set it when several
-  operators share one controller) refuses a new run once the verified operator has that many stored or starting;
-  runs with no verified operator share one count.
+  not touched for that long, at startup and in each maintenance sweep (never a run the process is driving, and never a
+  candidate re-staged between the age check and the removal: the two hold one lock against staging's rename; listing
+  runs skips one removed while it sorts). The default, `0`, keeps everything, so an upgrade deletes nothing (staging
+  holds a candidate's only copy); 30 suits a shared or long-running controller. `HARNESS_MAX_RUNS_PER_OPERATOR`
+  (default `0`, no cap; set it when several operators share one controller) refuses a new run once the verified
+  operator has that many stored or starting; runs with no verified operator share one count.
 - **Upgrade note:** a controller rolled back to 1.15.0 cannot read a harness run this version has saved with an
   attempt in it (each attempt now records a `trace_hash`, which 1.15.0 rejects), including an older run this version's
   startup sweep marked `interrupted`: such runs drop out of `harness.list_runs`, and `harness.get_status` fails on

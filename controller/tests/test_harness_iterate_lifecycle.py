@@ -306,6 +306,66 @@ class RetentionTests(_Base):
         self.assertFalse((service.store.staging_root / ".tmp-leftover").exists())
         self.assertTrue(Path(new.candidate.files["candidate.json"]).exists())
 
+    async def test_w4_11_a_candidate_restaged_while_prune_waits_to_remove_it_survives(self) -> None:
+        # Prune read the old candidate's age, then removed whatever was at that path: a re-stage that replaced it in
+        # between lost the new candidate. Staging's replace now waits for prune's check-and-remove.
+        import threading
+
+        from app.harness import iterate
+
+        service = HarnessService(self.root)
+        record = await self._run(service)
+        target = Path(record.candidate.files["candidate.json"]).parent
+        _age(target / "candidate.json", 40)
+        _age(target, 40)
+        build = service.store.staging_root / ".tmp-restaged"
+        shutil.copytree(target, build)
+        (build / "candidate.json").write_text('{"fresh": true}', encoding="utf-8")
+        real_rmtree = shutil.rmtree
+        restage = threading.Thread(target=service.inducer.place, args=(build, target))
+
+        def paused_rmtree(path, *args, **kwargs):
+            if Path(path) == target and not restage.is_alive() and restage.ident is None:
+                restage.start()
+                restage.join(0.5)  # the replace runs now unless prune holds the staging lock
+            return real_rmtree(path, *args, **kwargs)
+
+        with patch.object(iterate.shutil, "rmtree", paused_rmtree):
+            service.store.prune(30)
+        restage.join(10)
+
+        self.assertFalse(restage.is_alive())
+        self.assertEqual((target / "candidate.json").read_text(encoding="utf-8"), '{"fresh": true}')
+
+    async def test_w4_11_staging_replaces_a_candidate_under_the_stores_staging_lock(self) -> None:
+        from app.harness import induce
+
+        service = HarnessService(self.root)
+        self.assertIs(service.inducer.lock, service.store.staging_lock)
+        held: list[bool] = []
+        real_move = induce._move_into_place
+
+        def move(build_dir, target_dir):
+            held.append(service.store.staging_lock.locked())
+            real_move(build_dir, target_dir)
+
+        with patch.object(induce, "_move_into_place", move):
+            await self._run(service)
+            await self._run(service)  # the same contract: a re-stage over the first candidate
+
+        self.assertEqual(held, [True, True])
+
+    async def test_w4_11_listing_skips_a_run_removed_while_it_sorts(self) -> None:
+        service = HarnessService(self.root)
+        kept, removed = await self._run(service), await self._run(service)
+        globbed = sorted(service.store.runs_root.glob("*/run.json"))
+        shutil.rmtree(service.store.run_dir(removed.id))  # pruned between the glob and the sort
+
+        with patch.object(Path, "glob", lambda self, pattern: iter(globbed)):
+            listed = service.store.list()
+
+        self.assertEqual([record.id for record in listed], [kept.id])
+
     async def test_zero_days_keeps_everything(self) -> None:
         service = HarnessService(self.root)
         record = await self._run(service)

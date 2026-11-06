@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
@@ -104,6 +104,9 @@ class HarnessRunStore:
         self._active: dict[str, str | None] = {}
         self._active_lock = threading.Lock()
         self._started_at = time.time()
+        # Shared with the SkillInducer: prune holds it from a candidate's age check through its removal, staging
+        # around its rename into place, so a candidate re-staged in between is never removed as old.
+        self.staging_lock = threading.Lock()
 
     def begin_run(self, run_id: str, owner: str | None, *, max_owned: int = 0) -> bool:
         """Mark a new run active, unless `owner` already has `max_owned` runs stored or starting (0: no cap).
@@ -353,11 +356,15 @@ class HarnessRunStore:
             if not directory.is_dir() or directory.name in self._active:
                 continue
             try:
-                marker_path = directory / marker
-                newest = max(directory.stat().st_mtime, marker_path.stat().st_mtime if marker_path.exists() else 0.0)
-                if newest >= cutoff:
-                    continue
-                shutil.rmtree(directory)
+                # The age check and the removal are one step against staging's rename into place.
+                with self.staging_lock:
+                    marker_path = directory / marker
+                    newest = max(
+                        directory.stat().st_mtime, marker_path.stat().st_mtime if marker_path.exists() else 0.0
+                    )
+                    if newest >= cutoff:
+                        continue
+                    shutil.rmtree(directory)
                 removed += 1
             except OSError as exc:
                 logger.warning("harness prune could not remove %s: %s", directory, exc)
@@ -392,7 +399,7 @@ class HarnessRunStore:
         visible: Callable[[HarnessRunRecord], bool] | None = None,
     ) -> list[HarnessRunRecord]:
         records: list[HarnessRunRecord] = []
-        for path in sorted(self.runs_root.glob("*/run.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        for _, path in sorted(_with_mtimes(self.runs_root.glob("*/run.json")), key=lambda item: item[0], reverse=True):
             try:
                 record = _read_record(path)
             except Exception as exc:
@@ -406,6 +413,17 @@ class HarnessRunStore:
             if len(records) >= limit:
                 break
         return records
+
+
+def _with_mtimes(paths: Iterable[Path]) -> list[tuple[float, Path]]:
+    """Each path with its modification time, leaving out one removed since it was listed (a prune in between)."""
+    stamped: list[tuple[float, Path]] = []
+    for path in paths:
+        try:
+            stamped.append((path.stat().st_mtime, path))
+        except FileNotFoundError:
+            continue
+    return stamped
 
 
 def _read_record(path: Path) -> HarnessRunRecord:
@@ -427,7 +445,7 @@ class HarnessService:
         self.max_runs_per_operator = max_runs_per_operator
         self.verifier = verifier or ProgrammaticVerifier()
         self.model_tiers = {key: value for key, value in (model_tiers or {}).items() if value}
-        self.inducer = SkillInducer(self.store.staging_root, signer=signer)
+        self.inducer = SkillInducer(self.store.staging_root, signer=signer, lock=self.store.staging_lock)
         # Signing without a matching check is decoration; the registry gets the
         # counterpart to whatever the inducer signs with.
         self.registry = SkillStagingRegistry(self.store.staging_root, verifier=envelope_verifier)

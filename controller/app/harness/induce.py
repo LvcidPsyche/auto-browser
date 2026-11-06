@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -55,9 +56,17 @@ class SkillCandidate(BaseModel):
 
 
 class SkillInducer:
-    def __init__(self, staging_root: str | Path, signer: Signer | None = None):
+    def __init__(self, staging_root: str | Path, signer: Signer | None = None, lock: threading.Lock | None = None):
         self.staging_root = Path(staging_root)
         self.signer = signer
+        # Held around the rename into place; HarnessService passes its store's staging lock, which retention's prune
+        # holds from a candidate's age check through its removal, so a fresh re-stage is never removed as old.
+        self.lock = lock if lock is not None else threading.Lock()
+
+    def place(self, build_dir: Path, target_dir: Path) -> None:
+        """Rename a finished build over `target_dir` under the staging lock."""
+        with self.lock:
+            _move_into_place(build_dir, target_dir)
 
     def induce(
         self,
@@ -89,7 +98,7 @@ class SkillInducer:
             candidate = self._build(
                 contract, trace, verification, build_dir, target_dir, skill_id, attempts, cost_usd, model_tiers, owner
             )
-            _move_into_place(build_dir, target_dir)
+            self.place(build_dir, target_dir)
         except BaseException:
             shutil.rmtree(build_dir, ignore_errors=True)
             raise
