@@ -27,9 +27,9 @@ All notable changes to auto-browser are documented here.
 - **Upgrade note:** for a controller that reads `ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS` itself (outside compose:
   `docker-compose.isolation.yml` passes `${ISOLATED_TUNNEL_REMOTE_BIND_ADDRESS:-127.0.0.1}`, so there an empty value
   reached the controller as `127.0.0.1`), an empty value, which under `ISOLATED_TUNNEL_ACCESS_MODE=unsafe-public`
-  bound the tunnel on every interface of the bastion, now stops startup. Set `*` for every interface (IPv4 and IPv6)
-  or `0.0.0.0` for IPv4 only; both need `unsafe-public`, and the bastion's `GatewayPorts` still decides.
-- **Upgrade note:** an approval webhook whose host is a private name (a service on the compose network, a LAN address)
+  asked the bastion to bind the tunnel on every interface, now stops startup. Set `*` for every interface (IPv4 and
+  IPv6) or `0.0.0.0` for IPv4 only; both need `unsafe-public`, and the bastion's `GatewayPorts` still decides.
+- **Upgrade note:** an approval webhook whose host is a private name (a service on the compose network, a LAN host)
   was reachable by name before and is now refused, as is one at a shared address (`100.64.0.0/10`, such as a Tailscale
   node): every address that is not global is. Set the new `APPROVAL_WEBHOOK_ALLOW_PRIVATE_TARGETS=true` to allow it.
   The flag lifts the name and address checks, so loopback (`localhost`, `127.0.0.1`) and every private range are
@@ -46,9 +46,9 @@ All notable changes to auto-browser are documented here.
   `CURATOR_MODEL` are now `Settings` fields, read from the controller's settings rather than from `os.environ` at
   startup. The names and defaults are unchanged; `MESH_ENABLED` now takes any boolean spelling pydantic accepts (not
   only `true`), and an unparseable `MESH_ENABLED` or `MESH_TIMESTAMP_WINDOW`, an empty one included (`MESH_ENABLED=`),
-  stops startup (before, any `MESH_ENABLED` other than `true` meant off). The harness settings lost their redundant
-  environment fallbacks.
-- `TYPING_DELAY_MS` is removed from the settings, `.env.example` and `docker-compose.yml`: nothing ever read it
+  stops startup (before, any `MESH_ENABLED` other than `true`, in any letter case, meant off). The harness settings
+  lost their redundant environment fallbacks.
+- `TYPING_DELAY_MS` is removed from the settings, `.env.example` and `docker-compose.yml`: no release ever read it
   (typing pacing is `HUMAN_TYPING_MIN_DELAY_MS` and `HUMAN_TYPING_MAX_DELAY_MS`). An old env file that still sets it
   is ignored.
 - httpx's per-request `HTTP Request:` INFO lines are no longer logged, at any `LOG_LEVEL` and for every client (the
@@ -80,11 +80,12 @@ All notable changes to auto-browser are documented here.
   memory profile no longer both start: the limit is checked again right before a create reserves its slot, with no
   await in between.
 - `POST /crons/{job_id}/trigger` answers a run whose session meets the session cap with 409 and an unreadable
-  encrypted auth state with 422, as `POST /sessions` does; both were a bare 500 there. The 422 carries the same
-  detail; the 409's is a fixed text that names no session, since `POST /sessions`'s names the job owner's live
-  session ids and the trigger checks only the job's webhook key, which another operator may hold.
+  encrypted auth state with 422, as `POST /sessions` does; both were a bare 500 there (an auth state file that is not
+  JSON, or JSON with no ciphertext, was a 400 or a 404). The 422 carries the same detail; the 409's is a fixed text
+  that names no session, since the cap's own text (the one `POST /sessions` answers with) would name the job owner's
+  live session ids, and the trigger checks only the job's webhook key, which another operator may hold.
 - The scripts' `.env` loader no longer re-parses a whole multi-line quoted value for every added line: only a line
-  that holds the opening quote character can close it, so a PEM-sized value is no longer quadratic.
+  that holds the opening quote character can close it, so a PEM-sized value is no longer re-parsed on every line.
 - The scripts' `.env` loader no longer overwrites a variable the calling script declared without a value (`local x`,
   `declare x`): it read such a name as unset and let `.env` set it.
 - `scripts/bootstrap_cli_auth.sh` now refuses a `CLI_HOME` with a `..` component (`/data/../etc` matched `/data/*`).
@@ -107,16 +108,18 @@ All notable changes to auto-browser are documented here.
   plaintext state while `AUTH_STATE_ENCRYPTION_KEY` is set logs a warning.
 - `POST /sessions` with an auth profile or `storage_state_path` that cannot be decrypted (wrong or missing
   `AUTH_STATE_ENCRYPTION_KEY`, or a corrupt file) now answers 422 "wrong or missing AUTH_STATE_ENCRYPTION_KEY, or the
-  file is corrupt" instead of a 409 Conflict (no key), a 500 (a wrong key or a damaged ciphertext), or a 400 or 404 (a
-  file that is not an encrypted envelope). `POST /sessions/{session_id}/fork` answers the same 422 when the fork's own
-  stored state cannot be read back, where it answered 409 Conflict.
-- A `nan` or infinite value in any float setting (`ARTIFACT_RETENTION_HOURS=nan` swept every artifact on the next
-  cleanup) now stops startup with an error naming the setting. Zero and negative retention still mean "keep forever".
+  file is corrupt" instead of a 409 Conflict (no key), a 500 (a wrong key, a damaged ciphertext, or JSON of another
+  shape), or a 400 or 404 (a file that is not JSON, or JSON with no ciphertext). `POST /sessions/{session_id}/fork`
+  answers the same 422 when the fork's own stored state cannot be read back, where 1.15.0 answered as `POST /sessions`
+  did (409 Conflict with no key, otherwise a 500, 400 or 404).
+- A `nan` or infinite value in any float setting (`ARTIFACT_RETENTION_HOURS=nan` swept every artifact outside a live
+  session's directories, however new, on the next cleanup) now stops startup with an error naming the setting. Zero
+  and negative retention still mean "keep forever".
 - Forking a session that sits on `about:blank` or a `data:` page no longer fails with a 403, nor one on Chrome's error
   page (`chrome-error://chromewebdata/`) with a 400 asking for `start_url`: with no `start_url` named, the fork starts
-  on a blank page with the source's cookies, and the audit records no start URL. Such a page is still judged first:
-  one the page checks refuse (an off-list or refused page, or one that could not be judged) answers the 403, as
-  about:blank does.
+  on a blank page with the source's cookies, and the audit records no start URL. Such a page is still judged first
+  when no `start_url` is named: one the page checks refuse (a refused page, or one that could not be judged) answers
+  the 403, a refused about:blank page included.
 - A forked session now keeps the source's proxy persona, User-Agent, protection mode and TOTP secret and hosts, as
   `create_session` would have set them (the fork used the deployment defaults before). `POST /sessions/{id}/fork` and
   `browser.fork_session` take optional `proxy_persona`, `user_agent` and `protection_mode`; a value named there wins.
@@ -188,10 +191,11 @@ All notable changes to auto-browser are documented here.
   `ISOLATED_TAKEOVER_HOST`, so the takeover URL a session hands out through its tunnel was refused by noVNC's own
   Origin/Host guard.
 - Releasing an isolated session no longer takes an unreachable Docker daemon (or any Docker error other than "not
-  found") for a gone container, and no longer carries on after a container removal that failed (any error but "not
-  found", which means gone): the release now fails, `close_session` reports it in `failed_steps` (the audit event and
-  receipt say partial), and the session's profile and downloads directories are kept instead of being deleted under a
-  container that may still be running (after a failed removal, with a warning naming them). A provision that fails
+  found") for a gone container, and no longer goes on as if released after a container removal that failed (any
+  error but "not found", which means gone): it still releases the session network (force-disconnecting that
+  container from it), then fails: `close_session` reports it in `failed_steps` (the audit event and receipt say
+  partial), and the session's profile and downloads directories are kept instead of being deleted under a container
+  that may still be running (with a warning naming the directory that holds them). A provision that fails
   before it returns (the container did not start, the session network could not be joined) does the same: when its
   rollback cannot remove the container, or cannot look it up (an unreachable daemon: whether one was created is then
   unknown), the directories stay, with a warning that says which, instead of being emptied; the lookup failure was
@@ -202,14 +206,16 @@ All notable changes to auto-browser are documented here.
   which only stops the container.
 - Two isolated sessions created at once now read the Docker daemon's API version once and log the "GwPriority is not
   honoured" warning once; both were unsynchronised across the provisioning threads.
-- When the active tab closes (`browser.close_tab`, or the page closing itself), the session no longer moves to a tab
-  that `ALLOWED_HOSTS` refuses while an allowed one is left: it takes the nearest allowed tab, and only when every
-  remaining tab is refused does the old choice stand.
+- When the active tab closes, the session no longer moves to a tab that `ALLOWED_HOSTS` refuses while an allowed one
+  is left: `browser.close_tab` takes the allowed tab nearest the closed one (the earlier of two equally near), a page
+  that closes itself leaves the session on the last allowed tab, and only when every remaining tab is refused does
+  the old choice stand.
 - A convergence run started with `max_attempts` below the contract's budget now needs that many consecutive passes at
   most: the threshold followed the contract's budget, so `max_attempts=1` on a budget of 5 could never converge.
 - A convergence run is `over_budget` only when `max_wall_seconds` actually ran out: a `TimeoutError` raised inside an
   attempt or the verifier (an orchestrator or verifier-command timeout) with budget left now ends the run as `failed`
-  with "attempt failed: TimeoutError", instead of claiming the wall-clock budget was spent.
+  (the note reads "Harness attempt failed: TimeoutError" and the decision reason "attempt <n> failed"), instead of
+  claiming the wall-clock budget was spent.
 - A harness attempt driven by a real orchestrator session no longer records its `model_decision` event as
   `simulated: true`; only the mock attempt does.
 - A convergence run that is cancelled (or crashes) is no longer left `running` forever: it is saved as `cancelled` (or
@@ -252,8 +258,9 @@ All notable changes to auto-browser are documented here.
   it holds no place); runs with no verified operator share one count.
 - **Upgrade note:** a controller rolled back to 1.15.0 cannot read a harness run this version has saved (each run now
   records the `generation` of the process that created it, and each attempt a `trace_hash`, fields 1.15.0 rejects),
-  including an older run this version's startup sweep marked `interrupted`: such runs drop out of `harness.list_runs`,
-  and `harness.get_status` fails on them.
+  including an older run this version's startup rewrote: one an earlier process left `running` (now `interrupted`)
+  or `converged` with no candidate (now `failed`, or given the candidate it had staged). Such runs drop out of
+  `harness.list_runs`, and `harness.get_status` fails on them.
 - The harness's `login_redirect` forbidden state now looks at where the browser is, not what the page says: a URL path
   segment, in any case, of `login`, `log-in`, `log_in`, `logon`, `signin`, `sign-in`, `sign_in`, `auth`, `authorize`,
   `wp-login` (WordPress), `ServiceLogin` (Google), `login-actions` (Keycloak) or `signin-oidc` (ASP.NET Core) (path
@@ -263,29 +270,33 @@ All notable changes to auto-browser are documented here.
   marketing page that offers "sign in" or mentions "authenticate" no longer fails a run. `payment_screen` and
   `captcha_screen` match their built-in words and phrases whole (`credit card`, `card number`, `payment method`, ...;
   the bare word `payment` no longer counts, a `/payment` path does), so "accredit cards" or "captchaless" are not
-  hits; for `captcha_screen` a `_`, a `-` or a camelCase hump also ends a word, so names in page code such as
-  `captcha_image`, `captchaToken` or `reCaptcha` count, as do the widgets' `grecaptcha` and `hcaptcha`. The caller's
-  own `value` still matches as a case-insensitive substring, as before, so a path such as `/billing` does. These are
-  heuristics with known false hits: a page-code flag such as `captcha_enabled`, and an API path such as
+  hits; a `-` ends a word for both, and for `captcha_screen` a `_` or a camelCase hump does too, so names in page code
+  such as `captcha_image`, `captchaToken` or `reCaptcha` count, as do the widgets' `grecaptcha` and `hcaptcha`. The
+  caller's own `value` still matches as a case-insensitive substring, as before, so a path such as `/billing` does.
+  These are heuristics with known false hits: a page-code flag such as `captcha_enabled`, and an API path such as
   `/payments/1/authorize` (read as a login page).
 - The harness's `HARNESS_UV_COMMAND` verifier reads its stdout with a 1 MiB cap (it used to buffer all of it): a
   command that writes more is killed and the verification is `unverified`. Its stderr keeps the first 4 KiB, even
-  when one read crosses that, so a failure's notes still start with the command's own message. On POSIX the command
-  now runs in its own process group, and a kill (past the cap, at its timeout, or when the caller gives up) reaches
-  the processes it started, not only the command itself (on Windows only the command itself is killed); its pipes
-  are then drained, discarding, for at most 5 seconds instead of read to their end with no cap or timeout, which a
-  descendant holding one could hang. A descendant that calls `setsid` leaves the group and is not killed. The docs
-  now say the command receives the full contract and the unscrubbed trace on stdin.
-- A drift check whose expected-text scrubber fails keeps the expectation as written: a failing URL scrubber hands
+  when one read crosses that, so a failure's notes still carry the start of the command's own message. On POSIX the
+  command now runs in its own process group, and a kill (past the cap, at its timeout, or when the caller gives up)
+  reaches the processes it started, not only the command itself (on Windows only the command itself is killed); its
+  pipes are then drained, discarding, for at most 5 seconds instead of read to their end with no cap or timeout, which
+  a descendant holding one could hang. A descendant that calls `setsid` leaves the group and is not killed. The docs
+  now say the command receives the full contract and the attempt's trace on stdin, its final observation as the page
+  gave it (only secret-named keys removed, not the PII and URL-token scrubbing of what is stored).
+- A drift check whose expected-text scrubber fails keeps a `url_contains` expectation as written: a failing URL
+  scrubber hands
   back the value's path, the empty string for a `url_contains` value that starts with `?` or `#` and `/` for one
   that starts with `/?` or `/#`, and every URL contains either. A scrubber that raises is reported `unverified` with
   the exception type instead of failing the call. A URL inside a `text_contains` or `dom_contains` expectation
-  whose query or fragment a failing scrub dropped is kept as written too, instead of shrinking to its path.
+  whose query or fragment a failing scrub dropped is kept as written too, instead of shrinking to its path; one
+  inside a `network_response_shape` or `extracted_data_schema` value still shrinks to its path.
 - The harness trace no longer blanks the `value`, `label` and `username` of a dict in page data (an observation or
   extracted data) just because the site's own data carries a `sensitive` or `text_redacted` key: that hiding applies
   to an action's own event payload only, and stops at the page data the action event carries (its `observation` and
   the execution's `before` and `after`), so a row there keeps what the same row keeps in `final_observation`. A
-  sensitive `select_option`'s execution `target` is still hidden. A `text` or `text_preview` beside such a key is
+  sensitive `select_option`'s execution `target` still hides its `value` and `label`; its `index`, like the
+  decision's, is kept. A `text` or `text_preview` beside such a key is
   still hidden everywhere.
 - A URL the harness trace scrubs out of quoted text now ends before the closing quote when `.`, `!` or `?` and then a
   space or the end follow it (`see 'https://site/a?token=...'.` lost its quote and full stop); an apostrophe inside
@@ -298,22 +309,24 @@ All notable changes to auto-browser are documented here.
   the highest wall time seen is more than `MESH_TIMESTAMP_WINDOW` past its envelope's timestamp (a clock stepped back
   does not free it), and `/mesh/receive` refuses an envelope stamped before the controller started or within one
   window after it, since the last process accepted envelopes stamped up to one window ahead (so one it could have run
-  cannot be replayed after a restart, unless the clock stepped back across it: by more than a window, any envelope the
-  last process ran; by less, those it accepted stamped ahead of its clock; the high-water mark below is kept in memory
-  only). After lowering `MESH_TIMESTAMP_WINDOW`, a restart is safe once the old window has passed since the last
-  envelope was accepted (or restart first with the old value and lower it after that long): the check assumes the last
-  process ran with no larger window. The cost is about one window, 30 s by default, of `403` refusals after each
-  start, which a sender's retry passes. The timestamp window is checked against that same high-water mark, not the raw
-  clock, so an envelope whose nonce has expired cannot come back inside the window when the clock steps back; a peer's
-  reply to this node's own delegation request is checked the same way, and a reply whose request id is not the
-  request's is refused. The cost: after a large backward step of the clock, fresh envelopes are refused until it
-  catches up (for about the step minus the window). The 10,000-nonce cap no longer evicts a nonce still inside its
-  window (an envelope accepted, then 10,000 others inside its window, and it ran again): at the cap every expired
-  nonce goes, and if none has, the new envelope is refused with `503` ("mesh replay cache is full; retry later") and
-  not recorded, so the cap bounds how many nonces are remembered at once, and nothing remembered is dropped before it
-  expires; a reply that finds the cache full fails the delegation. The limit: a nonce is recorded once the envelope's
-  signature checks out, before the request is decoded or granted, so one registered peer that sends 10,000 signed
-  envelopes inside a window fills the cache, and every peer is refused (`503`) until they expire.
+  cannot be replayed after a restart, unless the clock stepped back across it: by more than a window, those the
+  last process ran stamped later than the step minus one window before the restart (all of them once the step
+  reaches how long it ran); by less, those it accepted stamped ahead of its clock; the high-water mark below is kept
+  in memory only). After lowering `MESH_TIMESTAMP_WINDOW`, a restart is safe once the old window has passed since the
+  last envelope was accepted (or restart first with the old value and lower it after that long): the check assumes the
+  last process ran with no larger window. The cost is about one window, 30 s by default, of `403` refusals after each
+  start, which a sender's retry with a new envelope passes once that window is over. The timestamp window is checked
+  against that same high-water mark, not the raw clock, so an envelope whose nonce has expired cannot come back inside
+  the window when the clock steps back; a peer's reply to this node's own delegation request is checked the same way,
+  and a reply whose request id is not the request's is refused. The cost: after a large backward step of the clock,
+  fresh envelopes are refused until it catches up (for about the step minus the window). The 10,000-nonce cap no
+  longer evicts a nonce still inside its window (an envelope accepted, then 10,000 others inside its window, and it
+  ran again): at the cap every expired nonce goes, and if none has, the new envelope is refused with `503` ("mesh
+  replay cache is full; retry later") and not recorded, so the cap bounds how many nonces are remembered at once, and
+  nothing remembered is dropped before it expires; a reply that finds the cache full fails the delegation. The limit:
+  a nonce is recorded once the envelope's signature checks out, before the request is decoded or granted, so one
+  registered peer that sends 10,000 signed envelopes inside a window fills the cache, and every peer is refused
+  (`503`) until they expire.
 - The Codex host bridge reads a request body within 60 seconds in total (a client trickling a byte every 29 s used to
   hold a handler thread indefinitely; it now gets 408) and the request line and headers within 30 seconds in total
   (past that it closes the connection; a request line cut off that way no longer ends in a broken-pipe traceback),
@@ -349,43 +362,46 @@ All notable changes to auto-browser are documented here.
   `/proc/PID/environ` by any process of its uid. The controller confines it before each Playwright start and fails to
   start if the installed Playwright no longer has the function it confines. Tesseract, which screenshot redaction's
   OCR starts through pytesseract, gets the same base names plus `TESSDATA_PREFIX` and `OMP_*`: until now it too got
-  the controller's whole environment (the API token and the provider keys among it), readable at `/proc/PID/environ`
+  the controller's whole environment (the provider keys among it, and the API token when it is set as
+  `API_BEARER_TOKEN` or `API_BEARER_TOKENS`), readable at `/proc/PID/environ`
   by any process of its uid while it ran. The controller confines it at startup, before anything can run OCR, and
   fails to start if the installed pytesseract no longer has the module-level `environ` it replaces. Known limit: such
   a child still runs as the controller's uid and can read its files (`data/api-token`, `data/takeover-token`, the mesh
-  and witness keys); the `cli` providers and the bridge's Codex are such children, and page content can prompt-inject
-  them. The driver and the browsers it launches, like the provider CLIs, are ordinary processes of the controller's
-  user: their environment holds none of the controller's own tokens or keys (a proxy setting that carries credentials
-  excepted), but their memory holds page content and what is typed into pages, which a command one of them runs could
-  read where the host lets a process ptrace another of the same user (`kernel.yama.ptrace_scope` 0). A provider CLI's
-  key is readable by the commands it runs and by those another CLI runs at the same time (`/proc/PID/environ` of a
-  dumpable process of the same user). On macOS and Windows the controller and the bridge do not change this, and
-  whether a process of the same user can read their environment depends on the system. A Docker credential helper
-  configured for the controller's user (`credsStore` or `credHelpers` in its Docker config) is run by the Docker SDK
-  with the controller's whole environment when the controller pulls a session image the daemon does not have: build or
-  pull that image ahead (compose builds it) and configure no credential helper for that user.
+  and witness keys); the `cli` providers are such children, the bridge's Codex runs as the host user who started the
+  bridge (who can read those files where it owns `./data`), and page content can prompt-inject them. The driver and
+  the browsers it launches, like the provider CLIs, are ordinary processes of the controller's user: their environment
+  holds none of the controller's own tokens or keys (a proxy setting that carries credentials excepted), but their
+  memory holds page content and what is typed into pages, which a command one of them runs could read where the host
+  lets a process ptrace another of the same user (`kernel.yama.ptrace_scope` 0). A provider CLI's key is readable by
+  the commands it runs and by those another CLI runs at the same time (`/proc/PID/environ` of a dumpable process of
+  the same user). On macOS and Windows the controller and the bridge do not change this, and whether a process of the
+  same user can read their environment depends on the system. A Docker credential helper configured for the
+  controller's user (`credsStore` or `credHelpers` in its Docker config) is run by the Docker SDK with the
+  controller's whole environment when the controller pulls a session image the daemon does not have: build or pull
+  that image ahead (compose builds it) and configure no credential helper for that user.
 - **Upgrade note:** a `HARNESS_UV_COMMAND` that needs a variable outside those base names (its own key or setting)
   names it in the new `HARNESS_UV_ENV_PASSTHROUGH` (comma-separated).
 - The scripts' `.env` loader runs with xtrace off and restores the caller's setting, so
-  `bash -x scripts/takeover_link.sh` (or any script that loads `.env`) no longer prints `TAKEOVER_TOKEN`,
-  `API_BEARER_TOKEN` or any other value; the isolated smokes pipe the takeover-link response to Python instead of
-  holding it in a variable `bash -x` would print. `bearer_curl`, `takeover_curl` and `doctor.sh`'s API calls pass curl
-  `--noproxy` for `localhost`, `127.0.0.1`, `::1` and the scripts' base URL host when it is another loopback address
-  or `0.0.0.0` (`127.0.0.2`, say; `bearer_curl` and `takeover_curl` refuse, before any token is sent, a base URL whose
-  host is not a plain host name or address: an IPv4 address written another way than four dotted decimals, such as
-  `127.2`, `0x7f.0.0.2`, `2130706434` or `0177.0.0.1`, a host holding anything but ASCII letters, digits, `.` and `-`
-  (such as `%31%32%37.0.0.2`) or ending in `.`, and a bracketed IPv6 host other than `[::1]` whose first group is
-  empty or all zeros, which covers every IPv4-mapped form such as `[::ffff:127.0.0.2]`; curl normalises a host before
-  it matches `--noproxy`, so a spelling of another loopback address missed the list, while a spelling of `127.0.0.1`
-  itself was normalised to it; the host is read as curl reads it, a scheme only at the start of the URL and the
-  authority ending at the first `/`, `?` or `#`, and they also refuse a set base URL that starts with a scheme and a
-  colon but not with that scheme, `//` and a host, such as `http:///127.0.0.2:8000/` or `http:/127.0.0.2:8000/`,
-  which curl reads as `127.0.0.2`, and one whose host is empty, such as `http://:8000/`; a scheme-less
-  `localhost:8000` is still accepted), then the environment's own `NO_PROXY` (a `NO_PROXY` of `*` is passed alone, so
-  every host still goes direct), the reverse-SSH smoke's bastion curl passes it for the bastion's own loopback names,
-  and `scripts/smoke_download.py` sends its controller requests with no proxy, so a request to a loopback controller
-  no longer hands its tokens to an `HTTP_PROXY` or `ALL_PROXY`. `scripts/takeover_link.sh` warns when it finds no
-  takeover token and says what a 403 means.
+  `bash -x` no longer prints every `.env` value as a script loads them, and `bash -x scripts/takeover_link.sh`
+  prints neither `TAKEOVER_TOKEN` nor `API_BEARER_TOKEN` (a value a script expands after loading still shows in its
+  trace); the isolated smokes pipe the takeover-link response to Python instead of
+  holding it in a variable `bash -x` would print. `bearer_curl`, `takeover_curl` and `doctor.sh`'s token-carrying API
+  calls pass curl `--noproxy` for `localhost`, `127.0.0.1`, `::1` and the scripts' base URL host when it is another
+  loopback address or `0.0.0.0` (`127.0.0.2`, say; `bearer_curl` and `takeover_curl` refuse, before any token is sent,
+  a base URL whose host is not a plain host name or address: an IPv4 address written another way than four dotted
+  decimals, such as `127.2`, `0x7f.0.0.2`, `2130706434` or `0177.0.0.1`, a host holding anything but ASCII letters,
+  digits, `.` and `-` (such as `%31%32%37.0.0.2`) or ending in `.`, and a bracketed IPv6 host other than `[::1]` whose
+  first group is empty or all zeros, which covers every IPv4-mapped form such as `[::ffff:127.0.0.2]`; curl normalises
+  a host before it matches `--noproxy`, so a spelling of another loopback address missed the list, while a spelling of
+  `127.0.0.1` itself was normalised to it; the host is read as curl reads it, a scheme only at the start of the URL
+  and the authority ending at the first `/`, `?` or `#`, and they also refuse a set base URL that starts with a
+  scheme, a colon and a slash but not with that scheme, `//` and a host, such as `http:///127.0.0.2:8000/` or
+  `http:/127.0.0.2:8000/`, which curl reads as `127.0.0.2`, and one whose host is empty, such as `http://:8000/`; a
+  scheme-less `localhost:8000` is still accepted), then the environment's own `NO_PROXY` (a `NO_PROXY` of `*` is
+  passed alone, so every host still goes direct), the reverse-SSH smoke's bastion curl passes it for the bastion's own
+  loopback names, and `scripts/smoke_download.py` sends its controller requests with no proxy, so a request to a
+  loopback controller no longer hands its tokens to an `HTTP_PROXY` or `ALL_PROXY`. `scripts/takeover_link.sh` warns
+  when it finds no takeover token and says what a 403 means.
 - The Codex host bridge (`scripts/codex_host_bridge.py`, `OPENAI_AUTH_MODE=host_bridge`) now starts Codex with an
   allowlisted environment instead of the whole environment of the shell it was started from, which Codex, and every
   command a prompt-injected Codex ran under `-s read-only`, received: the names the controller gives its own provider
@@ -414,42 +430,46 @@ All notable changes to auto-browser are documented here.
   `ARTIFACT_ROOT` (served under `/artifacts`), `UPLOAD_ROOT` (uploadable into a page) and `AUTH_ROOT` (its profiles
   exported as archives), all three swept by maintenance, and the five mounted into a container: `browser-profile` and
   `downloads` in browser-node and `tunnels` and `ssh` in reverse-ssh, which compose mounts, and `browser-sessions`,
-  whose `<id>` directory the controller binds into each isolated session. The check looks for those five under the
-  parent of `ARTIFACT_ROOT`, which is where compose's `./data` lands in the image (`/data`); with `ARTIFACT_ROOT` moved
-  elsewhere, compose's mounts stay under `./data` and the check no longer covers them, so keep `TAKEOVER_TOKEN_FILE`
-  out of them. The other data roots are read by fixed names, so a token there reaches no agent, and one of them set
-  to `/data` itself (`MESH_IDENTITY_DIR`, say) leaves the default `/data/takeover-token` usable. Spaces and tabs
-  around the presented header are not part of the token. A token file that cannot be read or written, holds an
-  unusable token, or stays readable beyond its owner because its mode cannot be tightened (a root-owned 0444 mount),
-  or cannot be opened or read for that mode check (it vanished or turned unreadable since the read), logs a warning
-  naming that cause and the endpoint answers 503. A token file (either one) on a filesystem that accepts a chmod and
-  keeps the mode (a repository on a Windows drive under Docker Desktop, some FUSE or SMB mounts) is used with a
-  warning that the mode did not hold, instead of a log line saying it was changed to 0600, and one the controller has
-  just generated there gets that warning on the same start, not only the next; the line announcing a generated token
-  file says "mode 0600" only when the mode found is exactly 0600, else the mode found (another owner-only mode, such
-  as 0400, without a warning), or that its mode could not be checked after the write, which also gets a warning naming
-  the setting and path, the token still used. A symlinked token file (a Kubernetes secret mount, 0644 by default),
-  whether `TAKEOVER_TOKEN_FILE` or `API_TOKEN_FILE`, is used as it is, its target's mode untouched, with one warning
-  naming the path and mode when that target is readable beyond its owner, or that its mode could not be checked when
-  the target cannot be opened for that check (it vanished or turned unreadable since the read). The takeover token
-  stops only agents without file access to the controller's host: one running as the host user that owns `./data` (a
-  local MCP setup) can read `data/takeover-token`, and so can the controller's own `cli` providers, which run as its
-  uid (or anything that reads the session container's own copy of the password). Open the dashboard and the link in a
-  browser no agent drives: such an agent can read the dashboard's sessionStorage. The `takeover_note` names no script.
-  The shared browser-node keeps the operator's `VNC_PASSWORD` and a password-free link.
+  whose `<id>/profile` and `<id>/downloads` directories the controller binds into each isolated session. The check
+  looks for those five under the parent of `ARTIFACT_ROOT`, which is where compose's `./data` lands in the image
+  (`/data`); with `ARTIFACT_ROOT` moved elsewhere, compose's mounts stay under `./data` and the check no longer covers
+  them, so keep `TAKEOVER_TOKEN_FILE` out of them. The other data roots are read by fixed names, so a token there
+  reaches no agent, and one of them set to `/data` itself (`MESH_IDENTITY_DIR`, say) leaves the default
+  `/data/takeover-token` usable. Spaces and tabs around the presented header are not part of the token. A token file
+  that cannot be read or written, holds an unusable token, or stays readable beyond its owner because its mode cannot
+  be tightened (a root-owned 0444 mount), or cannot be opened or read for that mode check (it vanished or turned
+  unreadable since the read), logs a warning naming that cause and the endpoint answers 503. A token file (either one)
+  on a filesystem that accepts a chmod and keeps the mode (a repository on a Windows drive under Docker Desktop, some
+  FUSE or SMB mounts) is used with a warning that the mode did not hold, instead of a log line saying it was changed
+  to 0600, and one the controller has just generated there gets that warning on the same start, not only the next; the
+  line announcing a generated token file says "mode 0600" only when the mode found is exactly 0600, else the mode
+  found (another owner-only mode, such as 0400, without a warning), or that its mode could not be checked after the
+  write, which also gets a warning naming the setting and path, the token still used. A symlinked token file (a
+  Kubernetes secret mount, 0644 by default), whether `TAKEOVER_TOKEN_FILE` or `API_TOKEN_FILE`, is used as it is, its
+  target's mode untouched, with one warning naming the path and mode when that target is readable beyond its owner, or
+  that its mode could not be checked when the target cannot be opened for that check (it vanished or turned unreadable
+  since the read). The takeover token stops only agents without file access to the controller's host: one running as
+  the host user that owns `./data` (a local MCP setup) can read `data/takeover-token`, and so can the controller's own
+  `cli` providers, which run as its uid (or anything that reads the session container's own copy of the password).
+  Open the dashboard and the link in a browser no agent drives: such an agent can read the dashboard's sessionStorage.
+  The `takeover_note` names no script. The shared browser-node keeps the operator's `VNC_PASSWORD` and a password-free
+  link.
 - **On a host shared with other users,** keep `./data` closed to them: mode 0700, or 0750 with a group only the
   operators are in. browser-node's endpoint file there (`./data/browser-profile/browser-ws-endpoint.txt`) holds the
   `ws://` URL that connects to the shared browser, and it cannot be private to one uid, since browser-node writes it
   and the controller, another uid, reads it. docs/deployment.md has the details.
-- `bearer_curl` (scripts/load_env.sh), `doctor.sh`'s API calls and the reverse-SSH smoke's bastion curl now run
-  `curl -q`, so a `.curlrc` cannot add a proxy or header to a request that carries the token, and the scripts' `.env`
+- `bearer_curl` and `takeover_curl` (scripts/load_env.sh), `doctor.sh`'s token-carrying API calls and the reverse-SSH
+  smoke's bastion curl now run `curl -q`, so a `.curlrc` cannot add a proxy or header to a request that carries the
+  token (the tokenless readiness waits still run plain `curl`), and the scripts' `.env`
   loader also refuses `CURL_HOME`, `XDG_CONFIG_HOME`, `PERL5*`, `PERLLIB`, `LANG`, `LC_*` and the proxy variables
   (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and their lower-case forms). Before, only `LC_ALL`,
   `LC_CTYPE`, `PERL5OPT` and `PERL5LIB` of these were refused. A proxy set in `.env` for the scripts must now be
   exported in your shell instead.
 - The Codex path-compatibility shim (which links a `.codex` home named in the CLI home's `config.toml` to the real
   one) now creates a link only under the CLI home or at `/home/<user>/.codex`, never makes parent directories anywhere
-  else, logs each path it skips, and runs once per adapter instead of on every CLI call. It checks where a path is
+  else, logs each path it refuses, leaves a path that already exists (a dangling link included) as it is, and reads
+  the config and makes its links once per adapter, on the first CLI call that finds a `config.toml` it can parse,
+  instead of on every CLI call. It checks where a path is
   before it looks at it, so a refused one such as `/root/.codex` is never read (for a non-root controller on Python
   3.11 and 3.12 that read raised and ended the call), and a path it cannot check or link (a parent it may not
   create, a NUL byte) is logged and skipped.

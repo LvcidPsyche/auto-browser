@@ -129,13 +129,14 @@ Nonces are kept in memory only, so a restart empties them; to close that gap the
 envelope stamped before the moment it started or within one window after it (`403`). The last process accepted
 envelopes stamped up to one window ahead of its clock, so this covers everything it could have run. The cost is
 about one window (`MESH_TIMESTAMP_WINDOW`, 30 seconds by default) of refusals after each start, which a sender's
-retry, with a new envelope, passes. Replay protection therefore holds across a restart as long as the clock did
-not step back across it: the high-water mark is kept in memory only, so a controller restarted with its clock set
-back by more than a window can accept again, once its clock nears their stamps, envelopes the last process already
-ran, and one set back by less, the envelopes it accepted stamped ahead of its clock. The check also assumes the
-last process ran with no larger `MESH_TIMESTAMP_WINDOW`: after lowering it, a restart is safe once the old window
-has passed since the last envelope was accepted (or restart first with the old value, and lower it after that
-long).
+retry with a new envelope passes once that window is over. Replay protection therefore holds across a restart as
+long as the clock did not step back across it: the high-water mark is kept in memory only, so a controller
+restarted with its clock set back by more than a window can accept again, once its clock nears their stamps, the
+envelopes the last process ran stamped later than the step minus one window before the restart (all of them once
+the step reaches how long it ran), and one set back by less, the envelopes it accepted stamped ahead of its clock.
+The check also assumes the last process ran with no larger `MESH_TIMESTAMP_WINDOW`: after lowering it, a restart
+is safe once the old window has passed since the last envelope was accepted (or restart first with the old value,
+and lower it after that long).
 
 ## Upgrading from a release that had `POST /mesh/peers`
 
