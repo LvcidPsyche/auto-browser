@@ -414,15 +414,22 @@ class SessionCreation:
         await self._forget_failed_session_state(session, session_id)
 
     def remove_session_dirs(self, session_id: str) -> None:
-        """Remove what prepare_dirs made for a session that never came to be."""
+        """Remove what prepare_dirs made for a session that never came to be.
+
+        Each directory on its own (W10-6): an OSError from its removal or its check (Path.exists raises for EACCES or
+        EIO on Python 3.11) is logged and the loop goes on, so the other directories and the record close still run.
+        """
         for directory in (
             self.manager.artifacts.artifact_root / session_id,
             self.auth_root(session_id),
             self.upload_root(session_id),
         ):
-            shutil.rmtree(directory, ignore_errors=True)
-            if directory.exists():
-                logger.warning("rollback could not remove %s", directory)
+            try:
+                shutil.rmtree(directory, ignore_errors=True)
+                if directory.exists():
+                    logger.warning("rollback could not remove %s", directory)
+            except OSError as exc:
+                logger.warning("rollback could not remove %s: %s", directory, exc)
 
     async def _forget_failed_session_state(self, session: "BrowserSession | None", session_id: str) -> None:
         """Remove the directories a failed create made, and close the record it persisted, if it got that far.

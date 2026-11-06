@@ -108,6 +108,37 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
         record = await self.manager.session_store.get(SESSION_ID)
         self.assertEqual((record.status, record.close_reason, record.live), ("closed", "create_failed", False))
 
+    async def test_w10_6_a_directory_check_that_raises_does_not_stop_the_rollback(self) -> None:
+        # Path.exists raises for EACCES or EIO on Python 3.11: the rollback skipped the other directories and the
+        # record close, and the caller saw that error instead of the create's own.
+        artifacts = self.root / "artifacts" / SESSION_ID
+        armed = False
+        real_exists = Path.exists
+
+        async def fail(*_args, **_kwargs):
+            nonlocal armed
+            armed = True
+            raise RuntimeError("witness down")
+
+        def exists(path, *args, **kwargs):
+            if armed and path == artifacts:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_exists(path, *args, **kwargs)
+
+        self.manager.witness_bridge.record_session_receipt = AsyncMock(side_effect=fail)  # type: ignore[method-assign]
+        with patch.object(Path, "exists", exists):
+            with self.assertLogs("app.browser.services.session_creation", "WARNING") as logs:
+                with self.assertRaisesRegex(RuntimeError, "witness down"):
+                    await self.manager.create_session()
+
+        self.assertTrue(armed, "the create never reached the witness receipt")
+        self.assertEqual(self.leftovers(), [])
+        record = await self.manager.session_store.get(SESSION_ID)
+        self.assertEqual((record.status, record.close_reason, record.live), ("closed", "create_failed", False))
+        self.assertTrue(
+            any(str(artifacts) in line and "Permission denied" in line for line in logs.output), logs.output
+        )
+
     async def test_w5_6_a_cancel_during_the_rollback_still_closes_the_record_and_removes_the_directories(self) -> None:
         # The directory removal is awaited before the closed record is written: a second cancel there (a shutdown)
         # left a record the create had already persisted reading active.
