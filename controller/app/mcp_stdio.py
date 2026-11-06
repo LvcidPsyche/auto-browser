@@ -89,9 +89,10 @@ def urlopen(request: Request, *args: Any, **kwargs: Any) -> Any:
     urllib skips a proxy for localhost only when no_proxy names it, so with http_proxy set the bridge's
     Authorization header for a local controller went to the proxy. Any other host still uses the proxy the
     environment names, read for each request. The host judged is the one urllib connects to, ``request.host``,
-    which it has percent-decoded (W9-5: %31%32%37.0.0.2 is 127.0.0.2), not the URL as written.
+    which it has percent-decoded (W9-5: %31%32%37.0.0.2 is 127.0.0.2), not the URL as written. A host-less
+    request (``request.host`` None) falls through to urllib's own error, raised before any proxy is used (W10-14).
     """
-    if _is_loopback_host(urlsplit("//" + request.host).hostname):
+    if _is_loopback_host(urlsplit("//" + (request.host or "")).hostname):
         return _DIRECT.open(request, *args, **kwargs)
     return build_opener(_NoRedirects).open(request, *args, **kwargs)
 

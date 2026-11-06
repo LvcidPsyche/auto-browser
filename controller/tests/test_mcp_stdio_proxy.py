@@ -90,6 +90,37 @@ def _post_through_the_bridge(base_url: str, proxy: ThreadingHTTPServer, *, check
     return json.loads(result.stdout)
 
 
+_BRIDGE_CHILD = """
+import json, sys
+from {module} import HttpMcpClient, StdioMcpBridge
+client = HttpMcpClient(base_url=sys.argv[1], bearer_token=sys.argv[2], timeout_seconds=10)
+bridge = StdioMcpBridge(client=client, stderr=sys.stderr)
+print(json.dumps(bridge._handle_line(json.dumps({{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}}))))
+"""
+
+
+def _bridge_error_through_the_bridge(base_url: str, proxy: ThreadingHTTPServer) -> str:
+    """The JSON-RPC error message the stdio bridge answers a tools/list with, the proxy named in its environment."""
+    proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+    env = {"http_proxy": proxy_url, "HTTP_PROXY": proxy_url, "PYTHONPATH": str(_IMPORT_ROOT)}
+    for name in ("PATH", "SYSTEMROOT"):  # SYSTEMROOT: Python's sockets need it on Windows
+        if name in os.environ:
+            env[name] = os.environ[name]
+    result = subprocess.run(
+        [sys.executable, "-c", _BRIDGE_CHILD.format(module=_MODULE), base_url, MARKER],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)["error"]["message"]
+
+
+UNREACHABLE = "No Auto Browser controller reachable"
+
+
 @pytest.fixture
 def recording_proxy():
     proxy = _serve()
@@ -150,6 +181,17 @@ def test_w9_5_a_loopback_address_written_another_way_never_goes_through_the_envi
         controller.shutdown()
         controller.server_close()
 
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("base_url", ["localhost:8000/mcp", "http:/127.0.0.1:9/mcp"])
+def test_w10_14_a_host_less_base_url_reports_no_controller_reachable(recording_proxy, base_url: str) -> None:
+    # urllib leaves request.host None for these (localhost: reads as a scheme), and the rule's "//" + None raised a
+    # TypeError the bridge reported as an unexpected failure; urllib refuses them itself before any proxy is used.
+    message = _bridge_error_through_the_bridge(base_url, recording_proxy)
+
+    assert UNREACHABLE in message
+    assert "Unexpected stdio bridge failure" not in message
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
 
 
