@@ -159,9 +159,9 @@ class IsolatedSessionTunnelBroker:
                         *self._autossh_args(tunnel),
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=tunnel.stderr_handle,
-                        # The base names only, not the controller's tokens and keys (W2-27); this code sets no
-                        # AUTOSSH_ variable.
-                        env=allowlisted_environment(),
+                        # The base names, not the controller's tokens and keys (W2-27), plus the operator's own
+                        # AUTOSSH_ tuning (AUTOSSH_POLL, AUTOSSH_GATETIME, ...): configuration, not secrets.
+                        env=allowlisted_environment(extra_prefixes=("AUTOSSH_",)),
                     )
                 except BaseException:
                     # BaseException: a create cancelled while autossh is starting

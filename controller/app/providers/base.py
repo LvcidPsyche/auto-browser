@@ -52,16 +52,18 @@ CLI_BASE_ENV_NAMES = frozenset(
 CLI_BASE_ENV_PREFIXES = ("LC_",)
 
 
-def allowlisted_environment(extra_names=()) -> dict[str, str]:
-    """This process's environment cut to CLI_BASE_ENV_NAMES, the LC_ prefix and `extra_names` (compared upper-cased).
+def allowlisted_environment(extra_names=(), extra_prefixes=()) -> dict[str, str]:
+    """This process's environment cut to CLI_BASE_ENV_NAMES, the LC_ prefix, `extra_names` and `extra_prefixes`
+    (compared upper-cased).
 
     What every child the controller starts gets instead of its whole environment, the controller's tokens and keys.
     """
     allowed = CLI_BASE_ENV_NAMES | {name.upper() for name in extra_names}
+    prefixes = (*CLI_BASE_ENV_PREFIXES, *(prefix.upper() for prefix in extra_prefixes))
     return {
         name: value
         for name, value in os.environ.items()
-        if name.upper() in allowed or name.upper().startswith(CLI_BASE_ENV_PREFIXES)
+        if name.upper() in allowed or name.upper().startswith(prefixes)
     }
 
 

@@ -372,6 +372,7 @@ class UvVerifierEnvironmentTests(unittest.IsolatedAsyncioTestCase):
             "LC_ALL": "C",
             SENTINEL_NAME: SENTINEL,
             "UV_EXTRA_SETTING": "sentinel-passed-through",
+            "AUTOSSH_POLL": "30",
         }
         if sys.platform == "win32":
             env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", r"C:\Windows")
@@ -382,6 +383,7 @@ class UvVerifierEnvironmentTests(unittest.IsolatedAsyncioTestCase):
             result = await adapter.verify(CONTRACT, TRACE)
         names = {name.upper() for name in result.failed_postconditions}
         self.assertNotIn(SENTINEL_NAME, names)
+        self.assertNotIn("AUTOSSH_POLL", names)  # autossh's own tuning reaches autossh only
         self.assertIn("UV_EXTRA_SETTING", names)
         self.assertIn("LC_ALL", names)
         self.assertIn("PATH", names)
@@ -422,7 +424,7 @@ class RegexWorkerEnvironmentTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AutosshEnvironmentTests(unittest.IsolatedAsyncioTestCase):
-    async def test_autossh_gets_the_base_names_only(self) -> None:
+    async def test_autossh_gets_the_base_names_and_its_own_autossh_variables_only(self) -> None:
         from app.session_tunnel import IsolatedSessionTunnelBroker
 
         from .test_session_tunnel import FakeProcess
@@ -451,14 +453,20 @@ class AutosshEnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 seen.append(kwargs.get("env"))
                 return FakeProcess()
 
-            env = {"PATH": "/usr/bin", "HOME": str(root), "LC_ALL": "C", SENTINEL_NAME: SENTINEL}
+            env = {
+                "PATH": "/usr/bin",
+                "HOME": str(root),
+                "LC_ALL": "C",
+                "AUTOSSH_POLL": "30",
+                SENTINEL_NAME: SENTINEL,
+            }
             with (
                 patch.dict(os.environ, env, clear=True),
                 patch("app.session_tunnel.asyncio.create_subprocess_exec", new=fake_exec),
             ):
                 tunnel = await broker.provision("session-env", local_host="browser-session-env", local_port=6080)
             await broker.release(tunnel)
-        self.assertEqual(seen, [{"PATH": "/usr/bin", "HOME": str(root), "LC_ALL": "C"}])
+        self.assertEqual(seen, [{"PATH": "/usr/bin", "HOME": str(root), "LC_ALL": "C", "AUTOSSH_POLL": "30"}])
 
 
 if __name__ == "__main__":
