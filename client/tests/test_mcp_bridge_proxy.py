@@ -131,6 +131,28 @@ def test_a_bind_all_or_trailing_dot_host_never_goes_through_the_environment_prox
     assert recording_proxy.seen == []  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize("host", ["127.2", "2130706434", "0x7f000002", "[::ffff:127.0.0.2]", "%31%32%37.0.0.2"])
+def test_w9_5_a_loopback_address_written_another_way_never_goes_through_the_environment_proxy(
+    recording_proxy, host: str
+) -> None:
+    # The socket layer connects to 127.0.0.2 for each (urllib decodes the percent-encoded host), while the bridge's
+    # rule read them as names and sent the token to the proxy. Nothing listens on 127.0.0.2, so the direct request
+    # fails; the assertion is what the proxy saw.
+    if "%" not in host and not host.startswith("["):
+        try:
+            socket.getaddrinfo(host, 80, flags=socket.AI_NUMERICHOST)
+        except OSError:
+            pytest.skip(f"this platform's numeric parser does not read {host}, so no socket reaches it directly")
+    controller = _serve()
+    try:
+        _post_through_the_bridge(f"http://{host}:{controller.server_port}/mcp", recording_proxy, check=False)
+    finally:
+        controller.shutdown()
+        controller.server_close()
+
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
 def test_a_non_loopback_controller_still_goes_through_the_environment_proxy(recording_proxy) -> None:
     # controller.invalid is never resolved: the request goes to the (local) recording proxy.
     status = _post_through_the_bridge("http://controller.invalid/mcp", recording_proxy)

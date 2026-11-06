@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import socket
 from pathlib import Path
 
 import httpx
@@ -43,20 +44,37 @@ def loopback_transport(base_url: str, *, asynchronous: bool) -> httpx.BaseTransp
     httpx follows HTTP_PROXY, http_proxy and ALL_PROXY to a loopback host unless NO_PROXY names it, so the
     Authorization header for a local controller went to the proxy. A client given a transport uses no
     environment proxy, and the transport still reads SSL_CERT_FILE and SSL_CERT_DIR (trust_env=False would drop
-    those too). Any other host keeps the proxy the environment names. The rule is the bridge's (W8-3): localhost,
-    also with one trailing dot, or an IP literal that is loopback or unspecified (0.0.0.0 and ::, which reach this
-    host on Linux and macOS).
+    those too). Any other host keeps the proxy the environment names. The rule is the bridge's (W8-3, W9-5):
+    localhost, also with one trailing dot, or an address that is loopback or unspecified (0.0.0.0 and ::, which reach
+    this host on Linux and macOS), an IPv4-mapped IPv6 address counting as the IPv4 address it maps. The address is
+    the IP literal, or what the platform's numeric parser reads the host as (127.2, 2130706434 and 0x7f000002 are
+    127.0.0.2 to the socket layer), never a DNS answer.
     """
-    host = httpx.URL(base_url).host
-    if host.removesuffix(".") == "localhost":
-        loopback = True
-    else:
-        try:
-            address = ipaddress.ip_address(host)
-        except ValueError:
-            loopback = False
-        else:
-            loopback = address.is_loopback or address.is_unspecified
-    if not loopback:
+    if not _is_loopback_host(httpx.URL(base_url).host):
         return None
     return httpx.AsyncHTTPTransport() if asynchronous else httpx.HTTPTransport()
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host.removesuffix(".") == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = _numeric_address(host)
+        if address is None:
+            return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_loopback or address.is_unspecified
+
+
+def _numeric_address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The address getaddrinfo reads ``host`` as with AI_NUMERICHOST only, which never queries DNS; None otherwise."""
+    if not host:
+        return None
+    try:
+        infos = socket.getaddrinfo(host, None, flags=socket.AI_NUMERICHOST)
+        return ipaddress.ip_address(infos[0][4][0])
+    except (OSError, UnicodeError, ValueError, IndexError):
+        return None

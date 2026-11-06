@@ -13,6 +13,7 @@ import argparse
 import ipaddress
 import json
 import os
+import socket
 import sys
 from dataclasses import dataclass
 from typing import Any, TextIO
@@ -50,9 +51,11 @@ _DIRECT = build_opener(ProxyHandler({}), _NoRedirects)
 def _is_loopback_host(host: str | None) -> bool:
     """Whether a request to this host stays on this machine, so it goes past any environment proxy.
 
-    One rule for every Python sender of the token: localhost, also with one trailing dot, or an IP literal that is
+    One rule for every Python sender of the token: localhost, also with one trailing dot, or an address that is
     loopback or unspecified (0.0.0.0 and ::, which a server's startup line prints and which reach this host on Linux
-    and macOS). A short IPv4 form (127.1) and a *.localhost name are not local here.
+    and macOS), an IPv4-mapped IPv6 address counting as the IPv4 address it maps. The address is the IP literal, or
+    what the platform's numeric parser reads the host as (W9-5: 127.2, 2130706434 and 0x7f000002 are 127.0.0.2 to
+    the socket layer), never a DNS answer. A *.localhost name is not local here.
     """
     host = host or ""
     if host.removesuffix(".") == "localhost":
@@ -60,8 +63,23 @@ def _is_loopback_host(host: str | None) -> bool:
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
-        return False
+        address = _numeric_address(host)
+        if address is None:
+            return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
     return address.is_loopback or address.is_unspecified
+
+
+def _numeric_address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The address getaddrinfo reads ``host`` as with AI_NUMERICHOST only, which never queries DNS; None otherwise."""
+    if not host:
+        return None
+    try:
+        infos = socket.getaddrinfo(host, None, flags=socket.AI_NUMERICHOST)
+        return ipaddress.ip_address(infos[0][4][0])
+    except (OSError, UnicodeError, ValueError, IndexError):
+        return None
 
 
 # Module-level, as urllib's own urlopen was, so tests can patch it.
@@ -70,9 +88,10 @@ def urlopen(request: Request, *args: Any, **kwargs: Any) -> Any:
 
     urllib skips a proxy for localhost only when no_proxy names it, so with http_proxy set the bridge's
     Authorization header for a local controller went to the proxy. Any other host still uses the proxy the
-    environment names, read for each request.
+    environment names, read for each request. The host judged is the one urllib connects to, ``request.host``,
+    which it has percent-decoded (W9-5: %31%32%37.0.0.2 is 127.0.0.2), not the URL as written.
     """
-    if _is_loopback_host(urlsplit(request.full_url).hostname):
+    if _is_loopback_host(urlsplit("//" + request.host).hostname):
         return _DIRECT.open(request, *args, **kwargs)
     return build_opener(_NoRedirects).open(request, *args, **kwargs)
 

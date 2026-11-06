@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -114,6 +115,33 @@ def test_a_bind_all_or_trailing_dot_host_never_goes_through_the_proxy(servers, h
             client.list_sessions()
         except Exception:
             pass
+    assert proxy.seen == []
+
+
+@pytest.mark.parametrize("host", ["127.2", "2130706434", "0x7f000002", "[::ffff:127.0.0.2]"])
+def test_w9_5_a_loopback_address_written_another_way_never_goes_through_the_proxy(servers, host: str) -> None:
+    # httpx picked the environment proxy for these, while the socket layer connects to 127.0.0.2 for each. Nothing
+    # listens on 127.0.0.2, so the direct request fails; the assertion is what the proxy saw.
+    if not host.startswith("["):
+        try:
+            socket.getaddrinfo(host, 80, flags=socket.AI_NUMERICHOST)
+        except OSError:
+            pytest.skip(f"this platform's numeric parser does not read {host}, so no socket reaches it directly")
+    proxy, controller = servers
+
+    async def call() -> None:
+        async with AutoBrowserClient(f"http://{host}:{controller.server_port}", token=MARKER) as client:
+            await client.async_list_sessions()
+
+    with AutoBrowserClient(f"http://{host}:{controller.server_port}", token=MARKER) as client:
+        try:
+            client.list_sessions()
+        except Exception:
+            pass
+    try:
+        asyncio.run(call())
+    except Exception:
+        pass
     assert proxy.seen == []
 
 
