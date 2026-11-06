@@ -271,6 +271,17 @@ class AgentEvalProxyTests(unittest.TestCase):
         self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
         self.assertEqual(self.controller.seen, [])  # type: ignore[attr-defined]
 
+    def test_w15_8_an_empty_host_is_refused(self) -> None:
+        # Codex R01: no reading finds a local host in an empty one, so the Authorization header went to the proxy.
+        for base_url in ("http://:8000", "http://user@:8000"):
+            with self.subTest(base_url=base_url):
+                self.proxy.seen.clear()  # type: ignore[attr-defined]
+                result = self._post_raw(base_url)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("app.mcp_stdio.InvalidControllerURL: its host is empty", result.stderr)
+                self.assertEqual(self.proxy.seen, [])  # type: ignore[attr-defined]
+                self.assertEqual(self.controller.seen, [])  # type: ignore[attr-defined]
+
     def test_w15_4_a_port_outside_0_to_65535_is_refused(self) -> None:
         # The socket layer wrapped these: on Windows getaddrinfo connects 99999 to 34463, 65536 to 0 and -1 to 65535,
         # so the Authorization header could go to another local port than the one written.

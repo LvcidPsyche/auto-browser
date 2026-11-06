@@ -795,3 +795,34 @@ def test_a_redirect_on_the_proxied_branch_is_not_followed(recording_proxy) -> No
 
     assert status == 302
     assert recording_proxy.seen == [("http://controller.invalid/mcp", f"Bearer {MARKER}")]  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("base_url", ["http://:8000/mcp", "http://user@:8000/mcp"])
+def test_w15_8_an_empty_host_is_refused(recording_proxy, base_url: str) -> None:
+    # Codex R01: urllib reads the host as ":8000" (not empty), so W15-3 let these through, and with no reading local
+    # the request went to the environment proxy with the token (an empty HOST in http://${HOST}:${PORT}/mcp).
+    message = _bridge_error_through_the_bridge(base_url, recording_proxy)
+
+    assert INVALID in message
+    assert "its host is empty" in message
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://alice:93847561029384756102@controller.invalid:8000/mcp",
+        "http://controller.invalid/mcp#93847561029384756102",
+    ],
+)
+def test_w15_8_a_retry_after_equal_to_a_secret_of_the_url_is_not_shown(recording_proxy, base_url: str) -> None:
+    # Codex R03: a numeric Retry-After passed the seconds check whole, even as the URL's password or fragment.
+    recording_proxy.answer = (  # type: ignore[attr-defined]
+        429,
+        json.dumps({"detail": "Too many requests"}).encode(),
+        {"Retry-After": "93847561029384756102"},
+    )
+
+    message = _bridge_error_through_the_bridge(base_url, recording_proxy)
+
+    assert message == "Auto Browser controller returned HTTP 429: Too many requests (rate limited)"

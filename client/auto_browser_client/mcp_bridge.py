@@ -199,6 +199,11 @@ def _goes_direct(request: Request) -> bool:
         )
     except (InvalidURL, ValueError) as exc:
         raise InvalidControllerURL("a reading cannot parse its host (for example, a malformed bracket)") from exc
+    # Codex R01: urllib reads http://:8000/mcp's host as ":8000" and no reading finds a local host in an empty
+    # one, so the request went to the environment proxy with the token. The fifth reading is the host http.client
+    # reads after the last @.
+    if not others[-1]:
+        raise InvalidControllerURL("its host is empty")
     if _is_loopback_host(connected):
         return True
     if any(_is_loopback_host(host) for host in others):
@@ -526,7 +531,8 @@ class StdioMcpBridge:
         elif response.status_code == 429:
             # Seconds only (W15-6): an HTTP-date, or any other text, which can quote the URL, is not shown.
             retry_after = (response.headers.get("retry-after") or "").strip()
-            if retry_after.isascii() and retry_after.isdigit():
+            # Codex R03: not when it is a secret of the URL, such as a numeric password or fragment.
+            if retry_after.isascii() and retry_after.isdigit() and self._shown(retry_after) == retry_after:
                 message += f" (rate limited; retry after {retry_after}s)"
             else:
                 message += " (rate limited)"
