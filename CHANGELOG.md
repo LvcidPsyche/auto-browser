@@ -302,10 +302,12 @@ All notable changes to auto-browser are documented here.
   `TAKEOVER_TOKEN` when set; else the controller reads it from `TAKEOVER_TOKEN_FILE` (default `/data/takeover-token`,
   which `docker-compose.yml` pins, as it pins `API_TOKEN_FILE`, and passes a `TAKEOVER_TOKEN` from the shell or
   `.env`) or generates one there (mode 0600) on first start, and logs only a sha256 fingerprint. A `TAKEOVER_TOKEN`
-  shorter than 32 characters or equal to an API credential refuses startup; a token file that cannot be read or
-  written, or holds an unusable token, logs a warning and the endpoint answers 503. An agent that can read files on
-  the controller's host can still read `data/takeover-token` (or the session container's own copy of the password).
-  The shared browser-node keeps the operator's `VNC_PASSWORD` and a password-free link.
+  shorter than 32 characters, outside printable ASCII (a space included: a header could not carry it) or equal to an
+  API credential refuses startup, as does a `TAKEOVER_TOKEN_FILE` inside `ARTIFACT_ROOT` or `UPLOAD_ROOT`; spaces and
+  tabs around the presented header are not part of the token. A token file that cannot be read or written, or holds an
+  unusable token, logs a warning and the endpoint answers 503. An agent that can read files on the controller's host
+  can still read `data/takeover-token` (or the session container's own copy of the password). The shared browser-node
+  keeps the operator's `VNC_PASSWORD` and a password-free link.
 - **On a host shared with other users,** keep `./data` closed to them: mode 0700, or 0750 with a group only the
   operators are in. browser-node's endpoint file there (`./data/browser-profile/browser-ws-endpoint.txt`) holds the
   `ws://` URL that connects to the shared browser, and it cannot be private to one uid, since browser-node writes it

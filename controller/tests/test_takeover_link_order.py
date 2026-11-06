@@ -101,6 +101,11 @@ class TakeoverLinkOrderTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers["cache-control"], "no-store")
 
+    def test_w2_21_spaces_and_tabs_around_the_presented_token_are_not_part_of_it(self) -> None:
+        # As normalize_authorization does for the bearer token: uvicorn's httptools keeps trailing whitespace.
+        self.assertEqual(self._get("owned-by-alice", f" \t{TAKEOVER}\t ").status_code, 200)
+        self.assertEqual(self._get("owned-by-alice", f"{TAKEOVER} x").status_code, 403)
+
     def test_a_malformed_id_is_400_with_a_fixed_text_before_the_token_check(self) -> None:
         self.manager.audit.append.reset_mock()
         response = self._get("..bad%20id", None)

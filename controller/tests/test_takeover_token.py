@@ -137,3 +137,33 @@ def test_no_agent_facing_package_reads_the_takeover_token() -> None:
             text = path.read_text(encoding="utf-8", errors="replace")
             for needle in ("TAKEOVER_TOKEN", "takeover-token", "takeover_token", "X-Takeover-Token"):
                 assert needle not in text, f"{path} names {needle}"
+
+
+@pytest.mark.parametrize(
+    "configured",
+    [
+        "takeover-sentinel-with a-space-" + "s" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH,
+        "takeover-sentinel-ümlaut-" + "u" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH,
+        "takeover-sentinel-tab\t-" + "t" * MIN_PRODUCTION_BEARER_TOKEN_LENGTH,
+    ],
+)
+def test_w2_21_a_configured_token_outside_printable_ascii_refuses_startup_without_naming_it(
+    tmp_path: Path, configured: str
+) -> None:
+    # The file's rule now holds for TAKEOVER_TOKEN too: Starlette decodes headers as latin-1 and curl sends UTF-8, so
+    # a non-ASCII token could never be presented, and a space cannot survive the header's whitespace stripping.
+    settings = make_settings(tmp_path, TAKEOVER_TOKEN=configured)
+    with pytest.raises(RuntimeError, match="printable ASCII") as raised:
+        ensure_takeover_token(settings)
+    assert configured not in str(raised.value)
+    assert "sentinel" not in str(raised.value)
+
+
+@pytest.mark.parametrize("root", ["ARTIFACT_ROOT", "UPLOAD_ROOT"])
+def test_w2_21_a_token_file_inside_a_served_or_uploadable_root_refuses_startup(tmp_path: Path, root: str) -> None:
+    # /artifacts serves ARTIFACT_ROOT and uploads land in UPLOAD_ROOT: a token there can be read or replaced.
+    served = tmp_path / "served"
+    settings = make_settings(tmp_path, **{root: str(served), "TAKEOVER_TOKEN_FILE": str(served / "x" / ".." / "tok")})
+    with pytest.raises(RuntimeError, match=root):
+        ensure_takeover_token(settings)
+    assert not (served / "tok").exists()

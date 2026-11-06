@@ -110,7 +110,8 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
         expected = getattr(manager.settings, "takeover_token", None)
         if not expected:
             raise HTTPException(status_code=503, detail=TAKEOVER_LINK_UNAVAILABLE_DETAIL)
-        presented = (x_takeover_token or "").encode("utf-8", "surrogateescape")
+        # Spaces and tabs around the token are not part of it, as normalize_authorization treats the bearer token.
+        presented = (x_takeover_token or "").strip(" \t").encode("utf-8")
         if not hmac.compare_digest(presented, expected.encode("utf-8")):
             await manager.audit.append(
                 event_type="takeover_link_refused",

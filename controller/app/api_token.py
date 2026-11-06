@@ -123,6 +123,13 @@ def ensure_takeover_token(settings: Any) -> None:
                 f"TAKEOVER_TOKEN must be at least {MIN_PRODUCTION_BEARER_TOKEN_LENGTH} characters "
                 f"(found {len(configured)}). Set a longer one, or unset it to have the controller generate one."
             )
+        if not _printable_ascii(configured):
+            # Not the value: it is a secret. Starlette decodes headers as latin-1 and curl sends UTF-8, so a
+            # non-ASCII token could never be presented, and the header's surrounding whitespace is stripped.
+            raise RuntimeError(
+                "TAKEOVER_TOKEN must be printable ASCII with no spaces (letters, digits and punctuation), as a "
+                "token file must. Set another, or unset it to have the controller generate one."
+            )
         if configured in api_tokens:
             raise RuntimeError(
                 "TAKEOVER_TOKEN equals API_BEARER_TOKEN or an API_BEARER_TOKENS entry: agents hold those, so it "
@@ -132,6 +139,7 @@ def ensure_takeover_token(settings: Any) -> None:
             logger.info("TAKEOVER_TOKEN is set, so the token in %s is ignored", path)
         return
 
+    _refuse_a_served_token_file(settings, path)
     settings.takeover_token = None
     try:
         token = _read_takeover_token_file(path)
@@ -170,6 +178,22 @@ def ensure_takeover_token(settings: Any) -> None:
     settings.takeover_token = token
 
 
+def _printable_ascii(token: str) -> bool:
+    """Printable ASCII with no spaces: what a header carries unchanged, whatever the client and the server."""
+    return all("!" <= char <= "~" for char in token)
+
+
+def _refuse_a_served_token_file(settings: Any, path: Path) -> None:
+    """RuntimeError when TAKEOVER_TOKEN_FILE resolves inside ARTIFACT_ROOT or UPLOAD_ROOT (served or uploadable)."""
+    target = path.resolve()
+    for name, root in (("ARTIFACT_ROOT", settings.artifact_root), ("UPLOAD_ROOT", settings.upload_root)):
+        if target.is_relative_to(Path(root).resolve()):
+            raise RuntimeError(
+                f"TAKEOVER_TOKEN_FILE {path} is inside {name} ({root}), whose files can be read or replaced through "
+                "the API. Point it outside, such as /data/takeover-token, or set TAKEOVER_TOKEN."
+            )
+
+
 def _read_takeover_token_file(path: Path) -> str | None:
     """The stripped token, None when there is no file; ValueError (naming no token) when it is unusable."""
     try:
@@ -178,7 +202,7 @@ def _read_takeover_token_file(path: Path) -> str | None:
         return None
     except UnicodeDecodeError as exc:
         raise ValueError(f"TAKEOVER_TOKEN_FILE {path} is not UTF-8 text") from exc
-    if len(token) < MIN_PRODUCTION_BEARER_TOKEN_LENGTH or not all("!" <= char <= "~" for char in token):
+    if len(token) < MIN_PRODUCTION_BEARER_TOKEN_LENGTH or not _printable_ascii(token):
         raise ValueError(
             f"TAKEOVER_TOKEN_FILE {path} does not hold a usable token: it must be at least "
             f"{MIN_PRODUCTION_BEARER_TOKEN_LENGTH} printable ASCII characters with no spaces "
