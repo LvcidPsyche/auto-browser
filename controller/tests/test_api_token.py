@@ -409,21 +409,59 @@ def test_a_symlinked_token_file_is_left_alone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ):
     # Kubernetes secret mounts are symlinks, and chmod would change the target (a file we may not own).
-    # O_NOFOLLOW makes opening a symlink fail with ELOOP.
+    # O_NOFOLLOW makes opening a symlink fail with ELOOP; the target is then opened only to read its mode.
     opened: list[int] = []
 
     def refuse_symlink(target, flags):
         opened.append(flags)
-        raise OSError(errno.ELOOP, "Too many levels of symbolic links")
+        if flags & fake_os.O_NOFOLLOW:
+            raise OSError(errno.ELOOP, "Too many levels of symbolic links")
+        return 9
 
-    fake_os = _posix_stand_in(open=refuse_symlink, fstat=None, fchmod=None, close=None)
+    fchmods: list[int] = []
+    fake_os = _posix_stand_in(
+        open=refuse_symlink,
+        fstat=lambda fd: SimpleNamespace(st_mode=0o100600),
+        fchmod=lambda fd, bits: fchmods.append(fd),
+        close=lambda fd: None,
+    )
     monkeypatch.setattr(api_token, "os", fake_os)
 
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         api_token._restrict_mode(tmp_path / "api-token")
 
     assert opened and opened[0] & fake_os.O_NOFOLLOW
+    assert fchmods == []
     assert caplog.text == ""
+
+
+requires_posix_symlinks = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX modes, and creating a symlink on Windows needs a privilege CI's runner lacks"
+)
+
+
+@requires_posix_symlinks
+@pytest.mark.parametrize(("mode", "warned"), [(0o644, True), (0o600, False)])
+def test_w4_4_a_symlinked_token_file_is_used_and_warns_when_its_target_is_readable_beyond_its_owner(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, mode: int, warned: bool
+):
+    target = tmp_path / "secret-mount" / "..data" / "api-token"
+    target.parent.mkdir(parents=True)
+    target.write_text(STRONG_TOKEN + "\n", encoding="utf-8")
+    target.chmod(mode)
+    link = tmp_path / "api-token"
+    link.symlink_to(target)
+    settings = make_settings(link)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_api_credential(settings)
+
+    assert settings.api_bearer_token == STRONG_TOKEN
+    assert stat.S_IMODE(target.stat().st_mode) == mode  # the target is not ours to change
+    assert ("readable beyond its owner" in caplog.text) is warned
+    if warned:
+        assert str(link) in caplog.text and "644" in caplog.text
+    assert STRONG_TOKEN not in caplog.text
 
 
 def test_any_other_open_error_is_raised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

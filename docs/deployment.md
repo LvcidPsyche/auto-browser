@@ -71,6 +71,11 @@ token, from either source.
 - A controller run outside compose defaults to `/data/api-token` too. On Windows
   that is `C:\data\api-token`, which inherits permissions that let every local user
   read and replace it, so set `API_TOKEN_FILE` to a path under your user profile.
+- On POSIX a token file (this one or `TAKEOVER_TOKEN_FILE`) that group or others can read
+  is changed to 0600 at startup. A symlinked one (a Kubernetes secret mount, 0644 by
+  default) is used as it is, its target's mode untouched, with one warning naming the
+  path and mode when that target is readable beyond its owner: set the mount's mode
+  (`defaultMode: 0400`) instead.
 - To rotate the generated token, delete the file and restart the controller. Once
   `API_BEARER_TOKEN` is set the file is ignored (the startup log says so), and
   clients still pointed at it get a 401.

@@ -298,3 +298,28 @@ def test_w4_1_the_default_token_file_in_the_data_root_itself_is_accepted(tmp_pat
     ensure_takeover_token(settings)
     assert settings.takeover_token
     assert (data / "takeover-token").read_text(encoding="utf-8").strip() == settings.takeover_token
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX modes, and creating a symlink on Windows needs a privilege CI's runner lacks"
+)
+@pytest.mark.parametrize(("mode", "warned"), [(0o644, True), (0o600, False)])
+def test_w4_4_a_symlinked_takeover_token_file_is_used_and_warns_when_its_target_is_open(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, mode: int, warned: bool
+) -> None:
+    # A Kubernetes secret mount: a symlink to a file that is 0644 by default and not the controller's to change.
+    target = tmp_path / "secret-mount" / "..data" / "takeover-token"
+    target.parent.mkdir(parents=True)
+    target.write_text(SENTINEL + "\n", encoding="utf-8")
+    target.chmod(mode)
+    link = tmp_path / "takeover-token"
+    link.symlink_to(target)
+    settings = make_settings(tmp_path, TAKEOVER_TOKEN_FILE=str(link))
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        ensure_takeover_token(settings)
+
+    assert settings.takeover_token == SENTINEL
+    assert stat.S_IMODE(target.stat().st_mode) == mode
+    assert ("readable beyond its owner" in caplog.text) is warned
+    assert SENTINEL not in caplog.text

@@ -347,8 +347,9 @@ def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
 
     The file is opened without following a symlink and changed through that
     descriptor, so swapping the path between the check and the chmod cannot point
-    the chmod at another file. A symlinked token (a Kubernetes secret mount) is
-    left alone: its target is not ours to change.
+    the chmod at another file. A symlinked token (a Kubernetes secret mount, 0644
+    by default) is used as it is, since its target is not ours to change, with one
+    warning naming the path and mode when the target is readable beyond its owner.
     """
     if os.name == "nt":
         return
@@ -356,6 +357,7 @@ def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
+            _warn_about_an_open_link_target(path, name)
             return
         raise
     try:
@@ -366,6 +368,24 @@ def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
     finally:
         os.close(fd)
     logger.warning("%s %s was readable beyond its owner (mode %o); changed it to 0600", name, path, mode)
+
+
+def _warn_about_an_open_link_target(path: Path, name: str) -> None:
+    """Open a symlinked token file following the link and warn when its target grants group or other bits."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        mode = stat.S_IMODE(os.fstat(fd).st_mode)
+    finally:
+        os.close(fd)
+    if mode & _GROUP_OR_OTHER_BITS:
+        logger.warning(
+            "%s %s is a symlink to a file readable beyond its owner (mode %o); it is used as it is, since its "
+            "target is not the controller's to change. Restrict it where it is mounted (a Kubernetes secret's "
+            "defaultMode 0400, say).",
+            name,
+            path,
+            mode,
+        )
 
 
 def _match_parent_owner(path: Path) -> None:
