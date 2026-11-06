@@ -27,6 +27,10 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
+# Every request goes to the loopback controller, so none goes through an environment proxy: urllib skips one for
+# 127.0.0.1 only when no_proxy names it, and the API token would go to the proxy.
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 
 def call(method: str, url: str, token: str, body: dict | None = None) -> tuple[int, dict]:
     data = json.dumps(body).encode() if body is not None else None
@@ -35,7 +39,7 @@ def call(method: str, url: str, token: str, body: dict | None = None) -> tuple[i
     if data is not None:
         request.add_header("content-type", "application/json")
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:  # noqa: S310 - a loopback URL
+        with _DIRECT.open(request, timeout=120) as response:  # noqa: S310 - a loopback URL
             return response.status, json.loads(response.read() or b"{}")
     except urllib.error.HTTPError as exc:
         try:
@@ -60,7 +64,7 @@ def main(argv: list[str]) -> int:
     base = f"http://127.0.0.1:{args.api_port}"
     for _ in range(90):
         try:
-            with urllib.request.urlopen(f"{base}/healthz", timeout=5):  # noqa: S310
+            with _DIRECT.open(f"{base}/healthz", timeout=5):  # noqa: S310
                 break
         except OSError:
             time.sleep(2)

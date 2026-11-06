@@ -10,13 +10,15 @@ edit here must be mirrored to the other copy.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import sys
 from dataclasses import dataclass
 from typing import Any, TextIO
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 # MCP spec header names, kept as local constants so the bridge has no
 # controller dependency. The controller test suite asserts these match
@@ -42,8 +44,29 @@ class _NoRedirects(HTTPRedirectHandler):
         return None
 
 
+_DIRECT = build_opener(ProxyHandler({}), _NoRedirects)
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host or "").is_loopback
+    except ValueError:
+        return False
+
+
 # Module-level, as urllib's own urlopen was, so tests can patch it.
-urlopen = build_opener(_NoRedirects).open
+def urlopen(request: Request, *args: Any, **kwargs: Any) -> Any:
+    """Open the request without following redirects, past any environment proxy when its host is loopback.
+
+    urllib skips a proxy for localhost only when no_proxy names it, so with http_proxy set the bridge's
+    Authorization header for a local controller went to the proxy. Any other host still uses the proxy the
+    environment names, read for each request.
+    """
+    if _is_loopback_host(urlsplit(request.full_url).hostname):
+        return _DIRECT.open(request, *args, **kwargs)
+    return build_opener(_NoRedirects).open(request, *args, **kwargs)
 
 
 @dataclass
