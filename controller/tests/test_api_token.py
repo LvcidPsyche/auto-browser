@@ -630,9 +630,16 @@ def test_any_other_open_error_is_raised(tmp_path: Path, monkeypatch: pytest.Monk
 
     monkeypatch.setattr(api_token, "os", _posix_stand_in(open=refuse))
 
-    # W8-6: raised as an OSError of _restrict_mode's own, which keeps the errno, so a takeover token file can name it.
-    with pytest.raises(OSError) as raised:
+    # W10-1: API_TOKEN_FILE's failure is the original exception, as before W8-6.
+    with pytest.raises(PermissionError) as raised:
         api_token._restrict_mode(tmp_path / "api-token")
+    assert type(raised.value) is PermissionError
+    assert raised.value.__cause__ is None
+
+    # W8-6: for a takeover token file it is an OSError of _restrict_mode's own, which keeps the errno, so the
+    # caller can name the cause.
+    with pytest.raises(api_token._ModeCheckOpenError) as raised:
+        api_token._restrict_mode(tmp_path / "takeover-token", name="TAKEOVER_TOKEN_FILE")
     assert raised.value.errno == errno.EACCES
 
 

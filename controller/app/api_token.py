@@ -372,6 +372,9 @@ def _restrict_mode(path: Path, *, name: str = "API_TOKEN_FILE") -> None:
             _warn_about_an_open_link_target(path, name)
             return
         # The file vanished or turned unreadable since it was read (W8-6): not a mode that could not be tightened.
+        # Only the takeover path names that apart; API_TOKEN_FILE's startup failure stays the original (W10-1).
+        if name != "TAKEOVER_TOKEN_FILE":
+            raise
         raise _ModeCheckOpenError(exc.errno, exc.strerror, exc.filename) from exc
     try:
         mode = stat.S_IMODE(os.fstat(fd).st_mode)
