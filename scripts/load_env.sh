@@ -271,10 +271,43 @@ curl_auth_config() {
 # The hosts curl reaches directly whatever HTTP_PROXY, HTTPS_PROXY or ALL_PROXY says: a request to a loopback
 # controller carries the tokens, and through a proxy it would hand them to the proxy. curl's --noproxy takes a
 # comma-separated list (an IPv6 address unbracketed) and replaces NO_PROXY for that curl, so the environment's own
-# list (no_proxy, which curl reads first, else NO_PROXY) follows them.
+# list (no_proxy, which curl reads first, else NO_PROXY) follows them. The scripts' base URL host (API_BASE_URL, else
+# AUTO_BROWSER_BASE_URL) is listed too when it is another loopback address (127.0.0.2, say): named exactly, since
+# older curls take no CIDR. curl reads `*` as every host only when it is the whole list, so an inherited `*` is
+# printed alone.
 loopback_noproxy() {
   local inherited="${no_proxy:-${NO_PROXY:-}}"
-  printf '%s' "localhost,127.0.0.1,::1${inherited:+,${inherited}}"
+  local trimmed="${inherited//[[:space:]]/}"
+  if [[ "$trimmed" == "*" ]]; then
+    printf '%s' "*"
+    return 0
+  fi
+  local hosts="localhost,127.0.0.1,::1"
+  local host
+  host="$(base_url_loopback_host "${API_BASE_URL:-${AUTO_BROWSER_BASE_URL:-}}")"
+  if [[ -n "$host" && ",${hosts}," != *",${host},"* ]]; then
+    hosts="${hosts},${host}"
+  fi
+  printf '%s' "${hosts}${inherited:+,${inherited}}"
+}
+
+# The host of a base URL when it is a loopback address (localhost, anything in 127.0.0.0/8, ::1), IPv6 unbracketed
+# as --noproxy takes it; nothing otherwise.
+base_url_loopback_host() {
+  local rest="${1#*://}"
+  rest="${rest%%/*}"
+  rest="${rest##*@}"
+  local host
+  if [[ "$rest" == \[* ]]; then
+    host="${rest#\[}"
+    host="${host%%\]*}"
+  else
+    host="${rest%%:*}"
+  fi
+  host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$host" == "localhost" || "$host" == "::1" || "$host" =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+    printf '%s' "$host"
+  fi
 }
 
 # curl that sends the controller's bearer token. Without it every API call is a

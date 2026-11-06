@@ -246,6 +246,80 @@ class LoopbackNoProxyTests(unittest.TestCase):
         self.assertEqual(argv[0], "-q")
         self.assertEqual(argv[argv.index("--noproxy") + 1], "localhost,127.0.0.1,::1,hooks.internal")
 
+    def _noproxy_list(self, extra_env: dict[str, str]) -> str:
+        """The --noproxy value bearer_curl hands a stand-in curl."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            fake_bin = Path(tempdir) / "bin"
+            fake_bin.mkdir()
+            argv_log = Path(tempdir) / "argv.log"
+            curl = fake_bin / "curl"
+            curl.write_text(
+                f'#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "{_bash_path(argv_log)}"\ncat > /dev/null\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            curl.chmod(0o755)
+            path = f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+            result = self._run("bearer_curl", "http://127.0.0.1:8000/", {"PATH": path, **extra_env})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            argv = argv_log.read_text(encoding="utf-8").splitlines()
+        return argv[argv.index("--noproxy") + 1]
+
+    def test_w4_6_the_base_urls_host_is_listed_when_it_is_another_loopback_address(self) -> None:
+        cases = {
+            "http://127.0.0.2:8000": "localhost,127.0.0.1,::1,127.0.0.2",
+            "http://user@127.10.20.30:8000/x": "localhost,127.0.0.1,::1,127.10.20.30",
+            "http://LOCALHOST:8000": "localhost,127.0.0.1,::1",
+            "http://[::1]:8000": "localhost,127.0.0.1,::1",
+            "http://127.0.0.1:8000": "localhost,127.0.0.1,::1",
+            "http://10.0.0.5:8000": "localhost,127.0.0.1,::1",
+            "http://127.0.0.2.example.com:8000": "localhost,127.0.0.1,::1",
+        }
+        for url, expected in cases.items():
+            with self.subTest(url=url):
+                self.assertEqual(self._noproxy_list({"AUTO_BROWSER_BASE_URL": url}), expected)
+        self.assertEqual(
+            self._noproxy_list({"API_BASE_URL": "http://127.0.0.3:8000", "NO_PROXY": "hooks.internal"}),
+            "localhost,127.0.0.1,::1,127.0.0.3,hooks.internal",
+        )
+
+    def test_w4_6_an_inherited_star_is_printed_alone(self) -> None:
+        for inherited in ("*", " * "):
+            with self.subTest(inherited=inherited):
+                self.assertEqual(self._noproxy_list({"NO_PROXY": inherited}), "*")
+        self.assertEqual(self._noproxy_list({"no_proxy": "*", "NO_PROXY": "hooks.internal"}), "*")
+
+    def test_w4_6_a_controller_on_another_loopback_address_is_reached_directly(self) -> None:
+        reached, proxied = [], []
+        try:
+            target = http.server.ThreadingHTTPServer(("127.0.0.2", 0), type("Handler", (_Recorder,), {"seen": reached}))
+        except OSError as exc:
+            self.skipTest(f"cannot listen on 127.0.0.2 here: {exc}")
+        threading.Thread(target=target.serve_forever, daemon=True).start()
+        proxy = _serve(proxied)
+        self.addCleanup(target.shutdown)
+        self.addCleanup(proxy.shutdown)
+        base_url = f"http://127.0.0.2:{target.server_address[1]}"
+        environ = {
+            **_proxy_environment(f"http://127.0.0.1:{proxy.server_address[1]}"),
+            "AUTO_BROWSER_BASE_URL": base_url,
+        }
+        result = self._run("bearer_curl", f"{base_url}/sessions", environ)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(proxied, [], "a request carrying the tokens went through the proxy")
+        self.assertEqual([headers.get("authorization") for headers in reached], [f"Bearer {TOKEN}"])
+
+    def test_w4_6_with_no_proxy_star_a_remote_controller_is_not_reached_through_the_proxy(self) -> None:
+        # 1.15.0's curl read NO_PROXY='*' as every host and went direct; appended to the loopback list it no longer
+        # meant that, and the tokens went to the proxy.
+        proxied: list = []
+        proxy = _serve(proxied)
+        self.addCleanup(proxy.shutdown)
+        environ = {**_proxy_environment(f"http://127.0.0.1:{proxy.server_address[1]}"), "NO_PROXY": "*"}
+        # Direct, 10.0.0.5 is unreachable here: the request fails fast instead of reaching the proxy.
+        self._run("bearer_curl --connect-timeout 2 --max-time 3", "http://10.0.0.5:8000/sessions", environ)
+        self.assertEqual(proxied, [], "a request carrying the tokens went through the proxy")
+
 
 def _proxy_environment(proxy_url: str) -> dict[str, str]:
     return {name: proxy_url for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")}
