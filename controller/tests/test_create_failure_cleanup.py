@@ -98,7 +98,9 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
             path.write_text("{not json", encoding="utf-8")
             raise RuntimeError("witness down")
 
-        self.manager.witness_bridge.record_session_receipt = AsyncMock(side_effect=corrupt_then_fail)  # type: ignore[method-assign]
+        self.manager.witness_bridge.record_session_receipt = AsyncMock(  # type: ignore[method-assign]
+            side_effect=corrupt_then_fail
+        )
 
         with self.assertRaises(RuntimeError):
             await self.manager.create_session()
@@ -142,7 +144,7 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
 
     async def _cancel_while_rollback_waits_in(self, step: str) -> tuple[AsyncMock, int]:
         # W7-2: a failed create's rollback with an isolated runtime and a tunnel; the caller is cancelled while the
-        # rollback waits in ``step`` (a cancelled MCP tool call, say). Returns the runtime release and how many
+        # rollback waits in ``step``. Returns the runtime release and how many
         # CancelledErrors the caller saw.
         import asyncio
 
@@ -163,7 +165,9 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
         )
         browser = self.manager.browser
         browser.close = AsyncMock()  # type: ignore[attr-defined]
-        self.manager._acquire_session_browser = AsyncMock(return_value=(browser, runtime))  # type: ignore[method-assign]
+        self.manager._acquire_session_browser = AsyncMock(  # type: ignore[method-assign]
+            return_value=(browser, runtime)
+        )
         release_runtime = AsyncMock()
         self.manager.runtime_provisioner.release = release_runtime  # type: ignore[method-assign]
 
@@ -172,7 +176,9 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
 
         self.manager._maybe_provision_session_tunnel = AsyncMock(side_effect=provision)  # type: ignore[method-assign]
         self.manager.tunnel_broker.release = AsyncMock()  # type: ignore[method-assign]
-        self.manager.witness_bridge.record_session_receipt = AsyncMock(side_effect=RuntimeError("witness down"))  # type: ignore[method-assign]
+        self.manager.witness_bridge.record_session_receipt = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("witness down")
+        )
         reached, go_on = asyncio.Event(), asyncio.Event()
 
         async def gated(*_args, **_kwargs) -> None:

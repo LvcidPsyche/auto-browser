@@ -142,7 +142,10 @@ class AgentEvalProxyTests(unittest.TestCase):
         # controller.invalid is never resolved: the request goes to the (local) recording proxy.
         self.assertEqual(self._post("http://controller.invalid:8000"), {"id": "s1"})
 
-        self.assertEqual(self.proxy.seen, [("http://controller.invalid:8000/sessions", f"Bearer {MARKER}")])  # type: ignore[attr-defined]
+        self.assertEqual(
+            self.proxy.seen,  # type: ignore[attr-defined]
+            [("http://controller.invalid:8000/sessions", f"Bearer {MARKER}")],
+        )
         self.assertEqual(self.controller.seen, [])  # type: ignore[attr-defined]
 
 

@@ -361,9 +361,9 @@ class SessionCreation:
         runtime: "IsolatedBrowserRuntime | None",
         created_hook_started: bool = False,
     ) -> None:
-        """Roll back a create that failed: every step runs to its end even when the caller is cancelled during
-        one (a cancelled MCP tool call, W7-2), and the cancel is raised once the rollback is done. A cancel at any
-        step left the isolated runtime running, the directories in place and the record reading active."""
+        """Roll back a create that failed: every step runs to its end even when the task awaiting it is cancelled
+        during one (W7-2), and the cancel is raised once the rollback is done. A cancel at any step left the isolated
+        runtime running, the directories in place and the record reading active."""
         await self._run_to_completion(
             self._cleanup_failed_steps(
                 session_id,

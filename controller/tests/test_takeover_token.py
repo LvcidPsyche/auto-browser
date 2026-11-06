@@ -254,8 +254,8 @@ def test_w2_21_a_token_file_inside_a_served_or_uploadable_root_refuses_startup(t
 
 
 # The data roots that expose a file by path (W5-3): ARTIFACT_ROOT is served under /artifacts, UPLOAD_ROOT's files can
-# be uploaded into a page, AUTH_ROOT is packaged whole by GET /auth-profiles/{name}/export, and maintenance sweeps all
-# three. The other roots are read by fixed names, so a token file there reaches no agent.
+# be uploaded into a page, GET /auth-profiles/{name}/export exports AUTH_ROOT's profiles as archives, and maintenance
+# sweeps all three. The other roots are read by fixed names, so a token file there reaches no agent.
 REFUSED_ROOT_SETTINGS = ["ARTIFACT_ROOT", "UPLOAD_ROOT", "AUTH_ROOT"]
 FIXED_NAME_ROOT_SETTINGS = [
     "APPROVAL_ROOT",

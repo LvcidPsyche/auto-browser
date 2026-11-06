@@ -293,7 +293,7 @@ loopback_noproxy() {
 
 # The host of a base URL as curl reads its authority: the scheme stripped, the authority cut at the first /, ? or #,
 # the userinfo dropped up to the last @, then a bracketed host up to ] (printed with its brackets), else the host up
-# to the port's colon. Nothing is decoded: base_url_plain_host refuses a host curl would decode or normalise.
+# to the port's colon. Nothing is decoded: refuse_other_ipv4_spelling refuses a host curl would decode or normalise.
 base_url_host() {
   local rest="${1#*://}"
   rest="${rest%%[/?#]*}"
@@ -315,7 +315,8 @@ base_url_loopback_host() {
   host="${host#\[}"
   host="${host%\]}"
   host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
-  if [[ "$host" == "localhost" || "$host" == "::1" || "$host" == "0.0.0.0" || "$host" =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+  if [[ "$host" == "localhost" || "$host" == "::1" || "$host" == "0.0.0.0" \
+    || "$host" =~ ^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
     printf '%s' "$host"
   fi
 }

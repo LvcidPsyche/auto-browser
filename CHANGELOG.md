@@ -143,11 +143,11 @@ All notable changes to auto-browser are documented here.
   record in the session store: the directories are made only after every check that can refuse the request, removed
   again by the rollback (in a worker thread, so a large tree does not stall other requests), and a record the create
   had already written is marked `closed` (reason `create_failed`). The whole rollback (the tunnel and isolated runtime
-  releases, the context and browser closes, the directories and the record) runs to completion when the caller is
-  cancelled during it (a cancelled MCP tool call, say), then the cancel is raised. Each of its steps is bounded as
-  `close_session`'s teardown steps are (30 seconds, then logged and passed), so a context close or runtime release
-  that never returns no longer holds the rest of the rollback or its caller. When the controller itself stops,
-  every task left is cancelled, the rollback's own included, and the next start marks such a record `interrupted`.
+  releases, the context and browser closes, the directories and the record) runs to completion when the task awaiting
+  it is cancelled during it, then the cancel is raised. Each of its steps is bounded as `close_session`'s teardown
+  steps are (30 seconds, then logged and passed), so a context close or runtime release that never returns no longer
+  holds the rest of the rollback or its caller. When the controller itself stops, every task left is cancelled, the
+  rollback's own included, and the next start marks such a record `interrupted`.
 - A shadow browse that fails or is cancelled after its Chromium started no longer leaves that browser running, the
   shadow's artifact, auth and upload directories on disk, or an `active` record in the session store (a record
   already written is marked `closed` with reason `create_failed`, as a failed `create_session`'s is): the rollback
@@ -396,29 +396,31 @@ All notable changes to auto-browser are documented here.
   accept the same tokens and every client sends one unchanged: curl sends a UTF-8 `.env` value that Starlette reads as
   latin-1) or equal to an API credential refuses startup, as does a `TAKEOVER_TOKEN_FILE` in one of eight directories:
   `ARTIFACT_ROOT` (served under `/artifacts`), `UPLOAD_ROOT` (uploadable into a page) and `AUTH_ROOT` (its profiles
-  exported as archives), all three swept by maintenance, and the five mounted into a container, found under the parent
-  of `ARTIFACT_ROOT` (so a relocated `ARTIFACT_ROOT` moves them too): `browser-profile` and `downloads` in
-  browser-node and `tunnels` and `ssh` in reverse-ssh, which compose mounts, and `browser-sessions`, whose `<id>`
-  directory the controller binds into each isolated session. The other data roots are read by fixed names, so a token
-  there reaches no agent, and one of them set to `/data` itself (`MESH_IDENTITY_DIR`, say) leaves the default
-  `/data/takeover-token` usable. Spaces and tabs around the presented header are not part of the token. A token file
-  that cannot be read or written, holds an unusable token, or stays readable beyond its owner because its mode cannot
-  be tightened (a root-owned 0444 mount), or cannot be opened for that mode check (it vanished or turned unreadable
-  since the read), logs a warning naming that cause and the endpoint answers 503. A token file (either one) on a
-  filesystem that accepts a chmod and keeps the mode (a repository on a Windows drive under Docker Desktop, some FUSE
-  or SMB mounts) is used with a warning that the mode did not hold, instead of a log line saying it was changed to
-  0600, and one the controller has just generated there gets that warning on the same start, not only the next; the
-  line announcing a generated token file says "mode 0600" only when that held, else the mode found, and a mode that
-  cannot be checked after the write gets a warning naming the setting and path, the token still used. A symlinked
-  token file (a Kubernetes secret mount, 0644 by default), whether `TAKEOVER_TOKEN_FILE` or `API_TOKEN_FILE`, is used
-  as it is, its target's mode untouched, with one warning naming the path and mode when that target is readable
-  beyond its owner, or that its mode could not be checked when the target cannot be opened for that check (it
-  vanished or turned unreadable since the read). The takeover token stops only agents without file access to
-  the controller's host: one running as the host user that owns `./data` (a local MCP setup) can read
-  `data/takeover-token`, and so can the controller's own `cli` providers, which run as its uid (or anything that reads
-  the session container's own copy of the password). Open the dashboard and the link in a browser no agent drives:
-  such an agent can read the dashboard's sessionStorage. The `takeover_note` names no script. The shared browser-node
-  keeps the operator's `VNC_PASSWORD` and a password-free link.
+  exported as archives), all three swept by maintenance, and the five mounted into a container: `browser-profile` and
+  `downloads` in browser-node and `tunnels` and `ssh` in reverse-ssh, which compose mounts, and `browser-sessions`,
+  whose `<id>` directory the controller binds into each isolated session. The check looks for those five under the
+  parent of `ARTIFACT_ROOT`, which is where compose's `./data` lands in the image (`/data`); with `ARTIFACT_ROOT` moved
+  elsewhere, compose's mounts stay under `./data` and the check no longer covers them, so keep `TAKEOVER_TOKEN_FILE`
+  out of them. The other data roots are read by fixed names, so a token there reaches no agent, and one of them set
+  to `/data` itself (`MESH_IDENTITY_DIR`, say) leaves the default `/data/takeover-token` usable. Spaces and tabs
+  around the presented header are not part of the token. A token file that cannot be read or written, holds an
+  unusable token, or stays readable beyond its owner because its mode cannot be tightened (a root-owned 0444 mount),
+  or cannot be opened for that mode check (it vanished or turned unreadable since the read), logs a warning naming
+  that cause and the endpoint answers 503. A token file (either one) on a filesystem that accepts a chmod and keeps
+  the mode (a repository on a Windows drive under Docker Desktop, some FUSE or SMB mounts) is used with a warning that
+  the mode did not hold, instead of a log line saying it was changed to 0600, and one the controller has just
+  generated there gets that warning on the same start, not only the next; the line announcing a generated token file
+  says "mode 0600" only when that held, else the mode found, and a mode that cannot be checked after the write gets a
+  warning naming the setting and path, the token still used. A symlinked token file (a Kubernetes secret mount, 0644
+  by default), whether `TAKEOVER_TOKEN_FILE` or `API_TOKEN_FILE`, is used as it is, its target's mode untouched, with
+  one warning naming the path and mode when that target is readable beyond its owner, or that its mode could not be
+  checked when the target cannot be opened for that check (it vanished or turned unreadable since the read). The
+  takeover token stops only agents without file access to the controller's host: one running as the host user that
+  owns `./data` (a local MCP setup) can read `data/takeover-token`, and so can the controller's own `cli` providers,
+  which run as its uid (or anything that reads the session container's own copy of the password). Open the dashboard
+  and the link in a browser no agent drives: such an agent can read the dashboard's sessionStorage. The
+  `takeover_note` names no script. The shared browser-node keeps the operator's `VNC_PASSWORD` and a password-free
+  link.
 - **On a host shared with other users,** keep `./data` closed to them: mode 0700, or 0750 with a group only the
   operators are in. browser-node's endpoint file there (`./data/browser-profile/browser-ws-endpoint.txt`) holds the
   `ws://` URL that connects to the shared browser, and it cannot be private to one uid, since browser-node writes it

@@ -149,7 +149,9 @@ class PersistAfterCloseTests(unittest.IsolatedAsyncioTestCase):
         record_path(self.manager.session_store.file_store.root, self.session_id, ".json").write_text(
             "{not json", encoding="utf-8"
         )
-        self.manager._session_summary = AsyncMock(side_effect=RuntimeError("summary failed"))  # type: ignore[method-assign]
+        self.manager._session_summary = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("summary failed")
+        )
 
         with acting_as(ALICE), self.assertRaises(RuntimeError):
             await self.manager.close_session(self.session_id, reason="operator")

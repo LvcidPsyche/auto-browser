@@ -212,8 +212,9 @@ def _printable_ascii(token: str) -> bool:
 
 # The data roots whose files the API exposes by path (setting name to Settings attribute): /artifacts serves
 # ARTIFACT_ROOT, UPLOAD_ROOT's files can be uploaded into a page, GET /auth-profiles/{name}/export exports AUTH_ROOT's
-# profiles as archives, and maintenance sweeps all three. The other roots are read by fixed names (W5-3), so a token file there reaches no
-# agent, and one of them set to the data root itself must not refuse the default /data/takeover-token.
+# profiles as archives, and maintenance sweeps all three. The other roots are read by fixed names (W5-3), so a token
+# file there reaches no agent, and one of them set to the data root itself must not refuse the default
+# /data/takeover-token.
 TAKEOVER_TOKEN_REFUSED_ROOTS = {
     "ARTIFACT_ROOT": "artifact_root",
     "UPLOAD_ROOT": "upload_root",
@@ -221,9 +222,10 @@ TAKEOVER_TOKEN_REFUSED_ROOTS = {
 }
 # The directories mounted into a container, where a compromised browser or helper container could read or replace
 # the file, with the name the refusal gives each: compose mounts all but browser-sessions, whose browser-sessions/<id>
-# the controller binds into each isolated session itself through the Docker SDK. They are found under the parent of
-# ARTIFACT_ROOT (/data in the image), as session isolation finds browser-sessions, so a relocated ARTIFACT_ROOT moves
-# them too.
+# the controller binds into each isolated session itself through the Docker SDK. The check looks for them under the
+# parent of ARTIFACT_ROOT, as session isolation finds browser-sessions: that is where compose's ./data lands in the
+# image (/data). With ARTIFACT_ROOT moved elsewhere, compose's mounts stay under ./data and the check no longer covers
+# them, so keep TAKEOVER_TOKEN_FILE out of them.
 TAKEOVER_TOKEN_REFUSED_MOUNTS = {
     "browser-profile": "the browser-profile directory browser-node mounts",
     "downloads": "the downloads directory browser-node mounts",
