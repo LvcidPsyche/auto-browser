@@ -123,7 +123,9 @@ restart empties them; to close that gap the controller also refuses any envelope
 started or within one window after it (`403`). The last process accepted envelopes stamped up to one window
 ahead of its clock, so this covers everything it could have run. The cost is about one window
 (`MESH_TIMESTAMP_WINDOW`, 30 seconds by default) of refusals after each start, which a sender's retry, with a
-new envelope, passes. Replay protection therefore holds across a restart.
+new envelope, passes. Replay protection therefore holds across a restart as long as the clock did not step back
+across it: the high-water mark is kept in memory only, so a controller restarted with its clock set back by more
+than a window can accept again, once its clock nears their stamps, envelopes the last process already ran.
 
 ## Upgrading from a release that had `POST /mesh/peers`
 
