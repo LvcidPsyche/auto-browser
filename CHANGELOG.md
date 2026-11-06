@@ -216,9 +216,9 @@ All notable changes to auto-browser are documented here.
   create, a NUL byte) is logged and skipped.
 - `browser.cdp_attach` now logs, audits and returns the Chrome it attached to as `scheme://host:port` only. A CDP
   URL's userinfo, query and `/devtools/browser/<id>` path can be the credential for that Chrome; the attach itself
-  still uses the full URL. The startup log line for `CDP_CONNECT_URL` shows it the same way, and a connect that fails
-  (at startup or in the tool) says why without the URL, which Playwright's error repeats whole in its call log. A
-  request that meets a browser that cannot be reached (Chrome over CDP, the shared browser-node, or an isolated
+  still uses the full URL. The startup log line for `CDP_CONNECT_URL` shows it the same way. Why a connect failed is
+  in the controller's log and the startup error, without the URL, which Playwright's error repeats whole in its call
+  log; the caller of the tool or a route gets the fixed text below, not the reason. A request that meets a browser that cannot be reached (Chrome over CDP, the shared browser-node, or an isolated
   session's own browser) at `POST /sessions`, a fork or `POST /crons/{job_id}/trigger` answers 503 with the fixed
   detail "the browser could not be reached" instead of a 500 (CDP) or a 409 Conflict (a browser-node), and an MCP
   call (`browser.cdp_attach`, a session it creates) answers the same text with the code `browser_unreachable`. A `CDP_CONNECT_URL` in which a browser could read another host than that
