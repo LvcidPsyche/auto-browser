@@ -4,6 +4,7 @@ import ipaddress
 import os
 import socket
 from pathlib import Path
+from typing import Literal, overload
 
 import httpx
 
@@ -36,6 +37,16 @@ def resolve_bearer_token(bearer_token: str | None, token_file: str | os.PathLike
     if not token:
         raise ValueError(f"token_file {token_file} is empty")
     return token
+
+
+# One overload per client kind (W9-12): httpx.Client takes only a BaseTransport and httpx.AsyncClient only an
+# AsyncBaseTransport, so the union return type was flagged at every call site.
+@overload
+def loopback_transport(base_url: str, *, asynchronous: Literal[True]) -> httpx.AsyncBaseTransport | None: ...
+
+
+@overload
+def loopback_transport(base_url: str, *, asynchronous: Literal[False]) -> httpx.BaseTransport | None: ...
 
 
 def loopback_transport(base_url: str, *, asynchronous: bool) -> httpx.BaseTransport | httpx.AsyncBaseTransport | None:
