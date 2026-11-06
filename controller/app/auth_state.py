@@ -82,8 +82,16 @@ class AuthStateManager:
             atomic_write_text(final_path, json.dumps(payload), mode=PRIVATE_FILE_MODE)
             # A plaintext state saved before encryption was on would otherwise stay beside the encrypted one, and
             # still load.
+            # Best-effort: the encrypted save has succeeded, so a sibling that cannot go (a directory, a Windows
+            # lock) only warns.
             if final_path.name.endswith(".enc"):
-                final_path.with_name(final_path.name.removesuffix(".enc")).unlink(missing_ok=True)
+                plain = final_path.with_name(final_path.name.removesuffix(".enc"))
+                try:
+                    plain.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning(
+                        "could not remove the plaintext auth state %s beside its encrypted copy: %s", plain, exc
+                    )
             return self.inspect(final_path)
 
         # A fresh temp file per save, removed whatever happens. The fixed

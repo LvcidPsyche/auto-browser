@@ -44,6 +44,19 @@ class PlaintextSiblingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(plain.exists())
         self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["session.json.enc"])
 
+    async def test_w4_16_a_plaintext_sibling_that_cannot_be_removed_only_warns(self) -> None:
+        # The removal was unguarded: a sibling that could not go (a directory, a Windows lock) failed a save that had
+        # already written the encrypted state.
+        target = self.root / "session.json.enc"
+        (self.root / "session.json").mkdir()
+
+        with self.assertLogs("app.auth_state", "WARNING") as logged:
+            info = await _manager(Fernet.generate_key().decode()).write_storage_state(_Context(), target)
+
+        self.assertTrue(info["path"].endswith("session.json.enc"))
+        self.assertTrue(target.is_file())
+        self.assertIn(str(self.root / "session.json"), "\n".join(logged.output))
+
     async def test_an_unencrypted_save_leaves_its_own_file(self) -> None:
         target = self.root / "session.json"
         await _manager(None).write_storage_state(_Context(), target)
