@@ -222,6 +222,10 @@ class AgentEvalProxyTests(unittest.TestCase):
             f"http://127.0.0.2%23.bad:{port}",
             f"http://user:pass@127.0.0.1:{port}",
             f"http://x%2f@127.0.0.1:{port}",
+            # W15-1: only the URL as written reads a local host (urlsplit's hostname stops at the first colon after
+            # the last literal @); every decoded reading finds controller.invalid.
+            "http://x@127.0.0.1:%40controller.invalid:80",
+            "http://x@localhost:%40controller.invalid:80",
         ):
             with self.subTest(base_url=base_url):
                 self.proxy.seen.clear()  # type: ignore[attr-defined]
@@ -237,7 +241,9 @@ class AgentEvalProxyTests(unittest.TestCase):
         # is raised as the bridges' InvalidControllerURL, a subclass of http.client's InvalidURL (W13-1), before any
         # opener is chosen.
         port = self.controller.server_port
-        for authority in (f"%5b127.0.0.1%5d:{port}", f"x%5b@127.0.0.1:{port}", "controller.invalid:abc"):
+        # The bracketed IPv4 last (W15-1): its skipTest inside subTest ends the whole method under a runner without
+        # per-subtest skips (pytest below 9 without pytest-subtests), which would skip the cases after it.
+        for authority in (f"x%5b@127.0.0.1:{port}", "controller.invalid:abc", f"%5b127.0.0.1%5d:{port}"):
             with self.subTest(authority=authority):
                 if authority.startswith("%5b") and not _urlsplit_refuses_a_bracketed_ipv4():
                     self.skipTest("this Python's urlsplit does not refuse a bracketed IPv4 host (it does from 3.11.4)")

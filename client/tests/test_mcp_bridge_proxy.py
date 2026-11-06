@@ -11,6 +11,7 @@ urllib reads the proxy variables when an opener is built, which for the old modu
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import socket
@@ -20,6 +21,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import URLError
 from urllib.parse import urlsplit
 
 import pytest
@@ -294,6 +296,11 @@ def test_w11_1_a_host_any_reading_finds_local_never_goes_through_the_environment
         "http://127.0.0.2%23.bad:{port}/mcp",
         "http://user:pass@127.0.0.1:{port}/mcp",
         "http://x%2f@127.0.0.1:{port}/mcp",
+        # W15-1: only the URL as written reads a local host (urlsplit's hostname stops at the first colon after the
+        # last literal @); every decoded reading finds controller.invalid, and the connect host is
+        # x@127.0.0.1:@controller.invalid.
+        "http://x@127.0.0.1:%40controller.invalid:80/mcp",
+        "http://x@localhost:%40controller.invalid:80/mcp",
     ],
 )
 def test_w13_2_a_host_local_one_way_but_connected_to_as_another_is_refused(recording_proxy, base_url: str) -> None:
@@ -361,6 +368,40 @@ def closed_port():
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         yield probe.getsockname()[1]
+
+
+@pytest.fixture
+def request_line_echo():
+    """A raw TCP server on 127.0.0.1 that answers each request with its own request line as the status line.
+
+    http.client then raises BadStatusLine quoting that line, the URL's query included, which is not a URLError, so
+    the bridge answers with its unexpected-failure message (W15-1)."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+
+    def answer() -> None:
+        while True:
+            try:
+                connection, _ = listener.accept()
+            except OSError:
+                return
+            with connection, connection.makefile("rb") as stream:
+                request_line = stream.readline()
+                length = 0
+                while (header := stream.readline()) not in (b"\r\n", b""):
+                    name, _, value = header.partition(b":")
+                    if name.strip().lower() == b"content-length":
+                        length = int(value)
+                # Read the body first: on Windows a socket closed with unread data resets.
+                stream.read(length)
+                connection.sendall(request_line.rstrip(b"\r\n") + b"\r\nContent-Length: 0\r\n\r\n")
+
+    threading.Thread(target=answer, daemon=True).start()
+    try:
+        yield listener.getsockname()[1]
+    finally:
+        listener.close()
 
 
 @pytest.mark.parametrize(
@@ -433,6 +474,41 @@ def test_w14_1_a_proxys_error_detail_never_shows_the_urls_query(recording_proxy)
     assert "HTTP 502" in message
     assert "sentinel" not in message
     assert len(recording_proxy.seen) == 1  # type: ignore[attr-defined]
+
+
+def test_w15_1_the_unexpected_failure_answer_never_shows_the_urls_query(
+    recording_proxy, request_line_echo: int
+) -> None:
+    # http.client's BadStatusLine quotes the request line, query and all, and is not a URLError: the generic answer
+    # shows its text, which goes through _shown.
+    message = _bridge_error_through_the_bridge(
+        f"http://127.0.0.1:{request_line_echo}/mcp?key=sentinel", recording_proxy
+    )
+
+    assert "Unexpected stdio bridge failure: POST /mcp?[redacted] HTTP/1.1" in message
+    assert "sentinel" not in message
+    assert recording_proxy.seen == []  # type: ignore[attr-defined]
+
+
+def test_w15_1_the_unreachable_answer_never_shows_the_urls_query(monkeypatch) -> None:
+    # A URLError's reason can quote the URL (a proxy's tunnel failure, say): the answer that no controller is
+    # reachable shows it through _shown.
+    import auto_browser_client.mcp_bridge as bridge
+
+    def unreachable(*_args: object, **_kwargs: object) -> None:
+        raise URLError("tunnel to http://controller.invalid/mcp?key=sentinel failed")
+
+    monkeypatch.setattr(bridge, "urlopen", unreachable)
+    client = bridge.HttpMcpClient(base_url="http://controller.invalid/mcp?key=sentinel", bearer_token=MARKER)
+    reply = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())._handle_line(
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    )
+    assert reply is not None
+    message = reply["error"]["message"]
+
+    assert UNREACHABLE in message
+    assert "(underlying: tunnel to http://controller.invalid/mcp?[redacted] failed)" in message
+    assert "sentinel" not in message
 
 
 def test_w14_1_the_error_text_shown_drops_the_urls_known_secrets() -> None:
