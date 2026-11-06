@@ -149,17 +149,17 @@ All notable changes to auto-browser are documented here.
   controller process; two processes sharing a store are not covered. Writes for different sessions do not wait for
   each other.
 - A `create_session` that fails no longer leaves its artifact, auth and upload directories behind or an `active`
-  record in the session store: the directories are made only after every check that can refuse the request, removed
-  again by the rollback (in a worker thread, so a large tree does not stall other requests, and each on its own: one
-  whose removal or check fails is logged and the rest of the rollback goes on), and a record the create had already
-  written is marked `closed` (reason `create_failed`). The whole rollback (the tunnel and isolated runtime releases,
-  the context and browser closes, the directories and the record) runs to completion when the task awaiting it is
-  cancelled during it, then the cancel is raised. The create-failed hook, the tunnel release, the context close, the
-  isolated browser's close and the runtime release are each bounded as `close_session`'s teardown steps are (30
-  seconds, then logged and passed), so a context close or runtime release that never returns no longer holds the rest
-  of the rollback or its caller; the directory removal and the record close are not bounded. When the controller
-  itself stops, every task left is cancelled, the rollback's own included, and the next start marks such a record
-  `interrupted`.
+  record in the session store: the directories are made only after every check that can refuse the request,
+  removed again by the rollback (in a worker thread, so a large tree does not stall other requests, and each on
+  its own: one whose removal or check fails is logged with its error, the rest of its tree is still removed, and
+  the rest of the rollback goes on), and a record the create had already written is marked `closed` (reason
+  `create_failed`). The whole rollback (the tunnel and isolated runtime releases, the context and browser closes,
+  the directories and the record) runs to completion when the task awaiting it is cancelled during it, then the
+  cancel is raised. The create-failed hook, the tunnel release, the context close, the isolated browser's close
+  and the runtime release are each bounded as `close_session`'s teardown steps are (30 seconds, then logged and
+  passed), so a context close or runtime release that never returns no longer holds the rest of the rollback or
+  its caller; the directory removal and the record close are not bounded. When the controller itself stops, every
+  task left is cancelled, the rollback's own included, and the next start marks such a record `interrupted`.
 - Releasing an isolated session's tunnel (a close, or a failed create's rollback) now waits at most 5 seconds for
   autossh to exit after `SIGKILL`, as it already did after the terminate, then logs a warning naming the session and
   the process id and finishes the teardown: an autossh that never exited (stuck in uninterruptible I/O) held the close

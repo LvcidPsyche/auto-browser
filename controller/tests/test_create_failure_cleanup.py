@@ -139,6 +139,43 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
             any(str(artifacts) in line and "Permission denied" in line for line in logs.output), logs.output
         )
 
+    async def test_w11_5_a_removal_error_inside_rmtree_is_logged_with_its_error_and_the_rollback_goes_on(self) -> None:
+        # rmtree(ignore_errors=True) dropped the error, so the warning named the directory without it (W10-6 asked
+        # for both). One file in the artifacts tree cannot be unlinked; the rest of that tree, the other directories
+        # and the record close still run.
+        import os
+
+        artifacts = self.root / "artifacts" / SESSION_ID
+        armed = False
+        real_unlink = os.unlink
+
+        async def fail(*_args, **_kwargs):
+            nonlocal armed
+            armed = True
+            (artifacts / "stuck.bin").write_bytes(b"x")
+            (artifacts / "other.bin").write_bytes(b"x")
+            raise RuntimeError("witness down")
+
+        def unlink(path, *args, **kwargs):
+            if armed and os.path.basename(os.fsdecode(path)) == "stuck.bin":
+                raise PermissionError(13, "Permission denied", os.fsdecode(path))
+            return real_unlink(path, *args, **kwargs)
+
+        self.manager.witness_bridge.record_session_receipt = AsyncMock(side_effect=fail)  # type: ignore[method-assign]
+        with patch("os.unlink", unlink):
+            with self.assertLogs("app.browser.services.session_creation", "WARNING") as logs:
+                with self.assertRaisesRegex(RuntimeError, "witness down"):
+                    await self.manager.create_session()
+
+        self.assertTrue(armed, "the create never reached the witness receipt")
+        self.assertEqual(self.leftovers(), [f"artifacts{os.sep}{SESSION_ID}"])
+        self.assertEqual(sorted(path.name for path in artifacts.iterdir()), ["stuck.bin"])
+        record = await self.manager.session_store.get(SESSION_ID)
+        self.assertEqual((record.status, record.close_reason, record.live), ("closed", "create_failed", False))
+        self.assertTrue(
+            any(str(artifacts) in line and "Permission denied" in line for line in logs.output), logs.output
+        )
+
     async def test_w5_6_a_cancel_during_the_rollback_still_closes_the_record_and_removes_the_directories(self) -> None:
         # The directory removal is awaited before the closed record is written: a second cancel there (a shutdown)
         # left a record the create had already persisted reading active.

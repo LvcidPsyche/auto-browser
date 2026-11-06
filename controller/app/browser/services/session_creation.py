@@ -11,6 +11,7 @@ import asyncio
 import logging
 import re
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -427,14 +428,27 @@ class SessionCreation:
 
         Each directory on its own (W10-6): an OSError from its removal or its check (Path.exists raises for EACCES or
         EIO on Python 3.11) is logged and the loop goes on, so the other directories and the record close still run.
+        A removal error inside rmtree is logged with the directory and the error, and rmtree goes on through the rest
+        of that tree (W11-5); a path already gone is not an error.
         """
         for directory in (
             self.manager.artifacts.artifact_root / session_id,
             self.auth_root(session_id),
             self.upload_root(session_id),
         ):
+
+            def logged(_function: Any, _path: Any, error: Any, directory: Path = directory) -> None:
+                if isinstance(error, tuple):  # onerror's exc_info
+                    error = error[1]
+                if not isinstance(error, FileNotFoundError):
+                    logger.warning("rollback could not remove %s: %s", directory, error)
+
             try:
-                shutil.rmtree(directory, ignore_errors=True)
+                # onexc from Python 3.12, where onerror is deprecated; onerror on 3.11.
+                if sys.version_info >= (3, 12):
+                    shutil.rmtree(directory, onexc=logged)
+                else:
+                    shutil.rmtree(directory, onerror=logged)
                 if directory.exists():
                     logger.warning("rollback could not remove %s", directory)
             except OSError as exc:
