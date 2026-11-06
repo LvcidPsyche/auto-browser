@@ -108,6 +108,7 @@ class PassEnvOptionTests(unittest.TestCase):
             patch.object(sys, "argv", ["codex_host_bridge.py", *argv]),
             patch.object(bridge, "prepare_socket_path", Mock(return_value=Path("unused.sock"))) as prepare,
             patch.object(bridge, "CodexBridgeService", service),
+            patch.object(bridge.os, "umask"),  # main() sets 0o077; left set, it changed later tests' file modes
             redirect_stderr(captured),
         ):
             try:
