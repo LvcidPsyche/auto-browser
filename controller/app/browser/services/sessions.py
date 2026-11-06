@@ -14,7 +14,6 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from ... import events as _events
 from ...action_errors import (
-    ERROR_PAGE_SOURCE_FORK,
     ERROR_PAGE_SOURCE_SHADOW,
     BrowserActionError,
     ErrorPageSourceError,
@@ -440,10 +439,9 @@ class BrowserSessionService(SessionCreation):
             # As shadow browse: without a start_url the fork opens the page's URL with the session's
             # cookies, and a refused page chose that URL, so a refused page is not forked onto it and the
             # URL is recorded as shown. A start_url the caller names is judged by create_session.
-            if start_url is None:
-                if _on_error_page(session.page):
-                    # Before anything is exported: Chrome's error page is no URL to open.
-                    raise ErrorPageSourceError(ERROR_PAGE_SOURCE_FORK)
+            # Chrome's error page is no URL to open either: like about:blank and data:, it forks with no start URL
+            # (the scheme fallback below), so it is not judged as a page here.
+            if start_url is None and not _on_error_page(session.page):
                 self.manager._assert_page_allowed(session)
             current_url = self.manager._shown_url(session.page)
             # Export through AuthStateManager so the state file is encrypted

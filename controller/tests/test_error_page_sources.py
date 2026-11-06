@@ -2,7 +2,8 @@
 
 A navigation the pre-request gate stopped, or one that failed, leaves the session on
 ``chrome-error://chromewebdata/``. Without a start_url, fork and shadow browse open the source page's URL, and that
-one is no page to open: they refuse before exporting anything, saying why and what to pass instead.
+one is no page to open: shadow browse refuses before exporting anything, saying why, and fork starts on a blank page
+with the source's cookies, as it does from about:blank or a data: page (B-fix-0).
 """
 
 from __future__ import annotations
@@ -47,13 +48,17 @@ class ForkFromAnErrorPageTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         self.tmp.cleanup()
 
-    async def test_without_a_start_url_it_is_refused_before_anything_is_exported(self) -> None:
-        with acting_as(ALICE), self.assertRaises(ErrorPageSourceError) as caught:
-            await self.manager.fork_session(self.source_id)
+    async def test_without_a_start_url_it_forks_onto_a_blank_page(self) -> None:
+        # B-fix-0 (AUTH-09): refused with ErrorPageSourceError before; now it forks with no start URL, as a source on
+        # about:blank or a data: page does.
+        create = AsyncMock(wraps=self.manager.create_session)
+        self.manager.create_session = create  # type: ignore[method-assign]
+        with acting_as(ALICE):
+            forked = await self.manager.fork_session(self.source_id)
 
-        self.assertEqual(str(caught.exception), ERROR_PAGE_SOURCE_FORK)
-        self.assertIn("start_url", str(caught.exception))
-        self.export.assert_not_awaited()
+        self.assertEqual(forked["forked_from"], self.source_id)
+        self.assertIsNone(create.await_args.kwargs["start_url"])
+        self.export.assert_awaited_once()
 
     async def test_a_start_url_the_caller_names_still_forks(self) -> None:
         with acting_as(ALICE):
