@@ -88,6 +88,40 @@ class CreateFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.status, "closed")
         self.assertFalse(record.live)
 
+    async def test_w5_6_a_cancel_during_the_rollback_still_closes_the_record_and_removes_the_directories(self) -> None:
+        # The directory removal is awaited before the closed record is written: a second cancel there (a shutdown)
+        # left a record the create had already persisted reading active.
+        import asyncio
+        import threading
+
+        from app.browser.services.sessions import BrowserSessionService
+
+        self.manager.witness_bridge.record_session_receipt = AsyncMock(side_effect=RuntimeError("witness down"))  # type: ignore[method-assign]
+        started, go_on = threading.Event(), threading.Event()
+        self.addCleanup(go_on.set)
+        real = BrowserSessionService.remove_session_dirs
+
+        def gated(service, session_id):
+            started.set()
+            go_on.wait(10)
+            real(service, session_id)
+
+        with patch.object(BrowserSessionService, "remove_session_dirs", gated):
+            task = asyncio.create_task(self.manager.create_session())
+            self.assertTrue(await asyncio.to_thread(started.wait, 10), "the rollback never removed the directories")
+            self.assertEqual((await self.manager.session_store.get(SESSION_ID)).status, "active")
+            task.cancel()
+            await asyncio.sleep(0.05)
+            go_on.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        record = await self.manager.session_store.get(SESSION_ID)
+        self.assertEqual(record.status, "closed")
+        self.assertEqual(record.close_reason, "create_failed")
+        self.assertFalse(record.live)
+        self.assertEqual(self.leftovers(), [])
+
     async def test_a_successful_create_keeps_its_directories(self) -> None:
         await self.manager.create_session()
 

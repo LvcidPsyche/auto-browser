@@ -405,7 +405,14 @@ class SessionCreation:
                 logger.warning("rollback could not remove %s", directory)
 
     async def _forget_failed_session_state(self, session: "BrowserSession | None", session_id: str) -> None:
-        """Remove the directories a failed create made, and close the record it persisted, if it got that far."""
+        """Remove the directories a failed create made, and close the record it persisted, if it got that far.
+
+        Run to completion despite a cancel (a shutdown during the rollback, W5-6), which is raised once it is done:
+        each await below is a point where a cancel stopped it before the record read closed.
+        """
+        await self._run_to_completion(self._forget_failed_session_state_steps(session, session_id))
+
+    async def _forget_failed_session_state_steps(self, session: "BrowserSession | None", session_id: str) -> None:
         # In a worker thread: rmtree of a large profile or artifact tree would stall every request on the loop.
         await asyncio.to_thread(self.remove_session_dirs, session_id)
         if session is None:
