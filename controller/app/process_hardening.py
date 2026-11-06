@@ -1,4 +1,4 @@
-"""Make the controller process non-dumpable, and keep the controller's secrets out of the Playwright driver.
+"""Make the controller process non-dumpable, and keep the controller's secrets out of Playwright's driver and Tesseract.
 
 The controller starts children that run as its own uid: the provider CLIs, the Universal Verifier command, autossh,
 the regex worker, and Playwright's node driver (and any browser the driver launches). proc(5): reading
@@ -6,8 +6,8 @@ the regex worker, and Playwright's node driver (and any browser the driver launc
 is dumpable. A non-dumpable process passes it only for a caller holding CAP_SYS_PTRACE, so a same-uid child that runs
 unsandboxed can no longer read the controller's whole environment around the allowlisted one it was given. The flag
 resets at execve, so the children themselves stay ordinary and dumpable: each gets an allowlisted environment
-instead of the controller's, the driver through confine_playwright_driver_environment(). make_non_dumpable acts on
-Linux only.
+instead of the controller's, the driver through confine_playwright_driver_environment() and Tesseract through
+confine_tesseract_environment(). make_non_dumpable acts on Linux only.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import importlib.metadata
 import logging
 import os
 import sys
+from collections.abc import Mapping
 
 PR_SET_DUMPABLE = 4
 # What the Playwright driver keeps of its environment besides the provider CLIs' base names (CLI_BASE_ENV_NAMES and
@@ -28,6 +29,10 @@ PLAYWRIGHT_DRIVER_ENV_NAMES = frozenset(
     {"DEBUG", "DEBUG_FILE", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"}
 )
 PLAYWRIGHT_DRIVER_ENV_PREFIXES = ("PW_", "PLAYWRIGHT_")
+# What Tesseract keeps besides the base names: its data path and OpenMP's threads (PATH, a base name, is what
+# subprocess finds the tesseract binary by).
+TESSERACT_ENV_NAMES = frozenset({"TESSDATA_PREFIX"})
+TESSERACT_ENV_PREFIXES = ("OMP_",)
 _CONFINED = "_auto_browser_confined"
 
 logger = logging.getLogger(__name__)
@@ -92,3 +97,27 @@ def confine_playwright_driver_environment() -> None:
 
     setattr(confined_driver_env, _CONFINED, True)
     transport.get_driver_env = confined_driver_env
+
+
+def confine_tesseract_environment() -> None:
+    """Give every Tesseract that pytesseract starts an allowlisted environment. Harmless to call again.
+
+    pytesseract has no way to set Tesseract's environment: it does `from os import environ` and passes that module
+    global as env= both in subprocess_args (every OCR call) and in get_tesseract_version, reading it each time. So
+    this replaces the global with the base names, TESSERACT_ENV_NAMES and TESSERACT_ENV_PREFIXES of this process's
+    environment. If an upgrade drops the global, this raises rather than let Tesseract start with the controller's
+    secrets (the pin is exact, and CI runs the lifespan, so that goes red there first).
+    """
+    from .providers.base import allowlisted_environment
+
+    module = importlib.import_module("pytesseract.pytesseract")
+    if not isinstance(getattr(module, "environ", None), Mapping):
+        try:
+            version = importlib.metadata.version("pytesseract")
+        except importlib.metadata.PackageNotFoundError:
+            version = "unknown"
+        raise RuntimeError(
+            f"pytesseract {version} has no module-level environ to confine; Tesseract would start with the "
+            "controller's whole environment"
+        )
+    module.environ = allowlisted_environment(TESSERACT_ENV_NAMES, TESSERACT_ENV_PREFIXES)

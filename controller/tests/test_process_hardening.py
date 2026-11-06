@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import importlib.metadata
 import json
 import os
 import subprocess
@@ -175,6 +176,31 @@ class LifespanHardeningTests(unittest.IsolatedAsyncioTestCase):
                     pass
         self.assertEqual(order, ["dumpable", "credential"])
 
+    async def test_the_lifespan_confines_tesseract_before_anything_can_run_ocr(self) -> None:
+        from app import main
+
+        order: list[str] = []
+
+        class _Stop(Exception):
+            pass
+
+        def credential(_settings):
+            order.append("credential")
+            raise _Stop
+
+        with (
+            patch("app.process_hardening.make_non_dumpable", side_effect=lambda: order.append("dumpable")),
+            patch(
+                "app.process_hardening.confine_tesseract_environment",
+                side_effect=lambda: order.append("tesseract"),
+            ),
+            patch.object(main, "ensure_api_credential", side_effect=credential),
+        ):
+            with self.assertRaises(_Stop):
+                async with main.lifespan(main.app):
+                    pass
+        self.assertEqual(order, ["dumpable", "tesseract", "credential"])
+
     @unittest.skipUnless(_BRIDGE.is_file(), "scripts/ is not shipped in the controller image")
     def test_the_bridge_main_makes_itself_non_dumpable_before_anything_else(self) -> None:
         from .test_codex_host_bridge_hardening import bridge
@@ -323,6 +349,74 @@ class BrowserManagerConfinesTheDriverTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(_Stop):
                     await manager.startup()
         self.assertEqual(order, ["confine", "start"])
+
+
+class _KeptTesseractEnviron:
+    """pytesseract's module-level environ is put back after the block, whatever the block set it to."""
+
+    def __enter__(self):
+        import pytesseract.pytesseract as module
+
+        self.module = module
+        self.found = module.environ
+        return module
+
+    def __exit__(self, *_exc) -> None:
+        self.module.environ = self.found
+
+
+class TesseractEnvironmentTests(unittest.TestCase):
+    """pytesseract starts every Tesseract with env=<its module-level environ>, os.environ unless confined (W5-1)."""
+
+    ENV = {
+        "PATH": "/usr/local/bin:/usr/bin",
+        "LC_ALL": "C",
+        "TESSDATA_PREFIX": "/usr/share/tesseract-ocr/5/tessdata",
+        "OMP_THREAD_LIMIT": "1",
+        "API_BEARER_TOKEN": SENTINEL,
+        SENTINEL_NAME: SENTINEL,
+    }
+    KEPT = {"PATH", "LC_ALL", "TESSDATA_PREFIX", "OMP_THREAD_LIMIT"}
+
+    def test_the_confined_environ_keeps_what_tesseract_needs_and_drops_secrets(self) -> None:
+        from app.process_hardening import confine_tesseract_environment
+
+        with _KeptTesseractEnviron() as module, patch.dict(os.environ, self.ENV, clear=True):
+            confine_tesseract_environment()
+            confined = module.environ
+            confine_tesseract_environment()
+            self.assertEqual(module.environ, confined, "a second call must leave the same mapping")
+            self.assertIsNot(confined, os.environ)
+            self.assertEqual(set(confined), self.KEPT)
+            self.assertNotIn(SENTINEL, confined.values())
+            self.assertIs(module.subprocess_args()["env"], module.environ)
+
+    def test_get_tesseract_version_is_handed_the_confined_environ(self) -> None:
+        from app.process_hardening import confine_tesseract_environment
+
+        seen: list[dict] = []
+
+        def check_output(*_args, **kwargs):
+            seen.append(kwargs["env"])
+            return b"tesseract 5.3.0\n"
+
+        with _KeptTesseractEnviron() as module, patch.dict(os.environ, self.ENV, clear=True):
+            confine_tesseract_environment()
+            with patch.object(module.subprocess, "check_output", side_effect=check_output):
+                module.get_tesseract_version.__wrapped__()
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(set(seen[0]), self.KEPT)
+        self.assertNotIn(SENTINEL, seen[0].values())
+
+    def test_a_pytesseract_without_a_module_level_environ_fails_closed(self) -> None:
+        from app.process_hardening import confine_tesseract_environment
+
+        stub = type(sys)("pytesseract.pytesseract")
+        with patch.dict(sys.modules, {"pytesseract.pytesseract": stub}):
+            with self.assertRaises(RuntimeError) as raised:
+                confine_tesseract_environment()
+        self.assertIn("pytesseract", str(raised.exception))
+        self.assertIn(importlib.metadata.version("pytesseract"), str(raised.exception))
 
 
 _SPAWN_APIS = {

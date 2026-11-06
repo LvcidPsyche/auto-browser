@@ -466,18 +466,19 @@ INSTALL_AGENT_CLIS=true
 
 A CLI child gets only the base names below, its own provider's variables (such as `ANTHROPIC_API_KEY`,
 `OPENAI_API_KEY`, `GEMINI_API_KEY`) and the names in `CLI_PROVIDER_ENV_PASSTHROUGH` (comma-separated), never the
-controller's tokens or other keys. The base names (`CLI_BASE_ENV_NAMES` in `controller/app/providers/base.py`),
-each passed only when set, are `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`, every `LC_*`, `TZ`,
+controller's tokens or other keys. The base names (`CLI_BASE_ENV_NAMES` in `controller/app/providers/base.py`), each
+passed only when set, are `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`, every `LC_*`, `TZ`,
 `TERM`, `NO_COLOR`, `CI`, `TEMP`, `TMP`, `TMPDIR`, the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
-`NO_PROXY`), the CA variables (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`) and
-the Windows names (`USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `APPDATA`, `LOCALAPPDATA`, `SYSTEMROOT`, `SYSTEMDRIVE`,
+`NO_PROXY`), the CA variables (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`) and the
+Windows names (`USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `APPDATA`, `LOCALAPPDATA`, `SYSTEMROOT`, `SYSTEMDRIVE`,
 `WINDIR`, `COMSPEC`, `PATHEXT`). The other children the controller starts get the same base names: the Universal
-Verifier command (plus the names in `HARNESS_UV_ENV_PASSTHROUGH`), autossh (plus its own `AUTOSSH_*` tuning), and
+Verifier command (plus the names in `HARNESS_UV_ENV_PASSTHROUGH`), autossh (plus its own `AUTOSSH_*` tuning),
 Playwright's node driver and every browser it launches (plus Playwright's own `PW_*` and `PLAYWRIGHT_*`, `DEBUG`,
 `DEBUG_FILE`, and `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` for
-shadow browse's headed browser); the regex worker gets only `SYSTEMROOT`, on Windows. On Linux the controller also
-makes itself non-dumpable at startup, so a process of its uid cannot read the controller's own environment through
-`/proc/PID/environ`.
+shadow browse's headed browser), and Tesseract, which screenshot redaction's OCR starts through pytesseract (plus
+`TESSDATA_PREFIX` and every `OMP_*`); the regex worker gets only `SYSTEMROOT`, on Windows. On Linux the controller
+also makes itself non-dumpable at startup, so a process of its uid cannot read the controller's own environment
+through `/proc/PID/environ`.
 
 Known limit: a child running as the controller's uid can still read the controller's files: `data/api-token`,
 `data/takeover-token`, the mesh and witness keys. The CLI providers (`OPENAI_AUTH_MODE=cli` and the others) and the

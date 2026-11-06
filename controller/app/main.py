@@ -68,6 +68,8 @@ async def lifespan(application: FastAPI):
     # Before anything starts a child (W2-27): a process of the controller's uid can read a dumpable controller's
     # whole environment through /proc/PID/environ. Through the module, so the test suite can keep itself dumpable.
     process_hardening.make_non_dumpable()
+    # Before anything can run OCR (W5-1): pytesseract starts Tesseract with the controller's whole environment.
+    process_hardening.confine_tesseract_environment()
     # First, so the runtime policy below sees a token loaded or generated from
     # API_TOKEN_FILE. Not at import: tests and dev harnesses import this module.
     ensure_api_credential(settings)

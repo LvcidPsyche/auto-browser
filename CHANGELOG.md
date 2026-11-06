@@ -306,17 +306,21 @@ All notable changes to auto-browser are documented here.
   whole environment through `/proc/PID/environ`, around the allowlisted one it was given. Where the call fails the
   process logs one warning and goes on. The Universal Verifier command and autossh now get the provider CLIs' base
   names (`CLI_BASE_ENV_NAMES` and `LC_*`) instead of the controller's whole environment (autossh also keeps its own
-  `AUTOSSH_*` tuning, such as `AUTOSSH_POLL`), and the regex worker gets only `SYSTEMROOT`, on Windows (the base
-  names are listed in docs/deployment.md). Playwright's node driver, and every browser it launches (shadow browse's
-  headed Chromium among them), get those base names plus Playwright's own `PW_*` and `PLAYWRIGHT_*`, `DEBUG`,
-  `DEBUG_FILE` and the display and session-bus names (`DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR`,
+  `AUTOSSH_*` tuning, such as `AUTOSSH_POLL`), and the regex worker gets only `SYSTEMROOT`, on Windows (the base names
+  are listed in docs/deployment.md). Playwright's node driver, and every browser it launches (shadow browse's headed
+  Chromium among them), get those base names plus Playwright's own `PW_*` and `PLAYWRIGHT_*`, `DEBUG`, `DEBUG_FILE`
+  and the display and session-bus names (`DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR`,
   `DBUS_SESSION_BUS_ADDRESS`): until now the driver got the controller's whole environment and stayed readable at
-  `/proc/PID/environ` by any process of its uid. The controller confines it before each Playwright start and fails
-  to start if the installed Playwright no longer has the function it confines. Known limit: such a child still runs
-  as the controller's uid and can read its files (`data/api-token`, `data/takeover-token`, the mesh and witness
-  keys); the `cli` providers and the bridge's Codex are such children, and page content can prompt-inject them. The
-  driver and the browsers it launches, like the provider CLIs, are ordinary processes of the controller's user:
-  their environment holds no secret, but their memory holds page content and what is typed into pages, which a
+  `/proc/PID/environ` by any process of its uid. The controller confines it before each Playwright start and fails to
+  start if the installed Playwright no longer has the function it confines. Tesseract, which screenshot redaction's
+  OCR starts through pytesseract, gets the same base names plus `TESSDATA_PREFIX` and `OMP_*`: until now it too got
+  the controller's whole environment (the API token and the provider keys among it), readable at `/proc/PID/environ`
+  by any process of its uid while it ran. The controller confines it at startup, before anything can run OCR, and
+  fails to start if the installed pytesseract no longer has the module-level `environ` it replaces. Known limit: such
+  a child still runs as the controller's uid and can read its files (`data/api-token`, `data/takeover-token`, the mesh
+  and witness keys); the `cli` providers and the bridge's Codex are such children, and page content can prompt-inject
+  them. The driver and the browsers it launches, like the provider CLIs, are ordinary processes of the controller's
+  user: their environment holds no secret, but their memory holds page content and what is typed into pages, which a
   command one of them runs could read where the host lets a process ptrace another of the same user
   (`kernel.yama.ptrace_scope` 0). A provider CLI's key is readable by the commands it runs and by those another CLI
   runs at the same time (`/proc/PID/environ` of a dumpable process of the same user). On macOS and Windows the
