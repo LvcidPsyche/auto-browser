@@ -96,7 +96,8 @@ All notable changes to auto-browser are documented here.
 - `POST /sessions` with an auth profile or `storage_state_path` that cannot be decrypted (wrong or missing
   `AUTH_STATE_ENCRYPTION_KEY`, or a corrupt file) now answers 422 "wrong or missing AUTH_STATE_ENCRYPTION_KEY, or the
   file is corrupt" instead of a 409 Conflict (no key), a 500 (a wrong key or a damaged ciphertext), or a 400 or 404 (a
-  file that is not an encrypted envelope).
+  file that is not an encrypted envelope). `POST /sessions/{session_id}/fork` answers the same 422 when the fork's own
+  stored state cannot be read back, where it answered 409 Conflict.
 - A `nan` or infinite value in any float setting (`ARTIFACT_RETENTION_HOURS=nan` swept every artifact on the next
   cleanup) now stops startup with an error naming the setting. Zero and negative retention still mean "keep forever".
 - Forking a session that sits on `about:blank` or a `data:` page no longer fails with a 403, nor one on Chrome's error

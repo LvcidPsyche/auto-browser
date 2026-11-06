@@ -147,6 +147,17 @@ class SessionRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertEqual(response.json(), {"detail": AUTH_STATE_UNREADABLE})
 
+    def test_w4_17_fork_session_answers_the_same_422(self) -> None:
+        # The fork's own stored state is read back by create_session; the fork route mapped every RuntimeError to 409.
+        async def fork_session(session_id, **kwargs):
+            raise AuthStateDecryptError(AUTH_STATE_UNREADABLE)
+
+        app = FastAPI()
+        app.include_router(create_sessions_router(manager=SimpleNamespace(fork_session=fork_session)))
+        response = TestClient(app, raise_server_exceptions=False).post("/sessions/abc123def456/fork")
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json(), {"detail": AUTH_STATE_UNREADABLE})
+
 
 if __name__ == "__main__":
     unittest.main()

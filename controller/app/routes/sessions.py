@@ -332,6 +332,9 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                     )
             except SessionLimitError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from None
+            except AuthStateDecryptError as exc:
+                # The fork's own stored state, read back by create_session: the fixed text POST /sessions answers.
+                raise HTTPException(status_code=422, detail=str(exc)) from None
             except RuntimeError:
                 raise HTTPException(status_code=409, detail="Conflict") from None
             except RefusedPageError:
