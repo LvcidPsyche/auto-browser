@@ -43,6 +43,7 @@ class CloseTests(unittest.IsolatedAsyncioTestCase):
         result = await self.close()
 
         self.assertTrue(result["closed"])
+        self.assertEqual(result["teardown"], "complete")
         self.assertEqual(result["failed_steps"], [])
         self.assertEqual(self.closed_audit()["status"], "ok")
         self.assertEqual(self.receipt.await_args.kwargs["status"], "ok")
@@ -52,7 +53,9 @@ class CloseTests(unittest.IsolatedAsyncioTestCase):
 
         result = await self.close()
 
-        self.assertFalse(result["closed"])
+        # B-fix-9: the session is gone, so closed; the failed step makes the teardown partial.
+        self.assertTrue(result["closed"])
+        self.assertEqual(result["teardown"], "partial")
         self.assertEqual(result["failed_steps"], ["close browser context"])
         self.assertNotIn(self.session_id, self.manager.sessions)
         self.assertEqual(result["session"]["status"], "closed")
@@ -75,7 +78,8 @@ class CloseTests(unittest.IsolatedAsyncioTestCase):
 
         result = await self.close()
 
-        self.assertFalse(result["closed"])
+        self.assertTrue(result["closed"])
+        self.assertEqual(result["teardown"], "partial")
         self.assertEqual(result["failed_steps"], ["release session tunnel"])
 
     async def test_nav37_an_owned_browser_that_will_not_close_is_named(self) -> None:
@@ -84,7 +88,8 @@ class CloseTests(unittest.IsolatedAsyncioTestCase):
 
         result = await self.close()
 
-        self.assertFalse(result["closed"])
+        self.assertTrue(result["closed"])
+        self.assertEqual(result["teardown"], "partial")
         self.assertEqual(result["failed_steps"], ["close isolated browser"])
 
     async def test_nav36_a_cancel_mid_teardown_still_records_the_close(self) -> None:

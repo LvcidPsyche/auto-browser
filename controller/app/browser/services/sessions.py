@@ -195,7 +195,8 @@ class BrowserSessionService(SessionCreation):
 
         The teardown runs to its end even when the caller is cancelled (the HTTP client gave up, shutdown): a
         half-done close left the audit event, the witness receipt and the stored record unwritten. ``closed`` in
-        the answer is True only when every teardown step succeeded; ``failed_steps`` names the ones that did not.
+        the answer is True (the session is gone); ``teardown`` is "partial" when a step failed, and ``failed_steps``
+        names those steps ("complete" and an empty list otherwise).
         """
         session = await self.manager.get_session(session_id)
         # One protected unit from here: the busy path of _lock_for_close already closes the context, so a cancel
@@ -293,7 +294,10 @@ class BrowserSessionService(SessionCreation):
         summary["close_reason"] = reason
         await self.manager.session_store.upsert(SessionRecord.model_validate(summary))
         return {
-            "closed": not failed_steps,
+            # The session is gone by now, whatever failed: `closed` says so. A step that failed is named in
+            # failed_steps and makes the teardown partial (the audit event and receipt say partial too).
+            "closed": True,
+            "teardown": "partial" if failed_steps else "complete",
             "failed_steps": failed_steps,
             "trace_path": str(session.trace_path),
             "session": summary,
