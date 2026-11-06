@@ -309,7 +309,7 @@ def create_sessions_router(*, manager: Any) -> APIRouter:
                 raise HTTPException(status_code=400, detail=str(exc)) from None
             except RefusedPageError:
                 # The page checks' refusal, as the page routes answer it. Every other PermissionError
-                # (create_session's URL check, a fresh page's about:blank among them) stays the generic one.
+                # (create_session's URL check among them) stays the generic one.
                 raise HTTPException(status_code=403, detail=OFF_LIST_PAGE_DETAIL) from None
 
     return router
