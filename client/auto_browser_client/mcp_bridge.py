@@ -224,6 +224,14 @@ def urlopen(request: Request, *args: Any, **kwargs: Any) -> Any:
     return build_opener(_NoRedirects).open(request, *args, **kwargs)
 
 
+# Why a request went without the token that --bearer-token gives, added to a 401's answer (W15-7): fixed text, which
+# names the source and never the token.
+_ARGUMENT_HOLDS_A_LINE_BREAK = (
+    "--bearer-token or AUTO_BROWSER_BEARER_TOKEN holds a line break, which an HTTP header cannot carry, so no token "
+    "was sent"
+)
+
+
 @dataclass
 class HttpMcpResponse:
     status_code: int
@@ -246,7 +254,7 @@ class HttpMcpClient:
         self.timeout_seconds = timeout_seconds
         self.operator_id = operator_id
         self.token_file = os.path.expanduser(token_file) if token_file else None
-        # Why the last request went without a token from token_file; added to a 401's message.
+        # Why the last request went without a token, from token_file or bearer_token; added to a 401's message.
         self.token_file_problem: str | None = None
 
     def _bearer(self) -> str | None:
@@ -256,7 +264,14 @@ class HttpMcpClient:
         controller has written the file, and a regenerated token must not need a
         restart. A missing or unreadable file sends no header, so a controller
         running without a token still works.
+
+        A token holding a line break, from either source, sends no header either (W15-7): http.client refuses that
+        header with a ValueError quoting it whole, which an answer would show the agent. ``token_file_problem`` says
+        why the last request went without a token, for bearer_token as well as for token_file.
         """
+        if self.bearer_token and ("\r" in self.bearer_token or "\n" in self.bearer_token):
+            self.token_file_problem = _ARGUMENT_HOLDS_A_LINE_BREAK
+            return None
         if self.bearer_token or not self.token_file:
             return self.bearer_token
         try:
@@ -264,6 +279,12 @@ class HttpMcpClient:
                 token = handle.read().strip()
         except (OSError, UnicodeDecodeError) as exc:
             self.token_file_problem = f"could not read the token file {self.token_file}: {exc}"
+            return None
+        if "\r" in token or "\n" in token:
+            self.token_file_problem = (
+                f"the token file {self.token_file} holds a line break, which an HTTP header cannot carry, so no token "
+                "was sent"
+            )
             return None
         self.token_file_problem = None if token else f"the token file {self.token_file} is empty"
         return token or None

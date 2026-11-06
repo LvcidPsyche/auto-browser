@@ -631,6 +631,46 @@ def test_w15_6_the_token_file_problem_is_shown_without_the_urls_secrets(tmp_path
     assert "sentinel" not in message
 
 
+@pytest.mark.parametrize(
+    ("token", "in_file"),
+    [
+        ("sentinelA\r\nsentinelB", False),
+        # http.client lets a line break before a space or tab through, as an obsolete header fold, and sent it.
+        ("sentinelA\n sentinelB", False),
+        ("sentinelA\nsentinelB", True),
+    ],
+    ids=["bearer_token_crlf", "bearer_token_folded", "token_file_lf"],
+)
+def test_w15_7_a_token_holding_a_line_break_is_never_sent(tmp_path: Path, token: str, in_file: bool) -> None:
+    # http.client refused the header with a ValueError that quoted it whole, and the generic answer showed the
+    # controller's token to the agent.
+    import app.mcp_stdio as bridge
+
+    token_file = tmp_path / "api-token"
+    token_file.write_bytes(token.encode() + b"\n")
+    controller = _serve()
+    controller.answer = (401, b'{"detail": "Missing or invalid bearer token"}')  # type: ignore[attr-defined]
+    try:
+        client = bridge.HttpMcpClient(
+            base_url=f"http://127.0.0.1:{controller.server_port}/mcp",
+            bearer_token=None if in_file else token,
+            token_file=str(token_file) if in_file else None,
+        )
+        reply = bridge.StdioMcpBridge(client=client, stderr=io.StringIO())._handle_line(
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        )
+    finally:
+        controller.shutdown()
+        controller.server_close()
+    assert reply is not None
+    message = reply["error"]["message"]
+
+    assert "HTTP 401" in message
+    assert "holds a line break, which an HTTP header cannot carry, so no token was sent" in message
+    assert "sentinel" not in message
+    assert controller.seen == [("/mcp", None)]  # type: ignore[attr-defined]
+
+
 def test_w14_1_a_proxys_error_detail_never_shows_the_urls_query(recording_proxy) -> None:
     # A proxy's JSON 502 whose detail echoes the URL reached the agent whole through the HTTP error message.
     recording_proxy.answer = (  # type: ignore[attr-defined]
